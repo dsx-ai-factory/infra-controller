@@ -1,0 +1,152 @@
+[
+   {
+      "id": "83ad26bc-4687-4427-b01c-0857599d1b17",
+      "name": "demo-compute-instance-1",
+      "controllerInstanceId": "c0da5caa-76d6-4a5a-abf7-992b75fec7ae",
+      "allocationId": "c4d1b674-d061-4e95-946e-667149a88113",
+      "tenantId": "aaf3cb83-8785-4265-a3bd-61e828f87db8",
+      "infrastructureProviderId": "16060041-f146-43fe-8c82-be48460b5583",
+      "siteId": "bd4692bd-da95-410e-911a-d492fe2d35f8",
+      "instanceTypeId": "7aa0864b-71b2-4253-af7d-d957e288ff57",
+      "vpcId": "f466a2d5-5820-4824-a845-3218fdff801b",
+      "machineId": "2ff5f788-7430-424a-86f8-87d371256496",
+      "operatingSystemId": "7471cecd-88f6-40f0-b1a2-d53f29573bf3",
+      "ipxeScript": "#!ipxe\nkernel https://github.com/netbootxyz/ubuntu-squash/releases/download/20.04.6-a1b16d57/vmlinuz ip=dhcp fb=false interface=ens5f0 url=https://releases.ubuntu.com/20.04.6/ubuntu-20.04.6-live-server-amd64.iso autoinstall ds=nocloud-net;s=${tenant-cloudinit-url} initrd=initrd.magic\ninitrd https://github.com/netbootxyz/ubuntu-squash/releases/download/20.04.6-a1b16d57/initrd\nboot\n",
+      "userdata": "#cloud-config\nusers:\n  - default\n  - name: demo-user\n    gecos: Demo User\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    groups: root\n    lock_passwd: true\n    ssh_authorized_keys:\n      - ssh-ed25519 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAcV/3oxRllEji0wl9F6icRk+Kme0H2MMAPFizKB5yv8 demo@example.com\n\nautoinstall:\n  version: 1\n\n  identity:\n    hostname: demo-host\n    password: $6$jCfWFbdxh1lK09sY$pxFnrW/yXewYFmgoaywu3WKhdPQg0e8DR8jvedAV.udXM0.i5M6wr4Up2S7ZCN9kNDmg.s7fmrOaXE6nEyzPb/ # Welcome123+\n    username: ubuntu\n",
+      "serialConsoleUrl": "ssh://c0da5caa-76d6-4a5a-abf7-992b75fec7ae@reno.nico.nvidia.com",
+      "status": "Ready",
+      "instanceSubnets": [
+         {
+         "id": "09142b2f-85c3-4e09-aeb2-34e7db19a36d",
+         "instanceId": "83ad26bc-4687-4427-b01c-0857599d1b17",
+         "subnetId": "548e925c-fb5f-449f-9ec1-2dc3d89c8e9d",
+         "isPhysical": true,
+         "macAddress": null,
+         "ipAddresses": [
+            "192.166.128.3"
+         ],
+         "status": "Ready",
+         "created": "2023-04-26T19:37:32.445684Z",
+         "updated": "2023-04-26T19:40:18.427811Z"
+         }
+      ],
+      "interfaces": [
+         {
+         "id": "09142b2f-85c3-4e09-aeb2-34e7db19a36d",
+         "instanceId": "83ad26bc-4687-4427-b01c-0857599d1b17",
+         "subnetId": "548e925c-fb5f-449f-9ec1-2dc3d89c8e9d",
+         "isPhysical": true,
+         "macAddress": null,
+         "ipAddresses": [
+            "192.166.128.3"
+         ],
+         "status": "Ready",
+         "created": "2023-04-26T19:37:32.445684Z",
+         "updated": "2023-04-26T19:40:18.427811Z"
+         }
+      ],
+      "statusHistory": [
+         {
+         "status": "BootCompleted",
+         "message": "Instance is ready for use",
+         "created": "2023-04-26T19:40:18.418073Z",
+         "updated": "2023-04-26T19:40:18.418073Z"
+         },
+         {
+         "status": "Provisioning",
+         "message": "Instance provisioning was successfully initiated on Site",
+         "created": "2023-04-26T19:37:34.405577Z",
+         "updated": "2023-04-26T19:37:34.405577Z"
+         },
+         {
+         "status": "Provisioning",
+         "message": "Provisioning request was sent to the Site",
+         "created": "2023-04-26T19:37:33.599048Z",
+         "updated": "2023-04-26T19:37:33.599048Z"
+         },
+         {
+         "status": "Pending",
+         "message": "received instance creation request, pending",
+         "created": "2023-04-26T19:37:32.445684Z",
+         "updated": "2023-04-26T19:37:32.445684Z"
+         }
+      ],
+      "created": "2023-04-26T19:37:32.445684Z",
+      "updated": "2023-04-26T19:40:18.40905Z"
+   },
+   {
+      "id": "01e9969c-9a84-4c2d-82fb-973dff30cfc1",
+      "name": "demo-compute-instance-0",
+      "controllerInstanceId": "16708e55-012c-46b6-a1c6-815d45ba45bc",
+      "allocationId": "c4d1b674-d061-4e95-946e-667149a88113",
+      "tenantId": "aaf3cb83-8785-4265-a3bd-61e828f87db8",
+      "infrastructureProviderId": "16060041-f146-43fe-8c82-be48460b5583",
+      "siteId": "bd4692bd-da95-410e-911a-d492fe2d35f8",
+      "instanceTypeId": "7aa0864b-71b2-4253-af7d-d957e288ff57",
+      "vpcId": "f466a2d5-5820-4824-a845-3218fdff801b",
+      "machineId": "e6e1b8b2-5ae5-4093-997e-eecb8baf528a",
+      "operatingSystemId": "7471cecd-88f6-40f0-b1a2-d53f29573bf3",
+      "ipxeScript": "#!ipxe\nkernel https://github.com/netbootxyz/ubuntu-squash/releases/download/20.04.6-a1b16d57/vmlinuz ip=dhcp fb=false interface=ens5f0 url=https://releases.ubuntu.com/20.04.6/ubuntu-20.04.6-live-server-amd64.iso autoinstall ds=nocloud-net;s=${tenant-cloudinit-url} initrd=initrd.magic\ninitrd https://github.com/netbootxyz/ubuntu-squash/releases/download/20.04.6-a1b16d57/initrd\nboot\n",
+      "userdata": "#cloud-config\nusers:\n  - default\n  - name: demo-user\n    gecos: Demo User\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    groups: root\n    lock_passwd: true\n    ssh_authorized_keys:\n      - ssh-ed25519 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAcV/3oxRllEji0wl9F6icRk+Kme0H2MMAPFizKB5yv8 demo@example.com\n\nautoinstall:\n  version: 1\n\n  identity:\n    hostname: demo-host\n    password: $6$jCfWFbdxh1lK09sY$pxFnrW/yXewYFmgoaywu3WKhdPQg0e8DR8jvedAV.udXM0.i5M6wr4Up2S7ZCN9kNDmg.s7fmrOaXE6nEyzPb/ # Welcome123+\n    username: ubuntu\n",
+      "serialConsoleUrl": "ssh://16708e55-012c-46b6-a1c6-815d45ba45bc@reno.nico.nvidia.com",
+      "status": "Ready",
+      "instanceSubnets": [
+         {
+         "id": "10758364-57f9-4429-84a2-5dede1b5045f",
+         "instanceId": "01e9969c-9a84-4c2d-82fb-973dff30cfc1",
+         "subnetId": "548e925c-fb5f-449f-9ec1-2dc3d89c8e9d",
+         "isPhysical": true,
+         "macAddress": null,
+         "ipAddresses": [
+            "192.166.128.2"
+         ],
+         "status": "Ready",
+         "created": "2023-04-26T19:34:40.96039Z",
+         "updated": "2023-04-26T19:40:18.372682Z"
+         }
+      ],
+      "interfaces": [
+         {
+         "id": "10758364-57f9-4429-84a2-5dede1b5045f",
+         "instanceId": "01e9969c-9a84-4c2d-82fb-973dff30cfc1",
+         "subnetId": "548e925c-fb5f-449f-9ec1-2dc3d89c8e9d",
+         "isPhysical": true,
+         "macAddress": null,
+         "ipAddresses": [
+            "192.166.128.2"
+         ],
+         "status": "Ready",
+         "created": "2023-04-26T19:34:40.96039Z",
+         "updated": "2023-04-26T19:40:18.372682Z"
+         }
+      ],
+      "statusHistory": [
+         {
+         "status": "BootCompleted",
+         "message": "Instance is ready for use",
+         "created": "2023-04-26T19:37:18.21838Z",
+         "updated": "2023-04-26T19:37:18.21838Z"
+         },
+         {
+         "status": "Provisioning",
+         "message": "Instance provisioning was successfully initiated on Site",
+         "created": "2023-04-26T19:34:43.651979Z",
+         "updated": "2023-04-26T19:34:43.651979Z"
+         },
+         {
+         "status": "Provisioning",
+         "message": "Provisioning request was sent to the Site",
+         "created": "2023-04-26T19:34:42.278639Z",
+         "updated": "2023-04-26T19:34:42.278639Z"
+         },
+         {
+         "status": "Pending",
+         "message": "received instance creation request, pending",
+         "created": "2023-04-26T19:34:40.96039Z",
+         "updated": "2023-04-26T19:34:40.96039Z"
+         }
+      ],
+      "created": "2023-04-26T19:34:40.96039Z",
+      "updated": "2023-04-26T19:37:18.191004Z"
+   }
+]

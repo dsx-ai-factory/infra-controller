@@ -1,0 +1,346 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Lint and Test
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+defaults:
+  run:
+    working-directory: rest-api
+
+env:
+  GO_VERSION: "1.27.3"
+
+jobs:
+  style:
+    name: Style Check
+    runs-on: linux-amd64-cpu4
+    continue-on-error: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # setup-go's own cache saves on every ref, so these jobs restore and
+      # save through go-cache-restore and go-cache-save instead.
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: rest-style
+          dependency-path: rest-api/go.sum
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Download dependencies
+        uses: ./.github/actions/go-mod-download
+
+      - name: Run revive
+        run: |
+          pkgs=$(go list ./... | grep -v $(go env GOMODCACHE))
+          go list $pkgs | grep -v $(go env GOMODCACHE) | xargs -L1 go tool revive -config .revive.toml -set_exit_status
+
+      - name: Run go fmt
+        run: |
+          pkgs=$(go list ./... | grep -v $(go env GOMODCACHE))
+          go fmt $pkgs > /dev/null 2>&1
+          if git diff --quiet; then
+            echo "go fmt was clean"
+          else
+            echo "::error::go fmt was unclean on the following files:"
+            git -P diff --name-only
+            exit 1
+          fi
+
+      - name: Check REST command bundle contract
+        run: make check-command-bundle
+
+      - name: Test local nico-api address configuration
+        run: python3 -B scripts/test_local_core_address.py
+
+      - name: Save Go caches
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}
+
+  lint-go:
+    name: Lint Go
+    runs-on: linux-amd64-cpu8
+    continue-on-error: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: rest-lint-go
+          dependency-path: rest-api/go.sum
+
+      - name: Download dependencies
+        uses: ./.github/actions/go-mod-download
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+          args: --timeout=10m --issues-exit-code=0 ./...
+          working-directory: rest-api
+
+      - name: Save Go caches
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}
+
+  lint-openapi:
+    name: Lint OpenAPI
+    runs-on: linux-amd64-cpu4
+    continue-on-error: false
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - name: Test NVSwitch registration form
+        run: node --test nvswitch-manager/cmd/ui_registration_test.mjs
+
+      - name: Install Redocly CLI
+        run: npm install -g @redocly/cli@latest
+
+      - name: Run OpenAPI lint
+        run: redocly lint ./openapi/spec.yaml --format=github-actions
+
+  openapi-breaking-changes:
+    name: OpenAPI Breaking Changes Check
+    runs-on: linux-amd64-cpu4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Resolve OpenAPI comparison base
+        id: openapi-base
+        run: |
+          set -euo pipefail
+
+          MERGE_BASE="$(git merge-base HEAD origin/main)"
+
+          echo "merge_base=${MERGE_BASE}" >> "${GITHUB_OUTPUT}"
+          echo "Comparing OpenAPI changes against merge-base ${MERGE_BASE}"
+
+      - name: Check OpenAPI breaking changes
+        uses: oasdiff/oasdiff-action/breaking@3e9d440d37f468355457604348009f50e0cddbf3
+        with:
+          base: '${{ steps.openapi-base.outputs.merge_base }}:rest-api/openapi/spec.yaml'
+          revision: ':rest-api/openapi/spec.yaml'
+          fail-on: ERR
+          # Allowlist reviewed one-time API contract corrections; see the
+          # referenced ignore file for each accepted breaking-change report.
+          err-ignore: 'rest-api/openapi/oasdiff-breaking-changes-ignore.txt'
+
+  check-generated-sdk:
+    name: Check Generated SDK
+    runs-on: linux-amd64-cpu4
+    continue-on-error: false
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: rest-check-generated-sdk
+          dependency-path: rest-api/go.sum
+
+      # The generator version itself is pinned in rest-api/Makefile.
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # generate-sdk applies source headers with a Python script.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Regenerate SDK
+        run: make generate-sdk
+
+      - name: Check for uncommitted changes
+        run: >-
+          bash ../scripts/check-repo-clean.sh "REST SDK generation"
+          "make rest-api/generate-sdk (from the repository root)"
+
+      - name: Save Go caches
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}
+
+  check-protobuf-generated:
+    name: Check Protobuf Generated Code
+    runs-on: linux-amd64-cpu4
+    continue-on-error: false
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: rest-check-protobuf-generated
+          dependency-path: rest-api/go.sum
+
+      - name: Download dependencies
+        uses: ./.github/actions/go-mod-download
+
+      - name: Regenerate protobuf code
+        run: make core-proto
+
+      - name: Check for uncommitted changes
+        run: >-
+          bash ../scripts/check-repo-clean.sh "REST protobuf generation"
+          "make sync-protobuf (from the repository root)"
+
+      - name: Save Go caches
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}
+
+  test:
+    name: Test (${{ matrix.module }})
+    runs-on: linux-amd64-cpu8
+    continue-on-error: false
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - api
+          - auth
+          - cert-manager
+          - cli
+          - cli-commands
+          - common
+          - db
+          - flow
+          - ipam
+          - nvswitch-manager
+          - powershelf-manager
+          - proto
+          - sdk-simple
+          - site-agent
+          - site-manager
+          - site-workflow
+          - workflow
+
+    env:
+      # db/pkg/util/testing.go uses 'postgres' hostname when CI=true (GitLab convention); force localhost.
+      CI: "false"
+      DB_NAME: nicotest
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_HOST: localhost
+      DB_PORT: 30432
+      CGO_ENABLED: 1
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+
+      # One scope for every module: per-module entries would multiply the
+      # storage each go.sum change saves, and the modules share most of their
+      # dependency packages.
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: rest-test
+          dependency-path: rest-api/go.sum
+
+      - name: Download dependencies
+        uses: ./.github/actions/go-mod-download
+
+      - name: Run unit tests for ${{ matrix.module }}
+        working-directory: .
+        run: make rest-api/test-${{ matrix.module }}
+
+      - name: Save Go caches
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}

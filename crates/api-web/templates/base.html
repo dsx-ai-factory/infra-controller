@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>carbide-web | {% block title %}Base{% endblock %}</title>
+		<link href="/admin/static/carbide.css" rel="stylesheet" />
+		<link href="/admin/static/sortable.css" rel="stylesheet" />
+		{% block head %}{% endblock %}
+	</head>
+	<body class="preload">
+		<nav>
+			<h3><a href="/admin" id="site-name">NICo &bull; {{ Self::site_name() }}</a></h3>
+			<form action="/admin/search" class="search-container">
+				<input type="search" placeholder="fm100.., 10.2.., etc" name="q" tabindex="1" title="Enter a machine id, UUID, IP address, MAC address, serial number, or shortcode">
+				<input type="submit" value="">
+			</form>
+			<ul>
+				<li><a href="/admin">Configuration</a></li>
+				<li><a href="/admin/resource-pool">Resource Pools</a></li>
+				<li><a href="/admin/logs">Live Logs</a></li>
+			</ul>
+			<hr />
+			<h3>Racks</h3>
+			<ul>
+				<li><a href="/admin/rack">Managed Racks</a></li>
+				<li><a href="/admin/expected-rack">Expected Racks</a></li>
+			</ul>
+			<hr />
+			<h3>Switches</h3>
+			<ul>
+				<li><a href="/admin/switch">Managed Switches</a></li>
+				<li><a href="/admin/expected-switch">Expected Switches</a></li>
+			</ul>
+			<hr />
+			<h3>Power Shelves</h3>
+			<ul>
+				<li><a href="/admin/power-shelf">Managed Power Shelves</a></li>
+				<li><a href="/admin/expected-power-shelf">Expected Power Shelves</a></li>
+			</ul>
+			<hr />
+			<h3>Machines</h3>
+			<ul>
+				<li>
+					<a href="/admin/managed-host">Managed Hosts</a>
+					<ul>
+						<li><a href="/admin/expected-machine">Expected</a></li>
+					</ul>
+				</li>
+				<li><a href="/admin/host">Hosts</a></li>
+				<li><a href="/admin/dpu">DPUs</a>
+					<ul>
+						<li><a href="/admin/network-status">Network Status</a></li>
+						<li><a href="/admin/dpu/versions">Versions</a></li>
+					</ul>
+				</li>
+				<li><a href="/admin/interface">Machine Interfaces</a></li>
+				<li><a href="/admin/network-device">Network Devices</a></li>
+				<li><a href="/admin/machinevalidation">Machine Validation</a>
+					<ul>
+						<li><a href="/admin/machinevalidation/tests">Tests</a></li>
+						<li><a href="/admin/machinevalidation/external-config">External-config</a></li>
+					</ul>
+				</li>
+				<li><a href="/admin/sku">SKUs</a></li>
+				<li><a href="/admin/attestation-summary">Attestations</a></li>
+				<li><a href="/admin/instance-type">Instance Types</a></li>
+				<li><a href="/admin/dpa">DPAs</a></li>
+				<li><a href="/admin/firmware">Firmware</a></li>
+			</ul>
+			<hr/>
+			<h3>BMCs and Site Explorer</h3>
+			<ul>
+				<li><a href="/admin/explored-endpoint">Explored Endpoints</a>
+					<ul>
+						<li><a href="/admin/explored-endpoint/paired">Paired</a></li>
+						<li><a href="/admin/explored-endpoint/unpaired">Unpaired</a></li>
+					</ul>
+				</li>
+				<li><a href="/admin/redfish-browser">Redfish Browser</a></li>
+				<li><a href="/admin/redfish-actions">Redfish Actions</a></li>
+			</ul>
+			<hr />
+			<h3>InfiniBand</h3>
+			<ul>
+				<li><a href="/admin/ib-fabric">Fabrics</a></li>
+				<li><a href="/admin/ufm-browser">UFM Browser</a></li>
+			</ul>
+			<hr />
+                        <h3>NVLink</h3>
+                        <ul>
+                               <li><a href="/admin/nmxc-browser">NMX-C Browser</a></li>
+                               <li><a href="/admin/nvlink-domain">Domains</a></li>
+                        </ul>
+			<hr />
+
+			<h3>IPAM</h3>
+			<ul>
+				<li><a href="/admin/ipam/dhcp">DHCP</a></li>
+				<li><a href="/admin/ipam/dns">DNS</a></li>
+				<li><a href="/admin/ipam/underlay">Underlay Networks</a></li>
+				<li><a href="/admin/ipam/overlay">Overlay Networks</a></li>
+			</ul>
+		<hr />
+			<h3>Boot / OS Library</h3>
+			<ul>
+				<li><a href="/admin/operating-system">Operating Systems</a></li>
+				<li><a href="/admin/ipxe-template">iPXE Templates</a></li>
+			</ul>
+		<hr />
+
+		<h3>Tenant Objects</h3>
+			<ul>
+				<li><a href="/admin/domain">Domains</a></li>
+				<li><a href="/admin/vpc">VPCs</a></li>
+				<li><a href="/admin/ib-partition">InfiniBand Partitions</a></li>
+				<li><a href="/admin/nvlink-partition">NVLink Partitions</a></li>
+				<li><a href="/admin/spx-partition">Spx Partitions</a></li>
+				<li><a href="/admin/network-segment">Network Segments</a></li>
+				<li><a href="/admin/instance">Instances</a></li>
+				<li><a href="/admin/compute-allocation">Compute Allocations</a></li>
+				<li><a href="/admin/tenant">Tenants</a></li>
+				<li><a href="/admin/tenant_keyset">Keysets</a></li>
+				<li><a href="/admin/network-security-group">Network Security Groups</a></li>
+			</ul>
+			{% if !Self::tools().is_empty() %}
+			<hr />
+			<h3>Tools</h3>
+			<ul>
+				{% for tool in Self::tools() %}
+				<li><a href="{{ tool.url }}">{{ tool.display_name }}</a></li>
+				{% endfor %}
+			</ul>
+			{% endif %}
+		</nav>
+		<script>
+			// Sidebar links load a whole new page: mark the link for the current page and
+			// keep the sidebar where it was scrolled instead of resetting it to the top.
+			(function() {
+				const nav = document.querySelector('nav');
+				const home = new URL(document.getElementById('site-name').href).pathname;
+				const path = window.location.pathname.replace(/\/+$/, '');
+				let activeLink = null;
+				let activeLength = 0;
+				nav.querySelectorAll('ul a').forEach(function(link) {
+					const url = new URL(link.href);
+					const linkPath = url.pathname.replace(/\/+$/, '');
+					// The longest matching link wins, so detail pages such as /admin/vpc/<id>
+					// select their list page. The home link only matches itself.
+					const matches = url.origin === window.location.origin && (path === linkPath
+						|| (linkPath !== home && path.startsWith(linkPath + '/')));
+					if (matches && linkPath.length > activeLength) {
+						activeLink = link;
+						activeLength = linkPath.length;
+					}
+				});
+				if (activeLink) {
+					activeLink.classList.add('active');
+					activeLink.setAttribute('aria-current', 'page');
+				}
+
+				nav.addEventListener('click', function(e) {
+					const link = e.target.closest('a');
+					// Ctrl/Cmd/Shift/Alt clicks and other targets open the link elsewhere and leave
+					// this page in place, so a later, unrelated page would restore their position.
+					if (!link || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey
+						|| (link.target && link.target !== '_self')) {
+						return;
+					}
+					try {
+						sessionStorage.setItem('navScrollTop', nav.scrollTop);
+					} catch(err) {}
+				});
+				// sessionStorage throws when the browser blocks site data; without a saved
+				// position the current link is centered below.
+				let savedScrollTop = null;
+				try {
+					savedScrollTop = sessionStorage.getItem('navScrollTop');
+					sessionStorage.removeItem('navScrollTop');
+				} catch(err) {}
+				if (savedScrollTop !== null) {
+					nav.scrollTop = Number(savedScrollTop);
+				} else if (activeLink && activeLink.offsetTop + activeLink.offsetHeight > nav.clientHeight) {
+					// Arrived some other way (typed URL, search): center the current link.
+					nav.scrollTop = activeLink.offsetTop - nav.clientHeight / 2;
+				}
+			})();
+		</script>
+		<main>{% block content %}{% endblock %}</main>
+
+		<!-- Toast container for action success/warning notifications -->
+		<div id="toast-container" class="action-toast-container"></div>
+
+		<!-- Error modal (with gray backdrop) -->
+		<div id="error-modal-wrapper" class="error-modal-wrapper" style="display:none" onclick="if(event.target===this)hideErrorModal()">
+			<div class="error-modal">
+				<div id="error-modal-title" class="error-modal-title">Action Failed</div>
+				<div class="error-modal-body">
+					<pre id="error-modal-msg"></pre>
+				</div>
+				<div class="error-modal-footer">
+					<button class="error-modal-copy-btn" onclick="copyErrorMsg()">Copy</button>
+					<button onclick="hideErrorModal()">Dismiss</button>
+				</div>
+			</div>
+		</div>
+
+		<script>
+			requestAnimationFrame(function() {
+				requestAnimationFrame(function() {
+					document.body.classList.remove('preload');
+				});
+			});
+		</script>
+		<script src="/admin/static/sortable.js"></script>
+		<script src="/admin/static/tabs.js"></script>
+		<script src="/admin/static/table_filter.js"></script>
+		<script>
+			const toastContainer = document.getElementById('toast-container');
+			const errorWrapper = document.getElementById('error-modal-wrapper');
+			const errorTitleEl = document.getElementById('error-modal-title');
+			const errorMsgEl = document.getElementById('error-modal-msg');
+
+			let pendingScope = null;
+
+			document.addEventListener('submit', function(e) {
+				const form = e.target;
+				if (!form.querySelector('.action-spinner')) return;
+				form.classList.add('submitting');
+				const scope = form.closest('table') || form;
+				scope.classList.add('actions-busy');
+				scope.querySelectorAll('input[type="submit"], button[type="submit"]')
+					.forEach(function(b) { b.disabled = true; });
+				pendingScope = scope;
+				document.querySelector('nav').classList.add('nav-disabled');
+			});
+
+			function hideActionSpinner() {
+				if (!pendingScope) return;
+				pendingScope.querySelector('.submitting')?.classList.remove('submitting');
+				pendingScope.classList.remove('actions-busy');
+				pendingScope.querySelectorAll('input[type="submit"], button[type="submit"]')
+					.forEach(function(b) { b.disabled = false; });
+				pendingScope = null;
+				document.querySelector('nav').classList.remove('nav-disabled');
+			}
+
+			window.addEventListener('pageshow', function(e) {
+				if (e.persisted) hideActionSpinner();
+			});
+
+			function showToast(message, isError) {
+				hideActionSpinner();
+				const toast = document.createElement('div');
+				toast.className = 'action-toast' + (isError ? ' action-toast-error' : '');
+				const text = document.createElement('span');
+				text.className = 'action-toast-text';
+				text.textContent = message;
+				toast.appendChild(text);
+				toastContainer.appendChild(toast);
+				setTimeout(function() {
+					toast.classList.add('dismissing');
+					setTimeout(function() { toast.remove(); }, 300);
+				}, 5000);
+			}
+
+			function prettifyErrorMsg(raw) {
+				const jsonMatch = raw.match(/Some\("(.*)"\)\s*\(response code:/s);
+				if (jsonMatch) {
+					try {
+						const unescaped = jsonMatch[1].replace(/\\"/g, '"').replace(/\\n/g, '\n');
+						const parsed = JSON.parse(unescaped);
+						const prefix = raw.substring(0, raw.indexOf('Some("'));
+						const suffix = raw.substring(raw.lastIndexOf('(response code:'));
+						return prefix.trim() + '\n\n' + JSON.stringify(parsed, null, 2) + '\n\n' + suffix;
+					} catch(e) {}
+				}
+				try {
+					return JSON.stringify(JSON.parse(raw), null, 2);
+				} catch(e) {}
+				return raw;
+			}
+
+			function showErrorModal(msg, title) {
+				hideActionSpinner();
+				errorTitleEl.textContent = title || 'Action Failed';
+				errorMsgEl.textContent = prettifyErrorMsg(msg);
+				errorWrapper.style.display = '';
+			}
+
+			function hideErrorModal() {
+				errorWrapper.style.display = 'none';
+			}
+
+			function copyErrorMsg() {
+				navigator.clipboard.writeText(errorMsgEl.textContent).then(function() {
+					const btn = document.querySelector('.error-modal-copy-btn');
+					btn.textContent = 'Copied';
+					setTimeout(function() { btn.textContent = 'Copy'; }, 1500);
+				});
+			}
+
+			function create_el(type, attributes, htmlAttributes) {
+				const el = document.createElement(type);
+				Object.assign(el, attributes);
+				if (htmlAttributes && htmlAttributes != undefined) {
+					for (const [key, value] of Object.entries(htmlAttributes)) {
+						el.setAttribute(key, value);
+					}
+				}
+				return el;
+			}
+
+			// Build logs URL for a given search term (machine ID or BMC IP).
+			// Returns the URL with {search} replaced, or null if not configured.
+			function buildLogsUrl(searchTerm) {
+				const template = {{ Self::logs_link_template()|json|safe }};
+				if (!template) return null;
+				return template.replace('{search}', encodeURIComponent(searchTerm));
+			}
+
+			// "Show" pages have a JSON link, fill in its target
+			function attachJsonLink() {
+				let jsonLink = document.getElementById("json-link");
+				if (!jsonLink) {
+					return;
+				}
+				// JSON endpoints don't honor UI query state (e.g. ?tab=),
+				// so target the path-only ".json" variant of this page.
+				const url = new URL(window.location.href);
+				url.pathname = url.pathname + ".json";
+				url.search = "";
+				url.hash = "";
+				jsonLink.href = url.toString();
+			}
+
+			document.addEventListener("DOMContentLoaded", function(event){
+				attachJsonLink();
+			});
+
+			// Updates the title of spans to render the localized version
+			// of the timestamp stored inside a span
+			function setTitleToLocalizedTime(element) {
+				let date = new Date(element.innerText);
+				// TODO: This format is not exactly equal to the non-localized format
+				element.title = date.toString();
+			}
+			{% block script %}{% endblock %}
+		</script>
+	</body>
+</html>

@@ -1,0 +1,1396 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+use std::convert::Infallible;
+use std::fmt::{Display, Formatter};
+use std::panic::Location;
+use std::sync::Arc;
+
+use ::rpc::errors::RpcDataConversionError;
+use carbide_ib_fabric::errors::IbError;
+use carbide_redfish::libredfish::RedfishClientCreationError;
+use carbide_redfish::libredfish::dpu_bios::is_dpu_bios_attributes_not_ready;
+use carbide_resource_pool::grpc::GrpcResourcePoolError;
+use carbide_resource_pool::registration::RegistrationError;
+use carbide_resource_pool::remote::RemoteResourcePoolError;
+use carbide_resource_pool::{ResourcePoolBackendError, ResourcePoolRegistryError};
+use carbide_site_explorer::EndpointExplorationServiceError;
+use carbide_uuid::machine::{InvalidMachineType, MachineId};
+use config_version::ConfigVersionParseError;
+use db::credential_rotation::CredentialRotationType;
+use db::ip_allocator::DhcpError;
+use db::machine_interface_address::AddressAlreadyInUseError;
+use db::resource_pool::ResourcePoolDatabaseError;
+use db::resource_pool::binding::BindingError;
+use db::resource_pool::remote::RemoteAllocationError;
+use db::work_lock_manager::AcquireLockError;
+use db::{AnnotatedSqlxError, DatabaseError};
+use librms::RackManagerError;
+use mac_address::MacAddress;
+use model::errors::{ErrorCode, ErrorSubsystem, ModelError, OperatorError};
+use model::hardware_info::HardwareInfoError;
+use model::network_devices::LldpError;
+use model::resource_pool::remote::AllocationFailureCode;
+use model::site_explorer::EndpointExplorationError;
+use model::tenant::TenantError;
+use model::vpc::VpcCapabilityError;
+use model::{ConfigValidationError, resource_pool};
+use tonic::Status;
+use tonic::metadata::MetadataValue;
+
+/// Represents various Errors that can occur throughout the system.
+///
+/// CarbideError is a way to represent and enrich lower-level errors with specific business logic
+/// that can be handled.
+///
+/// It uses `thiserror` to adapt lower-level errors to this type.
+#[derive(thiserror::Error, Debug)]
+pub enum CarbideError {
+    #[error("generic error from report: {0}")]
+    GenericErrorFromReport(#[from] eyre::ErrReport),
+
+    #[error("unable to parse string into IP network: {0}")]
+    NetworkParseError(#[from] ipnetwork::IpNetworkError),
+
+    #[error("unable to parse string into IP address: {0}")]
+    AddressParseError(#[from] std::net::AddrParseError),
+
+    #[error("unable to parse string into mac address: {0}")]
+    MacAddressParseError(#[from] mac_address::MacParseError),
+
+    #[error("uuid type conversion error: {0}")]
+    UuidConversionError(#[from] uuid::Error),
+
+    #[error("RPC uuid type conversion error: {0}")]
+    RpcUuidConversionError(#[from] carbide_uuid::UuidConversionError),
+
+    #[error("{kind} already exists: {id}")]
+    AlreadyFoundError {
+        /// The type of the resource that already exists (e.g. Machine)
+        kind: &'static str,
+        /// The ID of the resource that already exists.
+        id: String,
+    },
+
+    #[error("{kind} not found: {id}")]
+    NotFoundError {
+        /// The type of the resource that was not found (e.g. Machine)
+        kind: &'static str,
+        /// The ID of the resource that was not found
+        id: String,
+    },
+
+    #[error("argument is missing in input: {0}")]
+    MissingArgument(&'static str),
+
+    #[error("argument is invalid: {0}")]
+    InvalidArgument(String),
+
+    #[error("argument is invalid: {0}")]
+    VpcCapability(#[from] VpcCapabilityError),
+
+    #[error(transparent)]
+    AddressAlreadyInUse(#[from] AddressAlreadyInUseError),
+
+    #[error("{0}")]
+    DBError(#[from] AnnotatedSqlxError),
+
+    #[error("database type conversion error")]
+    DatabaseTypeConversionError(String),
+
+    #[error("database migration error: {0}")]
+    DatabaseMigrationError(#[from] sqlx::migrate::MigrateError),
+
+    #[error("duplicate MAC address for network: {0}")]
+    NetworkSegmentDuplicateMacAddress(MacAddress),
+
+    #[error("duplicate MAC address for expected host BMC interface: {0}")]
+    ExpectedHostDuplicateMacAddress(MacAddress),
+
+    #[error("NVOS MAC address is already claimed by another expected switch: {0}")]
+    ExpectedSwitchDuplicateNvosMacAddress(MacAddress),
+
+    #[error("admin network is not configured")]
+    AdminNetworkNotConfigured,
+
+    #[error("all network segments are not allocated yet")]
+    NetworkSegmentNotAllocated,
+
+    #[error("network has attached VPC or subdomain : {0}")]
+    NetworkSegmentDelete(String),
+
+    #[error(
+        "A unique identifier was specified for a new object.  when creating a new object of type {0}, do not specify an identifier"
+    )]
+    IdentifierSpecifiedForNewObject(String),
+
+    #[error("internal error: {message}")]
+    Internal { message: String },
+
+    #[error("only one interface per machine can be marked as primary")]
+    OnePrimaryInterface,
+
+    #[error("find one returned no results but should return one for uuid - {0}")]
+    FindOneReturnedNoResultsError(uuid::Uuid),
+
+    #[error("find one returned many results but should return one for uuid - {0}")]
+    FindOneReturnedManyResultsError(uuid::Uuid),
+
+    #[error("JSON parse failure - {0}")]
+    JSONParseError(#[from] serde_json::Error),
+
+    #[error("tokio task join error {0}")]
+    TokioJoinError(#[from] tokio::task::JoinError),
+
+    #[error("can not convert between RPC data model and internal data model - {0}")]
+    RpcDataConversionError(#[from] RpcDataConversionError),
+
+    #[error("invalid configuration version - {0}")]
+    InvalidConfigurationVersion(#[from] ConfigVersionParseError),
+
+    // TODO: Or VersionMismatchError? Or ObjectNotFoundOrModifiedError?
+    #[error(
+        "an object of type {0} was intended to be modified did not have the expected version {1}"
+    )]
+    ConcurrentModificationError(&'static str, String),
+
+    #[error("the function is not implemented")]
+    NotImplemented,
+
+    #[error("invalid configuration: {0}")]
+    InvalidConfiguration(#[from] ConfigValidationError),
+
+    #[error("error in DHCP allocation/handling: {0}")]
+    DhcpError(#[from] DhcpError),
+
+    #[error("error in libredfish: {0}")]
+    RedfishError(#[from] libredfish::RedfishError),
+
+    #[error("could not create connection to redfish API to {machine_id}, check logs")]
+    RedfishClientCreation {
+        inner: Box<RedfishClientCreationError>,
+        machine_id: MachineId,
+    },
+
+    #[error("resource pool error: {0}")]
+    ResourcePoolError(#[source] resource_pool::ResourcePoolError),
+
+    #[error("resource pool database error: {0}")]
+    ResourcePoolDatabaseError(#[source] ResourcePoolDatabaseError),
+
+    /// A remote allocation could not complete; its saved request may need cleanup.
+    #[error(transparent)]
+    RemoteResourcePool(Box<RemoteResourcePoolError>),
+
+    /// A remote pool definition could not be loaded or validated.
+    #[error(transparent)]
+    ResourcePoolRegistration(Box<RegistrationError>),
+
+    #[error("hardware info error: {0}")]
+    HardwareInfoError(#[from] HardwareInfoError),
+
+    #[error("failed to call IBFabricManager: {0}")]
+    IBFabricError(String),
+
+    #[error("failed to generate client certificate: {0}")]
+    ClientCertificateError(String),
+
+    #[error("DPU reprovisioning is already started: {0}")]
+    DpuReprovisioningInProgress(String),
+
+    #[error("tenant handling error: {0}")]
+    TenantError(#[from] TenantError),
+
+    #[error("machine is in maintenance mode. cannot allocate instance on it")]
+    MaintenanceMode,
+
+    #[error("resource {0} is empty")]
+    ResourceExhausted(String),
+
+    #[error("tenant SitePrefix quota reached: {used} of {limit} retained SitePrefixes are in use")]
+    TenantSitePrefixQuotaExceeded { used: u32, limit: u32 },
+
+    /// New tenant SitePrefixes are blocked by the site's legacy isolation input budget.
+    #[error(
+        "SitePrefix isolation rule limit reached: rules in use {used}, after creation {requested}, limit {limit}"
+    )]
+    SitePrefixIsolationLimitExceeded {
+        /// Number of compacted configured and retained tenant prefixes in the legacy input.
+        used: usize,
+        /// Number of compacted prefixes if the new root were admitted.
+        requested: usize,
+        /// Configured maximum for admitting new tenant roots.
+        limit: u32,
+    },
+
+    #[error("host is not available for allocation due to health probe alert")]
+    UnhealthyHost,
+
+    #[error("lldp handling error: {0}")]
+    LldpError(#[from] LldpError),
+
+    #[error("DPU {0} is missing from host snapshot")]
+    MissingDpu(MachineId),
+
+    #[error("attest quote error: {0}")]
+    AttestQuoteError(String),
+
+    #[error("attest bind key error: {0}")]
+    AttestBindKeyError(String),
+
+    #[error("{requested_ip} resolves to {found_mac} not {requested_mac}")]
+    BmcMacIpMismatch {
+        /// The BMC endpoint IP requested by the caller
+        requested_ip: String,
+        /// The BMC MAC address requested by the caller
+        requested_mac: String,
+        /// The actual BMC MAC address found associated with the endpoint IP
+        found_mac: String,
+    },
+
+    #[error("{0}")]
+    FailedPrecondition(String),
+
+    #[error("failed to map device to dpu: {0}")]
+    DpuMappingError(String),
+
+    #[error("client certificate presented has missing information: {0}")]
+    ClientCertificateMissingInformation(String),
+
+    #[error("rack manager service error: {0}")]
+    RackManagerError(#[from] RackManagerError),
+
+    #[error("maximum one association per interface")]
+    MaxOneInterfaceAssociation,
+
+    #[error("DPF error: {0}")]
+    DpfError(#[from] carbide_dpf::DpfError),
+
+    #[error("service unavailable: {0}")]
+    UnavailableError(String),
+
+    /// A caller cancelled a local pool preparation or admission step.
+    #[error("{operation} was cancelled")]
+    ResourcePoolCancelled {
+        /// The local step that stopped, such as `DPU loopback lookup`.
+        operation: &'static str,
+    },
+
+    /// A local pool preparation or admission step did not finish in time.
+    #[error("{operation} timed out")]
+    ResourcePoolDeadlineExceeded {
+        /// The local step whose wait budget expired, such as `DPU admin lock admission`.
+        operation: &'static str,
+    },
+
+    #[error("permission denied: {0}")]
+    PermissionDeniedError(String),
+
+    #[error("{0}")]
+    AlreadyInProgress(String),
+
+    #[error("attestation error: {0}")]
+    AttestationError(String),
+}
+
+// Implement From<Infallible> so that we can write generic code that converts between MachineId
+// representations using TryFrom, while supporting "non-converting" cases where the caller is
+// already passing the right type. (The `impl TryFrom<T> for T` blanket impl uses `Infallible` as
+// its error type.)
+impl From<Infallible> for CarbideError {
+    fn from(_: Infallible) -> Self {
+        // We just crash if this is ever called, because the whole point of `Infallible` is that
+        // it's an error variant that is never actually constructed. Future rust versions will use
+        // `!` as the error type for TryFrom<T> for T, and this whole conversion will become
+        // unnecessary (as the compiler will already determine it to be unreachable.)
+        unreachable!()
+    }
+}
+
+impl From<InvalidMachineType> for CarbideError {
+    fn from(err: InvalidMachineType) -> Self {
+        Self::InvalidArgument(err.to_string())
+    }
+}
+
+impl From<libnmxc::NmxcError> for CarbideError {
+    fn from(e: libnmxc::NmxcError) -> Self {
+        match e {
+            libnmxc::NmxcError::Status(s) => CarbideError::internal(s.to_string()),
+            other => CarbideError::internal(other.to_string()),
+        }
+    }
+}
+
+impl From<ModelError> for CarbideError {
+    fn from(e: ModelError) -> Self {
+        match e {
+            ModelError::DpuMappingError(e) => Self::DpuMappingError(e),
+            ModelError::MissingDpu(e) => Self::MissingDpu(e),
+            ModelError::DatabaseTypeConversionError(e) => Self::DatabaseTypeConversionError(e),
+            ModelError::MissingArgument(e) => Self::MissingArgument(e),
+            ModelError::HardwareInfo(e) => Self::HardwareInfoError(e),
+            ModelError::InvalidArgument(e) => Self::InvalidArgument(e),
+            ModelError::InvalidMachindId(e) => Self::InvalidArgument(e),
+        }
+    }
+}
+
+impl From<ResourcePoolRegistryError> for CarbideError {
+    fn from(error: ResourcePoolRegistryError) -> Self {
+        match error {
+            ResourcePoolRegistryError::Database(error)
+            | ResourcePoolRegistryError::Binding(BindingError::Database(error)) => error.into(),
+            error => Self::FailedPrecondition(error.to_string()),
+        }
+    }
+}
+
+impl From<RemoteResourcePoolError> for CarbideError {
+    fn from(error: RemoteResourcePoolError) -> Self {
+        match error {
+            // Database failures, including a failed work-lock write, keep their
+            // SQL diagnostics out of the API status like any other `DBError`.
+            RemoteResourcePoolError::Database(error)
+            | RemoteResourcePoolError::Acquire(AcquireLockError::Database(error)) => error.into(),
+            error => Self::RemoteResourcePool(Box::new(error)),
+        }
+    }
+}
+
+/// Preserve the allocator's existing API error mapping when callers use the
+/// shared allocation operations. A changed request, or one whose earlier
+/// attempt is still being cleaned up, can be retried once that cleanup finishes.
+impl From<ResourcePoolBackendError> for CarbideError {
+    fn from(error: ResourcePoolBackendError) -> Self {
+        match error {
+            ResourcePoolBackendError::Cancelled { operation } => {
+                Self::ResourcePoolCancelled { operation }
+            }
+            ResourcePoolBackendError::DeadlineExceeded { operation } => {
+                Self::ResourcePoolDeadlineExceeded { operation }
+            }
+            ResourcePoolBackendError::Database(error) => error.into(),
+            ResourcePoolBackendError::Integrated(error) => error.into(),
+            ResourcePoolBackendError::Remote(error) => error.into(),
+            ResourcePoolBackendError::Registration(error) => error.into(),
+            ResourcePoolBackendError::Registry(error) => error.into(),
+            ResourcePoolBackendError::Value(error) => RemoteResourcePoolError::Value(error).into(),
+            error @ (ResourcePoolBackendError::RequestChanged
+            | ResourcePoolBackendError::CleanupPending) => {
+                Self::FailedPrecondition(error.to_string())
+            }
+        }
+    }
+}
+
+impl From<RegistrationError> for CarbideError {
+    fn from(error: RegistrationError) -> Self {
+        match error {
+            RegistrationError::Database(error) => error.into(),
+            error => Self::ResourcePoolRegistration(Box::new(error)),
+        }
+    }
+}
+
+impl From<resource_pool::ResourcePoolError> for CarbideError {
+    fn from(error: resource_pool::ResourcePoolError) -> Self {
+        match error {
+            resource_pool::ResourcePoolError::MissingAllocationRange { .. } => {
+                Self::FailedPrecondition(error.to_string())
+            }
+            error => Self::ResourcePoolError(error),
+        }
+    }
+}
+
+impl From<ResourcePoolDatabaseError> for CarbideError {
+    fn from(error: ResourcePoolDatabaseError) -> Self {
+        match error {
+            ResourcePoolDatabaseError::ResourcePool(
+                error @ resource_pool::ResourcePoolError::MissingAllocationRange { .. },
+            ) => error.into(),
+            ResourcePoolDatabaseError::Database(error) => (*error).into(),
+            error => Self::ResourcePoolDatabaseError(error),
+        }
+    }
+}
+
+impl From<DatabaseError> for CarbideError {
+    fn from(e: DatabaseError) -> Self {
+        use CarbideError::*;
+        match e {
+            DatabaseError::AddressAlreadyInUse(e) => AddressAlreadyInUse(e),
+            DatabaseError::AddressParseError(e) => AddressParseError(e),
+            DatabaseError::AdminNetworkNotConfigured => AdminNetworkNotConfigured,
+            DatabaseError::AlreadyFoundError { kind, id } => AlreadyFoundError { kind, id },
+            DatabaseError::ConcurrentModificationError(type_str, msg) => {
+                ConcurrentModificationError(type_str, msg)
+            }
+            DatabaseError::DhcpError(e) => DhcpError(e),
+            DatabaseError::ExpectedHostDuplicateMacAddress(e) => ExpectedHostDuplicateMacAddress(e),
+            DatabaseError::ExpectedSwitchDuplicateNvosMacAddress(e) => {
+                ExpectedSwitchDuplicateNvosMacAddress(e)
+            }
+            DatabaseError::FailedPrecondition(e) => FailedPrecondition(e),
+            DatabaseError::FindOneReturnedManyResultsError(e) => FindOneReturnedManyResultsError(e),
+            DatabaseError::FindOneReturnedNoResultsError(e) => FindOneReturnedNoResultsError(e),
+            DatabaseError::GenericErrorFromReport(e) => GenericErrorFromReport(e),
+            DatabaseError::HardwareInfoError(e) => HardwareInfoError(e),
+            DatabaseError::Internal { message } => Internal { message },
+            DatabaseError::InvalidArgument(e) => InvalidArgument(e),
+            DatabaseError::InvalidConfiguration(e) => InvalidConfiguration(e),
+            DatabaseError::MissingArgument(e) => MissingArgument(e),
+            // NVOS intentionally has no target until its first versioned secret
+            // is published, so status requests can encounter this normal state.
+            DatabaseError::MissingSitewideRotationTarget(CredentialRotationType::Nvos) => {
+                FailedPrecondition(
+                    "no site-wide NVOS credential rotation target has been published".to_string(),
+                )
+            }
+            // Other credential families are seeded during migration. A missing
+            // target for them is a corrupted invariant.
+            DatabaseError::MissingSitewideRotationTarget(credential_type) => Internal {
+                message: format!(
+                    "no site-wide rotation target for credential type: {credential_type:?}"
+                ),
+            },
+            DatabaseError::NetworkParseError(e) => NetworkParseError(e),
+            DatabaseError::NetworkSegmentDelete(e) => NetworkSegmentDelete(e),
+            DatabaseError::NetworkSegmentDuplicateMacAddress(e) => {
+                NetworkSegmentDuplicateMacAddress(e)
+            }
+            DatabaseError::NetworkSegmentNotAllocated => NetworkSegmentNotAllocated,
+            DatabaseError::NotFoundError { kind, id } => NotFoundError { kind, id },
+            DatabaseError::NotImplemented => NotImplemented,
+            DatabaseError::OnePrimaryInterface => OnePrimaryInterface,
+            DatabaseError::ResourceExhausted(e) => ResourceExhausted(e),
+            DatabaseError::TenantSitePrefixQuotaExceeded { used, limit } => {
+                TenantSitePrefixQuotaExceeded { used, limit }
+            }
+            DatabaseError::ResourcePoolError(e) => e.into(),
+            DatabaseError::RpcUuidConversionError(e) => RpcUuidConversionError(e),
+            DatabaseError::Sqlx(e) => DBError(e),
+            DatabaseError::TenantError(e) => TenantError(e),
+            DatabaseError::UuidConversionError(e) => UuidConversionError(e),
+            DatabaseError::MaxOneInterfaceAssociation => MaxOneInterfaceAssociation,
+            DatabaseError::TryAgain => Internal {
+                message: DatabaseError::TryAgain.to_string(),
+            },
+            error @ DatabaseError::NetworkConfigVersionChanged { .. } => Internal {
+                message: error.to_string(),
+            },
+        }
+    }
+}
+
+impl From<EndpointExplorationServiceError> for CarbideError {
+    fn from(error: EndpointExplorationServiceError) -> Self {
+        match error {
+            EndpointExplorationServiceError::Database(error) => error.into(),
+            EndpointExplorationServiceError::NotFound { kind, id } => {
+                CarbideError::NotFoundError { kind, id }
+            }
+            EndpointExplorationServiceError::AlreadyInProgress(bmc_ip) => {
+                CarbideError::AlreadyInProgress(format!(
+                    "endpoint exploration already in progress for {bmc_ip}"
+                ))
+            }
+            suppressed_error @ (EndpointExplorationServiceError::Suppressed { .. }
+            | EndpointExplorationServiceError::DpfProvisioning { .. }) => {
+                CarbideError::FailedPrecondition(suppressed_error.to_string())
+            }
+            EndpointExplorationServiceError::ConcurrentModification { kind, version } => {
+                CarbideError::ConcurrentModificationError(kind, version)
+            }
+            background_error @ EndpointExplorationServiceError::BackgroundTaskFailed { .. } => {
+                CarbideError::internal(background_error.to_string())
+            }
+        }
+    }
+}
+
+impl From<IbError> for CarbideError {
+    fn from(e: IbError) -> Self {
+        match e {
+            IbError::DatabaseError(e) => e.into(),
+            IbError::ModelError(e) => e.into(),
+            IbError::IBFabricError(msg) => Self::IBFabricError(msg),
+            IbError::NotFoundError { kind, id } => Self::NotFoundError { kind, id },
+            IbError::InvalidArgument(e) => Self::InvalidArgument(e),
+            IbError::CredentialConfigurationError(e) => Self::FailedPrecondition(e),
+            IbError::NotImplemented => Self::NotImplemented,
+            IbError::Internal { message } => Self::Internal { message },
+        }
+    }
+}
+
+impl CarbideError {
+    /// Creates a `Internal` error with the given error message
+    pub fn internal(message: String) -> Self {
+        CarbideError::Internal { message }
+    }
+
+    /// Returns the Postgres SQLSTATE code if this is a database error, or `None` otherwise.
+    pub(crate) fn pg_sqlstate(&self) -> Option<String> {
+        if let CarbideError::DBError(db::AnnotatedSqlxError {
+            source: sqlx::Error::Database(db_err),
+            ..
+        }) = self
+        {
+            db_err.code().map(|c| c.into_owned())
+        } else {
+            None
+        }
+    }
+
+    /// Whether the wrapped query error is a Postgres deadlock or serialization
+    /// failure (`db::AnnotatedSqlxError::is_retryable_transaction_error`).
+    pub(crate) fn is_retryable_transaction_error(&self) -> bool {
+        matches!(self, CarbideError::DBError(error) if error.is_retryable_transaction_error())
+    }
+}
+
+impl OperatorError for CarbideError {
+    fn operator_error_code(&self) -> ErrorCode {
+        use ErrorSubsystem::{Api, Redfish};
+        match self {
+            CarbideError::InvalidArgument(_)
+            | CarbideError::UuidConversionError(_)
+            | CarbideError::VpcCapability(_)
+            | CarbideError::InvalidConfiguration(_)
+            | CarbideError::RpcDataConversionError(_)
+            | CarbideError::MissingArgument(_)
+            | CarbideError::NetworkSegmentDelete(_)
+            | CarbideError::BmcMacIpMismatch { .. } => ErrorCode::nico(Api, 400),
+            CarbideError::ClientCertificateMissingInformation(_) => ErrorCode::nico(Api, 401),
+            CarbideError::PermissionDeniedError(_) => ErrorCode::nico(Api, 403),
+            CarbideError::NotFoundError { .. } => ErrorCode::nico(Api, 404),
+            CarbideError::AlreadyFoundError { .. }
+            | CarbideError::AlreadyInProgress(_)
+            | CarbideError::ExpectedHostDuplicateMacAddress(_) => ErrorCode::nico(Api, 409),
+            CarbideError::MaintenanceMode
+            | CarbideError::UnhealthyHost
+            | CarbideError::ConcurrentModificationError(_, _)
+            | CarbideError::FailedPrecondition(_)
+            | CarbideError::ExpectedSwitchDuplicateNvosMacAddress(_)
+            | CarbideError::AddressAlreadyInUse(_) => ErrorCode::nico(Api, 412),
+            CarbideError::ResourceExhausted(_)
+            | CarbideError::TenantSitePrefixQuotaExceeded { .. }
+            | CarbideError::SitePrefixIsolationLimitExceeded { .. }
+            | CarbideError::DhcpError(_) => ErrorCode::nico(Api, 429),
+            CarbideError::UnavailableError(_) => ErrorCode::nico(Api, 503),
+            CarbideError::ResourcePoolCancelled { .. } => ErrorCode::nico(Api, 499),
+            CarbideError::ResourcePoolDeadlineExceeded { .. } => ErrorCode::nico(Api, 504),
+            CarbideError::RemoteResourcePool(error) => ErrorCode::nico(
+                Api,
+                match remote_resource_pool_status_code(error) {
+                    tonic::Code::InvalidArgument => 400,
+                    tonic::Code::FailedPrecondition => 412,
+                    tonic::Code::ResourceExhausted => 429,
+                    tonic::Code::Cancelled => 499,
+                    tonic::Code::Unavailable => 503,
+                    tonic::Code::DeadlineExceeded => 504,
+                    _ => 500,
+                },
+            ),
+            CarbideError::RedfishError(error) if is_dpu_bios_attributes_not_ready(error) => {
+                EndpointExplorationError::INVALID_DPU_REDFISH_BIOS_RESPONSE_CODE
+            }
+            CarbideError::RedfishError(_) | CarbideError::RedfishClientCreation { .. } => {
+                ErrorCode::nico(Redfish, 500)
+            }
+            _ => ErrorCode::nico(Api, 500),
+        }
+    }
+
+    fn operator_mitigation(&self) -> Option<&'static str> {
+        match self {
+            CarbideError::RedfishError(error) if is_dpu_bios_attributes_not_ready(error) => {
+                Some(EndpointExplorationError::INVALID_DPU_REDFISH_BIOS_RESPONSE_MITIGATION)
+            }
+            CarbideError::RedfishError(_) | CarbideError::RedfishClientCreation { .. } => {
+                Some("Check BMC reachability, credentials, and Redfish service health.")
+            }
+            CarbideError::UnavailableError(_) => Some(
+                "A dependent NICo service is temporarily unavailable. Retry the same request \
+                 once it recovers: re-run the Admin CLI command, REST API call, or client \
+                 integration that failed, backing off briefly between attempts.",
+            ),
+            CarbideError::ResourceExhausted(_) | CarbideError::DhcpError(_) => {
+                Some("Check configured resource pools and available capacity.")
+            }
+            CarbideError::RemoteResourcePool(error)
+                if matches!(
+                    error.as_ref(),
+                    RemoteResourcePoolError::Rejected(AllocationFailureCode::ResourceExhausted)
+                ) =>
+            {
+                Some("Check configured resource pools and available capacity.")
+            }
+            CarbideError::TenantSitePrefixQuotaExceeded { .. } => Some(
+                "Review the tenant's retained SitePrefixes; complete removal of an unneeded prefix \
+                 or increase max_site_prefixes_per_tenant if additional roots are intended.",
+            ),
+            CarbideError::SitePrefixIsolationLimitExceeded { .. } => Some(
+                "Review the configured and retained tenant SitePrefixes and max_site_prefix_isolation_rules; \
+                 existing protection is retained until prefixes can be safely removed.",
+            ),
+            _ => None,
+        }
+    }
+}
+
+#[test]
+fn test_carbide_error() {
+    let error = crate::CarbideError::internal(String::from("unable to yeet foo into the sun"));
+    assert_eq!(
+        error.to_string(),
+        "internal error: unable to yeet foo into the sun"
+    );
+}
+
+impl From<::measured_boot::Error> for CarbideError {
+    fn from(value: measured_boot::Error) -> Self {
+        CarbideError::internal(value.to_string())
+    }
+}
+
+/// `remote_resource_pool_status_code` separates rejected allocation requests
+/// from provider failures. Provider credentials and resource names belong to
+/// NICo, so those failures must not look like mistakes by the API caller.
+/// A provider that can't take the call is `Unavailable`. A call that reached
+/// its deadline is `DeadlineExceeded`, because the provider may still have
+/// allocated; recovery settles that request either way.
+fn remote_resource_pool_status_code(error: &RemoteResourcePoolError) -> tonic::Code {
+    match error {
+        RemoteResourcePoolError::Rejected(AllocationFailureCode::ResourceExhausted) => {
+            tonic::Code::ResourceExhausted
+        }
+        RemoteResourcePoolError::Rejected(AllocationFailureCode::InvalidArgument) => {
+            tonic::Code::InvalidArgument
+        }
+        RemoteResourcePoolError::Rejected(AllocationFailureCode::FailedPrecondition)
+        | RemoteResourcePoolError::NotCurrent => tonic::Code::FailedPrecondition,
+        RemoteResourcePoolError::Storage(error) => match error.as_ref() {
+            RemoteAllocationError::RequestConflict(_)
+            | RemoteAllocationError::GenerationExists(_)
+            | RemoteAllocationError::SlotInUse(_) => tonic::Code::FailedPrecondition,
+            RemoteAllocationError::Database(_) | RemoteAllocationError::BindingMismatch(_) => {
+                tonic::Code::Internal
+            }
+        },
+        RemoteResourcePoolError::Incomplete
+        | RemoteResourcePoolError::Provider(GrpcResourcePoolError::DeadlineExceeded) => {
+            tonic::Code::DeadlineExceeded
+        }
+        RemoteResourcePoolError::Provider(GrpcResourcePoolError::Rpc(error))
+            if error.code() == tonic::Code::DeadlineExceeded =>
+        {
+            tonic::Code::DeadlineExceeded
+        }
+        // An overloaded provider's `ResourceExhausted` is transient, not an
+        // exhausted pool; only `Rejected` reports exhaustion.
+        RemoteResourcePoolError::Busy
+        | RemoteResourcePoolError::Provider(
+            GrpcResourcePoolError::Busy
+            | GrpcResourcePoolError::Connect(_)
+            | GrpcResourcePoolError::Rpc(_),
+        )
+        | RemoteResourcePoolError::Acquire(
+            AcquireLockError::WorkAlreadyLocked(_)
+            | AcquireLockError::WorkLockManagerSend(_)
+            | AcquireLockError::WorkLockManagerReply(_)
+            | AcquireLockError::Timeout(_),
+        ) => tonic::Code::Unavailable,
+        RemoteResourcePoolError::Cancelled => tonic::Code::Cancelled,
+        RemoteResourcePoolError::Database(_)
+        | RemoteResourcePoolError::Acquire(AcquireLockError::Database(_))
+        | RemoteResourcePoolError::Value(_)
+        | RemoteResourcePoolError::InvalidRecord(_)
+        | RemoteResourcePoolError::InvalidResponse(_)
+        | RemoteResourcePoolError::Provider(
+            GrpcResourcePoolError::InvalidConfiguration(_)
+            | GrpcResourcePoolError::Preparation(_)
+            | GrpcResourcePoolError::Credentials { .. }
+            | GrpcResourcePoolError::Tls(_)
+            | GrpcResourcePoolError::InvalidResponse(_),
+        ) => tonic::Code::Internal,
+    }
+}
+
+impl From<CarbideError> for tonic::Status {
+    /// Maps errors to gRPC responses and operator metadata.
+    /// `DBError` uses fixed `Internal` text and `nico-error-text`; the original
+    /// diagnostic is logged and available in the in-process status source.
+    #[track_caller] // get the source Location from the caller, not this function
+    fn from(error: CarbideError) -> Self {
+        let mut schema = error.operator_error_schema();
+
+        // TODO: There's many more mapped to `Status::internal` which are likely
+        // user errors instead
+        let mut status = match &error {
+            CarbideError::DBError(database_error) => {
+                // `batch_release` can put this message in an `Ok` response, so
+                // request middleware cannot log every per-instance failure.
+                tracing::error!(error = %database_error, "database error conversion");
+                schema.text = database_error.status_message().to_string();
+                Status::internal(&schema.text)
+            }
+            e @ CarbideError::Internal { .. } => Status::internal(e.to_string()),
+            CarbideError::InvalidArgument(msg) => Status::invalid_argument(msg),
+            error @ CarbideError::UuidConversionError(_) => {
+                Status::invalid_argument(error.to_string())
+            }
+            error @ CarbideError::VpcCapability(_) => Status::invalid_argument(error.to_string()),
+            CarbideError::InvalidConfiguration(e) => Status::invalid_argument(e.to_string()),
+            CarbideError::RpcDataConversionError(e) => Status::invalid_argument(e.to_string()),
+            e @ CarbideError::DhcpError(_) => Status::resource_exhausted(e.to_string()),
+            CarbideError::MissingArgument(msg) => Status::invalid_argument(*msg),
+            CarbideError::NetworkSegmentDelete(msg) => Status::invalid_argument(msg),
+            CarbideError::NotFoundError { kind, id } => {
+                Status::not_found(format!("{kind} not found: {id}"))
+            }
+            CarbideError::AlreadyFoundError { kind, id } => {
+                Status::already_exists(format!("{kind} already exists: {id}"))
+            }
+            CarbideError::MaintenanceMode => {
+                Status::failed_precondition("MaintenanceMode".to_string())
+            }
+            e @ CarbideError::BmcMacIpMismatch { .. } => Status::invalid_argument(e.to_string()),
+            CarbideError::UnhealthyHost => Status::failed_precondition(error.to_string()),
+            CarbideError::ResourceExhausted(kind) => Status::resource_exhausted(kind),
+            CarbideError::RemoteResourcePool(remote) => {
+                Status::new(remote_resource_pool_status_code(remote), remote.to_string())
+            }
+            error @ (CarbideError::TenantSitePrefixQuotaExceeded { .. }
+            | CarbideError::SitePrefixIsolationLimitExceeded { .. }) => {
+                Status::resource_exhausted(error.to_string())
+            }
+            error @ CarbideError::ConcurrentModificationError(_, _) => {
+                Status::failed_precondition(error.to_string())
+            }
+            error @ CarbideError::FailedPrecondition(_) => {
+                Status::failed_precondition(error.to_string())
+            }
+            error @ CarbideError::ExpectedHostDuplicateMacAddress(_) => {
+                Status::already_exists(error.to_string())
+            }
+            error @ CarbideError::ExpectedSwitchDuplicateNvosMacAddress(_) => {
+                Status::failed_precondition(error.to_string())
+            }
+            error @ CarbideError::AddressAlreadyInUse(_) => {
+                Status::failed_precondition(error.to_string())
+            }
+            error @ CarbideError::ClientCertificateMissingInformation(_) => {
+                Status::unauthenticated(error.to_string())
+            }
+            CarbideError::UnavailableError(msg) => Status::unavailable(msg),
+            CarbideError::ResourcePoolCancelled { operation } => {
+                Status::cancelled(format!("{operation} was cancelled"))
+            }
+            CarbideError::ResourcePoolDeadlineExceeded { operation } => {
+                Status::deadline_exceeded(format!("{operation} timed out"))
+            }
+            CarbideError::PermissionDeniedError(msg) => Status::permission_denied(msg),
+            CarbideError::AlreadyInProgress(msg) => Status::already_exists(msg),
+            other => Status::internal(other.to_string()),
+        };
+
+        insert_ascii_metadata(
+            &mut status,
+            "nico-error-code",
+            &schema.error_code.to_string(),
+        );
+        insert_ascii_metadata(&mut status, "nico-error-text", &schema.text);
+        if let Some(mitigation) = &schema.mitigation {
+            insert_ascii_metadata(&mut status, "nico-error-mitigation", mitigation);
+        }
+
+        let error_with_location = CarbideErrorWithLocation {
+            error,
+            location: Location::caller().to_string(),
+        };
+
+        // Set the inner error to the CarbideError, which can be inspected by our LogService layer
+        status.set_source(Arc::new(error_with_location));
+        status
+    }
+}
+
+/// A CarbideError with the corresponding source location where it was converted to a tonic::Status
+#[derive(Debug)]
+pub(crate) struct CarbideErrorWithLocation {
+    pub(crate) error: CarbideError,
+    pub(crate) location: String,
+}
+
+impl Display for CarbideErrorWithLocation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.error, f)
+    }
+}
+
+impl std::error::Error for CarbideErrorWithLocation {}
+
+fn insert_ascii_metadata(status: &mut Status, key: &'static str, value: &str) {
+    match MetadataValue::try_from(value) {
+        Ok(value) => {
+            status.metadata_mut().insert(key, value);
+        }
+        Err(error) => {
+            tracing::warn!(
+                metadata_key = key,
+                error = %error,
+                "Operator error metadata was rejected because it contains non-ASCII content"
+            );
+        }
+    }
+}
+
+/// Result type for the return type of Carbide functions
+///
+/// Wraps `CarbideError` into `CarbideResult<T>`
+pub(crate) type CarbideResult<T> = Result<T, CarbideError>;
+
+#[test]
+fn test_carbide_result() {
+    use crate::{CarbideError, CarbideResult};
+
+    fn do_something() -> CarbideResult<u8> {
+        Err(CarbideError::internal(String::from("can't make u8")))
+    }
+    assert!(matches!(do_something(), Err(CarbideError::Internal { .. })));
+}
+
+#[tokio::test]
+async fn sqlx_status_hides_message_and_metadata_diagnostics() {
+    use std::error::Error;
+
+    let error = CarbideError::from(DatabaseError::query(
+        "SELECT private_column FROM private_table",
+        sqlx::Error::protocol("private database diagnostic"),
+    ));
+    let diagnostic = error.to_string();
+    let ((status, conversion_line), logs) =
+        carbide_instrument::testing::capture_logs_async(async {
+            (tonic::Status::from(error), line!())
+        })
+        .await;
+
+    assert_eq!(status.code(), tonic::Code::Internal);
+    assert_eq!(status.message(), "internal database error");
+    assert_eq!(
+        status.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-500"
+    );
+    assert_eq!(
+        status.metadata().get("nico-error-text").unwrap(),
+        "internal database error"
+    );
+    assert!(logs.iter().any(|log| {
+        log.level == tracing::Level::ERROR
+            && log.message == "database error conversion"
+            && log.field("error") == Some(diagnostic.as_str())
+    }));
+
+    let source = status
+        .source()
+        .unwrap()
+        .downcast_ref::<CarbideErrorWithLocation>()
+        .unwrap();
+    assert_eq!(source.error.to_string(), diagnostic);
+    assert_eq!(source.error.operator_error_schema().text, diagnostic);
+    assert!(
+        source
+            .location
+            .starts_with(&format!("{}:{conversion_line}:", file!()))
+    );
+    let CarbideError::DBError(annotated) = &source.error else {
+        panic!("expected the original database error: {source:?}");
+    };
+    assert!(matches!(
+        &annotated.source,
+        sqlx::Error::Protocol(message) if message == "private database diagnostic"
+    ));
+    assert!(diagnostic.contains("SELECT private_column FROM private_table"));
+    assert!(diagnostic.contains(file!()));
+    assert!(diagnostic.contains("line="));
+}
+
+#[test]
+fn database_domain_status_messages_are_preserved() {
+    use carbide_test_support::{Check, check_values};
+
+    check_values(
+        [
+            Check {
+                scenario: "missing resource",
+                input: DatabaseError::NotFoundError {
+                    kind: "machine",
+                    id: "missing-machine".to_string(),
+                },
+                expect: (tonic::Code::NotFound, "NICO-API-404".to_string()),
+            },
+            Check {
+                scenario: "concurrent modification",
+                input: DatabaseError::ConcurrentModificationError(
+                    "machine",
+                    "old-version".to_string(),
+                ),
+                expect: (tonic::Code::FailedPrecondition, "NICO-API-412".to_string()),
+            },
+            Check {
+                scenario: "non-SQLx internal error",
+                input: DatabaseError::internal("domain diagnostic".to_string()),
+                expect: (tonic::Code::Internal, "NICO-API-500".to_string()),
+            },
+            Check {
+                scenario: "non-SQLx fallback",
+                input: DatabaseError::NetworkSegmentNotAllocated,
+                expect: (tonic::Code::Internal, "NICO-API-500".to_string()),
+            },
+        ],
+        |error| {
+            let message = error.to_string();
+            let status = tonic::Status::from(CarbideError::from(error));
+            assert_eq!(status.message(), message);
+            assert_eq!(
+                status
+                    .metadata()
+                    .get("nico-error-text")
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                message
+            );
+            (
+                status.code(),
+                status
+                    .metadata()
+                    .get("nico-error-code")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+            )
+        },
+    );
+}
+
+#[test]
+fn test_dhcp_error_maps_to_resource_exhausted_status() {
+    let err = CarbideError::DhcpError(DhcpError::PrefixExhausted(
+        "10.217.5.160".parse().expect("valid IP"),
+    ));
+    let status: tonic::Status = err.into();
+    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+}
+
+#[test]
+fn tenant_site_prefix_quota_error_is_actionable() {
+    let err = CarbideError::TenantSitePrefixQuotaExceeded { used: 8, limit: 8 };
+    let status: tonic::Status = err.into();
+
+    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+    assert_eq!(
+        status.message(),
+        "tenant SitePrefix quota reached: 8 of 8 retained SitePrefixes are in use"
+    );
+    assert_eq!(
+        status
+            .metadata()
+            .get("nico-error-code")
+            .expect("metadata should include operator error code")
+            .to_str()
+            .expect("operator error code should be ASCII"),
+        "NICO-API-429"
+    );
+    assert_eq!(
+        status
+            .metadata()
+            .get("nico-error-text")
+            .expect("metadata should include operator error text")
+            .to_str()
+            .expect("operator error text should be ASCII"),
+        "tenant SitePrefix quota reached: 8 of 8 retained SitePrefixes are in use"
+    );
+    assert_eq!(
+        status
+            .metadata()
+            .get("nico-error-mitigation")
+            .expect("metadata should include operator mitigation")
+            .to_str()
+            .expect("operator mitigation should be ASCII"),
+        "Review the tenant's retained SitePrefixes; complete removal of an unneeded prefix or \
+         increase max_site_prefixes_per_tenant if additional roots are intended."
+    );
+}
+
+#[test]
+fn missing_allocation_range_preserves_status_through_wrappers() {
+    use resource_pool::ResourcePoolError;
+
+    #[derive(Debug)]
+    enum Wrapper {
+        Pool,
+        PoolDatabase,
+        Database,
+        NestedDatabase,
+    }
+    for wrapper in [
+        Wrapper::Pool,
+        Wrapper::PoolDatabase,
+        Wrapper::Database,
+        Wrapper::NestedDatabase,
+    ] {
+        let error = ResourcePoolError::MissingAllocationRange {
+            pool_name: "test-pool".to_string(),
+            auto_assign: false,
+        };
+        let error = match wrapper {
+            Wrapper::Pool => CarbideError::from(error),
+            Wrapper::PoolDatabase => CarbideError::from(ResourcePoolDatabaseError::from(error)),
+            Wrapper::Database => CarbideError::from(DatabaseError::from(error)),
+            Wrapper::NestedDatabase => {
+                CarbideError::from(ResourcePoolDatabaseError::from(DatabaseError::from(error)))
+            }
+        };
+        let status = tonic::Status::from(error);
+        assert_eq!(
+            status.code(),
+            tonic::Code::FailedPrecondition,
+            "{wrapper:?}"
+        );
+        assert_eq!(
+            status.message(),
+            "resource-pool `test-pool` has no explicit allocation range",
+            "{wrapper:?}"
+        );
+        assert_eq!(
+            status
+                .metadata()
+                .get("nico-error-code")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "NICO-API-412",
+            "{wrapper:?}"
+        );
+    }
+}
+
+/// Pool failures report the same distinction in gRPC status and operator metadata.
+#[test]
+fn resource_pool_errors_preserve_status() {
+    use carbide_test_support::{Check, check_values};
+
+    check_values(
+        [
+            Check {
+                scenario: "local precondition failure",
+                input: CarbideError::from(ResourcePoolDatabaseError::from(
+                    DatabaseError::FailedPrecondition("no allocation range".to_string()),
+                )),
+                expect: (
+                    tonic::Code::FailedPrecondition,
+                    "NICO-API-412".to_owned(),
+                    None,
+                ),
+            },
+            Check {
+                scenario: "local database failure",
+                input: CarbideError::from(ResourcePoolDatabaseError::from(DatabaseError::query(
+                    "allocate",
+                    sqlx::Error::RowNotFound,
+                ))),
+                expect: (tonic::Code::Internal, "NICO-API-500".to_owned(), None),
+            },
+            Check {
+                scenario: "failed work-lock write is reported as a database error",
+                input: CarbideError::from(RemoteResourcePoolError::Acquire(
+                    AcquireLockError::Database(DatabaseError::query(
+                        "acquire work lock",
+                        sqlx::Error::RowNotFound,
+                    )),
+                )),
+                expect: (tonic::Code::Internal, "NICO-API-500".to_owned(), None),
+            },
+            Check {
+                scenario: "provider confirmed exhaustion includes capacity advice",
+                input: CarbideError::from(RemoteResourcePoolError::Rejected(
+                    AllocationFailureCode::ResourceExhausted,
+                )),
+                expect: (
+                    tonic::Code::ResourceExhausted,
+                    "NICO-API-429".to_owned(),
+                    Some("Check configured resource pools and available capacity.".to_owned()),
+                ),
+            },
+            Check {
+                scenario: "busy coordinator does not establish exhaustion",
+                input: CarbideError::from(RemoteResourcePoolError::Busy),
+                expect: (tonic::Code::Unavailable, "NICO-API-503".to_owned(), None),
+            },
+            Check {
+                scenario: "provider credentials do not belong to the API caller",
+                input: CarbideError::from(RemoteResourcePoolError::Provider(
+                    GrpcResourcePoolError::Rpc(
+                        tonic::Status::permission_denied("provider credentials rejected").into(),
+                    ),
+                )),
+                expect: (tonic::Code::Unavailable, "NICO-API-503".to_owned(), None),
+            },
+            Check {
+                scenario: "provider deadline remains distinguishable from unavailability",
+                input: CarbideError::from(RemoteResourcePoolError::Provider(
+                    GrpcResourcePoolError::Rpc(
+                        tonic::Status::deadline_exceeded("provider operation timed out").into(),
+                    ),
+                )),
+                expect: (
+                    tonic::Code::DeadlineExceeded,
+                    "NICO-API-504".to_owned(),
+                    None,
+                ),
+            },
+            Check {
+                scenario: "a saved request cannot be retried with different inputs",
+                input: CarbideError::from(RemoteResourcePoolError::from(
+                    RemoteAllocationError::RequestConflict(uuid::Uuid::nil()),
+                )),
+                expect: (
+                    tonic::Code::FailedPrecondition,
+                    "NICO-API-412".to_owned(),
+                    None,
+                ),
+            },
+            Check {
+                scenario: "provider rejects the requested value",
+                input: CarbideError::from(RemoteResourcePoolError::Rejected(
+                    AllocationFailureCode::InvalidArgument,
+                )),
+                expect: (
+                    tonic::Code::InvalidArgument,
+                    "NICO-API-400".to_owned(),
+                    None,
+                ),
+            },
+            Check {
+                scenario: "attempt changed before attachment",
+                input: CarbideError::from(RemoteResourcePoolError::NotCurrent),
+                expect: (
+                    tonic::Code::FailedPrecondition,
+                    "NICO-API-412".to_owned(),
+                    None,
+                ),
+            },
+            Check {
+                scenario: "earlier attempt is still being cleaned up",
+                input: CarbideError::from(ResourcePoolBackendError::CleanupPending),
+                expect: (
+                    tonic::Code::FailedPrecondition,
+                    "NICO-API-412".to_owned(),
+                    None,
+                ),
+            },
+            Check {
+                scenario: "unconfirmed completion leaves the result unknown",
+                input: CarbideError::from(RemoteResourcePoolError::Incomplete),
+                expect: (
+                    tonic::Code::DeadlineExceeded,
+                    "NICO-API-504".to_owned(),
+                    None,
+                ),
+            },
+            Check {
+                scenario: "overloaded provider is unavailable, not exhausted",
+                input: CarbideError::from(RemoteResourcePoolError::Provider(
+                    GrpcResourcePoolError::Rpc(
+                        tonic::Status::resource_exhausted("provider overloaded").into(),
+                    ),
+                )),
+                expect: (tonic::Code::Unavailable, "NICO-API-503".to_owned(), None),
+            },
+            Check {
+                scenario: "API shutdown cancels the allocation",
+                input: CarbideError::from(RemoteResourcePoolError::Cancelled),
+                expect: (tonic::Code::Cancelled, "NICO-API-499".to_owned(), None),
+            },
+            Check {
+                scenario: "invalid saved record is an internal failure",
+                input: CarbideError::from(RemoteResourcePoolError::InvalidRecord(
+                    "missing request",
+                )),
+                expect: (tonic::Code::Internal, "NICO-API-500".to_owned(), None),
+            },
+            Check {
+                // Local cancellation keeps the caller's status without implying provider work.
+                scenario: "local pool lookup cancellation preserves cancelled status",
+                input: CarbideError::from(ResourcePoolBackendError::Cancelled {
+                    operation: "DPU loopback lookup",
+                }),
+                expect: (tonic::Code::Cancelled, "NICO-API-499".to_owned(), None),
+            },
+            Check {
+                // Admission exhaustion is a deadline, not unavailable remote capacity.
+                scenario: "local pool admission timeout preserves deadline status",
+                input: CarbideError::from(ResourcePoolBackendError::DeadlineExceeded {
+                    operation: "DPU admin lock admission",
+                }),
+                expect: (
+                    tonic::Code::DeadlineExceeded,
+                    "NICO-API-504".to_owned(),
+                    None,
+                ),
+            },
+        ],
+        |error| {
+            let status = tonic::Status::from(error);
+            (
+                status.code(),
+                status
+                    .metadata()
+                    .get("nico-error-code")
+                    .expect("operator error code")
+                    .to_str()
+                    .expect("ASCII operator code")
+                    .to_owned(),
+                status
+                    .metadata()
+                    .get("nico-error-mitigation")
+                    .map(|mitigation| mitigation.to_str().expect("ASCII mitigation").to_owned()),
+            )
+        },
+    );
+}
+
+#[test]
+fn test_unavailable_error_maps_to_unavailable_status() {
+    let err = CarbideError::UnavailableError("service down".into());
+    let status: tonic::Status = err.into();
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+}
+
+#[test]
+fn unavailable_error_schema_describes_who_should_retry() {
+    let schema = CarbideError::UnavailableError("service down".into()).operator_error_schema();
+
+    let mitigation = schema.mitigation.expect("has a mitigation");
+    assert!(mitigation.contains("Admin CLI"));
+    assert!(mitigation.contains("REST API"));
+}
+
+#[test]
+fn invalid_argument_status_includes_operator_schema_metadata() {
+    let err = CarbideError::InvalidArgument("bad input".into());
+    let status: tonic::Status = err.into();
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert_eq!(status.message(), "bad input");
+    assert_eq!(
+        status
+            .metadata()
+            .get("nico-error-code")
+            .expect("metadata should include operator error code")
+            .to_str()
+            .expect("operator error code should be ASCII"),
+        "NICO-API-400"
+    );
+    assert_eq!(
+        status
+            .metadata()
+            .get("nico-error-text")
+            .expect("metadata should include operator error text")
+            .to_str()
+            .expect("operator error text should be ASCII"),
+        "argument is invalid: bad input"
+    );
+}
+
+#[test]
+fn uuid_conversion_status_includes_invalid_argument_metadata() {
+    use carbide_test_support::{Check, check_values};
+
+    let errors = [
+        (
+            "direct UUID error",
+            CarbideError::from(uuid::Uuid::parse_str("not-a-uuid").unwrap_err()),
+        ),
+        (
+            "database UUID error",
+            CarbideError::from(DatabaseError::from(
+                uuid::Uuid::parse_str("not-a-uuid").unwrap_err(),
+            )),
+        ),
+    ];
+    check_values(
+        errors.map(|(scenario, input)| Check {
+            scenario,
+            input,
+            expect: (tonic::Code::InvalidArgument, "NICO-API-400".to_owned()),
+        }),
+        |error| {
+            let status: tonic::Status = error.into();
+            let code = status
+                .metadata()
+                .get("nico-error-code")
+                .expect("metadata should include operator error code")
+                .to_str()
+                .expect("operator error code should be ASCII");
+            (status.code(), code.to_owned())
+        },
+    );
+}
+
+#[test]
+fn dpu_bios_redfish_error_uses_dpu_operator_schema() {
+    let err = CarbideError::RedfishError(libredfish::RedfishError::MissingKey {
+        key: "HostPrivilegeLevel".to_string(),
+        url: "Systems/{}/Bios".to_string(),
+    });
+
+    let schema = err.operator_error_schema();
+
+    assert_eq!(
+        schema.error_code,
+        EndpointExplorationError::INVALID_DPU_REDFISH_BIOS_RESPONSE_CODE
+    );
+    assert_eq!(
+        schema.mitigation.as_deref(),
+        Some(EndpointExplorationError::INVALID_DPU_REDFISH_BIOS_RESPONSE_MITIGATION)
+    );
+}
+
+#[test]
+fn test_permission_denied_error_maps_to_permission_denied_status() {
+    let err = CarbideError::PermissionDeniedError("not allowed".into());
+    let status: tonic::Status = err.into();
+    assert_eq!(status.code(), tonic::Code::PermissionDenied);
+}
+
+#[test]
+fn test_address_already_in_use_maps_to_failed_precondition_status() {
+    use std::str::FromStr;
+    let err = CarbideError::AddressAlreadyInUse(AddressAlreadyInUseError::active(
+        "10.0.0.1".parse().unwrap(),
+        MacAddress::from_str("aa:bb:cc:dd:ee:ff").unwrap(),
+        uuid::Uuid::new_v4().into(),
+        uuid::Uuid::new_v4().into(),
+    ));
+    let status: tonic::Status = err.into();
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+}

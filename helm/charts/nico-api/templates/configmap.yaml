@@ -1,0 +1,110 @@
+{{- include "nico-api.validateAdminRootCertPem" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nico-api.name" . }}-config-files
+  namespace: {{ include "nico-api.namespace" . }}
+  labels:
+    {{- include "nico-api.labels" . | nindent 4 }}
+data:
+  # Both filenames are populated with the same content so the chart works
+  # whether the binary expects carbide-api-config.toml or nico-api-config.toml.
+  carbide-api-config.toml: |
+    {{- if .Values.configFiles.nicoApiConfig }}
+    {{- .Values.configFiles.nicoApiConfig | nindent 4 }}
+    {{- else }}
+    {{- tpl (.Files.Get "files/carbide-api-config.toml") . | nindent 4 }}
+    {{- end }}
+  nico-api-config.toml: |
+    {{- if .Values.configFiles.nicoApiConfig }}
+    {{- .Values.configFiles.nicoApiConfig | nindent 4 }}
+    {{- else }}
+    {{- tpl (.Files.Get "files/carbide-api-config.toml") . | nindent 4 }}
+    {{- end }}
+  casbin-policy.csv: |
+    {{- if .Values.configFiles.casbinPolicy }}
+    {{- .Values.configFiles.casbinPolicy | nindent 4 }}
+    {{- else }}
+    {{- tpl (.Files.Get "files/casbin-policy.csv") . | nindent 4 }}
+    {{- end }}
+{{- if .Values.siteConfig.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nico-api.name" . }}-site-config-files
+  namespace: {{ include "nico-api.namespace" . }}
+  labels:
+    {{- include "nico-api.labels" . | nindent 4 }}
+data:
+  # Both filenames populated for dual carbide/nico image support.
+  #
+  # spiffe_trust_domain is stripped from the site TOML before rendering.
+  # The built-in config (carbide-api-config.toml) always renders it from
+  # global.spiffe.trustDomain, so a stale "forge.local" in a migrated site
+  # overlay cannot silently override it and cause bare HTTP 403s (issue #3666).
+  #
+  # UPGRADE NOTE: If your site TOML contains spiffe_trust_domain, set
+  # global.spiffe.trustDomain to the same value in your helm values before
+  # upgrading. The key will be stripped from the site TOML and the chart
+  # value will take effect.
+  #
+  # The regex covers both TOML string forms (double-quoted and single-quoted
+  # literal strings). Bare (unquoted) values are not valid TOML for strings
+  # and are not expected in practice.
+  {{- $raw := .Values.siteConfig.nicoApiSiteConfig | default "" }}
+  {{- $siteConfig := regexReplaceAll `(?m)^\s*spiffe_trust_domain\s*=\s*["'][^"']*["'][^\n]*$` $raw "" }}
+  carbide-api-site-config.toml: {{ $siteConfig | quote }}
+  nico-api-site-config.toml:    {{ $siteConfig | quote }}
+{{- with .Values.siteConfig.adminRootCertPem }}
+  admin_root_cert_pem: |
+    {{- . | nindent 4 }}
+{{- end }}
+{{- end }}
+{{- if .Values.vaultClusterInfo }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.envFrom.vaultClusterInfo.configMapName }}
+  namespace: {{ include "nico-api.namespace" . }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  labels:
+    {{- include "nico-api.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.vaultClusterInfo }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+{{- end }}
+{{- if .Values.databaseConfig }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.envFrom.databaseConfig.configMapName }}
+  namespace: {{ include "nico-api.namespace" . }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "nico-api.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.databaseConfig }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+{{- end }}
+---
+## Hostname ConfigMap — always created (site-specific, not tied to Vault/DB infrastructure)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.envFrom.nicoWebHostname.configMapName }}
+  namespace: {{ include "nico-api.namespace" . }}
+  labels:
+    {{- include "nico-api.labels" . | nindent 4 }}
+data:
+  hostname: {{ .Values.hostname | default "nico.local" | quote }}

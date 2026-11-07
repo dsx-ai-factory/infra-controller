@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-mcp.name" . }}
+  namespace: {{ include "nico-mcp.namespace" . }}
+  labels:
+    {{- include "nico-mcp.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}
+      name: mcp
+      appProtocol: agentgateway.dev/mcp
+  selector:
+    {{- include "nico-mcp.selectorLabels" . | nindent 4 }}

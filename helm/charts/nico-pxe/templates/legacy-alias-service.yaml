@@ -1,0 +1,37 @@
+{{/*
+Legacy name alias — opt-in ExternalName Service that makes the legacy
+"carbide-pxe.<alias-namespace>.svc.cluster.local" hostname resolve to
+this chart's nico-pxe Service.
+
+Why: pre-rename binaries (DPU agents, host PXE loaders) hardcode the
+legacy URL. Rather than rebuild every consumer, the chart provides the
+alias so both the modern and legacy names resolve simultaneously,
+pointing at the same pods.
+
+Note: this template only creates the Service. The alias namespace is
+expected to exist already — when the umbrella chart's nico-api
+legacyAlias is enabled (its own template creates the namespace with
+`helm.sh/resource-policy: keep`). If you enable nico-pxe's alias
+without nico-api's, the namespace must already exist by some other
+means or this Service apply will fail.
+*/}}
+{{- if and .Values.legacyAlias .Values.legacyAlias.enabled }}
+{{- range $alias := .Values.legacyAlias.aliases }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $alias.name }}
+  namespace: {{ $alias.namespace }}
+  labels:
+    {{- include "nico-pxe.labels" $ | nindent 4 }}
+    nico.nvidia.com/legacy-alias-of: {{ include "nico-pxe.name" $ }}
+spec:
+  type: ExternalName
+  externalName: {{ include "nico-pxe.name" $ }}.{{ include "nico-pxe.namespace" $ }}.svc.cluster.local
+  ports:
+    - name: http
+      port: {{ $.Values.service.port | default 8080 }}
+      protocol: TCP
+{{- end }}
+{{- end }}

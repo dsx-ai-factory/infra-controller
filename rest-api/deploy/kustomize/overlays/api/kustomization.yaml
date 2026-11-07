@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Overlay for API only: nico-rest-api.
+# Deploys only this component; Postgres, Keycloak, Temporal certs, secrets, etc. are assumed to exist.
+# Apply with: kubectl kustomize --load-restrictor LoadRestrictionsNone . | kubectl apply -f -
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+namespace: nico-rest
+
+resources:
+  - ../../base/api
+
+images:
+  - name: nico-rest-api
+    newName: localhost:5000/nico-rest-api
+    newTag: latest
+
+patches:
+  - target:
+      kind: Deployment
+      name: nico-rest-api
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/imagePullSecrets
+        value: []
+
+commonLabels:
+  app.kubernetes.io/part-of: nico-rest

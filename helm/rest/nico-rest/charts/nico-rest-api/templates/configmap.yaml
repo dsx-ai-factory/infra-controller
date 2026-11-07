@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- include "nico-rest-api.validateAuth" . }}
+{{- include "nico-rest-api.validatePowerProvisioning" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nico-rest-api.name" . }}-config
+  namespace: {{ include "nico-rest-api.namespace" . }}
+  labels:
+    {{- include "nico-rest-api.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- if .Values.secrets.dbCreds }}
+    {{- $config := deepCopy .Values.config -}}
+    {{- $_ := set $config.db "passwordPath" "/var/secrets/db/password" -}}
+    {{- $_ := unset $config.db "password" -}}
+    {{- $config | toYaml | nindent 4 }}
+    {{- else }}
+    {{- .Values.config | toYaml | nindent 4 }}
+    {{- end }}

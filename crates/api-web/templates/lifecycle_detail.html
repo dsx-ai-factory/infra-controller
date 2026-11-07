@@ -1,0 +1,21 @@
+<h2>Lifecycle</h2>
+<table class="detailsview">
+	<tr>
+		<th>State</th>
+		<td>{{ state_display|safe }}</td>
+	</tr>
+	{% if let Some(associated_instance_id) = associated_instance_id %}
+	<tr><th>Instance</th><td><a href="/admin/instance/{{ associated_instance_id }}">{{ associated_instance_id }}</a></td></tr>
+	{% endif %}
+	{% if let Some(json_state) = json_state %}
+	<tr>
+		<th>JSON State</th>
+		<td><div style="overflow: auto;"><pre><code>{{ json_state|pretty_json }}</code></pre></div></td>
+	</tr>
+	{% endif %}
+	<tr><th>State Version</th><td>{{ version|config_version|safe }}</td></tr>
+	<tr><th>Time in state</th><td>{{ time_in_state }}</td></tr>
+	<tr><th>State SLA</th><td>{{ state_sla }}</td></tr>
+	<tr><th>Time in State is above SLA</th><td>{{ time_in_state_above_sla }}</td></tr>
+	<tr><th>State Handler Outcome</th><td>{{ state_reason|controller_state_reason_fmt|safe }}</td></tr>
+</table>

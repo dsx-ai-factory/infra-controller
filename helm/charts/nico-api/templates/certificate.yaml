@@ -1,0 +1,9 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "nico-api.name" . }}-certificate
+  namespace: {{ include "nico-api.namespace" . }}
+  labels:
+    {{- include "nico-api.labels" . | nindent 4 }}
+spec:
+  {{- include "nico-api.certificateSpec" (dict "name" (printf "%s-certificate" (include "nico-api.name" .)) "svcName" (include "nico-api.name" .) "cert" .Values.certificate "global" .Values.global "namespace" (include "nico-api.namespace" .)) | nindent 2 }}

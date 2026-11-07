@@ -1,0 +1,8 @@
+apiVersion: v2
+name: nico-dpu-agent
+description: NICo DPU agent for configuration, IMDS, health, and status reporting
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+annotations:
+  dpu.nvidia.com/doca-version: ">= 2.9"

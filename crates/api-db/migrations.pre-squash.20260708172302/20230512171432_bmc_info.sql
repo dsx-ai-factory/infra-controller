@@ -1,0 +1,1 @@
+UPDATE machine_topologies SET topology=jsonb_set_lax(jsonb_set_lax(jsonb_set_lax(topology, '{bmc_info}', '{}', true), '{bmc_info,mac}', topology->'ipmi_mac', true), '{bmc_info,ip}', topology->'ipmi_ip', true) #- '{ipmi_ip}' WHERE NOT topology ? 'bmc_info' ;

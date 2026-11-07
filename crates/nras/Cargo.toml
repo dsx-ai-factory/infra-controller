@@ -1,0 +1,46 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[package]
+name = "nras"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+carbide-instrument = { path = "../instrument" }
+
+async-trait.workspace = true
+base64 = { workspace = true }
+clap = { features = ["derive", "env"], workspace = true }
+fmt = { workspace = true }
+jsonwebtoken = { features = ["rust_crypto"], workspace = true }
+mockito = { workspace = true }
+reqwest = { default-features = false, features = [
+  "rustls",
+  "stream",
+], workspace = true }
+reqwest-middleware = { workspace = true }
+reqwest-tracing = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

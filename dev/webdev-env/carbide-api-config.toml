@@ -1,0 +1,92 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+listen = "[::]:1079"
+listen_mode = "plaintext_http1"
+metrics_endpoint = "[::]:1080"
+database_url = "postgresql://postgres:admin@localhost:5433?sslmode=disable"
+asn = 4294967000
+
+bypass_rbac = true
+
+attestation_enabled = false
+
+initial_domain_name = "local.forge"
+initial_dpu_agent_upgrade_policy = "off"
+
+[pools.lo-ip]
+type = "ipv4"
+ranges = [{ start = "10.180.62.1", end = "10.180.62.62" }]
+
+[pools.vlan-id]
+type = "integer"
+ranges = [{ start = "100", end = "501" }]
+
+[pools.vni]
+type = "integer"
+ranges = [{ start = "1024500", end = "1024550" }]
+
+[pools.vpc-vni]
+type = "integer"
+ranges = [{ start = "2024500", end = "2024550" }]
+
+[networks.admin]
+type = "admin"
+prefix = "192.168.252.0/24"
+gateway = "192.168.252.1"
+mtu = 9000
+reserve_first = 5
+
+[host_health]
+hardware_health_reports = "MonitorOnly"
+
+[firmware_global]
+autoupdate = false
+
+[network_security_group]
+stateful_acls_enabled = false
+max_network_security_group_size = 200
+
+[machine_validation_config]
+enabled = false
+test_selection_mode = "EnableAll"
+
+[machine_state_controller]
+dpu_wait_time = "24h"
+power_down_wait = "24h"
+
+[machine_state_controller.controller]
+iteration_time = "24h"
+
+[network_segment_state_controller]
+network_segment_drain_time = "24h"
+[network_segment_state_controller.controller]
+iteration_time = "24h"
+
+[vpc_prefix_state_controller]
+vpc_prefix_drain_time = "24h"
+[vpc_prefix_state_controller.controller]
+iteration_time = "24h"
+
+[ib_partition_state_controller.controller]
+iteration_time = "24h"
+
+[site_explorer]
+enabled = false
+create_machines = false
+allow_changing_bmc_proxy = false
+bmc_proxy = ":2000"
+run_interval = "600s"

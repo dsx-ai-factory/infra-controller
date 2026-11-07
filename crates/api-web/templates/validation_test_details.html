@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+
+{% block title %}Machine Validation{% endblock %}
+
+{% block content %}
+<h1>Machine Validation Tests</h1>
+<table class="sortable overview">
+	{% for test in validation_tests %}
+	<tr>
+		<th>Test ID</th>
+		<td>{{ test.test_id }}</td>
+	</tr>
+	<tr>
+		<th>Name</th>
+		<td>{{ test.name }}</td>
+	</tr>
+	<tr>
+		<th>Description</th>
+		<td>{{ test.description }}</td>
+	</tr>
+	<tr>
+		<th>Version</th>
+		<td>{{ test.version }}</td>
+	</tr>
+	<tr>
+		<th>Command</th>
+		<td>{{ test.command }}</td>
+	</tr>
+	<tr>
+		<th>Args</th>
+		<td>{{ test.args }}</td>
+	</tr>
+	<tr>
+		<th>Contexts</th>
+		<td>{{ test.contexts }}</td>
+	</tr>
+	<tr>
+		<th>Supported Platforms</th>
+		<td>{{ test.supported_platforms }}</td>
+	</tr>
+	<tr>
+		<th>Is Verified</th>
+		<td>{{ test.is_verified }}</td>
+	</tr>
+	<tr>
+		<th>Is Enabled</th>
+		<td>{{ test.is_enabled }}</td>
+	</tr>
+	<tr>
+		<th>Timeout</th>
+		<td>{{ test.timeout }}</td>
+	</tr>
+	<tr>
+		<th>Custom Tags</th>
+		<td>{{ test.tags }}</td>
+	</tr>
+	<tr>
+		<th>Output file</th>
+		<td>{{ test.extra_output_file }}</td>
+	</tr>
+	<tr>
+		<th>Error file</th>
+		<td>{{ test.extra_err_file }}</td>
+	</tr>
+	<tr>
+		<th>Pre condition</th>
+		<td>{{ test.pre_condition }}</td>
+	</tr>
+	<tr>
+		<th>Image name</th>
+		<td>{{ test.img_name }}</td>
+	</tr>
+	<tr>
+		<th>Container args</th>
+		<td>{{ test.container_arg }}</td>
+	</tr>
+	<tr>
+		<th>External Config File</th>
+		<td>{{ test.external_config_file }}</td>
+	</tr>
+	<tr>
+		<th>Components</th>
+		<td>{{ test.components }}</td>
+	</tr>
+	{% endfor %}
+</table>
+
+{% endblock %}

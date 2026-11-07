@@ -1,0 +1,50 @@
+# Use file_storage extension to help otelcol remember where it left off in log
+# files, in case otelcol restarts while ssh-console is still running
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol/filelog-checkpoints
+
+receivers:
+  filelog:
+    include:
+      - /var/log/consoles/*.log
+      - /var/log/consoles/*.log.*
+    start_at: beginning
+    storage: file_storage
+    operators:
+      - type: regex_parser
+        id: parser-machineid
+        regex: '^(?P<machineid>[a-z0-9]+)_(?P<bmc_ip>[^_]+).log$'
+        parse_from: attributes["log.file.name"]
+
+processors:
+  attributes:
+    actions:
+      - key: exporter
+        value: nico-ssh-console-rs
+        action: upsert
+      - key: loki.attribute.labels
+        value: machineid,exporter
+        action: insert
+      - key: loki.format
+        value: raw
+        action: insert
+  batch:
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 4096
+    spike_limit_mib: 1024
+
+exporters:
+  loki:
+    endpoint: "http://loki.loki.svc.cluster.local:3100/loki/api/v1/push"
+    headers:
+      "X-Scope-OrgID": nico
+
+service:
+  extensions: [file_storage]
+  pipelines:
+    logs:
+      receivers: [filelog]
+      processors: [attributes, batch]
+      exporters: [loki]

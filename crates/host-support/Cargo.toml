@@ -1,0 +1,83 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[package]
+name = "carbide-host-support"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# TODO: rename to carbide_host_support in source
+[lib]
+name = "carbide_host_support"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+carbide-instrument = { path = "../instrument" }
+
+# [local-dependencies]
+carbide-dpu-agent-utils = { path = "../dpu-agent-utils" }
+carbide-tls = { path = "../tls" }
+carbide-libmlx = { path = "../libmlx" }
+logfmt = { path = "../logfmt" }
+carbide-rpc = { path = "../rpc" }
+carbide-rpc-utils = { path = "../rpc-utils" }
+carbide-utils = { path = "../utils" }
+carbide-uuid = { path = "../uuid" }
+
+arc-swap = { workspace = true }
+base64 = { workspace = true }
+csv = { workspace = true }
+eyre = { workspace = true }
+ipnetwork = { workspace = true }
+libudev = { optional = true, workspace = true }
+procfs = { optional = true, workspace = true }
+regex = { workspace = true }
+rustls-pemfile = { workspace = true }
+serde = { features = ["derive"], workspace = true }
+serde_json = { workspace = true }
+smbios-lib = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+toml = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { features = [
+  "env-filter",
+  "local-time",
+], workspace = true }
+tryhard = { workspace = true }
+uname = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+x509-parser = { workspace = true }
+serde_with = { workspace = true }
+
+[dev-dependencies]
+carbide-test-support = { path = "../test-support" }
+rcgen = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+default = ["linux-build"]
+linux-build = ["libudev", "procfs"]

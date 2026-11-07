@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package console_log;
+
+import "common.proto";
+
+// Private service implemented by carbide-ssh-console and proxied by Forge.
+service ConsoleLogService {
+  rpc StreamConsoleLogs(StreamConsoleLogsRequest)
+      returns (stream ConsoleLogLine);
+}
+
+message StreamConsoleLogsRequest {
+  common.MachineId machine_id = 1;
+  uint32 tail_lines = 2;
+}
+
+message ConsoleLogLine {
+  bytes data = 1;
+}

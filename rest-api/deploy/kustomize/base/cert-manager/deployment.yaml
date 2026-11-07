@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# nico-rest-cert-manager (credsmgr) Deployment with native Go PKI
+# Requires CA certificate to be provided via K8s secrets (no fallback generation)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nico-rest-cert-manager
+  labels:
+    app: nico-rest-cert-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nico-rest-cert-manager
+  template:
+    metadata:
+      labels:
+        app: nico-rest-cert-manager
+    spec:
+      imagePullSecrets:
+        - name: image-pull-secret
+      serviceAccountName: nico-rest-cert-manager
+      terminationGracePeriodSeconds: 5
+      # 1000 is the `nvs` user the image declares. The image states it by name,
+      # which the kubelet cannot verify, so runAsNonRoot needs the numeric UID
+      # spelled out here. fsGroup makes the tmp volume below writable.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: cert-manager
+          image: nico-rest-cert-manager
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          args:
+            - --ca-common-name=NICo Local Dev CA
+            - --ca-organization=NVIDIA
+            - --ca-cert-file=/etc/pki/ca/tls.crt
+            - --ca-key-file=/etc/pki/ca/tls.key
+            - --tls-port=8000
+            - --insecure-port=8001
+            - --ca-base-dns=nico.local
+            # Clients reach the Service by both its short name and its
+            # namespace-qualified forms, so all of them need to be SANs on the
+            # HTTPS listener's certificate. These assume the nico-rest
+            # namespace the overlays deploy into; change them alongside it.
+            - --dns-name=nico-rest-cert-manager
+            - --dns-name=nico-rest-cert-manager.nico-rest
+            - --dns-name=nico-rest-cert-manager.nico-rest.svc
+            - --dns-name=nico-rest-cert-manager.nico-rest.svc.cluster.local
+            - --dns-name=localhost
+            - --debug
+          ports:
+            - containerPort: 8000
+              name: https
+            - containerPort: 8001
+              name: http
+          volumeMounts:
+            - name: ca-signing-secret
+              mountPath: /etc/pki/ca
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "250m"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8001
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8001
+            initialDelaySeconds: 15
+            periodSeconds: 15
+      volumes:
+        - name: ca-signing-secret
+          secret:
+            secretName: ca-signing-secret
+        - name: tmp
+          emptyDir: {}

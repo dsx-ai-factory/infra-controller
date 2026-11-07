@@ -1,0 +1,44 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.certificate.name }}
+  namespace: {{ include "nico-flow.namespace" . }}
+  labels:
+    {{- include "nico-flow.labels" . | nindent 4 }}
+spec:
+  {{- include "nico-flow.certificateSpec" (dict
+        "name" .Values.certificate.name
+        "cert" .Values.certificate
+        "global" .Values.global
+        "namespace" (include "nico-flow.namespace" .)
+      ) | nindent 2 }}
+{{- if .Values.temporalCert.enabled }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.temporalCert.name }}
+  namespace: {{ include "nico-flow.namespace" . }}
+  labels:
+    {{- include "nico-flow.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.temporalCert.secretName }}
+  duration: {{ .Values.temporalCert.duration }}
+  renewBefore: {{ .Values.temporalCert.renewBefore }}
+  commonName: {{ .Values.temporalCert.commonName }}
+  isCA: false
+  subject:
+    organizations:
+      - NVIDIA
+  privateKey:
+    algorithm: {{ .Values.temporalCert.privateKey.algorithm }}
+    size: {{ .Values.temporalCert.privateKey.size }}
+  usages:
+    - client auth
+  dnsNames:
+    {{- toYaml .Values.temporalCert.dnsNames | nindent 4 }}
+  issuerRef:
+    kind: {{ .Values.temporalCert.issuerRef.kind }}
+    name: {{ .Values.temporalCert.issuerRef.name }}
+    group: {{ .Values.temporalCert.issuerRef.group }}
+{{- end }}

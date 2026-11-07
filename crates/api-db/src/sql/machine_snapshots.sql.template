@@ -1,0 +1,112 @@
+-- This is a denormalized view of a machine that includes its interfaces (including their denormalized address/vendors),
+-- its most recent topology, and optionally its history, in a single query, using LATERAL JOINs and JSON_AGG.
+--
+-- Note, prior versions of this query used CTE' (WITH (...) AS), but this ended up being a huge performance issue, and
+-- using JOIN LATERAL is a lot faster. See comments in managed_hosts.sql.template for details.
+
+SELECT
+m.*,
+COALESCE(nic_firmware.json, '[]') AS nic_firmware_card_selections,
+boot_interface.desired_mac_address AS desired_boot_interface_mac,
+boot_interface.desired_interface_id AS desired_boot_interface_id,
+boot_interface.desired_version AS desired_boot_interface_version,
+boot_interface.selection_source AS boot_interface_selection_source,
+boot_interface.selection_updated_at AS boot_interface_selection_updated_at,
+boot_interface.verified_version AS boot_interface_verified_version,
+boot_interface.observed_at AS boot_interface_observed_at,
+COALESCE(boot_interface.assumed, false) AS boot_interface_observation_assumed,
+sku.device_type as hw_sku_device_type,
+COALESCE(i.json, '[]') AS interfaces,
+COALESCE(t.json, '[]') AS topology,
+COALESCE(bmc.json, t.bmc_info - 'ip' - 'mac', '{}'::jsonb) AS bmc_info
+__HISTORY_SELECT__
+FROM machines m
+LEFT JOIN LATERAL (
+    SELECT json_agg(json_build_object(
+        'selector', card.selector,
+        'profile_id', card.profile_id
+    ) ORDER BY card.selector) AS json
+    FROM machine_nic_firmware_overrides card
+    WHERE card.machine_id = m.id
+) AS nic_firmware ON true
+LEFT JOIN machine_boot_interfaces boot_interface
+    ON boot_interface.machine_id = m.id
+LEFT JOIN machine_skus sku on  m.hw_sku = sku.id
+
+-- (1) Read the latest topology as JSON
+LEFT JOIN LATERAL (
+    SELECT
+    json_build_array(json_build_object(
+        'machine_id', mt2.machine_id,
+        'topology', mt2.topology,
+        'created', mt2.created,
+        'updated', mt2.updated,
+        'topology_update_needed', mt2.topology_update_needed
+    )) AS json,
+    mt2.topology->'bmc_info' AS bmc_info
+    FROM machine_topologies mt2
+    WHERE mt2.machine_id = m.id
+    ORDER BY mt2.created DESC
+    LIMIT 1
+) AS t ON true
+
+-- (2) Read the BMC interface selected by topology as JSON
+LEFT JOIN LATERAL (
+    SELECT jsonb_strip_nulls(
+        COALESCE(t.bmc_info, '{}'::jsonb) ||
+        jsonb_build_object(
+            'machine_interface_id', bmc_i.id,
+            'ip', host(bmc_addr.address),
+            'mac', bmc_i.mac_address::text
+        )
+    ) AS json
+    FROM machine_interfaces bmc_i
+    LEFT JOIN LATERAL (
+        SELECT a.address
+        FROM machine_interface_addresses a
+        WHERE a.interface_id = bmc_i.id
+        ORDER BY family(a.address), a.address
+        LIMIT 1
+    ) AS bmc_addr ON true
+    WHERE bmc_i.machine_id = m.id
+      AND bmc_i.interface_type = 'Bmc'
+      AND (
+          t.bmc_info->>'machine_interface_id' IS NULL
+          OR bmc_i.id::text = t.bmc_info->>'machine_interface_id'
+      )
+    ORDER BY bmc_i.created ASC
+    LIMIT 1
+) AS bmc ON true
+
+-- (3) Read related non-BMC interfaces as JSON
+LEFT JOIN LATERAL (
+    SELECT json_agg(x) AS json
+    FROM (
+        SELECT
+        i2.*,
+        COALESCE(a.json, '[]') AS addresses,
+        COALESCE(v.json, '[]') AS vendors,
+        ns.network_segment_type
+        FROM machine_interfaces i2
+
+        -- (1.1) Read related addresses as a JSON array
+        LEFT JOIN LATERAL (
+            SELECT json_agg(a2.address) AS json
+            FROM machine_interface_addresses a2
+            WHERE a2.interface_id = i2.id
+        ) AS a ON true
+
+        -- (1.2) Read related vendor strings as a JSON array
+        LEFT JOIN LATERAL (
+            SELECT json_agg(d.vendor_string) AS json
+            FROM dhcp_entries d
+            WHERE d.machine_interface_id = i2.id
+        ) AS v ON true
+        INNER JOIN network_segments ns ON ns.id = i2.segment_id
+        WHERE i2.machine_id = m.id
+          AND i2.interface_type != 'Bmc'
+    ) x
+) AS i ON true
+
+-- (4) Read the history as JSON
+__HISTORY_JOIN__

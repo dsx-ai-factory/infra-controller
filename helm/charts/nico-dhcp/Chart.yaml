@@ -1,0 +1,10 @@
+apiVersion: v2
+name: nico-dhcp
+description: Helm chart for the NICo DHCP component
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - nico
+  - dhcp
+  - nico

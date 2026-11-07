@@ -1,0 +1,14 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "nico-dsx-exchange-consumer.name" . }}-metrics
+  namespace: {{ include "nico-dsx-exchange-consumer.namespace" . }}
+  labels:
+    {{- include "nico-dsx-exchange-consumer.labels" . | nindent 4 }}
+    app.kubernetes.io/metrics: {{ include "nico-dsx-exchange-consumer.name" . }}
+    app: {{ include "nico-dsx-exchange-consumer.name" . }}
+    prometheus: nico-monitoring
+spec:
+  {{- include "nico-dsx-exchange-consumer.serviceMonitorSpec" (dict "name" (include "nico-dsx-exchange-consumer.name" .) "port" "metrics" "monitor" .Values.serviceMonitor "namespace" (include "nico-dsx-exchange-consumer.namespace" .)) | nindent 2 }}
+{{- end }}

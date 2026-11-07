@@ -1,0 +1,1099 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
+use std::time::Duration;
+
+use carbide_instrument::red;
+use reqwest::header::{ACCEPT, HeaderMap, HeaderValue};
+use reqwest::{Client, ClientBuilder, Method, Response, Url};
+pub use serde_json::Value as JsonValue;
+
+use crate::config::{NvueConfig, NvueConfigWithHeader, NvueRevision};
+use crate::types::bgp::{BgpNeighbors, BgpVrfInfo};
+use crate::types::revision::{RevisionConfigDiff, RevisionData, RevisionIssueSummary};
+
+/// Repeated NVUE field-selection query parameters.
+///
+/// Filter values are JSON Pointer-style paths that start with `/` and may
+/// use Unix shell-style wildcards to match dynamic object keys. For example,
+/// `/neighbor/*/state` matches the `state` field for every BGP neighbor. Values
+/// are passed to NVUE without local validation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FieldFilter {
+    include: Vec<String>,
+    omit: Vec<String>,
+}
+
+impl FieldFilter {
+    /// Create an empty filter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a filter from `include` field patterns.
+    pub fn with_includes<I, S>(fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            include: fields.into_iter().map(Into::into).collect(),
+            omit: Vec::new(),
+        }
+    }
+
+    /// Create a filter from `omit` field patterns.
+    pub fn with_omits<I, S>(fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            include: Vec::new(),
+            omit: fields.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Add an `include` field pattern.
+    pub fn include(mut self, field: impl Into<String>) -> Self {
+        self.include.push(field.into());
+        self
+    }
+
+    /// Add an `omit` field pattern.
+    pub fn omit(mut self, field: impl Into<String>) -> Self {
+        self.omit.push(field.into());
+        self
+    }
+
+    fn is_empty(&self) -> bool {
+        self.include.is_empty() && self.omit.is_empty()
+    }
+
+    fn query_pairs(&self) -> Vec<(&str, &str)> {
+        self.include
+            .iter()
+            .map(|field| ("include", field.as_str()))
+            .chain(self.omit.iter().map(|field| ("omit", field.as_str())))
+            .collect()
+    }
+}
+
+#[derive(Debug)]
+pub struct NvueClient {
+    server_address: NvueServerAddress,
+    client: Client,
+}
+
+impl NvueClient {
+    // We've seen apply operations take up to 43 seconds in the wild, though
+    // admittedly using `NvueAutoPrompt` settings that were not matched to our
+    // use case.
+    const APPLY_CONFIG_REVISION_TIMEOUT: Duration = Duration::from_secs(60);
+    const APPLY_CONFIG_REVISION_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+    pub fn new(server_address: NvueServerAddress) -> Result<Self, NvueClientError> {
+        build_client(&server_address).map(|client| Self {
+            server_address,
+            client,
+        })
+    }
+
+    pub fn new_https_from_env() -> Result<Self, NvueClientError> {
+        NvueServerAddress::https_from_env().and_then(Self::new)
+    }
+
+    // Construct a URL string using the internal server address and the
+    // specified path.
+    fn construct_url_string(&self, path: &str) -> String {
+        let (scheme, address) = match &self.server_address {
+            NvueServerAddress::UnixSocket { .. } => ("http", "localhost"),
+            NvueServerAddress::TcpTls { address, .. } => ("https", address.as_str()),
+        };
+        format!("{scheme}://{address}{path}")
+    }
+
+    // Get the auth creds, if applicable.
+    fn auth_creds(&self) -> Option<&NvueAuth> {
+        match &self.server_address {
+            NvueServerAddress::UnixSocket { .. } => None,
+            NvueServerAddress::TcpTls { auth, .. } => auth.as_ref(),
+        }
+    }
+
+    // Helper for constructing a request.
+    fn request(
+        &self,
+        method: Method,
+        path: &str,
+    ) -> Result<reqwest::RequestBuilder, NvueClientError> {
+        let url = self.construct_url_string(path);
+        let builder = self.client.request(method, url);
+        // TODO: Make this timeout configurable.
+        let builder = builder.timeout(std::time::Duration::from_secs(60));
+        let builder = match self.auth_creds() {
+            Some(creds) => builder.basic_auth(&creds.username, Some(&creds.password)),
+            None => builder,
+        };
+        Ok(builder)
+    }
+
+    async fn execute(
+        &self,
+        operation: &'static str,
+        request: reqwest::Request,
+    ) -> Result<Response, NvueClientError> {
+        let method = request.method().clone();
+        let url = request.url().clone();
+        let body = request
+            .body()
+            .and_then(|b| b.as_bytes())
+            .map(|b| String::from_utf8_lossy(b).into_owned());
+        red::instrumented("nvue", operation, async move {
+            self.client
+                .execute(request)
+                .await
+                .and_then(|response| response.error_for_status())
+        })
+        .await
+        .map_err(|source| {
+            NvueClientError::RequestFailed(Box::new(RequestFailed {
+                method,
+                url,
+                body,
+                source,
+            }))
+        })
+    }
+
+    pub async fn get_api(&self) -> Result<Response, NvueClientError> {
+        const PATH: &str = "/nvue_v1/system/api?rev=applied";
+        let request = self.request(Method::GET, PATH)?.build()?;
+        self.execute("get_api", request).await
+    }
+
+    /// Return the config that is tagged as "applied" (in other words, the one
+    /// that is currently running on the system).
+    pub async fn get_applied_config(&self) -> Result<NvueConfigWithHeader, NvueClientError> {
+        const PATH: &str = "/nvue_v1/?rev=applied&filled=false";
+        let request = self.request(Method::GET, PATH)?.build()?;
+        let response = self.execute("get_applied_config", request).await?;
+        let nvue_config = response.json().await?;
+        Ok(nvue_config)
+    }
+
+    /// Get the config diff between two NVUE revisions. The order of the
+    /// arguments is significant; NVUE will return the set of changes necessary
+    /// to turn `base_revision` into `target_revision`.
+    pub async fn get_revision_config_diff(
+        &self,
+        base_revision: &str,
+        target_revision: &str,
+    ) -> Result<RevisionConfigDiff, NvueClientError> {
+        let mut request = self.request(Method::GET, "/nvue_v1/")?.build()?;
+        request
+            .url_mut()
+            .query_pairs_mut()
+            .append_pair("diff", base_revision)
+            .append_pair("rev", target_revision)
+            .append_pair("filled", "false");
+
+        let response = self.execute("get_revision_config_diff", request).await?;
+        let diff = response.json().await?;
+        Ok(diff)
+    }
+
+    /// Return BGP data for a VRF.
+    ///
+    /// This calls `GET /nvue_v1/vrf/{vrf-id}/router/bgp` without field filters.
+    /// The `vrf_id` path segment is URL-encoded before the request is built.
+    pub async fn get_bgp_vrf_info(&self, vrf_id: &str) -> Result<BgpVrfInfo, NvueClientError> {
+        self.get_bgp_vrf_info_filtered(vrf_id, FieldFilter::new())
+            .await
+    }
+
+    /// Return BGP data for a VRF, applying NVUE field-selection filters.
+    ///
+    /// Non-empty filters are encoded as repeated `include` and `omit` query
+    /// parameters. Field patterns are passed through without local validation.
+    pub async fn get_bgp_vrf_info_filtered(
+        &self,
+        vrf_id: &str,
+        filter: FieldFilter,
+    ) -> Result<BgpVrfInfo, NvueClientError> {
+        let path = format!(
+            "/nvue_v1/vrf/{encoded_vrf_id}/router/bgp",
+            encoded_vrf_id = urlencoding::encode(vrf_id),
+        );
+        let mut request = self.request(Method::GET, &path)?.build()?;
+
+        append_filter_query_pairs(&mut request, &filter);
+
+        let response = self.execute("get_bgp_vrf_info", request).await?;
+        let bgp_vrf_info = response.json().await?;
+        Ok(bgp_vrf_info)
+    }
+
+    /// Return BGP neighbor data for a VRF.
+    ///
+    /// This calls `GET /nvue_v1/vrf/{vrf-id}/router/bgp/neighbor` without field filters.
+    /// The `vrf_id` path segment is URL-encoded before the request is built.
+    pub async fn get_bgp_neighbors(
+        &self,
+        vrf_id: &str,
+    ) -> Result<Option<BgpNeighbors>, NvueClientError> {
+        self.get_bgp_neighbors_filtered(vrf_id, FieldFilter::new())
+            .await
+    }
+
+    /// Return BGP neighbor data for a VRF, applying NVUE field-selection filters.
+    ///
+    /// This calls `GET /nvue_v1/vrf/{vrf-id}/router/bgp/neighbor`. Non-empty
+    /// filters are encoded as repeated `include` and `omit` query parameters.
+    /// The `vrf_id` path segment is URL-encoded before the request is built.
+    pub async fn get_bgp_neighbors_filtered(
+        &self,
+        vrf_id: &str,
+        filter: FieldFilter,
+    ) -> Result<Option<BgpNeighbors>, NvueClientError> {
+        let path = format!(
+            "/nvue_v1/vrf/{encoded_vrf_id}/router/bgp/neighbor",
+            encoded_vrf_id = urlencoding::encode(vrf_id),
+        );
+        let mut request = self.request(Method::GET, &path)?.build()?;
+
+        append_filter_query_pairs(&mut request, &filter);
+
+        let response = self.execute("get_bgp_neighbors_filtered", request).await?;
+        let bgp_neighbors = response.json().await?;
+        Ok(bgp_neighbors)
+    }
+
+    /// Create a new NVUE config revision, returning the revision ID.
+    pub async fn create_config_revision(&self) -> Result<String, NvueClientError> {
+        const PATH: &str = "/nvue_v1/revision";
+        let request = self.request(Method::POST, PATH)?.build()?;
+        let response = self.execute("create_config_revision", request).await?;
+        let revision: NvueRevision = response.json().await?;
+        let revision_id = revision
+            .get_revision_id()
+            .ok_or(NvueClientError::SchemaMismatch("Missing revision id"))?;
+        Ok(revision_id)
+    }
+
+    /// Return data about the specified revision.
+    pub async fn get_revision(&self, revision_id: &str) -> Result<RevisionData, NvueClientError> {
+        let encoded_revision_id = urlencoding::encode(revision_id);
+        let revision_path = format!("/nvue_v1/revision/{encoded_revision_id}");
+        let request = self.request(Method::GET, &revision_path)?.build()?;
+        let response = self.execute("get_revision", request).await?;
+
+        // For some reason, the NVUE schema allows the response to be nulled,
+        // but as far as we're concerned that's an error.
+        let revision_data: Option<_> = response.json().await?;
+        revision_data.ok_or(NvueClientError::SchemaMismatch(
+            "revision response was null",
+        ))
+    }
+
+    /// Replace the specified config revision. Under the hood, this is a
+    /// two-stage operation where the configuration is deleted and then new
+    /// values are inserted.
+    pub async fn replace_config_revision(
+        &self,
+        revision_id: &str,
+        config: &NvueConfig,
+    ) -> Result<(), NvueClientError> {
+        let revision_path = format!("/nvue_v1/?rev={revision_id}");
+
+        let builder = self.request(Method::DELETE, &revision_path)?;
+        let empty_config: HashMap<String, String> = HashMap::new();
+        let builder = builder.json(&empty_config);
+        let request = builder.build()?;
+        let _response = self.execute("replace_config.delete", request).await?;
+
+        let builder = self.request(Method::PATCH, &revision_path)?;
+        let builder = builder.json(&config);
+        let request = builder.build()?;
+        let _response = self.execute("replace_config.patch", request).await?;
+        Ok(())
+    }
+
+    /// Apply the specified revision ID and poll it until NVUE reports it as
+    /// "applied" or another terminal state.
+    ///
+    /// If NVUE returns a terminal error state with a rollback revision
+    /// specified, this method will also attempt to poll that revision to a
+    /// terminal state, unless this method encounters an error while polling
+    /// it or hits a timeout. This represents our best-effort attempt to yield
+    /// control back to the client in a predictable state, despite all of the
+    /// complications introduced by NVUE's revision model.
+    ///
+    /// Each polling stage has a timeout of 60 seconds, but an in-flight HTTP
+    /// request may exceed this until its own timeout is reached.
+    ///
+    /// Many of the error variants returned by this method can be caused by a
+    /// timeout without that being immediately obvious in the return value, so
+    /// the caller is advised to be extremely pessimistic about what state NVUE
+    /// might be in when encountering an error.
+    pub async fn apply_config_revision(&self, revision_id: &str) -> Result<(), NvueClientError> {
+        let revision_path = format!("/nvue_v1/revision/{revision_id}");
+        let builder = self.request(Method::PATCH, &revision_path)?;
+        let body = NvueApplyData::force_apply();
+        let builder = builder.json(&body);
+        let request = builder.build()?;
+        let _response = self.execute("apply_config_revision", request).await?;
+
+        let revision = self.poll_revision_to_terminal_state(revision_id).await?;
+        if revision.is_apply_success() {
+            return Ok(());
+        }
+
+        let error = NvueClientError::RevisionApplyFailed {
+            revision_id: revision_id.to_owned(),
+            reason: RevisionApplyFailureReason::Error,
+            last_state: revision.state.clone(),
+            progress: revision.transition_progress().map(str::to_owned),
+            error_issues: revision.error_issue_summaries(),
+        };
+
+        // If NVUE gives us a rollback target, we'll wait for the rollback to
+        // finish before returning control to the caller.
+        if let Some(rollback_target) = revision.rollback_target() {
+            // Note that our behavior here is not ideal; we're not handling
+            // the (probably unlikely) case of a rollback failing or timing
+            // out, which would potentially leave the "applied" branch in an
+            // unpredictable state.
+            //
+            // TODO: Rework this method and any other fused-operation methods to
+            // return a different error type; NvueClientError cannot carry the
+            // amount of detail we need to describe our failure modes accurately
+            // to the caller.
+            if let Err(rollback_error) = self.poll_revision_to_terminal_state(rollback_target).await
+            {
+                tracing::warn!(%revision_id, %rollback_target, %rollback_error, "error polling rollback target");
+            }
+        }
+        Err(error)
+    }
+
+    async fn poll_revision_to_terminal_state(
+        &self,
+        revision_id: &str,
+    ) -> Result<RevisionData, NvueClientError> {
+        let started = tokio::time::Instant::now();
+        let deadline = started + Self::APPLY_CONFIG_REVISION_TIMEOUT;
+
+        loop {
+            let revision = self.get_revision(revision_id).await?;
+            if revision.is_terminal_for_apply() {
+                return Ok(revision);
+            }
+
+            let now = tokio::time::Instant::now();
+            if let Some(remaining) = deadline.checked_duration_since(now) {
+                tokio::time::sleep(remaining.min(Self::APPLY_CONFIG_REVISION_POLL_INTERVAL)).await;
+            } else {
+                return Err(NvueClientError::RevisionApplyFailed {
+                    revision_id: revision_id.to_owned(),
+                    reason: RevisionApplyFailureReason::Timeout {
+                        waited: now - started,
+                    },
+                    last_state: revision.state.clone(),
+                    progress: revision.transition_progress().map(str::to_owned),
+                    error_issues: revision.error_issue_summaries(),
+                });
+            }
+        }
+    }
+
+    /// Perform all of the NVUE operations required to apply a new config. Under
+    /// the hood, we create a new revision, patch it with this config, diff it
+    /// against the "applied" revision, and then apply it if it differed.
+    ///
+    /// Returns a `Some(revision_id)` if we applied the new revision, and `None`
+    /// if NVUE indicated no change compared to the "applied" revision.
+    ///
+    /// Please also refer to the warning text about error handling in
+    /// `apply_config_revision`'s docstring.
+    pub async fn push_config(
+        &self,
+        config: &NvueConfig,
+    ) -> Result<Option<String>, NvueClientError> {
+        let revision_id = self.create_config_revision().await?;
+        self.replace_config_revision(&revision_id, config).await?;
+
+        // NVUE will not actually apply a revision if it's unchanged from what's
+        // currently applied, we need to check this before we try.
+        let diff = self
+            .get_revision_config_diff("applied", &revision_id)
+            .await?;
+        if diff.is_empty() {
+            // Note that we're leaving the old revision sitting around unused!
+            // NVUE provides a `DELETE` operation on a revision ID starting in
+            // version 1.8.0.32, but HBN 3.0 through 3.3 are built on the NVUE
+            // 1.7 line and therefore don't implement it.
+            return Ok(None);
+        }
+
+        self.apply_config_revision(&revision_id).await?;
+        Ok(Some(revision_id))
+    }
+
+    // Retrieve the system information from the NVUE server. The fields returned
+    // seem to vary depending on which platform NVUE is running on, so we just
+    // return a JSON value.
+    pub async fn system_info(&self) -> Result<JsonValue, NvueClientError> {
+        let path = "/nvue_v1/system";
+        let builder = self.request(Method::GET, path)?;
+        let request = builder.build()?;
+        let response = self.execute("system_info", request).await?;
+        let resonse_body = response.json().await?;
+        Ok(resonse_body)
+    }
+
+    /// Using the system_info() method, try to extract the value of the "build"
+    /// key from the system info.
+    pub async fn system_build_info(&self) -> Result<String, NvueClientError> {
+        let system = self.system_info().await?;
+        let system_object = match system {
+            JsonValue::Object(map) => Ok(map),
+            _ => {
+                let msg = "System info is not a JSON object";
+                Err(NvueClientError::SchemaMismatch(msg))
+            }
+        }?;
+        let build = system_object.get("build").ok_or({
+            let msg = "System info object has no \"build\" key";
+            NvueClientError::SchemaMismatch(msg)
+        })?;
+        let build_value = match build {
+            JsonValue::String(value) => Ok(value),
+            _ => {
+                let msg = "System info \"build\" value was not a string";
+                Err(NvueClientError::SchemaMismatch(msg))
+            }
+        }?;
+        Ok(build_value.into())
+    }
+
+    /// Get the MAC table for a bridge.
+    pub async fn bridge_mac_table(
+        &self,
+        bridge_domain: &str,
+    ) -> Result<Vec<crate::types::MacTableEntry>, NvueClientError> {
+        let path = format!("/nvue_v1/bridge/domain/{bridge_domain}/mac-table");
+        let builder = self.request(Method::GET, &path)?;
+        let request = builder.build()?;
+        let response = self.execute("bridge_mac_table", request).await?;
+        let resonse_body: BTreeMap<String, _> = response.json().await?;
+        let response = resonse_body.into_values().collect();
+        Ok(response)
+    }
+}
+
+fn append_filter_query_pairs(request: &mut reqwest::Request, filter: &FieldFilter) {
+    if filter.is_empty() {
+        return;
+    }
+
+    let mut query_pairs = request.url_mut().query_pairs_mut();
+    for (key, value) in filter.query_pairs() {
+        query_pairs.append_pair(key, value);
+    }
+}
+
+fn build_client(server_address: &NvueServerAddress) -> Result<Client, NvueClientError> {
+    let builder = ClientBuilder::new().default_headers(default_nvue_headers());
+    let builder = match server_address {
+        NvueServerAddress::UnixSocket { socket_path } => builder.unix_socket(socket_path.as_path()),
+        NvueServerAddress::TcpTls { .. } => {
+            // NVUE uses a self-signed cert out of the box.
+            builder.danger_accept_invalid_certs(true)
+        }
+    };
+    builder.build().map_err(NvueClientError::from)
+}
+
+#[derive(Debug, serde::Serialize)]
+struct NvueApplyData {
+    state: String,
+    #[serde(rename = "auto-prompt")]
+    auto_prompt: NvueAutoPrompt,
+}
+
+impl NvueApplyData {
+    fn force_apply() -> Self {
+        let state = "apply".into();
+        let auto_prompt = NvueAutoPrompt::unattended_fail_fast();
+        Self { state, auto_prompt }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+// This controls what NVUE does with configurations where the validator produced
+// warnings or errors.
+struct NvueAutoPrompt {
+    // "ays" means Are You Sure.
+    ays: String,
+    // This controls whether NVUE waits for a client for 30 seconds to try to do
+    // something about a config health-check failure, or fails immediately.
+    ignore_fail: String,
+}
+
+impl NvueAutoPrompt {
+    fn unattended_fail_fast() -> Self {
+        let ays = "ays_yes".into();
+        let ignore_fail = "ignore_fail_no".into();
+        Self { ays, ignore_fail }
+    }
+}
+
+fn default_nvue_headers() -> HeaderMap {
+    HeaderMap::from_iter([(ACCEPT, HeaderValue::from_static("application/json"))])
+}
+
+#[derive(Debug)]
+pub enum NvueServerAddress {
+    UnixSocket {
+        socket_path: PathBuf,
+    },
+    TcpTls {
+        address: String,
+        auth: Option<NvueAuth>,
+    },
+}
+
+impl NvueServerAddress {
+    /// Construct the server address using an undocumented internal Unix socket,
+    /// which sidesteps authentication entirely but may not be available unless
+    /// you're on the same host as the server.
+    pub fn default_unix_socket() -> Self {
+        let socket_path = "/run/nvue/nvue.sock".into();
+        Self::UnixSocket { socket_path }
+    }
+
+    /// Construct the server address using values from the environment.
+    /// `NVUE_HTTPS_ADDRESS` should just be the address part of the URL, so
+    /// something like `localhost:8765`. `NVUE_USERNAME` and `NVUE_PASSWORD`
+    /// should contain the username and password used during HTTP basic auth to
+    /// the API.
+    pub fn https_from_env() -> Result<Self, NvueClientError> {
+        let address = get_nvue_envvar("NVUE_HTTPS_ADDRESS")?;
+        let username = get_nvue_envvar("NVUE_USERNAME")?;
+        let password = get_nvue_envvar("NVUE_PASSWORD")?;
+        let auth = Some(NvueAuth { username, password });
+        Ok(Self::TcpTls { address, auth })
+    }
+}
+
+fn get_nvue_envvar(var: &'static str) -> Result<String, NvueClientError> {
+    std::env::var(var).map_err(|e| NvueClientError::EnvVarError(var, e))
+}
+
+pub struct NvueAuth {
+    username: String,
+    password: String,
+}
+
+impl std::fmt::Debug for NvueAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NvueAuth")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum NvueClientError {
+    #[error("reqwest client error: {0}")]
+    ReqwestError(#[from] reqwest::Error),
+
+    #[error(transparent)]
+    RequestFailed(Box<RequestFailed>),
+
+    #[error("environment variable error ({0}): {1}")]
+    EnvVarError(&'static str, std::env::VarError),
+
+    #[error("schema mismatch between NVUE client and server: {0}")]
+    SchemaMismatch(&'static str),
+
+    #[error(
+        "NVUE revision apply failed: revision_id={revision_id}, reason={reason}, last_state={last_state:?}, progress={progress:?}, error_issues={error_issues:?}"
+    )]
+    RevisionApplyFailed {
+        revision_id: String,
+        reason: RevisionApplyFailureReason,
+        last_state: Option<String>,
+        progress: Option<String>,
+        error_issues: Vec<RevisionIssueSummary>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevisionApplyFailureReason {
+    Error,
+    Timeout { waited: Duration },
+}
+
+impl std::fmt::Display for RevisionApplyFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Error => f.write_str("error"),
+            Self::Timeout { waited } => write!(f, "timeout after {waited:?}"),
+        }
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+#[error("NVUE request failed ({method} {url}{}): {source}",
+    body.as_deref().map(|b| format!(" body={b}")).unwrap_or_default())]
+pub struct RequestFailed {
+    pub method: Method,
+    pub url: Url,
+    pub body: Option<String>,
+    #[source]
+    pub source: reqwest::Error,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use http::StatusCode;
+
+    use super::*;
+    use crate::test_support::{
+        ConfigRevisionHandler, ConfigRevisionRollbackHandler, MockNvueServer, MockRequest,
+        MockResponse, NvueMockHandler, handler_fn, respond_once,
+    };
+    use crate::types::bgp::BgpPeerState;
+    use crate::types::revision::RevisionIssueSeverity;
+
+    #[tokio::test]
+    async fn get_bgp_neighbors_filtered_returns_neighbors() {
+        let handler = handler_fn(|request| {
+            (request.matches(Method::GET, "/nvue_v1/vrf/default/router/bgp/neighbor")
+                && matches!(
+                    request.query_pairs().as_slice(),
+                    [(key, value)] if key == "include" && value == "/*/state"
+                ))
+            .then(|| {
+                MockResponse::json(
+                    StatusCode::OK,
+                    &serde_json::json!({
+                        "p0_if": {"state": "established"},
+                        "p1_if": {"state": "active"},
+                    }),
+                )
+            })
+        });
+        let server = MockNvueServer::start(handler).expect("mock server should start");
+        let client = NvueClient::new(server.server_address()).expect("client should be created");
+
+        let neighbors = client
+            .get_bgp_neighbors_filtered("default", FieldFilter::new().include("/*/state"))
+            .await
+            .expect("BGP neighbor request should succeed")
+            .expect("BGP neighbor response should contain neighbors");
+
+        assert_eq!(neighbors.len(), 2);
+        assert_eq!(
+            neighbors.get("p0_if").and_then(|peer| peer.state.as_ref()),
+            Some(&BgpPeerState::Established)
+        );
+        assert_eq!(
+            neighbors.get("p1_if").and_then(|peer| peer.state.as_ref()),
+            Some(&BgpPeerState::Active)
+        );
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn apply_config_revision_polls_until_applied() {
+        let pending_revision = handler_fn(|request| {
+            request
+                .route_captures(Method::GET, "/nvue_v1/revision/{revision_id}")
+                .map(|_| {
+                    MockResponse::json(
+                        StatusCode::OK,
+                        &serde_json::json!({
+                            "state": "apply",
+                            "transition": {"progress": "pending"},
+                        }),
+                    )
+                })
+        });
+
+        // Since ConfigRevisionHandler doesn't model the "pending" state, we'll
+        // fake it by making the revision pending the first time the client asks,
+        // before allowing the real revision handler to respond.
+        let (respond_pending_once, checkpoint) =
+            respond_once(pending_revision).with_response_checkpoint();
+        let handler = ConfigRevisionHandler::default().with_override(respond_pending_once);
+
+        let server = MockNvueServer::start(handler).expect("mock server should start");
+        let client = NvueClient::new(server.server_address()).expect("client should be created");
+        let revision_id = client
+            .create_config_revision()
+            .await
+            .expect("revision creation should succeed");
+        let revision_path = format!("/nvue_v1/revision/{revision_id}");
+
+        let mut apply_future = Box::pin(client.apply_config_revision(&revision_id));
+        tokio::select! {
+            () = checkpoint.wait_until_reached() => {}
+            result = &mut apply_future => {
+                panic!("revision apply completed before pending response: {result:?}");
+            }
+        }
+        tokio::time::pause();
+        tokio::time::advance(NvueClient::APPLY_CONFIG_REVISION_POLL_INTERVAL).await;
+        apply_future.await.expect("revision apply should succeed");
+
+        assert_eq!(
+            server.summarize_requests(),
+            [
+                "POST /nvue_v1/revision".to_string(),
+                format!("PATCH {revision_path}"),
+                format!("GET {revision_path}"),
+                format!("GET {revision_path}"),
+            ]
+        );
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn apply_config_revision_times_out_with_last_pending_status() {
+        let pending_response = handler_fn(|request: &MockRequest| {
+            request
+                .route_captures(Method::GET, "/nvue_v1/revision/{revision_id}")
+                .map(|_| {
+                    MockResponse::json(
+                        StatusCode::OK,
+                        &serde_json::json!({"state":"apply","transition":{"progress":"pending"},}),
+                    )
+                })
+        });
+
+        let (pending_revisions, checkpoints) = pending_response.with_response_checkpoints();
+        let handler = ConfigRevisionHandler::default().with_override(pending_revisions);
+
+        let server = MockNvueServer::start(handler).expect("mock server should start");
+        let client = NvueClient::new(server.server_address()).expect("client should be created");
+        let revision_id = client
+            .create_config_revision()
+            .await
+            .expect("revision creation should succeed");
+
+        let mut apply_future = Box::pin(client.apply_config_revision(&revision_id));
+
+        tokio::select! {
+            () = checkpoints.wait_until_response(1) => {}
+            result = &mut apply_future => {
+                panic!("revision apply completed before pending response: {result:?}");
+            }
+        }
+        // At this point we know the first pending response has been produced
+        // (though we don't know whether the client has consumed it). Calling
+        // tokio's `pause()` disconnects the runtime's clock from the wall
+        // clock and allows it to auto-advance if timers are the only thing it's
+        // waiting on.
+        tokio::time::pause();
+        let paused_at = tokio::time::Instant::now();
+        tokio::select! {
+            () = checkpoints.wait_until_response(2) => {}
+            result = &mut apply_future => {
+                panic!("revision apply completed before second pending response: {result:?}");
+            }
+        }
+        // Now, we know the second pending response has been produced and the
+        // client is definitely inside the polling loop (since it has provably
+        // consumed the earlier pending response). Fast-forward the runtime's
+        // clock so that we reach the timeout.
+        let elapsed_while_paused = tokio::time::Instant::now() - paused_at;
+        tokio::time::advance(
+            NvueClient::APPLY_CONFIG_REVISION_TIMEOUT.saturating_sub(elapsed_while_paused),
+        )
+        .await;
+
+        match apply_future.await {
+            Err(error) => {
+                let NvueClientError::RevisionApplyFailed {
+                    revision_id: failed_revision_id,
+                    reason: RevisionApplyFailureReason::Timeout { waited },
+                    last_state,
+                    progress,
+                    error_issues,
+                } = error
+                else {
+                    panic!("unexpected revision apply error: {error:?}");
+                };
+
+                assert_eq!(failed_revision_id, revision_id);
+                assert!(waited >= NvueClient::APPLY_CONFIG_REVISION_TIMEOUT);
+                assert_eq!(last_state.as_deref(), Some("apply"));
+                assert_eq!(progress.as_deref(), Some("pending"));
+                assert!(error_issues.is_empty());
+            }
+            Ok(()) => panic!("revision apply should time out"),
+        }
+
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn apply_config_revision_waits_for_rollback_and_preserves_error() {
+        let handler = ConfigRevisionRollbackHandler::new(serde_json::json!({}), 1, 1);
+        let server = MockNvueServer::start(handler).expect("mock server should start");
+        let client = NvueClient::new(server.server_address()).expect("client should be created");
+        let revision_id = client
+            .create_config_revision()
+            .await
+            .expect("revision creation should succeed");
+
+        let error = client
+            .apply_config_revision(&revision_id)
+            .await
+            .expect_err("apply should fail");
+        let NvueClientError::RevisionApplyFailed {
+            revision_id: failed_revision_id,
+            reason,
+            last_state,
+            progress,
+            error_issues,
+        } = error
+        else {
+            panic!("unexpected apply error: {error:?}");
+        };
+        assert_eq!(failed_revision_id, revision_id);
+        assert_eq!(reason, RevisionApplyFailureReason::Error);
+        assert_eq!(last_state.as_deref(), Some("apply_fail"));
+        assert_eq!(progress.as_deref(), Some("apply failed"));
+        assert_eq!(
+            error_issues,
+            vec![RevisionIssueSummary {
+                issue_id: "1".to_owned(),
+                severity: RevisionIssueSeverity::Error,
+                code: Some("apply_failed".to_owned()),
+                message: Some("apply failed".to_owned()),
+                data: Some(BTreeMap::from([("path".to_owned(), "/system".to_owned())])),
+            }]
+        );
+
+        let rollback_request = "GET /nvue_v1/revision/rev_1_apply_1%2Fstart";
+        let requests = server.summarize_requests();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.as_str() == rollback_request)
+                .count(),
+            2
+        );
+        assert_eq!(requests.last().map(String::as_str), Some(rollback_request));
+
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn apply_config_revision_gives_rollback_its_own_polling_window() {
+        let (handler, checkpoints) =
+            ConfigRevisionRollbackHandler::new(serde_json::json!({}), 35, 35)
+                .with_response_checkpoints();
+        let server = MockNvueServer::start(handler).expect("mock server should start");
+        let client = NvueClient::new(server.server_address()).expect("client should be created");
+        let revision_id = client
+            .create_config_revision()
+            .await
+            .expect("revision creation should succeed");
+
+        let mut apply_future = Box::pin(client.apply_config_revision(&revision_id));
+        tokio::select! {
+            () = checkpoints.wait_until_response(4) => {}
+            result = &mut apply_future => panic!("apply completed before second checking response: {result:?}"),
+        }
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let mut clock = tokio::time::interval(Duration::from_millis(100));
+        let error = loop {
+            tokio::select! {
+                result = &mut apply_future => break result.expect_err("apply should fail"),
+                _ = clock.tick() => {}
+            }
+        };
+        assert!(
+            matches!(
+                &error,
+                NvueClientError::RevisionApplyFailed {
+                    last_state: Some(state),
+                    ..
+                } if state == "apply_fail"
+            ),
+            "unexpected apply error: {error:?}"
+        );
+        assert!(started.elapsed() > NvueClient::APPLY_CONFIG_REVISION_TIMEOUT);
+
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn push_config_applies_changed_config_then_skips_same_config() {
+        let config = NvueConfig {
+            bridge: None,
+            evpn: None,
+            interface: None,
+            nve: None,
+            router: None,
+            system: Some(serde_json::json!({"hostname": "leaf-1"})),
+            vrf: None,
+            acl: None,
+        };
+        let expected_config =
+            serde_json::to_value(&config).expect("test configuration should serialize");
+        let handler = Arc::new(ConfigRevisionHandler::default());
+        let server = MockNvueServer::start(Arc::clone(&handler)).expect("mock server should start");
+        let client = NvueClient::new(server.server_address()).expect("client should be created");
+
+        let first_revision_id = client
+            .push_config(&config)
+            .await
+            .expect("configuration push should succeed");
+        assert_eq!(first_revision_id.as_deref(), Some("1"));
+        assert_eq!(handler.get_applied_config(), expected_config);
+
+        let second_revision_id = client
+            .push_config(&config)
+            .await
+            .expect("configuration push should succeed");
+
+        assert_eq!(second_revision_id, None);
+        assert_eq!(
+            server.summarize_requests(),
+            [
+                "POST /nvue_v1/revision",
+                "DELETE /nvue_v1/?rev=1",
+                "PATCH /nvue_v1/?rev=1",
+                "GET /nvue_v1/?diff=applied&rev=1&filled=false",
+                "PATCH /nvue_v1/revision/1",
+                "GET /nvue_v1/revision/1",
+                "POST /nvue_v1/revision",
+                "DELETE /nvue_v1/?rev=2",
+                "PATCH /nvue_v1/?rev=2",
+                "GET /nvue_v1/?diff=applied&rev=2&filled=false",
+            ]
+        );
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
+    }
+
+    #[test]
+    fn field_filter_empty_has_no_query_pairs() {
+        let filter = FieldFilter::new();
+
+        assert!(filter.is_empty());
+        assert!(filter.query_pairs().is_empty());
+    }
+
+    #[test]
+    fn field_filter_preserves_include_pairs() {
+        let filter = FieldFilter::new()
+            .include("/neighbor/*/state")
+            .include("/neighbor/*/peer-group");
+
+        assert_eq!(
+            filter.query_pairs(),
+            vec![
+                ("include", "/neighbor/*/state"),
+                ("include", "/neighbor/*/peer-group"),
+            ]
+        );
+    }
+
+    #[test]
+    fn field_filter_with_includes_builds_include_pairs() {
+        let filter = FieldFilter::with_includes(["/neighbor/*/state", "/neighbor/*/peer-group"]);
+
+        assert_eq!(
+            filter.query_pairs(),
+            vec![
+                ("include", "/neighbor/*/state"),
+                ("include", "/neighbor/*/peer-group"),
+            ]
+        );
+    }
+
+    #[test]
+    fn field_filter_preserves_omit_pairs() {
+        let filter = FieldFilter::new()
+            .omit("/peer-group")
+            .omit("/address-family");
+
+        assert_eq!(
+            filter.query_pairs(),
+            vec![("omit", "/peer-group"), ("omit", "/address-family")]
+        );
+    }
+
+    #[test]
+    fn field_filter_with_omits_builds_omit_pairs() {
+        let filter = FieldFilter::with_omits(["/peer-group", "/address-family"]);
+
+        assert_eq!(
+            filter.query_pairs(),
+            vec![("omit", "/peer-group"), ("omit", "/address-family")]
+        );
+    }
+
+    #[test]
+    fn field_filter_combines_include_and_omit_pairs() {
+        let filter = FieldFilter::new()
+            .include("/neighbor/*/state")
+            .omit("/peer-group")
+            .include("/configured-neighbors")
+            .omit("/address-family");
+
+        assert_eq!(
+            filter.query_pairs(),
+            vec![
+                ("include", "/neighbor/*/state"),
+                ("include", "/configured-neighbors"),
+                ("omit", "/peer-group"),
+                ("omit", "/address-family"),
+            ]
+        );
+    }
+}

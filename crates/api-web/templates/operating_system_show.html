@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+
+{% block title %}Operating Systems{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Operating Systems</h1>
+
+<table class="sortable overview">
+	<thead>
+		<th>Name</th>
+		<th>ID</th>
+		<th>Type</th>
+		<th>Status</th>
+		<th>Template</th>
+		<th>Active</th>
+		<th>Tenant</th>
+	</thead>
+	<tbody>
+		{% for os in operating_systems %}
+		<tr>
+			<td><a href="/admin/operating-system/{{ os.id }}">{{ os.name }}</a></td>
+			<td>{{ os.id }}</td>
+			<td>{{ os.os_type }}</td>
+			<td>
+				{% if os.status == "Ready" %}
+					<span class="bubble success">{{ os.status }}</span>
+				{% else if os.status.to_lowercase().contains("failed") || os.status.to_lowercase().contains("error") %}
+					<span class="bubble error">{{ os.status }}</span>
+				{% else %}
+					<span class="bubble">{{ os.status }}</span>
+				{% endif %}
+			</td>
+			<td>{{ os.template_id }}</td>
+			<td>{{ os.is_active }}</td>
+			<td>{{ os.tenant_organization_id }}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+
+{% endblock %}

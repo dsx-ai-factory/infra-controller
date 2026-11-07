@@ -1,0 +1,502 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+    helm.sh/resource-policy: keep
+  labels:
+    app.kubernetes.io/part-of: dpf-operator-controller-manager
+    dpu.nvidia.com/component: dpf-operator-controller-manager
+  name: dpusets.provisioning.dpu.nvidia.com
+spec:
+  group: provisioning.dpu.nvidia.com
+  names:
+    kind: DPUSet
+    listKind: DPUSetList
+    plural: dpusets
+    singular: dpuset
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: DPUSet is the Schema for the dpusets API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: DPUSetSpec defines the desired state of DPUSet
+            properties:
+              dpuDeviceSelector:
+                description: DPUDeviceSelector defines the selector for DPUDevices
+                  that the DPUSet should target and should create a DPU for.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              dpuNodeSelector:
+                description: Select the DPUNodes with specific labels
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              dpuSelector:
+                additionalProperties:
+                  type: string
+                description: |-
+                  Select the DPU with specific labels
+
+                  Deprecated: This field is deprecated and will be removed with v31.0.0. Use DPUDeviceSelector instead.
+                type: object
+              dpuTemplate:
+                description: Object that describes the DPU that will be created if
+                  insufficient replicas are detected
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: Annotations specifies annotations which are added
+                      to the DPU.
+                    type: object
+                  spec:
+                    description: Spec specifies the DPU specification.
+                    properties:
+                      astraEnabled:
+                        description: AstraEnabled indicates whether E/W NIC configuration
+                          (Astra) is enabled
+                        type: boolean
+                      bfb:
+                        description: Specifies a BFB CR
+                        properties:
+                          name:
+                            description: Specifies name of the bfb CR to use for this
+                              DPU
+                            minLength: 1
+                            type: string
+                        type: object
+                      blueFieldSoftware:
+                        description: Specifies a BlueFieldSoftware CR
+                        properties:
+                          name:
+                            description: Specifies name of the BlueFieldSoftware CR
+                              to use for this DPU
+                            minLength: 1
+                            type: string
+                        type: object
+                      cluster:
+                        description: Specifies details on the K8S cluster to join
+                        properties:
+                          nodeAnnotations:
+                            additionalProperties:
+                              type: string
+                            description: NodeAnnotations specifies the annotations
+                              to be added to the node.
+                            type: object
+                          nodeLabels:
+                            additionalProperties:
+                              type: string
+                            description: NodeLabels specifies the labels to be added
+                              to the node.
+                            type: object
+                          selector:
+                            description: Selector defines the selector of the DPUClusters
+                              the produced DPUs should join
+                            properties:
+                              matchExpressions:
+                                description: matchExpressions is a list of label selector
+                                  requirements. The requirements are ANDed.
+                                items:
+                                  description: |-
+                                    A label selector requirement is a selector that contains values, a key, and an operator that
+                                    relates the key and values.
+                                  properties:
+                                    key:
+                                      description: key is the label key that the selector
+                                        applies to.
+                                      type: string
+                                    operator:
+                                      description: |-
+                                        operator represents a key's relationship to a set of values.
+                                        Valid operators are In, NotIn, Exists and DoesNotExist.
+                                      type: string
+                                    values:
+                                      description: |-
+                                        values is an array of string values. If the operator is In or NotIn,
+                                        the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                        the values array must be empty. This array is replaced during a strategic
+                                        merge patch.
+                                      items:
+                                        type: string
+                                      type: array
+                                      x-kubernetes-list-type: atomic
+                                  required:
+                                  - key
+                                  - operator
+                                  type: object
+                                type: array
+                                x-kubernetes-list-type: atomic
+                              matchLabels:
+                                additionalProperties:
+                                  type: string
+                                description: |-
+                                  matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                  map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                  operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                type: object
+                            type: object
+                            x-kubernetes-map-type: atomic
+                        type: object
+                      dpuFlavor:
+                        description: |-
+                          DPUFlavor is the name of the DPUFlavor that will be used to deploy the DPU.
+                          Mutually exclusive with DPUFlavorTemplate.
+                        minLength: 1
+                        type: string
+                      dpuFlavorTemplate:
+                        description: |-
+                          DPUFlavorTemplate is the name of a DPUFlavorTemplate that is rendered per-DPU
+                          (against DPUDevice.spec.values) into a generated DPUFlavor. Mutually exclusive
+                          with DPUFlavor.
+                        minLength: 1
+                        type: string
+                      nodeEffect:
+                        description: Specifies how changes to the DPU should affect
+                          the Node
+                        properties:
+                          applyOnLabelChange:
+                            default: false
+                            description: |-
+                              Apply node effect when labels change on the DPU object
+                              When set to true, label changes in Ready state will trigger node effect logic
+                            type: boolean
+                          customAction:
+                            description: |-
+                              Name of a config map which contains a pod yaml definition to run which will apply the nodeEffect.
+                              The pod is expected to exit when node effect is done, if pod terminates with error then DPU would move to an error phase.
+                              The DPUNode's name will be exported as an environment variable, named as DPUNODE_NAME, to each container and init container in the pod.
+                              The labels and annotations of DPUNode will be exported in `/etc/dpu/dpf-pod-info/labels` and `/etc/dpu/dpf-pod-info/annotations` accordingly; the volume name `dpf-pod-info` is used to mount the labels and annotations.
+                              If any name confliction for env or volume, the controller will not export the name or labels/annotations of DPUNode accordingly.
+                            type: string
+                          customLabel:
+                            additionalProperties:
+                              type: string
+                            description: Add specify labels on the DPU node
+                            type: object
+                          drain:
+                            description: Drain the K8s host node by NodeMaintenance
+                              operator
+                            type: boolean
+                          force:
+                            default: false
+                            description: |-
+                              Force is the flag to indicate if the node effect should be applied immediately.
+                              If true, dpfOperatorConfig.multiDPUOperationsSyncWaitTime and dpfOperatorConfig.maxUnavailableDPUNodes will be ignored when applying node effect for DPUNodeMaintenance CR
+                            type: boolean
+                          hold:
+                            description: |-
+                              Places annotation `wait-for-external-nodeeffect` and waits for it to be removed
+                              this is the default behavior in a non K8S environment
+                            type: boolean
+                          noEffect:
+                            description: Do not do any action on the DPU node
+                            type: boolean
+                          nodeMaintenanceAdditionalRequestors:
+                            description: Additional requestors to be added to the
+                              NvidiaNodeMaintenance CR when Drain is selected
+                            items:
+                              type: string
+                            type: array
+                          taint:
+                            description: Add specify taint on the DPU node
+                            properties:
+                              effect:
+                                description: |-
+                                  Required. The effect of the taint on pods
+                                  that do not tolerate the taint.
+                                  Valid effects are NoSchedule, PreferNoSchedule and NoExecute.
+                                type: string
+                              key:
+                                description: Required. The taint key to be applied
+                                  to a node.
+                                type: string
+                              timeAdded:
+                                description: TimeAdded represents the time at which
+                                  the taint was added.
+                                format: date-time
+                                type: string
+                              value:
+                                description: The taint value corresponding to the
+                                  taint key.
+                                type: string
+                            required:
+                            - effect
+                            - key
+                            type: object
+                        type: object
+                        x-kubernetes-validations:
+                        - message: exactly one of taint, noEffect=true, drain=true,
+                            non-empty customLabel, non-empty customAction, hold=true
+                            must be set
+                          rule: '(has(self.taint) ? 1 : 0) + ((has(self.noEffect)
+                            && self.noEffect) ? 1 : 0) + ((has(self.customLabel) &&
+                            size(self.customLabel) > 0) ? 1 : 0) + ((has(self.drain)
+                            && self.drain) ? 1 : 0) + ((has(self.customAction) &&
+                            size(self.customAction) > 0) ? 1 : 0) + ((has(self.hold)
+                            && self.hold) ? 1 : 0) == 1'
+                      secureBoot:
+                        description: SecureBoot specifies whether UEFI Secure Boot
+                          should be enabled.
+                        type: boolean
+                    required:
+                    - nodeEffect
+                    type: object
+                    x-kubernetes-validations:
+                    - message: exactly one of bfb or blueFieldSoftware must be set
+                      rule: '(has(self.bfb) && has(self.bfb.name) ? 1 : 0) + (has(self.blueFieldSoftware)
+                        && has(self.blueFieldSoftware.name) ? 1 : 0) == 1'
+                    - message: exactly one of dpuFlavor or dpuFlavorTemplate must
+                        be set
+                      rule: has(self.dpuFlavor) != has(self.dpuFlavorTemplate)
+                type: object
+              strategy:
+                description: The rolling update strategy to use to updating existing
+                  DPUs with new ones.
+                properties:
+                  rollingUpdate:
+                    description: Rolling update config params. Present only if StrategyType
+                      = RollingUpdate.
+                    properties:
+                      maxUnavailable:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxUnavailable is the maximum number of DPUs that can be unavailable during the update.
+
+                          Deprecated: This field is deprecated and will be removed with v31.0.0.
+                        x-kubernetes-int-or-string: true
+                    type: object
+                  type:
+                    description: Can be "OnDelete" or "RollingUpdate".
+                    enum:
+                    - OnDelete
+                    - RollingUpdate
+                    type: string
+                required:
+                - type
+                type: object
+            required:
+            - dpuTemplate
+            - strategy
+            type: object
+            x-kubernetes-validations:
+            - message: only one of dpuSelector or dpuDeviceSelector can be specified
+              rule: '!(has(self.dpuSelector) && has(self.dpuDeviceSelector))'
+          status:
+            description: DPUSetStatus defines the observed state of DPUSet
+            properties:
+              conditions:
+                description: Conditions reflect the status of the object
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              dpuReconfig:
+                description: |-
+                  DPUReconfig is the in-place reconfig round owned by the DPUSet controller.
+                  The user starts a round with annotation provisioning.dpu.nvidia.com/inplace-reconfig=true.
+                  Nil means no round has started.
+                properties:
+                  active:
+                    description: Active is true while this annotation round is not
+                      finished.
+                    type: boolean
+                  round:
+                    description: |-
+                      Round identifies the current or last round. It increases by one when a new
+                      annotation round starts and is not reset when the annotation is removed.
+                      Zero means no round has started.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  startedAt:
+                    description: |-
+                      StartedAt is when this round became active. It distinguishes a DPU that was
+                      already Ready before the round from one that first becomes Ready during it.
+                      The controller sets it with round and active, and never leaves it zero.
+                    format: date-time
+                    type: string
+                type: object
+              dpuStatistics:
+                additionalProperties:
+                  type: integer
+                description: DPUStatistics is a map of DPUPhase to the number of DPUs
+                  in that phase.
+                type: object
+              observedGeneration:
+                description: ObservedGeneration records the Generation observed on
+                  the object the last time it was patched.
+                format: int64
+                type: integer
+            type: object
+        type: object
+        x-kubernetes-validations:
+        - message: name length can't be bigger than 63 chars
+          rule: self.metadata.name.size() <= 63
+    served: true
+    storage: true
+    subresources:
+      status: {}

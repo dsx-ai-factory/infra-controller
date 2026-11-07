@@ -1,0 +1,52 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# tokio_unstable is required in order to enable tokio runtime metrics
+#
+# -A dependency-on-unit-never-type-fallback is here due to `!` falling back to `()`  is being removed and looks like sqlx hasn't updated yet
+# Compiler lints are configured here so they apply to every workspace package,
+# including packages that do not inherit the workspace lint table.
+[target.'cfg(all())']
+rustflags = [
+  "-D",
+  "warnings",
+  "-D",
+  "unreachable-pub",
+  "--cfg",
+  "tokio_unstable",
+  "-A",
+  "dependency-on-unit-never-type-fallback",
+  "-A",
+  "unknown_lints",                          # Needed so that prior cargo checks tolerate custom lints like txn_held_across_await
+]
+
+# This linker seems faster than default, but not everyone is using it yet
+#[target.x86_64-unknown-linux-gnu]
+#rustflags = ["-C", "linker=clang", "-C", "link-arg=-fuse-ld=lld"]
+
+# mold is selected by the build environment rather than from here, through
+# CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER pointing at a driver that
+# already passes -fuse-ld=mold. Setting the flag here as well reached every
+# aarch64 build, including ones whose image predates the mold install, and cc
+# rejects a linker it does not have: "unrecognized command-line option
+# '-fuse-ld=mold'". Keep linker selection with the toolchain that provides it.
+
+[env]
+RUST_TEST_THREADS = "60"
+
+[alias]
+xtask = "run --package xtask --"
+check-metric-docs = "run --package xtask -- check-metric-docs"

@@ -1,0 +1,9 @@
+
+#if you need to specify where kea is locally (it's installed in a non standard location)
+#export KEA_INCLUDE_PATH=/usr/local/include/kea
+#export KEA_BIN_PATH=/usr/local/bin
+#export KEA_LIB_PATH=/usr/local/lib
+
+#if you locally build kea you will need this -- if you see an error related to missing kea .so's when running tests, uncomment this
+#export LD_LIBRARY_PATH=/usr/local/lib/
+

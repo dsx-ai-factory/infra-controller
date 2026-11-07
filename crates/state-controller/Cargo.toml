@@ -1,0 +1,76 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[package]
+name = "state-controller"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "state_controller"
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+# [local-dependencies]
+# DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
+carbide-api-db = { path = "../api-db", default-features = false }
+carbide-api-model = { path = "../api-model", default-features = false }
+carbide-health-metrics = { path = "../health-metrics" }
+carbide-utils = { path = "../utils" }
+carbide-uuid = { path = "../uuid", features = ["sqlx"] }
+config-version = { path = "../config-version", features = ["sqlx"] }
+sqlx-query-tracing = { path = "../sqlx-query-tracing" }
+# DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
+
+#these are alphabetized
+async-trait = { workspace = true }
+chrono = { workspace = true }
+eyre = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+opentelemetry = { workspace = true }
+prometheus = { workspace = true }
+rand = { workspace = true }
+serde = { features = ["derive"], workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true, features = [
+  "runtime-tokio",
+  "tls-rustls",
+  "postgres",
+  "chrono",
+  "macros",
+] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+#these are alphabetized
+
+[dev-dependencies]
+carbide-macros = { path = "../macros" }
+carbide-sqlx-testing = { path = "../sqlx-testing" }
+carbide-utils = { path = "../utils", features = ["test-support"] }
+tokio = { workspace = true, features = ["test-util"] }
+uuid = { features = ["v4"], workspace = true }
+
+[lints]
+workspace = true

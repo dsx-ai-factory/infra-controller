@@ -1,0 +1,497 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Chart debug mode
+# (eg. disable helm hook delete policy)
+debug: false
+
+# Custom Service account management
+serviceAccount:
+  # Whether to create service account or not
+  create: false
+
+  # Name of the service account, default: temporal.fullname
+  name:
+
+  # extraAnnotations would let users add additional annotations
+  extraAnnotations:
+
+server:
+  enabled: true
+
+  # If you have sidecar containers:
+  sidecarContainers: {}
+
+  # Use the new upstream server image version, preserving your local choice of "1.22.x" (here 1.22.6)
+  image:
+    repository: temporalio/server
+    tag: 1.22.6
+    pullPolicy: IfNotPresent
+
+  # Global default settings (can be overridden per service)
+  replicaCount: 1
+
+  # Incorporate your additional environment (TLS)
+  additionalEnv:
+    - name: TEMPORAL_CLI_TLS_SERVER_NAME
+      value: interservice.server.temporal.local
+    - name: TEMPORAL_CLI_TLS_ENABLE_HOST_VERIFICATION
+      value: "true"
+    - name: TEMPORAL_CLI_TLS_CERT
+      value: /var/secrets/temporal/certs/server-interservice/tls.crt
+    - name: TEMPORAL_CLI_TLS_KEY
+      value: /var/secrets/temporal/certs/server-interservice/tls.key
+    - name: TEMPORAL_CLI_TLS_CA
+      value: /var/secrets/temporal/certs/server-interservice/ca.crt
+
+  secretLabels: {}
+  secretAnnotations: {}
+
+  metrics:
+    # Annotate pods directly with Prometheus annotations.
+    # Use this if you installed Prometheus from a Helm chart.
+    annotations:
+      enabled: true
+    # Enable Prometheus ServiceMonitor
+    # Use this if you installed the Prometheus Operator (https://github.com/coreos/prometheus-operator).
+    serviceMonitor:
+      enabled: true
+      interval: 30s
+      # Set additional lables to all the ServiceMonitor resources
+      additionalLabels: {}
+      #  label1: value1
+      #  label2: value2
+      # Set Prometheus metric_relabel_configs via ServiceMonitor
+      # Use metricRelabelings to adjust metric and label names as needed
+      metricRelabelings: []
+      # - action: replace
+      #   sourceLabels:
+      #   - exported_namespace
+      #   targetLabel: temporal_namespace
+      # - action: replace
+      #   regex: service_errors_(.+)
+      #   replacement: ${1}
+      #   sourceLabels:
+      #   - __name__
+      #   targetLabel: temporal_error_kind
+      # - action: replace
+      #   regex: service_errors_.+
+      #   replacement: temporal_service_errors
+      #   sourceLabels:
+      #   - __name__
+      #   targetLabel: __name__
+    prometheus:
+      timerType: histogram
+
+  podAnnotations: {}
+  podLabels: {}
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  # Merge your additional volume mounts and volumes
+  additionalVolumeMounts:
+    # Cert and key
+    - name: server-interservice-certs
+      mountPath: "/var/secrets/temporal/certs/server-interservice/"
+      readOnly: true
+    # Cert and key
+    - name: server-cloud-certs
+      mountPath: "/var/secrets/temporal/certs/server-cloud/"
+      readOnly: true
+    # Cert and key
+    - name: server-site-certs
+      mountPath: "/var/secrets/temporal/certs/server-site/"
+      readOnly: true
+  additionalVolumes:
+    - name: server-interservice-certs
+      secret:
+        secretName: server-interservice-certs
+    #
+    - name: server-cloud-certs
+      secret:
+        secretName: server-cloud-certs
+    #
+    - name: server-site-certs
+      secret:
+        secretName: server-site-certs
+
+  securityContext:
+    fsGroup: 1000
+    runAsUser: 1000
+
+  config:
+    logLevel: "debug,info"
+
+    # IMPORTANT: This value cannot be changed, once it's set.
+    numHistoryShards: 512
+
+    persistence:
+      defaultStore: default
+      additionalStores: {}
+      # You used a custom Secret for Postgres authentication
+      secretName: "postgres-auth"
+      secretKey: "password"
+
+      default:
+        driver: "sql"
+
+        sql:
+          driver: "postgres12"
+          host: "postgres.postgres.svc.cluster.local"
+          port: 5432
+          database: "temporal"
+          user: "temporal"
+          existingSecret: "postgres-auth"
+          maxConns: 20
+          maxConnLifetime: "1h"
+
+      visibility:
+        driver: "sql"
+
+        sql:
+          driver: "postgres12"
+          host: "postgres.postgres.svc.cluster.local"
+          port: 5432
+          database: "temporal_visibility"
+          user: "temporal"
+          existingSecret: "postgres-auth"
+          maxConns: 20
+          maxConnLifetime: "1h"
+
+    global:
+      tls:
+        internode:
+          server:
+            certFile: /var/secrets/temporal/certs/server-interservice/tls.crt
+            keyFile: /var/secrets/temporal/certs/server-interservice/tls.key
+            requireClientAuth: true
+            clientCaFiles:
+              - /var/secrets/temporal/certs/server-interservice/ca.crt
+          client:
+            serverName: interservice.server.temporal.local
+            rootCaFiles:
+              - /var/secrets/temporal/certs/server-interservice/ca.crt
+        frontend:
+          server:
+            certFile: /var/secrets/temporal/certs/server-interservice/tls.crt
+            keyFile: /var/secrets/temporal/certs/server-interservice/tls.key
+            requireClientAuth: true
+            clientCaFiles:
+              - /var/secrets/temporal/certs/server-interservice/ca.crt
+          client:
+            serverName: interservice.server.temporal.local
+            rootCaFiles:
+              - /var/secrets/temporal/certs/server-interservice/ca.crt
+          hostOverrides:
+            interservice.server.temporal.local:
+              certFile: /var/secrets/temporal/certs/server-interservice/tls.crt
+              keyFile: /var/secrets/temporal/certs/server-interservice/tls.key
+              requireClientAuth: true
+              clientCaFiles:
+                - /var/secrets/temporal/certs/server-interservice/ca.crt
+            cloud.server.temporal.local:
+              certFile: /var/secrets/temporal/certs/server-cloud/tls.crt
+              keyFile: /var/secrets/temporal/certs/server-cloud/tls.key
+              requireClientAuth: true
+              clientCaFiles:
+                - /var/secrets/temporal/certs/server-cloud/ca.crt
+            site.server.temporal.local:
+              certFile: /var/secrets/temporal/certs/server-site/tls.crt
+              keyFile: /var/secrets/temporal/certs/server-site/tls.key
+              requireClientAuth: true
+              clientCaFiles:
+                - /var/secrets/temporal/certs/server-site/ca.crt
+
+  frontend:
+    replicaCount: 1
+    service:
+      type: ClusterIP
+      annotations: {}
+      port: 7233
+    externalService:
+      enabled: false
+    metrics:
+      annotations:
+        enabled: true
+      serviceMonitor: {}
+      # enabled: false
+      prometheus: {}
+      # timerType: histogram
+    podAnnotations: {}
+    podLabels: {}
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  history:
+    # replicaCount: 1
+    service:
+      # type: ClusterIP
+      port: 7234
+    metrics:
+      annotations:
+        enabled: true
+      serviceMonitor: {}
+      # enabled: false
+      prometheus: {}
+      # timerType: histogram
+    podAnnotations: {}
+    podLabels: {}
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  matching:
+    # replicaCount: 1
+    service:
+      # type: ClusterIP
+      port: 7235
+    metrics:
+      annotations:
+        enabled: false
+      serviceMonitor: {}
+      # enabled: false
+      prometheus: {}
+      # timerType: histogram
+    podAnnotations: {}
+    podLabels: {}
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  worker:
+    # replicaCount: 1
+    service:
+      # type: ClusterIP
+      port: 7239
+    metrics:
+      annotations:
+        enabled: true
+      serviceMonitor: {}
+      # enabled: false
+      prometheus: {}
+      # timerType: histogram
+    podAnnotations: {}
+    podLabels: {}
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+admintools:
+  enabled: true
+  image:
+    repository: temporalio/admin-tools
+    tag: 1.22.6
+    pullPolicy: IfNotPresent
+  # Merge your additionalEnv (TLS) with upstream placeholders
+  additionalEnv:
+    - name: TEMPORAL_CLI_TLS_SERVER_NAME
+      value: interservice.server.temporal.local
+    - name: TEMPORAL_CLI_TLS_DISABLE_HOST_VERIFICATION
+      value: "false"
+    - name: TEMPORAL_CLI_TLS_CERT
+      value: /var/secrets/temporal/certs/server-interservice/tls.crt
+    - name: TEMPORAL_CLI_TLS_KEY
+      value: /var/secrets/temporal/certs/server-interservice/tls.key
+    - name: TEMPORAL_CLI_TLS_CA
+      value: /var/secrets/temporal/certs/server-interservice/ca.crt
+
+  service:
+    type: ClusterIP
+    port: 22
+    annotations: {}
+  podLabels: {}
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  resources: {}
+  containerSecurityContext: {}
+  securityContext: {}
+  podDisruptionBudget: {}
+  volumeMounts:
+    # Cert and key
+    - name: server-interservice-certs
+      mountPath: "/var/secrets/temporal/certs/server-interservice/"
+      readOnly: true
+  volumes:
+    - name: server-interservice-certs
+      secret:
+        secretName: server-interservice-certs
+
+web:
+  enabled: true
+  image:
+    repository: temporalio/ui
+    tag: 2.16.2
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  config:
+    # server/config.yml file content
+    auth:
+      enabled: false
+    routing:
+      default_to_namespace:
+      issue_report_link: https://github.com/temporalio/web/issues/new/choose
+  additionalEnv:
+    - name: TEMPORAL_TLS_SERVER_NAME
+      value: interservice.server.temporal.local
+    - name: TEMPORAL_TLS_ENABLE_HOST_VERIFICATION
+      value: "true"
+    - name: TEMPORAL_TLS_CERT
+      value: /var/secrets/temporal/certs/server-interservice/tls.crt
+    - name: TEMPORAL_TLS_KEY
+      value: /var/secrets/temporal/certs/server-interservice/tls.key
+    - name: TEMPORAL_TLS_CA
+      value: /var/secrets/temporal/certs/server-interservice/ca.crt
+  service:
+    # set type to NodePort if access to web needs access from outside the cluster
+    # for more info see https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types
+    type: ClusterIP
+    port: 8088
+    annotations: {}
+    # loadBalancerIP:
+  ingress:
+    enabled: false
+    annotations: {}
+    # kubernetes.io/ingress.class: traefik
+    # ingress.kubernetes.io/ssl-redirect: "false"
+    # traefik.frontend.rule.type: PathPrefix
+    hosts:
+      - "/"
+      # - "domain.com/xyz"
+      # - "domain.com"
+    tls: []
+    #  - secretName: chart-example-tls
+    #    hosts:
+    #      - chart-example.local
+  podAnnotations: {}
+  podLabels: {}
+  resources: {}
+  # We usually recommend not to specify default resources and to leave this as a conscious
+  # choice for the user. This also increases chances charts run on environments with little
+  # resources, such as Minikube. If you do want to specify resources, uncomment the following
+  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
+  # limits:
+  #  cpu: 100m
+  #  memory: 128Mi
+  # requests:
+  #  cpu: 100m
+  #  memory: 128Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Retain your volumeMounts
+  volumeMounts:
+    # Cert and key
+    - name: server-interservice-certs
+      mountPath: "/var/secrets/temporal/certs/server-interservice/"
+      readOnly: true
+  volumes:
+    - name: server-interservice-certs
+      secret:
+        secretName: server-interservice-certs
+
+schema:
+  setup:
+    enabled: true
+    backoffLimit: 100
+  update:
+    enabled: true
+    backoffLimit: 100
+  resources: {}
+  containerSecurityContext: {}
+  securityContext: {}
+
+# Disable elasticsearch - use postgres for visibility
+elasticsearch:
+  enabled: false
+
+prometheus:
+  enabled: false
+  nodeExporter:
+    enabled: false
+
+grafana:
+  enabled: false
+  replicas: 1
+  testFramework:
+    enabled: false
+  rbac:
+    create: false
+    pspEnabled: false
+    namespaced: true
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: "default"
+          orgId: 1
+          folder: ""
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/default
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+        - name: TemporalMetrics
+          type: prometheus
+          url: http://{{ .Release.Name }}-prometheus-server
+          access: proxy
+          isDefault: true
+  dashboards:
+    default:
+      server-general-github:
+        url: https://raw.githubusercontent.com/temporalio/dashboards/helm/server/server-general.json
+        datasource: TemporalMetrics
+      sdk-general-github:
+        url: https://raw.githubusercontent.com/temporalio/dashboards/helm/sdk/sdk-general.json
+        datasource: TemporalMetrics
+      misc-advanced-visibility-specific-github:
+        url: https://raw.githubusercontent.com/temporalio/dashboards/helm/misc/advanced-visibility-specific.json
+        datasource: TemporalMetrics
+      misc-clustermonitoring-kubernetes-github:
+        url: https://raw.githubusercontent.com/temporalio/dashboards/helm/misc/clustermonitoring-kubernetes.json
+        datasource: TemporalMetrics
+      misc-frontend-service-specific-github:
+        url: https://raw.githubusercontent.com/temporalio/dashboards/helm/misc/frontend-service-specific.json
+        datasource: TemporalMetrics
+      misc-history-service-specific-github:
+        url: https://raw.githubusercontent.com/temporalio/dashboards/helm/misc/history-service-specific.json
+        datasource: TemporalMetrics
+      misc-matching-service-specific-github:
+        url: https://raw.githubusercontent.com/temporalio/dashboards/helm/misc/matching-service-specific.json
+        datasource: TemporalMetrics
+      misc-worker-service-specific-github:
+        url: https://raw.githubusercontent.com/temporalio/dashboards/helm/misc/worker-service-specific.json
+        datasource: TemporalMetrics
+
+cassandra:
+  enabled: false
+
+mysql:
+  enabled: false

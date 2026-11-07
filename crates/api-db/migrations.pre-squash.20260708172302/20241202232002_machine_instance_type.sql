@@ -1,0 +1,2 @@
+ALTER TABLE machines ADD COLUMN instance_type_id character varying(64);
+ALTER TABLE ONLY machines ADD CONSTRAINT machines_instance_type_id_fkey FOREIGN KEY (instance_type_id) REFERENCES instance_types(id);

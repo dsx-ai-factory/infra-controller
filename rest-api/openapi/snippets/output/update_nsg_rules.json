@@ -1,0 +1,46 @@
+{
+  "id": "string",
+  "name": "string",
+  "description": "string",
+  "siteId": "60189e9c-7d12-438c-b9ca-6998d9c364b1",
+  "tenantId": "f97df110-f4de-492e-8849-4a6af68026b0",
+  "status": "Pending",
+  "statusHistory": [
+    {
+      "status": "Pending",
+      "message": "Request received, pending processing",
+      "created": "2019-08-24T14:15:22Z",
+      "updated": "2019-08-24T14:15:22Z"
+    }
+  ],
+  "rules": [
+    {
+      "name": "allow-all-ingress",
+      "direction": "INGRESS",
+      "sourcePortRange": "0-65535",
+      "destinationPortRange": "0-65535",
+      "protocol": "ANY",
+      "action": "PERMIT",
+      "priority": 0,
+      "sourcePrefix": "192.168.1.0/24",
+      "destinationPrefix": "0.0.0.0/0"
+    },
+    {
+      "name": "allow-all-egress",
+      "direction": "EGRESS",
+      "sourcePortRange": "0-65535",
+      "destinationPortRange": "0-65535",
+      "protocol": "ANY",
+      "action": "PERMIT",
+      "priority": 0,
+      "sourcePrefix": "0.0.0.0/0",
+      "destinationPrefix": "0.0.0.0/0"
+    }
+  ],
+  "labels": {
+    "property1": "default",
+    "property2": "global-allow"
+  },
+  "created": "2019-08-24T14:15:22Z",
+  "updated": "2019-08-24T14:15:22Z"
+}

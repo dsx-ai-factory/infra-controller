@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block title %}Power Shelves{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+
+<div class="container-fluid">
+    <div class="row">
+        <div class="col">
+            <h1>Power Shelves</h1>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">Power Shelves</h5>
+                </div>
+                <div class="card-body">
+                    {% if !power_shelves.is_empty() %}
+                    <div class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Name</th>
+                                <th>State</th>
+                                <th>Capacity (W)</th>
+                                <th>Voltage (V)</th>
+                                <th>Actions</th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            {% for shelf in power_shelves %}
+                            <tr>
+                                <td>{{ shelf.id|power_shelf_id_link|safe }}</td>
+                                <td>{{ shelf.name }}</td>
+                                <td>{{ shelf.state_display|safe }}</td>
+                                <td>{{ shelf.capacity }}</td>
+                                <td>{{ shelf.voltage }}</td>
+                                <td>
+                                    <a href="/admin/power-shelf/{{ shelf.id }}/state-history"
+                                       class="btn btn-sm btn-outline-primary">
+                                        State History
+                                    </a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <p class="text-muted">No power shelves found.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

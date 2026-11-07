@@ -1,0 +1,21 @@
+<form id="powercontrol_action" method="POST" action="/admin/explored-endpoint/{{ bmc_ip }}/power-control">
+	<span class="action-spinner"></span><select name="action" id="power_action">
+		<option title="Turn the power on." value="On">On</option>
+		<option title="Shut down gracefully and power off." value="GracefulShutdown">Graceful Shutdown</option>
+		<option title="Remove power from the system to turn off the unit immediately (non-graceful shutdown)."
+			value="ForceOff">Force Off</option>
+		<option
+			title="Asks the OS to restart via ACPI.  MIGHT restart DPUs if no OS is running. Will NOT apply pending BIOS/UEFI setting changes."
+			value="GracefulRestart">Graceful Restart</option>
+		<option
+			title="This is equivalent to pressing the reset button on the front panel.  Will NOT restart DPUs. WILL apply pending BIOS/UEFI setting changes"
+			value="ForceRestart">Force Restart</option>
+		<option
+			title="This is equivalent to unplugging and reconnecting power cables. Not supported on Vikings."
+			value="ACPowercycle">AC Powercycle</option>
+	</select>
+	{% if let Some(bmc_action_redirect_to) = bmc_action_redirect_to %}
+	<input type="hidden" name="redirect_to" value="{{ bmc_action_redirect_to }}">
+	{% endif %}
+	<input type="submit" value="Submit">
+</form>

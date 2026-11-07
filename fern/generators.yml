@@ -1,0 +1,3 @@
+api:
+  specs:
+    - openapi: ../rest-api/openapi/spec.yaml

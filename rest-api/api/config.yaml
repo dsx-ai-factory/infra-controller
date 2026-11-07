@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+#
+
+env:
+  dev: true
+  disconnected: true
+
+log:
+  level: debug
+  sentry:
+    dsn: ""
+
+api:
+  name: nico
+  route:
+    version: v2
+  expectedMachineBatchRecovery:
+    # Default false. Upgrade every REST API and inventory worker with this off
+    # before enabling durable recovery for new Expected Machine create batches.
+    # Disabling leaves existing reservation guards and inventory recovery active.
+    # Before rollback to older binaries, pending_expected_machine must be empty.
+    # Check with SELECT count(*) FROM pending_expected_machine; let recovery
+    # resolve remaining batches instead of deleting unconfirmed reservations.
+    # API.EXPECTEDMACHINEBATCHRECOVERY.ENABLED overrides this file.
+    # File changes require restarting the REST API.
+    enabled: false
+
+db:
+  host: localhost
+  port: 30432
+  name: nico
+  user: nico
+  password: nico
+
+temporal:
+  host: localhost
+  port: 30233
+  serverName: server.temporal.test.com
+  namespace: cloud
+  queue: cloud
+  tls:
+    enabled: true
+    certPath: certs/client-cloud/tls.crt
+    keyPath: certs/client-cloud/tls.key
+    caPath: certs/client-cloud/ca.crt
+  encryptionKey: "local-dev" # Must match encryption key in workflow module
+
+issuers:
+  - name: kas
+    origin: kas-legacy
+    jwks: https://authn.nvidia.com/pubJWKS
+    issuer: "authn.nvidia.com"
+
+siteManager:
+  enabled: false
+  svcEndpoint: "https://nico-rest-site-manager:8100/v1/site"
+
+metrics:
+  enabled: true
+  port: 9360
+
+tracing:
+  enabled: false
+  serviceName: cloud-api
+
+keycloak:
+  enabled: false
+  baseURL: http://keycloak.keycloak.svc.cluster.local:8082
+  externalBaseURL: https://keycloak.test.com
+  realm: nico
+  clientID: nico-cloud
+  clientSecretPath: /var/secrets/keycloak/client-secret
+  serviceAccount: true
+
+rateLimiter:
+  enabled: false
+  rate: 10.0        # requests per second
+  burst: 30         # maximum burst size
+  expiresIn: 180    # expiration time in seconds (3 minutes)
+
+# Enable DPS when NICo must make direct, synchronous authenticated gRPC calls
+# to the configured service. It is disabled by default.
+powerProvisioning:
+  dps:
+    enabled: false
+    endpoint: ""
+    requestTimeout: 15s
+    tokenPath: ""
+    tls:
+      caPath: ""
+      serverName: ""

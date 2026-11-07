@@ -1,0 +1,151 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2020 The metal-stack Authors
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: MIT AND Apache-2.0
+ */
+
+syntax = "proto3";
+
+package api.v1;
+
+option go_package = "v1;v1";
+
+service IpamService {
+  rpc CreatePrefix(CreatePrefixRequest) returns (CreatePrefixResponse);
+  rpc DeletePrefix(DeletePrefixRequest) returns (DeletePrefixResponse);
+  rpc GetPrefix(GetPrefixRequest) returns (GetPrefixResponse);
+  rpc ListPrefixes(ListPrefixesRequest) returns (ListPrefixesResponse);
+  rpc PrefixUsage(PrefixUsageRequest) returns (PrefixUsageResponse);
+  rpc AcquireChildPrefix(AcquireChildPrefixRequest) returns (AcquireChildPrefixResponse);
+  rpc ReleaseChildPrefix(ReleaseChildPrefixRequest) returns (ReleaseChildPrefixResponse);
+  rpc AcquireIP(AcquireIPRequest) returns (AcquireIPResponse);
+  rpc ReleaseIP(ReleaseIPRequest) returns (ReleaseIPResponse);
+  rpc Dump(DumpRequest) returns (DumpResponse);
+  rpc Load(LoadRequest) returns (LoadResponse);
+  rpc CreateNamespace(CreateNamespaceRequest) returns (CreateNamespaceResponse);
+  rpc ListNamespaces(ListNamespacesRequest) returns (ListNamespacesResponse);
+  rpc DeleteNamespace(DeleteNamespaceRequest) returns (DeleteNamespaceResponse);
+}
+
+message Prefix {
+  string cidr = 1;
+  string parent_cidr = 2;
+}
+message CreatePrefixResponse {
+  Prefix prefix = 1;
+}
+message DeletePrefixResponse {
+  Prefix prefix = 1;
+}
+message GetPrefixResponse {
+  Prefix prefix = 1;
+}
+message AcquireChildPrefixResponse {
+  Prefix prefix = 1;
+}
+message ReleaseChildPrefixResponse {
+  Prefix prefix = 1;
+}
+message CreatePrefixRequest {
+  string cidr = 1;
+  optional string namespace = 2;
+}
+message DeletePrefixRequest {
+  string cidr = 1;
+  optional string namespace = 2;
+}
+message GetPrefixRequest {
+  string cidr = 1;
+  optional string namespace = 2;
+}
+message ListPrefixesRequest {
+  optional string namespace = 1;
+}
+message ListPrefixesResponse {
+  repeated Prefix prefixes = 1;
+}
+
+message PrefixUsageRequest {
+  string cidr = 1;
+  optional string namespace = 2;
+}
+
+message PrefixUsageResponse {
+  // AvailableIPs the number of available IPs if this is not a parent prefix
+  // No more than 2^31 available IPs are reported
+  uint64 available_ips = 1;
+  // AcquiredIPs the number of acquired IPs if this is not a parent prefix
+  uint64 acquired_ips = 2;
+  // AvailableSmallestPrefixes is the count of available Prefixes with 2 countable Bits
+  // No more than 2^31 available Prefixes are reported
+  uint64 available_smallest_prefixes = 3;
+  // AvailablePrefixes is a list of prefixes which are available
+  repeated string available_prefixes = 4;
+  // AcquiredPrefixes the number of acquired prefixes if this is a parent prefix
+  uint64 acquired_prefixes = 5;
+  // AcquiredSubnets the number of acquired subnets if this is a parent prefix
+  uint64 acquired_subnets = 6;
+}
+
+message AcquireChildPrefixRequest {
+  string cidr = 1;
+  uint32 length = 2;
+  optional string child_cidr = 3;
+  optional string namespace = 4;
+}
+message ReleaseChildPrefixRequest {
+  string cidr = 1;
+  optional string namespace = 2;
+}
+
+message IP {
+  string ip = 1;
+  string parent_prefix = 2;
+}
+message AcquireIPResponse {
+  IP ip = 1;
+  optional string namespace = 2;
+}
+message ReleaseIPResponse {
+  IP ip = 1;
+}
+message AcquireIPRequest {
+  string prefix_cidr = 1;
+  optional string ip = 2;
+  optional string namespace = 3;
+}
+message ReleaseIPRequest {
+  string prefix_cidr = 1;
+  string ip = 2;
+  optional string namespace = 3;
+}
+message DumpRequest {
+  optional string namespace = 1;
+}
+message DumpResponse {
+  string dump = 1;
+}
+message LoadRequest {
+  string dump = 1;
+  optional string namespace = 2;
+}
+
+message LoadResponse {}
+
+message CreateNamespaceRequest {
+  string namespace = 1;
+}
+
+message CreateNamespaceResponse {}
+
+message ListNamespacesRequest {}
+
+message ListNamespacesResponse {
+  repeated string namespace = 1;
+}
+
+message DeleteNamespaceRequest {
+  string namespace = 1;
+}
+
+message DeleteNamespaceResponse {}

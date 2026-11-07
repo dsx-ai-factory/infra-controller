@@ -1,0 +1,96 @@
+suite: identity & authz — nico default and carbide/forge override
+# One suite, both modes. The "[nico]" cases run against chart defaults; the
+# "[carbide]" cases load examples/carbide-legacy.yaml via per-test `values:` so
+# the same suite validates both the default render and the legacy override from
+# the one shipped example file.
+release:
+  namespace: nico-system
+templates:
+  - charts/nico-api/templates/certificate.yaml
+  - charts/nico-api/templates/configmap.yaml
+  - charts/nico-dns/templates/configmap.yaml
+tests:
+  # ---------------------------------------------------------------- nico default
+  - it: "[nico] nico-api certificate uses nico names and nico.local"
+    template: charts/nico-api/templates/certificate.yaml
+    set:
+      # Clear extraDnsNames to test pure generated behavior
+      nico-api.certificate.extraDnsNames: []
+    asserts:
+      - equal:
+          path: metadata.name
+          value: nico-api-certificate
+      - equal:
+          path: spec.dnsNames
+          value:
+            - nico-api.nico-system.svc.cluster.local
+            - nico-api.nico-system
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://nico.local/nico-system/sa/nico-api
+
+  - it: "[nico] nico-api auth config + casbin use nico defaults"
+    template: charts/nico-api/templates/configmap.yaml
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: 'spiffe_trust_domain = "nico\.local"'
+      - matchRegex:
+          path: data["casbin-policy.csv"]
+          pattern: 'g, spiffe-service-id/nico-dhcp, nico-dhcp'
+
+  - it: "[nico] nico-dns points clients at the nico-api host"
+    template: charts/nico-dns/templates/configmap.yaml
+    asserts:
+      - equal:
+          path: data.NICO_API_HOST
+          value: nico-api.nico-system.svc.cluster.local
+
+  # ----------------------------------------------- carbide/forge (carbide-legacy)
+  - it: "[carbide] nico-api certificate flips to carbide/forge"
+    template: charts/nico-api/templates/certificate.yaml
+    values:
+      - ../examples/carbide-legacy.yaml
+    asserts:
+      - equal:
+          path: metadata.name
+          value: carbide-api-certificate
+      - equal:
+          path: spec.dnsNames
+          value:
+            - carbide-api.forge-system.svc.cluster.local
+            - carbide-api.forge-system
+            # carbide-api.forge is in extraDnsNames by default for backwards
+            # compatibility with forge-dpu-agent (see issue #2823)
+            - carbide-api.forge
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://forge.local/forge-system/sa/carbide-api
+
+  - it: "[carbide] nico-api auth config + casbin flip to forge/carbide"
+    template: charts/nico-api/templates/configmap.yaml
+    documentIndex: 0
+    values:
+      - ../examples/carbide-legacy.yaml
+    asserts:
+      - matchRegex:
+          path: data["carbide-api-config.toml"]
+          pattern: 'spiffe_trust_domain = "forge\.local"'
+      - matchRegex:
+          path: data["carbide-api-config.toml"]
+          pattern: '"/forge-system/sa/"'
+      - matchRegex:
+          path: data["casbin-policy.csv"]
+          pattern: 'g, spiffe-service-id/carbide-dhcp, nico-dhcp'
+
+  - it: "[carbide] nico-dns points clients at the carbide-api host"
+    template: charts/nico-dns/templates/configmap.yaml
+    values:
+      - ../examples/carbide-legacy.yaml
+    asserts:
+      - equal:
+          path: data.NICO_API_HOST
+          value: carbide-api.nico-system.svc.cluster.local

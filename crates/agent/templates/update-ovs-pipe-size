@@ -1,0 +1,76 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+vswitchpid=$(pidof ovs-vswitchd)
+if [ -z $vswitchpid ]
+then
+	echo "ovs-vswitchd not running, quitting"
+	if ! /usr/bin/systemctl is-enabled update-ovs-pipe-size.service &>/dev/null; then
+		/usr/bin/systemctl --now enable update-ovs-pipe-size.service
+	fi
+	exit 1
+fi
+
+# Grab the total mem.
+total_mem=$(free -m -w | grep Mem | awk '{print $2}')
+
+# BF3 is 32G of RAM.  BF2 is 16G
+# We're not sure if we need/want this fix for BF2 yet,
+# so only set it if the total mem signals BF3.
+if [ "${total_mem}" -gt "30000" ]; then
+
+	# We know what we need for 2.8 and 2.9, but 64 for everyone else.
+	target_pipesize=64
+
+	if grep 'doca2\.9\.' /opt/forge/doca_container_configs/configs/doca_hbn.yaml &>/dev/null;then
+		target_pipesize=32768
+	elif grep 'doca2\.8\.' /opt/forge/doca_container_configs/configs/doca_hbn.yaml &>/dev/null;then
+		target_pipesize=1024
+	fi
+
+	pipesize=$(ovs-vsctl get Open_vSwitch . other_config:ctl-pipe-size | sed 's/"//g')
+	if [ "${pipesize}" != "${target_pipesize}" ]
+	then
+		echo "Setting ctl-pipe-size to ${target_pipesize}"
+
+		# Restarting ovs-vswitchd triggers a restart of the sfc service which runs /opt/mellanox/sfc/sfc.sh and resets
+		# the value to what it was.  We need to update the sfc.sh
+		# So, this isn't actually enough, but who knows what the future holds, so let's do it anyway in
+		# the spirit of things.
+		ovs-vsctl set Open_vSwitch . other_config:ctl-pipe-size=${target_pipesize}
+
+		# This is what we actually need to so the change takes effect _and_ persists.
+		sed -i 's/\(ovs_ctl_pipe_size}" != "X\)[0-9]*/\1'${target_pipesize}'/g' /opt/mellanox/sfc/sfc.sh
+		sed -i "s/ctl-pipe-size=[0-9]*/ctl-pipe-size=${target_pipesize}/g;s/ctl-pipe-size to [0-9]*/ctl-pipe-size to ${target_pipesize}/g" /opt/mellanox/sfc/sfc.sh
+
+		echo "Restarting OVS"
+		/usr/sbin/service ovs-vswitchd restart
+
+		# Verify that it actually worked.
+		pipesize=$(ovs-vsctl get Open_vSwitch . other_config:ctl-pipe-size | sed 's/"//g')
+		if [ "${pipesize}" != "${target_pipesize}" ]; then
+			echo "$0 failed to set ctl-pipe-size"
+			exit 1
+		fi
+
+	else
+		echo "Pipe size already set to ${target_pipesize}"
+	fi
+fi
+
+if ! /usr/bin/systemctl is-enabled update-ovs-pipe-size.service &>/dev/null; then
+	/usr/bin/systemctl --now enable update-ovs-pipe-size.service
+fi

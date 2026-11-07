@@ -1,0 +1,101 @@
+{{- if .Values.vault.tls.create }}
+## =============================================================================
+## Vault TLS bootstrap — breaks the chicken-and-egg problem
+##
+## vault-nico-issuer uses Vault as its PKI backend, so it can't issue Vault's
+## own TLS certs. Instead we use site-issuer (backed by the self-signed
+## site-root CA) to issue the two secrets Vault needs before it can start:
+##
+##   nicoca-vault-client  — Vault port 8200 listener cert
+##   vault-raft-tls        — Vault Raft port 8201 peer cert
+##
+## Hook weights:
+##   -10  selfsigned-bootstrap ClusterIssuer (existing template)
+##    -9  site-root Certificate              (existing template)
+##    -5  site-issuer ClusterIssuer          (this file)
+##    -4  nicoca-vault-client Certificate   (this file)
+##    -4  vault-raft-tls Certificate         (this file)
+##     0  (default) everything else
+##    10  vault-pki-config Job
+##    15  vault-nico-issuer ClusterIssuer
+## =============================================================================
+
+---
+## site-issuer — ClusterIssuer backed by the self-signed site-root CA.
+## Issues Vault TLS certs without depending on Vault being up.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: site-issuer
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  ca:
+    secretName: site-root
+
+---
+## nicoca-vault-client — TLS cert for the Vault port 8200 listener.
+## Mounted at /vault/userconfig/nicoca-vault/ inside Vault pods.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: nicoca-vault-client
+  namespace: {{ .Values.vaultNamespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-4"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  secretName: nicoca-vault-client
+  duration: 720h0m0s
+  renewBefore: 360h0m0s
+  privateKey:
+    algorithm: ECDSA
+    size: 384
+  dnsNames:
+    - vault
+    - vault.{{ .Values.vaultNamespace }}
+    - vault.{{ .Values.vaultNamespace }}.svc
+    - vault.{{ .Values.vaultNamespace }}.svc.cluster.local
+    - vault-0.vault-internal
+    - vault-1.vault-internal
+    - vault-2.vault-internal
+  {{- if .Values.vaultServiceIP }}
+  ipAddresses:
+    - {{ .Values.vaultServiceIP }}
+  {{- end }}
+  issuerRef:
+    name: site-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+
+---
+## vault-raft-tls — TLS cert for Raft peer-to-peer replication (port 8201).
+## Mounted at /vault/userconfig/vault-raft-tls/ inside Vault pods.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: vault-raft-tls
+  namespace: {{ .Values.vaultNamespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-4"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  secretName: vault-raft-tls
+  duration: 720h0m0s
+  renewBefore: 360h0m0s
+  privateKey:
+    algorithm: ECDSA
+    size: 384
+  dnsNames:
+    - vault-0.vault-internal
+    - vault-1.vault-internal
+    - vault-2.vault-internal
+  issuerRef:
+    name: site-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+{{- end }}

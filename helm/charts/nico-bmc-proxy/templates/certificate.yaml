@@ -1,0 +1,9 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "nico-bmc-proxy.name" . }}-certificate
+  namespace: {{ include "nico-bmc-proxy.namespace" . }}
+  labels:
+    {{- include "nico-bmc-proxy.labels" . | nindent 4 }}
+spec:
+  {{- include "nico-bmc-proxy.certificateSpec" (dict "name" (printf "%s-certificate" (include "nico-bmc-proxy.name" .)) "svcName" (include "nico-bmc-proxy.name" .) "cert" .Values.certificate "global" .Values.global "namespace" (include "nico-bmc-proxy.namespace" .)) | nindent 2 }}

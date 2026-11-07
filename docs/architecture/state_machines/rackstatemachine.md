@@ -1,0 +1,518 @@
+# Rack State Machine interaction with Machine, Switch, and Power Shelf
+
+This document defines the combined state machines for **Machine** (each compute tray / managed host lifecycle), **Switch** (each NVLink switch), **Power Shelf** (each power shelf), and **Rack** (collection of machines, switches, and power shelves). The diagram below shows all four and the transitions between the Rack state machine and the child device state machines.
+
+For switch-only and power-shelf-only diagrams, see [Switch State Diagram](switch.md) and [Power Shelf State Diagram](power_shelf.md). For on-demand rack maintenance API details, see [On-Demand Rack Maintenance](rack.md).
+
+## Combined State Diagram (Machine, Switch, Power Shelf, Rack)
+
+```mermaid
+stateDiagram-v2
+    state "Machine (each compute tray)" as Machine {
+        [*] --> M_Created : site-op inserts expected machine and site explorer explores
+        M_Created --> M_Ready : via intermediate ingestion states
+        M_Ready --> M_Assigned : instance requested
+        M_Assigned --> M_Ready : via instance creation / release
+        M_Ready --> M_HostReprovision : reprovision (non-NVL node only)
+        state M_HostReprovision {
+            [*] --> M_HostReprovision_CheckingFirmware
+            state "CheckingFirmware" as M_HostReprovision_CheckingFirmware
+            state "FailedFirmwareUpgrade" as M_HostReprovision_FailedFirmwareUpgrade
+            M_HostReprovision_CheckingFirmware --> M_HostReprovision_FailedFirmwareUpgrade : firmware upgrade failed
+            M_HostReprovision_FailedFirmwareUpgrade --> M_HostReprovision_CheckingFirmware : auto-retry or fresh Host Reprovision request
+        }
+        M_HostReprovision --> M_Ready : Done
+        M_Assigned --> M_Failed : Failure
+        M_Failed --> M_ForceDeletion : Admin
+        M_ForceDeletion --> [*]
+    }
+
+    state "Switch (each NVLink switch)" as Switch {
+        [*] --> S_Created
+        S_Created --> S_Initializing
+        S_Initializing --> S_Configuring : NVOS interfaces associated
+        state S_Configuring {
+            [*] --> S_Configuring_ConfigureCertificate
+            S_Configuring_ConfigureCertificate --> S_Configuring_RotateOsPassword
+            state "RotateOsPassword" as S_Configuring_RotateOsPassword
+        }
+        S_Configuring_RotateOsPassword --> S_FetchInfo
+        S_FetchInfo --> S_Validating
+        S_Validating --> S_BomValidating
+        S_BomValidating --> S_Ready
+        S_Ready --> S_Maintenance : operator maintenance requested
+        S_Ready --> S_ReProvisioning : rack reprovision requested
+        S_Maintenance --> S_Ready : operation complete
+        state S_ReProvisioning {
+            [*] --> S_ReProvisioning_Firmware
+            S_ReProvisioning_Firmware --> S_ReProvisioning_NVOS
+            S_ReProvisioning_NVOS --> S_ReProvisioning_NMXC
+            state "WaitingForRackFirmwareUpgrade" as S_ReProvisioning_Firmware
+            state "WaitingForNVOSUpgrade" as S_ReProvisioning_NVOS
+            state "WaitingForNMXCConfigure" as S_ReProvisioning_NMXC
+        }
+        S_ReProvisioning --> S_Ready : rack cycle complete
+        S_ReProvisioning --> S_Error : upgrade or fabric failure
+        S_Ready --> S_Deleting : marked for deletion
+        S_Error --> S_Deleting : marked for deletion
+        S_Deleting --> [*]
+    }
+
+    state "Power Shelf (each shelf)" as PowerShelf {
+        [*] --> PS_Initializing
+        PS_Initializing --> PS_FetchingData
+        PS_FetchingData --> PS_Configuring
+        PS_Configuring --> PS_Ready
+        PS_Ready --> PS_Maintenance : operator maintenance requested
+        PS_Maintenance --> PS_Ready : operation complete
+        PS_Ready --> PS_Deleting : marked for deletion
+        PS_Deleting --> [*]
+    }
+
+    state "Rack (collection of machines, switches, power shelves)" as Rack {
+        [*] --> R_Created
+        R_Created --> R_Discovering : profile switch count discovered
+        R_Discovering --> R_Maintenance : profile switch count ready
+        state R_Maintenance {
+            [*] --> R_Maintenance_FirmwareUpgrade
+            R_Maintenance_FirmwareUpgrade --> R_Maintenance_NVOSUpdate : normal maintenance
+            R_Maintenance_FirmwareUpgrade --> R_Maintenance_Completed : supplemental ingestion firmware complete
+            R_Maintenance_NVOSUpdate --> R_Maintenance_ConfigureNmxCluster : no reboot required, NMX selected
+            R_Maintenance_NVOSUpdate --> R_Maintenance_Completed : no reboot required, NMX not selected
+            R_Maintenance_NVOSUpdate --> R_Maintenance_PowerSequence : ingestion update succeeded or explicit power activity
+            R_Maintenance_PowerSequence --> R_Maintenance_ConfigureNmxCluster : reboot barrier passed, NMX selected
+            R_Maintenance_PowerSequence --> R_Maintenance_Completed : reboot barrier passed, NMX not selected
+            R_Maintenance_ConfigureNmxCluster --> R_Maintenance_Completed
+            R_Maintenance_Completed --> R_Maintenance_FirmwareUpgrade : ingestion has unsubmitted non-Assigned compute or pending firmware
+            state "FirmwareUpgrade" as R_Maintenance_FirmwareUpgrade
+            state "NVOSUpdate" as R_Maintenance_NVOSUpdate
+            state "ConfigureNmxCluster" as R_Maintenance_ConfigureNmxCluster
+            state "PowerSequence" as R_Maintenance_PowerSequence
+            state "Completed" as R_Maintenance_Completed
+        }
+        R_Maintenance_Completed --> R_Validating
+        state R_Validating {
+            [*] --> R_Validating_Pending
+            R_Validating_Pending --> R_Validating_InProgress
+            R_Validating_InProgress --> R_Validating_Validated
+            state "Pending" as R_Validating_Pending
+            state "InProgress / Partial / FailedPartial" as R_Validating_InProgress
+            state "Validated" as R_Validating_Validated
+        }
+        R_Validating_Validated --> R_Ready : all child devices ready
+        R_Ready --> R_Maintenance : reprovision or on-demand maintenance requested
+        R_Ready --> R_Discovering : topology changed
+        R_Ready --> R_Error : child device failure detected
+        R_Maintenance --> R_Error : timeout or failure
+        R_Validating --> R_Error : validation failure
+        R_Error --> R_Ready : component failure and all child devices healthy
+        R_Error --> R_Maintenance : on-demand maintenance requested
+        R_Ready --> R_Deleting : marked for deletion
+        R_Deleting --> [*] : final delete
+    }
+
+    R_Created --> M_Created : check for newly-created machines
+    R_Created --> S_Created : check for newly-created switches
+    R_Discovering --> S_Ready : wait for profile switch count ready
+    R_Maintenance --> S_ReProvisioning : request switch reprovision
+    R_Maintenance --> M_HostReprovision : request compute reprovision
+    R_Ready --> M_Created : tray replaced (topology change)
+```
+
+---
+
+## Rack State Machine Flow
+
+The **Rack** state machine represents a collection of machines, switches, and power shelves. The rack lifecycle runs in coordination with child device state machines: the rack tracks when its children are created and ready, drives maintenance (firmware upgrade, NVOS update, NMX cluster configuration, optional power sequencing), validates the rack via RVS, and reaches `Ready` when validation completes and all trays are healthy.
+
+### High-Level Rack Diagram
+
+```mermaid
+stateDiagram-v2
+    state "Created" as Created
+    state "Discovering" as Discovering
+    state "Maintenance" as Maintenance
+    state "Validating" as Validating
+    state "Ready" as Ready
+    state "Error" as Error
+    state "Deleting" as Deleting
+
+    [*] --> Created : rack created when first child references rack_id
+
+    Created --> Discovering : profile switch count discovered
+    Discovering --> Maintenance : profile switch count ready
+
+    Maintenance --> Validating : maintenance complete
+    Maintenance --> Error : timeout or failure
+
+    Validating --> Ready : RVS validation complete and all children ready
+    Validating --> Error : validation failure
+
+    Ready --> Maintenance : reprovision_requested or maintenance_requested
+    Ready --> Discovering : topology_changed
+    Ready --> Error : child device in error/failed state
+
+    Error --> Ready : component failure and all child devices healthy
+    Error --> Maintenance : maintenance_requested
+
+    Ready --> Deleting : marked for deletion
+    Deleting --> [*] : final deletion
+```
+
+### Rack State Definitions
+
+#### Created (R_Created)
+
+- **Entry:** Site operator enters the expected rack; Site Explorer creates the rack entity when a machine, switch, or power shelf with the same `rack_id` is discovered.
+- **Exit:** When the number of discovered switches reaches the rack profile switch count, the rack moves to **Discovering**. A missing or unknown rack profile keeps the rack in `Created`.
+
+#### Discovering (R_Discovering)
+
+- **Entry:** From `Created` when discovery starts. Also re-entered from `Ready` when `topology_changed` is set (tray replacement).
+- **Exit:** When the number of switches in `SwitchControllerState::Ready` reaches the rack profile switch count, the rack atomically sets `ingestion_in_progress` and transitions to **Maintenance** at `FirmwareUpgrade(Start)`. A missing or unknown rack profile keeps the rack in `Discovering`.
+
+Compute and power shelf counts and readiness do not gate either ingestion transition. Their profile counts describe expected inventory for `MissingRackComponent` health alerts. The Helm chart defaults expect 16 compute trays and 9 switches in every profile. The default power shelf count is 8 for GB200, 6 for GB300, and 4 for VR profiles. `_NO_POWERSHELF` profiles expect zero power shelves. Site configuration can override these defaults. The switch count is a minimum threshold: zero allows progression without switches, and extra switches do not prevent either transition.
+
+#### Maintenance (R_Maintenance)
+
+- **Entry:** From `Discovering` after the profile switch readiness threshold is met, from `Ready` when `reprovision_requested` or `maintenance_requested` is set, or from `Error` when on-demand maintenance is requested.
+- **Exit:**
+  - To **Validating** (`Pending`) when maintenance reaches `Completed`.
+  - To **Error** on timeout or unrecoverable failure.
+
+**Sub-state flow** (activities may be skipped based on `MaintenanceScope.activities`):
+
+```text
+FirmwareUpgrade(Start -> WaitForComplete)
+  -> NVOSUpdate(Start -> WaitForComplete)
+  -> PowerSequence(PowerReset) (when required)
+  -> ConfigureNmxCluster(Start -> WaitForSwitchCertificateJob
+                               -> WaitForScaleUpFabricManagerJob
+                               -> WaitForPrimarySwitchCertificateJob (optional telemetry))
+  -> Completed
+  -> Validating(Pending)
+```
+
+During automatic maintenance, a missing rack-profile `firmware_object` skips
+both update phases. If a switch in the maintenance scope is already in
+`ReProvisioning::WaitingForNVOSUpgrade`, the rack transitions to `Error` instead
+of skipping the NVOS phase.
+
+The first automatic firmware batch includes only ready compute hosts without
+reprovision or machine-maintenance requests, ready switches without reprovision
+requests, and ready power shelves without reprovision requests. Unready compute
+is left for supplemental admission. If no compute or switch is ready, NICo keeps
+an empty current-cycle job without submitting an empty RMS request.
+
+While automatic ingestion has a persisted firmware job, `WaitForComplete`
+compares current compute membership with that job's device handles. A newly
+arrived host stays pending until it is `Ready` and has no reprovision or machine
+maintenance request. NICo then submits the rack profile's configured firmware
+object for that host and appends its child job handle to the persisted rack job.
+Existing devices are not resubmitted, and a controller restart resumes polling
+all persisted handles. A host that has not joined this job stays pending even
+if its machine state is `Failed`; that unrelated failure does not fail the
+rack firmware job. An unsubmitted host already in `Assigned` is excluded from
+supplemental firmware and does not block ingestion. Its firmware requires a
+separate maintenance operation when the host is eligible.
+
+Switch and power shelf firmware progress includes only devices admitted to the
+current job. Unsubmitted devices do not fail or delay this firmware phase merely
+because their own provisioning is waiting or failed. Shelf membership is persisted
+separately from RMS handles because RMS may omit shelf jobs; the existing
+controller-completion fallback applies only to those admitted shelves.
+
+A ready host with desired power `Off` blocks submission with a retryable handler
+error; its desired power is not changed. Results polled for existing devices
+are committed before supplemental admission. Inventory, credential, or dispatch
+errors for a late host therefore do not prevent existing devices from observing
+their completed firmware results. Other unsubmitted hosts remain pending until
+ready and free of conflicting requests; this waiting has no overall deadline.
+
+`Completed` repeats this membership check before clearing `ingestion_in_progress`
+and validation labels. Unsubmitted hosts outside `Assigned`, or a pending firmware job, return the
+rack to `FirmwareUpgrade(WaitForComplete)`, including after a restart between
+persisting a new batch and transitioning the rack. The firmware job persists
+`return_to_completed = true` with the supplemental batch, or with the transition
+to firmware waiting when hosts are not ready. After that job completes, the rack returns directly to
+`Completed` and repeats the membership check. It does not repeat switch NVOS
+updates, rack-wide compute reboots, or NMX configuration. Predecessor jobs
+without the marker default to `false` and retain the normal firmware continuation.
+Explicit maintenance retains its selected device scope. Entering a new ingestion cycle
+clears the previous cycle's firmware job in the same transaction as the state transition.
+If the new cycle skips firmware because its profile has no firmware object, no old job
+can trigger supplemental admission at `Completed`. Hosts arriving after ingestion ends
+are outside this check.
+
+When a firmware job exists, automatic ingestion selects restart targets from its
+admitted compute hosts, excluding `Assigned` hosts and desired power `Off`.
+It waits for selected targets to accept maintenance. Without a firmware job,
+only ready, unclaimed hosts whose desired power is not `Off` are selected. It saves that batch in `restart_machine_ids` and waits for
+those targets, including across restarts. New arrivals do not enlarge an active
+batch or restart previously completed targets. Saved targets that have been deleted
+or are no longer associated with the rack no longer block the batch; remaining targets
+must still complete their restarts. Explicit power maintenance retains its existing
+desired-off rejection and membership handling.
+
+Discovery persists `ingestion_in_progress` when entering maintenance. Only an
+actual successful NVOS update in that ingestion cycle automatically reboots
+compute hosts; skipping the update does not. On-demand maintenance requires an
+explicit `PowerSequence` activity, including when other activities default to
+all. Reprovision does not enable the ingestion flag. Predecessor rows without
+the flag do not gain an automatic reboot.
+
+When an NVOS update triggers a reboot, its completion commits the transition to
+`PowerReset` before any reboot request is queued. `PowerReset` then atomically
+queues asynchronous graceful `Reboot` requests for the selected batch. Saved
+target IDs let the batch resume after a controller restart. Explicit power
+maintenance targets every compute host in the rack regardless of device scope.
+It waits without queuing requests while any target has an instance, pending
+maintenance, or a state that cannot accept maintenance.
+
+For explicit power maintenance, any compute host with desired power `Off`
+causes rack maintenance to enter `Error` without queuing reboots or changing
+desired power. After correcting desired power, an operator must request
+maintenance again. Automatic ingestion instead excludes desired-off targets.
+
+The batch completes when every request is cleared and every host has a Scout
+reboot timestamp later than the persisted batch-state timestamp. Hosts do not
+need to reach `Ready`, and the timestamp does not prove that this request caused
+the reboot. The batch has no timeout; a host that never becomes eligible or never
+reports a newer reboot can leave maintenance waiting indefinitely
+([timeout follow-up](https://github.com/dsx-ai-factory/infra-controller/issues/8461)).
+An operator can terminate maintenance, which cancels only saved, rack-owned
+restart requests that no host has claimed. For explicit power maintenance,
+membership changes start a fresh batch. Automatic ingestion retains its saved
+batch and waits only for saved targets still associated with the rack. Deleted or
+detached targets do not block completion. Conflicting maintenance requests move the
+rack to `Error`. After the batch
+completes, maintenance runs NMX-C configuration if selected, or completes. A
+persisted `PoweringOn` state remains a no-op that completes maintenance without
+another reboot.
+
+Graceful reboots do not fall back to forced restarts. Both direct Redfish and
+RMS compute backends receive `GracefulRestart`. Saved legacy `Reset` requests
+retain forced-restart behavior and can still complete
+or be cancelled by the rack. All controllers reading machine maintenance must
+support the `Reboot` operation before a rack queues it.
+
+The RMS power-control adapter preserves `GracefulRestart` and `ForceRestart` as
+distinct operations and rejects `AcPowercycle` for compute trays, switches, and
+power shelves. Queued compute and switch resets preserve graceful intent through
+the `graceful` flag; both state controllers reject `AcPowercycle`. The power-shelf
+state controller supports only power on/off. See the
+[RMS power-control mapping](../backends/rms.md#rms-apis-nico-calls).
+
+| Sub-state | Description |
+|-----------|-------------|
+| **FirmwareUpgrade** | Rack-level RMS firmware upgrade for scoped machines, switches, and power shelves. Sets per-device `firmware_upgrade_status` and drives switch `ReProvisioning::WaitingForRackFirmwareUpgrade` / machine `HostReprovision`. |
+| **NVOSUpdate** | NVOS image update and NVOS admin password recovery for scoped switches. Sets `nvos_update_status` and drives switch `ReProvisioning::WaitingForNVOSUpgrade`. |
+| **ConfigureNmxCluster** | Rotates switch-local certificates on every rack switch, submits the asynchronous RMS ScaleUpFabricManager job, then optionally binds nmx-telemetry on the selected primary. RMS V2 binds NMX-C. See sub-states below. |
+| **PowerSequence** | Graceful compute-host reboot barrier before NMX-C configuration, under the ingestion or explicit-selection policy above. |
+| **Completed** | Rechecks compute admission for an automatic ingestion firmware job; returns to firmware waiting while non-`Assigned` hosts are unsubmitted or the job is pending, otherwise clears ingestion state and validation labels and advances to validation. |
+
+#### ConfigureNmxCluster sub-states
+
+```mermaid
+stateDiagram-v2
+    [*] --> Start
+    Start --> Start : retryable inventory error
+    Start --> WaitForSwitchCertificateJob : certificate batch accepted, persist job_id
+    Start --> NextActivity : no switches requested or discovered
+    Start --> Error : invalid profile, endpoint, backend, or certificate submission
+    WaitForSwitchCertificateJob --> WaitForSwitchCertificateJob : running, poll error, or restart
+    WaitForSwitchCertificateJob --> WaitForScaleUpFabricManagerJob : certificate complete and V2 accepted, persist job_id
+    WaitForSwitchCertificateJob --> NextActivity : V2 has no switches requested or discovered
+    WaitForSwitchCertificateJob --> Error : certificate failed, job missing, or V2 validation failed
+    WaitForScaleUpFabricManagerJob --> WaitForScaleUpFabricManagerJob : pending, poll or verification retry, restart, or V2 resubmission
+    WaitForScaleUpFabricManagerJob --> NextActivity : V2 complete, primary persisted, telemetry not selected
+    WaitForScaleUpFabricManagerJob --> WaitForPrimarySwitchCertificateJob : V2 complete, primary persisted, telemetry batch accepted
+    WaitForScaleUpFabricManagerJob --> WaitForScaleUpFabricManagerJob : telemetry request rejected before dispatch
+    WaitForScaleUpFabricManagerJob --> Error : V2 failed or returned invalid state, Component Manager is absent, polling is unsupported, or terminal verification failed
+    WaitForScaleUpFabricManagerJob --> Error : telemetry submission outcome is ambiguous or failed after dispatch
+    WaitForPrimarySwitchCertificateJob --> WaitForPrimarySwitchCertificateJob : running, poll error, or restart
+    WaitForPrimarySwitchCertificateJob --> NextActivity : primary certificate job complete
+    WaitForPrimarySwitchCertificateJob --> Error : certificate failed or job missing
+```
+
+`Start` submits one `ConfigureSwitchCertificate` request containing every rack
+switch. The request always binds `nvue_api` and also binds the explicitly configured gNMI
+telemetry interface. After that job completes, the rack submits the unchanged
+RMS ScaleUpFabricManager V2 request. RMS selects the primary and reconciles the
+fabric and binds NMX-C to the current NVUE material. NICo persists the observed
+primary. When `scale_up_fabric_telemetry` is in the effective service list, NICo
+submits a certificate request for that primary. Each submitted parent
+RMS job ID is persisted while NICo polls the corresponding operation.
+The RMS V2 deployment must rebind NMX-C on every run, including when its
+existing Hello check succeeds; otherwise a rotation can leave NMX-C on the old
+certificate.
+
+| Current sub-state | Condition | Result |
+|-------------------|-----------|--------|
+| `Start` | Partial scope contains no switch IDs, or the rack inventory contains no switches | Skip to the next requested maintenance activity before validating fabric prerequisites. |
+| `Start` | Rack profile is missing, unknown, or lacks `rack_hardware_topology` | Transition to `Error` before submitting a certificate batch. |
+| `Start` | Component Manager is absent, endpoint data or NVOS credentials are invalid, or RMS does not support the request | Transition to `Error` before dispatch. |
+| `Start` | Inventory loading fails, or certificate preparation returns `RejectedBeforeDispatch` | Retain `Start` and retry on the next iteration because RMS did not receive the request. Database-backed RMS node lookup failures use this path. |
+| `Start` | Certificate submission returns `OperationOutcomeUnknown` or any other post-dispatch error | Transition to `Error` without automatically resubmitting because RMS may have accepted all or part of the batch. A failed aggregate parent job covers only accepted targets and cannot prove the complete rack was updated. Any returned RMS job ID is retained in the error for operator reconciliation. |
+| `Start` | RMS accepts the certificate batch | Persist its parent job ID in `WaitForSwitchCertificateJob`. |
+| `WaitForSwitchCertificateJob` | Component Manager is absent, polling fails, or the job is `Started` or `InProgress` | Retain the same parent job ID and poll again. A controller restart resumes from this persisted state. |
+| `WaitForSwitchCertificateJob` | RMS cannot find the persisted job | Transition to `Error` with the job ID in the cause. Do not resubmit the non-idempotent certificate batch. |
+| `WaitForSwitchCertificateJob` | Certificate job is `Failed` | Transition to `Error`. |
+| `WaitForSwitchCertificateJob` | Certificate job is `Completed` | Submit RMS V2. Retryable inventory or submission errors retain the certificate wait state; skip and terminal conditions match the `Start` outcomes above. A successful submission persists `WaitForScaleUpFabricManagerJob`. |
+| `WaitForScaleUpFabricManagerJob` | Job is pending, polling or observed-status verification fails, or a restart occurs | Retain the V2 job ID and retry. If RMS no longer has the job, resubmit the idempotent V2 desired state. |
+| `WaitForScaleUpFabricManagerJob` | Job fails, has an invalid state, or a terminal validation error occurs | Transition to `Error`. |
+| `WaitForScaleUpFabricManagerJob` | Job completes and the RMS-selected primary and Fabric Manager status are persisted | Continue to the next activity if nmx-telemetry is absent from the effective service list. Otherwise submit its primary-only certificate batch. A rejection proven to occur before dispatch retains the V2 wait state for retry. An ambiguous or post-dispatch submission error transitions to `Error`. A successful submission persists `WaitForPrimarySwitchCertificateJob`. |
+| `WaitForPrimarySwitchCertificateJob` | Component Manager is absent, polling fails, or the job is `Started` or `InProgress` | Retain the same parent job ID and poll again. |
+| `WaitForPrimarySwitchCertificateJob` | RMS cannot find the job, or the job is `Failed` | Transition to `Error` without resubmitting the certificate operation. |
+| `WaitForPrimarySwitchCertificateJob` | Job is `Completed` | Continue to the next requested maintenance activity. |
+
+#### Validating (R_Validating)
+
+- **Entry:** From `Maintenance(Completed)`.
+- **Exit:**
+  - To **Ready** when validation reaches `Validated` and all child devices are ready.
+  - To **Error** on terminal validation failure.
+
+**Sub-states:** `Pending` → `InProgress` → `Partial` / `FailedPartial` → `Validated` or `Failed`. RVS drives transitions by writing `rv.run-id` and partition result labels on rack machines.
+
+#### Ready (R_Ready)
+
+- **Entry:** From `Validating` when validation completes and every tray is healthy.
+- **Exit:**
+  - To **Maintenance** when `reprovision_requested` or `maintenance_requested` is set.
+  - To **Discovering** when `topology_changed` is set (tray replacement).
+  - To **Error** when any child switch, power shelf, or machine enters a terminal failure state.
+
+The rack is fully operational. While ready, it monitors child health and accepts reprovisioning or on-demand maintenance requests.
+
+#### Error (R_Error)
+
+- **Entry:** From `Maintenance`, `Validating`, or `Ready` on failure.
+- **Exit:**
+  - To **Ready** when a component-origin error is marked for automatic recovery and all child devices are healthy again.
+  - To **Maintenance** when on-demand maintenance is requested from error state.
+
+Maintenance-origin errors remain in **Error** until a new maintenance request is submitted. Errors without recovery metadata retain automatic component-readiness recovery.
+
+#### Deleting (R_Deleting)
+
+- **Entry:** When the rack is marked `deleted`.
+- **Exit:** Terminal delete.
+
+---
+
+## Switch Interaction with Rack
+
+The Rack state machine drives or observes the Switch state machine as follows:
+
+| Rack state | Effect on Switch |
+|------------|------------------|
+| R_Discovering | Rack waits until the ready switch count reaches the profile minimum before moving to `Maintenance`. |
+| R_Maintenance (`FirmwareUpgrade`) | Rack sets `switch_reprovisioning_requested` and `firmware_upgrade_status`; switches enter `ReProvisioning::WaitingForRackFirmwareUpgrade`. |
+| R_Maintenance (`NVOSUpdate`) | Rack sets `nvos_update_status`; switches advance to `ReProvisioning::WaitingForNVOSUpgrade`. |
+| R_Maintenance (`ConfigureNmxCluster`) | Rack rotates every switch's NVUE certificate, submits the RMS ScaleUpFabricManager job, and persists the RMS-selected primary and `fabric_manager_status`; switches advance to `ReProvisioning::WaitingForNMXCConfigure`. |
+| R_Maintenance (any) | If the rack enters `Error`, rack-initiated switch reprovisioning is aborted and switches return to `Ready`. |
+| R_Ready | Rack monitors for switches in `Error`; any failed switch can move the rack to `Error`. |
+
+These cross-state dependencies are shown in the [Combined State Diagram](#combined-state-diagram-machine-switch-power-shelf-rack).
+
+### Switch State Machine Flow (summary)
+
+The **Switch** state machine runs on each switch. The lifecycle runs from creation through initialization, certificate configuration, password rotation, slot/tray fetch, validation, BOM validation, and `Ready`. From `Ready` a switch can enter operator `Maintenance`, rack-driven `ReProvisioning`, `Deleting`, or `Error`.
+
+Bring-up flow:
+
+```text
+Created -> Initializing -> Configuring -> FetchInfo -> Validating -> BomValidating -> Ready
+```
+
+Rack reprovisioning flow (when `continue_after_firmware_upgrade` is true):
+
+```text
+Ready -> ReProvisioning(WaitingForRackFirmwareUpgrade
+                      -> WaitingForNVOSUpgrade
+                      -> WaitingForNMXCConfigure) -> Ready
+```
+
+See [Switch State Diagram](switch.md) for the full switch FSM.
+
+---
+
+## Machine Interaction with Rack
+
+The Rack state machine drives or observes the Machine (compute) state machine as follows:
+
+| Rack state | Effect on Machine |
+|------------|-------------------|
+| R_Created | Rack checks for newly-created compute machines (`ManagedHostState` ingestion states) that belong to this rack. |
+| R_Discovering | Compute count and readiness do not gate ingestion; missing compute trays remain visible in rack health. |
+| R_Maintenance | Rack requests compute machine reprovision (`HostReprovision`); tracks when machines return to `Ready`. If a machine is stuck in `HostReprovision::FailedFirmwareUpgrade`, the Rack (or operator) may issue a fresh Host Reprovision request to restart the firmware upgrade flow without waiting for the auto-retry interval. |
+| R_Ready | If a tray is replaced, a new machine is created and the rack re-enters `Discovering`. |
+
+These cross-state dependencies are shown in the [Combined State Diagram](#combined-state-diagram-machine-switch-power-shelf-rack).
+
+---
+
+## Power Shelf Interaction with Rack
+
+| Rack state | Effect on Power Shelf |
+|------------|-----------------------|
+| R_Discovering | Power shelf count and readiness do not gate ingestion; missing power shelves remain visible in rack health. |
+| R_Maintenance | Scoped power shelves participate in firmware upgrade, and the rack waits for their firmware outcome. Power shelves do not participate in the compute-host reboot batch. |
+| R_Ready | Rack monitors for power shelves in `Error`; any failed shelf can move the rack to `Error`. |
+
+See [Power Shelf State Diagram](power_shelf.md) for the power-shelf FSM.
+
+---
+
+### Recovering from M_HostReprovision::FailedFirmwareUpgrade
+
+A compute machine that fails its host firmware upgrade lands in the
+`M_HostReprovision::FailedFirmwareUpgrade` substate. There are two ways out:
+
+1. **Automatic retry.** While `retry_count < MAX_FIRMWARE_UPGRADE_RETRIES` and the
+   configured `host_firmware_upgrade_retry_interval` has elapsed since the
+   failure, the machine state handler automatically transitions back to
+   `CheckingFirmwareV2` and re-attempts the upgrade.
+2. **Fresh Host Reprovision request.** The Rack state machine (or an operator
+   via `trigger_host_reprovisioning`) can issue a brand-new Host Reprovision
+   request at any time. The new request overwrites
+   `host_reprovisioning_requested` with `started_at = None`; the FailedFirmwareUpgrade
+   handler detects this fresh request and restarts the upgrade flow from
+   `CheckingFirmwareV2` with `retry_count` reset to `0`, mirroring the way
+   `ManagedHostState::Ready` kicks off a Host Reprovision (including the
+   `host-fw-update` health-report alert merge). Rack-level requests (initiator
+   prefixed with `rack-`) instead enter `WaitingForRackFirmwareUpgrade`.
+
+A fresh request allows the rack to retry an admitted compute host's failed
+firmware operation without waiting for retry backoff. Automatic ingestion tracks
+admitted firmware work separately from unrelated device failures; it does not
+require the full expected inventory to reach `M_Ready` before validation.
+
+### Tray Replacement (External Event)
+
+When a tray (compute machine) in a rack is physically replaced, the rack topology changes. This is an external event that triggers the following state machine transitions:
+
+1. **Old machine:** The replaced machine is removed from the rack. Its Machine state machine terminates (deletion path).
+2. **New machine:** Site Explorer detects the new tray and creates a new machine entity in **M_Created**. The new machine progresses through its ingestion states toward **M_Ready**.
+3. **Rack:** The rack detects the topology change (`topology_changed`) and transitions from **R_Ready** → **R_Discovering**. In R_Discovering the rack waits until the ready switch count reaches the profile minimum, then proceeds through **R_Maintenance** → **R_Validation** → **R_Ready** as in the normal flow.
+
+Compute discovery proceeds independently of the switch threshold; the rack follows its normal maintenance and validation flow.
+
+### How the data is organized
+
+A **rack** is the top-level entity. Every **machine** (compute tray), every **switch**, and every **power shelf** belongs to exactly one rack.
+
+- Each rack has a unique identifier (the rack ID).
+- Each child device stores the rack ID of the rack it belongs to.
+- Each switch has `switch_reprovisioning_requested` and per-cycle status fields (`firmware_upgrade_status`, `nvos_update_status`, `fabric_manager_status`) that the rack state machine sets during maintenance.
+
+When a site operator enters an expected rack (with a rack ID and rack type), Site Explorer creates the rack entity as soon as it discovers machines, switches, or power shelves that share the same rack ID. From that point the rack tracks its children through their respective state machines until the entire rack reaches a ready state.
+
+## Implementation
+
+- **Rack state type**: `RackState` in `crates/api-model/src/rack.rs`.
+- **Rack handlers**: `crates/rack-controller/src/`.
+- **Switch state type**: `SwitchControllerState` in `crates/api-model/src/switch/mod.rs`.
+- **Switch handlers**: `crates/switch-controller/src/`.
+- **On-demand maintenance API**: [On-Demand Rack Maintenance](rack.md).

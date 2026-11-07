@@ -1,0 +1,97 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+# If you change this you need to build and publish it. That does not happen automatically.
+# None of your changes will be used until you publish.
+#
+# - Make sure you are authed with urm.nvidia.com (check your
+# `~/.docker/config.json`)
+# - `git describe` to get the tag
+# - `cd dev/docker`
+# - `docker build -t urm.nvidia.com/swngc-ngcc-docker-local/forge/carbide/x86-64/build-container:{OUTPUT_OF_GIT_DESCRIBE_HERE} -f Dockerfile.build-container .`
+# - `docker push urm.nvidia.com/swngc-ngcc-docker-local/forge/carbide/x86-64/build-container:{OUTPUT_OF_GIT_DESCRIBE_HERE}`
+
+# This should match rust-toolchain.toml
+FROM rust:1.97.1-slim-bullseye
+
+# Set in gitlab-templates/scripts/build-push-container-image.sh
+ARG CI_COMMIT_SHORT_SHA
+ENV CI_COMMIT_SHORT_SHA $CI_COMMIT_SHORT_SHA
+
+# Bullseye security package downloads return 404 from deb.debian.org.
+# Use Debian's archive so Rust 1.97.1 builds can upgrade CA certificates
+# and install PostgreSQL 13 without changing the base image version.
+RUN sed -i \
+    's|http://deb.debian.org/debian-security|https://archive.debian.org/debian-security|g' \
+    /etc/apt/sources.list
+
+# Change CACHEKEY to whatever so docker doesn't re-use the cache from before if you want apt to actually run.
+#
+# https://github.com/moby/moby/issues/1996
+# https://github.com/moby/buildkit/issues/4294
+#
+RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
+	DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt upgrade -y && \
+	DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt install -y \
+		automake \
+		binutils-aarch64-linux-gnu \
+		build-essential \
+		clang \
+		cmake \
+		curl \
+		fdisk dosfstools \
+		gcc-aarch64-linux-gnu \
+		ipmitool \
+		iproute2 \
+		iputils-ping \
+		jq \
+		libboost-dev \
+		libgrpc-dev \
+		liblzma-dev \
+		libopenipmi-dev \
+		libprotobuf-dev \
+		libssh-dev \
+		libssl-dev \
+		libtss2-dev \
+		libudev-dev \
+		libgrpc++-dev \
+		libaio-dev \
+		openipmi \
+		pkg-config \
+		protobuf-compiler-grpc \
+		postgresql-13 \
+		protobuf-compiler \
+		sudo \
+		unzip \
+		wget \
+		git \
+	&& rm -rf /var/lib/apt/lists/*
+
+RUN rustup component add rustfmt
+RUN cargo install cargo-cache cargo-make sccache --locked && \
+	cargo install mdbook@0.4.52 mdbook-plantuml@0.8.0 mdbook-mermaid@0.16.2 && \
+	cargo cache -r registry-index,registry-sources
+
+# install stuff that's not in debian
+RUN curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh
+RUN curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.14.0/kind-linux-amd64  && chmod +x ./kind && mv kind /usr/local/bin
+RUN cd /tmp && curl -Lo ./grpcurl.tar.gz https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_x86_64.tar.gz && tar xzf grpcurl.tar.gz && chmod +x ./grpcurl && mv grpcurl /usr/local/bin/ && rm LICENSE && rm grpcurl.tar.gz
+RUN cd /tmp && curl -Lo vault.zip https://releases.hashicorp.com/vault/1.14.1/vault_1.14.1_linux_amd64.zip && unzip vault.zip && chmod u+x vault && mv vault /usr/local/bin/ && rm vault.zip
+RUN cd /usr/local/bin && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && chmod +x /usr/local/bin/kubectl
+
+# create a postgres user
+RUN /etc/init.d/postgresql start && su postgres -c "/usr/lib/postgresql/13/bin/createuser -d root" && /etc/init.d/postgresql stop

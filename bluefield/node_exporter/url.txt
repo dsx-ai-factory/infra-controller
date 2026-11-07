@@ -1,0 +1,1 @@
+https://github.com/prometheus/node_exporter/releases/download/v${VERSION}/node_exporter-${VERSION}.linux-arm64.tar.gz

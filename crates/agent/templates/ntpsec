@@ -1,0 +1,94 @@
+NTP_CONF=/etc/ntpsec/ntp.conf
+NTP_DHCP_CONF_DIR=/run/ntpsec
+NTP_DHCP_CONF=$NTP_DHCP_CONF_DIR/ntp.conf.dhcp
+
+
+ntp_server_restart() {
+        if [ -r /etc/default/ntpsec ]; then
+                . /etc/default/ntpsec
+        fi
+
+        if [ "$IGNORE_DHCP" != "yes" ]; then
+                invoke-rc.d ntpsec@mgmt try-restart
+        fi
+}
+
+
+ntp_servers_setup_remove() {
+        if [ ! -e "$NTP_DHCP_CONF" ]; then
+                return
+        fi
+        rm -f "$NTP_DHCP_CONF"
+        ntp_server_restart
+}
+
+
+ntp_servers_setup_add() {
+        # dhclient provides the old servers in $old_ntp_servers, but NetworkManager
+        # and networkd do not.  Get the old list from the configuration file, if
+        # it is present.
+        old_ntp_servers=""
+        if [ -e "$NTP_DHCP_CONF" ]; then
+                old_ntp_servers=$(awk '/^server / {print $2}' "$NTP_DHCP_CONF")
+        fi
+
+        # $new_ntp_servers comes from dhclient.
+        # $DHCP4_NTP_SERVERS and $DHCP6_NTP_SERVERS come from NetworkManager.
+        new_ntp_servers=$(
+                for i in \
+                        $new_ntp_servers \
+                        $DHCP4_NTP_SERVERS $DHCP6_NTP_SERVERS \
+                        $(sed -n 's/NTP=//p' /run/systemd/netif/leases/* 2>/dev/null)
+                do
+                        echo $i
+                done)
+
+        # NOTE: By this point, both $old_ntp_servers and $new_ntp_servers are
+        # NOTE: newline-separated.
+        if [ "$new_ntp_servers" = "$old_ntp_servers" ]; then
+                return
+        fi
+
+        if [ -z "$new_ntp_servers" ]; then
+                ntp_servers_setup_remove
+                return
+        fi
+
+        mkdir -p "$NTP_DHCP_CONF_DIR"
+        tmp=$(mktemp "$NTP_DHCP_CONF.XXXXXX") || return
+        chmod --reference="$NTP_CONF" "$tmp"
+        chown --reference="$NTP_CONF" "$tmp"
+
+        (
+          echo "# This file was copied from $NTP_CONF with the server options changed"
+          echo "# to reflect the information sent by the DHCP server.  Any changes made"
+          echo "# here will be lost at the next DHCP event.  Edit $NTP_CONF instead."
+          echo
+          echo "# NTP server entries received from DHCP server"
+          for server in $new_ntp_servers; do
+                echo "server $server iburst"
+          done
+          echo
+          sed '/^[[:space:]]*\(server\|peer\|pool\|tos\)[[:space:]]/d' \
+                "$NTP_CONF"
+        ) >> "$tmp"
+
+        mv "$tmp" "$NTP_DHCP_CONF"
+
+        ntp_server_restart
+}
+
+
+ntp_servers_setup() {
+        case $reason in
+                BOUND|RENEW|REBIND|REBOOT)
+                        ntp_servers_setup_add
+                        ;;
+                EXPIRE|FAIL|RELEASE|STOP)
+                        ntp_servers_setup_remove
+                        ;;
+        esac
+}
+
+
+ntp_servers_setup

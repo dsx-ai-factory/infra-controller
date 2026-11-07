@@ -1,0 +1,21 @@
+#!/bin/bash
+
+APT_SANDBOX_OPTS="-o APT::Sandbox::User=root"
+export DEBIAN_FRONTEND=noninteractive
+
+# Clean up unneeded packages and clean up apt
+apt-get ${APT_SANDBOX_OPTS} -y --purge autoremove
+apt-get ${APT_SANDBOX_OPTS} -y clean
+rm -rf /var/lib/apt/lists/*
+rm -rf /var/cache/debconf/*
+
+# Remove docs and locales
+rm -rf /usr/share/doc/*
+rm -rf /usr/share/locale/*
+
+# Remove systemd journal
+systemctl stop systemd-journald.service systemd-journald-audit.socket systemd-journald.socket systemd-journald-dev-log.socket
+rm -rf /var/log/journal/*
+
+# Remove unnecessary kernel files
+rm -f /boot/System.map-* /boot/config-* /boot/vmlinu* /lib/modules/*/vmlinuz

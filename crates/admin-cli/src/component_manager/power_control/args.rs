@@ -1,0 +1,136 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+use clap::Parser;
+
+use crate::component_manager::common::{
+    ComputeTraySelection, CredentialOverridesArgs, PowerActionArg, PowerControlTargetArgs,
+    PowerShelfSelection, SwitchSelection,
+};
+
+#[derive(Parser, Debug)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Power on a switch:
+    $ nico-admin-cli component-manager component-power-control --action on switch \
+    --switch-id sw100ntjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0
+
+Power on a switch directly using credential overrides:
+    $ nico-admin-cli component-manager component-power-control --action on \
+    --bypass-state-controller --bmc-username admin --bmc-password mypassword \
+    --nvos-username admin --nvos-password mypassword switch --mac-address 00:11:22:33:44:55
+
+Power on a switch by BMC MAC (targets the switch before ingestion):
+    $ nico-admin-cli component-manager component-power-control --action on switch \
+    --mac-address 00:11:22:33:44:55
+
+Force off a compute tray:
+    $ nico-admin-cli component-manager component-power-control --action force-off compute-tray \
+    --machine-id fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
+
+Force off a compute tray by BMC MAC (targets the tray before ingestion):
+    $ nico-admin-cli component-manager component-power-control --action force-off compute-tray \
+    --mac-address 00:11:22:33:44:55
+
+AC power-cycle a power shelf:
+    $ nico-admin-cli component-manager component-power-control --action ac-powercycle power-shelf \
+    --power-shelf-id ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0
+
+AC power-cycle a power shelf by PMC MAC (targets the power shelf before ingestion):
+    $ nico-admin-cli component-manager component-power-control --action ac-powercycle power-shelf \
+    --mac-address 00:11:22:33:44:55
+
+")]
+pub(crate) struct Args {
+    #[clap(flatten)]
+    credentials: CredentialOverridesArgs,
+
+    #[clap(subcommand)]
+    target: PowerControlTargetArgs,
+
+    #[clap(
+        long = "action",
+        value_enum,
+        help = "Power control action to apply to the targeted components"
+    )]
+    action: PowerActionArg,
+
+    #[clap(
+        long = "bypass-state-controller",
+        help = "Bypass the state controller and dispatch directly to the component backend"
+    )]
+    bypass_state_controller: bool,
+}
+
+impl From<Args> for rpc::forge::ComponentPowerControlRequest {
+    fn from(args: Args) -> Self {
+        let credential_overrides = args.credentials.into_overrides();
+        let action = ::rpc::common::SystemPowerControl::from(args.action) as i32;
+        let bypass_state_controller = args.bypass_state_controller;
+        match args.target {
+            PowerControlTargetArgs::Switch(target) => {
+                let target = match target.into_selection() {
+                    SwitchSelection::SwitchIds(list) => {
+                        rpc::forge::component_power_control_request::Target::SwitchIds(list)
+                    }
+                    SwitchSelection::Macs(macs) => {
+                        rpc::forge::component_power_control_request::Target::SwitchBmcMacs(macs)
+                    }
+                };
+                Self {
+                    credential_overrides,
+                    target: Some(target),
+                    action,
+                    bypass_state_controller,
+                }
+            }
+            PowerControlTargetArgs::PowerShelf(target) => {
+                let target = match target.into_selection() {
+                    PowerShelfSelection::PowerShelfIds(list) => {
+                        rpc::forge::component_power_control_request::Target::PowerShelfIds(list)
+                    }
+                    PowerShelfSelection::Macs(macs) => {
+                        rpc::forge::component_power_control_request::Target::PowerShelfPmcMacs(macs)
+                    }
+                };
+                Self {
+                    credential_overrides,
+                    target: Some(target),
+                    action,
+                    bypass_state_controller,
+                }
+            }
+            PowerControlTargetArgs::ComputeTray(target) => {
+                let target = match target.into_selection() {
+                    ComputeTraySelection::MachineIds(list) => {
+                        rpc::forge::component_power_control_request::Target::MachineIds(list)
+                    }
+                    ComputeTraySelection::Macs(macs) => {
+                        rpc::forge::component_power_control_request::Target::ComputeBmcMacs(macs)
+                    }
+                };
+                Self {
+                    credential_overrides,
+                    target: Some(target),
+                    action,
+                    bypass_state_controller,
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,178 @@
+- header:
+    model: VX
+    nvue-api-version: nvue_v1
+    rev-id: 1.0
+    version: Cumulus Linux 5.6.0
+- set:
+    bridge:
+      domain:
+        br_default:
+          vlan:
+            '10': {}
+    evpn:
+      enable: on
+    interface:
+      lo:
+        ip:
+          address:
+            127.0.0.1/32: {}
+        type: loopback
+      pf0dpu1_if:
+        ip:
+          address:
+            169.254.169.253/30: {}
+          vrf: vpc_0            
+      p0_if:
+        type: swp
+      p1_if:
+        type: swp
+      pf0hpf_if:
+        type: swp
+        bridge:
+          domain:
+            br_default:
+              access: 10
+      vlan10:
+        type: svi
+        vlan: 10
+        ip:
+          address:
+            192.168.0.0/16: {}
+            10.255.255.2/29: {}
+    nve:
+      vxlan:
+        arp-nd-suppress: on
+        enable: on
+        source:
+          address: 127.0.0.1
+    router:
+      bgp:
+        autonomous-system: 65535
+        enable: on
+        router-id: 127.0.0.1
+      vrr:
+        enable: on
+      policy:
+        prefix-list:
+          FORGE_FROM_UNDERLAY:
+            rule:
+              '10':
+                action: permit
+                match:
+                  0.0.0.0/0: {}
+              '1000':
+                action: deny
+                match:
+                  any: {}
+          dpu_from_instance:
+            rule:
+              '1000':
+                action: permit
+                match:
+                  5.255.255.0/24:
+                    min-prefix-len: 32
+              '65535':
+                action: deny
+                match:
+                  any: {}
+          DPU_FROM_INSTANCE_PREFIX_LIST_IPV6:
+            rule:
+              '65535':
+                action: deny
+                match:
+                  any: {}
+        route-map:
+          dpu_to_instance:
+            rule:
+              '10':
+                action:
+                  deny: {}
+          dpu_from_instance_ipv6:
+            rule:
+              '10':
+                action:
+                  permit: {}
+                match:
+                  type: ipv6
+                  ip-prefix-list: DPU_FROM_INSTANCE_PREFIX_LIST_IPV6
+                  community-list: BYOIP_LEAK_COMMUNITY_LIST
+                set:
+                  tag: 65100
+                  community:
+                      none: {}
+                  large-community:
+                    none: {}
+              '11':
+                action:
+                  permit: {}
+                match:
+                  type: ipv6
+                  ip-prefix-list: DPU_FROM_INSTANCE_PREFIX_LIST_IPV6
+                set:
+                  tag: 65101
+                  community:
+                      none: {}
+                  large-community:
+                    none: {}
+              '65535':
+                action:
+                  deny: {}
+    system:
+      api:
+        listening-address:
+          0.0.0.0: {}
+    vrf:
+      default:
+        router:
+          nexthop-tracking:
+            ipv4:
+              resolved-via-default: on
+          bgp:
+            address-family:
+              ipv4-unicast:
+                enable: on
+                multipaths:
+                  ebgp: 128
+                redistribute:
+                  connected:
+                    enable: on
+              ipv6-unicast:
+                enable: on
+                multipaths:
+                  ebgp: 128
+                redistribute:
+                  connected:
+                    enable: on
+              l2vpn-evpn:
+                enable: on
+            enable: on
+            neighbor:
+              p0_if:
+                peer-group: underlay
+                type: unnumbered
+              p1_if:
+                peer-group: underlay
+                type: unnumbered
+            path-selection:
+              multipath:
+                aspath-ignore: on
+                bandwidth: ignore
+            peer-group:
+              routeserver:
+                address-family:
+                  ipv4-unicast:
+                    enable: off
+                  ipv6-unicast:
+                    enable: off
+                  l2vpn-evpn:
+                    enable: on
+                multihop-ttl: 255
+                remote-as: external
+                update-source: lo
+              underlay:
+                remote-as: external
+                address-family:
+                  ipv4-unicast:
+                    policy:
+                      inbound:
+                        prefix-list: FORGE_FROM_UNDERLAY

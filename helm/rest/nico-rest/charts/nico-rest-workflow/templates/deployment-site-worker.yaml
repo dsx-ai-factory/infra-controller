@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nico-rest-site-worker
+  namespace: {{ include "nico-rest-workflow.namespace" . }}
+  labels:
+    {{- include "nico-rest-workflow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: site-worker
+spec:
+  replicas: {{ .Values.siteWorker.replicaCount }}
+  selector:
+    matchLabels:
+      app: nico-rest-site-worker
+      app.kubernetes.io/name: nico-rest-workflow
+      app.kubernetes.io/component: site-worker
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: nico-rest-site-worker
+        app.kubernetes.io/name: nico-rest-workflow
+        app.kubernetes.io/component: site-worker
+      annotations:
+        checksum/config: {{ include (print .Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: nico-rest-site-worker
+          image: "{{ include "nico-rest-workflow.image" . }}"
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.config.metrics.port }}
+              name: metrics
+          env:
+            - name: CONFIG_FILE_PATH
+              value: /app/config.yaml
+            - name: TEMPORAL_NAMESPACE
+              value: site
+            {{- range $k, $v := merge (dict) .Values.siteWorker.extraEnv .Values.extraEnv }}
+            {{- if has $k (list "CONFIG_FILE_PATH" "TEMPORAL_NAMESPACE" "TEMPORAL_QUEUE") }}
+            {{- fail (printf "extraEnv must not override chart-managed variable %s" $k) }}
+            {{- end }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            - name: TEMPORAL_QUEUE
+              value: site
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+            - name: temporal-encryption-key
+              mountPath: /var/secrets/temporal
+              readOnly: true
+            - name: temporal-tls-certs
+              mountPath: /var/secrets/temporal/certs
+              readOnly: true
+            {{- include "nico-rest-workflow.dbCredsVolumeMount" . | nindent 12 }}
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8899
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8899
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.siteWorker.resources | nindent 12 }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      # 1000 is the `nvs` user the image declares. The image names it rather
+      # than giving a UID, which the kubelet cannot verify, so runAsNonRoot
+      # needs the number spelled out here.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      volumes:
+        # Scratch space for the read-only root filesystem. Go puts temp files
+        # under /tmp.
+        - name: tmp
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: {{ include "nico-rest-workflow.name" . }}-config
+        - name: temporal-encryption-key
+          secret:
+            secretName: {{ .Values.secrets.temporalEncryptionKey }}
+            items:
+              - key: temporal-encryption-key
+                path: encryption-key
+        - name: temporal-tls-certs
+          secret:
+            secretName: {{ .Values.secrets.temporalClientCerts }}
+        {{- include "nico-rest-workflow.dbCredsVolume" . | nindent 8 }}

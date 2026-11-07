@@ -1,0 +1,246 @@
+{
+  "info": {
+    "id": "f3a1c2d4-1001-4000-8000-000000000001",
+    "name": "r01",
+    "manufacturer": "NVIDIA",
+    "model": "GB200 NVL72 Rack",
+    "serial_number": "NVRK0001001",
+    "description": "Example GB200 NVL72 rack"
+  },
+  "location": {
+    "region": "us-west",
+    "datacenter": "SJC01",
+    "room": "SJC01 EW-A01-DH-01",
+    "position": "A01"
+  },
+  "components": [
+    {
+      "type": "torswitch",
+      "info": {
+        "id": "f3a1c2d4-2001-4000-8000-000000000001",
+        "name": "leaf1-nvl1-gp1-smn1-sjc01",
+        "manufacturer": "Mellanox",
+        "model": "MSN2201-CB2RC",
+        "serial_number": "MT9900000001",
+        "description": ""
+      },
+      "firmware_version": "",
+      "component_id": "",
+      "position": {
+        "slot_id": 43,
+        "tray_index": 0,
+        "host_id": 0
+      },
+      "bmcs": []
+    },
+    {
+      "type": "torswitch",
+      "info": {
+        "id": "f3a1c2d4-2001-4000-8000-000000000002",
+        "name": "leaf2-nvl1-gp1-smn1-sjc01",
+        "manufacturer": "Mellanox",
+        "model": "MSN2201-CB2RC",
+        "serial_number": "MT9900000002",
+        "description": ""
+      },
+      "firmware_version": "",
+      "component_id": "",
+      "position": {
+        "slot_id": 44,
+        "tray_index": 1,
+        "host_id": 0
+      },
+      "bmcs": []
+    },
+    {
+      "type": "compute",
+      "info": {
+        "id": "f3a1c2d4-3001-4000-8000-000000000001",
+        "name": "gpu1-nvl1-gp1-cin1-sjc01",
+        "manufacturer": "NVIDIA",
+        "model": "GB200 Compute Tray",
+        "serial_number": "C9000001000000000001Y0FA",
+        "description": ""
+      },
+      "firmware_version": "",
+      "component_id": "",
+      "position": {
+        "slot_id": 11,
+        "tray_index": 0,
+        "host_id": 0
+      },
+      "bmcs": [
+        {
+          "type": "host",
+          "mac": "aa:bb:cc:01:00:01",
+          "ip": "192.168.1.1",
+          "user": "admin",
+          "password": "changeme"
+        },
+        {
+          "type": "dpu",
+          "mac": "aa:bb:cc:02:00:01",
+          "ip": "",
+          "user": "",
+          "password": ""
+        },
+        {
+          "type": "dpu",
+          "mac": "aa:bb:cc:02:01:01",
+          "ip": "",
+          "user": "",
+          "password": ""
+        }
+      ]
+    },
+    {
+      "type": "compute",
+      "info": {
+        "id": "f3a1c2d4-3001-4000-8000-000000000002",
+        "name": "gpu2-nvl1-gp1-cin1-sjc01",
+        "manufacturer": "NVIDIA",
+        "model": "GB200 Compute Tray",
+        "serial_number": "C9000001000000000002Y0FA",
+        "description": ""
+      },
+      "firmware_version": "",
+      "component_id": "",
+      "position": {
+        "slot_id": 12,
+        "tray_index": 1,
+        "host_id": 0
+      },
+      "bmcs": [
+        {
+          "type": "host",
+          "mac": "aa:bb:cc:01:00:02",
+          "ip": "192.168.1.2",
+          "user": "admin",
+          "password": "changeme"
+        },
+        {
+          "type": "dpu",
+          "mac": "aa:bb:cc:02:00:02",
+          "ip": "",
+          "user": "",
+          "password": ""
+        },
+        {
+          "type": "dpu",
+          "mac": "aa:bb:cc:02:01:02",
+          "ip": "",
+          "user": "",
+          "password": ""
+        }
+      ]
+    },
+    {
+      "type": "nvswitch",
+      "info": {
+        "id": "f3a1c2d4-4001-4000-8000-000000000001",
+        "name": "nvswitch1-nvl1-gp1-sjc01",
+        "manufacturer": "NVIDIA",
+        "model": "GB200 NVLink Switch",
+        "serial_number": "MT9901000001",
+        "description": ""
+      },
+      "firmware_version": "",
+      "component_id": "",
+      "position": {
+        "slot_id": 19,
+        "tray_index": 0,
+        "host_id": 0
+      },
+      "bmcs": [
+        {
+          "type": "host",
+          "mac": "aa:bb:cc:03:00:01",
+          "ip": "192.168.2.1",
+          "user": "admin",
+          "password": "changeme"
+        }
+      ]
+    },
+    {
+      "type": "nvswitch",
+      "info": {
+        "id": "f3a1c2d4-4001-4000-8000-000000000002",
+        "name": "nvswitch2-nvl1-gp1-sjc01",
+        "manufacturer": "NVIDIA",
+        "model": "GB200 NVLink Switch",
+        "serial_number": "MT9901000002",
+        "description": ""
+      },
+      "firmware_version": "",
+      "component_id": "",
+      "position": {
+        "slot_id": 20,
+        "tray_index": 1,
+        "host_id": 0
+      },
+      "bmcs": [
+        {
+          "type": "host",
+          "mac": "aa:bb:cc:03:00:02",
+          "ip": "192.168.2.2",
+          "user": "admin",
+          "password": "changeme"
+        }
+      ]
+    },
+    {
+      "type": "powershelf",
+      "info": {
+        "id": "f3a1c2d4-5001-4000-8000-000000000001",
+        "name": "pwr1-nvl1-gp1-sjc01",
+        "manufacturer": "NVIDIA",
+        "model": "GB200 Power Shelf",
+        "serial_number": "614FK0FXX00X00000F1",
+        "description": ""
+      },
+      "firmware_version": "",
+      "component_id": "",
+      "position": {
+        "slot_id": 0,
+        "tray_index": 0,
+        "host_id": 0
+      },
+      "bmcs": [
+        {
+          "type": "host",
+          "mac": "aa:bb:cc:04:00:01",
+          "ip": "192.168.3.1",
+          "user": "admin",
+          "password": "changeme"
+        }
+      ]
+    },
+    {
+      "type": "powershelf",
+      "info": {
+        "id": "f3a1c2d4-5001-4000-8000-000000000002",
+        "name": "pwr2-nvl1-gp1-sjc01",
+        "manufacturer": "NVIDIA",
+        "model": "GB200 Power Shelf",
+        "serial_number": "614FK0FXX00X00000F2",
+        "description": ""
+      },
+      "firmware_version": "",
+      "component_id": "",
+      "position": {
+        "slot_id": 0,
+        "tray_index": 0,
+        "host_id": 0
+      },
+      "bmcs": [
+        {
+          "type": "host",
+          "mac": "aa:bb:cc:04:00:02",
+          "ip": "192.168.3.2",
+          "user": "admin",
+          "password": "changeme"
+        }
+      ]
+    }
+  ]
+}

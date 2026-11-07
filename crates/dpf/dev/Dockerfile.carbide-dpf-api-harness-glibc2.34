@@ -1,0 +1,104 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Dockerfile for building carbide-dpf-api-harness against GLIBC 2.34
+# Uses Ubuntu 22.04 (Jammy) which ships with GLIBC 2.34
+# Build from workspace root: docker build -f crates/dpf/dev/Dockerfile.carbide-dpf-api-harness-glibc2.34 -t carbide-dpf-api-harness:glibc2.34 .
+
+FROM ubuntu:22.04 AS builder
+
+WORKDIR /workspace
+
+# Install build dependencies and Rust
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    curl \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    ca-certificates \
+    git \
+    && if [ "$(dpkg --print-architecture)" = arm64 ]; then \
+         DEBIAN_FRONTEND=noninteractive apt-get install -y clang mold; \
+       fi \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97.1 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add Rust to PATH
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Native ARM64 Cargo builds use mold without changing the linker selected by
+# other architectures.
+COPY --chmod=0755 dev/linkers/clang-mold /usr/local/bin/clang-mold
+RUN if [ "$(dpkg --print-architecture)" = arm64 ]; then \
+      printf 'int main(void) { return 0; }\n' | \
+        clang-mold -x c - -o /tmp/mold-smoke && \
+      readelf -p .comment /tmp/mold-smoke | grep -q mold && \
+      rm /tmp/mold-smoke; \
+    fi
+
+# Copy workspace configuration files
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY .cargo/ .cargo/
+COPY pxe/ipxe/local/embed.ipxe pxe/ipxe/local/embed.ipxe
+
+# Verify workspace structure
+RUN grep -q '^\[workspace\]' Cargo.toml && \
+    grep -q 'members.*crates' Cargo.toml && \
+    echo "Workspace structure verified"
+
+# Copy workspace crates
+COPY crates/ crates/
+
+# Download and cache dependencies
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/workspace/target \
+    cargo fetch --locked
+
+# Build carbide-dpf-api-harness with driver feature using cached dependencies
+# Copy binary out of cache mount to persist it
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/workspace/target \
+    if [ "$(dpkg --print-architecture)" = arm64 ]; then \
+      export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=/usr/local/bin/clang-mold; \
+    fi && \
+    cargo build --release --package carbide-dpf --bin carbide-dpf-api-harness --features driver && \
+    cp target/release/carbide-dpf-api-harness /tmp/carbide-dpf-api-harness && \
+    strip /tmp/carbide-dpf-api-harness && \
+    echo "Binary built successfully from workspace"
+
+# Verify binary was copied successfully and check GLIBC version
+RUN test -f /tmp/carbide-dpf-api-harness && \
+    echo "Workspace build verified" && \
+    ldd /tmp/carbide-dpf-api-harness 2>/dev/null | head -1 || echo "Binary built successfully" && \
+    strings /tmp/carbide-dpf-api-harness | grep -q "GLIBC_2.34" && \
+    echo "GLIBC 2.34 requirement verified"
+
+# Output stage - copy the binary
+FROM ubuntu:22.04
+
+RUN apt-get update && \
+    apt-get install -y ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /tmp/carbide-dpf-api-harness /usr/local/bin/carbide-dpf-api-harness
+
+# Verify binary is linked correctly
+RUN ldd /usr/local/bin/carbide-dpf-api-harness | grep libc.so || echo "Binary linked successfully"
+
+ENTRYPOINT ["/usr/local/bin/carbide-dpf-api-harness"]

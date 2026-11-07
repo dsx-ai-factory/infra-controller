@@ -1,0 +1,185 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en"
+early_access: false
+tone_instructions: >-
+  State the defect, triggering condition, and consequence briefly. Use neutral,
+  direct language. Omit praise and rhetorical questions.
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary_in_walkthrough: true
+  suggested_reviewers: false
+  in_progress_fortune: false
+  poem: false
+  review_status: true
+  review_details: false
+  collapse_walkthrough: false
+  slop_detection:
+    enabled: true
+  finishing_touches:
+    autofix:
+      enabled: false
+  pre_merge_checks:
+    # Counts every touched function, not the public declarations STYLE_GUIDE.md
+    # requires, and pushes rustdoc onto Clap types where it changes help text.
+    docstrings:
+      mode: "off"
+    title:
+      requirements: >-
+        Use the conventional commit format `type(scope): Summary`, with an
+        optional scope and `!` before the colon for a breaking change. The title
+        becomes the squash commit subject.
+  tools:
+    # Its only finding here is CKV_OPENAPI_5 on spec.yaml, attached to unrelated comments.
+    checkov:
+      enabled: false
+    languagetool:
+      enabled: false
+  path_filters:
+    - "!target/**"
+    - "!rest-api/**/*.pb.go"
+    - "!rest-api/**/*_grpc.pb.go"
+    - "!rest-api/**/*.connect.go"
+    - "!rest-api/site-manager/pkg/client/**"
+    - "!rest-api/site-manager/pkg/crds/v1/zz_generated.deepcopy.go"
+    - "!rest-api/sdk/standard/api_*.go"
+    - "!rest-api/sdk/standard/model_*.go"
+    - "!rest-api/sdk/standard/client.go"
+    - "!rest-api/sdk/standard/configuration.go"
+    - "!rest-api/sdk/standard/response.go"
+    - "!rest-api/sdk/standard/utils.go"
+    - "!rest-api/proto/core/src/v1/*_nico.proto"
+    - "!rest-api/proto/flow/src/v1/*.proto"
+    - "!crates/dpf/crds/**"
+    - "!crates/mqttea-example/src/sample_protos/**"
+    - "!crates/ssh-console-mock-api-server/src/generated/**"
+    - "!dev/deployment/devspace/values.generated.yaml"
+  path_instructions:
+    - path: "**/*"
+      instructions: >-
+        Report a defect introduced, made reachable, or materially worsened by
+        this PR. Identify the reviewed revision, concrete trigger, and
+        observable consequence. Compare with the base before flagging unchanged
+        behavior. Read the PR rationale, relevant construction paths, callers,
+        wrappers, and retained tests; check evidence that contradicts the claim.
+        If proposing a remedy, verify that it fixes the stated problem under the
+        actual framework and runner without violating another contract.
+        For compatibility claims, identify the published contract, merged schema,
+        or supported consumer affected. Assume merged migrations are deployed;
+        do not infer a release contract from an intermediate PR revision alone.
+        Current code and versioned contracts take precedence over a learning's
+        historical assumptions. If the evidence is insufficient, omit the finding.
+        Do not request unrelated fixes, speculative hardening, style rewrites,
+        or documentation that only repeats names or types. Report missing docs
+        when needed to use a supported interface correctly: behavior, constraints,
+        defaults, side effects, errors, or valid command examples. Request a test
+        only for a specific changed contract or failure boundary not protected
+        by retained coverage; name the regression it catches. Do not repeat
+        compiler, formatter, or linter diagnostics already reported by CI.
+        Keep independent defects separate; do not bundle optional rewrites with
+        a valid fix. Group repeated instances of one root cause. When challenged,
+        check the counter-evidence before withdrawing or learning a general rule.
+        Verify a learning's premise against the current head and support contract.
+        Preserve its PR, path, and release limits; temporary exceptions need an
+        end condition. Correct a superseded rule instead of storing its opposite
+        alongside it. Do not turn a PR-specific deferral into a permanent exemption.
+        Revisit a declined finding only when new code or evidence changes its
+        premise; a new flaw in a follow-up fix is new evidence. Review generated
+        output at its authoritative source and consolidate repeated findings.
+        Before treating a finding as addressed, inspect the current PR head;
+        a fixed reply or intermediate commit does not prove the fix remains.
+        A resolved or deferred bot comment is not itself a defect or blocker.
+        Apply this threshold to every matching path. Repository instructions
+        guide implementation. Authoring preferences and missing verification
+        reports alone are not findings.
+    - path: "crates/**/*.rs"
+      instructions: >-
+        Apply STYLE_GUIDE.md within the finding threshold above. Awaiting
+        queries on the same database transaction and nesting transactions are
+        permitted; identify unrelated network, sleep, or task waits before
+        alleging a transaction-lifetime problem. Test transactions may span
+        awaits for isolation. In test code, request additional shutdown or
+        cleanup only when a concrete leak, cross-test interference, hang,
+        unobserved task failure, or lost primary failure is demonstrated.
+        Preserve readable log messages; interpolation alone is not a defect.
+    - path: "crates/api-db/migrations/**"
+      instructions: >-
+        Apply the database-migration rules in root AGENTS.md. Existing merged
+        migrations are immutable. SQLx normally applies each file once in a
+        transaction. Do not add redundant rerun guards to transactional files;
+        assess interrupted-application recovery for explicit no-transaction files.
+        The forward change must apply while the outgoing binary
+        writes, and leave the schema the incoming binary expects. Retain
+        the two-step removal rule for schema objects used by the outgoing
+        binary. For index retention, identify an affected query or constraint;
+        an expression difference alone does not prove a performance regression.
+        A Squawk lock warning is a finding only when you can name the table and
+        the nico-api read or write the lock would block. Do not propose NOT VALID
+        with VALIDATE CONSTRAINT in the same file. A CONCURRENTLY statement needs
+        its own no-transaction migration. Data-semantic changes need
+        predecessor-schema tests using the shipped migration file.
+    - path: "rest-api/**"
+      instructions: >-
+        Apply rest-api/AGENTS.md to changed behavior. Preserve tenant ownership
+        checks and API response fields, including empty values except for the
+        documented date-gated deprecation and opt-in includeRelation cases.
+        Pagination must sort deterministically before slicing, with supported orderBy
+        values and default documented in OpenAPI. Verify changed model fields and
+        routes against rest-api/openapi/spec.yaml. Generated SDK changes
+        belong in the source contract. Run tests through the repository Make
+        targets that start the required services. Receiver-method and test-layout
+        preferences alone are not findings.
+    - path: "**/*.proto"
+      instructions: >-
+        Distinguish protobuf binary-wire and ProtoJSON/Any compatibility from
+        generated-source and descriptor compatibility. For wire failures, show the changed encoding
+        or type identity, including Any type URLs. For generated-source or
+        descriptor failures, identify the affected symbol or descriptor and
+        consumer. A renamed message with the same field numbers and wire types
+        is not by itself proof of a payload encoding break. Review generator-owned
+        sources, not imported generated declarations.
+    - path: "**/*.md"
+      instructions: >-
+        Check operator commands within the threshold above. Recognizable
+        placeholders in command templates are not defects by themselves.
+        Report missing or incorrect prerequisites and failures that remain after
+        valid substitutions and documented setup. Also report credentials exposed
+        in arguments or logs, secrets written to predictable or broadly readable
+        paths, or destructive steps before their required backup or export
+        succeeds. Spelling, grammar, ordering, and link style alone are not findings.
+    - path: "**/*.sh"
+      instructions: >-
+        Check scripts within the threshold above. Report an ignored failure that
+        lets a later step run on partial state, a retry or rerun that skips a
+        required step, a credential exposed in arguments or logs, or a secret
+        written to a predictable or broadly readable path. Quoting and
+        portability alone are not findings unless a supported input breaks.
+    - path: "{**/AGENTS.md,STYLE_GUIDE.md,CONTRIBUTING.md,.coderabbit.yaml}"
+      instructions: >-
+        When this PR materially revises guidance, report conflicting or
+        ambiguous instructions that could cause concrete incorrect behavior,
+        even if inherited from the base. Cite the relevant wording, specific
+        misapplication, and observable consequence.
+  auto_review:
+    enabled: true
+    ignore_usernames:
+      - "rwthompsonii"
+      - "kensimon"
+knowledge_base:
+  learnings:
+    scope: local
+  code_guidelines:
+    enabled: true
+    # These supplement built-in discovery of all nested AGENTS.md/CLAUDE.md.
+    filePatterns:
+      - STYLE_GUIDE.md
+      - CONTRIBUTING.md
+      # Auto-discovery only treats skills/ at the repository root as Agent Skills.
+      - files: "rest-api/skills/**/SKILL.md"
+        applyTo: "rest-api/**"
+issue_enrichment:
+  planning:
+    enabled: true

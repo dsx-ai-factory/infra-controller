@@ -1,0 +1,252 @@
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+package v1;
+option go_package = "proto/v1";
+
+// PowershelfManager exposes registration, inventory, firmware management, and power control RPCs for power shelves via their PMCs.
+service PowershelfManager {
+    // Registration
+    // RegisterPowershelves registers the specified powershelves and persists their PMC credentials. 
+    rpc RegisterPowershelves(RegisterPowershelvesRequest) returns (RegisterPowershelvesResponse);
+
+    // Inventory Management
+    // GetPowershelves returns powershelf information for all the powershelves requested.
+    rpc GetPowershelves(PowershelfRequest) returns (GetPowershelvesResponse);
+
+    // Firmware Management
+    // UpdateFirmware performs a firmware upgrade (supports dry-run).
+    rpc UpdateFirmware(UpdateFirmwareRequest) returns (UpdateFirmwareResponse);
+    // GetFirmwareUpdateStatus returns the status of firmware updates for the specified PMC(s) and component(s).
+    rpc GetFirmwareUpdateStatus(GetFirmwareUpdateStatusRequest) returns (GetFirmwareUpdateStatusResponse);
+    // ListAvailableFirmware lists the firmware versions that are available for a given powershelf.
+    rpc ListAvailableFirmware(PowershelfRequest) returns (ListAvailableFirmwareResponse);
+    // SetDryRun configures whether the firmware manager is in Dry Run mode.
+    rpc SetDryRun(SetDryRunRequest) returns (google.protobuf.Empty);
+
+    // Power Control
+    // Power OFF the rack
+    rpc PowerOff(PowershelfRequest) returns (PowerControlResponse);
+    // Power ON the rack
+    rpc PowerOn(PowershelfRequest) returns (PowerControlResponse);
+}
+
+
+// PMCVendor enumerates supported PMC vendors. 
+enum PMCVendor {
+    PMC_TYPE_UNKNOWN = 0;
+    PMC_TYPE_LITEON = 1;
+}
+
+// Credentials wraps around a username and password
+message Credentials {
+    string username = 1;
+    string password = 2;
+}
+
+// PowerManagementController contains PMC identity and metadata (some fields enriched from Redfish Manager). 
+message PowerManagementController {
+    string mac_address = 1;
+    string ip_address = 2;
+    PMCVendor vendor = 3;
+    string serial_number = 4;
+    string model = 5;
+    string manufacturer = 6;
+    string part_number = 7;
+    string firmware_version = 8;
+    string hardware_version = 9;
+}
+
+// Chassis contains chassis identity and model/manufacturer fields.
+message Chassis {
+    string serial_number = 1;
+    string model = 2;
+    string manufacturer = 3;
+}
+
+message SensorThreshold {
+    float reading = 1;
+}
+
+message SensorThresholds {
+    SensorThreshold lower_caution = 1;
+    SensorThreshold lower_critical = 2;
+    SensorThreshold upper_caution = 3;
+    SensorThreshold upper_critical = 4;
+}
+
+// Sensor captures a single sensor reading, thresholds, and units.
+message Sensor{
+    string id = 1;
+    string name = 2;
+    float reading = 3;
+    double reading_range_max = 4;
+    float reading_range_min = 5;
+    string reading_type = 6;
+    string reading_units = 7;
+    SensorThresholds thresholds = 8;
+}
+
+// PowerSupplyUnit contains power supply hardware/firmware and sensor data. 
+message PowerSupplyUnit {
+    string capacity_watts = 1;
+    string firmware_version = 2;
+    string hardware_version = 3;
+    string id = 4;
+    string manufacturer = 5;
+    string model = 6;
+    string name = 7;
+    bool power_state = 8;
+    repeated Sensor sensors = 9;
+    string serial_number = 10;
+}
+
+message PowerShelf {
+    PowerManagementController pmc = 1;
+    Chassis chassis = 2;
+    // TODO: system
+    repeated PowerSupplyUnit psus = 3;
+}
+
+message RegisterPowershelfRequest {
+    string pmc_mac_address = 1;
+    string pmc_ip_address = 2;
+    PMCVendor pmc_vendor = 3;
+    Credentials pmc_credentials = 4;
+}
+
+message RegisterPowershelvesRequest {
+    repeated RegisterPowershelfRequest registration_requests = 1;
+}
+
+enum StatusCode {
+    SUCCESS = 0;
+    INVALID_ARGUMENT = 1;
+    INTERNAL_ERROR = 2;
+}
+
+message RegisterPowershelfResponse {
+    string pmc_mac_address = 1;
+    bool is_new = 2;
+    google.protobuf.Timestamp created = 3;
+    StatusCode status = 4;
+    string error = 5;
+}
+
+message RegisterPowershelvesResponse {
+    repeated RegisterPowershelfResponse responses = 1;
+}
+
+message PowershelfRequest {
+    repeated string pmc_macs = 1;
+}
+
+message PowershelfResponse {
+    string pmc_mac_address = 1;
+    StatusCode status = 2;
+    string error = 3;
+}
+
+message PowerControlResponse {
+    repeated PowershelfResponse responses = 1;
+}
+
+message GetPowershelvesResponse {
+    repeated PowerShelf powershelves = 1;
+}
+
+message UpdateComponentFirmwareRequest {
+    PowershelfComponent component = 1;
+    FirmwareVersion upgradeTo = 2;
+}
+
+message UpdatePowershelfFirmwareRequest {
+    string pmc_mac_address = 1;
+    repeated UpdateComponentFirmwareRequest components = 2;
+}
+
+message UpdateFirmwareRequest {
+    repeated UpdatePowershelfFirmwareRequest upgrades = 1;
+}
+
+message UpdateComponentFirmwareResponse {
+    PowershelfComponent component = 1;
+    StatusCode status = 2;
+    string error = 3;
+}
+
+message UpdatePowershelfFirmwareResponse {
+    string pmc_mac_address = 1;
+    repeated UpdateComponentFirmwareResponse components = 2;
+}
+
+message UpdateFirmwareResponse {
+    repeated UpdatePowershelfFirmwareResponse responses = 1;
+}
+
+message CanUpdateFirmwareResponse {
+    bool can_update = 1;
+}
+
+enum PowershelfComponent {
+    PMC = 0;
+    PSU = 1;
+}
+
+message FirmwareVersion {
+    string version = 1;
+}
+
+message ComponentFirmwareUpgrades {
+    PowershelfComponent component = 1;
+    repeated FirmwareVersion upgrades = 2;
+}
+
+message AvailableFirmware {
+    string pmc_mac_address = 1;
+    repeated ComponentFirmwareUpgrades upgrades = 2;
+}
+
+message ListAvailableFirmwareResponse {
+    repeated AvailableFirmware upgrades = 1; 
+}
+
+message SetDryRunRequest {
+    bool dry_run = 1;
+}
+
+// FirmwareUpdateState represents the state of a firmware update operation.
+enum FirmwareUpdateState {
+    FIRMWARE_UPDATE_STATE_UNKNOWN = 0;
+    FIRMWARE_UPDATE_STATE_QUEUED = 1;
+    FIRMWARE_UPDATE_STATE_VERIFYING = 2;
+    FIRMWARE_UPDATE_STATE_COMPLETED = 3;
+    FIRMWARE_UPDATE_STATE_FAILED = 4;
+}
+
+// GetFirmwareUpdateStatusRequest queries the status of firmware updates for specific PMC(s) and component(s).
+message GetFirmwareUpdateStatusRequest {
+    repeated FirmwareUpdateQuery queries = 1;
+}
+
+// FirmwareUpdateQuery specifies a single PMC MAC and component to query.
+message FirmwareUpdateQuery {
+    string pmc_mac_address = 1;
+    PowershelfComponent component = 2;
+}
+
+// GetFirmwareUpdateStatusResponse contains the status of the requested firmware updates.
+message GetFirmwareUpdateStatusResponse {
+    repeated FirmwareUpdateStatus statuses = 1;
+}
+
+// FirmwareUpdateStatus contains the status of a firmware update operation.
+message FirmwareUpdateStatus {
+    string pmc_mac_address = 1;
+    PowershelfComponent component = 2;
+    FirmwareUpdateState state = 3;
+    StatusCode status = 4;  // Request status (SUCCESS if found, error otherwise)
+    string error = 5;       // Request error message (e.g., "not found")
+}

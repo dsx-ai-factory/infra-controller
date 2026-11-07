@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+
+{% block title %}Logical Partition Detail{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Logical Partition Detail</h1>
+
+<table class="detailsview">
+        <tr><th>ID</th><td>{{ id }}</td></tr>
+        <tr><th>Name</th><td>{{ name }}</td></tr>
+        <tr><th>State</th><td>{{ state }}</td></tr>
+        <tr><th>Created</th><td>{{ created }}</td></tr>
+</table>
+
+<h2>Physical Partitions</h2>
+<table class="sortable overview">
+	<thead>
+		<tr>
+			<th>ID</th>
+			<th>Domain UUID</th>
+			<th>Name</th>
+			<th>NMX-C partition ID</th>
+			<th>Members</th>
+		</tr>
+	</thead>
+	<tbody>
+
+        	{% for p in physical_partitions %}
+		<tr>
+			<td> {{ p.id }} </td>
+			<td><a href="{{ p.domain_health_url }}">{{ p.domain_uuid }}</a></td>
+			<td> {{ p.name }} </td>
+			<td> {{ p.nmx_c_partition_id }} </td>
+
+			<td styles="padding: 0;">
+				<table>
+					<thead>
+						<tr>
+							<th>GPU Guid</th>
+							<th>Machine ID</th>
+						</tr>
+					</thead>
+				</table>
+                		{% for m in p.members %}
+				<table>
+					<tbody>
+						<tr>
+							<td> {{ m.gpu_id }} </td>
+							<td> {{ m.machine_id }} </td>
+						</tr>
+					</tbody>
+				</table>
+		        	{% endfor %}
+			</td>
+		</tr>
+        	{% endfor %}
+	</tbody>
+	<tfoot>
+		<tr>
+			<th>{{ physical_partitions.len() }} item{% if physical_partitions.len() != 1 %}s{% endif %}</th>
+			<th></th>
+			<th></th>
+			<th></th>
+			<th></th>
+</table>
+
+{% endblock %}

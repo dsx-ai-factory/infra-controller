@@ -1,0 +1,413 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+use std::fmt::Display;
+use std::sync::Arc;
+
+pub use crate::chained_reader::ChainedCredentialReader;
+/// Direct vault access for the narrow cases that need it: `CertificateProvider`
+/// (PKI), and the Transit KMS provider, which builds its own raw vault client
+/// via `create_raw_vault_client_settings`. Credential operations should go
+/// through `create_credential_manager` instead of using the vault client directly.
+pub use crate::forge_vault::{
+    DedicatedVaultConfig, ForgeVaultClient, SpiffeIdentity, VaultConfig,
+    create_dedicated_vault_client, create_raw_vault_client_settings, create_vault_client,
+};
+pub use crate::local_credentials::{
+    CredentialSnapshot, EnvCredentialsConfig, FileCredentialsConfig, MachineIdentityConfig,
+    UsernamePassword,
+};
+
+pub mod certificates;
+pub mod chained_reader;
+pub mod credentials;
+pub mod forge_vault;
+pub mod key_encryption;
+pub mod local_credentials;
+pub mod memory_credentials;
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
+use credentials::{
+    CompositeCredentialManager, CredentialManager, CredentialReader, CredentialWriter,
+};
+use local_credentials::{EnvCredentials, FileCredentialsWatcher};
+pub use memory_credentials::MemoryCredentialStore;
+
+use crate::certificates::CertificateProvider;
+
+#[derive(Default, Debug, Clone)]
+pub struct CredentialConfig {
+    pub vault: VaultConfig,
+    pub env: EnvCredentialsConfig,
+    pub file: FileCredentialsConfig,
+}
+
+/// Selects and configures the backend that vends machine/service certificates.
+///
+/// Certificate vending is independent of the credential store: this lets the
+/// API issue PKI certificates from a different Vault than the one backing
+/// credentials — or, in future, from a non-Vault CA — without disturbing
+/// credential storage.
+#[derive(Default, Debug, Clone)]
+pub struct CertificateConfig {
+    pub backend: CertBackend,
+}
+
+/// Backend used to issue certificates.
+///
+/// Today both variants are Vault-backed. The enum exists so additional backends
+/// (e.g. an in-process CA whose key lives in a Kubernetes Secret) can be added
+/// without touching the call sites that consume [`CertificateProvider`].
+// The shared `Vault` suffix is intentional: both current variants are Vault
+// backends, distinguished by whether the client is shared with the credential
+// store. The lint resolves once a non-Vault backend is added.
+#[allow(clippy::enum_variant_names)]
+#[derive(Default, Debug, Clone)]
+pub enum CertBackend {
+    /// Reuse the credential store's Vault client — one client, one token lease.
+    /// This is the default and matches historical behavior.
+    #[default]
+    SharedVault,
+    /// Issue certificates from a dedicated Vault, decoupled from the credential
+    /// store. [`DedicatedVaultConfig`] is fully explicit: its connection fields
+    /// never fall back to the process-global `VAULT_*` env vars, so a partial
+    /// config fails fast instead of silently re-pointing at the credential
+    /// Vault.
+    DedicatedVault(DedicatedVaultConfig),
+}
+
+/// Builds the certificate provider selected by `config`.
+///
+/// `shared_vault` is the already-constructed credential Vault client, reused
+/// for [`CertBackend::SharedVault`] so no second client or token lease is
+/// created in the common case; that backend fails without it, and a dedicated
+/// Vault never uses it. `spiffe` is the site's SPIFFE identity; a dedicated
+/// Vault issues certs under the same identity namespace as the rest of the
+/// deployment.
+pub fn create_certificate_provider(
+    config: &CertificateConfig,
+    shared_vault: Option<&Arc<ForgeVaultClient>>,
+    spiffe: SpiffeIdentity,
+) -> eyre::Result<Arc<dyn CertificateProvider>> {
+    match &config.backend {
+        CertBackend::SharedVault => {
+            let provider: Arc<dyn CertificateProvider> = shared_vault
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "the shared vault certificate backend requires the credential vault client"
+                    )
+                })?
+                .clone();
+            Ok(provider)
+        }
+        CertBackend::DedicatedVault(dedicated) => {
+            let provider: Arc<dyn CertificateProvider> =
+                create_dedicated_vault_client(dedicated, spiffe)?;
+            Ok(provider)
+        }
+    }
+}
+
+/// create_credential_manager builds the default credential chain: env -> file -> vault.
+pub async fn create_credential_manager(
+    config: &CredentialConfig,
+) -> eyre::Result<Arc<dyn CredentialManager>> {
+    let mut readers: Vec<Box<dyn CredentialReader>> = Vec::new();
+
+    if config.env.enabled() {
+        readers.push(Box::new(EnvCredentials::new(config.env.clone())?));
+    }
+
+    if config.file.enabled() {
+        readers.push(Box::new(
+            FileCredentialsWatcher::new(config.file.clone()).await?,
+        ));
+    }
+
+    let vault_client = create_vault_client(&config.vault)?;
+    readers.push(Box::new(vault_client.clone()));
+
+    let chained = ChainedCredentialReader::from(readers);
+    let composite = CompositeCredentialManager::new(chained, vault_client);
+    Ok(Arc::new(composite))
+}
+
+/// Whether a setting names a Vault: an explicit address, or `VAULT_ADDR`.
+/// Other `VAULT_*` settings alone do not select Vault.
+fn vault_is_named(config: &VaultConfig, env_address: Option<&str>) -> bool {
+    config.address.is_some() || env_address.is_some_and(|a| !a.is_empty())
+}
+
+/// create_credential_reader builds a read-only credential chain for services
+/// that never write credentials: env -> file -> vault. The Vault client is
+/// constructed only when a setting names it (`vault.address` or `VAULT_ADDR`),
+/// so a service with no Vault settings starts without any Vault connection.
+/// When Vault is named, an incomplete Vault configuration fails startup rather
+/// than being dropped from the chain.
+pub async fn create_credential_reader(
+    config: &CredentialConfig,
+) -> eyre::Result<Arc<dyn CredentialReader>> {
+    let env_address = std::env::var("VAULT_ADDR").ok();
+    create_credential_reader_with(config, env_address.as_deref()).await
+}
+
+/// [`create_credential_reader`] with `VAULT_ADDR` passed in, so tests do not
+/// depend on the process environment.
+async fn create_credential_reader_with(
+    config: &CredentialConfig,
+    env_address: Option<&str>,
+) -> eyre::Result<Arc<dyn CredentialReader>> {
+    let mut readers: Vec<Box<dyn CredentialReader>> = Vec::new();
+
+    if config.env.enabled() {
+        readers.push(Box::new(EnvCredentials::new(config.env.clone())?));
+    }
+
+    if config.file.enabled() {
+        readers.push(Box::new(
+            FileCredentialsWatcher::new(config.file.clone()).await?,
+        ));
+    }
+
+    if vault_is_named(&config.vault, env_address) {
+        readers.push(Box::new(create_vault_client(&config.vault)?));
+    }
+
+    Ok(Arc::new(ChainedCredentialReader::from(readers)))
+}
+
+/// create_credential_manager_from builds a
+/// credential manager from a caller-defined chain.
+/// The caller fully controls the reader order and
+/// writer selection.
+pub fn create_credential_manager_from(
+    writer: Arc<dyn CredentialWriter>,
+    readers: Vec<Box<dyn CredentialReader>>,
+) -> Arc<dyn CredentialManager> {
+    let chained = ChainedCredentialReader::from(readers);
+    Arc::new(CompositeCredentialManager::new(chained, writer))
+}
+
+#[derive(Debug)]
+pub enum SecretsError {
+    GenericError(eyre::Report),
+    /// A local UFM source owns credentials but has no entry for the requested
+    /// fabric; callers should surface the configuration remediation.
+    UfmCredentialReadBlocked {
+        fabric: String,
+    },
+    /// A caller attempted to mutate a persistent UFM credential while local
+    /// sources own UFM credentials; callers should direct the operator to the
+    /// configured local source.
+    UfmCredentialMutationBlocked {
+        fabric: String,
+    },
+    /// A local source owns version 0 of the site-wide BMC root but has no entry;
+    /// callers should surface the configuration remediation without falling
+    /// through to a persistent backend.
+    BmcSiteWideRootV0CredentialReadBlocked,
+    /// A caller attempted to mutate version 0 of the site-wide BMC root in a
+    /// persistent backend while local sources own it.
+    BmcSiteWideRootV0CredentialMutationBlocked,
+}
+
+impl Display for SecretsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SecretsError::GenericError(report) => {
+                write!(f, "Secrets operation failed: {}", report)
+            }
+            SecretsError::UfmCredentialReadBlocked { fabric } => write!(
+                f,
+                "secrets operation failed: credential for UFM fabric {fabric:?} is absent from \
+                 the configured local sources; {}; {}",
+                crate::chained_reader::UFM_LOCAL_CREDENTIAL_REMEDIATION,
+                crate::chained_reader::UFM_BACKEND_SOURCE_REMEDIATION
+            ),
+            SecretsError::UfmCredentialMutationBlocked { fabric } => write!(
+                f,
+                "persistent backend credential mutation is disabled for UFM fabric {fabric:?} \
+                 because local sources own all UFM credentials; {}; {}",
+                crate::chained_reader::UFM_LOCAL_CREDENTIAL_REMEDIATION,
+                crate::chained_reader::UFM_BACKEND_SOURCE_REMEDIATION
+            ),
+            SecretsError::BmcSiteWideRootV0CredentialReadBlocked => write!(
+                f,
+                "secrets operation failed: site-wide BMC root version 0 is absent from the \
+                 configured local sources; {}; {}",
+                crate::chained_reader::BMC_SITE_WIDE_ROOT_V0_LOCAL_CREDENTIAL_REMEDIATION,
+                crate::chained_reader::BMC_SITE_WIDE_ROOT_V0_BACKEND_SOURCE_REMEDIATION
+            ),
+            SecretsError::BmcSiteWideRootV0CredentialMutationBlocked => write!(
+                f,
+                "persistent backend credential mutation is disabled for site-wide BMC root \
+                 version 0 because local sources own it; {}; {}",
+                crate::chained_reader::BMC_SITE_WIDE_ROOT_V0_LOCAL_CREDENTIAL_REMEDIATION,
+                crate::chained_reader::BMC_SITE_WIDE_ROOT_V0_BACKEND_SOURCE_REMEDIATION
+            ),
+        }
+    }
+}
+
+impl From<eyre::Report> for SecretsError {
+    fn from(value: eyre::Report) -> Self {
+        SecretsError::GenericError(value)
+    }
+}
+
+impl From<SecretsError> for eyre::Report {
+    fn from(value: SecretsError) -> Self {
+        match value {
+            SecretsError::GenericError(report) => report,
+            value @ SecretsError::UfmCredentialReadBlocked { .. } => eyre::eyre!("{value}"),
+            value @ SecretsError::UfmCredentialMutationBlocked { .. } => eyre::eyre!("{value}"),
+            value @ SecretsError::BmcSiteWideRootV0CredentialReadBlocked => {
+                eyre::eyre!("{value}")
+            }
+            value @ SecretsError::BmcSiteWideRootV0CredentialMutationBlocked => {
+                eyre::eyre!("{value}")
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use serial_test::serial;
+
+    use super::*;
+    use crate::credentials::{CredentialKey, Credentials, MqttCredentialType};
+
+    /// Removes an environment variable and restores it on drop, including
+    /// while unwinding from a panic.
+    struct ClearedEnvVar {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ClearedEnvVar {
+        fn clear(name: &'static str) -> Self {
+            let previous = std::env::var_os(name);
+            // SAFETY: callers mark tests `#[serial]`, which serializes the
+            // tests that read or write process environment variables.
+            unsafe { std::env::remove_var(name) };
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for ClearedEnvVar {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                // SAFETY: as in `clear`.
+                unsafe { std::env::set_var(self.name, value) };
+            }
+        }
+    }
+
+    #[test]
+    fn vault_is_named_only_by_an_address() {
+        let with_address = VaultConfig {
+            address: Some("https://vault.example:8200".to_string()),
+            ..Default::default()
+        };
+        let other_setting_only = VaultConfig {
+            kv_mount_location: Some("secrets".to_string()),
+            token: Some("t".to_string()),
+            ..Default::default()
+        };
+        let cases = [
+            ("config address", &with_address, None, true),
+            (
+                "env address",
+                &VaultConfig::default(),
+                Some("https://v"),
+                true,
+            ),
+            (
+                "empty env address",
+                &VaultConfig::default(),
+                Some(""),
+                false,
+            ),
+            ("no setting", &VaultConfig::default(), None, false),
+            ("non-address settings", &other_setting_only, None, false),
+        ];
+        for (name, config, env_address, want) in cases {
+            assert_eq!(vault_is_named(config, env_address), want, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn credential_reader_serves_file_source_without_vault_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("creds.yaml");
+        std::fs::write(
+            &path,
+            "mqtt_auth_by_credential_type:\n  DsxExchangeConsumer:\n    username: consumer\n    password: pw\n",
+        )
+        .expect("write credential file");
+        let config = CredentialConfig {
+            file: FileCredentialsConfig {
+                enabled: Some(true),
+                path: Some(path),
+                poll_interval: Some(Duration::from_millis(250)),
+            },
+            ..Default::default()
+        };
+
+        let reader = create_credential_reader_with(&config, None)
+            .await
+            .expect("no Vault setting is required");
+        let key = CredentialKey::MqttAuth {
+            credential_type: MqttCredentialType::DsxExchangeConsumer,
+        };
+        let found = reader.get_credentials(&key).await.expect("read");
+        assert_eq!(
+            found,
+            Some(Credentials::UsernamePassword {
+                username: "consumer".to_string(),
+                password: "pw".to_string(),
+            })
+        );
+        let other = CredentialKey::MqttAuth {
+            credential_type: MqttCredentialType::Dpa,
+        };
+        assert_eq!(reader.get_credentials(&other).await.expect("read"), None);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn credential_reader_fails_when_named_vault_cannot_be_built() {
+        // A named Vault that cannot start fails startup instead of being
+        // dropped from the chain. `resolve_vault_root_ca_path` falls back to
+        // VAULT_CACERT when the configured path is missing, so clear it.
+        let _cacert = ClearedEnvVar::clear("VAULT_CACERT");
+        let config = CredentialConfig {
+            vault: VaultConfig {
+                address: Some("https://vault.example:8200".to_string()),
+                vault_cacert: Some("/nonexistent/vault-ca.crt".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(create_credential_reader_with(&config, None).await.is_err());
+    }
+}

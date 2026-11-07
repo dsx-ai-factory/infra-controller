@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-api.name" . }}
+  namespace: {{ include "nico-api.namespace" . }}
+  labels:
+    {{- include "nico-api.labels" . | nindent 4 }}
+    app: {{ include "nico-api.name" . }}
+spec:
+  selector:
+    {{- include "nico-api.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: {{ .Values.service.grpc.port }}
+      name: grpc
+      protocol: TCP

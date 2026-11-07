@@ -1,0 +1,23 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package scout_firmware_upgrade;
+
+option go_package = "github.com/NVIDIA/infra-controller/rest-api/proto/core";
+
+message ScoutFirmwareUpgradeTask {
+  string upgrade_task_id = 1;
+  string component_type = 2;
+  string target_version = 3;
+  FileArtifact script = 4;
+  uint32 execution_timeout_seconds = 5;
+  uint32 artifact_download_timeout_seconds = 6;
+  repeated FileArtifact file_artifacts = 7;
+}
+
+message FileArtifact {
+  string url = 1;
+  string sha256 = 2;
+}

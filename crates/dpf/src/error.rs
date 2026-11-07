@@ -1,0 +1,182 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+//! Error types for the DPF SDK.
+
+use thiserror::Error;
+
+/// Error type for DPF operations.
+#[derive(Error, Debug)]
+pub enum DpfError {
+    #[error("kubernetes client error: {0}")]
+    KubeError(#[from] kube::Error),
+
+    #[error("resource not found: {kind} '{name}'")]
+    NotFound { kind: &'static str, name: String },
+
+    #[error("resource already exists: {kind} '{name}'")]
+    AlreadyExists { kind: &'static str, name: String },
+
+    /// A revision-fenced Kubernetes JSON Patch lost a race with another writer.
+    #[error("patch conflict for {kind} '{name}'")]
+    PatchConflict {
+        /// Kubernetes resource kind whose observation became stale.
+        kind: &'static str,
+        /// Name of the resource that must be observed again before retrying.
+        name: String,
+    },
+
+    #[error("timeout waiting for {operation}: {details}")]
+    Timeout { operation: String, details: String },
+
+    #[error("invalid state: {0}")]
+    InvalidState(String),
+
+    /// A DPUServiceInterface migration failed with retry context while retaining its repository cause.
+    #[error("{context}: {source}")]
+    MigrationFailed {
+        /// Description of the failed migration and its safe retry action.
+        context: String,
+        /// Repository failure that interrupted the migration.
+        #[source]
+        source: Box<DpfError>,
+    },
+
+    /// The current site-wide BMC credential is absent from its authoritative
+    /// source. DPF leaves any derived Secret unchanged until the source
+    /// supplies a value or coordinated per-device fencing can remove it.
+    #[error("BMC password source unavailable: {0}")]
+    BmcPasswordSourceUnavailable(String),
+
+    /// Local sources own version 0 of the site-wide BMC root but do not supply
+    /// it. The SDK rejects startup so source-policy activation is safe across
+    /// rolling deployments.
+    #[error("local BMC password source unavailable: {0}")]
+    LocalBmcPasswordSourceUnavailable(String),
+
+    #[error("configuration error: {0}")]
+    ConfigError(String),
+
+    #[error("watcher error: {0}")]
+    WatcherError(String),
+
+    #[error("JSON serialization error: {0}")]
+    SerializationError(#[from] serde_json::Error),
+}
+
+impl DpfError {
+    /// Recognizes create and conditional-write races so callers can reread before retrying safely.
+    pub fn is_already_exists_or_conflict(&self) -> bool {
+        matches!(
+            self,
+            Self::AlreadyExists { .. } | Self::PatchConflict { .. }
+        ) || matches!(self, Self::KubeError(kube::Error::Api(status)) if status.is_already_exists() || status.is_conflict())
+    }
+
+    /// Returns whether this error represents a missing DPF resource.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::NotFound { .. })
+            || matches!(self, Self::KubeError(kube::Error::Api(status)) if status.is_not_found())
+    }
+
+    /// Returns whether the configured source cannot supply the BMC password.
+    pub fn is_bmc_password_source_unavailable(&self) -> bool {
+        matches!(
+            self,
+            Self::BmcPasswordSourceUnavailable(_) | Self::LocalBmcPasswordSourceUnavailable(_)
+        )
+    }
+
+    /// Returns whether local ownership made BMC root version 0 unavailable.
+    pub(crate) fn is_local_bmc_password_source_unavailable(&self) -> bool {
+        matches!(self, Self::LocalBmcPasswordSourceUnavailable(_))
+    }
+
+    pub fn not_found(kind: &'static str, name: impl Into<String>) -> Self {
+        Self::NotFound {
+            kind,
+            name: name.into(),
+        }
+    }
+
+    pub fn already_exists(kind: &'static str, name: impl Into<String>) -> Self {
+        Self::AlreadyExists {
+            kind,
+            name: name.into(),
+        }
+    }
+
+    pub fn timeout(operation: impl Into<String>, details: impl Into<String>) -> Self {
+        Self::Timeout {
+            operation: operation.into(),
+            details: details.into(),
+        }
+    }
+}
+
+impl From<kube::runtime::watcher::Error> for DpfError {
+    fn from(e: kube::runtime::watcher::Error) -> Self {
+        Self::WatcherError(e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    /// Verifies repository and Kubernetes write races request an immediate reread while unrelated
+    /// failures do not, preventing permanent API errors from entering conflict handling.
+    #[test]
+    fn already_exists_or_conflict_classifies_retryable_write_races() {
+        value_scenarios!(
+            run = |error: DpfError| error.is_already_exists_or_conflict();
+            "repository races require a reread" {
+                // Repository create collisions require callers to validate the object returned by
+                // the reread.
+                DpfError::already_exists("DPUService", "shared") => true,
+                // Repository patch conflicts require a fresh resourceVersion before another write.
+                DpfError::PatchConflict {
+                    kind: "DPUService",
+                    name: "shared".to_string(),
+                } => true,
+            }
+
+            "Kubernetes races require a reread" {
+                // Raw Kubernetes create collisions carry the same reread requirement.
+                DpfError::KubeError(kube::Error::Api(Box::new(
+                    kube::core::Status::failure("already exists", "AlreadyExists").with_code(409),
+                ))) => true,
+                // Raw Kubernetes conditional-write conflicts also require a fresh observation.
+                DpfError::KubeError(kube::Error::Api(Box::new(
+                    kube::core::Status::failure("conflict", "Conflict").with_code(409),
+                ))) => true,
+            }
+
+            "non-race failures bypass conflict handling" {
+                // Raw Kubernetes validation failures must not enter create-or-patch conflict
+                // handling.
+                DpfError::KubeError(kube::Error::Api(Box::new(
+                    kube::core::Status::failure("invalid resource", "BadRequest").with_code(400),
+                ))) => false,
+                // Missing resources follow separate reconciliation behavior and must not enter this path.
+                DpfError::not_found("DPUService", "shared") => false,
+            }
+        );
+    }
+}

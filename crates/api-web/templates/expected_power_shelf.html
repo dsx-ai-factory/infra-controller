@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block title %}Expected Power Shelves{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="row">
+        <div class="col">
+            <h1>Expected Power Shelves</h1>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">Expected Power Shelves</h5>
+                </div>
+                <div class="card-body">
+                    {% if !power_shelves.is_empty() %}
+                    <div class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                            <tr>
+                                <th>Serial Number</th>
+                                <th>BMC MAC Address</th>
+                                <th>Explored BMC IP</th>
+                                <th>Rack ID</th>
+                                <th>Linked Power Shelf</th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            {% for shelf in power_shelves %}
+                            <tr>
+                                <td>{{ shelf.serial_number }}</td>
+                                <td>{{ shelf.bmc_mac_address }}</td>
+                                <td>{{ shelf.explored_bmc_ip }}</td>
+                                <td>{{ shelf.rack_id|rack_id_link|safe }}</td>
+                                <td>{{ shelf.power_shelf_id|power_shelf_id_link|safe }}</td>
+                            </tr>
+                            {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <p class="text-muted">No expected power shelves found.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

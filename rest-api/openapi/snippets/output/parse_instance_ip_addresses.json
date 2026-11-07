@@ -1,0 +1,14 @@
+[
+{
+   "name": "demo-compute-instance-1",
+   "ipAddresses": [
+      "192.166.128.3"
+   ]
+},
+{
+   "name": "demo-compute-instance-0",
+   "ipAddresses": [
+      "192.166.128.2"
+   ]
+}
+]

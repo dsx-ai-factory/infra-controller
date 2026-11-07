@@ -1,0 +1,23 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+
+ROOTFS_CPIO="${OUTPUTDIR}/scout.cpio.zst"
+ROOTFS_SQUASHFS="${OUTPUTDIR}/scout.squashfs"
+WORKDIR="$(mktemp -d "${OUTPUTDIR}/scout-squashfs.XXXXXX")"
+
+cleanup() {
+	rm -rf "${WORKDIR}"
+}
+trap cleanup EXIT
+
+mkdir -p "${WORKDIR}/root"
+zstd -dc "${ROOTFS_CPIO}" | (cd "${WORKDIR}/root" && cpio -id --quiet)
+
+rm -f "${ROOTFS_SQUASHFS}"
+mksquashfs "${WORKDIR}/root" "${ROOTFS_SQUASHFS}" \
+	-comp zstd \
+	-Xcompression-level 19 \
+	-b 1M \
+	-noappend \
+	-no-progress

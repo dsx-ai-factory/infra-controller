@@ -1,0 +1,123 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[package]
+name = "carbide-api-web"
+version = "0.0.1"
+edition.workspace = true
+description = "Admin web UI (HTML/askama) for the carbide-api server"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "carbide_api_web"
+
+[dependencies]
+# Internal dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+carbide-api-core = { path = "../api-core", default-features = false }
+carbide-api-db = { path = "../api-db", default-features = false }
+carbide-api-model = { path = "../api-model", default-features = false }
+carbide-authn = { path = "../authn" }
+carbide-health-report = { path = "../health-report" }
+carbide-macros = { path = "../macros" }
+carbide-measured-boot = { path = "../measured-boot", features = ["sqlx"] }
+carbide-rpc = { path = "../rpc", features = ["sqlx", "model"] }
+carbide-rpc-utils = { path = "../rpc-utils" }
+carbide-utils = { path = "../utils" }
+carbide-uuid = { path = "../uuid", features = ["sqlx"] }
+carbide-version = { path = "../version" }
+config-version = { path = "../config-version", features = ["sqlx"] }
+trace-propagation = { path = "../trace-propagation" }
+
+# External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+ansi-to-html = { workspace = true }
+askama = { workspace = true, features = ["serde_json"] }
+askama_escape = { workspace = true }
+axum = { workspace = true, features = ["http2"] }
+axum-extra = { workspace = true, features = [
+  "cookie",
+  "cookie-private",
+  "typed-header",
+] }
+base64 = { workspace = true }
+chrono = { workspace = true }
+eyre = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+hyper = { workspace = true, features = ["full"] }
+ipnetwork = { workspace = true, features = ["serde"] }
+itertools = { workspace = true }
+lazy_static = { workspace = true }
+mac_address = { workspace = true }
+oauth2 = { workspace = true, default-features = false }
+rand = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true, default-features = false, features = [
+  "rustls",
+  "stream",
+] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+sqlx = { workspace = true, features = [
+  "runtime-tokio",
+  "tls-rustls",
+  "mac_address",
+  "ipnetwork",
+  "uuid",
+  "postgres",
+  "chrono",
+  "macros",
+  "json",
+] }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tower-http = { workspace = true, features = [
+  "add-extension",
+  "auth",
+  "csrf",
+  "normalize-path",
+] }
+tracing = { workspace = true }
+url = { workspace = true, features = ["serde"] }
+urlencoding = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+[build-dependencies]
+carbide-version = { path = "../version" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# The admin-UI tests build a real `Api` through carbide-test-harness. These entries
+# also enable test-support features and provide request-body helpers.
+# `db`/`model` are the library names of the existing normal dependencies.
+carbide-api-model = { path = "../api-model", features = ["test-support"] }
+carbide-redfish = { path = "../redfish", features = ["test-support"] }
+carbide-sqlx-testing = { path = "../sqlx-testing", default-features = false }
+carbide-test-harness = { path = "../test-harness" }
+carbide-test-support = { path = "../test-support" }
+http-body-util = { workspace = true }
+sqlx = { workspace = true, features = [
+  "runtime-tokio",
+  "tls-rustls",
+  "postgres",
+  "macros",
+] }
+tower = { workspace = true }

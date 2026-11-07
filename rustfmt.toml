@@ -1,0 +1,16 @@
+# Requires nightly rustfmt — these are unstable options.
+# CI enforces via `cargo make check-format-nightly`.
+unstable_features = true
+
+edition = "2024"
+
+# Import organization: merge use statements at the module level and group
+# into std / external / crate sections separated by blank lines.
+imports_granularity = "Module"
+group_imports = "StdExternalCrate"
+
+# Format Rust code snippets inside doc comments.
+format_code_in_doc_comments = true
+
+# Convert #[doc = "..."] attributes to /// doc comments.
+normalize_doc_attributes = true

@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+
+{% block title %}IPAM / DHCP{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>IPAM &rsaquo; DHCP Allocations</h1>
+<p>Showing {{ entries.len() }} address allocations. Default lease duration: {{ lease_duration_secs / 86400 }} days.</p>
+
+<table class="sortable overview">
+	<thead>
+		<tr>
+			<th>IP Address</th>
+			<th>MAC Address</th>
+			<th>Machine ID</th>
+			<th>Hostname</th>
+			<th>Created</th>
+			<th>Last DHCP Renew</th>
+			<th>Time Remaining</th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for entry in entries %}
+			<tr>
+				<td><a href="/admin/search?q={{ entry.ip_address }}">{{ entry.ip_address }}</a></td>
+				<td>{{ entry.mac_address }}</td>
+				<td>{% if !entry.machine_id.is_empty() %}<a href="/admin/machine/{{ entry.machine_id }}">{{ entry.machine_id }}</a>{% endif %}</td>
+				<td>{{ entry.hostname }}</td>
+				<td><span onmouseover="setTitleToLocalizedTime(this)">{{ entry.created }}</span></td>
+				<td>
+					{% if !entry.last_dhcp.is_empty() %}
+						<span onmouseover="setTitleToLocalizedTime(this)">{{ entry.last_dhcp }}</span>
+					{% else %}
+						<span class="muted">Never</span>
+					{% endif %}
+				</td>
+				<td class="time-remaining" data-last-dhcp="{{ entry.last_dhcp_rfc3339 }}" data-lease-secs="{{ lease_duration_secs }}">
+					{% if entry.last_dhcp.is_empty() %}
+						<span class="muted">&mdash;</span>
+					{% endif %}
+				</td>
+			</tr>
+		{% endfor %}
+	</tbody>
+</table>
+{% endblock %}
+
+{% block script %}
+function computeTimeRemaining() {
+	const cells = document.querySelectorAll('.time-remaining');
+	const now = Date.now();
+	cells.forEach(cell => {
+		const lastDhcp = cell.getAttribute('data-last-dhcp');
+		const leaseSecs = parseInt(cell.getAttribute('data-lease-secs'), 10);
+		if (!lastDhcp) return;
+
+		const leaseStart = new Date(lastDhcp).getTime();
+		const leaseEnd = leaseStart + (leaseSecs * 1000);
+		const remaining = leaseEnd - now;
+
+		if (remaining <= 0) {
+			cell.innerHTML = '<span class="bubble error">Expired</span>';
+			return;
+		}
+
+		const days = Math.floor(remaining / 86400000);
+		const hours = Math.floor((remaining % 86400000) / 3600000);
+		const minutes = Math.floor((remaining % 3600000) / 60000);
+
+		let text = '';
+		if (days > 0) text += days + 'd ';
+		if (hours > 0 || days > 0) text += hours + 'h ';
+		text += minutes + 'm';
+
+		if (days < 1) {
+			cell.innerHTML = '<span class="bubble warning">' + text.trim() + '</span>';
+		} else {
+			cell.innerHTML = '<span class="bubble success">' + text.trim() + '</span>';
+		}
+	});
+}
+
+document.addEventListener("DOMContentLoaded", computeTimeRemaining);
+{% endblock %}

@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "nico-rest-site-agent.name" . }}
+  namespace: {{ include "nico-rest-site-agent.namespace" . }}
+  labels:
+    {{- include "nico-rest-site-agent.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "nico-rest-site-agent.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nico-rest-site-agent.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "nico-rest-site-agent.name" . }}
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "1"
+      containers:
+        - name: site-agent
+          image: "{{ include "nico-rest-site-agent.image" . }}"
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+              name: http
+            - containerPort: {{ .Values.service.metricsPort }}
+              name: metrics
+          envFrom:
+            - configMapRef:
+                name: {{ include "nico-rest-site-agent.name" . }}-config
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: BOOTSTRAP_SECRET_NAME
+              value: {{ .Values.secrets.siteRegistration | quote }}
+          volumeMounts:
+            - name: site-registration
+              mountPath: /etc/sitereg
+              readOnly: true
+            - name: nico-certs
+              mountPath: /etc/core-grpc
+              readOnly: true
+            - name: temporal-certs
+              mountPath: /etc/temporal-certs
+              readOnly: true
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.readinessProbe }}
+          {{- if .enabled }}
+          readinessProbe:
+            {{- toYaml (omit . "enabled") | nindent 12 }}
+          {{- end }}
+          {{- end }}
+          {{- with .Values.livenessProbe }}
+          {{- if .enabled }}
+          livenessProbe:
+            {{- toYaml (omit . "enabled") | nindent 12 }}
+          {{- end }}
+          {{- end }}
+      volumes:
+        - name: site-registration
+          secret:
+            secretName: {{ .Values.secrets.siteRegistration }}
+        - name: nico-certs
+          secret:
+            secretName: {{ .Values.secrets.nicoTlsCerts }}
+            optional: true
+        - name: temporal-certs
+          secret:
+            secretName: {{ .Values.secrets.temporalClientCerts }}
+            optional: true
+            items:
+              - key: otp
+                path: otp
+              - key: cacertificate
+                path: ca/ca.crt
+              - key: certificate
+                path: client/tls.crt
+              - key: key
+                path: client/tls.key

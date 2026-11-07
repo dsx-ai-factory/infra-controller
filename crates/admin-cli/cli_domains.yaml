@@ -1,0 +1,91 @@
+# Operator-facing grouping of top-level `nico-admin-cli` commands, used to
+# organize the generated CLI reference under docs/manuals/nico-admin-cli (run
+# `nico-admin-cli generate-cli-docs`).
+#
+# Keyed by domain; each value is the list of command names (as rendered in
+# --help, e.g. "managed-host", "tenant-key-set") in that domain. When you add a
+# new top-level command, add it here under the right domain — the
+# `every_command_has_a_domain` test fails CI if a visible command is missing,
+# and `no_unknown_commands_in_domain_map` fails if an entry here no longer
+# matches a real command.
+
+hardware:
+  - backend
+  - machine
+  - managed-host
+  - host
+  - machine-interfaces
+  - machine-validation
+  - dpu
+  - dpu-remediation
+  - dpf
+  - dpa
+  - bmc-machine
+  - boot-interface
+  - boot-override
+  - credential
+  - power-shelf
+  - switch
+  - managed-switch
+  - rack
+  - firmware
+  - component-manager
+  - attestation
+  - redfish
+  - rms
+  - mlx
+  - scout-stream
+  - tpm-ca
+  - sku
+  - inventory
+  - set
+  - trim-table
+  - nvl-partition
+  - nvlink-nmxc-endpoints
+  - browse
+
+network:
+  - vpc
+  - vpc-peering
+  - vpc-prefix
+  - site-prefix
+  - network-segment
+  - network-device
+  - network-security-group
+  - route-server
+  - routing-profile
+  - domain
+  - ip
+  - ib-partition
+  - logical-partition
+  - resource-pool
+  - nvl-domain
+  - spx-partition
+  - spx-maintenance
+
+tenant:
+  - tenant
+  - tenant-key-set
+  - instance
+  - instance-type
+  - compute-allocation
+  - expected-machine
+  - expected-power-shelf
+  - expected-rack
+  - expected-rack-group
+  - expected-nvlink-domain
+  - expected-switch
+  - operating-system
+  - os-image
+  - ipxe-template
+  - extension-service
+  - site-explorer
+
+admin:
+  - version
+  - generate-shell-complete
+  - ping
+  - dev-env
+  - ssh
+  - jump
+  - secrets

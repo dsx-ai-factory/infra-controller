@@ -1,0 +1,55 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: certificate dnsNames and uris configurability
+templates:
+  - certificate.yaml
+release:
+  namespace: nico-rest
+tests:
+  - it: generates dnsNames and uris from the chart name and namespace by default
+    asserts:
+      - isKind:
+          of: Certificate
+      - equal:
+          path: spec.dnsNames
+          value:
+            - nico-rest-site-agent
+            - nico-rest-site-agent.nico-rest
+            - nico-rest-site-agent.nico-rest.svc.cluster.local
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://nico.local/nico-rest/sa/nico-rest-site-agent
+
+  - it: fully overrides dnsNames while uris falls back to the generated SPIFFE URI
+    set:
+      certificate:
+        dnsNames:
+          - site-agent.override.example.com
+    asserts:
+      - equal:
+          path: spec.dnsNames
+          value:
+            - site-agent.override.example.com
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://nico.local/nico-rest/sa/nico-rest-site-agent
+
+  - it: fully overrides uris while dnsNames falls back to the generated names
+    set:
+      certificate:
+        uris:
+          - spiffe://nico.local/nico-system/sa/elektra-site-agent
+    asserts:
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://nico.local/nico-system/sa/elektra-site-agent
+      - equal:
+          path: spec.dnsNames
+          value:
+            - nico-rest-site-agent
+            - nico-rest-site-agent.nico-rest
+            - nico-rest-site-agent.nico-rest.svc.cluster.local

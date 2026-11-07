@@ -1,0 +1,17 @@
+## local-path-provisioner values
+## Provisions PVs from host path on whichever node the pod schedules to.
+## Default host path: /opt/local-path-provisioner (configurable below)
+
+storageClass:
+  ## "local-path" StorageClass — reclaimPolicy: Delete (created by chart)
+  ## A separate "local-path-persistent" StorageClass with Retain is created
+  ## via helmfile postsync hook (operators/storageclass-local-path-persistent.yaml)
+  name: local-path
+  defaultClass: false   # don't make this the cluster default
+  reclaimPolicy: Delete
+
+## Host path where PV data is stored on each node
+nodePathMap:
+  - node: DEFAULT
+    paths:
+      - /opt/local-path-provisioner

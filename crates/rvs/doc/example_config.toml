@@ -1,0 +1,97 @@
+# =============================================================================
+# RVS SERVICE CONFIGURATION
+# =============================================================================
+#
+# This is the service-level configuration for the Rack Validation Service.
+# It controls how RVS itself runs -- networking, connection to NICo,
+# TLS, artifact caching, etc.
+#
+# This is NOT the scenario definition (which racks to validate and how).
+# Scenario configs are loaded separately from the paths specified in
+# `scenario_config_paths`.
+#
+# Environment variable overrides: all fields can be overridden with
+# CARBIDE_RVS__<SECTION>__<FIELD> (double underscore as separator).
+# For example: CARBIDE_RVS__NICO__URL=https://...
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# NETWORK
+# -----------------------------------------------------------------------------
+
+# gRPC listen address (for future inbound RPCs -- health checks, admin, etc.)
+listen = "[::]:1089"
+
+# Metrics endpoint (Prometheus scrape target)
+metrics_endpoint = "[::]:9019"
+
+# How long to wait between validation poll cycles
+poll_interval_secs = 30
+
+# -----------------------------------------------------------------------------
+# NICo CONNECTION
+# -----------------------------------------------------------------------------
+# RVS connects to NICo (Carbide API) to query rack/partition info, request
+# instance provisioning, and report validation results.
+
+[nico]
+
+# NICo gRPC endpoint URL
+url = "https://carbide-api.forge-system.svc.cluster.local:1079"
+
+# Timeout for individual NICo RPCs
+rpc_timeout_secs = 30
+
+# -----------------------------------------------------------------------------
+# TLS / mTLS
+# -----------------------------------------------------------------------------
+# RVS uses SPIFFE-based mTLS for communication with NICo.
+# Certificates are provisioned by cert-manager and mounted into the pod.
+
+[tls]
+
+identity_pemfile_path = "/var/run/secrets/spiffe.io/tls.crt"
+identity_keyfile_path = "/var/run/secrets/spiffe.io/tls.key"
+root_cafile_path = "/var/run/secrets/spiffe.io/ca.crt"
+
+# -----------------------------------------------------------------------------
+# SCENARIO
+# -----------------------------------------------------------------------------
+# Paths to scenario definition files (one per rack model/release).
+# Mounted into the pod as a ConfigMap.
+
+scenario_config_paths = ["/etc/forge/rvs/scenario.toml"]
+
+# -----------------------------------------------------------------------------
+# SOT (SOURCE OF TRUTH)
+# -----------------------------------------------------------------------------
+# Path to the SOT JSON file. RVS resolves `sotpath` artifacts -- drivers and
+# packages under BoardSKUs[].Components.Software -- from this document.
+#
+# TODO: stopgap. The SOT should come from a single authoritative source, not a
+# file placed per deployment. #1861 moved firmware-object management to RMS and
+# made the SOT push-only, so NICo no longer serves it for read -- the API
+# surface likely needs extending to expose it. Until then, point at a local file.
+
+sot_path = "/etc/forge/rvs/sot.json"
+
+# -----------------------------------------------------------------------------
+# ARTIFACT CACHE
+# -----------------------------------------------------------------------------
+# RVS pre-downloads all artifacts defined in the scenario before kicking
+# off any validation. This section controls where and how.
+
+[artifact_cache]
+
+# Local directory where artifacts are cached
+cache_dir = "/rvs-cache"
+
+# Port the HTTP cache server listens on (nodes pull artifacts from here)
+serve_port = 8080
+
+# Maximum time to wait for a single artifact download
+download_timeout_secs = 600
+
+# Number of concurrent artifact downloads
+max_concurrent_downloads = 4

@@ -1,0 +1,74 @@
+## =============================================================================
+## Legacy carbide/forge overrides — NICo Bare Metal Manager
+## =============================================================================
+## The charts default to nico names and the nico.local trust domain. This file
+## flips every subchart back to the legacy carbide/forge world (resource names,
+## certificate identity, client cross-references, and API/proxy authorization),
+## for clusters not yet migrated off the pre-#1532 carbide/forge identities.
+##
+## Layer it on top of your environment values:
+##   helm upgrade --install nico ./helm -n nico-system -f values-full.yaml -f carbide-legacy.yaml
+## =============================================================================
+
+## global propagates to every subchart (drives cert SANs + the API/proxy auth
+## trust domain).
+global:
+  spiffe:
+    # Legacy SPIFFE trust domain (see GH-2060). Rust/Helm default is nico.local;
+    # keep forge.local here until every client cert and Vault URI SAN is issued
+    # under nico.local. Path prefixes (/forge-system/machine/, /forge-system/sa/)
+    # come from auth.namespace below, not from this trustDomain field.
+    trustDomain: forge.local
+
+nico-api:
+  nameOverride: carbide-api
+  certificate:
+    identityNamespace: forge-system
+  auth:
+    namespace: forge-system          # accepted /<ns>/sa/ and /<ns>/machine/ paths
+    principals:
+      dhcp: carbide-dhcp
+      dns: carbide-dns
+
+nico-bmc-proxy:
+  nameOverride: carbide-bmc-proxy
+  apiServiceName: carbide-api
+  certificate:
+    identityNamespace: forge-system
+  auth:
+    namespace: forge-system
+    apiPrincipal: carbide-api         # API SPIFFE id allowed to call the proxy
+
+nico-dhcp:
+  nameOverride: carbide-dhcp
+  apiServiceName: carbide-api         # client -> API host
+  certificate:
+    identityNamespace: forge-system
+
+nico-dns:
+  nameOverride: carbide-dns
+  apiServiceName: carbide-api
+  certificate:
+    identityNamespace: forge-system
+
+nico-dsx-exchange-consumer:
+  nameOverride: carbide-dsx-exchange-consumer
+  certificate:
+    identityNamespace: forge-system
+
+nico-hardware-health:
+  nameOverride: carbide-hardware-health
+  certificate:
+    identityNamespace: forge-system
+
+nico-pxe:
+  nameOverride: carbide-pxe
+  apiServiceName: carbide-api
+  certificate:
+    identityNamespace: forge-system
+
+nico-ssh-console-rs:
+  nameOverride: carbide-ssh-console-rs
+  apiServiceName: carbide-api
+  certificate:
+    identityNamespace: forge-system

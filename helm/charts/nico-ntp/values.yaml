@@ -1,0 +1,69 @@
+# Default values for nico-ntp.
+#
+# Replaces the forged-kustomize base at forged/bases/carbide/ntp/. Deploys a
+# 3-replica chrony StatefulSet with optional per-pod LoadBalancer Services so
+# each instance gets a stable MetalLB VIP that DPUs and bare-metal hosts can
+# point at via the kea DHCP hook's nico-ntpserver parameter.
+
+enabled: true
+
+replicas: 3
+
+image:
+  repository: dockurr/chrony
+  tag: latest
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# chrony container env. Mirrors forged/bases/carbide/ntp/statefulset.yaml — the
+# dockurr/chrony image translates these into chrony.conf at runtime.
+#
+# - upstreamServers: NTP servers chrony peers with for external time sync.
+#   Cluster-local peer hostnames are appended automatically (one per pod) so
+#   the three chrony replicas also peer with each other.
+# - directives: extra chrony.conf directives (e.g. "ratelimit", "allow ...").
+ntp:
+  upstreamServers:
+    - time1.google.com
+    - time2.google.com
+    - time3.google.com
+    - time4.google.com
+  directives:
+    - ratelimit
+
+externalService:
+  enabled: false
+  type: LoadBalancer
+  # Empty values keep Kubernetes defaults. Use SingleStack with [IPv6] for an
+  # IPv6-only Service, or RequireDualStack with [IPv4, IPv6] for both families.
+  # PreferDualStack allows fallback on a single-stack cluster. An existing
+  # Service's primary family (the first entry) cannot be changed in place.
+  ipFamilyPolicy: ""
+  ipFamilies: []
+  # Local preserves client source IPs. MetalLB only lets Local Services share
+  # an IP with Services that select the same pods, so each NTP replica keeps
+  # its own IP under Local. Set "" to use the Kubernetes default (Cluster).
+  externalTrafficPolicy: Local
+  # Per-pod annotations applied to the corresponding nico-ntp-external-{i}
+  # LoadBalancer Service. The list is indexed in pod order; entry [0] goes on
+  # the Service backing pod nico-ntp-0, [1] on nico-ntp-1, etc.
+  #
+  # Example (assigns a fixed MetalLB VIP per instance):
+  #   perPodAnnotations:
+  #     - metallb.universe.tf/loadBalancerIPs: "10.180.126.165"
+  #     - metallb.universe.tf/loadBalancerIPs: "10.180.126.166"
+  #     - metallb.universe.tf/loadBalancerIPs: "10.180.126.167"
+  perPodAnnotations: []
+
+resources: {}
+
+podSecurityContext: {}
+
+securityContext: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

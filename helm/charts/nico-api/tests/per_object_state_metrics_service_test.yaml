@@ -1,0 +1,45 @@
+suite: Per-object state metrics Service
+templates:
+  - per-object-state-metrics-service.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: is absent by default
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: is absent when enabled with empty objectTypes
+    set:
+      service:
+        perObjectStateMetrics:
+          enabled: true
+          objectTypes: []
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: exposes the configured object metrics port
+    set:
+      service:
+        perObjectStateMetrics:
+          enabled: true
+          port: 9191
+          objectTypes:
+            - machine
+    asserts:
+      - isKind:
+          of: Service
+      # The slow metrics endpoint also needs to be reachable from IPv6 collectors.
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: PreferDualStack
+      - equal:
+          path: metadata.labels["app.kubernetes.io/metrics"]
+          value: nico-api-object-metrics
+      - equal:
+          path: spec.ports[0].port
+          value: 9191
+      - equal:
+          path: spec.ports[0].targetPort
+          value: object-metrics

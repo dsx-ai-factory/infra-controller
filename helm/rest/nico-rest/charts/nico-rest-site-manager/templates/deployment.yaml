@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nico-rest-site-manager.name" . }}
+  namespace: {{ include "nico-rest-site-manager.namespace" . }}
+  labels:
+    {{- include "nico-rest-site-manager.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "nico-rest-site-manager.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nico-rest-site-manager.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "nico-rest-site-manager.name" . }}
+      # 1000 is the `nvs` user the image declares. The image names it rather
+      # than giving a UID, which the kubelet cannot verify, so runAsNonRoot
+      # needs the number spelled out here.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: site-manager
+          image: "{{ include "nico-rest-site-manager.image" . }}"
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          args:
+            - --listen-port={{ .Values.args.listenPort }}
+            - --creds-manager-url={{ include "nico-rest-site-manager.credsManagerUrl" . }}
+            - --creds-manager-ca-path={{ .Values.args.credsManagerCaPath }}
+            - --tls-cert-path={{ .Values.args.tlsCertPath }}
+            - --tls-key-path={{ .Values.args.tlsKeyPath }}
+            - --namespace={{ include "nico-rest-site-manager.namespace" . }}
+            {{- if .Values.args.debug }}
+            - --debug
+            {{- end }}
+          ports:
+            - containerPort: {{ .Values.service.port }}
+              name: https
+          {{- with .Values.extraEnv }}
+          env:
+            {{- range $k, $v := . }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- end }}
+          volumeMounts:
+            - name: tls-certs
+              mountPath: /etc/tls
+              readOnly: true
+            - name: credsmgr-ca
+              mountPath: /etc/credsmgr-ca
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.service.port }}
+              scheme: HTTPS
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.service.port }}
+              scheme: HTTPS
+            initialDelaySeconds: 30
+            periodSeconds: 15
+      volumes:
+        - name: tls-certs
+          secret:
+            secretName: {{ .Values.certificate.secretName }}
+        # Only the CA certificate is projected. The signing key lives in the
+        # same Secret and Site Manager has no business reading it.
+        - name: credsmgr-ca
+          secret:
+            secretName: {{ .Values.credsManagerCa.secretName }}
+            items:
+              - key: {{ .Values.credsManagerCa.key }}
+                path: ca.crt
+        # Site Manager skips its own cert issuance while `args.tlsCertPath` and
+        # `args.tlsKeyPath` are set. Clearing either one sends it back to
+        # writing /tmp/mgr.cert, so keep this writable alongside the read-only
+        # root filesystem.
+        - name: tmp
+          emptyDir: {}

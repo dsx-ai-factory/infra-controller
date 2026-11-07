@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Agent Gateway discovery metadata
+templates:
+  - service.yaml
+tests:
+  - it: marks the MCP service port for Agent Gateway discovery
+    asserts:
+      - equal:
+          path: metadata.labels["app.kubernetes.io/name"]
+          value: nico-mcp
+      - equal:
+          path: spec.ports[0].name
+          value: mcp
+      - equal:
+          path: spec.ports[0].appProtocol
+          value: agentgateway.dev/mcp

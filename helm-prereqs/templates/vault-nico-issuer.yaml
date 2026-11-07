@@ -1,0 +1,33 @@
+{{- if .Values.certManager.vaultIssuer.create }}
+## =============================================================================
+## Vault-backed ClusterIssuer for NICo PKI
+## Issues certificates via Vault PKI engine (nicoca/sign/nico-cluster).
+## Requires: Vault PKI configured (vault-pki-config Job), cert-manager Vault SA.
+## =============================================================================
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: vault-nico-issuer
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "15"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  vault:
+    path: {{ .Values.vault.pkiMount }}/sign/{{ .Values.vault.pkiRole }}
+    server: {{ .Values.vault.address }}
+    {{- with .Values.vault.namespace }}
+    namespace: {{ . | quote }}
+    {{- end }}
+    caBundleSecretRef:
+      name: site-root
+      key: ca.crt
+    auth:
+      kubernetes:
+        role: cert-manager-nico-issuer
+        mountPath: /v1/auth/kubernetes
+        secretRef:
+          name: vault-nicoca-issuer-token
+          key: token
+{{- end }}

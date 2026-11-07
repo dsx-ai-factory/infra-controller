@@ -1,0 +1,9 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "nico-ssh-console-rs.name" . }}-certificate
+  namespace: {{ include "nico-ssh-console-rs.namespace" . }}
+  labels:
+    {{- include "nico-ssh-console-rs.labels" . | nindent 4 }}
+spec:
+  {{- include "nico-ssh-console-rs.certificateSpec" (dict "name" (printf "%s-certificate" (include "nico-ssh-console-rs.name" .)) "svcName" (include "nico-ssh-console-rs.name" .) "cert" .Values.certificate "global" .Values.global "namespace" (include "nico-ssh-console-rs.namespace" .)) | nindent 2 }}

@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+version: v1
+name: github.com/NVIDIA/infra-controller/rest-api/flow
+lint:
+  use:
+    - DEFAULT
+breaking:
+  use:
+    - FILE

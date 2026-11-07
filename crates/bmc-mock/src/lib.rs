@@ -1,0 +1,406 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+//! Mock BMCs with hardware-specific Redfish inventories and stateful management operations.
+//!
+//! # Architecture and extension rules
+//!
+//! Select the hardware representation and its capabilities when constructing the BMC:
+//!
+//! ```text
+//! HardwareType / MachineInfo
+//!     -> hw::<platform> profile
+//!     -> redfish resource/service configs
+//!     -> resource/service state
+//!     -> Redfish request handlers
+//! ```
+//!
+//! `machine_info` selects profiles and supplies machine identity and caller-provided settings.
+//! `hw` owns the platform's inventory, resource IDs, initial values, and choice of supported
+//! protocol behavior. `redfish` owns resource schemas, builders, HTTP handling, and the state
+//! transitions of the configured features. `mock_machine_router` assembles configs, state,
+//! callbacks, and routes before serving requests. See `hw/mod.rs` and `redfish/mod.rs` for
+//! the corresponding extension templates.
+//!
+//! Hardware code uses Redfish configs and builders. Keep new Redfish code independent of
+//! hardware profile types: handlers must not inspect `HardwareType`, recognize platforms
+//! from model strings or resource IDs, or construct hardware profiles during a request.
+//! A new platform should reuse existing protocol implementations through configuration.
+//!
+//! State may contain platform-specific or OEM features. Select and fully initialize those
+//! features before serving requests, using an explicit config, capability, or OEM state
+//! variant. During requests, dispatch on that configured behavior. Runtime operations may
+//! change values and perform configured transitions; they must not infer missing platform
+//! capabilities or lazily install them. Simulator integration may supply runtime values
+//! through explicit APIs with documented support and lifecycle semantics.
+//!
+//! Distinguish feature support from its mutable value. Use an optional feature config/state
+//! for optional support, and make advertised links and endpoint availability follow the same
+//! source of truth. A disabled feature value is different from an unsupported feature.
+//! Constructors must return ready-to-use state without a separate platform-specific fix-up.
+//!
+//! Keep external machine effects behind callbacks and explicit events. Protocol handlers
+//! should not acquire dependencies on machine-a-tron or a particular simulation backend.
+//!
+//! These rules govern additions and changes even where existing code has exceptions.
+//! Do not copy an exception as an extension template; keep unrelated architectural cleanup
+//! in a separate refactor.
+
+use std::borrow::Cow;
+use std::fmt;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+pub mod actor;
+mod ipmi;
+pub mod ipmi_sim;
+pub mod libvirt;
+pub mod persistence;
+pub mod simulated;
+
+mod auth_router;
+pub mod availability;
+mod bmc_state;
+mod combined_server;
+mod event_controls;
+mod http;
+mod hw;
+pub mod infiniband;
+mod json;
+pub mod mac_address_pool;
+mod machine_info;
+mod middleware_router;
+mod mock_machine_router;
+mod nvue;
+mod power_state;
+mod rack_info;
+mod redfish;
+mod sse;
+mod tar_router;
+pub mod test_support;
+pub mod tls;
+
+pub use bmc_state::{BmcEvent, BmcState};
+/// Builds the authority-based router from shared device routes.
+/// Registry wrappers can retain ownership metadata while exposing these routes.
+pub fn combined_router(
+    routes: impl Into<
+        std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, axum::Router>>>,
+    >,
+) -> axum::Router {
+    carbide_axum_utils::authority_router::authority_router(routes.into())
+}
+pub use carbide_axum_utils::injection;
+pub use combined_server::{CombinedServer, ListenerOrAddress};
+pub use http::redfish_error_envelope;
+pub use hw::rack::{RackElevation, RackPlacement, RackUnit, TrayPlacement};
+pub use machine_info::{
+    DpuFirmwareVersions, DpuMachineInfo, DpuSettings, HostFirmwareVersions, HostMachineInfo,
+    MachineInfo,
+};
+pub use mock_machine_router::{
+    EventServiceOverride, MachineRouterOptions, machine_router, machine_router_with_extension,
+    machine_router_with_injection_store,
+};
+pub use nv_redfish::schema::resource::{PowerState, ResetType as ResourceResetType};
+/// A switch's NVUE REST API, served at its NVOS address, and the simulation
+/// controls over what it reports.
+pub use nvue::{
+    LeakState, NvueState, SystemHealthStatus, UnknownLeakSensor, UnknownUser, nvue_router,
+};
+pub use power_state::validate_power_reset;
+pub use rack_info::RackInfo;
+/// BMC account state and the credential snapshot type used to persist and
+/// restore rotated passwords across a mock rebuild.
+pub use redfish::account_service::AccountServiceState;
+pub use redfish::event_service::{
+    EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState, EventServiceStats,
+};
+pub use redfish::update_service::{
+    BmcTaskState, DpuOsImage, DpuOsStatus, DpuOsStatusSource, UnknownBmcTaskState,
+};
+pub use redfish::virtual_media::{
+    DeviceConfig as VirtualMediaDeviceConfig, VirtualMediaContents, VirtualMediaDrive,
+    VirtualMediaGuard, VirtualMediaUpdate,
+};
+pub use sse::StreamStep;
+
+pub const DUMMY_FACTORY_USERNAME: &str = "root";
+pub const DUMMY_FACTORY_PASSWORD: &str = "factory_password";
+/// The NVOS administrator of a simulated switch, with
+/// [`DUMMY_FACTORY_PASSWORD`] until a rotation changes it.
+pub const DUMMY_NVOS_USERNAME: &str = "admin";
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+pub enum RackType {
+    #[serde(rename = "wiwynn_gb200_nvl72")]
+    WiwynnGb200Nvl72,
+    #[serde(rename = "lenovo_gb300_nvl72")]
+    LenovoGb300Nvl72,
+}
+
+impl fmt::Display for RackType {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WiwynnGb200Nvl72 => formatter.write_str("WIWYNN GB200 NVL72"),
+            Self::LenovoGb300Nvl72 => formatter.write_str("Lenovo GB300 NVL72"),
+        }
+    }
+}
+
+#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+pub enum HardwareType {
+    #[serde(rename = "dell_poweredge_r750")]
+    #[default]
+    DellPowerEdgeR750,
+    #[serde(rename = "dell_poweredge_r760_bf4")]
+    DellPowerEdgeR760Bf4,
+    #[serde(rename = "wiwynn_gb200_nvl")]
+    WiwynnGB200Nvl,
+    #[serde(rename = "lenovo_gb300_nvl")]
+    LenovoGB300Nvl,
+    #[serde(rename = "nvidia_dgx_gb300")]
+    NvidiaDgxGb300,
+    #[serde(rename = "supermicro_gb300_nvl")]
+    SupermicroGb300Nvl,
+    #[serde(rename = "nvidia_dgx_vr")]
+    NvidiaDgxVr,
+    #[serde(rename = "liteon_power_shelf")]
+    LiteOnPowerShelf,
+    #[serde(rename = "delta_power_shelf")]
+    DeltaPowerShelf,
+    #[serde(rename = "nvidia_switch_nd5200_ld")]
+    NvidiaSwitchNd5200Ld,
+    #[serde(rename = "nvidia_switch_n5700_ld")]
+    NvidiaSwitchN5700Ld,
+    #[serde(rename = "nvidia_dgx_h100")]
+    NvidiaDgxH100,
+    #[serde(rename = "generic_ami")]
+    GenericAmi,
+    #[serde(rename = "hpe_proliant_dl380a_gen11")]
+    HpeProliantDl380aGen11,
+    /// A non-GB300 Supermicro-vendor server (no NVIDIA GB300 GPU chassis). Reuses the
+    /// generic-server representation but reports a Supermicro vendor; used to assert that
+    /// the `is_gb300()` gate keeps such a box classified as generic `Supermicro`.
+    #[serde(rename = "generic_supermicro")]
+    GenericSupermicro,
+}
+
+impl fmt::Display for HardwareType {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::DellPowerEdgeR750 => "Dell PowerEdge R750".fmt(f),
+            Self::DellPowerEdgeR760Bf4 => "Dell PowerEdge R760 Bluefield-4".fmt(f),
+            Self::WiwynnGB200Nvl => "WIWYNN GB200 NVL".fmt(f),
+            Self::LenovoGB300Nvl => "Lenovo GB300 NVL".fmt(f),
+            Self::NvidiaDgxGb300 => "NVIDIA DGX GB300 NVL".fmt(f),
+            Self::SupermicroGb300Nvl => "Supermicro GB300 NVL".fmt(f),
+            Self::NvidiaDgxVr => "NVIDIA DGX VR NVL".fmt(f),
+            Self::LiteOnPowerShelf => "Lite-On Power Shelf".fmt(f),
+            Self::DeltaPowerShelf => "Delta Power Shelf".fmt(f),
+            Self::NvidiaSwitchNd5200Ld => "NVIDIA Switch ND5200_LD".fmt(f),
+            Self::NvidiaSwitchN5700Ld => "NVIDIA Switch N5700_LD".fmt(f),
+            Self::NvidiaDgxH100 => "NVIDIA DGX H100".fmt(f),
+            Self::GenericAmi => "Generic AMI Server".fmt(f),
+            Self::HpeProliantDl380aGen11 => "HPE ProLiant DL380a Gen11".fmt(f),
+            Self::GenericSupermicro => "Generic Supermicro Server".fmt(f),
+        }
+    }
+}
+
+impl HardwareType {
+    /// Key in `DesiredFirmwareVersionEntry.component_versions` for the host BMC
+    /// version.  Most platforms use `"bmc"`; DGX H100 uses `"combinedbmcuefi"`
+    /// because the API models its BMC as a `CombinedBmcUefi` component type.
+    pub fn host_bmc_version_key(&self) -> &'static str {
+        match self {
+            Self::NvidiaDgxH100 => "combinedbmcuefi",
+            _ => "bmc",
+        }
+    }
+
+    // This function returns how many DPUs must be attached to the
+    // platform. If None than platform can support variable number of
+    // DPUs.
+    pub fn fixed_number_of_dpu(&self) -> Option<u8> {
+        match self {
+            Self::DellPowerEdgeR750 => None,
+            Self::DellPowerEdgeR760Bf4 => Some(1),
+            Self::WiwynnGB200Nvl => Some(2),
+            Self::LenovoGB300Nvl => Some(1),
+            Self::NvidiaDgxGb300 => Some(1),
+            Self::SupermicroGb300Nvl => Some(1),
+            Self::NvidiaDgxVr => Some(1),
+            Self::LiteOnPowerShelf => Some(0),
+            Self::DeltaPowerShelf => Some(0),
+            Self::NvidiaSwitchNd5200Ld => Some(0),
+            Self::NvidiaSwitchN5700Ld => Some(0),
+            Self::NvidiaDgxH100 => Some(1),
+            Self::GenericAmi => None,
+            Self::HpeProliantDl380aGen11 => None,
+            Self::GenericSupermicro => None,
+        }
+    }
+
+    /// Whether the BMC answers 403 outside AccountService while the
+    /// credentials used are still the factory default, as BMCs that force a
+    /// password change on first use do. HPE iLO and the power shelves serve
+    /// every resource with their factory credentials. The other profiles keep
+    /// the stricter behavior.
+    pub(crate) fn bmc_requires_factory_password_change(&self) -> bool {
+        match self {
+            Self::HpeProliantDl380aGen11 | Self::LiteOnPowerShelf | Self::DeltaPowerShelf => false,
+            Self::DellPowerEdgeR750
+            | Self::DellPowerEdgeR760Bf4
+            | Self::WiwynnGB200Nvl
+            | Self::LenovoGB300Nvl
+            | Self::NvidiaDgxGb300
+            | Self::SupermicroGb300Nvl
+            | Self::NvidiaDgxVr
+            | Self::NvidiaSwitchNd5200Ld
+            | Self::NvidiaSwitchN5700Ld
+            | Self::NvidiaDgxH100
+            | Self::GenericAmi
+            | Self::GenericSupermicro => true,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ActionError {
+    #[error("bad request: {0}")]
+    BadRequest(eyre::Error),
+    #[error("internal error: {0}")]
+    Internal(eyre::Error),
+}
+
+// Simulate a 5-second power cycle
+pub const POWER_CYCLE_DELAY: Duration = Duration::from_secs(5);
+
+/// A physical effect that a BMC action has on the device behind the BMC, beyond the
+/// Redfish state the BMC itself serves.
+///
+/// This is the contract between bmc-mock and the backend that owns the simulated
+/// device (for example machine-a-tron's power actors). bmc-mock validates the
+/// request and reports the effect through [`Callbacks::device_effect`]. The backend
+/// applies it to everything the real action would reach, and the BMC then serves
+/// the observed result back through its usual state, such as the system `PowerState`.
+///
+/// Add a variant for each action whose effect leaves the BMC. The enum is not
+/// `non_exhaustive`: a new variant must fail to compile in every backend until it
+/// decides what the effect means for its device.
+#[derive(Debug)]
+pub enum DeviceEffect {
+    /// Chassis AC power cycle (`NvidiaChassis.AuxPowerReset` with `ResetType`
+    /// `AuxPowerCycle`). It drops all power to the compute tray, so the host and
+    /// every DPU in it lose power together. The backend applies it whatever the
+    /// current power state is, and it leaves the device `Off`: the BMC has no power
+    /// restore policy of its own, and the controller powers the host on again.
+    AuxPowerCycle,
+    /// Restore BMC factory accounts and restart BMC DHCP without changing system power.
+    /// The backend owns the update and admits DHCP recovery before reporting success.
+    ResetBmcToDefaults(BmcResetUpdate),
+}
+
+/// An owned, serialized BMC factory reset. Dropping it before commit changes no state.
+/// Transfer it to the device actor so an HTTP cancellation cannot interrupt publication.
+pub struct BmcResetUpdate {
+    apply: futures::future::BoxFuture<'static, Result<Duration, ActionError>>,
+}
+
+impl fmt::Debug for BmcResetUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BmcResetUpdate").finish_non_exhaustive()
+    }
+}
+
+impl BmcResetUpdate {
+    /// Synchronizes attached password backends, restores accounts, invalidates sessions
+    /// and starts the BMC outage. Returns the delay before BMC DHCP should resume.
+    pub async fn commit(self) -> Result<Duration, ActionError> {
+        self.apply.await
+    }
+}
+
+/// Backend operations for one BMC, selected by the router's concrete callback type.
+pub trait Callbacks: Send + Sync + 'static {
+    fn computer_system_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send;
+
+    /// Accepts a [`DeviceEffect`] into the owning device's execution path.
+    /// Chassis power may complete asynchronously after acceptance. Factory reset
+    /// must publish BMC state and admit actor-owned DHCP recovery before reporting
+    /// success. Callers observe the result through the state the BMC serves.
+    ///
+    /// The default rejects every effect, so a backend that does not model the
+    /// device fails the action instead of answering success without an effect.
+    fn device_effect(
+        &self,
+        effect: DeviceEffect,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send {
+        std::future::ready(Err(ActionError::BadRequest(eyre::eyre!(
+            "bmc-mock: backend does not support device effect {effect:?}"
+        ))))
+    }
+
+    /// Applies one virtual-media operation before reporting success.
+    ///
+    /// External backends must complete their I/O, then commit the update before
+    /// returning `Ok(())`. On failure, drop it without committing and return an
+    /// error. Actor implementations must transfer the whole update to retain
+    /// serialization and state publication if the requesting future is cancelled.
+    /// Backends without external media effects publish the requested state directly.
+    fn set_virtual_media(
+        &self,
+        update: VirtualMediaUpdate,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send {
+        update.commit();
+        std::future::ready(Ok(()))
+    }
+
+    fn state_refresh_indication(&self);
+}
+
+pub trait HostnameQuerying: std::fmt::Debug + Send + Sync {
+    fn get_hostname(&'_ self) -> Cow<'_, str>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootOptionKind {
+    Disk,
+    Network,
+}
+
+#[cfg(test)]
+mod hardware_type_tests {
+    use super::HardwareType;
+
+    #[test]
+    fn nvidia_switch_n5700_ld_serde_and_dpu_count() {
+        let hardware_type = HardwareType::NvidiaSwitchN5700Ld;
+        let serialized = serde_json::to_string(&hardware_type).expect("hardware type serializes");
+
+        assert_eq!(serialized, r#""nvidia_switch_n5700_ld""#);
+        assert_eq!(
+            serde_json::from_str::<HardwareType>(&serialized).expect("hardware type deserializes"),
+            hardware_type
+        );
+        assert_eq!(hardware_type.fixed_number_of_dpu(), Some(0));
+    }
+}

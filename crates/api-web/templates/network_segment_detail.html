@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block title %}Network Segment {{ id }}{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Network Segment {{ id }}</h1>
+
+<table class="detailsview">
+	<tr><th>ID</th><td>{{ id }}</td></tr>
+	<tr><th>Name</th><td>{{ name }}</td></tr>
+	<tr><th>VPC ID</th><td><a href="/admin/vpc/{{ vpc_id }}">{{ vpc_id }}</a></td></tr>
+	<tr><th>Config Version</th><td>{{ version|config_version|safe }}</td></tr>
+	<tr><th>Created </th><td>{{ created }}</td></tr>
+	<tr><th>Updated</th><td>{{ updated }}</td></tr>
+	<tr><th>Deleted</th><td>{{ deleted }}</td></tr>
+	<tr><th>Domain id</th><td><a href="/admin/domain">{{ domain_id }}</a></td></tr>
+	<tr><th>Domain name</th><td>{{ domain_name }}</td></tr>
+	<tr><th>Type</th><td>{{ segment_type }}</td></tr>
+	<tr><th>Infer SLAAC EUI-64 addresses</th><td>{{ infer_slaac_eui64_addresses }}</td></tr>
+</table>
+
+{{ lifecycle_detail|safe }}
+
+<h3>Prefixes</h3>
+{% for prefix in prefixes %}
+<table class="detailsview">
+	<tr><th>Index</th><td>{{ prefix.index }}</td></tr>
+	<tr><th>ID</th><td>{{ prefix.id }}</td></tr>
+	<tr><th>Prefix</th><td>{{ prefix.prefix }}</td></tr>
+	<tr><th>Gateway</th><td>{{ prefix.gateway }}</td></tr>
+	<tr><th>Reserve first</th><td>{{ prefix.reserve_first }}</td></tr>
+</table>
+{% endfor %}
+
+<h3>History</h3>
+<table class="detailsview">
+	<thead>
+		<tr>
+			<th>Version</th>
+			<th>State</th>
+		</tr>
+	</thead>
+	<tbody>
+	{% for event in history %}
+		<tr>
+			<td>{{event.version|config_version|safe}}</td>
+			<td><div style="overflow: auto;"><pre><code>{{event.state|pretty_json}}</code></pre></div></td>
+		</tr>
+	{% endfor %}
+	</tbody>
+</table>
+{% endblock %}

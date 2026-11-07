@@ -1,0 +1,108 @@
+{
+  "ipv4Unicast": {
+    "as": 64740,
+    "bestPath": {
+      "multiPathRelax": "true"
+    },
+    "dynamicPeers": 0,
+    "failedPeers": 2,
+    "peerCount": 2,
+    "peerGroupCount": 1,
+    "peerGroupMemory": 64,
+    "peerMemory": 46768,
+    "peers": {
+      "p0_if": {
+        "connectionsDropped": 0,
+        "connectionsEstablished": 0,
+        "idType": "interface",
+        "inq": 0,
+        "msgRcvd": 15,
+        "msgSent": 45,
+        "outq": 0,
+        "peerUptime": "never",
+        "peerUptimeMsec": 0,
+        "pfxRcd": 0,
+        "remoteAs": 0,
+        "state": "Idle",
+        "tableVersion": 0,
+        "version": 4
+      },
+      "p1_if": {
+        "connectionsDropped": 0,
+        "connectionsEstablished": 0,
+        "idType": "interface",
+        "inq": 0,
+        "msgRcvd": 15,
+        "msgSent": 46,
+        "outq": 0,
+        "peerUptime": "never",
+        "peerUptimeMsec": 0,
+        "pfxRcd": 0,
+        "remoteAs": 0,
+        "state": "Idle",
+        "tableVersion": 0,
+        "version": 4
+      }
+    },
+    "ribCount": 1,
+    "ribMemory": 200,
+    "routerId": "10.180.62.28",
+    "tableVersion": 1,
+    "totalPeers": 2,
+    "vrfId": 0,
+    "vrfName": "default"
+  },
+  "l2VpnEvpn": {
+    "as": 64740,
+    "bestPath": {
+      "multiPathRelax": "true"
+    },
+    "dynamicPeers": 0,
+    "failedPeers": 2,
+    "peerCount": 2,
+    "peerGroupCount": 1,
+    "peerGroupMemory": 64,
+    "peerMemory": 46768,
+    "peers": {
+      "p0_if": {
+        "connectionsDropped": 0,
+        "connectionsEstablished": 0,
+        "idType": "interface",
+        "inq": 0,
+        "msgRcvd": 15,
+        "msgSent": 45,
+        "outq": 0,
+        "peerUptime": "never",
+        "peerUptimeMsec": 0,
+        "pfxRcd": 0,
+        "remoteAs": 0,
+        "state": "Idle",
+        "tableVersion": 0,
+        "version": 4
+      },
+      "p1_if": {
+        "connectionsDropped": 0,
+        "connectionsEstablished": 0,
+        "idType": "interface",
+        "inq": 0,
+        "msgRcvd": 15,
+        "msgSent": 46,
+        "outq": 0,
+        "peerUptime": "never",
+        "peerUptimeMsec": 0,
+        "pfxRcd": 0,
+        "remoteAs": 0,
+        "state": "Idle",
+        "tableVersion": 0,
+        "version": 4
+      }
+    },
+    "ribCount": 0,
+    "ribMemory": 0,
+    "routerId": "10.180.62.28",
+    "tableVersion": 0,
+    "totalPeers": 2,
+    "vrfId": 0,
+    "vrfName": "default"
+  }
+}

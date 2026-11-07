@@ -1,0 +1,102 @@
+suite: bootstrap root CA source
+templates:
+  - deployment.yaml
+tests:
+  - it: preserves the legacy deployment when no bootstrap CA reference is configured
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FORGE_BOOTSTRAP_ROOT_CAFILE_PATH
+            value: /var/run/secrets/bootstrap-root-ca/ca.crt
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: bootstrap-root-ca
+            mountPath: /var/run/secrets/bootstrap-root-ca
+            readOnly: true
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 1
+
+  - it: preserves the legacy deployment when bootstrapRootCa is null
+    set:
+      bootstrapRootCa: null
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FORGE_BOOTSTRAP_ROOT_CAFILE_PATH
+            value: /var/run/secrets/bootstrap-root-ca/ca.crt
+      - lengthEqual:
+          path: spec.template.spec.volumes
+          count: 1
+
+  - it: treats a null environment as an empty map
+    set:
+      env: null
+    asserts:
+      - isEmpty:
+          path: spec.template.spec.containers[0].env
+
+  - it: mounts an existing ConfigMap as the bootstrap CA
+    set:
+      bootstrapRootCa:
+        configMapName: nico-bootstrap-root-ca
+        key: forge-root.pem
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FORGE_BOOTSTRAP_ROOT_CAFILE_PATH
+            value: /var/run/secrets/bootstrap-root-ca/ca.crt
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: bootstrap-root-ca
+            mountPath: /var/run/secrets/bootstrap-root-ca
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: bootstrap-root-ca
+            configMap:
+              name: nico-bootstrap-root-ca
+              items:
+                - key: forge-root.pem
+                  path: ca.crt
+
+  - it: mounts an existing Secret as the bootstrap CA
+    set:
+      bootstrapRootCa:
+        secretName: nico-bootstrap-root-ca
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: FORGE_BOOTSTRAP_ROOT_CAFILE_PATH
+            value: /var/run/secrets/bootstrap-root-ca/ca.crt
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: bootstrap-root-ca
+            mountPath: /var/run/secrets/bootstrap-root-ca
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: bootstrap-root-ca
+            secret:
+              secretName: nico-bootstrap-root-ca
+              items:
+                - key: ca.crt
+                  path: ca.crt
+
+  - it: rejects configuring both a ConfigMap and Secret
+    set:
+      bootstrapRootCa:
+        configMapName: nico-bootstrap-root-ca
+        secretName: nico-bootstrap-root-ca
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-pxe: set only one of bootstrapRootCa.configMapName or bootstrapRootCa.secretName"

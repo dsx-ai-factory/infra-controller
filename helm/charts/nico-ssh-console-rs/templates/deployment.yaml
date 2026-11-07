@@ -1,0 +1,143 @@
+{{- $env := deepCopy (.Values.env | default dict) -}}
+{{- with .Values.otlpEndpoint -}}
+{{- $_ := set $env "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" . -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nico-ssh-console-rs.name" . }}
+  namespace: {{ include "nico-ssh-console-rs.namespace" . }}
+  labels:
+    {{- include "nico-ssh-console-rs.labels" . | nindent 4 }}
+  annotations:
+    {{- tpl (toYaml .Values.annotations) . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  # Bumped from default 600s — on a cold cluster, vault-pki-config hook + cert-manager
+  # signing the SPIFFE cert can take 8–12 min before the pod can mount its TLS secret.
+  progressDeadlineSeconds: 1200
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "nico-ssh-console-rs.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nico-ssh-console-rs.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "nico-ssh-console-rs.name" . }}
+      {{- with (.Values.imagePullSecrets | default .Values.global.imagePullSecrets) }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: ssh-console-rs
+          image: "{{ include "nico-ssh-console-rs.image" . }}"
+          # Pick whichever binary path is in the image (nico or carbide). Same config file is mounted at both /etc/nico and /etc/forge paths.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              {{- $fdLimit := 65536 }}
+              {{- if not (kindIs "invalid" .Values.fileDescriptorLimit) }}
+              {{- $fdLimit = .Values.fileDescriptorLimit | int }}
+              {{- end }}
+              {{- if le $fdLimit 0 }}
+              {{- fail "fileDescriptorLimit must be a positive integer" }}
+              {{- end }}
+              FD_LIMIT={{ $fdLimit }}
+              FD_REQUESTED="$FD_LIMIT"
+              FD_HARD="$(ulimit -Hn)"
+              if [ "$FD_HARD" != "unlimited" ] && [ "$FD_LIMIT" -gt "$FD_HARD" ]; then
+                echo "fileDescriptorLimit ${FD_LIMIT} exceeds the hard limit ${FD_HARD}; clamping" >&2
+                FD_LIMIT="$FD_HARD"
+              fi
+              ulimit -Sn "$FD_LIMIT" || { echo "ulimit -Sn ${FD_LIMIT} failed (requested ${FD_REQUESTED}, hard limit ${FD_HARD})" >&2; exit 1; }
+              if [ -x /opt/nico/ssh-console ]; then
+                exec /opt/nico/ssh-console run -c /etc/nico/ssh-console/config.toml
+              else
+                exec /opt/carbide/ssh-console run -c /etc/forge/ssh-console/config.toml
+              fi
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          {{- with $env }}
+          env:
+            {{- range $name, $value := . }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+          {{- end }}
+          securityContext:
+            capabilities:
+              add:
+                - IPC_LOCK
+          ports:
+            - name: ssh
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.service.grpcPort }}
+              protocol: TCP
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            # Mount config at both paths so the binary finds it regardless of nico/carbide image variant.
+            - name: {{ include "nico-ssh-console-rs.name" . }}-config-files
+              mountPath: /etc/forge/ssh-console
+            - name: {{ include "nico-ssh-console-rs.name" . }}-config-files
+              mountPath: /etc/nico/ssh-console
+            - name: spiffe
+              mountPath: "/var/run/secrets/spiffe.io"
+              readOnly: true
+            - name: ssh-host-key
+              mountPath: /etc/ssh/ssh_host_ed25519_key
+              subPath: ssh_host_ed25519_key
+              readOnly: true
+            - name: ssh-host-key-pub
+              mountPath: /etc/ssh/ssh_host_ed25519_key.pub
+              subPath: ssh_host_ed25519_key_pub
+              readOnly: true
+            - name: console-logs
+              mountPath: /var/log/consoles
+        {{ if .Values.lokiLogCollector.enabled }}
+        - name: loki-log-collector
+          image: "{{ required "lokiLogCollector.image.repository is required when lokiLogCollector.enabled is true" .Values.lokiLogCollector.image.repository }}:{{ required "lokiLogCollector.image.tag is required when lokiLogCollector.enabled is true" .Values.lokiLogCollector.image.tag }}"
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          args: ["--config=/etc/otelcol-contrib/config.yaml"]
+          volumeMounts:
+            - name: otelcol-config
+              mountPath: /etc/otelcol-contrib
+              readOnly: true
+            - name: console-logs
+              mountPath: /var/log/consoles
+            - name: otelcol-file-log-checkpoints
+              mountPath: /var/lib/otelcol/filelog-checkpoints
+        {{ end }}
+      volumes:
+        - name: {{ include "nico-ssh-console-rs.name" . }}-config-files
+          configMap:
+            name: {{ include "nico-ssh-console-rs.name" . }}-config-files
+        - name: spiffe
+          secret:
+            secretName: {{ include "nico-ssh-console-rs.name" . }}-certificate
+        - name: ssh-host-key
+          secret:
+            secretName: ssh-host-key
+            defaultMode: 0400
+        - name: ssh-host-key-pub
+          secret:
+            secretName: ssh-host-key
+            defaultMode: 0444
+        - name: console-logs
+          emptyDir: {}
+        {{ if .Values.lokiLogCollector.enabled }}
+        - name: otelcol-file-log-checkpoints
+          emptyDir: {}
+        - name: otelcol-config
+          configMap:
+            name: {{ include "nico-ssh-console-rs.name" . }}-otelcol-config
+        {{ end }}

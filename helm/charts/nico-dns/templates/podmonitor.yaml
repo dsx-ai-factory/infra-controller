@@ -1,0 +1,31 @@
+{{- if .Values.podMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: nico-dns-metrics
+  namespace: {{ include "nico-dns.namespace" . }}
+  labels:
+    {{- include "nico-dns.labels" . | nindent 4 }}
+    {{- with .Values.podMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ include "nico-dns.namespace" . }}
+  selector:
+    matchLabels:
+      {{- include "nico-dns.selectorLabels" . | nindent 6 }}
+  podMetricsEndpoints:
+    # `metrics` is the container port name on the StatefulSet (8053/TCP).
+    - targetPort: metrics
+      {{- with .Values.podMonitor.path }}
+      path: {{ . }}
+      {{- end }}
+      {{- with .Values.podMonitor.interval }}
+      interval: {{ . }}
+      {{- end }}
+      {{- with .Values.podMonitor.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+{{- end }}

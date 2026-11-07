@@ -1,0 +1,50 @@
+<h2>{{ label }}</h2>
+{% match report %}
+{% when Some with (health) %}
+<table class="sortable detailsview">
+	<thead>
+		<tr>
+			<th>ID</th>
+			<th>Target</th>
+			<th>In Alert Since</th>
+			<th>Message</th>
+			<th>Tenant Message</th>
+			<th>Classifications</th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for alert in health.alerts %}
+		<tr>
+			<td>{{ alert.id }}</td>
+			<td>{{ alert.target|option_fmt }}</td>
+			<td>{{ alert.in_alert_since|option_fmt }}</td>
+			<td>{{ alert.message }}</td>
+			<td>{{ alert.tenant_message|option_fmt }}</td>
+			<td>{{ alert|health_alert_classification_fmt|safe }}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+
+<details class="successes-section">
+	<summary>Successes</summary>
+	<table class="sortable detailsview">
+		<thead>
+			<tr>
+				<th>ID</th>
+				<th>Target</th>
+			</tr>
+		</thead>
+		<tbody>
+			{% for success in health.successes %}
+			<tr>
+				<td>{{ success.id }}</td>
+				<td>{{ success.target|option_fmt }}</td>
+			</tr>
+			{% endfor %}
+		</tbody>
+	</table>
+</details>
+{% else %}
+<h3>Missing report</h3>
+{% endmatch %}

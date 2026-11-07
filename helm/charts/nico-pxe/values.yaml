@@ -1,0 +1,223 @@
+## nico-pxe — PXE boot server for OS provisioning workflows
+## Global settings (overridden by umbrella chart)
+global:
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []
+  certificate:
+    duration: 720h0m0s
+    renewBefore: 360h0m0s
+    privateKey:
+      algorithm: ECDSA
+      size: 384
+    issuerRef:
+      kind: ClusterIssuer
+      name: vault-nico-issuer
+      group: cert-manager.io
+  spiffe:
+    trustDomain: nico.local
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: site-controller
+
+## Override the release namespace (defaults to helm install -n <namespace>)
+namespaceOverride: ""
+
+## Legacy name aliases — opt-in ExternalName Services so binaries that
+## hardcode the pre-rename hostname (e.g. `carbide-pxe.forge-system.svc.
+## cluster.local`) continue to resolve to this chart's nico-pxe Service.
+## See helm/charts/nico-api/values.yaml `legacyAlias` for the full
+## explanation; this chart's variant creates only the Service. The alias
+## namespace is owned by nico-api's legacyAlias template, so enable
+## nico-api.legacyAlias in tandem.
+legacyAlias:
+  # On by default to match the chart's cert SAN posture (the `nico-pxe`
+  # Certificate already includes `carbide-pxe.forge-system.svc.cluster.local`
+  # as a SAN). Flip to false on all-modern fleets where no client uses the
+  # legacy hostname. Requires `nico-api.legacyAlias.enabled` to be true so
+  # the `forge-system` namespace is owned by nico-api's template.
+  enabled: true
+  aliases:
+    - name: carbide-pxe
+      namespace: forge-system
+
+replicas: 1
+
+## Soft open-file limit applied before startup. Clamped to the runtime hard
+## limit when it exceeds it. null falls back to 65536; non-null values must be
+## a positive integer (validated at render).
+fileDescriptorLimit: 65536
+
+## Optional component image. When repository is empty, the chart uses the
+## global image and its pull policy. When repository is set and tag is empty,
+## the component tag defaults to latest; an empty pull policy uses the global
+## pull policy.
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: ""
+
+## Optional general-purpose init containers, run in list order after bootArtifactContainers.
+## Omitted or empty lists add no general-purpose init containers.
+## Quote tags (for example, tag: "1.10") to preserve their exact text.
+## YAML parses unquoted 1.10 as 1.1; unquoted 0 is treated as empty and falls
+## back to image. Use "0" to select the literal tag 0.
+## Set both non-empty `repository` + `tag` to build `image: <repository>:<tag>`;
+## they take precedence over `image`. If either is omitted or empty, supply `image`.
+## Rendering fails if neither form supplies an image; the error identifies the list entry.
+## No repository or tag defaults are inherited from global.image.
+## All other Kubernetes container fields pass through unchanged; mounts are not injected.
+initContainers: []
+# initContainers:
+#   - name: custom-init
+#     repository: <your-registry>/custom-init
+#     tag: "<tag>"
+#     command: ["sh", "-c", "echo initializing"]
+
+## Boot-artifact init containers
+## Each entry is rendered as a Kubernetes init container with the boot-artifacts
+## volume automatically mounted at /forge-boot-artifacts/blobs/internal, then served by
+## nico-pxe at /public/blobs/internal.
+##
+## Required when boot artifacts are not bundled in the PXE image: if empty and
+## the image has no artifacts, the DPU/host requests its bootloader
+## (e.g. /public/blobs/internal/aarch64/ipxe.efi) and gets HTTP 404, then falls back to
+## its local disk and never (re)provisions. Populate per site (extensible list).
+##
+## NOTE: copy ONLY directories that exist in the image. The boot-artifacts-aarch64 image
+## ships /aarch64 and /apt (NOT /firmware); copying a missing dir makes `cp` exit non-zero
+## and the init container crash-loops.
+## When populated, the chart mounts an emptyDir and appends a root init container
+## after all other init containers to set group 10001 and grant group read/traverse
+## on the copied trees, including source files with mode 0600. Existing copy
+## commands work without migration. No world permissions are added.
+## The final init uses /bin/sh, chgrp, and chmod from the selected PXE image.
+## When empty, no boot-artifacts volume is mounted, preserving image-bundled files.
+## Quote tags (for example, tag: "1.10") to preserve their exact text.
+## YAML parses unquoted 1.10 as 1.1; unquoted 0 is treated as empty and falls
+## back to image. Use "0" to select the literal tag 0.
+## Set both non-empty `repository` + `tag` to override `image`. If either is omitted
+## or empty, supply `image` (a tag or digest reference). No global.image defaults apply.
+## Rendering fails if neither form supplies an image; the error identifies the list entry.
+bootArtifactContainers: []
+# bootArtifactContainers:
+#   - name: boot-artifacts-x86-64
+#     repository: <your-registry>/boot-artifacts-x86_64
+#     tag: "<tag>"
+#     command: ["sh", "-c", "set -e; cp -r /x86_64 /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal/x86_64; chmod -R g+rX /forge-boot-artifacts/blobs/internal/x86_64"]
+#   - name: boot-artifacts-aarch64
+#     repository: <your-registry>/boot-artifacts-aarch64
+#     tag: "<tag>"
+#     command: ["sh", "-c", "set -e; cp -r /aarch64 /apt /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal/aarch64 /forge-boot-artifacts/blobs/internal/apt; chmod -R g+rX /forge-boot-artifacts/blobs/internal/aarch64 /forge-boot-artifacts/blobs/internal/apt"]
+#   - name: machine-validation-config
+#     repository: <your-registry>/machine-validation-config
+#     tag: "<tag>"
+#     command: ["sh", "-c", "set -e; cp -r /machine-validation /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal/machine-validation; chmod -R g+rX /forge-boot-artifacts/blobs/internal/machine-validation"]
+
+## Boot artifact serving configuration
+## When bootArtifactContainers is populated, the chart mounts writable storage
+## at <servePath>/blobs/internal. Otherwise it serves the image's existing files.
+bootArtifacts:
+  servePath: /forge-boot-artifacts
+
+annotations:
+  configmap.reloader.stakater.com/reload: '{{ include "nico-pxe.name" . }}-env-config'
+
+service:
+  port: 8080
+
+apiServiceName: nico-api
+
+certificate:
+  ## serviceName is used to auto-generate dnsNames and SPIFFE URIs based on the release namespace
+  serviceName: ""
+  spiffeServiceName: ""
+  identityNamespace: ""
+  ## Fully override the auto-generated dnsNames/uris. When empty, dnsNames and
+  ## uris are generated from serviceName + namespace (extraDnsNames/extraUris
+  ## are appended to the generated list).
+  dnsNames: []
+  uris: []
+  extraDnsNames: []
+  extraUris: []
+
+## OTLP/gRPC collector endpoint. Empty leaves tracing off unless set through env.
+otlpEndpoint: ""
+
+env:
+  FORGE_ROOT_CAFILE_PATH: "/var/run/secrets/spiffe.io/ca.crt"
+  NICO_ROOT_CAFILE_PATH: "/var/run/secrets/spiffe.io/ca.crt"
+  FORGE_CLIENT_CERT_PATH: "/var/run/secrets/spiffe.io/tls.crt"
+  NICO_CLIENT_CERT_PATH: "/var/run/secrets/spiffe.io/tls.crt"
+  FORGE_CLIENT_KEY_PATH: "/var/run/secrets/spiffe.io/tls.key"
+  NICO_CLIENT_KEY_PATH: "/var/run/secrets/spiffe.io/tls.key"
+  RUST_BACKTRACE: "full"
+  RUST_LIB_BACKTRACE: "0"
+
+## Optional CA bundle served to bootstrapping clients at /api/v0/tls/root_ca.
+## Set at most one of configMapName or secretName. When neither is set, PXE
+## serves FORGE_ROOT_CAFILE_PATH exactly as it does in legacy deployments.
+## The referenced object must exist in the release namespace. The CA is public,
+## but Secret references are supported for sites that already distribute trust
+## bundles that way.
+bootstrapRootCa:
+  configMapName: ""
+  secretName: ""
+  key: ca.crt
+
+## ConfigMap settings for the env ConfigMap
+config:
+  ## NICO_API_HOST, NICO_API_PORT are auto-generated from the release namespace
+  nicoApiPort: "1079"
+  extraEnvData: {}  # additional keys to add to the env ConfigMap
+
+envFrom:
+  pxeEnvConfig:
+    configMapName: nico-pxe-env-config
+    optional: true
+
+livenessProbe:
+  tcpSocket:
+    port: 8080
+  initialDelaySeconds: 20
+  periodSeconds: 10
+  failureThreshold: 3
+  successThreshold: 1
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 25s
+
+## External LoadBalancer Services (for bare-metal / MetalLB)
+## Creates nico-pxe-external (port) and nico-pxe-external-80 (alternatePort),
+## both targeting container port 8080 and sharing one IP.
+externalService:
+  enabled: false
+  type: LoadBalancer
+  # Empty values keep Kubernetes defaults. Use SingleStack with [IPv6] for an
+  # IPv6-only Service, or RequireDualStack with [IPv4, IPv6] for both families.
+  # PreferDualStack allows fallback on a single-stack cluster. An existing
+  # Service's primary family (the first entry) cannot be changed in place.
+  ipFamilyPolicy: ""
+  ipFamilies: []
+  # External HTTP ports. nico-pxe-external-80 is omitted when alternatePort
+  # is 0; the Service name does not change with the port. Clients are set up
+  # for the defaults (the DHCP boot URL and the DPU agent PXE URL), so change
+  # the ports together with them.
+  port: 8080
+  alternatePort: 80
+  # Local preserves client source IPs. MetalLB only lets Local Services share
+  # an IP with Services that select the same pods.
+  externalTrafficPolicy: Local
+  # Annotation key that lets the two Services share an IP. Its value is the
+  # chart name. Change the key for a load-balancer controller that does not
+  # use MetalLB annotations, or set it to "" to omit the annotation. An
+  # annotations entry under either MetalLB spelling replaces the built-in
+  # annotation; one with the same key overrides its value.
+  sharedIpAnnotation: metallb.universe.tf/allow-shared-ip
+  annotations: {}
+  # annotations:
+  #   metallb.universe.tf/loadBalancerIPs: "10.x.x.x"

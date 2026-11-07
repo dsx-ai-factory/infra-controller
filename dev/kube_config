@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Config
+
+clusters:
+- cluster:
+    server: https://host.docker.internal:7272
+    insecure-skip-tls-verify: true
+  name: localtest
+
+contexts:
+- context:
+    cluster: localtest
+    user: localtest
+  name: localtest
+
+users:
+- name: localtest
+  user:
+    token: whatever
+
+current-context: localtest
+preferences: {}

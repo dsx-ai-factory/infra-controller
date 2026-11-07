@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nico-rest
+
+resources:
+  - db-creds.yaml
+  - keycloak-client-secret.yaml
+  - temporal-encryption-key.yaml
+  - image-pull-secret.yaml
+  - temporal-client-cloud-cert.yaml

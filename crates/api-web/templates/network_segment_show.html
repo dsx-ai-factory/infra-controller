@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block title %}Network Segments{% endblock %}
+
+{% macro network_segment_table(network_segments, show_vpc=false) %}
+<table class="sortable overview">
+	<thead>
+		<th>Name</th>
+		<th>Id</th>
+		{% if show_vpc %}
+			<th>VPC ID</th>
+		{% endif %}
+		<th>Created</th>
+		<th>State</th>
+		<th>Sub Domain</th>
+		<th>MTU</th>
+		<th>Prefixes</th>
+		<th>Version</th>
+	</thead>
+	<tbody>
+		{% for ns in network_segments %}
+		<tr>
+			<td><a href="/admin/network-segment/{{ ns.id }}">{{ ns.name }}</a></td>
+			<td>{{ ns.id }}</td>
+			{% if show_vpc %}
+				<td><a href="/admin/vpc/{{ ns.vpc_id }}">{{ ns.vpc_id }}</a></td>
+			{% endif %}
+			<td>{{ ns.created }}</td>
+			<td>{{ ns.state_display|safe }}</td>
+			<td>{{ ns.sub_domain }}</td>
+			<td>{{ ns.mtu }}</td>
+			<td>{{ ns.prefixes }}</td>
+			<td>{{ ns.version|config_version|safe }}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+{% endmacro %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Network Segments</h1>
+
+<h2>Admin</h2>
+{% call network_segment_table(admin) %}{% endcall %}
+
+<h2>Host Inband</h2>
+{% call network_segment_table(host_inband, true) %}{% endcall %}
+
+<h2>Underlay</h2>
+{% call network_segment_table(underlay) %}{% endcall %}
+
+<h2>Tenant</h2>
+{% call network_segment_table(tenant, true) %}{% endcall %}
+
+
+{% endblock %}

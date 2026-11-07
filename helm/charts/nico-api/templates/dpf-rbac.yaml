@@ -1,0 +1,87 @@
+# Access for the API to manage DPF (DOCA Platform Framework) custom resources
+# in the DPF operator namespace. Enabled with --set nico-api.dpf.rbacCreate=true
+# (setup.sh does this by default; --skip-dpf to opt out). Requires the DPF operator namespace to
+# exist at install time — it is created by setup.sh phase 5b before NICo Core.
+# Rule set follows docs/manuals/dpf.md §3.1 plus bluefieldsoftwares, which the
+# DPF SDK creates for BF4 deployments.
+{{- if .Values.dpf.rbacCreate }}
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ include "nico-api.name" . }}-dpf
+  namespace: {{ .Values.dpf.operatorNamespace | default "dpf-operator-system" }}
+  labels:
+    {{- include "nico-api.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["bfbs"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["bluefieldsoftwares"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpus"]
+    verbs: ["get", "list", "watch", "patch", "delete"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpudevices"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpunodes"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpunodemaintenances"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpuflavors"]
+    verbs: ["get", "create"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpuflavortemplates"]
+    verbs: ["get", "create"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpusets"]
+    verbs: ["get"]
+  - apiGroups: ["provisioning.dpu.nvidia.com"]
+    resources: ["dpuclusters"]
+    verbs: ["get", "list"]
+  - apiGroups: ["svc.dpu.nvidia.com"]
+    resources: ["dpudeployments"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["svc.dpu.nvidia.com"]
+    resources: ["dpuservices", "dpuservicechains"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["svc.dpu.nvidia.com"]
+    resources: ["dpuserviceinterfaces", "dpuservicetemplates", "dpuserviceconfigurations", "dpuservicenads"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: ["operator.dpu.nvidia.com"]
+    resources: ["dpfoperatorconfigs"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["bmc-shared-password"]
+    verbs: ["get", "patch"]
+  # Extra-script ConfigMaps the BF4 DPUFlavors source via contentFrom.
+  # NICo reads existing scripts and the Astra runtime config before initialization,
+  # but must not update or overwrite operator-owned content.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create"]
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ include "nico-api.name" . }}-dpf
+  namespace: {{ .Values.dpf.operatorNamespace | default "dpf-operator-system" }}
+  labels:
+    {{- include "nico-api.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "nico-api.name" . }}-dpf
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nico-api.name" . }}
+    namespace: {{ include "nico-api.namespace" . }}
+{{- end }}

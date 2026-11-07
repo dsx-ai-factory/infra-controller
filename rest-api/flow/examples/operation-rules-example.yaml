@@ -1,0 +1,707 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Operation Rules Reference Example
+#
+# ⚠️  This file is REFERENCE DOCUMENTATION ONLY - not loaded automatically at runtime.
+#
+# Initial Setup (run once per environment):
+#   flow rule create --from-yaml examples/operation-rules-example.yaml
+#
+# Update existing rules (skip existing by default):
+#   flow rule create --from-yaml examples/operation-rules-example.yaml
+#
+# Update existing rules (overwrite mode):
+#   flow rule create --from-yaml examples/operation-rules-example.yaml --overwrite
+#
+# After setup, manage rules via API:
+#   flow rule create --name "..." --operation-type power_control --operation power_on --rule-file steps.json
+#   flow rule set-default --id <rule-id>
+#   flow rule associate --rack-id <rack> --rule-id <rule>
+#
+# Validate before creating (dry-run):
+#   flow rule create --from-yaml examples/operation-rules-example.yaml --dry-run
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: v1
+
+rules:
+  # ===========================================
+  # Power Control - Action-Based with Verification
+  # ===========================================
+  # NEW FORMAT: Uses PreOperation, MainOperation, PostOperation
+  # Includes verification actions for graceful operations
+
+  - name: "Graceful Power On with Verification"
+    description: "Power-on with status verification and reachability checks"
+    operation_type: power_control
+    operation: power_on
+    steps:
+      # Stage 1: Power shelves first
+      - component_type: powershelf
+        stage: 1
+        max_parallel: 1
+        timeout: 10m
+        retry:
+          max_attempts: 3
+          initial_interval: 5s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          # Verify power shelf status
+          - name: VerifyPowerStatus
+            timeout: 3m
+            poll_interval: 10s
+            parameters:
+              expected_status: "on"
+
+          # Wait for downstream components (compute, nvswitch) to become reachable
+          - name: VerifyReachability
+            timeout: 3m
+            poll_interval: 10s
+            parameters:
+              component_types: ["compute", "nvswitch"]
+
+          # Additional settle time for hardware stabilization
+          - name: Sleep
+            parameters:
+              duration: 30s
+
+      # Stage 2: NVL switches (parallel batches)
+      - component_type: nvswitch
+        stage: 2
+        max_parallel: 4
+        timeout: 15m
+        retry:
+          max_attempts: 3
+          initial_interval: 5s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          # Verify switch status
+          - name: VerifyPowerStatus
+            timeout: 3m
+            poll_interval: 10s
+            parameters:
+              expected_status: "on"
+
+          # Brief settle time
+          - name: Sleep
+            parameters:
+              duration: 15s
+
+      # Stage 3: Compute nodes (larger parallel batches)
+      - component_type: compute
+        stage: 3
+        max_parallel: 8
+        timeout: 20m
+        retry:
+          max_attempts: 3
+          initial_interval: 1s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          # Verify compute node status
+          - name: VerifyPowerStatus
+            timeout: 3m
+            poll_interval: 10s
+            parameters:
+              expected_status: "on"
+
+  - name: "Graceful Power Off with Verification"
+    description: "Power-off with status verification (reverse order)"
+    operation_type: power_control
+    operation: power_off
+    steps:
+      # Stage 1: Compute nodes first
+      - component_type: compute
+        stage: 1
+        max_parallel: 8
+        timeout: 20m
+        retry:
+          max_attempts: 3
+          initial_interval: 1s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          - name: VerifyPowerStatus
+            timeout: 3m
+            poll_interval: 10s
+            parameters:
+              expected_status: "off"
+
+          - name: Sleep
+            parameters:
+              duration: 10s
+
+      # Stage 2: NVL switches
+      - component_type: nvswitch
+        stage: 2
+        max_parallel: 4
+        timeout: 15m
+        retry:
+          max_attempts: 3
+          initial_interval: 5s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          - name: VerifyPowerStatus
+            timeout: 3m
+            poll_interval: 10s
+            parameters:
+              expected_status: "off"
+
+          - name: Sleep
+            parameters:
+              duration: 5s
+
+      # Stage 3: Power shelves last
+      - component_type: powershelf
+        stage: 3
+        max_parallel: 1
+        timeout: 10m
+        retry:
+          max_attempts: 3
+          initial_interval: 5s
+          backoff_coefficient: 2.0
+
+        # Pre-operation: Allow time for downstream to fully shut down
+        pre_operation:
+          - name: Sleep
+            parameters:
+              duration: 30s
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          - name: VerifyPowerStatus
+            timeout: 3m
+            poll_interval: 10s
+            parameters:
+              expected_status: "off"
+
+  # ===========================================
+  # Forceful Operations - Fast with Final Verification
+  # ===========================================
+  # Forceful operations skip intermediate verification for speed
+  # but verify final state in a separate stage
+
+  - name: "Force Power On with Final Verification"
+    description: "Fast power-on, verify all components at the end"
+    operation_type: power_control
+    operation: force_power_on
+    steps:
+      # Stage 1: Power shelves (no verification)
+      - component_type: powershelf
+        stage: 1
+        max_parallel: 0  # All at once
+        timeout: 10m
+        retry:
+          max_attempts: 3
+          initial_interval: 5s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          - name: Sleep
+            parameters:
+              duration: 30s
+
+      # Stage 2: NVL switches (no verification)
+      - component_type: nvswitch
+        stage: 2
+        max_parallel: 0  # All at once
+        timeout: 15m
+        retry:
+          max_attempts: 3
+          initial_interval: 5s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          - name: Sleep
+            parameters:
+              duration: 15s
+
+      # Stage 3: Compute nodes (no verification)
+      - component_type: compute
+        stage: 3
+        max_parallel: 0  # All at once
+        timeout: 20m
+        retry:
+          max_attempts: 3
+          initial_interval: 1s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          - name: Sleep
+            parameters:
+              duration: 10s
+
+      # Stage 4: FINAL VERIFICATION (all component types in parallel)
+      - component_type: powershelf
+        stage: 4
+        max_parallel: 0
+        timeout: 2m
+        retry:
+          max_attempts: 2
+          initial_interval: 5s
+          backoff_coefficient: 1.5
+
+        main_operation:
+          name: VerifyPowerStatus
+          timeout: 1m
+          poll_interval: 5s
+          parameters:
+            expected_status: "on"
+
+      - component_type: nvswitch
+        stage: 4  # Parallel with powershelf
+        max_parallel: 0
+        timeout: 2m
+        retry:
+          max_attempts: 2
+          initial_interval: 5s
+          backoff_coefficient: 1.5
+
+        main_operation:
+          name: VerifyPowerStatus
+          timeout: 1m
+          poll_interval: 5s
+          parameters:
+            expected_status: "on"
+
+      - component_type: compute
+        stage: 4  # Parallel with others
+        max_parallel: 0
+        timeout: 2m
+        retry:
+          max_attempts: 2
+          initial_interval: 5s
+          backoff_coefficient: 1.5
+
+        main_operation:
+          name: VerifyPowerStatus
+          timeout: 1m
+          poll_interval: 5s
+          parameters:
+            expected_status: "on"
+
+  - name: "Force Power Off with Final Verification"
+    description: "Fast power-off, verify all components at the end"
+    operation_type: power_control
+    operation: force_power_off
+    steps:
+      # Stage 1: Compute nodes (no verification)
+      - component_type: compute
+        stage: 1
+        max_parallel: 0
+        timeout: 20m
+        retry:
+          max_attempts: 3
+          initial_interval: 1s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          - name: Sleep
+            parameters:
+              duration: 10s
+
+      # Stage 2: NVL switches (no verification)
+      - component_type: nvswitch
+        stage: 2
+        max_parallel: 0
+        timeout: 15m
+        retry:
+          max_attempts: 3
+          initial_interval: 5s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          - name: Sleep
+            parameters:
+              duration: 5s
+
+      # Stage 3: Power shelves (no verification)
+      - component_type: powershelf
+        stage: 3
+        max_parallel: 0
+        timeout: 10m
+        retry:
+          max_attempts: 3
+          initial_interval: 5s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          - name: Sleep
+            parameters:
+              duration: 10s
+
+      # Stage 4: FINAL VERIFICATION (all component types in parallel)
+      - component_type: powershelf
+        stage: 4
+        max_parallel: 0
+        timeout: 2m
+        retry:
+          max_attempts: 2
+          initial_interval: 5s
+          backoff_coefficient: 1.5
+
+        main_operation:
+          name: VerifyPowerStatus
+          timeout: 1m
+          poll_interval: 5s
+          parameters:
+            expected_status: "off"
+
+      - component_type: nvswitch
+        stage: 4  # Parallel with powershelf
+        max_parallel: 0
+        timeout: 2m
+        retry:
+          max_attempts: 2
+          initial_interval: 5s
+          backoff_coefficient: 1.5
+
+        main_operation:
+          name: VerifyPowerStatus
+          timeout: 1m
+          poll_interval: 5s
+          parameters:
+            expected_status: "off"
+
+      - component_type: compute
+        stage: 4  # Parallel with others
+        max_parallel: 0
+        timeout: 2m
+        retry:
+          max_attempts: 2
+          initial_interval: 5s
+          backoff_coefficient: 1.5
+
+        main_operation:
+          name: VerifyPowerStatus
+          timeout: 1m
+          poll_interval: 5s
+          parameters:
+            expected_status: "off"
+
+  # ===========================================
+  # Restart Operations
+  # ===========================================
+
+  - name: "Graceful Restart with Verification"
+    description: "Restart with verification at each stage"
+    operation_type: power_control
+    operation: restart
+    steps:
+      # === POWER OFF SEQUENCE (Stages 1-3) ===
+
+      # Stage 1: Compute off
+      - component_type: compute
+        stage: 1
+        max_parallel: 8
+        timeout: 20m
+        retry:
+          max_attempts: 3
+          initial_interval: 1s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          - name: VerifyPowerStatus
+            timeout: 3m
+            poll_interval: 10s
+            parameters:
+              expected_status: "off"
+
+      # Stage 2: NVL switches off
+      - component_type: nvswitch
+        stage: 2
+        max_parallel: 4
+        timeout: 15m
+        retry:
+          max_attempts: 3
+          initial_interval: 5s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          - name: VerifyPowerStatus
+            timeout: 3m
+            poll_interval: 10s
+            parameters:
+              expected_status: "off"
+
+      # Stage 3: Power shelves off
+      - component_type: powershelf
+        stage: 3
+        max_parallel: 1
+        timeout: 10m
+        retry:
+          max_attempts: 3
+          initial_interval: 5s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          - name: VerifyPowerStatus
+            timeout: 3m
+            poll_interval: 10s
+            parameters:
+              expected_status: "off"
+
+          # Brief pause between off and on
+          - name: Sleep
+            parameters:
+              duration: 10s
+
+      # === POWER ON SEQUENCE (Stages 4-6) ===
+
+      # Stage 4: Power shelves on
+      - component_type: powershelf
+        stage: 4
+        max_parallel: 1
+        timeout: 10m
+        retry:
+          max_attempts: 3
+          initial_interval: 5s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          - name: VerifyPowerStatus
+            timeout: 3m
+            poll_interval: 10s
+            parameters:
+              expected_status: "on"
+
+          - name: VerifyReachability
+            timeout: 3m
+            poll_interval: 10s
+            parameters:
+              component_types: ["compute", "nvswitch"]
+
+          - name: Sleep
+            parameters:
+              duration: 30s
+
+      # Stage 5: NVL switches on
+      - component_type: nvswitch
+        stage: 5
+        max_parallel: 4
+        timeout: 15m
+        retry:
+          max_attempts: 3
+          initial_interval: 5s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          - name: VerifyPowerStatus
+            timeout: 3m
+            poll_interval: 10s
+            parameters:
+              expected_status: "on"
+
+          - name: Sleep
+            parameters:
+              duration: 15s
+
+      # Stage 6: Compute nodes on
+      - component_type: compute
+        stage: 6
+        max_parallel: 8
+        timeout: 20m
+        retry:
+          max_attempts: 3
+          initial_interval: 1s
+          backoff_coefficient: 2.0
+
+        main_operation:
+          name: PowerControl
+
+        post_operation:
+          - name: VerifyPowerStatus
+            timeout: 3m
+            poll_interval: 10s
+            parameters:
+              expected_status: "on"
+
+  # ===========================================
+  # Firmware Control Operations
+  # ===========================================
+
+  - name: "Default Firmware Upgrade"
+    description: >
+      Three-stage firmware upgrade: PowerShelf first, then NVSwitch + Compute
+      in parallel, finally power-recycle compute nodes to activate new firmware.
+    operation_type: firmware_control
+    operation: upgrade
+    steps:
+      # === Stage 1: PowerShelf firmware ===
+      - component_type: powershelf
+        stage: 1
+        max_parallel: 0
+        timeout: 30m
+        retry:
+          max_attempts: 2
+          initial_interval: 30s
+          backoff_coefficient: 1.5
+        main_operation:
+          name: FirmwareControl
+          parameters:
+            poll_interval: 2m
+            poll_timeout: 30m
+
+      # === Stage 2: NVSwitch + Compute firmware (parallel) ===
+      - component_type: nvswitch
+        stage: 2
+        max_parallel: 0
+        timeout: 30m
+        retry:
+          max_attempts: 2
+          initial_interval: 30s
+          backoff_coefficient: 1.5
+        main_operation:
+          name: FirmwareControl
+          parameters:
+            poll_interval: 2m
+            poll_timeout: 30m
+
+      - component_type: compute
+        stage: 2
+        max_parallel: 0
+        timeout: 30m
+        retry:
+          max_attempts: 2
+          initial_interval: 30s
+          backoff_coefficient: 1.5
+        main_operation:
+          name: FirmwareControl
+          parameters:
+            poll_interval: 2m
+            poll_timeout: 30m
+
+      # === Stage 3: Compute power recycle ===
+      - component_type: compute
+        stage: 3
+        max_parallel: 0
+        timeout: 10m
+        retry:
+          max_attempts: 3
+          initial_interval: 5s
+          backoff_coefficient: 2.0
+        pre_operation:
+          - name: PowerControl
+            parameters:
+              operation: "force_power_off"
+          - name: Sleep
+            parameters:
+              duration: 10s
+        main_operation:
+          name: PowerControl
+          parameters:
+            operation: "power_on"
+        post_operation:
+          - name: VerifyPowerStatus
+            timeout: 5m
+            poll_interval: 15s
+            parameters:
+              expected_status: "on"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ACTION REFERENCE
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Available Actions:
+#
+# 1. PowerControl
+#    - Main operation for power on/off/restart
+#    - When used from the power workflow: no parameters needed (uses task context)
+#    - When used cross-workflow (firmware power recycle, bring-up):
+#      - Required parameter: operation (e.g. "power_on", "force_power_off")
+#      - Valid values: power_on, force_power_on, power_off, force_power_off,
+#        restart, force_restart, warm_reset, cold_reset
+#
+# 2. VerifyPowerStatus
+#    - Polls until expected power status is reached
+#    - Required parameters:
+#      - expected_status: "on" or "off"
+#    - Required fields:
+#      - timeout: Maximum time to wait (e.g., "30s", "2m")
+#      - poll_interval: Time between polls (e.g., "5s")
+#
+# 3. VerifyReachability
+#    - Polls until specified component types become reachable
+#    - Required parameters:
+#      - component_types: Array of strings ["compute", "nvswitch", "powershelf"]
+#    - Optional parameters:
+#      - require_all: true/false (default false). When true, every individual
+#        component within the type must respond, not just the API call succeeding.
+#    - Required fields:
+#      - timeout: Maximum time to wait
+#      - poll_interval: Time between polls
+#
+# 4. Sleep
+#    - Pauses execution for specified duration
+#    - Required parameters:
+#      - duration: Time to sleep (e.g., "5s", "30s", "2m")
+#    - Implemented as workflow.Sleep() (not an activity)
+#
+# 5. FirmwareControl
+#    - Starts firmware update and polls for completion (async start + poll)
+#    - Calls FirmwareControl, then polls GetFirmwareStatus
+#    - Optional parameters:
+#      - poll_interval: Time between status polls (default: "2m")
+#      - poll_timeout: Max time to wait for completion (default: "30m")
+#    - Uses operation context (FirmwareControlTaskInfo) from task
+#
+# 6. GetPowerStatus
+#    - Query current power status of components
+#    - Returns map of component IDs to power status
+#    - No required parameters
+#

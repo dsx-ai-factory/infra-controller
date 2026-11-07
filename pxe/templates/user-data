@@ -1,0 +1,680 @@
+cat << \ZOF >/etc/bf.cfg
+
+# SFC variables
+ENABLE_BR_HBN=yes
+ENABLE_BR_SFC=yes
+{% if forge_hbn_reps %}
+BR_HBN_REPS={{ forge_hbn_reps }}
+{% endif %}
+# Include `bmc_fw_update` file content
+{{ forge_bmc_fw_update }}
+
+# This function is called by `bfb_modify_os()` as a part of install.sh script
+# embedded in the BFB installer
+carbide_modify_os()
+{
+# set errexit so that if any command fails, we exit the script
+set -e
+
+# Use the standard BFB installer `ilog()` function to write logs
+ilog "======== Start of carbide_modify_os ============"
+ilog "$(/usr/sbin/fdisk -l)"
+ilog "$(/usr/bin/lsblk)"
+ilog "$(/usr/sbin/blkid)"
+ilog "$(/usr/bin/efibootmgr -v)"
+ilog "==================================="
+ilog "==================================="
+
+# Move the files out of the installer and into the installed OS
+ilog "=== Prepare directory structure and move Forge and DOCA files"
+local forge_path="/mnt/opt/forge"
+local artifacts=(
+  /forge-scout
+  /mlx-firmware-supervisor
+  /forge-dpu.deb
+  {% if bootstrap_ca_source == "embedded" %}
+  /embedded_forge_root.pem
+  {% endif %}
+  /doca_container_configs
+  /doca_hbn.tar
+)
+mkdir -p "${forge_path}"
+for artifact in "${artifacts[@]}"; do
+  [ -e "$artifact" ] || { ilog "WARN: $artifact does not exist"; continue; }
+  mv -v "$artifact" "${forge_path}" | while read -r log_line; do ilog "mv: $log_line"; done
+done
+chmod a+x "${forge_path}/forge-scout"
+# Older BFBs receive this PXE installer but have no firmware supervisor.
+if [ -e "${forge_path}/mlx-firmware-supervisor" ]; then
+  chmod a+x "${forge_path}/mlx-firmware-supervisor"
+fi
+
+local forge_path_debs="${forge_path}/debs"
+ilog "=== Moving deb files to $forge_path_debs"
+mkdir -p "$forge_path_debs"
+for deb in /debs/*.deb; do
+  [ -e "$deb" ] || continue
+  mv -v "$deb" "$forge_path_debs" | while read -r log_line; do ilog "mv: $log_line"; done
+done
+
+# Install nvinit if present
+# TODO: Migrate to deb package
+local nvinit_path="/nvinit_setup"
+if [ -d "$nvinit_path" ]; then
+  mkdir -p /mnt/etc/nvssh
+  chmod 0755 /mnt/etc/nvssh
+
+  # Files to install: src:dest:mode
+  local -a nvinit_files=(
+    "$nvinit_path/etc-nvssh-nvssh-conf:/mnt/etc/nvssh/nvssh.conf:0644"
+    "$nvinit_path/etc-sudoersd-nvssh-sudo:/mnt/etc/sudoers.d/nvssh-sudo:0600"
+    "$nvinit_path/etc-sudoersd-nvssh-sudo-nopasswd:/mnt/etc/sudoers.d/nvssh-sudo-nopasswd:0600"
+    "$nvinit_path/etc-nsswitch-conf:/mnt/etc/nsswitch.conf:0644"
+    "$nvinit_path/etc-pamd-sshd:/mnt/etc/pam.d/sshd:0600"
+    "$nvinit_path/etc-ssh-ngc-users-ca-keys-pem:/mnt/etc/ssh/ngc-users-ca-keys.pem:0644"
+    "$nvinit_path/sbin-nss-exec:/mnt/sbin/nss_exec:0755"
+    "$nvinit_path/usr-bin-nvssh:/mnt/usr/bin/nvssh:0755"
+    "$nvinit_path/etc-ssh-sshd-config:/mnt/etc/ssh/sshd_config:0644"
+  )
+
+  for entry in "${nvinit_files[@]}"; do
+    IFS=':' read -r src dest mode <<< "$entry"
+    [ -f "$src" ] || { ilog "WARN: $src does not exist"; continue; }
+    mv -v "$src" "$dest" | while read -r log_line; do ilog "mv: $log_line"; done
+    chmod "$mode" "$dest"
+    chroot /mnt chown root:root "${dest#/mnt}"
+  done
+
+  # Groups to create: name:gid (empty gid - auto-assign)
+  local -a nvinit_groups=(
+    "nvssh-sudo-nopasswd:959"
+    "nvssh-sudo:949"
+    "ngc-automation:"
+    "ngc:"
+    "nsv:"
+  )
+
+  for entry in "${nvinit_groups[@]}"; do
+    IFS=':' read -r name gid <<< "$entry"
+    ilog "Creating group: $name"
+    if [ -n "$gid" ]; then
+      chroot /mnt groupadd --gid "$gid" "$name"
+    else
+      chroot /mnt groupadd "$name"
+    fi
+  done
+fi
+# End of nvinit setup
+
+local forge_path_chroot_debs="${forge_path_debs#/mnt}"
+ilog "=== Installing debs from $forge_path_chroot_debs:"
+chroot /mnt chown -R root:root "$forge_path_chroot_debs"
+chroot /mnt dpkg -R -i "$forge_path_chroot_debs" 2>&1 | while read -r log_line; do ilog "dpkg: $log_line"; done
+
+cat << \EOF > /mnt/etc/NetworkManager/conf.d/99-carbide.conf
+[main]
+dns=systemd-resolved
+EOF
+
+cat << \EOF > /mnt/var/lib/cloud/seed/nocloud-net/user-data
+#cloud-config
+timezone: "Etc/UTC"
+fqdn: {{ hostname }}
+manage_etc_hosts: true
+users:
+  # The default `ubuntu` user is left in place for now; once a service user is in use, we can remove it entirely
+  - name: ubuntu
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: false
+    passwd: $6$QnKhCwOoDCL7WBiY$KgzONMVSjgq/137.pYEwHYQwLLR1CMuqhn2jMOxqhXEni8nQsynh.s6qhdqOWoB5CLhOnM2fjtKuAwf6rm5.6.
+    groups: [adm, dialout, cdrom, floppy, sudo, audio, dip, video, plugdev, netdev, lxd]
+write_files:
+  - path: /opt/forge/run-scout.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # When updating firmware, HBN is not installed and have no VRF.
+      set -e
+      CMD_PREFIX="ip vrf exec mgmt"
+      count=0
+      until $CMD_PREFIX curl -k {{ api_url }}
+      do
+      echo "api not available yet ($count)";
+      if [ $count -ge 60 ]; then exit 1; fi
+      sleep 10
+      ((count++))
+      ${CMD_PREFIX} resolvectl flush-caches
+      ${CMD_PREFIX} systemd-resolve --flush-caches
+      done
+      chmod a+x /opt/forge/forge-scout
+      echo "starting forge-scout"
+      ${CMD_PREFIX} /opt/forge/forge-scout --api={{ api_url }} --machine-interface-id={{ interface_id }} --mode="standalone" auto-detect > /var/log/forge/forge-scout.log 2>&1
+  - path: /etc/bf.cfg
+    permissions: '0644'
+    content: |
+      BOOT0=NET-OOB-IPV4-HTTP
+      BOOT1=DISK
+      BOOT2=NET-OOB.4040-IPV4
+  - path: /var/lib/hbn/etc/supervisor/conf.d/acltool.conf
+    content: |
+      [program: cl-acltool]
+      command = bash -c "sleep 5 && /usr/cumulus/bin/cl-acltool -i" ; wait for nl2docad to fully come online, revisit in hbn 1.4
+      startsecs = 0
+      autorestart = false
+      priority = 200
+  - path: /var/lib/hbn/etc/cumulus/acl/policy.d/10-dhcp.rules
+    content: |
+      [iptables]
+      -t filter -A FORWARD -p udp -d 255.255.255.255 --dport 67 -m physdev --physdev-in pf0hpf_if -m comment --comment 'offload:0' -j DROP
+      {% for vf_id in range(end=num_of_vfs|int) %}
+      -t filter -A FORWARD -p udp -d 255.255.255.255 --dport 67 -m physdev --physdev-in pf0vf{{ vf_id }}_if -m comment --comment 'offload:0' -j DROP
+      {% endfor %}
+
+  - path: /etc/sysctl.d/98-hbn.conf
+    permissions: '0644'
+    content: |
+      net.ipv6.conf.all.forwarding = 1
+      kernel.shmmax = 4294967296
+      vm.nr_hugepages=2048
+      vm.min_free_kbytes=67584
+  - path: /etc/forge/config.toml
+    encoding: b64
+    permissions: '0644'
+    content: {{ forge_agent_config_b64 }}
+  - path: /var/log/forge/forge-scout.log
+    permissions: '0644'
+    content: Not Started
+  - path: /opt/forge/patch-hbn-manifest.py
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env python3
+      """Patch doca_hbn.yaml to fix init-sfs bugs. (hbn init container script)
+
+      Fixes 1-3: init-sfs restart recovery
+      The init-sfs script moves SF interfaces to the pod namespace before
+      checking SFC journal completion. If the check fails, kubelet restarts
+      the init container, but the script only polls the host namespace for
+      interfaces that are now in the pod namespace, causing an infinite loop.
+      1. journalctl --boot: only check current boot's journal
+      2. Idempotent polling: fall back to pod namespace check
+      3. Non-fatal move: tolerate already-migrated interfaces
+
+      Fixes 4-5: mgmt.intf IP extraction
+      The setup_eth0_in_mgmt_vrf() function extracted the pod IP from
+      iptables NAT rules, which picks up all kube-proxy DNAT entries
+      (not just HBN's port-8765 rule). It also read the subnet mask from
+      the br-mgmt CNI config (/16), which is wrong when Flannel assigns
+      the pod IP (/24). This produces a mangled mgmt.intf that causes
+      ifreload to fail inside the HBN container.
+      4. Read IP/gateway directly from pod eth0 and default route
+      5. Make IPv6 address/gateway lines conditional (Flannel has no IPv6)
+
+      Fix 6: NVUE config re-apply on HBN restart
+      The forge-dpu-agent writes nvue_startup.yaml to the hostPath and
+      calls `nv config apply` inside HBN only when the file content
+      changes. After an HBN container restart, the applied NVUE state
+      is lost (bgpd reverts to no, interfaces revert to defaults) but
+      the file persists on the hostPath, so the agent sees no diff and
+      skips re-application. Deleting the file in init-sfs forces the
+      agent to re-write it and call `nv config apply` on the new
+      container.
+      6. Delete nvue_startup.yaml from hostPath during init-sfs
+      """
+      import re
+      import sys
+
+      path = sys.argv[1] if len(sys.argv) > 1 else \
+          '/opt/forge/doca_container_configs/configs/doca_hbn.yaml'
+
+      try:
+          with open(path) as f:
+              content = f.read()
+      except FileNotFoundError:
+          print(f"CARBIDE PATCH: {path} not found, skipping")
+          sys.exit(0)
+
+      original = content
+
+      # Fix 1: only check current boot's journal
+      if 'journalctl -u sfc.service --no-pager -b' not in content:
+          content = content.replace(
+              'journalctl -u sfc.service --no-pager',
+              'journalctl -u sfc.service --no-pager -b'
+          )
+
+      # Fix 2: poll pod namespace as fallback (two spacing variants)
+      POLL_FIX = (
+          'intf_ready=$(chroot /host nsenter -t 1 -n ip -br link show dev'
+          ' ${intf} 2>/dev/null | cut -d" " -f1); [ -z "$intf_ready" ] &&'
+          ' intf_ready=$(ip -br link show dev ${intf} 2>/dev/null'
+          ' | cut -d" " -f1)'
+      )
+      content = content.replace(
+          'intf_ready=$(chroot /host nsenter -t 1 -n ip -br link show'
+          ' dev ${intf} | cut -d" " -f1)',
+          POLL_FIX
+      )
+      content = content.replace(
+          'intf_ready=$(chroot /host nsenter -t 1 -n ip -br link show'
+          ' dev ${intf} | cut -d " " -f1)',
+          POLL_FIX
+      )
+
+      # Fix 3: non-fatal interface move
+      if 'echo "Interface ${intf} already in pod namespace"' not in content:
+          content = content.replace(
+              'chroot /host nsenter -t 1 -n /usr/sbin/ip link set'
+              ' ${intf} netns ${NS}',
+              'chroot /host nsenter -t 1 -n /usr/sbin/ip link set'
+              ' ${intf} netns ${NS} 2>/dev/null ||'
+              ' echo "Interface ${intf} already in pod namespace"'
+          )
+
+      # Fix 4: replace iptables-based IP/gateway extraction with direct
+      # eth0 reading from the pod namespace. The old approach greps all
+      # kube-proxy DNAT entries and reads the wrong subnet mask from the
+      # br-mgmt CNI config.
+      MGMT_INTF_FIX = [
+          '# Read eth0 IP directly from the pod network namespace (init container',
+          '# shares pod netns). The previous approach parsed iptables NAT rules to',
+          '# find the pod IP, but kube-proxy populates those rules with DNAT entries',
+          "# for every cluster service endpoint -- not just HBN's port-8765 rule --",
+          '# causing multiple IPs to be concatenated into mgmt.intf. It also read',
+          '# the subnet mask from the br-mgmt CNI config (/16), which is wrong when',
+          '# Flannel assigns the pod IP (/24). Reading eth0 directly is correct',
+          '# regardless of which CNI is active (br-mgmt on boot 1, Flannel on boot 2+).',
+          "IP4=$(ip -4 addr show eth0 2>/dev/null | awk '/inet /{print $2; exit}')",
+          "IP6=$(ip -6 addr show eth0 scope global 2>/dev/null | awk '/inet6 /{print $2; exit}')",
+          '# HBN skips a family if its mask variable is empty, even though the',
+          '# address written to mgmt.intf already includes the prefix length.',
+          'MASKLEN_IPV4=${IP4#*/}',
+          'MASKLEN_IPV6=${IP6#*/}',
+          '',
+          '# On fresh pod creation, IPv4 uses the CNI bridge as its gateway',
+          '# (10.244.x.1 for Flannel, 10.88.0.1 for br-mgmt). IPv6 addresses',
+          '# need global scope, but their default gateways may be link-local.',
+          "GW_IP4=$(ip -4 route show default 2>/dev/null | awk '/via/{print $3; exit}')",
+          "GW_IP6=$(ip -6 route show default 2>/dev/null | awk '/via/{print $3; exit}')",
+          '',
+          '# Fallback for HBN crash recovery: if the main HBN container ran and',
+          '# FRR/BGP replaced the original CNI default route (shows as "default',
+          '# nhid N proto bgp" with no "via"), derive the gateway as the first',
+          '# usable IP in the pod subnet (network_address + 1).',
+          'if [ -z "$GW_IP4" ] && [ -n "$IP4" ]; then',
+          "    IFS='/' read -r _addr _mask <<< \"$IP4\"",
+          "    IFS='.' read -r _a _b _c _d <<< \"$_addr\"",
+          '    _ipint=$(( (_a<<24) + (_b<<16) + (_c<<8) + _d ))',
+          '    _maskint=$(( 0xFFFFFFFF << (32-_mask) & 0xFFFFFFFF ))',
+          '    _gwint=$(( (_ipint & _maskint) + 1 ))',
+          '    GW_IP4="$(( (_gwint>>24)&0xFF )).$(( (_gwint>>16)&0xFF )).$(( (_gwint>>8)&0xFF )).$(( _gwint&0xFF ))"',
+          'fi',
+      ]
+      ip_match = re.search(r'^([ \t]*)# Read CNI file', content, re.MULTILINE)
+      if ip_match:
+          indent = ip_match.group(1)
+          new_code = '\n'.join(
+              (indent + line if line else '')
+              for line in MGMT_INTF_FIX
+          )
+          content = re.sub(
+              r'^[ \t]*# Read CNI file[^\n]*\n'
+              r'[ \t]*CNI_FILE=/etc/cni/net\.d/10-containerd-net-br-mgmt\.conflist'
+              r'.*?'
+              r'GW_IP6=\$\(echo \$GATEWAYS[^\n]+',
+              new_code,
+              content,
+              flags=re.DOTALL | re.MULTILINE,
+          )
+
+      # Fix 5: make IPv6 address/gateway conditional in mgmt.intf generation.
+      # Flannel does not assign IPv6, so writing empty address/gateway lines
+      # produces invalid ifupdown2 config. Guard against double-application
+      # since the old string is a substring of the new string.
+      if '[ -n "$IP6" ] && echo "    address $IP6"' not in content:
+          content = content.replace(
+              'echo "    address $IP6" >> $ENIM',
+              '[ -n "$IP6" ] && echo "    address $IP6" >> $ENIM'
+          )
+      if '[ -n "$GW_IP6" ] && echo "    gateway $GW_IP6"' not in content:
+          content = content.replace(
+              'echo "    gateway $GW_IP6" >> $ENIM',
+              '[ -n "$GW_IP6" ] && echo "    gateway $GW_IP6" >> $ENIM'
+          )
+
+      # Fix 6: delete the NVUE config diff cache from the hostPath so the
+      # forge-dpu-agent re-writes and re-applies it to the new container.
+      NVUE_RM = (
+          'rm -f /host/var/lib/hbn/var/support/nvue_startup.yaml\n'
+      )
+      if 'rm -f /host/var/lib/hbn/var/support/nvue_startup.yaml' not in content:
+          content = content.replace(
+              'setup_eth0_in_mgmt_vrf\n\n      sysctl',
+              'setup_eth0_in_mgmt_vrf\n\n'
+              '      # Force forge-dpu-agent to re-apply NVUE config to this\n'
+              '      # new container (the agent skips nv-config-apply when its\n'
+              '      # input file on the hostPath has not changed).\n'
+              '      rm -f /host/var/lib/hbn/var/support/nvue_startup.yaml\n\n'
+              '      sysctl'
+          )
+
+      expected_markers = {
+          "fix1 (journalctl -b)": 'journalctl -u sfc.service --no-pager -b' in content,
+          "fix4 (eth0 IP read)": 'ip -4 addr show eth0' in content,
+          "fix6 (nvue rm)": 'rm -f /host/var/lib/hbn/var/support/nvue_startup' in content,
+      }
+      missing = [name for name, ok in expected_markers.items() if not ok]
+      if missing:
+          print(f"CARBIDE PATCH: WARNING - fixes not applied to {path}: {', '.join(missing)}")
+          print("The manifest structure may have changed upstream.")
+          sys.exit(1)
+      if content == original:
+          print(f"CARBIDE PATCH: {path} already patched")
+          sys.exit(0)
+      with open(path, 'w') as f:
+          f.write(content)
+      print(f"CARBIDE PATCH: {path} patched successfully")
+  - path: /opt/forge/runcmds.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      function cleanup()
+      {
+        CMD_PREFIX="ip vrf exec mgmt"
+        if [[ ! -f "/run/cloud-init.done" ]]
+        then
+          # --uuid is required by the logerror subcommand's argument parser but is
+          # then ignored; the ID actually used is --machine-interface-id above.
+          # Without it clap rejects the invocation before any code runs, which is
+          # why this failure path never reported anything.
+          ${CMD_PREFIX} /opt/forge/forge-scout --api={{ api_url }} --machine-interface-id={{ interface_id }} --mode="standalone" logerror --uuid={{ interface_id }}
+        else
+          /bin/rm /run/cloud-init.done
+        fi
+      }
+      function ensure_ethernet_link_type()
+      {
+        local mst_device=$1
+        local log_file="/var/log/forge/link-type.log"
+        mkdir -p /var/log/forge
+
+        if [[ -z "${mst_device}" ]]
+        then
+          echo "No mst pciconf device found for LINK_TYPE normalization" | tee -a "${log_file}"
+          return
+        fi
+
+        # Non-VPI hardware may not expose LINK_TYPE, so treat query failures as non-fatal.
+        local link_config
+        if ! link_config="$(/usr/bin/mlxconfig -d "${mst_device}" q 2>&1)"
+        then
+          echo "LINK_TYPE query unsupported; continuing" | tee -a "${log_file}"
+          echo "${link_config}" | tee -a "${log_file}"
+          return
+        fi
+        echo "${link_config}" >> "${log_file}"
+
+        # Apply Ethernet mode only to exposed ports not already reporting Ethernet.
+        local link_type_keys=()
+        local link_type_key
+        local link_type_value
+        for link_type_key in LINK_TYPE_P1 LINK_TYPE_P2
+        do
+          link_type_value="$(printf '%s\n' "${link_config}" | awk -v key="${link_type_key}" '$1 == key { print $2; exit }')"
+          if [[ -n "${link_type_value}" && "${link_type_value}" != *"(2)"* ]]
+          then
+            link_type_keys+=("${link_type_key}")
+          fi
+        done
+
+        local link_type_changed=0
+        for link_type_key in "${link_type_keys[@]}"
+        do
+          echo "Normalizing ${link_type_key} to Ethernet" | tee -a "${log_file}"
+          if /usr/bin/mlxconfig -y -d "${mst_device}" set "${link_type_key}=2"
+          then
+            link_type_changed=1
+          else
+            echo "Failed to normalize ${link_type_key}; continuing" | tee -a "${log_file}"
+          fi
+        done
+
+        if [[ "${link_type_changed}" == "1" ]]
+        then
+          trap - EXIT
+          reboot
+          # Keep cloud-init incomplete; the controller restart path will re-enter PXE with the persisted LINK_TYPE setting.
+          exit 1
+        fi
+      }
+      trap cleanup EXIT
+      set -e
+      date -s '@{{ seconds_since_epoch }}'
+      hwclock --systohc
+      /usr/bin/bfrec --capsule /lib/firmware/mellanox/boot/capsule/efi_sbkeysync.cap || true
+      mst_device="$(compgen -G '/dev/mst/mt*_pciconf0' | head -n 1)"
+      ensure_ethernet_link_type "${mst_device}"
+      /usr/bin/bfcfg
+      {% if forge_dpu_nvconfig_parameters %}
+      if [[ -z "${mst_device}" ]]
+      then
+        echo "No mst pciconf device found for the DPU NVConfig profile" >&2
+        exit 1
+      fi
+      /usr/bin/mlxconfig -y -d "${mst_device}" set {{ forge_dpu_nvconfig_parameters }}
+      {% endif %}
+      {% if bootstrap_ca_source == "embedded" or bootstrap_ca_source == "mounted" %}
+      # BEGIN bootstrap CA validation helpers
+      validate_bootstrap_ca()
+      {
+        local source=$1
+        local source_name=$2
+
+        if [ ! -s "$source" ]; then
+          echo "bootstrap CA source $source_name requires a nonempty $source" >&2
+          return 1
+        fi
+        if ! command -v awk >/dev/null 2>&1; then
+          echo "awk is required to validate bootstrap CA source $source_name" >&2
+          return 1
+        fi
+        if ! command -v openssl >/dev/null 2>&1; then
+          echo "openssl is required to validate bootstrap CA source $source_name" >&2
+          return 1
+        fi
+
+        # Reject nested, misordered, and non-certificate PEM blocks before
+        # asking OpenSSL to parse every certificate in the bundle.
+        if ! awk '
+          { sub(/\r$/, "") }
+          /^[[:space:]]*-----BEGIN / {
+            if ($0 != "-----BEGIN CERTIFICATE-----" || in_certificate) {
+              exit 1
+            }
+            in_certificate = 1
+            certificate_count++
+            next
+          }
+          /^[[:space:]]*-----END / {
+            if ($0 != "-----END CERTIFICATE-----" || !in_certificate) {
+              exit 1
+            }
+            in_certificate = 0
+            next
+          }
+          END {
+            if (certificate_count == 0 || in_certificate) {
+              exit 1
+            }
+          }
+        ' "$source"; then
+          echo "bootstrap CA source $source_name is not a certificate-only PEM bundle: $source" >&2
+          return 1
+        fi
+        if ! openssl crl2pkcs7 -nocrl -certfile "$source" -outform DER -out /dev/null; then
+          echo "bootstrap CA source $source_name contains an invalid certificate: $source" >&2
+          return 1
+        fi
+        return 0
+      }
+
+      install_embedded_bootstrap_ca()
+      {
+        local source=$1
+        local destination=$2
+        local temporary
+
+        validate_bootstrap_ca "$source" embedded || return 1
+        temporary="$(mktemp "${destination}.tmp.XXXXXX")" || return 1
+        if install -m 0644 "$source" "$temporary" &&
+           mv -f "$temporary" "$destination"; then
+          return 0
+        fi
+        rm -f "$temporary"
+        return 1
+      }
+
+      accept_mounted_bootstrap_ca()
+      {
+        validate_bootstrap_ca "$1" mounted
+      }
+      # END bootstrap CA validation helpers
+      {% endif %}
+      {# Keep legacy_download's historical command and response handling. Local
+         PEM validation would add a runtime tool dependency without authenticating
+         the CA fetched over the unauthenticated bootstrap network. #}
+      {% if bootstrap_ca_source == "legacy_download" %}
+      ip vrf exec mgmt curl --retry 5 --retry-all-errors -v -o /opt/forge/forge_root.pem {{ pxe_url }}/api/v0/tls/root_ca
+      echo "downloaded forge root cert"
+      {% elif bootstrap_ca_source == "embedded" %}
+      install_embedded_bootstrap_ca /opt/forge/embedded_forge_root.pem /opt/forge/forge_root.pem
+      echo "using embedded forge root cert"
+      {% elif bootstrap_ca_source == "mounted" %}
+      accept_mounted_bootstrap_ca /opt/forge/forge_root.pem
+      echo "using mounted forge root cert"
+      {% else %}
+      echo "unknown bootstrap CA source: {{ bootstrap_ca_source }}" >&2
+      exit 1
+      {% endif %}
+      /usr/bin/mlxprivhost -d /dev/mst/mt*_pciconf0 r --disable_rshim --disable_tracer --disable_counter_rd --disable_port_owner
+      bash -c '/usr/bin/mlxconfig -y -d /dev/mst/mt*_pciconf0 s SRIOV_EN=True NUM_OF_VFS={{ num_of_vfs }} HIDE_PORT2_PF=True NUM_OF_PF=1'
+      bash -c '/usr/bin/mlxconfig -y -d /dev/mst/mt*_pciconf0 set LINK_TYPE_P1=2 LINK_TYPE_P2=2' || true # not all BF2s have VPI so ignore the error if it does not
+      dpkg -i /opt/forge/forge-dpu.deb
+      mkdir -p /etc/apt/sources.list.d
+      bash -c 'echo "deb [trusted=yes] {{ pxe_url }}/public/blobs/internal/apt/ focal main" > /etc/apt/sources.list.d/forge.list'
+      chmod +x /opt/forge/doca_container_configs/scripts/hbn-dpu-setup.sh
+      cd /opt/forge/doca_container_configs/scripts/
+      ip vrf exec mgmt /bin/bash hbn-dpu-setup.sh
+      python3 /opt/forge/patch-hbn-manifest.py
+      ctr -n=k8s.io image import /opt/forge/doca_hbn.tar
+      /opt/mellanox/doca/services/telemetry/import_doca_telemetry.sh
+
+      {% if forge_host_representor_intercept_bridging %}
+        add_host_representor_intercept_bridge() {
+          local host_representor="$1"
+          local host_intercept_bridge_name="$2"
+          local host_intercept_bridge_port="$3"
+          local host_intercept_hbn_port="hpp-${host_intercept_bridge_port}"
+
+          # Create our new bridge
+          ovs-vsctl --may-exist add-br "${host_intercept_bridge_name}" -- set bridge "${host_intercept_bridge_name}" datapath_type=netdev
+
+          # Grab the current port index of the hbn bridge and increment it
+          next_br_hbn_ofport_index=$(($(ovs-vsctl get bridge {{ forge_hbn_bridge }} external_ids | grep -o '[0-9]*')+1))
+
+          # Set the port index of the hbn bridge to the new index
+          ovs-vsctl set bridge {{ forge_hbn_bridge }} external_ids:ofport_index="${next_br_hbn_ofport_index}"
+
+          # Add our patch port to br-hbn and set its ofport index to match what we set on the hbn bridge
+          ovs-vsctl --may-exist add-port {{ forge_hbn_bridge }} "${host_intercept_hbn_port}" -- set interface "${host_intercept_hbn_port}" type=patch options:peer="${host_intercept_bridge_port}" ofport_request="${next_br_hbn_ofport_index}" external_ids="{hbn_netdev=${host_representor}_if, hbn_rep_ofport=${host_representor}_if_r}"
+
+          # Add our side of the patch to our new bridge
+          ovs-vsctl --may-exist add-port "${host_intercept_bridge_name}" "${host_intercept_bridge_port}" -- set interface "${host_intercept_bridge_port}" type=patch options:peer="${host_intercept_hbn_port}"
+
+          # Match ofport and ofport_request match so that sfc.sh doesn't error out.
+          ovs-vsctl set interface "${host_intercept_bridge_port}" ofport_request=$(ovs-vsctl get interface "${host_intercept_bridge_port}" ofport)
+
+          # Adjust the sfc.conf to insert our patch port where the host representor used to be
+          sed -i "s#{{ forge_hbn_bridge }}~${host_representor}~${host_representor}_if_r~${host_representor}_if~${host_representor}_if_r#{{ forge_hbn_bridge }}~${host_intercept_hbn_port}~${host_representor}_if_r~${host_representor}_if~${host_representor}_if_r#" /etc/mellanox/sfc.conf
+
+          # Keep the OVSDB move when its backing host PF/VF is not available yet.
+          # Now pop the host representor off of br-hbn and attach it to the host intercept bridge
+          ovs-vsctl --if-exists del-port "${host_representor}" -- \
+            --may-exist add-port "${host_intercept_bridge_name}" "${host_representor}" -- \
+            set interface "${host_representor}" type=dpdk mtu_request=9216 external_ids='{}' || true
+          ovs-vsctl set interface "${host_representor}" ofport_request=$(ovs-vsctl get interface "${host_representor}" ofport) || true
+
+          # Add the detail about the "uplink" for this bridge to external ids for the bridge
+          ovs-vsctl br-set-external-id "${host_intercept_bridge_name}" bridge-uplink "${host_intercept_bridge_port}"
+        }
+
+        {% for entry in forge_host_representor_intercept_bridging | split(pat=",") %}
+          host_representor_intercept_bridge_config={{ entry | json_encode | safe }}
+          IFS=':' read -r host_representor host_intercept_bridge_name host_intercept_bridge_port extra <<< "${host_representor_intercept_bridge_config}"
+
+          if [[ -z "${host_representor}" || -z "${host_intercept_bridge_name}" || -z "${host_intercept_bridge_port}" || -n "${extra}" ]]; then
+            echo "invalid host representor intercept bridge config: ${host_representor_intercept_bridge_config}" >&2
+            exit 1
+          fi
+
+          add_host_representor_intercept_bridge "${host_representor}" "${host_intercept_bridge_name}" "${host_intercept_bridge_port}"
+        {% endfor %}
+      {% endif %}
+
+      # Now restart sfc. This might not be necessary since OVS restart seems
+      # to trigger this because of a systemd dependency.
+      /usr/sbin/service sfc restart
+
+      # And restart ovs
+      /usr/sbin/service openvswitch-switch restart
+
+      configure_ovn_encap_ip()
+      {
+        local -a oob_ipv4_addresses
+        local oob_ipv4_address_count
+        mapfile -t oob_ipv4_addresses < <(
+          ip -4 -o address show dev oob_net0 scope global |
+            awk '{sub(/\/.*/, "", $4); print $4}'
+        )
+        oob_ipv4_address_count="$(
+          printf '%s\n' "${oob_ipv4_addresses[@]}" |
+            awk 'NF { count++ } END { print count + 0 }'
+        )"
+
+        if (( oob_ipv4_address_count != 1 )); then
+          echo "expected exactly one global IPv4 address on oob_net0; found ${oob_ipv4_address_count}" >&2
+          return 1
+        fi
+
+        ovs-vsctl set Open_vSwitch . \
+          "external_ids:ovn-encap-ip=${oob_ipv4_addresses[0]}"
+      }
+
+      configure_ovn_encap_ip
+
+      /opt/forge/run-scout.sh
+      touch /run/cloud-init.done
+
+# run these commands (last)
+runcmd:
+  - [ bash, -c, '/opt/forge/runcmds.sh' ]
+EOF
+
+ilog "======== End of carbide_modify_os ============"
+ilog "$(/usr/sbin/fdisk -l)"
+ilog "$(/usr/bin/lsblk)"
+ilog "$(/usr/sbin/blkid)"
+ilog "$(/usr/bin/efibootmgr -v)"
+ilog "==================================="
+ilog "==================================="
+# restore previous errexit behavior
+set +e
+}
+
+# This function is called by install.sh script embedded in the BFB installer
+bfb_modify_os() {
+  carbide_modify_os
+}
+ZOF
+
+# Do not remove these trailing spaces or this file will not work

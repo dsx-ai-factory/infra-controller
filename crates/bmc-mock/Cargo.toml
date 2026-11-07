@@ -1,0 +1,86 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[package]
+name = "bmc-mock"
+version = "0.1.0"
+description = "HTTP server that pretends to be a BMC / libredfish. For integration and local testing."
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+# bmc-mock should be usable independently of NICo.
+# Do not add new carbide-* dependencies, including dev-dependencies.
+[dependencies]
+bmc-platform = { path = "../bmc-platform" }
+axum = { workspace = true }
+axum-extra = { features = ["typed-header"], workspace = true }
+axum-server = { features = ["tls-rustls"], workspace = true }
+bytes = { workspace = true }
+carbide-axum-utils = { path = "../axum-utils" }
+chrono = { workspace = true }
+clap = { workspace = true }
+eyre = { workspace = true }
+flate2 = { workspace = true }
+form_urlencoded = { workspace = true }
+futures = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+indexmap = { workspace = true }
+itertools = { workspace = true }
+lazy_static = { workspace = true }
+mac_address = { features = ["serde"], workspace = true }
+nv-redfish = { workspace = true, features = [
+  "bmc-http",
+  "computer-systems",
+  "event-service",
+] }
+nv-redfish-server-core = { workspace = true }
+nix = { features = ["fs"], workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+quick-xml = { features = ["serialize"], workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+serde = { features = ["derive"], workspace = true }
+serde_json = { workspace = true }
+socket2 = { workspace = true }
+tar = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tower = { workspace = true }
+tower-http = { features = ["normalize-path"], workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { features = ["env-filter"], workspace = true }
+url = { workspace = true }
+
+[build-dependencies]
+nv-redfish-csdl-compiler = { workspace = true }
+nv-redfish-schema = { workspace = true }
+
+[dev-dependencies]
+rcgen = { workspace = true }
+hyper = { workspace = true, features = ["client", "http2"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+reqwest = { workspace = true, default-features = false, features = ["rustls"] }
+tokio = { features = ["test-util"], workspace = true }
+tokio-rustls = { workspace = true }
+
+[lints]
+workspace = true

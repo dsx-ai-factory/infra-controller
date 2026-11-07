@@ -1,0 +1,35 @@
+suite: resource naming (default nico, nameOverride to carbide)
+templates:
+  - deployment.yaml
+  - service-grpc.yaml
+  - service-account.yaml
+tests:
+  - it: defaults every resource name to the chart name (nico-api)
+    asserts:
+      - equal:
+          path: metadata.name
+          value: nico-api
+
+  - it: nameOverride renames every resource to carbide-api
+    set:
+      nameOverride: carbide-api
+    asserts:
+      - equal:
+          path: metadata.name
+          value: carbide-api
+
+  - it: deployment serviceAccountName defaults to nico-api
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: nico-api
+
+  - it: deployment serviceAccountName honors nameOverride
+    template: deployment.yaml
+    set:
+      nameOverride: carbide-api
+    asserts:
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: carbide-api

@@ -1,0 +1,100 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+name: "mlx_generic"
+filters:
+  - field: device_type
+    values: [ "BlueField2", "BlueField3" ]
+    match_mode: exact
+variables:
+  - name: "SRIOV_EN"
+    description: "Enable Single-Root I/O Virtualization (SR-IOV)."
+    read_only: false
+    spec:
+      type: "boolean"
+  - name: "NUM_OF_VFS"
+    description: "The total number of Virtual Functions (VFs) that can be supported, for each PF."
+    read_only: false
+    spec:
+      type: "integer"
+  - name: "HIDE_PORT2_PF"
+    description: "When TRUE, the device will not advertise the PFs associate with port 2, except for the Embedded CPU (ECPF) if exists. This configuration is available only with NV_PCI_CONF.ADVANCED_PCI_SETTINGS is TRUE."
+    read_only: false
+    spec:
+      type: "boolean"
+  - name: "NUM_OF_PF"
+    description: "Total number of Network PCIe functions (PFs) exposed by the device. In case the number of PFs cannot be equally distributed between the number of ports, the remainder of PFs will be distribute between the ports with the lower numbers. For a Multi-Host device, this number is applied to each host individually."
+    read_only: false
+    spec:
+      type: "integer"
+  - name: "INTERNAL_CPU_OFFLOAD_ENGINE"
+    description: "Defines whether the Internal CPU is used as an offload engine."
+    read_only: false
+    spec:
+      type: "enum"
+      config:
+        options: [ "ENABLED", "DISABLED" ]
+  - name: "ROCE_ADAPTIVE_ROUTING_EN"
+    description: "When TRUE, Adaptive Routing for RDMA QPs is supported."
+    read_only: false
+    spec:
+      type: "boolean"
+  - name: "USER_PROGRAMMABLE_CC"
+    description: "When set to TRUE, loading user programmed CC image is enabled. When FALSE, such image cannot be loaded. If an image already exists when this configuration is changed, the image is ignored. Valid only if ROCE_CC_LEGACY_DCQCN is FALSE"
+    read_only: true
+    spec:
+      type: "boolean"
+  - name: "TX_SCHEDULER_LOCALITY_MODE"
+    description: "Defines transmission scheduler adaptation to locality."
+    read_only: false
+    spec:
+      type: "enum"
+      config:
+        options: [ "DEVICE_DEFAULT", "STATIC_MODE", "ACCUMULATIVE", "DISABLED" ]
+  - name: "MULTIPATH_DSCP"
+    description: "Multipath on transmit, set the DSCP bit to hold the MP eligible info."
+    read_only: false
+    spec:
+      type: "enum"
+      config:
+        options: [ "DEVICE_DEFAULT", "DISABLE", "DSCP_0", "DSCP_1", "DSCP_2" ]
+  - name: "ROCE_RTT_RESP_DSCP_P1"
+    description: "The DiffServ Code Point of the generated RTT response for this port. If not set, RTT request value will be used. Overrides PCC_INT_NP_RTT_DSCP."
+    read_only: false
+    spec:
+      type: "integer"
+  - name: "ROCE_RTT_RESP_DSCP_MODE_P1"
+    description: "Defines the method for setting IP.DSCP in RTT response packet. FIXED_VALUE taken from ROCE_RTT_RESP_DSCP, RTT_RQUEST taken from the RTT request."
+    read_only: false
+    spec:
+      type: "enum"
+      config:
+        options: [ "DEVICE_DEFAULT", "FIXED_VALUE", "RTT_REQUEST" ]
+  - name: "PCI_DOWNSTREAM_PORT_OWNER"
+    description: "Identifies the owner of the respective PCI Downstream Port."
+    read_only: false
+    spec:
+      type: "enum_array"
+      config:
+        size: 16
+        options: [ "DEVICE_DEFAULT", "EMBEDDED_CPU", "HOST_0", "HOST_1", "HOST_2", "HOST_3", "HOST_4", "HOST_5", "HOST_6", "HOST_7" ]
+  - name: "ROCE_CC_STEERING_EXT"
+    description: "Defines CC extension for packet steering"
+    read_only: false
+    spec:
+      type: "enum"
+      config:
+        options: [ "DEVICE_DEFAULT", "DISABLED", "ENABLED" ]

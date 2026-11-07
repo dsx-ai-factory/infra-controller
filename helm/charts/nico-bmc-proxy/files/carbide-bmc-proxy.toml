@@ -1,0 +1,98 @@
+listen = "[::]:1079"
+metrics_endpoint = "[::]:1080"
+database_url = "postgres://replaced-by-env-var"
+allowed_principals = ["spiffe-service-id/{{ .Values.auth.apiPrincipal }}", "spiffe-service-id/nv-dps"]
+
+[redirects]
+mode = "follow_same_origin"
+
+[tls]
+identity_pemfile_path = "/var/run/secrets/spiffe.io/tls.crt"
+identity_keyfile_path = "/var/run/secrets/spiffe.io/tls.key"
+root_cafile_path = "/var/run/secrets/spiffe.io/ca.crt"
+admin_root_cafile_path = "/etc/forge/carbide-bmc-proxy/site/admin_root_cert_pem"
+
+[carbide_api]
+api_url = "https://{{ .Values.apiServiceName | default "nico-api" }}.{{ include "nico-bmc-proxy.namespace" . }}.svc.cluster.local:1079"
+root_ca = "/var/run/secrets/spiffe.io/ca.crt"
+client_cert = "/var/run/secrets/spiffe.io/tls.crt"
+client_key = "/var/run/secrets/spiffe.io/tls.key"
+
+[auth.trust]
+spiffe_trust_domain = "{{ .Values.global.spiffe.trustDomain }}"
+spiffe_service_base_paths = [
+  "/{{ .Values.auth.namespace | default (include "nico-bmc-proxy.namespace" .) }}/sa/",
+  "/default/sa/",
+]
+spiffe_machine_base_path = "/{{ .Values.auth.namespace | default (include "nico-bmc-proxy.namespace" .) }}/machine/"
+additional_issuer_cns = []
+
+[auth.acls]
+# ACL entry format:
+#   [!]VERB[,VERB...] /path/pattern
+# Examples:
+#   "/**"
+#   "GET /redfish/v1/**"
+#   "GET /redfish/v1/Systems/system*"
+#   "GET /redfish/v1/Systems/*Boot"
+#   "GET,POST /redfish/v1/Managers/BMC/NodeManager/Domains"
+#   "!POST,PATCH /redfish/v1/Systems/*/SecureBoot/**"
+#   "GET /nvue_v1/platform/environment/**"
+# Matching is ordered and first-match-wins. `*` matches one path component.
+# `prefix*` and `*suffix` match one component by prefix or suffix. `**` matches
+# zero or more path components. Replace templated components like `{id}` with
+# `*` when deriving ACLs from endpoint documentation.
+# An address that is a switch's NVOS management interface is proxied to its
+# NVUE REST API with the switch's NVOS credentials, so entries for switches
+# name `/nvue_v1/` paths.
+# By default, allow wildcards cannot consume percent escapes; spell them literally.
+# Structured allow entries may opt in, for example:
+#   { pattern = "/nvue_v1/**", allow_escapes = ["%2F", "%3A"] }
+# Use ["*"] for unrestricted wildcard escapes, still subject to path validation.
+# Deny wildcards remain broad. This GET rule permits escaped registry names.
+"spiffe-service-id/{{ .Values.auth.apiPrincipal }}" = [
+  "GET /redfish/v1/Registries/%23*",
+  "/**",
+]
+"spiffe-service-id/nv-dps" = [
+  "GET /redfish/v1",
+  "POST /redfish/v1/SessionService/Sessions",
+  "DELETE /redfish/v1/SessionService/Sessions/*",
+  "GET /redfish/v1/Systems",
+  "GET /redfish/v1/Systems/HGX_Baseboard_0",
+  "POST /redfish/v1/Systems/HGX_Baseboard_0/Actions/Oem/NvidiaComputerSystem.SetProcessorPowerLimits",
+  "GET /redfish/v1/Systems/HGX_Baseboard_0/Processors",
+  "GET /redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_*",
+  "GET,PATCH /redfish/v1/Systems/HGX_Baseboard_0/Processors/CPU_*/EnvironmentMetrics",
+  "GET /redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_*",
+  "GET,PATCH /redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_*/EnvironmentMetrics",
+  "GET /redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_*/Oem/Nvidia/WorkloadPowerProfile",
+  "POST /redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_*/Oem/Nvidia/WorkloadPowerProfile/Actions/NvidiaWorkloadPower.EnableProfiles",
+  "POST /redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_*/Oem/Nvidia/WorkloadPowerProfile/Actions/NvidiaWorkloadPower.DisableProfiles",
+  "GET /redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_SXM_*",
+  "GET /redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_SXM_*/EnvironmentMetrics",
+  "GET /redfish/v1/Chassis",
+  "GET /redfish/v1/Chassis/Chassis_0",
+  "GET /redfish/v1/Chassis/Chassis_0/EnvironmentMetrics",
+  "GET /redfish/v1/Chassis/HGX_Chassis_0",
+  "GET /redfish/v1/Chassis/HGX_Chassis_0/EnvironmentMetrics",
+  "GET,PATCH /redfish/v1/Chassis/HGX_ProcessorModule_*/EnvironmentMetrics",
+  "GET /redfish/v1/Chassis/HGX_ProcessorModule_*/Assembly",
+  "GET /redfish/v1/Managers",
+  "GET /redfish/v1/Managers/BMC",
+  "GET /redfish/v1/Managers/BMC/NodeManager",
+  "GET,POST /redfish/v1/Managers/BMC/NodeManager/Domains",
+  "GET,PATCH,DELETE /redfish/v1/Managers/BMC/NodeManager/Domains/*",
+  "GET /redfish/v1/Managers/BMC/NodeManager/Domains/*/Policies",
+  "GET /redfish/v1/Managers/BMC/NodeManager/Domains/*/Policies/*",
+  "GET /redfish/v1/Managers/BMC/NodeManager/PSUPolicies",
+  "GET /redfish/v1/Managers/BMC/NodeManager/PSUPolicies/*",
+  "GET /redfish/v1/Managers/HGX_BMC_0",
+  "GET /redfish/v1/UpdateService/FirmwareInventory/FW_BMC_0",
+  "GET /redfish/v1/UpdateService/FirmwareInventory/HGX_FW_BMC_0",
+  "GET /redfish/v1/UpdateService/FirmwareInventory/HostBMC_0",
+  "GET /redfish/v1/TelemetryService",
+  "GET /redfish/v1/TelemetryService/MetricReports",
+  "GET /redfish/v1/TelemetryService/MetricReports/NvidiaNMMetrics_0",
+  "GET /redfish/v1/TaskService/Tasks/*",
+]

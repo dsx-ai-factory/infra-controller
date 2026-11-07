@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}Expected Switches{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="row">
+        <div class="col">
+            <h1>Expected Switches</h1>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">Expected Switches</h5>
+                </div>
+                <div class="card-body">
+                    {% if !switches.is_empty() %}
+                    <div class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                            <tr>
+                                <th>Serial Number</th>
+                                <th>BMC MAC Address</th>
+                                <th>Explored BMC IP</th>
+                                <th>Rack ID</th>
+                                <th>Linked Switch</th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            {% for switch in switches %}
+                            <tr>
+                                <td>{{ switch.serial_number }}</td>
+                                <td>{{ switch.bmc_mac_address }}</td>
+                                <td>{{ switch.explored_bmc_ip }}</td>
+                                <td>{{ switch.rack_id }}</td>
+                                <td>
+                                    {% if switch.switch_id == "Unlinked" %}
+                                        {{ switch.switch_id }}
+                                    {% else %}
+                                        <a href="/admin/switch/{{ switch.switch_id }}">{{ switch.switch_id }}</a>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <p class="text-muted">No expected switches found.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

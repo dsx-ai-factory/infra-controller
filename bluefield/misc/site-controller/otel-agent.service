@@ -1,0 +1,17 @@
+[Unit]
+Description=DPU OpenTelemetry mTLS certificate renewal agent bootstrap + container monitor
+After=networking.service network-online.target time-sync.target containerd@mgmt.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/share/otelcol-contrib/docker/otel-agent/otel-agent.sh
+Restart=on-failure
+RestartSec=30
+
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

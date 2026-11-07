@@ -1,0 +1,13 @@
+Package: otel-dpu
+Version: SED__DPU_AGENT_PKG_VERSION
+Section: base
+Priority: optional
+Architecture: arm64
+Depends: jq
+Maintainer: Forge team <swngc-forge-dev@nvidia.com>
+Description: OpenTelemetry for site controller DPUs
+ This package installs the OpenTelemetry collector and mTLS certs renewal
+ agent. It expects a JSON file at /etc/site-dpu.json containing "site" and
+ "domain" values and an array of "endpoints" in the form { "fqdn": "some.fqdn",
+ "ip": "10.0.0.1" } including carbide api and otel ingress. A post-install
+ script reads this file and updates /etc/hosts and sets hostname.

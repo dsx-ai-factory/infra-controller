@@ -1,0 +1,10 @@
+apiVersion: v2
+name: nico-api
+description: Helm chart for the NICo API component
+type: application
+version: 0.1.1
+appVersion: "latest"
+keywords:
+  - nico
+  - api
+  - nico

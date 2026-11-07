@@ -1,0 +1,14 @@
+---
+host_interface_id: 6a3e76cd-e3f3-487a-aea0-04e56b049999 # host_primary machine interface
+host_ip_addresses:
+  vlan123:
+    address: 10.0.0.2
+    gateway: 10.0.0.1
+    prefix: 10.0.0.0/24
+    fqdn: seventeen-connecticut.dev3.frg.nvidia.com
+    booturl: test.com/ubuntu
+  vlan200:
+    address: 10.1.0.2
+    gateway: 10.1.0.1
+    prefix: 10.1.0.0/24
+    fqdn: chalie-failed.dev3.frg.nvidia.com

@@ -1,0 +1,78 @@
+{
+   "id": "9ffb8f90-f88f-4420-952d-e911f446d7eb",
+   "name": "demo-team-0-group",
+   "description": "Demo team group",
+   "org": "tenant-org-name",
+   "tenantId": "778086ad-35b8-46ff-a796-69b2e4c93975",
+   "version": "7fa801416ce27ec68d9dd531eb6948a9a5f4ed87",
+   "status": "Syncing",
+   "statusHistory": [
+      {
+         "status": "Syncing",
+         "message": "received SSH Key Group update request, syncing",
+         "created": "2023-11-01T12:38:04.208273Z",
+         "updated": "2023-11-01T12:38:04.208273Z"
+      },
+      {
+         "status": "Syncing",
+         "message": "received SSH Key Group update request, syncing",
+         "created": "2023-11-01T12:37:44.969029Z",
+         "updated": "2023-11-01T12:37:44.969029Z"
+      },
+      {
+         "status": "Syncing",
+         "message": "received SSH Key Group creation request, syncing",
+         "created": "2023-11-01T12:37:22.649619Z",
+         "updated": "2023-11-01T12:37:22.649619Z"
+      },
+      {
+         "status": "Synced",
+         "message": "SSH Key Group has successfully been synced to all Sites",
+         "created": "2023-11-01T12:37:22.649619Z",
+         "updated": "2023-11-01T12:37:22.649619Z"
+      }
+   ],
+   "sshKeys": [
+      {
+         "id": "b658db7e-f06c-4140-9494-48ea1f3f7769",
+         "name": "customer-0",
+         "org": "tenant-org-name",
+         "tenantId": "778086ad-35b8-46ff-a796-69b2e4c93975",
+         "fingerprint": "LfniSSO1iwx1nbAXyP6swmwmkrW3GnW1j9v+t/Ou9Vw",
+         "created": "2023-11-01T12:37:30.554055Z",
+         "updated": "2023-11-01T12:37:30.554055Z"
+      }
+   ],
+   "siteAssociations": [
+      {
+         "site": {
+         "id": "157627d6-d742-440b-ac04-77a618d94459",
+         "name": "demo-site-a",
+         "description": "Demo Site",
+         "org": "provider-org-name",
+         "infrastructureProviderId": "16060041-f146-43fe-8c82-be48460b5583",
+         "siteControllerVersion": null,
+         "siteAgentVersion": null,
+         "registrationToken": null,
+         "registrationTokenExpiration": null,
+         "serialConsoleHostname": "192.168.126.6",
+         "isSerialConsoleEnabled": true,
+         "serialConsoleIdleTimeout": 300,
+         "serialConsoleMaxSessionLength": 86400,
+         "isSerialConsoleSSHKeysEnabled": false,
+         "isOnline": true,
+         "deprecations": [],
+         "status": "Registered",
+         "statusHistory": [],
+         "created": "2023-04-21T17:30:08.425798Z",
+         "updated": "2023-11-01T12:37:53.579769Z"
+         },
+         "version": "3af0d2e8136292010bb23afeb8de1c009e343cb2",
+         "status": "Syncing",
+         "created": "2023-11-01T12:38:04.208273Z",
+         "updated": "2023-11-01T12:38:04.256966Z"
+      }
+   ],
+   "created": "2023-11-01T12:37:22.649619Z",
+   "updated": "2023-11-01T12:38:04.251866Z"
+}

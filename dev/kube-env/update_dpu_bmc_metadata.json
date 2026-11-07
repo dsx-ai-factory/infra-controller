@@ -1,0 +1,16 @@
+{
+  "machine_id": {
+    "id": "$HOST_MACHINE_ID"
+  },
+  "bmc_info" : {
+    "ip": "bmc-mock.forge-system.svc.cluster.local"
+  },
+  "data": [
+    {
+      "user": "forge_admin",
+      "password": "notforprod",
+      "role": 1
+    }
+  ],
+  "request_type": 1
+}

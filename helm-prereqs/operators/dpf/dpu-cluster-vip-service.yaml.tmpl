@@ -1,0 +1,41 @@
+# =============================================================================
+# operators/dpf/dpu-cluster-vip-service.yaml.tmpl — MetalLB advertisement for
+# the DPU cluster VIP
+#
+# Rendered by setup.sh with:
+#   envsubst '${NICO_DPF_METALLB_POOL} ${NICO_DPF_DPU_CLUSTER_VIP}'
+# Applied only when NICO_DPF_METALLB_POOL is set; skip it in environments
+# where the VIP is already routable from the DPUs.
+#
+# Deliberately unusual (docs/manuals/dpf.md §3.4): the selector-less Service
+# reserves and advertises the VIP via MetalLB, while the same-named Endpoints
+# object points at a dummy RFC 5737 address so nothing is actually routed —
+# keepalived (from the DPUCluster CR) terminates the traffic.
+# =============================================================================
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dpu-cluster-vip-loadbalancer
+  namespace: dpf-operator-system
+  annotations:
+    metallb.io/address-pool: '${NICO_DPF_METALLB_POOL}'
+spec:
+  allocateLoadBalancerNodePorts: true
+  loadBalancerIP: "${NICO_DPF_DPU_CLUSTER_VIP}"
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+  type: LoadBalancer
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: dpu-cluster-vip-loadbalancer
+  namespace: dpf-operator-system
+subsets:
+- addresses:
+  - ip: 192.0.2.10     # dummy/test IP (RFC 5737) — keepalived owns the VIP
+  ports:
+  - port: 80

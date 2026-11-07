@@ -1,0 +1,24 @@
+{
+  "id": "ff920227-e2a1-43aa-99bd-7e39653e4f9f",
+  "name": "demo-ipv4-block",
+  "description": "Demo IPv4 block",
+  "siteId": "bd4692bd-da95-410e-911a-d492fe2d35f8",
+  "infrastructureProviderId": "16060041-f146-43fe-8c82-be48460b5583",
+  "tenantId": null,
+  "routingType": "DatacenterOnly",
+  "prefix": "192.166.128.0",
+  "prefixLength": 24,
+  "protocolVersion": "IPv4",
+  "status": "Ready",
+  "statusHistory": [
+    {
+      "status": "Ready",
+      "message": "IP Block is ready for use",
+      "created": "2023-07-06T16:17:46.911267Z",
+      "updated": "2023-07-06T16:17:46.911267Z"
+    }
+  ],
+  "deprecations": [],
+  "created": "2023-07-06T16:17:46.911267Z",
+  "updated": "2023-07-06T16:17:46.911267Z"
+}

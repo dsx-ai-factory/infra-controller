@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Custom Resource Definition for Site resources
+# Used by site-manager to manage site lifecycle
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: sites.forge.nvidia.io
+spec:
+  group: forge.nvidia.io
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              properties:
+                uuid:
+                  type: string
+                  description: Unique identifier for the site
+                sitename:
+                  type: string
+                  description: Human-readable name of the site
+                provider:
+                  type: string
+                  description: Infrastructure Provider name
+                fcorg:
+                  type: string
+                  description: Organization identifier
+            status:
+              type: object
+              properties:
+                otp:
+                  type: object
+                  properties:
+                    passcode:
+                      type: string
+                      description: One-time passcode for site registration
+                    timestamp:
+                      type: string
+                      description: Expiry timestamp for the OTP
+                bootstrapstate:
+                  type: string
+                  description: Current bootstrap state (AwaitHandshake, HandshakeComplete, RegistrationComplete)
+                controlplanestatus:
+                  type: string
+                  description: Status of the control plane
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Site Name
+          type: string
+          jsonPath: .spec.sitename
+        - name: Bootstrap State
+          type: string
+          jsonPath: .status.bootstrapstate
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+  scope: Namespaced
+  names:
+    plural: sites
+    singular: site
+    kind: Site
+    shortNames:
+      - st

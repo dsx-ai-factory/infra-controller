@@ -1,0 +1,149 @@
+suite: WebUI authentication deployment configuration
+templates:
+  - deployment.yaml
+tests:
+  - it: defaults to Basic and injects the generated password Secret
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_WEB_AUTH_TYPE
+            value: basic
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_WEB_BASIC_AUTH_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: nico-api-web-basic-auth
+                key: password
+
+  - it: injects an existing Basic password Secret
+    set:
+      webAuth.basic.existingSecret.name: operator-web-password
+      webAuth.basic.existingSecret.key: credential
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_WEB_BASIC_AUTH_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: operator-web-password
+                key: credential
+
+  - it: generates the default Secret with a custom key
+    set:
+      webAuth.basic.existingSecret.key: credential
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_WEB_BASIC_AUTH_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: nico-api-web-basic-auth
+                key: credential
+
+  - it: oauth2 mode does not inject a Basic password
+    set:
+      webAuth.mode: oauth2
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_WEB_AUTH_TYPE
+            value: oauth2
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_WEB_BASIC_AUTH_PASSWORD
+
+  - it: none mode does not inject a Basic password
+    set:
+      webAuth.mode: none
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_WEB_AUTH_TYPE
+            value: none
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_WEB_BASIC_AUTH_PASSWORD
+
+  - it: literal legacy mode takes precedence without a duplicate built-in mode
+    set:
+      extraEnv:
+        - name: CARBIDE_WEB_AUTH_TYPE
+          value: oauth2
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_WEB_AUTH_TYPE
+            value: oauth2
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_WEB_BASIC_AUTH_PASSWORD
+
+  - it: literal legacy mode takes precedence over an invalid configured mode
+    set:
+      webAuth.mode: saml
+      extraEnv:
+        - name: CARBIDE_WEB_AUTH_TYPE
+          value: oauth2
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_WEB_AUTH_TYPE
+            value: oauth2
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_WEB_BASIC_AUTH_PASSWORD
+
+  - it: preserves a valueFrom legacy mode and conservatively injects a password
+    set:
+      extraEnv:
+        - name: CARBIDE_WEB_AUTH_TYPE
+          valueFrom:
+            configMapKeyRef:
+              name: web-auth-mode
+              key: mode
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_WEB_AUTH_TYPE
+            valueFrom:
+              configMapKeyRef:
+                name: web-auth-mode
+                key: mode
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_WEB_BASIC_AUTH_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: nico-api-web-basic-auth
+                key: password
+
+  - it: rejects an invalid configured mode
+    set:
+      webAuth.mode: saml
+    asserts:
+      - failedTemplate:
+          errorMessage: 'nico-api.webAuth.mode must be one of basic, oauth2, or none; got "saml"'
+
+  - it: rejects an invalid literal legacy mode
+    set:
+      extraEnv:
+        - name: CARBIDE_WEB_AUTH_TYPE
+          value: saml
+    asserts:
+      - failedTemplate:
+          errorMessage: 'literal CARBIDE_WEB_AUTH_TYPE in nico-api.extraEnv must be one of basic, oauth2, or none; got "saml"'

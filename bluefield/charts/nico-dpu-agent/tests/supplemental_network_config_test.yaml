@@ -1,0 +1,154 @@
+suite: supplemental network config
+templates:
+  - configmap.yaml
+  - daemonset.yaml
+tests:
+  - it: points the agent config at the mounted patch file
+    template: configmap.yaml
+    set:
+      supplementalNetworkConfig:
+        name: storage-testbed-nvue-patch
+    asserts:
+      - equal:
+          path: data["config.toml"]
+          value: |
+            [network]
+            supplemental-config-path = "/etc/forge/supplemental-network-config/supplemental.json"
+
+  - it: renders both agent config sections when sign proxy is also set
+    template: configmap.yaml
+    set:
+      fmds:
+        sign_proxy_url: http://dsx-imds.dpf-operator-system.svc.cluster.local:8080
+      supplementalNetworkConfig:
+        name: storage-testbed-nvue-patch
+    asserts:
+      - equal:
+          path: data["config.toml"]
+          value: |
+            [machine-identity]
+            sign-proxy-url = "http://dsx-imds.dpf-operator-system.svc.cluster.local:8080"
+            [network]
+            supplemental-config-path = "/etc/forge/supplemental-network-config/supplemental.json"
+
+  - it: mounts the externally managed ConfigMap by reference
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+      supplementalNetworkConfig:
+        name: storage-testbed-nvue-patch
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --config-path=/etc/forge/config.toml
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: agent-config
+            mountPath: /etc/forge/config.toml
+            subPath: config.toml
+            readOnly: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: supplemental-network-config
+            mountPath: /etc/forge/supplemental-network-config
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: supplemental-network-config
+            configMap:
+              name: storage-testbed-nvue-patch
+              optional: true
+              items:
+                - key: supplemental.json
+                  path: supplemental.json
+      - exists:
+          path: spec.template.metadata.annotations["checksum/machine-identity-config"]
+
+  - it: pins the mounted filename when a custom key is used
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+      supplementalNetworkConfig:
+        name: storage-testbed-nvue-patch
+        key: patch.json
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: supplemental-network-config
+            configMap:
+              name: storage-testbed-nvue-patch
+              optional: true
+              items:
+                - key: patch.json
+                  path: supplemental.json
+
+  - it: leaves the daemonset untouched when unset
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --config-path=/etc/forge/config.toml
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: supplemental-network-config
+            mountPath: /etc/forge/supplemental-network-config
+            readOnly: true
+      - notExists:
+          path: spec.template.metadata.annotations["checksum/machine-identity-config"]
+
+  - it: rejects a ConfigMap name that is not a valid Kubernetes name
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+      supplementalNetworkConfig:
+        name: "Not A Valid Name!"
+    asserts:
+      - failedTemplate:
+          errorPattern: supplementalNetworkConfig
+
+  - it: rejects a data key with characters Kubernetes does not allow
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+      supplementalNetworkConfig:
+        name: storage-testbed-nvue-patch
+        key: "bad key/with spaces"
+    asserts:
+      - failedTemplate:
+          errorPattern: supplementalNetworkConfig
+
+  - it: treats an empty name as disabled
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+      supplementalNetworkConfig:
+        name: ""
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --config-path=/etc/forge/config.toml
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: supplemental-network-config
+            mountPath: /etc/forge/supplemental-network-config
+            readOnly: true

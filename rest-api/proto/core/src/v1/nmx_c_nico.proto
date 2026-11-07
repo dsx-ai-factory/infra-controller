@@ -1,0 +1,978 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+
+package nmx_c;
+
+option go_package = "github.com/NVIDIA/infra-controller/rest-api/proto/core";
+
+enum ProtoMsgMajorVersion {
+  PROTO_MSG_MAJOR_VERSION_UNDEFINED = 0;
+  PROTO_MSG_MAJOR_VERSION_OBSOLETE1 = 1;
+  PROTO_MSG_MAJOR_VERSION = 2;
+}
+
+enum ProtoMsgMinorVersion {
+  PROTO_MSG_MINOR_VERSION_UNDEFINED = 0;
+  PROTO_MSG_MINOR_VERSION_OBSOLETE1 = 1;
+  PROTO_MSG_MINOR_VERSION_OBSOLETE2 = 2;
+  PROTO_MSG_MINOR_VERSION_OBSOLETE3 = 3;
+  PROTO_MSG_MINOR_VERSION = 20;
+
+}
+
+enum StReturnCode {
+  NMX_ST_UNDEFINED = 0;
+  NMX_ST_SUCCESS = 1;
+  NMX_ST_BADPARAM = 2;
+  NMX_ST_GENERIC_ERROR = 3;
+  NMX_ST_NOT_SUPPORTED = 4;
+  NMX_ST_UNINITIALIZED = 5;
+  NMX_ST_TIMEOUT = 6;
+  NMX_ST_VERSION_MISMATCH = 7;
+  NMX_ST_IN_USE = 8;
+  NMX_ST_NOT_CONFIGURED = 9;
+  NMX_ST_CONNECTION_NOT_VALID = 10;
+  NMX_ST_NVLINK_ERROR = 11;
+  NMX_ST_RESOURCE_BAD = 12;
+  NMX_ST_RESOURCE_IN_USE = 13;
+  NMX_ST_RESOURCE_NOT_IN_USE = 14;
+  NMX_ST_RESOURCE_EXHAUSTED = 15;
+  NMX_ST_RESOURCE_NOT_READY = 16;
+  NMX_ST_PARTITION_EXISTS = 17;
+  NMX_ST_PARTITION_ID_IN_USE = 18;
+  NMX_ST_PARTITION_ID_NOT_IN_USE = 19;
+  NMX_ST_PARTITION_NAME_IN_USE = 20;
+  NMX_ST_PARTITION_NAME_NOT_IN_USE = 21;
+  NMX_ST_PARTITION_ID_NAME_MISMATCH = 22;
+  NMX_ST_NOT_READY = 23;
+
+  NMX_ST_NMX_CONTROLLER_INTERNAL_ERROR = 500;
+  NMX_ST_NMX_CONTROLLER_DB_ERROR = 501;
+  NMX_ST_NMX_CONTROLLER_DB_CORRUPTION = 502;
+  NMX_ST_NMX_CONTROLLER_INVALID_CONFIG_FILE = 503;
+}
+
+enum ControlPlaneState {
+  NMX_CONTROL_PLANE_STATE_UNDEFINED  = 0;
+  NMX_CONTROL_PLANE_STATE_OFFLINE    = 1;
+  NMX_CONTROL_PLANE_STATE_STANDBY    = 2;
+  NMX_CONTROL_PLANE_STATE_CONFIGURED = 3;
+  NMX_CONTROL_PLANE_STATE_TIMEOUT    = 4;
+  NMX_CONTROL_PLANE_STATE_ERROR      = 5;
+  NMX_CONTROL_PLANE_STATE_UNCONFIGURED   = 6;
+  NMX_CONTROL_PLANE_STATE_DEGRADED       = 7;
+}
+
+enum PortType {
+  NMX_PORT_TYPE_UNDEFINED = 0;
+  NMX_PORT_TYPE_GPU = 1;
+  NMX_PORT_TYPE_SWITCH_ACCESS = 2;
+  NMX_PORT_TYPE_SWITCH_TRUNK = 3;
+  NMX_PORT_TYPE_FNM = 4;
+  NMX_PORT_TYPE_HCA = 5;
+}
+
+enum DeviceType {
+  NMX_DEVICE_TYPE_UNDEFINED   = 0;    //!< Undefined device type
+  NMX_DEVICE_TYPE_SWITCH      = 1;    //!< Switch device
+  NMX_DEVICE_TYPE_GPU         = 2;    //!< Gpu device
+  NMX_DEVICE_TYPE_ROUTER      = 3;    //!< Router device
+  NMX_DEVICE_TYPE_CA          = 4;    //!< Management device
+}
+
+enum ComputeNodeAttr {
+  NMX_COMPUTE_NODE_ATTR_UNDEFINED = 0;
+  NMX_COMPUTE_NODE_ATTR_ALL = 1;              //!< All Compute nodes
+  NMX_COMPUTE_NODE_ATTR_FREE = 2;                 //!< Compute nodes with all GPUs available for partition creation
+  NMX_COMPUTE_NODE_ATTR_FULLY_ALLOCATED = 3;      //!< Compute nodes with all GPUs allocated to partitions
+  NMX_COMPUTE_NODE_ATTR_PARTIALLY_ALLOCATED = 4;  //!< Compute nodes with some GPUs allocated to partitions
+}
+
+enum ComputeNodeHealth {
+  NMX_COMPUTE_NODE_HEALTH_UNKNOWN = 0;        //!< Unknown health state
+  NMX_COMPUTE_NODE_HEALTH_HEALTHY = 1;            //!< Fully healthy
+  NMX_COMPUTE_NODE_HEALTH_DEGRADED = 2;           //!< Some GPUs are degraded to NO_NVLINK
+  NMX_COMPUTE_NODE_HEALTH_UNHEALTHY = 3;            //!< Unable to participate in NVLink
+}
+
+enum GpuAttr {
+  NMX_GPU_ATTR_UNDEFINED = 0;
+  NMX_GPU_ATTR_ALL = 1;           //!< All GPUs in the NVLink Domain
+  NMX_GPU_ATTR_LOCATION = 2;          //!< All GPUs that are associated with a given Location
+  NMX_GPU_ATTR_PARTITION_ID = 3;      //!< All GPUs that are associated with a given Partition ID
+}
+
+enum GpuHealth {
+  NMX_GPU_HEALTH_UNKNOWN = 0;     //!< Unknown health state
+  NMX_GPU_HEALTH_HEALTHY = 1;         //!< Fully healthy
+  NMX_GPU_HEALTH_DEGRADED = 2;        //!< One or more links are down
+  NMX_GPU_HEALTH_NO_NVLINK = 3;       //!< Unable to participate in NVLink partition
+  NMX_GPU_HEALTH_DEGRADED_BW = 4;        //!< GPU operates in degraded bandwidth
+}
+
+enum SwitchNodeAttr {
+  NMX_SWITCH_NODE_ATTR_UNDEFINED = 0;
+  NMX_SWITCH_NODE_ATTR_ALL = 1;   //!< All Switch nodes
+  NMX_SWITCH_NODE_ATTR_L1 = 2;        //!< L1 Switch nodes
+  NMX_SWITCH_NODE_ATTR_L2 = 3;        //!< L2 Switch nodes
+}
+
+enum SwitchNodeHealth {
+  NMX_SWITCH_NODE_HEALTH_UNKNOWN = 0;         //!< Unknown health state
+  NMX_SWITCH_NODE_HEALTH_HEALTHY = 1;             //!< Fully healthy
+  NMX_SWITCH_NODE_HEALTH_MISSING_NVLINK = 2;            //!< one or more devices within the node is unhealthy
+  NMX_SWITCH_NODE_HEALTH_UNHEALTHY = 3;           //!< Fully unhealthy
+}
+
+enum SwitchHealth {
+  NMX_SWITCH_HEALTH_UNKNOWN = 0;              //!< Unknown health state
+  NMX_SWITCH_HEALTH_HEALTHY = 1;                 //!< Fully healthy
+  NMX_SWITCH_HEALTH_MISSING_NVLINK = 2;                 //!< one or more links are unhealthy
+  NMX_SWITCH_HEALTH_UNHEALTHY = 3;                //!< Fully unhealthy
+}
+
+enum PartitionInfoAttr {
+  NMX_PARTITION_INFO_ATTR_UNDEFINED = 0;
+  NMX_PARTITION_INFO_ATTR_ALL = 1;                 //!< All Partitions
+  NMX_PARTITION_INFO_ATTR_NUM_GPUS = 2;            //!< Number of Partitions with a specific GPU size
+  NMX_PARTITION_INFO_ATTR_NUM_COMPUTE_NODES = 3;    //!< Number of Partitions with a specific number of Compute nodes
+}
+
+enum PartitionHealth {
+  NMX_PARTITION_HEALTH_UNKNOWN = 0;   //!< Unknown health state
+  NMX_PARTITION_HEALTH_HEALTHY = 1;       //!< Partition is healthy
+  NMX_PARTITION_HEALTH_DEGRADED_BANDWIDTH = 2;     //!< Partition is in degraded bandwidth
+  NMX_PARTITION_HEALTH_DEGRADED = 3;              //!< One or more GPUs has routing disabled
+  NMX_PARTITION_HEALTH_UNHEALTHY = 4;              //!< Partition is unhealthy
+}
+
+enum PartitionType {
+  NMX_PARTITION_TYPE_UNDEFINED = 0;
+  NMX_PARTITION_TYPE_LOCATION_BASED       = 1; //<! Partition is allocated based on GPU's physical location
+  NMX_PARTITION_TYPE_GPUUID_BASED         = 2; //<! Partition is allocated based on GPU's Uid
+}
+
+enum LogicalLinkState {
+  NMX_LOGICAL_LINK_NO_CHANGE = 0;
+  NMX_LOGICAL_LINK_STATE_DOWN = 1;
+  NMX_LOGICAL_LINK_STATE_INIT = 2;
+  NMX_LOGICAL_LINK_STATE_ARMED = 3;
+  NMX_LOGICAL_LINK_STATE_ACTIVE = 4;
+  NMX_LOGICAL_LINK_STATE_ACT_DEFER = 5;
+}
+
+enum PhysicalPortState {
+  NMX_PORT_PHYS_STATE_NO_CHANGE = 0;
+  NMX_PORT_PHYS_STATE_SLEEP = 1;
+  NMX_PORT_PHYS_STATE_POLLING = 2;
+  NMX_PORT_PHYS_STATE_DISABLED = 3;
+  NMX_PORT_PHYS_STATE_PORTCONFTRAIN = 4;
+  NMX_PORT_PHYS_STATE_LINKUP = 5;
+  NMX_PORT_PHYS_STATE_LINKERRRECOVER = 6;
+  NMX_PORT_PHYS_STATE_PHYTEST = 7;
+}
+
+enum ConnState {
+  NMX_NVLINK_CONN_STATE_UNKNOWN = 0;     //!< Unknown connection state
+  NMX_NVLINK_CONN_STATE_ACTIVE = 1;      //!< Active link or connection state
+  NMX_NVLINK_CONN_STATE_INACTIVE = 2;    //!< Inactive link or connection state
+}
+
+enum ConnType {
+  NMX_NVLINK_CONN_TYPE_UNKNOWN = 0;            //!< Unknown connection type
+  NMX_NVLINK_CONN_TYPE_ALL = 1;                    //!< Dump the GPU and switch connections
+  NMX_NVLINK_CONN_TYPE_GPU = 2;                    //!< Dump the GPU connections
+  NMX_NVLINK_CONN_TYPE_SWITCH = 3;                 //!< Dump the Switch connections
+}
+
+enum ConnAttr {
+  NMX_NVLINK_CONN_ATTR_UNKNOWN = 0;              //!< Unknown connection attribute
+  NMX_NVLINK_CONN_ATTR_EXPECTED = 1;                 //!< All expected connections as per FM Topology
+  NMX_NVLINK_CONN_ATTR_DISCOVERED = 2;               //!< All discovered connections
+  NMX_NVLINK_CONN_ATTR_EXPECTED_ACTIVE = 3;          //!< All expected active connections as per FM Topology
+  NMX_NVLINK_CONN_ATTR_EXPECTED_INACTIVE = 4;        //!< All expected inactive connections
+  NMX_NVLINK_CONN_ATTR_UNEXPECTED = 5;               //!< All unexpected connections which are discovered
+}
+
+enum ResiliencyMode {
+  NMX_RESILIENCY_MODE_UNDEFINED = 0;      //!< Undefined resiliency mode
+  NMX_RESILIENCY_MODE_FULL_BANDWIDTH = 1;     //!< Full bandwidth mode
+  NMX_RESILIENCY_MODE_ADAPTIVE_BANDWIDTH = 2; //!< Adaptive bandwidth mode
+  NMX_RESILIENCY_MODE_USER_ACTION_REQUIRED = 3;    //!< User action required mode
+}
+
+enum NmxControllerHealth {
+  NMX_CONTROLLER_HEALTH_UNKNOWN = 0;
+  NMX_CONTROLLER_HEALTH_HEALTHY = 1;
+  NMX_CONTROLLER_HEALTH_DEGRADED = 2;
+  NMX_CONTROLLER_HEALTH_UNHEALTHY = 3;
+  NMX_CONTROLLER_HEALTH_UNHEALTHY_DB_CORRUPTED = 4;
+}
+
+enum AdminState {
+  NMX_ADMIN_STATE_UNKNOWN = 0;
+  NMX_ADMIN_STATE_UP = 1;
+  NMX_ADMIN_STATE_DOWN = 2;
+  NMX_ADMIN_STATE_DIAG = 3;
+}
+
+enum ReportType {
+  NMX_REPORT_TYPE_UNKNOWN = 0;
+  NMX_REPORT_TYPE_TOPOLOGY = 1;
+  NMX_REPORT_TYPE_PARTITIONS = 2;
+}
+
+message ReturnCode {
+  ServerHeader server_header = 1;
+}
+
+message KeyValPair {
+  string key = 1;
+  string value = 2;
+}
+
+message ServerHeader {
+  string domain_uuid = 1;
+  string app_uuid = 2;
+  string app_ver = 3;
+  StReturnCode return_code = 4;
+}
+
+message ClientHello {
+  string gateway_id = 1;
+  ProtoMsgMajorVersion major_version = 2;
+  ProtoMsgMinorVersion minor_version = 3;
+}
+
+message ServerHello {
+  ServerHeader server_header = 1;
+  repeated KeyValPair components_ver = 2;
+  repeated string capabilities = 3;
+  string host_os_details = 4;
+  ProtoMsgMajorVersion major_version = 5;
+  ProtoMsgMinorVersion minor_version = 6;
+}
+
+message SubscriptionResponse {
+  ServerHeader server_header = 1;
+}
+
+message HealthStateChanged {
+  ServerHeader server_header = 1;
+}
+
+message FmEvent {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  oneof event {
+    FmEventControlPlaneStateChange fm_event_control_plane_state_change = 3;
+    FmEventTopologyChange fm_event_topology_change = 4;
+    FmEventPartitionChange fm_event_partition_change = 5;
+  }
+}
+
+message InitDone {
+  ServerHeader server_header = 1;
+}
+
+message ServerNotification {
+  oneof notification {
+    SubscriptionResponse subscription_response = 1;      // sent only to requesting client
+    StaticConfigResponse static_config_response = 3;      // sent to all subscribed clients, except requesting client
+    CreatePartitionResponse create_partition_response = 4;          // sent to all subscribed clients, except requesting client
+    DeletePartitionResponse delete_partition_response = 5;          // sent to all subscribed clients, except requesting client
+    UpdatePartitionResponse update_partition_response = 6;          // sent to all subscribed clients, except requesting client
+    FmEvent fm_event = 7;                                // sent to all subscribed clients
+    HealthStateChanged health_state_changed = 8;          // sent to all subscribed clients
+    SetAdminStateResponse set_admin_state_response = 9;    // sent to all subscribed clients, except requesting client
+    DomainStateInfo domain_state_info = 10;               // sent to clients that requested heartbeat at requested interval
+    InitDone init_done = 11;          // sent to all subscribed clients
+  }
+}
+
+message ConfigFileContent {
+  string config_file_name = 1;
+  string config_file_content = 2;
+}
+
+message ConfigFileContents {
+  repeated ConfigFileContent config_file_content = 1;
+}
+
+message ConfigFile {
+  string config_file_name = 1;
+}
+
+message ConfigFiles {
+  repeated ConfigFile config_file = 1;
+}
+
+message ConfigKeyVal {
+  string config_file_name = 1;
+  string key = 2;
+  string value = 3;
+}
+
+message ConfigKeyVals {
+  repeated ConfigKeyVal config_key_val = 1;
+}
+
+message ConfigKey {
+  string config_file_name = 1;
+  string key = 2;
+}
+
+message ConfigKeys {
+  repeated ConfigKey config_key = 1;
+}
+
+// For future use, currently set context to ""
+message Context {
+  string context = 1;
+}
+
+message GetStaticConfigRequest {
+  Context context = 1;
+  oneof configRequest {
+    ConfigKeys config_keys = 2;
+    ConfigFiles config_files = 3;
+  }
+  string gateway_id = 4;
+}
+
+message SetStaticConfigRequest {
+  string gateway_id = 1;
+  StaticConfig static_config = 2;
+}
+
+message StaticConfigResponse {
+  ServerHeader server_header = 1;
+  StaticConfig static_config = 2;
+}
+
+message StaticConfig {
+  Context context = 1;
+  oneof config {
+    ConfigKeyVals config_key_vals = 2;
+    ConfigFileContents config_file_contents = 3;
+  }
+}
+
+message SlotId {
+  uint32 slot_id = 1;
+}
+
+message PartitionId {
+  uint32 partition_id = 1;
+}
+
+message Location {
+  uint64 chassis_id = 1;
+  uint64 slot_id = 2;
+  uint64 host_id = 3;
+}
+
+message LocationInfo {
+  string chassis_serial_number = 2;
+  uint64 tray_index = 4;
+  Location location = 6;
+}
+
+message DomainProperties {
+  ServerHeader server_header = 1;
+  Context context = 2;
+
+  // NvLink Domain Specific Information
+  reserved 3 to 9;
+
+  // Compute Node and GPU Specific Information
+  uint32 max_compute_nodes = 10;                            //!< Max Compute nodes in the NVLink Domain
+  uint32 max_compute_nodes_per_chassis = 11;                  //!< Max Compute nodes per Chassis
+  uint32 max_gpus_per_compute_node = 12;                      //!< Max GPUs per Compute Node
+  uint32 max_gpu_nv_links = 13;                              //!< Max links per GPU
+  uint32 line_rate_mbps = 14;                               //!< Max line Rate in MBps
+  reserved 15 to 19;
+
+  // Switch Node Specific Information
+  uint32  max_switch_nodes = 20;                             //!< Max Switch nodes in the NVLink Domain
+  uint32  max_switch_nodes_per_chassis = 21;                   //!< Max Switch nodes per Chassis
+  uint32  max_switches_per_switch_node = 22;                   //!< Max switches per Switch Node
+  uint32  max_switch_nv_links = 23;                           //!< Max links per switch
+  reserved 24 to 29;
+
+  // GPU Partition Specific Information
+  uint32  min_gpus_per_partition = 30 [deprecated = true];    //!< Min GPUs in a partition
+  uint32  max_num_partitions = 31;                           //!< Maximum number of partitions
+  uint32  max_num_alids = 32;                                //!< Maximum number of ALids
+  reserved 33 to 39;
+
+  // Multicast Groups specific information
+  uint32  max_multicast_groups = 40;                         //!< Max multicast groups in the NVLink Domain
+  reserved 41 to 49;
+
+  uint32 max_num_ports = 50;                                 //!< Maximum number of ports in this NVLink Domain
+}
+
+message DomainStateInfo {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  ControlPlaneState control_plane_state = 3;
+  uint32 available_multicast_groups = 4;
+  string config_status_description = 5;
+  NmxControllerHealth nmx_controller_health = 6;
+}
+
+message FmEventControlPlaneStateChange {
+  Context context = 1;
+}
+
+message FmEventTopologyChange {
+  Context context = 1;
+}
+
+message FmEventPartitionChange {
+  Context context = 1;
+  PartitionId partition_id = 2;
+}
+
+message PortTopoInfo {
+  PortType port_type = 1;
+  uint64 port_uid = 2;
+  uint64 port_num = 3;
+  uint64 peer_port_device_uid = 4;
+  uint64 peer_port_num = 5;
+  PhysicalPortState physical_state = 6;
+  LogicalLinkState logical_state = 7;
+  uint64 subnet_prefix = 8;
+  bool is_sdn_port = 9;
+  repeated PartitionId partition_id_list = 10;
+  reserved 11 to 20;
+  optional uint32 cage_num = 21;
+  optional uint32 cage_port_num = 22;
+  optional uint32 cage_split_port_num = 23;
+  optional uint64 base_lid = 24;
+  optional uint64 system_port_num = 25;
+  optional uint64 compute_port_num = 26;
+  bool contain_and_drain = 27;
+  uint32 rail = 28;
+  uint32 plane = 29;
+  uint32 link_rate_mbps = 30;
+  AdminState port_admin_state = 31;
+}
+
+message SwitchTopoInfo {
+  LocationInfo loc = 1;
+  uint64 topology_id = 2;
+  uint64 device_uid = 3;
+  uint32 device_id = 4;
+  uint64 num_ports = 5;
+  uint64 system_uid = 6;
+  uint32 vendor_id = 7;
+  uint64 device_pcie_id = 8;
+  string description = 9;
+  repeated PartitionId partition_id = 10;
+  SwitchHealth device_health = 11;
+  repeated PortTopoInfo port_topo_info = 12;
+}
+
+message GpuTopoInfo {
+  LocationInfo loc = 1;
+  uint64 topology_id = 2;
+  uint64 device_uid = 3;
+  uint32 device_id = 4;
+  uint64 num_ports = 5;
+  uint64 system_uid = 6;
+  uint32 vendor_id = 7;
+  uint64 device_pcie_id = 8;
+  repeated uint64 a_lids = 9;
+  string description = 10;
+  repeated PartitionId partition_id = 12;
+  GpuHealth device_health = 13;
+  repeated PortTopoInfo port_topo_info = 14;
+}
+
+message DeviceTopoInfo {
+  oneof device {
+    SwitchTopoInfo switch_topo_info = 1;
+    GpuTopoInfo gpu_topo_info = 2;
+  }
+}
+
+message GetTopologyInfoRequest {
+  Context context = 1;
+  string gateway_id = 3;
+}
+
+message FmTopologyInfo {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  repeated DeviceTopoInfo device_topo_info = 3;
+}
+
+message GetComputeNodeCountRequest {
+  Context context = 1;
+  ComputeNodeAttr attr = 2;
+  uint64 chassis_id = 3;                  //!<  Chassis ID(Optional)
+  ComputeNodeHealth node_health = 4;      //!<  Compute Node Health (Optional)
+  string gateway_id = 5;
+}
+
+message GetComputeNodeCountResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  uint32 num_nodes = 3;
+}
+
+message GetComputeNodeLocationListRequest {
+  Context context = 1;
+  ComputeNodeAttr attr = 2;
+  ComputeNodeHealth node_health = 3;     //!< Compute Node Health (Optional)
+  uint64 chassis_id = 4;                 //!< Chassis ID (Optional)
+  uint32 num_nodes = 5;
+  string gateway_id = 6;
+}
+
+message GetComputeNodeLocationListResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  repeated Location loc_list = 3;
+}
+
+message GetComputeNodeInfoListRequest {
+  Context context = 1;
+  repeated Location loc_list = 2;  // Optional - if not provided response will include all discovered compute nodes
+  string gateway_id = 3;
+}
+
+message ComputeNodeInfo {
+  LocationInfo loc = 1;
+  uint32 num_gpus = 2;
+  ComputeNodeHealth node_health = 3;
+  repeated PartitionId partition_id_list = 4;
+}
+
+message GetComputeNodeInfoListResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  repeated ComputeNodeInfo node_info_list = 3;
+}
+
+message GetGpuInfoListRequest {
+  Context context = 1;
+  GpuAttr attr = 2;
+  uint32 num_gpus = 3;               // Optional - if not provided the response includes all discovered GPUs that match filter
+  Location loc = 4;                 //!<  Compute node location (required when GPU_ATTR_LOCATION_ID is specified)
+  PartitionId partition_id = 5;      //!<  Partition ID (required when GPU_ATTR_PARTITION_ID is specified)
+  string gateway_id = 6;
+  GpuHealth gpu_health = 7;          // Optional
+}
+
+message GpuInfo {
+  LocationInfo loc = 1;
+  uint32 gpu_id = 2;
+  uint64 gpu_uid = 3;
+  GpuHealth gpu_health = 4;
+  PartitionId partition_id = 5;
+}
+
+message GetGpuInfoListResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  repeated GpuInfo gpu_info_list = 3;
+}
+
+message GetSwitchNodeCountRequest {
+  Context context = 1;
+  SwitchNodeAttr attr = 2;
+  SwitchNodeHealth node_health = 3; //!<  Switch Node Health (Optional)
+  uint32 num_nodes = 4;
+  string gateway_id = 5;
+}
+
+message GetSwitchNodeCountResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  uint32 num_nodes = 3;
+}
+
+message GetSwitchNodeLocationListRequest {
+  Context context = 1;
+  SwitchNodeAttr attr = 2;
+  SwitchNodeHealth node_health = 3;   //!< Switch Node Health (Optional)
+  uint32 num_nodes = 4;
+  string gateway_id = 5;
+}
+
+message GetSwitchNodeLocationListResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  repeated Location loc_list = 3;
+}
+
+message GetSwitchNodeInfoListRequest {
+  Context context = 1;
+  repeated Location loc_list = 2;  // Optional - if not provided response includes all discovered switch nodes
+  string gateway_id = 3;
+}
+
+message SwitchNodeInfo {
+  LocationInfo loc = 1;
+  uint32 num_switches = 2;
+  SwitchNodeHealth node_health = 3;
+  repeated PartitionId partition_id_list = 4;
+}
+
+message GetSwitchNodeInfoListResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  repeated SwitchNodeInfo node_info_list = 3;
+}
+
+message GetSwitchInfoListRequest {
+  Context context = 1;
+  Location loc = 2;
+  uint32 num_switches = 3;  // Optional - if not provided response includes all discovered switches
+  string gateway_id = 4;
+}
+
+message SwitchInfo {
+  Location loc = 1;
+  uint32 switch_id = 2;
+  uint64 switch_uid = 3;
+  uint32 num_ports = 4;
+  SwitchHealth health = 5;
+}
+
+message GetSwitchInfoListResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  repeated SwitchInfo switch_info_list = 3;
+}
+
+message GetPartitionCountRequest {
+  Context context = 1;
+  PartitionInfoAttr info_attr = 2;
+  uint32 num_gpus = 3;        //!<  GPU Size partitions(Optional)
+  uint32 num_nodes = 4;       //!<  Number of Compute nodes (Optional)
+  PartitionHealth health = 5;         //!<  Partition Health (Optional)
+  string gateway_id = 6;
+}
+
+message GetPartitionCountResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  uint32 num_partitions = 3;
+}
+
+message GetPartitionIdListRequest {
+  Context context = 1;
+  PartitionInfoAttr info_attr = 2;
+  uint32 num_gpus = 3;          //!<  GPU Size partitions(Optional)
+  uint32 num_nodes = 4;         //!<  Number of Compute nodes (Optional)
+  uint32 num_partitions = 5;
+  PartitionHealth health = 6;           //!<  Partition Health (Optional)
+  string gateway_id = 7;
+}
+
+message Partition {
+  PartitionId partition_id = 1;
+  uint32 num_gpus = 2;
+}
+
+message GetPartitionIdListResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  repeated Partition partition_list = 3;
+}
+
+message GetPartitionInfoListRequest {
+  Context context = 1;
+  repeated PartitionId partition_id_list = 2;  // Optional - if IDs/Names not provided response includes all provisioned Partitions
+  repeated string partition_name_list = 3;     // Optional - if IDs/Names not provided response includes all provisioned Partitions
+  string gateway_id = 4;
+}
+
+message PartitionAttr {
+  ResiliencyMode resiliency_mode = 1;
+  uint32 multicast_groups_limit = 3;
+}
+
+message PartitionInfo {
+  PartitionId partition_id = 1;
+  string name = 2;
+  uint32 num_gpus = 3;
+  repeated GpuLocation gpu_location_list = 4;
+  repeated uint64 gpu_uid_list = 5;
+  PartitionHealth health = 6;
+  PartitionType partition_type = 7;
+  uint32 num_allocated_multicast_groups = 8;
+  PartitionAttr attr = 9;
+}
+
+message GetPartitionInfoListResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  repeated PartitionInfo partition_info_list = 3;
+}
+
+message GpuLocation {
+  Location loc = 1;
+  uint32 gpu_id = 2;
+}
+
+message GpuResourceId {
+  oneof resourceId {
+    GpuLocation gpu_location = 1;              //!<  List of GPU locations
+    uint64 gpu_uid = 2;                    //!<  List of GPU Unique identifiers
+  }
+}
+
+message CreatePartitionRequest {
+  Context context = 1;
+  string name = 2;    // optional, if specified must be unique
+  repeated GpuResourceId gpu_resource_id = 3;
+  PartitionAttr attr = 4;
+  PartitionId partition_id = 6;    //!<  Partition ID of newly created partition (OPTIONAL), if specified must be unique
+  string gateway_id = 7;
+}
+
+message CreatePartitionResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  PartitionId partition_id = 3;
+}
+
+message DeletePartitionRequest {
+  Context context = 1;
+  PartitionId partition_id = 2; // can be set to 0 if name is provided
+  string gateway_id = 3;
+  string name = 4; // can be empty if partitionId is provided
+}
+
+message DeletePartitionResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  PartitionId partition_id = 3;
+}
+
+message UpdatePartitionRequest {
+  Context context = 1;
+  PartitionId partition_id = 2;  // can be set to 0 if name is provided
+  repeated GpuLocation location_list = 3;    //!<  List of GPU locations (provide only if PartitionType=PARTITION_TYPE_LOCATION_BASED)
+  repeated uint64 gpu_uid = 4;          //!<  List of GPU Unique identifiers(provide only if PartitionType=PARTITION_TYPE_GPUUID_BASED)
+  string gateway_id = 5;
+  string name = 6; // can be empty if partitionId is provided
+  bool reroute = 7; // default value is true, will be deprecated and then removed in future releases
+}
+
+message UpdatePartitionResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  PartitionId partition_id = 3;
+}
+
+message GetConnCountRequest {
+  Context context = 1;
+  ConnType conn_type = 2;
+  ConnAttr conn_attr = 3;
+  Location loc = 4;
+  string gateway_id = 5;
+}
+
+message GetConnCountResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  uint32 num_conns = 3;
+  string time_stamp = 4;        //!< Timestamp (UTC format - yyyy-mm-dd hh.mm.ss ) of last GFM connection update
+}
+
+message GetConnInfoListRequest {
+  Context context = 1;
+  ConnType conn_type = 2;
+  ConnAttr conn_attr = 3;
+  uint32 num_conns = 4;
+  Location loc = 5;
+  string gateway_id = 6;
+}
+
+message LinkEndPoint {
+  Location loc = 1;
+  uint32 switch_orgpu_id = 2;
+  uint32 cage_num = 3;
+  uint32 cage_port_num = 4;
+  uint32 cage_port_split_num = 5;
+  uint32 port_num = 6;
+}
+
+message ConnInfo {
+  LinkEndPoint end_point_a = 1;
+  LinkEndPoint end_point_b = 2;
+  ConnType conn_type = 3;
+  ConnState conn_state = 4;
+}
+
+message ConnInfoList {
+  repeated ConnInfo conn_info_list = 1;
+}
+
+message GetConnInfoListResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  ConnInfoList conn_info_list = 3;
+  string time_stamp = 4;        //!< Timestamp (UTC format - yyyy-mm-dd hh.mm.ss ) of last GFM connection update
+}
+
+message SubscribeRequest {
+  string gateway_id = 1;
+  bool notify_on_self_change = 2;
+  uint32 heart_beat_rate = 3;
+}
+
+message GetDomainPropertiesRequest {
+  Context context = 1;
+  string gateway_id = 2;
+}
+
+message GetDomainStateInfoRequest {
+  Context context = 1;
+  string gateway_id = 2;
+}
+
+message FactoryResetRequest {
+  string gateway_id = 1;
+}
+
+message GetConnInfoCombinedRequest {
+  Context context = 1;
+  string gateway_id = 2;
+}
+
+message ConnInfoCombined {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  ConnInfoList unexpected_conn_list = 3;
+}
+
+message TransceiverIdentifier {
+  oneof chassisInfo {
+    string chassis_serial_number = 1;
+    uint64 chassis_id = 2;
+  }
+  uint64 slot_id = 3;
+  uint32 transceiver_num = 4;
+}
+
+message GetAdminStateRequest {
+  Context context = 1;
+  string gateway_id = 2;
+  oneof adminStateEntity {
+    TransceiverIdentifier transceiver_identifier = 3;
+  }
+}
+
+message AdminStateEntry {
+  AdminState admin_state = 1;
+  oneof adminStateEntity {
+    TransceiverIdentifier transceiver_identifier = 2;
+  }
+}
+
+message GetAdminStateResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  repeated AdminStateEntry admin_state_entry = 3;
+}
+
+message SetAdminStateRequest {
+  Context context = 1;
+  string gateway_id = 2;
+  AdminStateEntry admin_state_entry = 3;
+}
+
+message SetAdminStateResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  AdminStateEntry admin_state_entry = 3;
+}
+
+message PartitionGpu {
+  uint64 device_uid = 1;
+  LocationInfo location_info = 2;
+}
+
+message PartitionReport {
+  PartitionId partition_id = 1;
+  repeated PartitionGpu gpus = 2;
+}
+
+message GetStateReportRequest {
+  Context context = 1;
+  string gateway_id = 2;
+  ReportType report_type = 3;
+}
+
+message TopologyInfo {
+  repeated DeviceTopoInfo device_topo_info = 1;
+}
+
+message PartitionsReport {
+  repeated PartitionReport partitions = 1;
+}
+
+message GetStateReportResponse {
+  ServerHeader server_header = 1;
+  Context context = 2;
+  oneof report {
+    TopologyInfo device_topo_info = 3;
+    PartitionsReport partitions = 4;
+  }
+}
+
+// protolint:disable:next SERVICE_NAMES_UPPER_CAMEL_CASE
+service NMX_Controller {
+  // Initial RPC call
+  rpc Hello(ClientHello) returns (ServerHello) {};
+
+  // Client subscription for push notifications on updates
+  rpc Subscribe(SubscribeRequest) returns (stream ServerNotification) {};
+
+  // Factory reset for state and configuration
+  rpc FactoryReset(FactoryResetRequest) returns (ReturnCode) {};
+
+  // Get/Set static configuration
+  rpc GetStaticConfig(GetStaticConfigRequest) returns (StaticConfigResponse) {};
+  rpc SetStaticConfig(SetStaticConfigRequest) returns (ReturnCode) {};
+
+  // AdminState management
+  rpc GetAdminState(GetAdminStateRequest) returns (GetAdminStateResponse);
+  rpc SetAdminState(SetAdminStateRequest) returns (SetAdminStateResponse);
+
+  // GFM SDK APIs
+  rpc GetDomainProperties(GetDomainPropertiesRequest) returns (DomainProperties) {};
+  rpc GetDomainStateInfo(GetDomainStateInfoRequest) returns (DomainStateInfo) {};
+  rpc GetTopologyInfo(GetTopologyInfoRequest) returns (FmTopologyInfo) {};
+  rpc GetComputeNodeCount(GetComputeNodeCountRequest) returns (GetComputeNodeCountResponse) {};
+  rpc GetComputeNodeLocationList(GetComputeNodeLocationListRequest) returns (GetComputeNodeLocationListResponse) {};
+  rpc GetComputeNodeInfoList(GetComputeNodeInfoListRequest) returns (GetComputeNodeInfoListResponse) {};
+  rpc GetGpuInfoList(GetGpuInfoListRequest) returns (GetGpuInfoListResponse) {};
+  rpc GetSwitchNodeCount(GetSwitchNodeCountRequest) returns (GetSwitchNodeCountResponse) {};
+  rpc GetSwitchNodeLocationList(GetSwitchNodeLocationListRequest) returns (GetSwitchNodeLocationListResponse) {};
+  rpc GetSwitchNodeInfoList(GetSwitchNodeInfoListRequest) returns (GetSwitchNodeInfoListResponse) {};
+  rpc GetSwitchInfoList(GetSwitchInfoListRequest) returns (GetSwitchInfoListResponse) {};
+  rpc GetPartitionCount(GetPartitionCountRequest) returns (GetPartitionCountResponse) {};
+  rpc GetPartitionIdList(GetPartitionIdListRequest) returns (GetPartitionIdListResponse) {};
+  rpc GetPartitionInfoList(GetPartitionInfoListRequest) returns (GetPartitionInfoListResponse) {};
+  rpc CreatePartition(CreatePartitionRequest) returns (CreatePartitionResponse) {};
+  rpc DeletePartition(DeletePartitionRequest) returns (DeletePartitionResponse) {};
+  rpc AddGpusToPartition(UpdatePartitionRequest) returns (UpdatePartitionResponse) {};
+  rpc RemoveGpusFromPartition(UpdatePartitionRequest) returns (UpdatePartitionResponse) {};
+  rpc GetConnCount(GetConnCountRequest) returns (GetConnCountResponse) {};
+  rpc GetConnInfoList(GetConnInfoListRequest) returns (GetConnInfoListResponse) {};
+  rpc GetConnInfoCombined(GetConnInfoCombinedRequest) returns (ConnInfoCombined) {};
+
+  // Get state reports
+  rpc GetStateReport(GetStateReportRequest) returns (GetStateReportResponse) {};
+}

@@ -1,0 +1,328 @@
+#!/bin/bash -e
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+#
+# forge-dpu-agent needs various crictl commands to succeed - examples:
+# $ crictl ps --name=doca-hbn -o=json
+# $ crictl exec <container-id> supervisorctl status
+# $ crictl exec <container-id> ifreload --all --syntax-check
+#
+# The integration tests puts this path, hence this script, on the front of the PATH to ensure they do.
+#
+set -ex
+PS_OUT='{
+  "containers": [
+    {
+      "id": "0dba92491080fd12b885a0cc5249b8fdda3ff36eea7ec06f499bfccf77a0be44",
+      "podSandboxId": "07b5118ad9f62b2d1f1d255b7b04251f47d217ed33ff4736d1de37d94965f4a1",
+      "metadata": {
+        "name": "doca-hbn",
+        "attempt": 0
+      },
+      "image": {
+        "image": "sha256:b1e7cf48e472bd0b8afcad135e337d6ccd483c9ae87e73a8c5538361c1ec3a51",
+        "annotations": {
+        }
+      },
+      "imageRef": "sha256:b1e7cf48e472bd0b8afcad135e337d6ccd483c9ae87e73a8c5538361c1ec3a51",
+      "state": "CONTAINER_RUNNING",
+      "createdAt": "1691185575590889827",
+      "labels": {
+        "io.kubernetes.container.name": "doca-hbn",
+        "io.kubernetes.pod.name": "doca-hbn-service-yellow-violet.dev3.frg.nvidia.com",
+        "io.kubernetes.pod.namespace": "default",
+        "io.kubernetes.pod.uid": "bbba3648e8cab53e0b107171e680a5da"
+      },
+      "annotations": {
+        "io.kubernetes.container.hash": "325a7490",
+        "io.kubernetes.container.restartCount": "0",
+        "io.kubernetes.container.terminationMessagePath": "/dev/termination-log",
+        "io.kubernetes.container.terminationMessagePolicy": "File",
+        "io.kubernetes.pod.terminationGracePeriod": "30"
+      }
+    }
+  ]
+}
+'
+
+EXEC_OUT='cl-acltool                       EXITED    Feb 26 08:32 PM
+cron                             RUNNING   pid 16, uptime 17:52:17
+decrypt-user-add                 EXITED    Feb 26 08:32 PM
+forge-dhcp-server-default        RUNNING   pid 13111, uptime 17:15:15
+frr                              RUNNING   pid 20, uptime 17:52:17
+frr-reload                       STOPPED   Not started
+ifreload                         EXITED    Feb 26 08:32 PM
+neighmgr                         RUNNING   pid 22, uptime 17:52:16
+nginx                            RUNNING   pid 24, uptime 17:52:16
+nginx-auth                       RUNNING   pid 25, uptime 17:52:16
+nl2doca                          RUNNING   pid 27, uptime 17:52:16
+nl2doca-reload                   STOPPED   Not started
+nvued                            RUNNING   pid 28, uptime 17:52:16
+nvued-startup                    EXITED    Feb 26 08:33 PM
+rsyslog                          RUNNING   pid 30, uptime 17:52:16
+sysctl-apply                     EXITED    Feb 26 08:32 PM
+'
+
+BGP_SUMMARY='{
+"ipv4Unicast":{
+  "routerId":"10.180.62.59",
+  "as":4244766820,
+  "vrfId":0,
+  "vrfName":"default",
+  "tableVersion":5,
+  "ribCount":5,
+  "ribMemory":1000,
+  "peerCount":2,
+  "peerMemory":46768,
+  "peerGroupCount":1,
+  "peerGroupMemory":64,
+  "peers":{
+    "p0_if":{
+      "hostname":"RNO1-M04-D01-TOR-01",
+      "remoteAs":64740,
+      "version":4,
+      "msgRcvd":35291,
+      "msgSent":35286,
+      "tableVersion":0,
+      "outq":0,
+      "inq":0,
+      "peerUptime":"1d05h23m",
+      "peerUptimeMsec":105803000,
+      "peerUptimeEstablishedEpoch":1678127082,
+      "pfxRcd":1,
+      "pfxSnt":3,
+      "state":"Established",
+      "connectionsEstablished":2,
+      "connectionsDropped":1,
+      "idType":"interface"
+    },
+    "p1_if":{
+      "hostname":"RNO1-M04-D01-TOR-02",
+      "remoteAs":64740,
+      "version":4,
+      "msgRcvd":35288,
+      "msgSent":35279,
+      "tableVersion":0,
+      "outq":0,
+      "inq":0,
+      "peerUptime":"1d05h23m",
+      "peerUptimeMsec":105796000,
+      "peerUptimeEstablishedEpoch":1678127089,
+      "pfxRcd":1,
+      "pfxSnt":3,
+      "state":"Established",
+      "connectionsEstablished":1,
+      "connectionsDropped":0,
+      "idType":"interface"
+    }
+  },
+  "failedPeers":0,
+  "totalPeers":2,
+  "dynamicPeers":0,
+  "bestPath":{
+    "multiPathRelax":"false"
+  }
+}
+,
+"l2VpnEvpn":{
+  "routerId":"10.180.62.59",
+  "as":4244766820,
+  "vrfId":0,
+  "vrfName":"default",
+  "tableVersion":0,
+  "ribCount":5,
+  "ribMemory":1000,
+  "peerCount":2,
+  "peerMemory":46768,
+  "peerGroupCount":1,
+  "peerGroupMemory":64,
+  "peers":{
+    "p0_if":{
+      "hostname":"RNO1-M04-D01-TOR-01",
+      "remoteAs":64740,
+      "version":4,
+      "msgRcvd":35291,
+      "msgSent":35286,
+      "tableVersion":0,
+      "outq":0,
+      "inq":0,
+      "peerUptime":"1d05h23m",
+      "peerUptimeMsec":105803000,
+      "peerUptimeEstablishedEpoch":1678127082,
+      "pfxRcd":2,
+      "pfxSnt":2,
+      "state":"Established",
+      "connectionsEstablished":2,
+      "connectionsDropped":1,
+      "idType":"interface"
+    },
+    "p1_if":{
+      "hostname":"RNO1-M04-D01-TOR-02",
+      "remoteAs":64740,
+      "version":4,
+      "msgRcvd":35288,
+      "msgSent":35279,
+      "tableVersion":0,
+      "outq":0,
+      "inq":0,
+      "peerUptime":"1d05h23m",
+      "peerUptimeMsec":105796000,
+      "peerUptimeEstablishedEpoch":1678127089,
+      "pfxRcd":2,
+      "pfxSnt":2,
+      "state":"Established",
+      "connectionsEstablished":1,
+      "connectionsDropped":0,
+      "idType":"interface"
+    }
+  },
+  "failedPeers":0,
+  "totalPeers":2,
+  "dynamicPeers":0,
+  "bestPath":{
+    "multiPathRelax":"false"
+  }
+}
+}'
+
+DAEMON_FILE='# Auto-generated by Forge!
+bgpd=yes
+ospfd=no
+ospf6d=no
+isisd=no
+pimd=no
+ldpd=no
+pbrd=no
+vrrpd=no
+fabricd=no
+nhrpd=no
+eigrpd=no
+babeld=no
+sharpd=no
+fabricd=no
+ripngd=no
+ripd=no
+
+vtysh_enable=yes
+zebra_options="  -M cumulus_mlag -M snmp -A 127.0.0.1 -s 90000000"
+bgpd_options="   -M snmp -A 127.0.0.1"
+ospfd_options="  -M snmp -A 127.0.0.1"
+ospf6d_options=" -M snmp -A ::1"
+ripd_options="   -A 127.0.0.1"
+ripngd_options=" -A ::1"
+isisd_options="  -A 127.0.0.1"
+pimd_options="   -A 127.0.0.1"
+ldpd_options="   -A 127.0.0.1"
+nhrpd_options="  -A 127.0.0.1"
+eigrpd_options=" -A 127.0.0.1"
+babeld_options=" -A 127.0.0.1"
+sharpd_options=" -A 127.0.0.1"
+pbrd_options="   -A 127.0.0.1"
+staticd_options="-A 127.0.0.1"
+fabricd_options="-A 127.0.0.1"
+vrrpd_options="  -A 127.0.0.1"
+
+frr_profile="datacenter"
+'
+
+# For frr.conf, etc/network/interfaces and dhcp server config we only need >100 bytes, because that's what
+# health check looks for, hence the short contents here
+
+FRR='# Auto-generated by Forge.
+#
+# - Route server IP: 10.217.126.5
+!---- Cumulus Defaults ----
+frr defaults datacenter
+'
+
+ENI='# Auto-generated by Forge!
+source /etc/network/interfaces.d/*.intf
+
+auto lo
+iface lo inet loopback
+    address 10.217.4.12/32
+    vxlan-local-tunnelip 10.217.4.12
+
+'
+
+DHCP_SERVER='# Auto-generated by Forge!
+[program: forge-dhcp-server-default]
+command = /var/support/forge-dhcp/bin/forge-dhcp-server  --interfaces vlan23  --dhcp-config /var/support/forge-dhcp/conf/dhcp.yaml --host-config /var/support/forge-dhcp/conf/host.yaml
+autostart = true
+'
+
+FDB='[{"mac":"7e:f6:b2:b2:f0:97","ifname":"pf0vf0_if","vlan":21,"flags":[],"master":"br_default","state":""},{"mac":"4e:1f:bd:97:23:3e","ifname":"pf0vf0_if","vlan":21,"flags":[],"master":"br_default","state":""},{"mac":"00:04:4b:b7:e5:00","ifname":"br_default","vlan":21,"flags":[],"master":"br_default","state":"permanent"},{"mac":"16:3c:3d:a8:81:40","ifname":"vxlan48","vlan":21,"flags":[],"master":"br_default","state":"permanent"}]'
+
+NVUE_STARTUP_TMP=/tmp/carbide-integration-nvue.tmp
+
+# Must match api-test/tests/integration/dpu.rs::make_dpu_filesystem hbn_root
+HBN_ROOT=/tmp/forge-hbn-chroot-integration
+
+case "$1" in
+	# crictl ps --name=doca-hbn -o=json
+	"ps" )
+		printf "$PS_OUT"
+		;;
+	"exec" )
+		case "$3" in
+			# crictl exec <container-id> supervisorctl status
+			"supervisorctl" )
+				printf "$EXEC_OUT"
+				;;
+			# crictl exec <container-id> ifreload --all --syntax-check
+			"ifreload" )
+				# Needs empty output
+				;;
+			# crictl exec <container-id> vtysh -c show bgp summary json
+			"vtysh" )
+				printf "$BGP_SUMMARY"
+				;;
+			# crictl exec <container-id> nv config replace /var/suport/nvue_startup.yaml
+			# crictl exec <container-id> nv config apply -y
+			"nv" )
+        # $4 is "config"
+        case "$5" in
+          "replace" )
+            rm -f ${NVUE_STARTUP_TMP}
+            cp ${HBN_ROOT}$6 ${NVUE_STARTUP_TMP}
+            echo "nv: Stored pending config at ${NVUE_STARTUP_TMP}"
+           ;;
+          "apply" )
+            echo "nv: Applying"
+            printf "$DAEMON_FILE" > ${HBN_ROOT}/etc/frr/daemons
+            printf "$FRR" > ${HBN_ROOT}/etc/frr/frr.conf
+            printf "$ENI" > ${HBN_ROOT}/etc/network/interfaces
+            printf "$DHCP_SERVER" > ${HBN_ROOT}/etc/supervisor/conf.d/default-forge-dhcp-server.conf
+            sleep 5 # The real `nv` takes a while here, it bounces daemons etc
+          ;;
+        esac
+				;;
+			# crictl exec -it <container-id> bridge -j fdb show vlan 21
+			# NOT USED YET - need to add instance creation to integration test
+			"bridge" )
+				printf "$FDB"
+				;;
+		  # crictl exec -it <container-id> echo "hack" for platform-config
+		  "echo" )
+        printf "" # the command has no output
+        ;;
+			"*" )
+				echo "Unexpected argments to crictl: $@"
+				exit 1
+        ;;
+		esac
+    ;;
+esac

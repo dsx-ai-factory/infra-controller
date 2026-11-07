@@ -1,0 +1,46 @@
+ExternalConfigs:
+  - "shoreline"
+Tests:
+  Cpu:
+    BenchMark:
+      CpuEcho1:
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+        ContainerImageName: "your.registry/docker/machine-validation-runner:latest"
+        ExecuteInHost: true
+        Command: "echo "
+        Desc: "Test desc"
+        Args: " test"
+        Contexts:
+          - Discovery
+          - Cleanup
+          - OnDemand
+  Shoreline:
+    Runbook:
+      ForgeRunBook:
+        ContainerImageName: "docker.io/shorelinesoftware/agent:release-24.0.22-multiarch-lt"
+        ContainerArg: --net-host  --env-file /tmp/machine_validation/external_config/shoreline --mount type=bind,src=/opt/shorelineagent/databases,dst=/agent/databases,options=rbind:rw   --mount type=bind,src=/opt/shorelineagent/onprem,dst=/agent/onprem,options=rbind:rw   --mount type=bind,src=/opt/shorelineagent/secrets,dst=/agent/secrets,options=rbind:rw   --mount type=bind,src=/opt/shorelineagent/scraper.yml,dst=/agent/etc/scraper.yml,options=rbind:rw   --mount type=bind,src=/root/.ssh,dst=/agent/.host_ssh,options=rbind:ro   --mount type=bind,src=/opt/shorelineagent/shoreline,dst=/agent/host-etc-shoreline,options=rbind:ro   --memory-limit 524288000   --cpus 0.5
+        RequiredExternalConfigFile: shoreline
+        Command: ""
+        Desc: "Shoreline Runbook"
+        ExtraOutputFile: "/tmp/output"
+        ExtraErrFile: "/tmp/error"
+        Args: ""
+        Contexts:
+          - Discovery
+          - Cleanup
+          - OnDemand

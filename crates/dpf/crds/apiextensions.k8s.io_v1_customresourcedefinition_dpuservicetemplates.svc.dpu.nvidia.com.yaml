@@ -1,0 +1,243 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+    helm.sh/resource-policy: keep
+  labels:
+    app.kubernetes.io/part-of: dpf-operator-controller-manager
+    dpu.nvidia.com/component: dpf-operator-controller-manager
+  name: dpuservicetemplates.svc.dpu.nvidia.com
+spec:
+  group: svc.dpu.nvidia.com
+  names:
+    kind: DPUServiceTemplate
+    listKind: DPUServiceTemplateList
+    plural: dpuservicetemplates
+    singular: dpuservicetemplate
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          DPUServiceTemplate is the Schema for the DPUServiceTemplate API. This object is intended to be used in
+          conjunction with a DPUDeployment object. This object is the template from which the DPUService will be created. It
+          contains configuration options related to resources required by the service to be deployed. The rest of the
+          configuration options must be defined in a DPUServiceConfiguration object.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: DPUServiceTemplateSpec defines the desired state of DPUServiceTemplate
+            properties:
+              deploymentServiceName:
+                description: |-
+                  DeploymentServiceName is the name of the DPU service this configuration refers to. It must match
+                  .spec.deploymentServiceName of a DPUServiceConfiguration object and one of the keys in .spec.services of a
+                  DPUDeployment object.
+                maxLength: 28
+                minLength: 1
+                type: string
+              helmChart:
+                description: |-
+                  HelmChart reflects the Helm related configuration. The user is supposed to configure the values that are static
+                  across any DPUServiceConfiguration used with this DPUServiceTemplate in a DPUDeployment. These values act as a
+                  baseline and are merged with values specified in the DPUServiceConfiguration. In case of conflict, the
+                  DPUServiceConfiguration values take precedence.
+                properties:
+                  source:
+                    description: Source specifies information about the Helm chart
+                    properties:
+                      chart:
+                        description: Chart is the name of the helm chart.
+                        type: string
+                      path:
+                        description: Path is the location of the chart inside the
+                          repo.
+                        type: string
+                      releaseName:
+                        description: ReleaseName is the name to give to the release
+                          generate from the DPUService.
+                        type: string
+                      repoURL:
+                        description: |-
+                          RepoURL specifies the URL to the repository that contains the application Helm chart.
+                          The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
+                          OCI registry or a web-based repository.
+                        pattern: ^(oci://|https://).+$
+                        type: string
+                      version:
+                        description: Version is a semver tag for the Chart's version.
+                        minLength: 1
+                        type: string
+                    required:
+                    - repoURL
+                    - version
+                    type: object
+                  values:
+                    description: Values specifies Helm values to be passed to Helm
+                      template, defined as a map. This takes precedence over Values.
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                required:
+                - source
+                type: object
+              resourceRequirements:
+                additionalProperties:
+                  anyOf:
+                  - type: integer
+                  - type: string
+                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                  x-kubernetes-int-or-string: true
+                description: ResourceRequirements contains the overall resources required
+                  by this particular service to run on a single node
+                type: object
+              security:
+                description: |-
+                  Security contains security-related settings for the generated DPUService.
+                  These settings are inherent to the service and apply to all deployments
+                  using this template. Specifically, Privileged should be set on charts
+                  that need privileged containers (e.g. for direct hardware access).
+                properties:
+                  privileged:
+                    description: |-
+                      Privileged, when set to true, allows workloads governed by this security
+                      setting to run containers with `securityContext.privileged: true` in the
+                      DPUCluster. When set to false, a ValidatingAdmissionPolicy in the
+                      DPUCluster rejects such workloads. On DPUService objects, this field must
+                      be unset when deployInCluster is true. For DPUServices that target a
+                      DPUCluster, Privileged must be set explicitly. When set on a
+                      DPUServiceTemplate, the DPUDeployment controller propagates the value to
+                      generated DPUServices that target DPUClusters.
+
+                      Scope of the policy enforcement:
+                        - Only `securityContext.privileged: true` is gated. Other
+                          privilege-escalation vectors (hostPID, hostIPC, hostNetwork,
+                          allowPrivilegeEscalation, capabilities, hostPath volumes) are NOT
+                          gated by this field.
+                        - Enforcement matches workloads via the
+                          `svc.dpu.nvidia.com/service` label. The controller adds this
+                          label to the resources it manages, and to pod templates of
+                          workload-controller resources (Deployment, DaemonSet, etc.). If a
+                          Helm chart strips that label from the pod template, the parent
+                          resource will be admitted but the child Pods will be denied at
+                          Pod admission time.
+                    type: boolean
+                  spiffe:
+                    description: |-
+                      SPIFFE opts this DPUService into SPIFFE workload identity. When set, one SPIRE
+                      ClusterStaticEntry is registered per targeted DPU, parented to that DPU's SPIRE
+                      agent, so the service's pods can obtain an SVID. The identity defaults to
+                      `spiffe://<trustDomain>/dpu/<serial>/service/<namespace>/<serviceID>` and is
+                      configurable through `DPFOperatorConfig.spec.security.spiffe`.
+                      The namespace qualifies the service ID, which is only unique within one.
+
+                      Presence-gated: `spiffe: {}` enables it. It has no sub-fields yet.
+
+                      Requires `DPFOperatorConfig.spec.security.spiffe`, and only covers DPUs in SPIFFE
+                      identity mode (`DPU.status.identityMode: Spiffe`); bootstrap-token DPUs are skipped.
+                      Both are reported on the SPIFFEEntriesReady condition rather than rejected at
+                      admission. Must not be set when deployInCluster is true, since in-cluster
+                      DPUServices run on the host and have no per-DPU SPIRE agent to parent to.
+
+                      When set on a DPUServiceTemplate, the DPUDeployment controller propagates it to
+                      generated DPUServices that target DPUClusters.
+                    type: object
+                type: object
+            required:
+            - deploymentServiceName
+            - helmChart
+            type: object
+          status:
+            description: DPUServiceTemplateStatus defines the observed state of DPUServiceTemplate
+            properties:
+              conditions:
+                description: Conditions reflect the status of the object
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                description: ObservedGeneration records the Generation observed on
+                  the object the last time it was patched.
+                format: int64
+                type: integer
+              versions:
+                additionalProperties:
+                  type: string
+                description: Versions reflects the required versions the generated
+                  DPUService needs in order to function correctly.
+                type: object
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

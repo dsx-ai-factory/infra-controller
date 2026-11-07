@@ -1,0 +1,15 @@
+1,root,false,true,true,ADMINISTRATOR
+2,forge_user,true,false,false,USER
+3,forge_operator,true,false,false,OPERATOR
+4,forge_admin,true,false,false,ADMINISTRATOR
+5,,true,false,false,NO ACCESS
+6,,true,false,false,NO ACCESS
+7,,true,false,false,NO ACCESS
+8,,true,false,false,NO ACCESS
+9,,true,false,false,NO ACCESS
+10,,true,false,false,NO ACCESS
+11,,true,false,false,NO ACCESS
+12,,true,false,false,NO ACCESS
+13,,true,false,false,NO ACCESS
+14,,true,false,false,NO ACCESS
+15,,true,false,false,NO ACCESS

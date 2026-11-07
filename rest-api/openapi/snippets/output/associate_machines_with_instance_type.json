@@ -1,0 +1,16 @@
+[
+   {
+      "id": "5e782d7f-78f6-47bf-a540-13b7e56897e7",
+      "machineId": "fm100hthvos96dbmmai84gsok0dn967v9fap8ublgp34kaknd9tq7pddim0",
+      "instanceTypeId": "9c4aaa6a-3934-4274-b0a9-5143b253039e",
+      "created": "2023-07-06T16:18:26.611048Z",
+      "updated": "2023-07-06T16:18:26.611048Z"
+   },
+   {
+      "id": "335fc255-fd3b-4602-bd2e-86b5b444a178",
+      "machineId": "fm100httuapjc6t4o629o5d3uu5616gimvn0smunp199mmmp1f2134nt92g",
+      "instanceTypeId": "9c4aaa6a-3934-4274-b0a9-5143b253039e",
+      "created": "2023-07-06T16:18:26.611048Z",
+      "updated": "2023-07-06T16:18:26.611048Z"
+   }
+]

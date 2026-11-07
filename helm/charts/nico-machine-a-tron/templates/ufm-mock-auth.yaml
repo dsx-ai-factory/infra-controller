@@ -1,0 +1,18 @@
+{{- if and .Values.ufmMock.enabled (not .Values.ufmMock.existingAuthSecret) }}
+{{- $secretName := printf "%s-ufm-mock-auth" (include "nico-machine-a-tron.name" .) }}
+{{- $token := randAlphaNum 24 }}
+{{- $existing := lookup "v1" "Secret" (include "nico-machine-a-tron.namespace" .) $secretName }}
+{{- if and $existing $existing.data (hasKey $existing.data "token") }}
+{{- $token = index $existing.data "token" | b64dec }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  namespace: {{ include "nico-machine-a-tron.namespace" . }}
+  labels:
+    {{- include "nico-machine-a-tron.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  token: {{ $token | quote }}
+{{- end }}

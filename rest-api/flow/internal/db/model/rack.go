@@ -1,0 +1,500 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package model
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/uptrace/bun"
+
+	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/utils"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+)
+
+var defaultRackPagination = dbquery.Pagination{
+	Offset: 0,
+	Limit:  100,
+	Total:  0,
+}
+
+// GetAllRacks returns every non-deleted rack without relations.
+func GetAllRacks(ctx context.Context, idb bun.IDB) (ret []Rack, err error) {
+	err = idb.NewSelect().Model(&ret).Scan(ctx)
+	return ret, err
+}
+
+var defaultRackOrderBy = []dbquery.OrderBy{
+	{Column: "name", Direction: dbquery.OrderAscending},
+	{Column: "id", Direction: dbquery.OrderAscending},
+}
+
+type Rack struct {
+	bun.BaseModel `bun:"table:rack,alias:r"`
+
+	ID   uuid.UUID `bun:"id,pk,type:uuid,default:gen_random_uuid()"`
+	Name string    `bun:"name,notnull"`
+	// Manufacturer and SerialNumber are descriptive chassis labels, not
+	// identity: a mirrored rack is identified by ExternalID. nullzero maps the
+	// empty string to SQL NULL, so a rack missing either half occupies no slot
+	// in rack_manufacturer_serial_idx.
+	Manufacturer string         `bun:"manufacturer,nullzero,unique:rack_manufacturer_serial_idx"`
+	SerialNumber string         `bun:"serial_number,nullzero,unique:rack_manufacturer_serial_idx"`
+	Description  map[string]any `bun:"description,type:jsonb,json_use_number"`
+	Location     map[string]any `bun:"location,type:jsonb"`
+	NVLDomainID  uuid.UUID      `bun:"nvldomain_id,type:uuid"`
+	// ExternalID is Core's operator-supplied stable rack identifier
+	// (ExpectedRack.rack_id, e.g. "a12") populated by the expected-inventory
+	// mirror. NULL on racks that the mirror has never adopted (e.g. legacy
+	// ingestion-gRPC rows on first run).
+	ExternalID    *string             `bun:"external_id"`
+	RackProfileID *string             `bun:"rack_profile_id"`
+	RackGroupID   *string             `bun:"rack_group_id"`
+	Status        RackStatus          `bun:"status,type:varchar(16),default:'new'"`
+	Health        *types.HealthReport `bun:"health,type:jsonb,nullzero"`
+	CreatedAt     time.Time           `bun:"created_at,nullzero,notnull,default:current_timestamp"`
+	UpdatedAt     time.Time           `bun:"updated_at,nullzero,notnull,default:current_timestamp"`
+	IngestedAt    *time.Time          `bun:"ingested_at"`
+	DeletedAt     *time.Time          `bun:"deleted_at,soft_delete"`
+	Components    []Component         `bun:"rel:has-many,join:id=rack_id"`
+	NVLDomain     *NVLDomain          `bun:"rel:belongs-to,join:nvldomain_id=id"`
+}
+
+// RackPatch contains rack metadata fields selected by a patch operation.
+// Nil fields are omitted from the UPDATE.
+type RackPatch struct {
+	ID          uuid.UUID
+	Name        *string
+	Description *map[string]any
+	Location    *map[string]any
+}
+
+func (patch *RackPatch) apply(rack *Rack) []string {
+	columns := make([]string, 0, 3)
+	if patch.Name != nil {
+		rack.Name = *patch.Name
+		columns = append(columns, "name")
+	}
+	if patch.Description != nil {
+		rack.Description = *patch.Description
+		columns = append(columns, "description")
+	}
+	if patch.Location != nil {
+		rack.Location = *patch.Location
+		columns = append(columns, "location")
+	}
+	return columns
+}
+
+// Patch updates only rack metadata explicitly selected by RackPatch.
+func (patch *RackPatch) Patch(ctx context.Context, idb bun.IDB) error {
+	rack := &Rack{ID: patch.ID}
+	columns := patch.apply(rack)
+	if len(columns) == 0 {
+		return nil
+	}
+
+	result, err := idb.NewUpdate().
+		Model(rack).
+		Column(columns...).
+		Where("id = ?", patch.ID).
+		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected != 1 {
+		return fmt.Errorf("patch rack %s affected %d rows", patch.ID, rowsAffected)
+	}
+	return nil
+}
+
+type RackStatus string
+
+const (
+	RackStatusNew       RackStatus = "new"
+	RackStatusIngesting RackStatus = "ingesting"
+	RackStatusIngested  RackStatus = "ingested"
+)
+
+/*
+var _ bun.BeforeAppendModelHook = (*Rack)(nil)
+
+func (r *Rack) BeforeAppendModel(ctx context.Context, query bun.Query) error {
+	switch query.(type) {
+	case *bun.InsertQuery:
+		r.CreatedAt = db.CurTime()
+		r.UpdatedAt = db.CurTime()
+	case *bun.UpdateQuery:
+		r.UpdatedAt = db.CurTime()
+	}
+	return nil
+}
+*/
+
+func (rd *Rack) Create(ctx context.Context, idb bun.IDB) error {
+	_, err := idb.NewInsert().Model(rd).Exec(ctx)
+	return err
+}
+
+// Get looks the rack up by ID, or by (manufacturer, serial_number) when no ID
+// is set. Both chassis columns are nullable, so a rack stored without one of
+// them is only reachable by the first form.
+func (rd *Rack) Get(
+	ctx context.Context,
+	idb bun.IDB,
+	withComponents bool,
+) (*Rack, error) {
+	var rack Rack
+	var query *bun.SelectQuery
+
+	if rd.ID != uuid.Nil {
+		// Get by the ID
+		query = idb.NewSelect().Model(&rack).Where("id = ?", rd.ID)
+	} else {
+		// Get by the serial information
+		query = idb.NewSelect().Model(&rack).Where(
+			"manufacturer = ? AND serial_number = ?",
+			rd.Manufacturer, rd.SerialNumber,
+		)
+	}
+
+	if withComponents {
+		query = query.Relation("Components").Relation("Components.BMCs")
+	}
+
+	if err := query.Scan(ctx); err != nil {
+		return nil, err
+	}
+
+	return &rack, nil
+}
+
+// GetIncludingDeleted retrieves a rack by ID regardless of soft-delete status.
+func (rd *Rack) GetIncludingDeleted(ctx context.Context, idb bun.IDB) (*Rack, error) {
+	var rack Rack
+	err := idb.NewSelect().Model(&rack).
+		Where("id = ?", rd.ID).
+		WhereAllWithDeleted().
+		Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &rack, nil
+}
+
+// Delete soft-deletes the rack by setting deleted_at.
+func (rd *Rack) Delete(ctx context.Context, idb bun.IDB) error {
+	_, err := idb.NewDelete().Model(rd).Where("id = ?", rd.ID).Exec(ctx)
+	return err
+}
+
+// ForceDelete permanently removes the rack row from the database.
+// The rack must already be soft-deleted.
+func (rd *Rack) ForceDelete(ctx context.Context, idb bun.IDB) error {
+	_, err := idb.NewDelete().Model(rd).Where("id = ?", rd.ID).ForceDelete().Exec(ctx)
+	return err
+}
+
+func (rd *Rack) Patch(ctx context.Context, idb bun.IDB) error {
+	_, err := idb.NewUpdate().Model(rd).Where("id = ?", rd.ID).Exec(ctx)
+	return err
+}
+
+// SetHealthByExternalID writes the latest aggregate health snapshot for the
+// rack identified by Core's external ID.
+func (rd *Rack) SetHealthByExternalID(ctx context.Context, idb bun.IDB) error {
+	if rd.ExternalID == nil || *rd.ExternalID == "" {
+		return errors.New("rack external ID not set")
+	}
+	_, err := idb.NewUpdate().Model(rd).
+		Set("health = ?", rd.Health).
+		Where("external_id = ?", *rd.ExternalID).
+		Exec(ctx)
+	return err
+}
+
+// BuildPatch builds a patched rack from the current rack and the
+// input rack. It goes through the patchable fields and builds the patched
+// rack. If there is no change on patchable fields, it returns nil.
+func (rd *Rack) BuildPatch(cur *Rack) *Rack {
+	patch := rd.BuildColumnPatch(cur)
+	if patch == nil {
+		return nil
+	}
+
+	patchedRack := *cur
+	patch.apply(&patchedRack)
+	return &patchedRack
+}
+
+// BuildColumnPatch returns only patchable rack metadata whose supplied values
+// differ from the current row.
+func (rd *Rack) BuildColumnPatch(cur *Rack) *RackPatch {
+	if rd == nil || cur == nil {
+		return nil
+	}
+
+	// The patchable fields include:
+	// Name
+	// Description
+	// Location
+
+	patch := &RackPatch{ID: cur.ID}
+
+	if len(rd.Name) > 0 && cur.Name != rd.Name {
+		patch.Name = &rd.Name
+	}
+
+	desc := utils.CompareAndCopyMaps(rd.Description, cur.Description)
+	if desc != nil {
+		patch.Description = &desc
+	}
+
+	loc := utils.CompareAndCopyMaps(rd.Location, cur.Location)
+	if loc != nil {
+		patch.Location = &loc
+	}
+
+	if patch.Name == nil && patch.Description == nil && patch.Location == nil {
+		return nil
+	}
+
+	return patch
+}
+
+// SerialInfo returns the serial number information of the rack.
+func (rd *Rack) SerialInfo() deviceinfo.SerialInfo {
+	return deviceinfo.SerialInfo{
+		Manufacturer: rd.Manufacturer,
+		SerialNumber: rd.SerialNumber,
+	}
+}
+
+func GetListOfRacks(
+	ctx context.Context,
+	idb bun.IDB,
+	info dbquery.StringQueryInfo,
+	manufacturerFilter *dbquery.StringQueryInfo,
+	modelFilter *dbquery.StringQueryInfo,
+	pagination *dbquery.Pagination,
+	orderBy *dbquery.OrderBy,
+	withComponents bool,
+	withExternalIDOnly bool,
+) ([]Rack, int32, error) {
+	var racks []Rack
+	conf := &dbquery.Config{
+		IDB:   idb,
+		Model: &racks,
+	}
+
+	if pagination != nil {
+		conf.Pagination = pagination
+	} else {
+		conf.Pagination = &defaultRackPagination
+	}
+
+	// Build filterables list from all provided filters
+	filterables := make([]dbquery.Filterable, 0)
+	if withExternalIDOnly {
+		filterables = append(filterables, &dbquery.Filter{
+			Column: "external_id", Operator: dbquery.OperatorNotEqual, Value: "",
+		})
+	}
+
+	if filterable := info.ToFilterable("name"); filterable != nil {
+		filterables = append(filterables, filterable)
+	}
+
+	if manufacturerFilter != nil {
+		if filterable := manufacturerFilter.ToFilterable("manufacturer"); filterable != nil {
+			filterables = append(filterables, filterable)
+		}
+	}
+
+	if modelFilter != nil {
+		// Model is stored in description JSONB, so we need to use JSONB path query
+		// Note: This assumes model is stored in description JSONB as a string value
+		if len(modelFilter.Patterns) > 0 {
+			// Use JSONB path query: description->>'model'
+			// For simplicity, we'll use LIKE on the JSONB text extraction
+			if len(modelFilter.Patterns) == 1 {
+				value := modelFilter.Patterns[0]
+				if modelFilter.IsWildcard {
+					// Add wildcard if not already present
+					if len(value) > 0 && value[0] != '%' && value[len(value)-1] != '%' {
+						value = "%" + value + "%"
+					}
+					filterables = append(filterables, &dbquery.Filter{
+						Column:   "description->>'model'",
+						Operator: dbquery.OperatorLike,
+						Value:    value,
+					})
+				} else {
+					filterables = append(filterables, &dbquery.Filter{
+						Column:   "description->>'model'",
+						Operator: dbquery.OperatorEqual,
+						Value:    value,
+					})
+				}
+			} else {
+				// Multiple patterns - use IN operator
+				filterables = append(filterables, &dbquery.Filter{
+					Column:   "description->>'model'",
+					Operator: dbquery.OperatorIn,
+					Value:    modelFilter.Patterns,
+				})
+			}
+		}
+	}
+
+	if len(filterables) > 0 {
+		conf.Filterables = filterables
+	}
+
+	conf.DefaultOrderBy = defaultRackOrderBy
+	if orderBy != nil {
+		conf.DefaultOrderBy = []dbquery.OrderBy{
+			*orderBy,
+			{Column: "id", Direction: dbquery.OrderAscending},
+		}
+	}
+
+	if withComponents {
+		conf.Relations = []string{"Components", "Components.BMCs"}
+	}
+
+	q, err := dbquery.New(ctx, conf)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if err := q.Scan(ctx); err != nil {
+		return nil, 0, err
+	}
+
+	return racks, int32(q.TotalCount()), nil
+}
+
+func GetRacksForNVLDomain(
+	ctx context.Context,
+	idb bun.IDB,
+	nvlDomainID uuid.UUID,
+	withComponents bool,
+) ([]Rack, error) {
+	var racks []Rack
+	q := idb.NewSelect().Model(&racks).Where("nvldomain_id = ?", nvlDomainID)
+	if withComponents {
+		q = q.Relation("Components").Relation("Components.BMCs")
+	}
+
+	if err := q.Scan(ctx); err != nil {
+		return nil, err
+	}
+
+	return racks, nil
+}
+
+// GetRacksByIDs retrieves multiple racks by their UUIDs
+func GetRacksByIDs(
+	ctx context.Context,
+	idb bun.IDB,
+	ids []uuid.UUID,
+	withComponents bool,
+) ([]Rack, error) {
+	var racks []Rack
+	q := idb.NewSelect().Model(&racks).Where("id IN (?)", bun.In(ids))
+
+	if withComponents {
+		q = q.Relation("Components").Relation("Components.BMCs")
+	}
+
+	if err := q.Scan(ctx); err != nil {
+		return nil, err
+	}
+
+	return racks, nil
+}
+
+// GetRacksByIDsIncludingDeleted retrieves multiple racks by UUID, including
+// soft-deleted rows.
+func GetRacksByIDsIncludingDeleted(
+	ctx context.Context,
+	idb bun.IDB,
+	ids []uuid.UUID,
+	withComponents bool,
+) ([]Rack, error) {
+	var racks []Rack
+	q := idb.NewSelect().Model(&racks).Where("id IN (?)", bun.In(ids)).WhereAllWithDeleted()
+
+	if withComponents {
+		q = q.Relation("Components", func(q *bun.SelectQuery) *bun.SelectQuery {
+			return q.WhereAllWithDeleted()
+		}).Relation("Components.BMCs")
+	}
+
+	if err := q.Scan(ctx); err != nil {
+		return nil, err
+	}
+
+	return racks, nil
+}
+
+// GetRackOperationStatusCounts counts each requested rack's operability phases
+// from its active Compute, NVSwitch, and PowerShelf components. Empty membership
+// produces zero counts; missing or unrecognized status increments Unknown.
+func GetRackOperationStatusCounts(
+	ctx context.Context,
+	idb bun.IDB,
+	rackIDs []uuid.UUID,
+) (map[uuid.UUID]types.TrayStatusCountsByType, error) {
+	result := make(map[uuid.UUID]types.TrayStatusCountsByType, len(rackIDs))
+	for _, rackID := range rackIDs {
+		result[rackID] = types.TrayStatusCountsByType{}
+	}
+	if len(rackIDs) == 0 {
+		return result, nil
+	}
+
+	var components []Component
+	supportedTypes := []string{
+		devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute),
+		devicetypes.ComponentTypeToString(devicetypes.ComponentTypeNVSwitch),
+		devicetypes.ComponentTypeToString(devicetypes.ComponentTypePowerShelf),
+	}
+	err := idb.NewSelect().
+		Model(&components).
+		Column("rack_id", "type", "status").
+		Where("rack_id IN (?)", bun.In(rackIDs)).
+		Where("type IN (?)", bun.In(supportedTypes)).
+		Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range components {
+		component := &components[i]
+		counts := result[component.RackID]
+		switch component.Type {
+		case devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute):
+			counts.Compute.Add(component.Status)
+		case devicetypes.ComponentTypeToString(devicetypes.ComponentTypeNVSwitch):
+			counts.NVSwitch.Add(component.Status)
+		case devicetypes.ComponentTypeToString(devicetypes.ComponentTypePowerShelf):
+			counts.PowerShelf.Add(component.Status)
+		}
+		result[component.RackID] = counts
+	}
+
+	return result, nil
+}

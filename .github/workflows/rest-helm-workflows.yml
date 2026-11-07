@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Helm Charts
+
+on:
+  workflow_call:
+    inputs:
+      ngc_path:
+        required: false
+        type: string
+        default: ''
+      app_version:
+        description: "Application version for Helm chart appVersion"
+        required: true
+        type: string
+      chart_version:
+        description: "Helm chart version (SemVer-strict, derived from git describe). Aligned with core's helm_version."
+        required: true
+        type: string
+    secrets:
+      NVCR_STG_TOKEN:
+        required: true
+      NICO_NGC_TOKEN:
+        required: false
+
+jobs:
+  validate-charts:
+    name: Validate Helm Charts
+    if: ${{ !cancelled() && github.event_name != 'schedule' }}
+    runs-on: linux-amd64-cpu4
+    strategy:
+      matrix:
+        include:
+          - chart: helm/rest/nico-rest
+            valueOverrides: '["nico-rest-api.config.keycloak.enabled=true","nico-rest-api.config.keycloak.baseURL=http://keycloak:8082","nico-rest-api.config.keycloak.realm=test","nico-rest-api.config.keycloak.clientID=test"]'
+          - chart: helm/rest/nico-rest-site-agent
+            valueOverrides: '[]'
+          - chart: helm/rest/nico-mcp
+            valueOverrides: '[]'
+          - chart: helm/nico-flow
+            valueOverrides: '[]'
+          - chart: rest-api/temporal-helm/temporal
+            valueOverrides: '[]'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate Helm chart
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-validate@94bde998f5d7965576b0c663db7d5d709c918167
+        with:
+          chart-path: ${{ matrix.chart }}
+          lint: 'true'
+          template: 'true'
+          valueOverrides: ${{ matrix.valueOverrides }}
+
+      - name: Test Temporal chart addresses
+        if: matrix.chart == 'rest-api/temporal-helm/temporal'
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@db3780bff4b2cbf90ba9117a63e41ddea066791b
+        with:
+          plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
+          registry-password: ${{ secrets.NVCR_STG_TOKEN }}
+          charts: rest-api/temporal-helm/temporal
+
+  push-charts:
+    name: Push Helm Charts
+    needs:
+      - validate-charts
+    if: ${{ !cancelled() && github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' && needs.validate-charts.result == 'success' && !contains(github.ref, 'pull-request/') }}
+    runs-on: linux-amd64-cpu4
+    strategy:
+      # NGC answers an upload with HTTP 409 while another upload to the same
+      # namespace is updating its chart index, and the CLI reports that as
+      # "already exists". One chart at a time keeps this matrix from colliding
+      # with itself, and `fail-fast: false` lets the other charts publish when
+      # one of them fails.
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        chart:
+          - helm/rest/nico-rest
+          - helm/rest/nico-rest-site-agent
+          - helm/rest/nico-mcp
+          - helm/nico-flow
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install yq for umbrella packaging
+        if: matrix.chart == 'helm/rest/nico-rest' && inputs.ngc_path != ''
+        uses: dcarbone/install-yq-action@4075b4dca348d74bd83f2bf82d30f25d7c54539b # v1.3.1
+        with:
+          version: v4.35.1
+
+      # This matrix also publishes the standalone nico-rest-site-agent, nico-mcp,
+      # and nico-flow charts, and may gain more; only the nico-rest umbrella has
+      # bundled subcharts to rewrite.
+      - name: Prepare umbrella chart versions
+        if: matrix.chart == 'helm/rest/nico-rest' && inputs.ngc_path != ''
+        id: prepare-umbrella
+        env:
+          APP_VERSION: ${{ inputs.app_version }}
+          CHART_VERSION: ${{ inputs.chart_version }}
+        run: |
+          prepared_chart_dir="${RUNNER_TEMP}/nico-rest-chart-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          .github/ci/prepare-rest-umbrella-chart.sh \
+            helm/rest/nico-rest \
+            "${CHART_VERSION}" \
+            "${APP_VERSION}" \
+            "${prepared_chart_dir}"
+          echo "chart_path=${prepared_chart_dir}" >> "${GITHUB_OUTPUT}"
+
+      - name: Package and push Helm chart to NGC
+        if: ${{ inputs.ngc_path != '' }}
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        with:
+          chart-path: ${{ steps.prepare-umbrella.outputs.chart_path || matrix.chart }}
+          chart-version: ${{ inputs.chart_version }}
+          app-version: ${{ inputs.app_version }}
+          lint: 'false'
+          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_STG_TOKEN }}
+          ngc-path: ${{ inputs.ngc_path }}
+          ngc-duplicate: verify
+          retries: 3

@@ -1,0 +1,314 @@
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+package v1;
+option go_package = "github.com/nvidia/bare-metal-manager-rest/rla/internal/nsmapi/gen";
+
+// NVSwitchManager exposes registration, inventory, firmware management, and power control RPCs for NVLink Switch trays.
+service NVSwitchManager {
+    // Registration
+    // RegisterNVSwitches registers the specified NV-Switch trays and returns service-generated UUIDs.
+    rpc RegisterNVSwitches(RegisterNVSwitchesRequest) returns (RegisterNVSwitchesResponse);
+
+    // Inventory Management
+    // GetNVSwitches returns NV-Switch information for the specified switches.
+    rpc GetNVSwitches(NVSwitchRequest) returns (GetNVSwitchesResponse);
+
+    // Firmware Management (New API)
+    // ListBundles returns all available firmware bundles.
+    rpc ListBundles(google.protobuf.Empty) returns (ListBundlesResponse);
+    // QueueUpdate queues firmware updates for one or more components (or all if not specified).
+    rpc QueueUpdate(QueueUpdateRequest) returns (QueueUpdateResponse);
+    // QueueUpdates queues firmware updates for multiple switches in a single call.
+    rpc QueueUpdates(QueueUpdatesRequest) returns (QueueUpdatesResponse);
+    // GetUpdate returns the status of a specific firmware update by ID.
+    rpc GetUpdate(GetUpdateRequest) returns (GetUpdateResponse);
+    // GetUpdatesForSwitch returns all firmware updates for a switch.
+    rpc GetUpdatesForSwitch(GetUpdatesForSwitchRequest) returns (GetUpdatesForSwitchResponse);
+    // GetAllUpdates returns all firmware updates across all switches.
+    rpc GetAllUpdates(google.protobuf.Empty) returns (GetAllUpdatesResponse);
+    // CancelUpdate cancels an in-progress firmware update.
+    rpc CancelUpdate(CancelUpdateRequest) returns (CancelUpdateResponse);
+
+    // Power Control
+    // PowerControl performs a power action (e.g. PowerCycle, GracefulShutdown) on NV-Switch trays.
+    rpc PowerControl(PowerControlRequest) returns (PowerControlResponse);
+}
+
+// Vendor enumerates supported hardware vendors.
+enum Vendor {
+    VENDOR_UNKNOWN = 0;
+    VENDOR_NVIDIA = 1;
+}
+
+// Credentials wraps around a username and password.
+message Credentials {
+    string username = 1;
+    string password = 2;
+}
+
+// Subsystem represents a network-accessible subsystem with MAC, IP, port, and credentials.
+message Subsystem {
+    string mac_address = 1;
+    string ip_address = 2;
+    Credentials credentials = 3;
+    int32 port = 4;  // Optional custom port (0 = default: 443 for BMC, 22 for NVOS)
+}
+
+// BMCInfo contains BMC identity and metadata enriched from Redfish.
+message BMCInfo {
+    string mac_address = 1;
+    string ip_address = 2;
+    string serial_number = 3;
+    string model = 4;
+    string manufacturer = 5;
+    string part_number = 6;
+    string firmware_version = 7;
+    int32 port = 8;  // Custom port (0 = default 443)
+}
+
+// NVOSInfo contains NVOS identity and version information.
+message NVOSInfo {
+    string mac_address = 1;
+    string ip_address = 2;
+    string version = 3;
+    int32 port = 4;  // Custom port (0 = default 22)
+}
+
+// Chassis contains chassis identity from Redfish.
+message Chassis {
+    string serial_number = 1;
+    string model = 2;
+    string manufacturer = 3;
+}
+
+// NVSwitchTray represents a complete NV-Switch tray.
+message NVSwitchTray {
+    string uuid = 1;           // Service-generated UUID
+    Vendor vendor = 2;
+    BMCInfo bmc = 3;           // BMC subsystem info
+    NVOSInfo nvos = 4;         // NVOS subsystem info
+    Chassis chassis = 5;
+    string cpld_version = 6;
+    string rack_id = 7;        // Optional rack identifier for grouping switches
+}
+
+// RegisterNVSwitchRequest contains all fields needed to register a switch.
+message RegisterNVSwitchRequest {
+    Vendor vendor = 1;
+    // BMC subsystem (4 fields)
+    Subsystem bmc = 2;
+    // NVOS subsystem (4 fields)
+    Subsystem nvos = 3;
+    // Optional rack identifier for grouping switches
+    string rack_id = 4;
+}
+
+message RegisterNVSwitchesRequest {
+    repeated RegisterNVSwitchRequest registration_requests = 1;
+}
+
+enum StatusCode {
+    SUCCESS = 0;
+    INVALID_ARGUMENT = 1;
+    INTERNAL_ERROR = 2;
+}
+
+message RegisterNVSwitchResponse {
+    string uuid = 1;  // Service-generated UUID for the registered switch
+    bool is_new = 2;
+    google.protobuf.Timestamp created = 3;
+    StatusCode status = 4;
+    string error = 5;
+}
+
+message RegisterNVSwitchesResponse {
+    repeated RegisterNVSwitchResponse responses = 1;
+}
+
+// NVSwitchRequest identifies switches by their UUID.
+message NVSwitchRequest {
+    repeated string uuids = 1;  // Switch UUIDs
+}
+
+message NVSwitchResponse {
+    string uuid = 1;
+    StatusCode status = 2;
+    string error = 3;
+}
+
+// PowerAction enumerates the Redfish ComputerSystem.Reset actions supported by NV-Switch trays.
+enum PowerAction {
+    POWER_ACTION_UNKNOWN = 0;
+    POWER_ACTION_FORCE_OFF = 1;
+    POWER_ACTION_POWER_CYCLE = 2;
+    POWER_ACTION_GRACEFUL_SHUTDOWN = 3;
+    POWER_ACTION_ON = 4;
+    POWER_ACTION_FORCE_ON = 5;
+    POWER_ACTION_GRACEFUL_RESTART = 6;
+    POWER_ACTION_FORCE_RESTART = 7;
+}
+
+// PowerControlRequest specifies the switches and the power action to perform.
+message PowerControlRequest {
+    repeated string uuids = 1;
+    PowerAction action = 2;
+}
+
+message PowerControlResponse {
+    repeated NVSwitchResponse responses = 1;
+}
+
+message GetNVSwitchesResponse {
+    repeated NVSwitchTray nvswitches = 1;
+}
+
+// NVSwitchComponent enumerates the updatable components of an NV-Switch tray.
+// Update sequence: BMC -> CPLD -> BIOS -> NVOS
+enum NVSwitchComponent {
+    NVSWITCH_COMPONENT_UNKNOWN = 0;
+    NVSWITCH_COMPONENT_BMC = 1;   // BMC firmware via Redfish
+    NVSWITCH_COMPONENT_CPLD = 2;  // CPLD via NVOS SSH
+    NVSWITCH_COMPONENT_BIOS = 3;  // BIOS firmware via Redfish
+    NVSWITCH_COMPONENT_NVOS = 4;  // NVOS system image via SSH
+}
+
+// ============================================================================
+// Firmware Management API
+// ============================================================================
+
+// UpdateStrategy specifies how firmware is updated.
+enum UpdateStrategy {
+    UPDATE_STRATEGY_UNKNOWN = 0;
+    UPDATE_STRATEGY_SCRIPT = 1;   // External shell scripts
+    UPDATE_STRATEGY_SSH = 2;      // Direct SSH commands
+    UPDATE_STRATEGY_REDFISH = 3;  // Redfish API
+}
+
+// UpdateState represents the granular state of a firmware update.
+enum UpdateState {
+    UPDATE_STATE_UNKNOWN = 0;
+    UPDATE_STATE_QUEUED = 1;
+    UPDATE_STATE_POWER_CYCLE = 2;     // NVOS: power cycle via BMC (bundle updates only)
+    UPDATE_STATE_WAIT_REACHABLE = 3;  // NVOS: wait for switch to be reachable
+    UPDATE_STATE_COPY = 4;            // SSH: copying file to switch
+    UPDATE_STATE_UPLOAD = 5;          // SSH: nv action fetch / Redfish: upload
+    UPDATE_STATE_INSTALL = 6;         // Installing firmware
+    UPDATE_STATE_POLL_COMPLETION = 7; // Redfish: polling task
+    UPDATE_STATE_VERIFY = 8;          // Verifying version
+    UPDATE_STATE_CLEANUP = 9;         // Cleaning up temp files
+    UPDATE_STATE_COMPLETED = 10;
+    UPDATE_STATE_FAILED = 11;
+    UPDATE_STATE_CANCELLED = 12;      // Cancelled due to predecessor failure
+}
+
+// FirmwareBundle represents a firmware package with multiple components.
+message FirmwareBundle {
+    string version = 1;     // Unique bundle version identifier
+    string description = 2;
+    repeated ComponentInfo components = 3;
+}
+
+// ComponentInfo describes a component within a bundle.
+message ComponentInfo {
+    string name = 1;        // Component name (firmware, cpld, nvos)
+    string version = 2;     // Component version
+    string strategy = 3;    // Update strategy (redfish, ssh, script)
+}
+
+// ListBundlesResponse returns available firmware bundles.
+message ListBundlesResponse {
+    repeated FirmwareBundle bundles = 1;
+}
+
+// QueueUpdateRequest queues firmware updates for one or more components.
+// If components is empty, all components in the bundle are updated in sequence.
+message QueueUpdateRequest {
+    string switch_uuid = 1;      // UUID of the NV-Switch to update
+    string bundle_version = 2;   // Version of the firmware bundle
+    repeated NVSwitchComponent components = 3; // Components to update (empty = all)
+}
+
+// QueueUpdateResponse returns the queued updates.
+message QueueUpdateResponse {
+    repeated FirmwareUpdateInfo updates = 1;
+}
+
+// QueueUpdatesRequest queues firmware updates for multiple switches.
+message QueueUpdatesRequest {
+    repeated string switch_uuids = 1;     // UUIDs of NV-Switches to update
+    string bundle_version = 2;            // Version of the firmware bundle
+    repeated NVSwitchComponent components = 3; // Components to update (empty = all)
+}
+
+// QueueUpdatesResponse returns the results for each switch.
+message QueueUpdatesResponse {
+    repeated QueueUpdateResult results = 1;
+}
+
+// QueueUpdateResult contains the result for a single switch update.
+message QueueUpdateResult {
+    string switch_uuid = 1;               // UUID of the switch
+    StatusCode status = 2;                // SUCCESS or error
+    string error = 3;                     // Error message if status != SUCCESS
+    repeated FirmwareUpdateInfo updates = 4; // Queued updates if successful
+}
+
+// GetUpdateRequest gets a specific update by ID.
+message GetUpdateRequest {
+    string update_id = 1;
+}
+
+// GetUpdateResponse returns a single update.
+message GetUpdateResponse {
+    FirmwareUpdateInfo update = 1;
+}
+
+// GetUpdatesForSwitchRequest gets all updates for a switch.
+message GetUpdatesForSwitchRequest {
+    string switch_uuid = 1;
+}
+
+// GetUpdatesForSwitchResponse returns updates for a switch.
+message GetUpdatesForSwitchResponse {
+    repeated FirmwareUpdateInfo updates = 1;
+}
+
+// GetAllUpdatesResponse returns all firmware updates.
+message GetAllUpdatesResponse {
+    repeated FirmwareUpdateInfo updates = 1;
+}
+
+// CancelUpdateRequest cancels an update.
+message CancelUpdateRequest {
+    string update_id = 1;
+}
+
+// CancelUpdateResponse confirms cancellation.
+message CancelUpdateResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// FirmwareUpdateInfo contains full details of a firmware update operation.
+message FirmwareUpdateInfo {
+    string id = 1;                    // Unique update ID (UUID)
+    string switch_uuid = 2;
+    NVSwitchComponent component = 3;
+    string bundle_version = 4;
+    UpdateStrategy strategy = 5;
+    UpdateState state = 6;
+    string version_from = 7;
+    string version_to = 8;
+    string version_actual = 9;        // Actual version after update
+    string error_message = 10;
+    google.protobuf.Timestamp created_at = 11;
+    google.protobuf.Timestamp updated_at = 12;
+    
+    // Sequencing fields for multi-component updates
+    string bundle_update_id = 13;     // Groups related updates (UUID, optional)
+    int32 sequence_order = 14;        // Order within bundle update (1, 2, 3...)
+    string predecessor_id = 15;       // Must complete before this one starts (UUID, optional)
+}

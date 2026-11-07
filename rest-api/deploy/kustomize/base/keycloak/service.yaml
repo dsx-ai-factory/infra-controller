@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Keycloak Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  labels:
+    app: keycloak
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8082
+      targetPort: 8080
+      name: http
+  selector:
+    app: keycloak
+---
+# NodePort service for Keycloak access from host
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-nodeport
+  labels:
+    app: keycloak
+spec:
+  type: NodePort
+  ports:
+    - port: 8082
+      targetPort: 8080
+      nodePort: 30082
+      name: http
+  selector:
+    app: keycloak

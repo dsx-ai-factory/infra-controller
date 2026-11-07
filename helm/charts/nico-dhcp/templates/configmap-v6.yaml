@@ -1,0 +1,66 @@
+{{- $dhcp := default (dict) .Values.dhcp -}}
+{{- if $dhcp.v6Enabled }}
+{{- $kea := default (dict) .Values.config.kea -}}
+{{- $hp := default (dict) $kea.hookParameters -}}
+{{- $declineProbationPeriod := 900 -}}
+{{- if hasKey $kea "declineProbationPeriod" -}}
+{{- $declineProbationPeriod = $kea.declineProbationPeriod -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nico-dhcp.name" . }}6-config
+  namespace: {{ include "nico-dhcp.namespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "nico-dhcp.name" . }}6
+    app.kubernetes.io/component: dhcp
+data:
+  # Kea's catch-all pool reaches the lease hooks; the API owns the final address.
+  kea_config6.json: |
+    {
+      "Dhcp6": {
+        "interfaces-config": {
+          "interfaces": [{{ printf "%s/__NICO_DHCPV6_ADDRESS__" (default "eth0" $dhcp.interface) | quote }}]
+        },
+        "server-id": {
+          "type": "LL",
+          "htype": 1,
+          "identifier": {{ $dhcp.v6ServerIdentifier | quote }},
+          "persist": false
+        },
+        "lease-database": {
+          "type": "memfile",
+          "name": "/var/lib/kea/kea-leases6.csv",
+          "lfc-interval": 3600
+        },
+        "preferred-lifetime": 3600,
+        "valid-lifetime": 7200,
+        "renew-timer": 1800,
+        "rebind-timer": 2880,
+        "decline-probation-period": {{ $declineProbationPeriod | toJson }},
+        "hooks-libraries": [
+          {
+            "library": "/usr/lib/kea/hooks/libdhcp.so",
+            "parameters": {
+              "carbide-api-url": {{ default (printf "https://%s.%s.svc.cluster.local:1079" (include "nico-dhcp.apiServiceName" .) (include "nico-dhcp.namespace" .)) $hp.nicoApiUrl | quote }},
+              "carbide-metrics-endpoint": {{ printf "[::]:%v" .Values.metrics.port | quote }},
+              "hook-dns-servers-ipv6": {{ default "" $dhcp.v6DnsServers | quote }},
+              "hook-ntp-servers-ipv6": {{ default "" $dhcp.v6NtpServers | quote }},
+              "hook-provisioning-server-ipv6": {{ default "" $dhcp.v6ProvisioningServer | quote }},
+              "hook-rapid-commit-v6": {{ default false $dhcp.v6RapidCommit | toJson }}
+            }
+          }
+        ],
+        "subnet6": [
+          {
+            "subnet": "::/0",
+            "rapid-commit": true,
+            "pools": [{"pool": "::1-ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe"}]
+          }
+        ],
+        "loggers": [
+          { "name": "kea-dhcp6", "severity": "INFO", "output_options": [{ "output": "stdout" }] }
+        ]
+      }
+    }
+{{- end }}

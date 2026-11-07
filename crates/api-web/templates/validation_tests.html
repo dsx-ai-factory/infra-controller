@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block title %}Machine Validation Tests{% endblock %}
+
+{% block content %}
+<h1>Machine Validation Tests ({{ page.total_items() }})</h1>
+<table class="sortable overview">
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Version</th>
+            <th>Name</th>
+            <th>Description</th>
+            <th>Contexts</th>
+            <th>Supported Platforms</th>
+            <th>Command</th>
+            <th>Args</th>
+            <th>Tags</th>
+            <th>IsVerified</th>
+            <th>IsEnabled</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for test in validation_tests %}
+        <tr>
+            <td>{{ test.id }}</td>
+            <td>{{ test.version }}</td>
+            <td>{{ test.name }}</td>
+            <td>{{ test.description }}</td>
+            <td>{{ test.contexts }}</td>
+            <td>{{ test.supported_platforms }}</td>
+            <td>{{ test.command }}</td>
+            <td>{{ test.args }}</td>
+            <td>{{ test.tags }}</td>
+            <td>{{ test.is_verified }}</td>
+            <td>{{ test.is_enabled }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% include "pages_footer.html" %}
+
+{% endblock %}

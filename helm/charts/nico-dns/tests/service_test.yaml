@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: DNS dual-stack Service defaults
+templates:
+  - service.yaml
+tests:
+  - it: prefers dual-stack addresses and exposes DNS over TCP and UDP
+    asserts:
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: PreferDualStack
+      - contains:
+          path: spec.ports
+          content:
+            port: 53
+            name: tcp
+            protocol: TCP
+      - contains:
+          path: spec.ports
+          content:
+            port: 53
+            name: udp
+            protocol: UDP

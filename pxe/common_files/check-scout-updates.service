@@ -1,0 +1,7 @@
+[Unit]
+Description=Check for scout updates
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/forge/check-scout-updates.sh

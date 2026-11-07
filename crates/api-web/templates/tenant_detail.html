@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block title %}Tenant {{ tenant.organization_id }}{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Tenant {{ tenant.organization_id }}</h1>
+
+<table class="detailsview">
+	<tr><th>Organization ID</th><td>{{ tenant.organization_id }}</td></tr>
+	<tr><th>Routing Profile Type</th><td>{{ tenant.routing_profile_type }}</td></tr>
+</table>
+
+<h2>Metadata</h2>
+{{ metadata_detail|safe }}
+
+{% endblock %}

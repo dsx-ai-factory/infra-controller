@@ -1,0 +1,334 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Notify Build Status
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Build version/tag to display'
+        required: false
+        type: string
+        default: ''
+      workflow-name:
+        description: 'Workflow name to display'
+        required: false
+        type: string
+        default: 'NICo Core CI'
+      needs-context:
+        description: 'JSON string of needs context from calling workflow'
+        required: true
+        type: string
+      channel-id:
+        description: 'Slack channel ID to send notifications to'
+        required: true
+        type: string
+      notify-on-success:
+        description: 'Send notification on successful builds'
+        required: false
+        type: boolean
+        default: true
+      notify-on-partial:
+        description: 'Send notification on partial failures'
+        required: false
+        type: boolean
+        default: true
+      notify-on-failure:
+        description: 'Send notification on complete failures'
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      slack-bot-token:
+        description: 'Slack Bot OAuth Token'
+        required: true
+
+jobs:
+  notify:
+    runs-on: linux-amd64-cpu4
+    steps:
+      - name: Analyze Build Results
+        id: analyze
+        env:
+          NEEDS_CONTEXT: ${{ inputs.needs-context }}
+        run: |
+          printf '%s' "$NEEDS_CONTEXT" > /tmp/needs.json
+
+          # Count job results (only look at .result field to avoid nested JSON issues)
+          TOTAL=$(jq -r 'length' /tmp/needs.json)
+          SUCCESS=$(jq -r '[.[] | select(.result == "success")] | length' /tmp/needs.json)
+          SKIPPED=$(jq -r '[.[] | select(.result == "skipped")] | length' /tmp/needs.json)
+          FAILED=$(jq -r '[.[] | select(.result == "failure")] | length' /tmp/needs.json)
+          CANCELLED=$(jq -r '[.[] | select(.result == "cancelled")] | length' /tmp/needs.json)
+
+          # Calculate status
+          if [ "$FAILED" -eq 0 ] && [ "$CANCELLED" -eq 0 ]; then
+            STATUS="success"
+            EMOJI="✅"
+          elif [ "$FAILED" -gt 0 ] && [ "$SUCCESS" -gt 0 ]; then
+            STATUS="partial"
+            EMOJI="⚠️"
+          else
+            STATUS="failure"
+            EMOJI="❌"
+          fi
+
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+          echo "emoji=$EMOJI" >> $GITHUB_OUTPUT
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+          echo "success=$SUCCESS" >> $GITHUB_OUTPUT
+          echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+          echo "cancelled=$CANCELLED" >> $GITHUB_OUTPUT
+
+          # Generate failed jobs list (convert to readable format)
+          FAILED_JOBS=$(jq -r '
+            to_entries |
+            map(select(.value.result == "failure") | .key) |
+            join(", ")
+          ' /tmp/needs.json | sed 's/_/-/g')
+          echo "failed_jobs=$FAILED_JOBS" >> $GITHUB_OUTPUT
+
+          # Create detailed status summary as single line
+          SUMMARY="*Total Jobs:* $TOTAL  •  ✅ Success: $SUCCESS  •  ⏭️ Skipped: $SKIPPED  •  ❌ Failed: $FAILED  •  🚫 Cancelled: $CANCELLED"
+
+          echo "summary=$SUMMARY" >> $GITHUB_OUTPUT
+
+          # Cleanup
+          rm -f /tmp/needs.json
+
+      - name: Notify Slack - Build Success
+        if: steps.analyze.outputs.status == 'success' && inputs.notify-on-success
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        with:
+          slack-bot-token: ${{ secrets.slack-bot-token }}
+          channel-id: ${{ inputs.channel-id }}
+          errors: 'false'
+          payload: |
+            {
+              "text": "✅ ${{ inputs.workflow-name }} - Build Successful${{ inputs.version && format(' - {0}', inputs.version) || '' }}",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "✅ ${{ inputs.workflow-name }} - Build Successful"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Repository:*\n${{ github.repository }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Version:*\n${{ inputs.version || github.sha }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Branch:*\n${{ github.ref_name }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Triggered by:*\n${{ github.actor }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "${{ steps.analyze.outputs.summary }}"
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Workflow"
+                      },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    },
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Commit"
+                      },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}"
+                    }
+                  ]
+                }
+              ]
+            }
+
+      - name: Notify Slack - Partial Failure
+        if: steps.analyze.outputs.status == 'partial' && inputs.notify-on-partial
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        with:
+          slack-bot-token: ${{ secrets.slack-bot-token }}
+          channel-id: ${{ inputs.channel-id }}
+          errors: 'false'
+          payload: |
+            {
+              "text": "⚠️ ${{ inputs.workflow-name }} - Partial Build Failure${{ inputs.version && format(' - {0}', inputs.version) || '' }}",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "⚠️ ${{ inputs.workflow-name }} - Partial Build Failure"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Repository:*\n${{ github.repository }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Version:*\n${{ inputs.version || github.sha }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Branch:*\n${{ github.ref_name }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Triggered by:*\n${{ github.actor }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "${{ steps.analyze.outputs.summary }}"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Failed Jobs:*\n${{ steps.analyze.outputs.failed_jobs }}"
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Failed Jobs"
+                      },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    },
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Commit"
+                      },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}"
+                    }
+                  ]
+                }
+              ]
+            }
+
+      - name: Notify Slack - Build Failure
+        if: steps.analyze.outputs.status == 'failure' && inputs.notify-on-failure
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/slack-notify@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        with:
+          slack-bot-token: ${{ secrets.slack-bot-token }}
+          channel-id: ${{ inputs.channel-id }}
+          errors: 'false'
+          payload: |
+            {
+              "text": "❌ ${{ inputs.workflow-name }} - Build Failed${{ inputs.version && format(' - {0}', inputs.version) || '' }}",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "❌ ${{ inputs.workflow-name }} - Build Failed"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Repository:*\n${{ github.repository }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Version:*\n${{ inputs.version || github.sha }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Branch:*\n${{ github.ref_name }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Triggered by:*\n${{ github.actor }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "${{ steps.analyze.outputs.summary }}"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Failed Jobs:*\n${{ steps.analyze.outputs.failed_jobs }}"
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Logs"
+                      },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    },
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Commit"
+                      },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}"
+                    }
+                  ]
+                }
+              ]
+            }

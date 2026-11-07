@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-rest-site-manager.name" . }}
+  namespace: {{ include "nico-rest-site-manager.namespace" . }}
+  labels:
+    {{- include "nico-rest-site-manager.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.port }}
+      name: https
+  selector:
+    {{- include "nico-rest-site-manager.selectorLabels" . | nindent 4 }}

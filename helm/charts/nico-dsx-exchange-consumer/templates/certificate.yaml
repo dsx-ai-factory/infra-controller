@@ -1,0 +1,9 @@
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "nico-dsx-exchange-consumer.name" . }}-certificate
+  namespace: {{ include "nico-dsx-exchange-consumer.namespace" . }}
+  labels:
+    {{- include "nico-dsx-exchange-consumer.labels" . | nindent 4 }}
+spec:
+  {{- include "nico-dsx-exchange-consumer.certificateSpec" (dict "name" (printf "%s-certificate" (include "nico-dsx-exchange-consumer.name" .)) "svcName" (include "nico-dsx-exchange-consumer.name" .) "cert" .Values.certificate "global" .Values.global "namespace" (include "nico-dsx-exchange-consumer.namespace" .)) | nindent 2 }}

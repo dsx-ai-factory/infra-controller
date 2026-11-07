@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Overlay for workflow only: cloud-worker + site-worker.
+# Deploys only this component; Postgres, Temporal certs, secrets, etc. are assumed to exist.
+# Apply with: kubectl kustomize --load-restrictor LoadRestrictionsNone . | kubectl apply -f -
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+generatorOptions:
+  disableNameSuffixHash: true
+
+namespace: nico-rest
+
+resources:
+  - ../../base/workflow
+
+images:
+  - name: nico-rest-workflow
+    newName: localhost:5000/nico-rest-workflow
+    newTag: latest
+
+patches:
+  - target:
+      kind: Deployment
+      name: nico-rest-cloud-worker
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/imagePullSecrets
+        value: []
+  - target:
+      kind: Deployment
+      name: nico-rest-site-worker
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/imagePullSecrets
+        value: []
+
+commonLabels:
+  app.kubernetes.io/part-of: nico-rest

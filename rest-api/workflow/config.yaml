@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+env:
+  dev: true
+
+log:
+  level: debug
+
+db:
+  host: localhost
+  port: 30432
+  name: nico
+  user: nico
+  password: nico
+
+temporal:
+  host: localhost
+  port: 30233
+  serverName: localhost
+  namespace: cloud
+  queue: cloud
+  tls:
+    enabled: true
+    certPath: certs/client-cloud/tls.crt
+    keyPath: certs/client-cloud/tls.key
+    caPath: certs/client-cloud/ca.crt
+  encryptionKey: "local-dev"
+
+ngc:
+  api:
+    baseUrl: ""
+
+notifications:
+  slack:
+    webhookURL: ""
+
+metrics:
+  enabled: true
+  port: 9360
+
+tracing:
+  enabled: false
+  serviceName: cloud-workflow

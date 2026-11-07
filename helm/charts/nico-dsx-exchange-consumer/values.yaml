@@ -1,0 +1,83 @@
+## Global settings
+global:
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []
+  certificate:
+    duration: 720h0m0s
+    renewBefore: 360h0m0s
+    privateKey:
+      algorithm: ECDSA
+      size: 384
+    issuerRef:
+      kind: ClusterIssuer
+      name: vault-nico-issuer
+      group: cert-manager.io
+  spiffe:
+    trustDomain: nico.local
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: site-controller
+
+## Override the release namespace (defaults to helm install -n <namespace>)
+namespaceOverride: ""
+
+replicas: 1
+
+service:
+  port: 9009
+
+certificate:
+  ## serviceName is used to auto-generate dnsNames and SPIFFE URIs based on the release namespace
+  serviceName: ""
+  spiffeServiceName: ""
+  identityNamespace: ""
+  ## Fully override the auto-generated dnsNames/uris. When empty, dnsNames and
+  ## uris are generated from serviceName + namespace (extraDnsNames/extraUris
+  ## are appended to the generated list).
+  dnsNames: []
+  uris: []
+  extraDnsNames: []
+  extraUris: []
+
+env:
+  RUST_BACKTRACE: "full"
+  RUST_LIB_BACKTRACE: "0"
+
+## MQTT credential source. The consumer reads the MQTT credential from the
+## environment, then a file, then Vault, and needs one only when its
+## mqtt.auth.auth_mode is not none. To supply it without Vault, set secretName
+## and key to a Secret whose key holds the file described in
+## docs/configuration/credential-sources.md. Both are required together.
+## Leave both empty to configure no file source.
+credentials:
+  secretName: ""
+  key: ""
+  mountPath: /var/run/secrets/nico-credentials
+
+## Extra container environment, volumes, and mounts. A Vault-backed credential
+## source sets VAULT_ADDR, VAULT_KV_MOUNT_LOCATION, VAULT_PKI_MOUNT_LOCATION,
+## and VAULT_PKI_ROLE_NAME here, and mounts the Vault CA bundle that
+## VAULT_CACERT names (default /var/run/secrets/forge-roots/ca.crt). A pod with
+## a service-account token authenticates through a Vault Kubernetes auth role
+## for its service account and ignores VAULT_TOKEN; set VAULT_TOKEN only when
+## the pod has no service-account token.
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
+
+livenessProbe:
+  httpGet:
+    port: 9009
+    scheme: HTTP
+  initialDelaySeconds: 20
+  periodSeconds: 300
+  failureThreshold: 3
+  successThreshold: 1
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 25s

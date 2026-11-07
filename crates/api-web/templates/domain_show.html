@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}Domains{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Domains</h1>
+
+<table class="sortable overview">
+	<thead>
+		<tr>
+			<th>ID</th>
+			<th>Name</th>
+			<th>Created</th>
+			<th>Updated</th>
+			<th>Deleted</th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for domain in domains %}
+			<tr>
+				<td>{{ domain.id|option_fmt }}</td>
+				<td>{{ domain.name }}</td>
+				<td>{{ domain.created|option_fmt }}</td>
+				<td>{{ domain.updated|option_fmt }}</td>
+				<td>{{ domain.deleted|option_fmt_or("Not Deleted") }}</td>
+			</tr>
+		{% endfor %}
+	</tbody>
+</table>
+
+{% endblock %}

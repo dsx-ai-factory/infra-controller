@@ -1,0 +1,13 @@
+# sudo ../target/debug/forge-dhcp-server --dhcp-config conf/conf.yaml --host-config test/host_config_localtest.yaml --interfaces lo
+# for i in (seq 1 100)
+#      sudo nmap --script broadcast-dhcp-discover --script-args requests=10 -e lo &
+#  end
+---
+host_interface_id: 6a3e76cd-e3f3-487a-aea0-04e56b049999 # host_primary machine interface
+host_ip_addresses:
+  lo:
+    address: 10.0.0.2
+    gateway: 10.0.0.1
+    prefix: 10.0.0.0/24
+    fqdn: seventeen-connecticut.dev3.frg.nvidia.com
+    booturl: test.com/ubuntu

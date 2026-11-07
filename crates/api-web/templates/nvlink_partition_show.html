@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}Logical Partitions{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Logical Partitions</h1>
+
+<table class="sortable overview">
+	<thead>
+		<th>Id</th>
+		<th>Name</th>
+		<th>State</th>
+		<th>Physical Partitions</th>
+	</thead>
+	<tbody>
+		{% for partition in partitions %}
+		<tr>
+			<td><a href="/admin/nvlink-partition/{{ partition.id }}">{{ partition.id }}</a></td>
+			<td>{{ partition.name }}</td>
+			<td>{{ partition.state }}</td>
+			<td>{{ partition.physical_partitions }}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+
+{% endblock %}
+

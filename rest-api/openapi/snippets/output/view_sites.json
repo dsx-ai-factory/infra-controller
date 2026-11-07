@@ -1,0 +1,35 @@
+[
+    {
+      "id": "bd4692bd-da95-410e-911a-d492fe2d35f8",
+      "name": "demo-site",
+      "description": "nico site",
+      "org": "wdksahew1rqv",
+      "infrastructureProviderId": "16060041-f146-43fe-8c82-be48460b5583",
+      "siteControllerVersion": null,
+      "siteAgentVersion": null,
+      "registrationToken": null,
+      "registrationTokenExpiration": "2023-05-03T22:18:45.23286Z",
+      "serialConsoleHostname": "example.console.com",
+      "isSerialConsoleEnabled": true,
+      "serialConsoleIdleTimeout": null,
+      "serialConsoleMaxSessionLength": null,
+      "deprecations": [],
+      "status": "Registered",
+      "statusHistory": [
+        {
+          "status": "Registered",
+          "message": "Site has been successfully paired",
+          "created": "2023-05-02T22:20:04.627469Z",
+          "updated": "2023-05-02T22:20:04.627469Z"
+        },
+        {
+          "status": "Pending",
+          "message": "registration token renewed, pending pairing",
+          "created": "2023-05-02T22:18:45.262934Z",
+          "updated": "2023-05-02T22:18:45.262934Z"
+        }
+      ],
+      "created": "2023-01-20T21:36:41.339466Z",
+      "updated": "2023-07-06T16:19:20.104353Z"
+    }
+  ]

@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+
+{% block title %}Switch {{ id }}{% endblock %}
+
+{% block content %}
+<div id="json">
+	<a id="json-link" href="">JSON</a>
+</div>
+<h1>Switch {{ id }}</h1>
+
+<h2>Info</h2>
+<table class="detailsview">
+	<tr>
+		<th>ID</th>
+		<td>{{ id }}</td>
+	</tr>
+	<tr><th>Rack ID</th><td>{{ rack_id|rack_id_link|safe }}</td></tr>
+</table>
+
+{{ lifecycle_detail|safe }}
+
+<h2>Metadata</h2>
+{{ metadata_detail|safe }}
+
+{{ health_detail|safe }}
+
+<h2>Configuration</h2>
+<table class="detailsview">
+	<tr>
+		<th>Name</th>
+		<td>{{ name }}</td>
+	</tr>
+	<tr>
+		<th>Slot Number</th>
+		<td>{{ slot_number }}</td>
+	</tr>
+	<tr>
+		<th>Tray Index</th>
+		<td>{{ tray_index }}</td>
+	</tr>
+	<tr>
+		<th>Enable NMXC</th>
+		<td>{{ enable_nmxc }}</td>
+	</tr>
+</table>
+
+<h2>Status</h2>
+<table class="detailsview">
+	{% if let Some(power_state) = power_state %}
+	<tr>
+		<th>Power State</th>
+		<td>{{ power_state }}</td>
+	</tr>
+	{% endif %}
+	{% if let Some(health_status) = health_status %}
+	<tr>
+		<th>Health Status</th>
+		<td>
+			{% if health_status == "ok" || health_status == "OK" %}
+				<span class="bubble success">{{ health_status }}</span>
+			{% else if health_status == "critical" || health_status == "Critical" %}
+				<span class="bubble error">{{ health_status }}</span>
+			{% else %}
+				<span class="bubble warning">{{ health_status }}</span>
+			{% endif %}
+		</td>
+	</tr>
+	{% endif %}
+</table>
+
+<h2>BMC</h2>
+<table class="detailsview">
+	{% if let Some(bmc_info) = bmc_info %}
+	{% if let Some(machine_interface_id) = bmc_info.machine_interface_id %}
+	<tr>
+		<th>Machine Interface ID</th>
+		<td>{{ machine_interface_id }}</td>
+	</tr>
+	{% endif %}
+	{% if let Some(ip) = bmc_info.ip %}
+	<tr>
+		<th>BMC IP</th>
+		<td>{{ ip }}</td>
+	</tr>
+	{% endif %}
+	{% if let Some(port) = bmc_info.port %}
+	<tr>
+		<th>BMC Port</th>
+		<td>{{ port }}</td>
+	</tr>
+	{% endif %}
+	{% if let Some(mac) = bmc_info.mac %}
+	<tr>
+		<th>BMC MAC</th>
+		<td>{{ mac }}</td>
+	</tr>
+	{% endif %}
+	{% if let Some(version) = bmc_info.version %}
+	<tr>
+		<th>BMC Version</th>
+		<td>{{ version }}</td>
+	</tr>
+	{% endif %}
+	{% if let Some(firmware_version) = bmc_info.firmware_version %}
+	<tr>
+		<th>BMC Firmware Version</th>
+		<td>{{ firmware_version }}</td>
+	</tr>
+	{% endif %}
+	{% else %}
+	<tr>
+		<td colspan="2" class="text-muted">No BMC info available.</td>
+	</tr>
+	{% endif %}
+</table>
+
+{{ firmware_inventory|safe }}
+
+<h2>Discovery Info</h2>
+<p>TBD</p>
+
+<h2>Interfaces</h2>
+{% if nvos_ports.is_empty() %}
+<p class="text-muted">No NVOS management port information available.</p>
+{% else %}
+{% for nvos_port in nvos_ports %}
+<h3>NVOS Management Endpoint {{ loop.index }}{% if nvos_port.is_primary %} (primary){% endif %}</h3>
+<table class="detailsview">
+	<tr>
+		<th>MAC Address</th>
+		<td>{{ nvos_port.mac }}</td>
+	</tr>
+	<tr>
+		<th>Primary</th>
+		<td>{% if nvos_port.is_primary %}Yes{% else %}No{% endif %}</td>
+	</tr>
+	{% if let Some(service_port) = nvos_port.service_port %}
+	<tr>
+		<th>Service Port</th>
+		<td>{{ service_port }}</td>
+	</tr>
+	{% endif %}
+	{% if nvos_port.addresses.is_empty() %}
+	<tr>
+		<th>IP Addresses</th>
+		<td class="text-muted">No IP addresses available.</td>
+	</tr>
+	{% else %}
+	{% for address in nvos_port.addresses %}
+	<tr>
+		<th>{{ address.address_family }} Address</th>
+		<td>{{ address.address }}</td>
+	</tr>
+	{% endfor %}
+	{% endif %}
+</table>
+{% endfor %}
+{% endif %}
+
+<h2>History</h2>
+<a href="/admin/switch/{{ id }}/state-history">Open State History on separate page</a>
+{{ history|safe }}
+
+{% endblock %}

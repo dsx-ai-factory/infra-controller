@@ -1,0 +1,21 @@
+dependencies:
+- name: nico-rest-common
+  repository: ""
+  version: 0.1.0
+- name: nico-rest-cert-manager
+  repository: ""
+  version: 0.1.0
+- name: nico-rest-api
+  repository: ""
+  version: 0.1.1
+- name: nico-rest-workflow
+  repository: ""
+  version: 0.1.0
+- name: nico-rest-site-manager
+  repository: ""
+  version: 0.1.1
+- name: nico-rest-db
+  repository: ""
+  version: 0.1.0
+digest: sha256:241b9c676f1c73361c20c25df6901b76de1e5e349cc305a6670c14a2652a6759
+generated: "2026-05-19T16:45:16.67864-07:00"

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}Network Devices{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Network Devices</h1>
+<ol id="toc">
+{% for d in devices %}
+	<li><a href="#{{ d.name }}">{{ d.name }}</a></li>
+{% endfor %}
+</ol>
+
+{% for d in devices %}
+<h2 id="{{d.name }}">{{ d.name }}</h2>
+<table class="detailsview">
+	<tr><th>ID</th><td>{{ d.id }}</td></tr>
+	<tr><th>Description</th><td>{{ d.description }}</td></tr>
+	<tr><th>Mgmt IP</th><td>{{ d.mgmt_ips }}</td></tr>
+	<tr><th>Discovered Via</th><td>{{ d.discovered_via }}</td></tr>
+	<tr><th>Device Type</th><td>{{ d.device_type }}</td></tr>
+	<tr><th>Connected DPU(s)</th>
+		<td>
+		<table>
+			<thead><tr><th>ID</th><th>Local port</th><th>Remote port</th></tr></thead>
+			<tbody>
+			{% for dpu in d.connected_dpus %}
+				<tr>
+					<td>{{ dpu.id|machine_id_link|safe }}</td>
+					<td>{{ dpu.local_port }}</td>
+					<td>{{ dpu.remote_port }}</td>
+				</tr>
+			{% endfor %}
+			</tbody>
+		</table>
+		</td>
+	</tr>
+</table>
+{% endfor %}
+{% endblock %}

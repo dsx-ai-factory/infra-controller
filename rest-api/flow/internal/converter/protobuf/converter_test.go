@@ -1,0 +1,1821 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package protobuf
+
+import (
+	"encoding/json"
+	"net"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
+	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
+	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
+	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/location"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/bmc"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
+	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+)
+
+func TestLeakStatusTo(t *testing.T) {
+	cases := map[types.LeakStatus]pb.LeakStatus{
+		types.LeakStatusDetected:    pb.LeakStatus_LEAK_STATUS_DETECTED,
+		types.LeakStatusNotDetected: pb.LeakStatus_LEAK_STATUS_NOT_DETECTED,
+		types.LeakStatusUnknown:     pb.LeakStatus_LEAK_STATUS_UNKNOWN,
+		types.LeakStatus(""):        pb.LeakStatus_LEAK_STATUS_UNKNOWN,
+		types.LeakStatus("bogus"):   pb.LeakStatus_LEAK_STATUS_UNKNOWN,
+	}
+	for in, want := range cases {
+		assert.Equal(t, want, LeakStatusTo(in), "LeakStatusTo(%q)", in)
+	}
+}
+
+func TestTaskTo(t *testing.T) {
+	appliedRuleID := uuid.New()
+	tests := []struct {
+		name          string
+		appliedRuleID *uuid.UUID
+		wantRuleID    string
+	}{
+		{name: "includes the applied rule", appliedRuleID: &appliedRuleID, wantRuleID: appliedRuleID.String()},
+		{name: "omits an unapplied rule"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			converted := TaskTo(&taskdef.Task{AppliedRuleID: test.appliedRuleID})
+
+			require.NotNil(t, converted)
+			require.Equal(t, test.wantRuleID, converted.GetAppliedRuleId().GetId())
+		})
+	}
+}
+
+func TestUUIDFrom(t *testing.T) {
+	testID := uuid.New()
+	testCases := map[string]struct {
+		id       *pb.UUID
+		expected uuid.UUID
+	}{
+		"valid protobuf uuid": {
+			id:       &pb.UUID{Id: testID.String()},
+			expected: testID,
+		},
+		"nil protobuf uuid": {
+			id:       nil,
+			expected: uuid.Nil,
+		},
+		"invalid protobuf uuid": {
+			id:       &pb.UUID{Id: "invalid-uuid"},
+			expected: uuid.Nil,
+		},
+	}
+
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, testCase.expected, UUIDFrom(testCase.id))
+		})
+	}
+}
+
+func TestComponentTypeConverter(t *testing.T) {
+	for typ, ptype := range componentTypeToMap {
+		assert.Equal(t, typ, ComponentTypeFrom(ptype))
+		assert.Equal(t, ptype, ComponentTypeTo(typ))
+	}
+
+	assert.Equal(t, devicetypes.ComponentTypeUnknown, ComponentTypeFrom(pb.ComponentType(-1)))               //nolint
+	assert.Equal(t, pb.ComponentType_COMPONENT_TYPE_UNKNOWN, ComponentTypeTo(devicetypes.ComponentType(-1))) //nolint
+}
+
+func TestBMCTypeConverter(t *testing.T) {
+	for typ, ptype := range bmcTypeToMap {
+		assert.Equal(t, typ, BMCTypeFrom(ptype))
+		assert.Equal(t, ptype, BMCTypeTo(typ))
+	}
+
+	assert.Equal(t, devicetypes.BMCTypeUnknown, BMCTypeFrom(pb.BMCType(-1)))         //nolint
+	assert.Equal(t, pb.BMCType_BMC_TYPE_UNKNOWN, BMCTypeTo(devicetypes.BMCType(-1))) //nolint
+}
+
+func TestDeviceInfoConverter(t *testing.T) {
+	shared := deviceinfo.NewRandom("some device", 5)
+
+	sharedP := pb.DeviceInfo{
+		Id:           &pb.UUID{Id: shared.ID.String()},
+		Name:         shared.Name,
+		Manufacturer: shared.Manufacturer,
+		Model:        &shared.Model,
+		SerialNumber: shared.SerialNumber,
+		Description:  &shared.Description,
+	}
+
+	testCases := map[string]struct {
+		source     *deviceinfo.DeviceInfo
+		sourceP    *pb.DeviceInfo
+		converted  *deviceinfo.DeviceInfo
+		convertedP *pb.DeviceInfo
+	}{
+		"valid": {
+			source:     &shared,
+			sourceP:    &sharedP,
+			converted:  &shared,
+			convertedP: &sharedP,
+		},
+		"nil": {
+			source:     nil,
+			sourceP:    nil,
+			converted:  &deviceinfo.DeviceInfo{},
+			convertedP: nil,
+		},
+		"empty fields": {
+			source: &deviceinfo.DeviceInfo{
+				ID:           uuid.Nil,
+				Name:         shared.Name,
+				Manufacturer: shared.Manufacturer,
+				Model:        "",
+				SerialNumber: shared.SerialNumber,
+				Description:  "",
+			},
+			sourceP: &pb.DeviceInfo{
+				Id:           nil,
+				Name:         sharedP.Name,
+				Manufacturer: sharedP.Manufacturer,
+				SerialNumber: sharedP.SerialNumber,
+			},
+			converted: &deviceinfo.DeviceInfo{
+				ID:           uuid.Nil,
+				Name:         shared.Name,
+				Manufacturer: shared.Manufacturer,
+				Model:        "",
+				SerialNumber: shared.SerialNumber,
+				Description:  "",
+			},
+			convertedP: &pb.DeviceInfo{
+				Id:           nil,
+				Name:         sharedP.Name,
+				Manufacturer: sharedP.Manufacturer,
+				SerialNumber: sharedP.SerialNumber,
+			},
+		},
+	}
+
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, *testCase.converted, DeviceInfoFrom(testCase.sourceP))
+			assert.Equal(t, testCase.convertedP, DeviceInfoTo(testCase.source))
+		})
+	}
+}
+
+func TestLocationConverter(t *testing.T) {
+	shared := location.Location{
+		Region:     "US",
+		DataCenter: "DC1",
+		Room:       "Room1",
+		Position:   "Pos1",
+	}
+
+	sharedP := pb.Location{
+		Region:     shared.Region,
+		Datacenter: shared.DataCenter,
+		Room:       shared.Room,
+		Position:   shared.Position,
+	}
+
+	testCases := map[string]struct {
+		source     *location.Location
+		sourceP    *pb.Location
+		converted  *location.Location
+		convertedP *pb.Location
+	}{
+		"valid": {
+			source:     &shared,
+			sourceP:    &sharedP,
+			converted:  &shared,
+			convertedP: &sharedP,
+		},
+		"nil": {
+			source:     nil,
+			sourceP:    nil,
+			converted:  &location.Location{},
+			convertedP: nil,
+		},
+	}
+
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, *testCase.converted, LocationFrom(testCase.sourceP))
+			assert.Equal(t, testCase.convertedP, LocationTo(testCase.source))
+		})
+	}
+}
+
+func TestRackPositionConverter(t *testing.T) {
+	shared := component.InRackPosition{
+		SlotID:    1,
+		TrayIndex: 2,
+		HostID:    3,
+	}
+
+	sharedP := pb.RackPosition{
+		SlotId:  int32(shared.SlotID),
+		TrayIdx: int32(shared.TrayIndex),
+		HostId:  int32(shared.HostID),
+	}
+
+	testCases := map[string]struct {
+		source     *component.InRackPosition
+		sourceP    *pb.RackPosition
+		converted  *component.InRackPosition
+		convertedP *pb.RackPosition
+	}{
+		"valid": {
+			source:     &shared,
+			sourceP:    &sharedP,
+			converted:  &shared,
+			convertedP: &sharedP,
+		},
+		"nil": {
+			source:  nil,
+			sourceP: nil,
+			converted: &component.InRackPosition{
+				SlotID:    -1,
+				TrayIndex: -1,
+				HostID:    -1,
+			},
+			convertedP: nil,
+		},
+	}
+
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, *testCase.converted, RackPositionFrom(testCase.sourceP))
+			assert.Equal(t, testCase.convertedP, RackPositionTo(testCase.source))
+		})
+	}
+}
+
+func TestBMCFrom(t *testing.T) {
+	stringPtr := func(s string) *string {
+		return &s
+	}
+
+	mustParseMAC := func(s string) net.HardwareAddr {
+		mac, err := net.ParseMAC(s)
+		if err != nil {
+			panic(err)
+		}
+		return mac
+	}
+
+	sharedMac := "00:1a:2b:3c:4d:5e"
+	sharedIp := "192.168.1.1"
+
+	testCases := map[string]struct {
+		name          string
+		sourceP       *pb.BMCInfo
+		source        *bmc.BMC
+		expectedType  devicetypes.BMCType
+		expectedBMC   *bmc.BMC
+		expectedProto *pb.BMCInfo
+		testBMCTo     bool
+		testBMCToType devicetypes.BMCType
+	}{
+		"valid host BMC with all fields": {
+			sourceP: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_HOST,
+				MacAddress: sharedMac,
+				IpAddress:  stringPtr(sharedIp),
+			},
+			expectedType: devicetypes.BMCTypeHost,
+			expectedBMC: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC(sharedMac)},
+				IP:  net.ParseIP(sharedIp),
+			},
+			source: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC(sharedMac)},
+				IP:  net.ParseIP(sharedIp),
+			},
+			expectedProto: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_HOST,
+				MacAddress: sharedMac,
+				IpAddress:  stringPtr(sharedIp),
+			},
+			testBMCTo:     true,
+			testBMCToType: devicetypes.BMCTypeHost,
+		},
+		"valid DPU BMC": {
+			sourceP: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_DPU,
+				MacAddress: sharedMac,
+				IpAddress:  stringPtr(sharedIp),
+			},
+			expectedType: devicetypes.BMCTypeDPU,
+			expectedBMC: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC(sharedMac)},
+				IP:  net.ParseIP(sharedIp),
+			},
+			source: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC(sharedMac)},
+				IP:  net.ParseIP(sharedIp),
+			},
+			expectedProto: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_DPU,
+				MacAddress: sharedMac,
+				IpAddress:  stringPtr(sharedIp),
+			},
+			testBMCTo:     true,
+			testBMCToType: devicetypes.BMCTypeDPU,
+		},
+		"unknown BMC type": {
+			sourceP: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_UNKNOWN,
+				MacAddress: sharedMac,
+			},
+			expectedType: devicetypes.BMCTypeUnknown,
+			expectedBMC: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC(sharedMac)},
+			},
+			source: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC(sharedMac)},
+			},
+			expectedProto: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_UNKNOWN,
+				MacAddress: sharedMac,
+			},
+			testBMCTo:     true,
+			testBMCToType: devicetypes.BMCTypeUnknown,
+		},
+		"nil BMCInfo": {
+			sourceP:       nil,
+			expectedType:  devicetypes.BMCTypeUnknown,
+			expectedBMC:   nil,
+			source:        nil,
+			expectedProto: nil,
+			testBMCTo:     true,
+			testBMCToType: devicetypes.BMCTypeHost,
+		},
+		"invalid MAC address": {
+			sourceP: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_HOST,
+				MacAddress: "invalid-mac-address",
+			},
+			expectedType: devicetypes.BMCTypeHost,
+			expectedBMC: &bmc.BMC{
+				MAC: bmc.MACAddress{},
+			},
+			source: &bmc.BMC{
+				MAC: bmc.MACAddress{},
+			},
+			expectedProto: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_HOST,
+				MacAddress: "",
+			},
+			testBMCTo:     true,
+			testBMCToType: devicetypes.BMCTypeHost,
+		},
+		"empty MAC address": {
+			sourceP: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_HOST,
+				MacAddress: "",
+			},
+			expectedType: devicetypes.BMCTypeHost,
+			expectedBMC: &bmc.BMC{
+				MAC: bmc.MACAddress{},
+			},
+			source: &bmc.BMC{
+				MAC: bmc.MACAddress{},
+			},
+			expectedProto: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_HOST,
+				MacAddress: "",
+			},
+			testBMCTo:     true,
+			testBMCToType: devicetypes.BMCTypeHost,
+		},
+		"nil IP address": {
+			sourceP: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_HOST,
+				MacAddress: sharedMac,
+				IpAddress:  nil,
+			},
+			expectedType: devicetypes.BMCTypeHost,
+			expectedBMC: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC(sharedMac)},
+				IP:  nil,
+			},
+			source: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC(sharedMac)},
+				IP:  nil,
+			},
+			expectedProto: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_HOST,
+				MacAddress: sharedMac,
+				IpAddress:  nil,
+			},
+			testBMCTo:     true,
+			testBMCToType: devicetypes.BMCTypeHost,
+		},
+		"empty IP address": {
+			sourceP: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_HOST,
+				MacAddress: sharedMac,
+				IpAddress:  stringPtr(""),
+			},
+			expectedType: devicetypes.BMCTypeHost,
+			expectedBMC: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC(sharedMac)},
+				IP:  nil,
+			},
+			testBMCTo: false,
+		},
+		"invalid IP address": {
+			sourceP: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_HOST,
+				MacAddress: sharedMac,
+				IpAddress:  stringPtr("invalid-ip"),
+			},
+			expectedType: devicetypes.BMCTypeHost,
+			expectedBMC: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC(sharedMac)},
+				IP:  nil,
+			},
+			testBMCTo: false,
+		},
+		"IPv6 address": {
+			sourceP: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_HOST,
+				MacAddress: sharedMac,
+				IpAddress:  stringPtr("2001:db8::1"),
+			},
+			expectedType: devicetypes.BMCTypeHost,
+			expectedBMC: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC(sharedMac)},
+				IP:  net.ParseIP("2001:db8::1"),
+			},
+			source: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC(sharedMac)},
+				IP:  net.ParseIP("2001:db8::1"),
+			},
+			expectedProto: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_HOST,
+				MacAddress: sharedMac,
+				IpAddress:  stringPtr("2001:db8::1"),
+			},
+			testBMCTo:     true,
+			testBMCToType: devicetypes.BMCTypeHost,
+		},
+		"BMC without credentials": {
+			sourceP: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_HOST,
+				MacAddress: sharedMac,
+			},
+			expectedType: devicetypes.BMCTypeHost,
+			expectedBMC: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC(sharedMac)},
+			},
+			source: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC(sharedMac)},
+			},
+			expectedProto: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_HOST,
+				MacAddress: sharedMac,
+			},
+			testBMCTo:     true,
+			testBMCToType: devicetypes.BMCTypeHost,
+		},
+		"different MAC formats": {
+			sourceP: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_DPU,
+				MacAddress: "AA-BB-CC-DD-EE-FF",
+			},
+			expectedType: devicetypes.BMCTypeDPU,
+			expectedBMC: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC("AA-BB-CC-DD-EE-FF")},
+			},
+			source: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC("AA-BB-CC-DD-EE-FF")},
+			},
+			expectedProto: &pb.BMCInfo{
+				Type:       pb.BMCType_BMC_TYPE_DPU,
+				MacAddress: "aa:bb:cc:dd:ee:ff",
+			},
+			testBMCTo:     true,
+			testBMCToType: devicetypes.BMCTypeDPU,
+		},
+		"invalid BMC type": {
+			sourceP: &pb.BMCInfo{
+				Type:       pb.BMCType(-1),
+				MacAddress: sharedMac,
+			},
+			expectedType: devicetypes.BMCTypeUnknown,
+			expectedBMC: &bmc.BMC{
+				MAC: bmc.MACAddress{HardwareAddr: mustParseMAC(sharedMac)},
+			},
+			testBMCTo: false,
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			convertedType, converted := BMCFrom(tc.sourceP)
+			assert.Equal(t, tc.expectedType, convertedType, "BMCFrom should return expected type") //nolint
+			assert.Equal(t, tc.expectedBMC, converted, "BMCFrom should return expected BMC")       //nolint
+
+			if tc.testBMCTo && tc.source != nil {
+				convertedProto := BMCTo(tc.testBMCToType, tc.source)
+				assert.Equal(t, tc.expectedProto, convertedProto, "BMCTo should return expected protobuf BMC") //nolint
+			} else if tc.testBMCTo && tc.source == nil {
+				convertedProto := BMCTo(tc.testBMCToType, tc.source)
+				assert.Nil(t, convertedProto, "BMCTo should return nil for nil BMC") //nolint
+			}
+		})
+	}
+}
+
+func TestComponentConverter(t *testing.T) {
+	domainID := uuid.New()
+	observedAt := time.Date(2026, time.September, 28, 12, 0, 0, 0, time.UTC)
+	health := &types.HealthReport{
+		Source:     "aggregate-host-health",
+		ObservedAt: &observedAt,
+		Successes:  []types.HealthProbeSuccess{{ID: "FanSpeed"}},
+		Alerts:     []types.HealthProbeAlert{},
+	}
+	shared := component.Component{
+		Type:            devicetypes.ComponentTypeCompute,
+		Info:            deviceinfo.NewRandom("TestComponent", 6),
+		FirmwareVersion: "1.0.0",
+		ComponentID:     "machine-123",
+		RackExternalID:  "rack-external-1",
+		Position: component.InRackPosition{
+			SlotID:    26,
+			TrayIndex: 12,
+			HostID:    0,
+		},
+		BmcsByType:  make(map[devicetypes.BMCType][]bmc.BMC),
+		NVLDomainID: domainID,
+		Health:      health,
+	}
+
+	sharedP := pb.Component{
+		Type: pb.ComponentType_COMPONENT_TYPE_COMPUTE,
+		Info: &pb.DeviceInfo{
+			Id:           &pb.UUID{Id: shared.Info.ID.String()},
+			Name:         shared.Info.Name,
+			Manufacturer: shared.Info.Manufacturer,
+			Model:        &shared.Info.Model,
+			SerialNumber: shared.Info.SerialNumber,
+			Description:  &shared.Info.Description,
+		},
+		FirmwareVersion: shared.FirmwareVersion,
+		Position: &pb.RackPosition{
+			SlotId:  int32(shared.Position.SlotID),
+			TrayIdx: int32(shared.Position.TrayIndex),
+			HostId:  int32(shared.Position.HostID),
+		},
+		Bmcs:           make([]*pb.BMCInfo, 0),
+		ComponentId:    shared.ComponentID,
+		NvlDomainId:    &pb.UUID{Id: domainID.String()},
+		RackExternalId: shared.RackExternalID,
+		Health: &pb.HealthReport{
+			Source:     health.Source,
+			ObservedAt: timestamppb.New(observedAt),
+			Successes:  []*pb.HealthProbeSuccess{{Id: "FanSpeed"}},
+			Alerts:     []*pb.HealthProbeAlert{},
+		},
+	}
+
+	testCases := map[string]struct {
+		source     *component.Component
+		sourceP    *pb.Component
+		converted  *component.Component
+		convertedP *pb.Component
+		wantErr    string
+	}{
+		"valid": {
+			source:     &shared,
+			sourceP:    &sharedP,
+			converted:  &shared,
+			convertedP: &sharedP,
+		},
+		"nil": {
+			source:     nil,
+			sourceP:    nil,
+			converted:  nil,
+			convertedP: nil,
+		},
+		"malformed component ID": {
+			sourceP: &pb.Component{
+				Info: &pb.DeviceInfo{Id: &pb.UUID{Id: "not-a-uuid"}},
+			},
+			wantErr: "component info.id",
+		},
+		"malformed domain ID": {
+			sourceP: &pb.Component{
+				NvlDomainId: &pb.UUID{Id: "not-a-uuid"},
+			},
+			wantErr: "component nvl_domain_id",
+		},
+	}
+
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			converted, err := ComponentFrom(testCase.sourceP)
+			if testCase.wantErr != "" {
+				require.ErrorContains(t, err, testCase.wantErr)
+				assert.Nil(t, converted)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, testCase.converted, converted)
+			assert.Equal(t, testCase.convertedP, ComponentTo(testCase.source))
+		})
+	}
+}
+
+func TestNVLinkDomainFromInventory(t *testing.T) {
+	for _, tc := range []struct {
+		name, otherProfile, domainName string
+		topology                       *string
+	}{
+		{name: "common topology", otherProfile: "GB200_NVL72R1_C2G4_SMC", topology: new("GB200_NVL72R1_C2G4")},
+		{name: "inconsistent topology", otherProfile: "GB300_NVL72R1_C2G4_SMC", domainName: "group-name"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cluster := uuid.New()
+			domain := &nvldomain.NVLDomain{Identifier: identifier.Identifier{ID: uuid.New(), ExternalID: "group-01", Name: tc.domainName}, NMXCClusterID: &cluster}
+			racks := []*rack.Rack{
+				{ExternalID: "rack-a", RackProfileID: new("GB200_NVL72R1_C2G4_NVIDIA"), OperationStatus: types.PhaseReady, Components: []component.Component{{ComponentID: "a"}}},
+				{ExternalID: "rack-b", RackProfileID: &tc.otherProfile, OperationStatus: types.PhaseInUse, Components: []component.Component{{ComponentID: "b"}}},
+			}
+			got := NVLinkDomainFromInventory(domain, racks)
+			assert.Equal(t, "group-01", got.GetId())
+			assert.Equal(t, got.GetId(), got.GetRackGroupId())
+			assert.Equal(t, cluster.String(), got.GetNmxcClusterId())
+			assert.Equal(t, tc.domainName, got.GetName())
+			assert.Equal(t, tc.topology, got.Topology)
+			assert.Equal(t, pb.Phase_PHASE_IN_USE, got.OperationStatus)
+			require.Len(t, got.Components, 2)
+			assert.Equal(t, "a", got.Components[0].GetComponentId())
+			assert.Equal(t, "b", got.Components[1].GetComponentId())
+		})
+	}
+}
+
+func TestRackTopology(t *testing.T) {
+	for _, tc := range []struct{ name, profile, topology string }{
+		{name: "qualified", profile: "GB200_NVL72R1_C2G4_WIWYNN", topology: "GB200_NVL72R1_C2G4"},
+		{name: "without power", profile: "GB300_NVL72R1_C2G4_SMC_NO_POWERSHELF", topology: "GB300_NVL72R1_C2G4"},
+		{name: "legacy", profile: "NVL72"},
+		{name: "unavailable"},
+		{name: "unknown vendor", profile: "GB200_NVL72R1_C2G4_OTHER"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			topology := rackTopology(tc.profile)
+			if tc.topology == "" {
+				assert.Nil(t, topology)
+			} else {
+				assert.Equal(t, &tc.topology, topology)
+			}
+		})
+	}
+}
+
+func TestRackConverter(t *testing.T) {
+	domainID := uuid.New()
+	observedAt := time.Date(2026, time.September, 28, 12, 0, 0, 0, time.UTC)
+	health := &types.HealthReport{
+		Source:     "rack-aggregate-health",
+		ObservedAt: &observedAt,
+		Successes:  []types.HealthProbeSuccess{},
+		Alerts:     []types.HealthProbeAlert{{ID: "RackAlert", Message: "fault"}},
+	}
+	shared := rack.Rack{
+		Info:       deviceinfo.NewRandom("TestRack", 12),
+		ExternalID: "rack-external-1",
+		Loc: location.Location{
+			Region:     "US",
+			DataCenter: "Santa Clara",
+			Room:       "Mars",
+			Position:   "Row 12",
+		},
+		Components:      make([]component.Component, 0),
+		NVLDomainID:     domainID,
+		OperationStatus: types.PhaseError,
+		Health:          health,
+	}
+
+	sharedP := pb.Rack{
+		Info: &pb.DeviceInfo{
+			Id:           &pb.UUID{Id: shared.Info.ID.String()},
+			Name:         shared.Info.Name,
+			Manufacturer: shared.Info.Manufacturer,
+			Model:        &shared.Info.Model,
+			SerialNumber: shared.Info.SerialNumber,
+			Description:  &shared.Info.Description,
+		},
+		Location: &pb.Location{
+			Region:     shared.Loc.Region,
+			Datacenter: shared.Loc.DataCenter,
+			Room:       shared.Loc.Room,
+			Position:   shared.Loc.Position,
+		},
+		Components:      make([]*pb.Component, 0),
+		NvlDomainIds:    []*pb.UUID{{Id: domainID.String()}},
+		ExternalId:      shared.ExternalID,
+		OperationStatus: pb.Phase_PHASE_ERROR,
+		Health: &pb.HealthReport{
+			Source:     health.Source,
+			ObservedAt: timestamppb.New(observedAt),
+			Successes:  []*pb.HealthProbeSuccess{},
+			Alerts:     []*pb.HealthProbeAlert{{Id: "RackAlert", Message: "fault"}},
+		},
+	}
+	fromProto := shared
+	fromProto.OperationStatus = types.PhaseUnknown
+	testCases := map[string]struct {
+		source     *rack.Rack
+		sourceP    *pb.Rack
+		converted  *rack.Rack
+		convertedP *pb.Rack
+		wantErr    string
+	}{
+		"valid": {
+			source:     &shared,
+			sourceP:    &sharedP,
+			converted:  &fromProto,
+			convertedP: &sharedP,
+		},
+		"nil": {
+			source:     nil,
+			sourceP:    nil,
+			converted:  nil,
+			convertedP: nil,
+		},
+		"malformed rack ID": {
+			sourceP: &pb.Rack{
+				Info: &pb.DeviceInfo{Id: &pb.UUID{Id: "not-a-uuid"}},
+			},
+			wantErr: "rack info.id",
+		},
+		"mixed valid and malformed domain IDs": {
+			sourceP: &pb.Rack{
+				NvlDomainIds: []*pb.UUID{
+					{Id: domainID.String()},
+					{Id: "not-a-uuid"},
+				},
+			},
+			wantErr: "rack nvl_domain_ids entry 1",
+		},
+		"malformed nested component ID": {
+			sourceP: &pb.Rack{
+				Components: []*pb.Component{
+					{Info: &pb.DeviceInfo{Id: &pb.UUID{Id: "not-a-uuid"}}},
+				},
+			},
+			wantErr: "rack component 0: component info.id",
+		},
+	}
+
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			converted, err := RackFrom(testCase.sourceP)
+			if testCase.wantErr != "" {
+				require.ErrorContains(t, err, testCase.wantErr)
+				assert.Nil(t, converted)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, testCase.converted, converted)
+			assert.Equal(t, testCase.convertedP, RackTo(testCase.source))
+		})
+	}
+}
+
+func TestRackConverterPropagatesDomainToNestedComponents(t *testing.T) {
+	domainID := uuid.New()
+	explicitComponentDomainID := uuid.New()
+	componentID := uuid.New()
+
+	fromProto, err := RackFrom(&pb.Rack{
+		Info:         &pb.DeviceInfo{Id: UUIDTo(uuid.New())},
+		NvlDomainIds: UUIDsTo([]uuid.UUID{domainID, uuid.New()}),
+		Components: []*pb.Component{
+			{Info: &pb.DeviceInfo{Id: UUIDTo(componentID)}},
+			{
+				Info:        &pb.DeviceInfo{Id: UUIDTo(uuid.New())},
+				NvlDomainId: UUIDTo(explicitComponentDomainID),
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, fromProto.Components, 2)
+	assert.Equal(t, domainID, fromProto.NVLDomainID)
+	assert.Equal(t, domainID, fromProto.Components[0].NVLDomainID)
+	assert.Equal(t, explicitComponentDomainID, fromProto.Components[1].NVLDomainID)
+
+	toProto := RackTo(&rack.Rack{
+		NVLDomainID: domainID,
+		Components: []component.Component{
+			{Info: deviceinfo.DeviceInfo{ID: componentID}},
+			{NVLDomainID: explicitComponentDomainID},
+		},
+	})
+	require.Len(t, toProto.GetComponents(), 2)
+	assert.Equal(t, domainID.String(), toProto.GetComponents()[0].GetNvlDomainId().GetId())
+	assert.Equal(t, explicitComponentDomainID.String(), toProto.GetComponents()[1].GetNvlDomainId().GetId())
+}
+
+func TestOrderByTo(t *testing.T) {
+	testCases := map[string]struct {
+		sourceDB   *dbquery.OrderBy
+		queryType  QueryType // QueryTypeRack or QueryTypeComponent
+		convertedP *pb.OrderBy
+	}{
+		"rack name ASC": {
+			sourceDB: &dbquery.OrderBy{
+				Column:    "name",
+				Direction: dbquery.OrderAscending,
+			},
+			queryType: QueryTypeRack,
+			convertedP: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_NAME},
+				Direction: "ASC",
+			},
+		},
+		"rack manufacturer DESC": {
+			sourceDB: &dbquery.OrderBy{
+				Column:    "manufacturer",
+				Direction: dbquery.OrderDescending,
+			},
+			queryType: QueryTypeRack,
+			convertedP: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MANUFACTURER},
+				Direction: "DESC",
+			},
+		},
+		"component name ASC": {
+			sourceDB: &dbquery.OrderBy{
+				Column:    "name",
+				Direction: dbquery.OrderAscending,
+			},
+			queryType: QueryTypeComponent,
+			convertedP: &pb.OrderBy{
+				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_NAME},
+				Direction: "ASC",
+			},
+		},
+		"component type DESC": {
+			sourceDB: &dbquery.OrderBy{
+				Column:    "type",
+				Direction: dbquery.OrderDescending,
+			},
+			queryType: QueryTypeComponent,
+			convertedP: &pb.OrderBy{
+				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_TYPE},
+				Direction: "DESC",
+			},
+		},
+		"nil dbquery": {
+			sourceDB:   nil,
+			queryType:  QueryTypeRack,
+			convertedP: nil,
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			convertedP := OrderByTo(tc.sourceDB, tc.queryType)
+			assert.Equal(t, tc.convertedP, convertedP, "OrderByTo should return expected protobuf OrderBy")
+		})
+	}
+}
+
+func TestRackOrderByFrom(t *testing.T) {
+	tests := []struct {
+		name    string
+		orderBy *pb.OrderBy
+		want    *dbquery.OrderBy
+		wantErr bool
+	}{
+		{
+			name: "omitted order by",
+		},
+		{
+			name: "model expression",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MODEL},
+				Direction: "ASC",
+			},
+			want: &dbquery.OrderBy{
+				Column: "description->>'model'", Direction: dbquery.OrderAscending, IsExpression: true,
+			},
+		},
+		{
+			name: "name descending",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_NAME},
+				Direction: "DESC",
+			},
+			want: &dbquery.OrderBy{
+				Column: "name", Direction: dbquery.OrderDescending,
+			},
+		},
+		{
+			name: "component field rejected for rack query",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_TYPE},
+				Direction: "ASC",
+			},
+			wantErr: true,
+		},
+		{
+			name: "unknown rack field",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField(99)},
+				Direction: "ASC",
+			},
+			wantErr: true,
+		},
+		{
+			name:    "missing field",
+			orderBy: &pb.OrderBy{Direction: "ASC"},
+			wantErr: true,
+		},
+		{
+			name: "invalid direction",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_NAME},
+				Direction: "SIDEWAYS",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := RackOrderByFrom(test.orderBy)
+			if test.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
+func TestComponentOrderByFrom(t *testing.T) {
+	tests := []struct {
+		name    string
+		orderBy *pb.OrderBy
+		want    *dbquery.OrderBy
+		wantErr bool
+	}{
+		{name: "omitted order by"},
+		{
+			name: "type descending",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField_COMPONENT_ORDER_BY_FIELD_TYPE},
+				Direction: "DESC",
+			},
+			want: &dbquery.OrderBy{Column: "type", Direction: dbquery.OrderDescending},
+		},
+		{
+			name: "rack field rejected for component query",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MODEL},
+				Direction: "ASC",
+			},
+			wantErr: true,
+		},
+		{
+			name: "unknown component field",
+			orderBy: &pb.OrderBy{
+				Field:     &pb.OrderBy_ComponentField{ComponentField: pb.ComponentOrderByField(99)},
+				Direction: "ASC",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := ComponentOrderByFrom(test.orderBy)
+			if test.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.want, got)
+		})
+	}
+}
+
+func TestOptionalUUIDFrom(t *testing.T) {
+	testID := uuid.New()
+	tests := map[string]struct {
+		input   *pb.UUID
+		want    *uuid.UUID
+		wantErr bool
+	}{
+		"omitted": {},
+		"valid": {
+			input: &pb.UUID{Id: testID.String()},
+			want:  &testID,
+		},
+		"empty": {
+			input:   &pb.UUID{},
+			wantErr: true,
+		},
+		"malformed": {
+			input:   &pb.UUID{Id: "not-a-uuid"},
+			wantErr: true,
+		},
+		"zero": {
+			input:   &pb.UUID{Id: uuid.Nil.String()},
+			wantErr: true,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			result, err := OptionalUUIDFrom(test.input)
+			if test.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, result)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.want, result)
+		})
+	}
+}
+
+func TestRequiredUUIDsFrom(t *testing.T) {
+	first := uuid.New()
+	second := uuid.New()
+	tests := map[string]struct {
+		input   []*pb.UUID
+		want    []uuid.UUID
+		wantErr string
+	}{
+		"empty": {
+			input: []*pb.UUID{},
+			want:  []uuid.UUID{},
+		},
+		"all valid": {
+			input: []*pb.UUID{{Id: first.String()}, {Id: second.String()}},
+			want:  []uuid.UUID{first, second},
+		},
+		"nil entry": {
+			input:   []*pb.UUID{{Id: first.String()}, nil},
+			wantErr: "entry 1",
+		},
+		"mixed valid and malformed": {
+			input:   []*pb.UUID{{Id: first.String()}, {Id: "not-a-uuid"}},
+			wantErr: "entry 1",
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			result, err := RequiredUUIDsFrom(test.input)
+			if test.wantErr != "" {
+				require.ErrorContains(t, err, test.wantErr)
+				assert.Nil(t, result)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.want, result)
+		})
+	}
+}
+
+func TestRackTargetFrom(t *testing.T) {
+	rackID := uuid.New()
+
+	testCases := map[string]struct {
+		input   *pb.RackTarget
+		want    operation.RackTarget
+		wantErr string
+	}{
+		"nil input": {
+			input:   nil,
+			wantErr: "rack target is nil",
+		},
+		"no identifier set": {
+			input:   &pb.RackTarget{},
+			wantErr: "rack target must have either id, external_id, or name set",
+		},
+		"valid UUID": {
+			input: &pb.RackTarget{
+				Identifier: &pb.RackTarget_Id{Id: &pb.UUID{Id: rackID.String()}},
+			},
+			want: operation.RackTarget{Identifier: identifier.Identifier{ID: rackID}},
+		},
+		"external rack ID": {
+			input: &pb.RackTarget{
+				Identifier: &pb.RackTarget_ExternalId{ExternalId: "rack-1"},
+			},
+			want: operation.RackTarget{Identifier: identifier.Identifier{ExternalID: "rack-1"}},
+		},
+		"invalid UUID": {
+			input: &pb.RackTarget{
+				Identifier: &pb.RackTarget_Id{Id: &pb.UUID{Id: "rack-1"}},
+			},
+			wantErr: "invalid rack uuid",
+		},
+		"empty ID": {
+			input: &pb.RackTarget{
+				Identifier: &pb.RackTarget_Id{Id: &pb.UUID{}},
+			},
+			wantErr: "rack target id must not be empty",
+		},
+		"empty external rack ID": {
+			input: &pb.RackTarget{
+				Identifier: &pb.RackTarget_ExternalId{},
+			},
+			wantErr: "rack target external_id must not be empty",
+		},
+		"valid name": {
+			input: &pb.RackTarget{
+				Identifier: &pb.RackTarget_Name{Name: "rack-1"},
+			},
+			want: operation.RackTarget{Identifier: identifier.Identifier{Name: "rack-1"}},
+		},
+		"empty name": {
+			input: &pb.RackTarget{
+				Identifier: &pb.RackTarget_Name{Name: ""},
+			},
+			wantErr: "rack target name must not be empty",
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			got, err := RackTargetFrom(tc.input)
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
+				assert.Equal(t, operation.RackTarget{}, got)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestComponentTargetFrom(t *testing.T) {
+	compID := uuid.New()
+
+	testCases := map[string]struct {
+		input   *pb.ComponentTarget
+		want    operation.ComponentTarget
+		wantErr string
+	}{
+		"nil input": {
+			input:   nil,
+			wantErr: "component target is nil",
+		},
+		"no identifier set": {
+			input:   &pb.ComponentTarget{},
+			wantErr: "component target must have either uuid or external set",
+		},
+		"valid UUID": {
+			input: &pb.ComponentTarget{
+				Identifier: &pb.ComponentTarget_Id{Id: &pb.UUID{Id: compID.String()}},
+			},
+			want: operation.ComponentTarget{UUID: compID},
+		},
+		"invalid UUID string": {
+			input: &pb.ComponentTarget{
+				Identifier: &pb.ComponentTarget_Id{Id: &pb.UUID{Id: "bad-uuid"}},
+			},
+			wantErr: "invalid component uuid",
+		},
+		"valid external": {
+			input: &pb.ComponentTarget{
+				Identifier: &pb.ComponentTarget_External{
+					External: &pb.ExternalRef{
+						Type: pb.ComponentType_COMPONENT_TYPE_COMPUTE,
+						Id:   "ext-123",
+					},
+				},
+			},
+			want: operation.ComponentTarget{
+				External: &operation.ExternalRef{
+					Type: devicetypes.ComponentTypeCompute,
+					ID:   "ext-123",
+				},
+			},
+		},
+		"external with unknown component type": {
+			input: &pb.ComponentTarget{
+				Identifier: &pb.ComponentTarget_External{
+					External: &pb.ExternalRef{
+						Type: pb.ComponentType_COMPONENT_TYPE_UNKNOWN,
+						Id:   "ext-123",
+					},
+				},
+			},
+			want: operation.ComponentTarget{
+				External: &operation.ExternalRef{
+					Type: devicetypes.ComponentTypeUnknown,
+					ID:   "ext-123",
+				},
+			},
+		},
+		"external with empty ID": {
+			input: &pb.ComponentTarget{
+				Identifier: &pb.ComponentTarget_External{
+					External: &pb.ExternalRef{
+						Type: pb.ComponentType_COMPONENT_TYPE_COMPUTE,
+						Id:   "",
+					},
+				},
+			},
+			wantErr: "external component id must not be empty",
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			got, err := ComponentTargetFrom(tc.input)
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
+				assert.Equal(t, operation.ComponentTarget{}, got)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestNVLDomainTargetFrom(t *testing.T) {
+	domainID := uuid.New()
+	testCases := map[string]struct {
+		input   *pb.NVLDomainTarget
+		want    operation.NVLDomainTarget
+		wantErr string
+	}{
+		"external ID": {
+			input: &pb.NVLDomainTarget{Identifier: &pb.NVLDomainTarget_ExternalId{ExternalId: "Rack-01"}},
+			want:  operation.NVLDomainTarget{Identifier: identifier.Identifier{ExternalID: "Rack-01"}},
+		},
+		"blank external ID": {
+			input:   &pb.NVLDomainTarget{Identifier: &pb.NVLDomainTarget_ExternalId{ExternalId: " "}},
+			wantErr: "must not be blank",
+		},
+		"nil input": {
+			wantErr: "NVLink domain target is nil",
+		},
+		"no identifier": {
+			input:   &pb.NVLDomainTarget{},
+			wantErr: "must have id, external_id, or name set",
+		},
+		"ID with filter": {
+			input: &pb.NVLDomainTarget{
+				Identifier: &pb.NVLDomainTarget_Id{Id: &pb.UUID{Id: domainID.String()}},
+				ComponentTypes: []pb.ComponentType{
+					pb.ComponentType_COMPONENT_TYPE_COMPUTE,
+				},
+			},
+			want: operation.NVLDomainTarget{
+				Identifier: identifier.Identifier{ID: domainID},
+				ComponentTypes: []devicetypes.ComponentType{
+					devicetypes.ComponentTypeCompute,
+				},
+			},
+		},
+		"name": {
+			input: &pb.NVLDomainTarget{
+				Identifier: &pb.NVLDomainTarget_Name{Name: "domain-1"},
+			},
+			want: operation.NVLDomainTarget{
+				Identifier: identifier.Identifier{Name: "domain-1"},
+			},
+		},
+		"invalid ID": {
+			input: &pb.NVLDomainTarget{
+				Identifier: &pb.NVLDomainTarget_Id{Id: &pb.UUID{Id: "invalid"}},
+			},
+			wantErr: "invalid NVLink domain id",
+		},
+		"unknown component type": {
+			input: &pb.NVLDomainTarget{
+				Identifier: &pb.NVLDomainTarget_Name{Name: "domain-1"},
+				ComponentTypes: []pb.ComponentType{
+					pb.ComponentType_COMPONENT_TYPE_UNKNOWN,
+				},
+			},
+			wantErr: "unknown component type",
+		},
+	}
+
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			got, err := NVLDomainTargetFrom(testCase.input)
+			if testCase.wantErr != "" {
+				assert.ErrorContains(t, err, testCase.wantErr)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, testCase.want, got)
+		})
+	}
+}
+
+func TestTargetSpecTo(t *testing.T) {
+	rackID := uuid.New()
+	compID := uuid.New()
+
+	testCases := map[string]struct {
+		input   operation.TargetSpec
+		wantErr string
+		check   func(*testing.T, *pb.OperationTargetSpec)
+	}{
+		"multiple target kinds set": {
+			input: operation.TargetSpec{
+				Racks:      []operation.RackTarget{{Identifier: identifier.Identifier{Name: "rack-1"}}},
+				Components: []operation.ComponentTarget{{UUID: compID}},
+			},
+			wantErr: "must have exactly one of racks, nvl_domains, or components",
+		},
+		"no target kind set": {
+			input:   operation.TargetSpec{},
+			wantErr: "must have exactly one of racks, nvl_domains, or components",
+		},
+		"rack target by name": {
+			input: operation.TargetSpec{
+				Racks: []operation.RackTarget{
+					{Identifier: identifier.Identifier{Name: "rack-1"}},
+				},
+			},
+		},
+		"rack target by UUID": {
+			input: operation.TargetSpec{
+				Racks: []operation.RackTarget{
+					{Identifier: identifier.Identifier{ID: rackID}},
+				},
+			},
+		},
+		"rack target by external ID": {
+			input: operation.TargetSpec{
+				Racks: []operation.RackTarget{
+					{Identifier: identifier.Identifier{ExternalID: "rack-1"}},
+				},
+			},
+			check: func(t *testing.T, got *pb.OperationTargetSpec) {
+				t.Helper()
+				targets := got.GetRacks().GetTargets()
+				require.Len(t, targets, 1)
+				assert.Equal(t, "rack-1", targets[0].GetExternalId())
+				assert.Nil(t, targets[0].GetId())
+			},
+		},
+		"component target by UUID": {
+			input: operation.TargetSpec{
+				Components: []operation.ComponentTarget{{UUID: compID}},
+			},
+		},
+		"NVLink domain target by UUID": {
+			input: operation.TargetSpec{
+				NVLDomains: []operation.NVLDomainTarget{
+					{
+						Identifier: identifier.Identifier{ID: rackID},
+						ComponentTypes: []devicetypes.ComponentType{
+							devicetypes.ComponentTypeCompute,
+						},
+					},
+				},
+			},
+		},
+		"NVLink domain target by external ID": {
+			input: operation.TargetSpec{NVLDomains: []operation.NVLDomainTarget{
+				{Identifier: identifier.Identifier{ExternalID: "Rack-01"}},
+			}},
+			check: func(t *testing.T, got *pb.OperationTargetSpec) {
+				t.Helper()
+				require.Len(t, got.GetNvlDomains().GetTargets(), 1)
+				assert.Equal(t, "Rack-01", got.GetNvlDomains().GetTargets()[0].GetExternalId())
+				roundtrip, err := NVLDomainTargetFrom(got.GetNvlDomains().GetTargets()[0])
+				require.NoError(t, err)
+				assert.Equal(t, "Rack-01", roundtrip.Identifier.ExternalID)
+			},
+		},
+		"NVLink domain target with unmapped component type": {
+			input: operation.TargetSpec{
+				NVLDomains: []operation.NVLDomainTarget{
+					{
+						Identifier: identifier.Identifier{ID: rackID},
+						ComponentTypes: []devicetypes.ComponentType{
+							devicetypes.ComponentType(999),
+						},
+					},
+				},
+			},
+			wantErr: "unknown component type filter",
+		},
+		"component target with no UUID and no external": {
+			input: operation.TargetSpec{
+				Components: []operation.ComponentTarget{{}},
+			},
+			wantErr: "invalid component target",
+		},
+		"rack target with neither id nor name": {
+			input: operation.TargetSpec{
+				Racks: []operation.RackTarget{
+					{Identifier: identifier.Identifier{}}, // zero value: ID == uuid.Nil, Name == ""
+				},
+			},
+			wantErr: "invalid rack target",
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			got, err := TargetSpecTo(tc.input)
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
+				assert.Nil(t, got)
+				return
+			}
+			assert.NoError(t, err)
+			assert.NotNil(t, got)
+			if tc.check != nil {
+				tc.check(t, got)
+			}
+		})
+	}
+}
+
+func TestTargetSpecFrom(t *testing.T) {
+	domainID := uuid.New()
+	type targetSpecCase struct {
+		input   *pb.OperationTargetSpec
+		want    operation.TargetSpec
+		wantErr string
+	}
+	testCases := map[string]targetSpecCase{
+		"empty targets": {
+			input: &pb.OperationTargetSpec{
+				Targets: &pb.OperationTargetSpec_NvlDomains{
+					NvlDomains: &pb.NVLDomainTargets{},
+				},
+			},
+			wantErr: "nvl_domains.targets must have at least one entry",
+		},
+		"ID and name targets": {
+			input: &pb.OperationTargetSpec{
+				Targets: &pb.OperationTargetSpec_NvlDomains{
+					NvlDomains: &pb.NVLDomainTargets{
+						Targets: []*pb.NVLDomainTarget{
+							{
+								Identifier: &pb.NVLDomainTarget_Id{
+									Id: &pb.UUID{Id: domainID.String()},
+								},
+							},
+							{
+								Identifier: &pb.NVLDomainTarget_Name{Name: "domain-2"},
+							},
+						},
+					},
+				},
+			},
+			want: operation.TargetSpec{
+				NVLDomains: []operation.NVLDomainTarget{
+					{Identifier: identifier.Identifier{ID: domainID}},
+					{Identifier: identifier.Identifier{Name: "domain-2"}},
+				},
+			},
+		},
+	}
+
+	// REST verifies its serialized output against the same fixture. Keeping the
+	// two generated descriptor packages in separate processes avoids collisions.
+	data, err := os.ReadFile("../../../../proto/flow/testdata/tray_batch_targets.json")
+	require.NoError(t, err)
+	var fixtures map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &fixtures))
+	for name, wire := range fixtures {
+		var target pb.OperationTargetSpec
+		require.NoError(t, protojson.Unmarshal(wire, &target))
+		var components []operation.ComponentTarget
+		for _, component := range target.GetComponents().GetTargets() {
+			id, err := uuid.Parse(component.GetId().GetId())
+			require.NoError(t, err)
+			components = append(components, operation.ComponentTarget{UUID: id})
+		}
+		testCases["REST tray batch "+name] = targetSpecCase{
+			input: &target, want: operation.TargetSpec{Components: components},
+		}
+	}
+
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			got, err := TargetSpecFrom(testCase.input)
+			if testCase.wantErr != "" {
+				assert.ErrorContains(t, err, testCase.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.NoError(t, got.Validate())
+			assert.Equal(t, testCase.want, got)
+		})
+	}
+}
+
+func TestScheduledOperationFrom(t *testing.T) {
+	rackTargetProto := &pb.OperationTargetSpec{
+		Targets: &pb.OperationTargetSpec_Racks{
+			Racks: &pb.RackTargets{
+				Targets: []*pb.RackTarget{
+					{Identifier: &pb.RackTarget_Name{Name: "rack-1"}},
+				},
+			},
+		},
+	}
+	rackSpec := operation.TargetSpec{
+		Racks: []operation.RackTarget{
+			{Identifier: identifier.Identifier{Name: "rack-1"}},
+		},
+	}
+
+	strPtr := func(s string) *string { return &s }
+
+	startTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	endTime := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+
+	testCases := map[string]struct {
+		input        *pb.ScheduledOperation
+		wantOp       operations.Operation
+		wantTS       operation.TargetSpec
+		wantQueueOpt *pb.QueueOptions
+		wantRuleID   *pb.UUID
+		wantErr      string
+	}{
+		"nil input": {
+			input:   nil,
+			wantErr: "operation is required",
+		},
+		"no operation set": {
+			input:   &pb.ScheduledOperation{},
+			wantErr: "operation is required",
+		},
+		"missing target_spec": {
+			input: &pb.ScheduledOperation{
+				Operation: &pb.ScheduledOperation_PowerOn{
+					PowerOn: &pb.PowerOnRackRequest{TargetSpec: nil},
+				},
+			},
+			wantErr: "invalid target_spec: target_spec is required",
+		},
+		"empty racks targets": {
+			input: &pb.ScheduledOperation{
+				Operation: &pb.ScheduledOperation_PowerOn{
+					PowerOn: &pb.PowerOnRackRequest{
+						TargetSpec: &pb.OperationTargetSpec{
+							Targets: &pb.OperationTargetSpec_Racks{
+								Racks: &pb.RackTargets{Targets: []*pb.RackTarget{}},
+							},
+						},
+					},
+				},
+			},
+			wantErr: "invalid target_spec: racks.targets must have at least one entry",
+		},
+		"empty components targets": {
+			input: &pb.ScheduledOperation{
+				Operation: &pb.ScheduledOperation_PowerOn{
+					PowerOn: &pb.PowerOnRackRequest{
+						TargetSpec: &pb.OperationTargetSpec{
+							Targets: &pb.OperationTargetSpec_Components{
+								Components: &pb.ComponentTargets{Targets: []*pb.ComponentTarget{}},
+							},
+						},
+					},
+				},
+			},
+			wantErr: "invalid target_spec: components.targets must have at least one entry",
+		},
+		"power_on": {
+			input: &pb.ScheduledOperation{
+				Operation: &pb.ScheduledOperation_PowerOn{
+					PowerOn: &pb.PowerOnRackRequest{TargetSpec: rackTargetProto},
+				},
+			},
+			wantOp: &operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn},
+			wantTS: rackSpec,
+		},
+		"power_off unforced": {
+			input: &pb.ScheduledOperation{
+				Operation: &pb.ScheduledOperation_PowerOff{
+					PowerOff: &pb.PowerOffRackRequest{TargetSpec: rackTargetProto, Forced: false},
+				},
+			},
+			wantOp: &operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOff},
+			wantTS: rackSpec,
+		},
+		"power_off forced": {
+			input: &pb.ScheduledOperation{
+				Operation: &pb.ScheduledOperation_PowerOff{
+					PowerOff: &pb.PowerOffRackRequest{TargetSpec: rackTargetProto, Forced: true},
+				},
+			},
+			wantOp: &operations.PowerControlTaskInfo{
+				Operation: operations.PowerOperationForcePowerOff,
+				Forced:    true,
+			},
+			wantTS: rackSpec,
+		},
+		"power_reset unforced": {
+			input: &pb.ScheduledOperation{
+				Operation: &pb.ScheduledOperation_PowerReset{
+					PowerReset: &pb.PowerResetRackRequest{TargetSpec: rackTargetProto, Forced: false},
+				},
+			},
+			wantOp: &operations.PowerControlTaskInfo{Operation: operations.PowerOperationRestart},
+			wantTS: rackSpec,
+		},
+		"power_reset forced": {
+			input: &pb.ScheduledOperation{
+				Operation: &pb.ScheduledOperation_PowerReset{
+					PowerReset: &pb.PowerResetRackRequest{TargetSpec: rackTargetProto, Forced: true},
+				},
+			},
+			wantOp: &operations.PowerControlTaskInfo{
+				Operation: operations.PowerOperationForceRestart,
+				Forced:    true,
+			},
+			wantTS: rackSpec,
+		},
+		"bring_up": {
+			input: &pb.ScheduledOperation{
+				Operation: &pb.ScheduledOperation_BringUp{
+					BringUp: &pb.BringUpRackRequest{TargetSpec: rackTargetProto},
+				},
+			},
+			wantOp: &operations.BringUpTaskInfo{},
+			wantTS: rackSpec,
+		},
+		"upgrade_firmware": {
+			input: &pb.ScheduledOperation{
+				Operation: &pb.ScheduledOperation_UpgradeFirmware{
+					UpgradeFirmware: &pb.UpgradeFirmwareRequest{
+						TargetSpec:    rackTargetProto,
+						TargetVersion: strPtr("v1.0.0"),
+					},
+				},
+			},
+			wantOp: &operations.FirmwareControlTaskInfo{
+				Operation:     operations.FirmwareOperationUpgrade,
+				TargetVersion: "v1.0.0",
+			},
+			wantTS: rackSpec,
+		},
+		"upgrade_firmware with start and end time": {
+			input: &pb.ScheduledOperation{
+				Operation: &pb.ScheduledOperation_UpgradeFirmware{
+					UpgradeFirmware: &pb.UpgradeFirmwareRequest{
+						TargetSpec:    rackTargetProto,
+						TargetVersion: strPtr("v1.0.0"),
+						StartTime:     timestamppb.New(startTime),
+						EndTime:       timestamppb.New(endTime),
+					},
+				},
+			},
+			wantOp: &operations.FirmwareControlTaskInfo{
+				Operation:     operations.FirmwareOperationUpgrade,
+				TargetVersion: "v1.0.0",
+				StartTime:     startTime.Unix(),
+				EndTime:       endTime.Unix(),
+			},
+			wantTS: rackSpec,
+		},
+		"power_on with queue_options and rule_id": {
+			input: &pb.ScheduledOperation{
+				Operation: &pb.ScheduledOperation_PowerOn{
+					PowerOn: &pb.PowerOnRackRequest{
+						TargetSpec: rackTargetProto,
+						QueueOptions: &pb.QueueOptions{
+							ConflictStrategy:    pb.ConflictStrategy_CONFLICT_STRATEGY_QUEUE,
+							QueueTimeoutSeconds: 60,
+						},
+						RuleId: &pb.UUID{Id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+					},
+				},
+			},
+			wantOp: &operations.PowerControlTaskInfo{Operation: operations.PowerOperationPowerOn},
+			wantTS: rackSpec,
+			wantQueueOpt: &pb.QueueOptions{
+				ConflictStrategy:    pb.ConflictStrategy_CONFLICT_STRATEGY_QUEUE,
+				QueueTimeoutSeconds: 60,
+			},
+			wantRuleID: &pb.UUID{Id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+		},
+		"bring_up with rule_id (no queue_options)": {
+			input: &pb.ScheduledOperation{
+				Operation: &pb.ScheduledOperation_BringUp{
+					BringUp: &pb.BringUpRackRequest{
+						TargetSpec: rackTargetProto,
+						RuleId:     &pb.UUID{Id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+					},
+				},
+			},
+			wantOp:       &operations.BringUpTaskInfo{},
+			wantTS:       rackSpec,
+			wantQueueOpt: nil,
+			wantRuleID:   &pb.UUID{Id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+		},
+		"ingest": {
+			// Ingest is scheduled as BringUpTaskInfo{OpCode: "ingest"} internally;
+			// it has no queue_options field, so wantQueueOpt is nil.
+			input: &pb.ScheduledOperation{
+				Operation: &pb.ScheduledOperation_Ingest{
+					Ingest: &pb.IngestRackRequest{
+						TargetSpec: rackTargetProto,
+					},
+				},
+			},
+			wantOp: &operations.BringUpTaskInfo{OpCode: taskcommon.OpCodeIngest},
+			wantTS: rackSpec,
+		},
+		"ingest with rule_id": {
+			input: &pb.ScheduledOperation{
+				Operation: &pb.ScheduledOperation_Ingest{
+					Ingest: &pb.IngestRackRequest{
+						TargetSpec: rackTargetProto,
+						RuleId:     &pb.UUID{Id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+					},
+				},
+			},
+			wantOp:     &operations.BringUpTaskInfo{OpCode: taskcommon.OpCodeIngest},
+			wantTS:     rackSpec,
+			wantRuleID: &pb.UUID{Id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			op, ts, queueOpt, ruleID, err := ScheduledOperationFrom(tc.input)
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
+				assert.Nil(t, op)
+				assert.Equal(t, operation.TargetSpec{}, ts)
+				assert.Nil(t, queueOpt)
+				assert.Nil(t, ruleID)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wantOp, op)
+			assert.Equal(t, tc.wantTS, ts)
+			assert.Equal(t, tc.wantQueueOpt, queueOpt)
+			assert.Equal(t, tc.wantRuleID, ruleID)
+		})
+	}
+}
+
+// TestTaskKindTo keeps every supported task kind identifiable in brief context,
+// including lifecycle work that OperationType cannot represent.
+func TestTaskKindTo(t *testing.T) {
+	cases := []struct {
+		kind taskcommon.TaskType
+		want pb.TaskKind
+	}{
+		// These are distinct wire values, not one shared "other task" category.
+		{taskcommon.TaskTypePowerControl, pb.TaskKind_TASK_KIND_POWER_CONTROL},
+		{taskcommon.TaskTypeFirmwareControl, pb.TaskKind_TASK_KIND_FIRMWARE_CONTROL},
+		{taskcommon.TaskTypeBringUp, pb.TaskKind_TASK_KIND_BRING_UP},
+		{taskcommon.TaskTypeDecommission, pb.TaskKind_TASK_KIND_DECOMMISSION},
+		{taskcommon.TaskTypeInjectExpectation, pb.TaskKind_TASK_KIND_INJECT_EXPECTATION},
+		// A kind unknown to this binary must not be mislabeled as power work.
+		{taskcommon.TaskTypeUnknown, pb.TaskKind_TASK_KIND_UNSPECIFIED},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.kind), func(t *testing.T) {
+			require.Equal(t, tc.want, TaskKindTo(tc.kind))
+		})
+	}
+}

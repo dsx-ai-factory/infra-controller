@@ -1,0 +1,114 @@
+suite: cert directory overrides
+templates:
+  - daemonset.yaml
+tests:
+  - it: should mount certs at /opt/forge by default
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - contains:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          content:
+            name: nico-certs
+            mountPath: /opt/forge
+            readOnly: true
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nico-certs
+            mountPath: /opt/forge
+            readOnly: true
+
+  - it: should hostPath-mount /opt/forge by default
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-certs
+            hostPath:
+              path: /opt/forge
+              type: DirectoryOrCreate
+
+  - it: should pass /opt/forge/forge_root.pem to fmds args by default
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --root-ca=/opt/forge/forge_root.pem
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --client-cert=/opt/forge/machine_cert.pem
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --client-key=/opt/forge/machine_cert.key
+
+  - it: wait-for-certs script should poll /opt/forge/forge_root.pem by default
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'Waiting for certificates in /opt/forge'
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: '/opt/forge/forge_root\.pem'
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: '/opt/forge/machine_cert\.pem'
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: '/opt/forge/machine_cert\.key'
+
+  - it: should fall back to /opt/forge and forge_root.pem when overrides cleared
+    set:
+      image:
+        repository: test
+        tag: test
+      certsDir: null
+      rootCaFile: null
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-certs
+            hostPath:
+              path: /opt/forge
+              type: DirectoryOrCreate
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --root-ca=/opt/forge/forge_root.pem
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --client-cert=/opt/forge/machine_cert.pem
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: '/opt/forge/forge_root\.pem'
+
+  - it: should accept a custom certsDir + rootCaFile pair
+    set:
+      image:
+        repository: test
+        tag: test
+      certsDir: /custom/dir
+      rootCaFile: custom_root.pem
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --root-ca=/custom/dir/custom_root.pem
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --client-cert=/custom/dir/machine_cert.pem
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: '/custom/dir/custom_root\.pem'

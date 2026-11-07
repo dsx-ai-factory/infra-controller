@@ -1,0 +1,30 @@
+{
+    "id": "5e1f6c51-a532-437b-b7a5-7dfac214de08",
+    "name": "demo-ipv4-subnet",
+    "description": "Demo IPv4 Tenant Subnet",
+    "siteId": "bd4692bd-da95-410e-911a-d492fe2d35f8",
+    "vpcId": "f466a2d5-5820-4824-a845-3218fdff801b",
+    "tenantId": "aaf3cb83-8785-4265-a3bd-61e828f87db8",
+    "controllerNetworkSegmentId": null,
+    "ipv4Prefix": "192.166.128.0",
+    "ipv4BlockId": "20d7dd4f-ae43-4245-a9d9-d093296009c4",
+    "ipv4Gateway": "192.166.128.1",
+    "ipv6Prefix": null,
+    "ipv6BlockId": null,
+    "ipv6Gateway": null,
+    "mtu": 9000,
+    "prefixLength": 28,
+    "routingType": "Public",
+    "status": "Pending",
+    "statusHistory": [
+        {
+        "status": "Pending",
+        "message": "received subnet creation request, pending",
+        "created": "2023-07-06T16:21:34.916407Z",
+        "updated": "2023-07-06T16:21:34.916407Z"
+        }
+    ],
+    "deprecations": [],
+    "created": "2023-07-06T16:21:34.916407Z",
+    "updated": "2023-07-06T16:21:34.916407Z"
+}

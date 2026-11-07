@@ -1,0 +1,19 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package carbide.proto.compiler.fixture.conflicting_extern_path;
+
+import "codegen/v1/derive.proto";
+import "codegen/v1/extern_path.proto";
+
+option (carbide.codegen.v1.imported_extern_path) = {
+  protobuf_type: ".carbide.proto.compiler.fixture.conflicting_extern_path.ExternalMessage"
+  rust_type: "::fixture_types::SecondExternalMessage"
+};
+
+message ExternalMessage {
+  option (carbide.codegen.v1.message_extern_path) = "::fixture_types::ExternalMessage";
+  string value = 1;
+}

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}Instance Types{% endblock %}
+
+{% block content %}
+
+<h1>Instance Types</h1>
+
+<table class="sortable overview">
+	<thead>
+	<tr>
+		<th>ID</th>
+		<th>Name</th>
+		<th>Description</th>
+		<th>Version</th>
+		<th>Created</th>
+	</tr>
+	</thead>
+	<tbody>
+	{% for itype in instance_types %}
+		<tr>
+			<td><a href="/admin/instance-type/{{ itype.id }}">{{ itype.id }}</a></td>
+			<td>{{ itype.name }}</td>
+			<td>{{ itype.description }}</td>
+			<td>{{ itype.version }}</td>
+			<td>{{ itype.created }}</td>
+		</tr>
+	{% endfor %}
+	</tbody>
+	<tfoot>
+		<tr><th colspan="5">
+			{% include "pages_footer.html" %}
+		</th></tr>
+	</tfoot>
+</table>
+<br/>
+
+{% endblock %}

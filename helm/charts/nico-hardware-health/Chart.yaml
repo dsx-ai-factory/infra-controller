@@ -1,0 +1,10 @@
+apiVersion: v2
+name: nico-hardware-health
+description: Helm chart for the NICo Hardware Health component
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - nico
+  - hardware-health
+  - nico

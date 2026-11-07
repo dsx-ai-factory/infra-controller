@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+
+{% block title %}Operating System {{ name }}{% endblock %}
+
+{% block content %}
+<h1>Operating System: {{ name }}</h1>
+
+<table class="detailsview">
+	<tr><th>ID</th><td>{{ id }}</td></tr>
+	<tr><th>Name</th><td>{{ name }}</td></tr>
+	<tr><th>Description</th><td>{{ description }}</td></tr>
+	<tr><th>Type</th><td>{{ os_type }}</td></tr>
+	<tr><th>Status</th><td>{{ status }}</td></tr>
+	<tr><th>Tenant Organization</th><td>{{ tenant_organization_id }}</td></tr>
+	<tr><th>Active</th><td>{{ is_active }}</td></tr>
+	<tr><th>Allow Override</th><td>{{ allow_override }}</td></tr>
+	<tr><th>Phone Home Enabled</th><td>{{ phone_home_enabled }}</td></tr>
+	<tr><th>Created</th><td>{{ created }}</td></tr>
+	<tr><th>Updated</th><td>{{ updated }}</td></tr>
+</table>
+
+{% if !ipxe_script.is_empty() %}
+<h2>iPXE Script</h2>
+<textarea disabled rows="20" cols="100" style="width:100%;font-family:monospace;">{{ ipxe_script }}</textarea>
+{% endif %}
+
+{% if !template_id.is_empty() %}
+<h2>iPXE Template</h2>
+<table class="detailsview">
+	<tr><th>Template ID</th><td><a href="/admin/ipxe-template/{{ template_id }}">{{ template_id }}</a></td></tr>
+	<tr><th>Definition Hash</th><td>{{ definition_hash }}</td></tr>
+</table>
+
+{% if !parameters.is_empty() %}
+<h3>Parameters</h3>
+<table class="sortable overview">
+	<thead>
+		<th>Name</th>
+		<th>Value</th>
+	</thead>
+	<tbody>
+		{% for param in parameters %}
+		<tr>
+			<td>{{ param.name }}</td>
+			<td>{{ param.value }}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+{% endif %}
+
+{% if !artifacts.is_empty() %}
+<h3>Artifacts</h3>
+<table class="sortable overview">
+	<thead>
+		<th>Name</th>
+		<th>URL</th>
+		<th>Local URL</th>
+		<th>SHA256</th>
+		<th>Cache Strategy</th>
+	</thead>
+	<tbody>
+		{% for artifact in artifacts %}
+		<tr>
+			<td>{{ artifact.name }}</td>
+			<td>{{ artifact.url }}</td>
+			<td>{{ artifact.cached_url }}</td>
+			<td>{{ artifact.sha }}</td>
+			<td>{{ artifact.cache_strategy }}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+{% endif %}
+
+{% endif %}
+
+{% endblock %}

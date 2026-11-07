@@ -1,0 +1,220 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+    helm.sh/resource-policy: keep
+  labels:
+    app.kubernetes.io/part-of: dpf-operator-controller-manager
+    dpu.nvidia.com/component: dpf-operator-controller-manager
+  name: dpunodemaintenances.provisioning.dpu.nvidia.com
+spec:
+  group: provisioning.dpu.nvidia.com
+  names:
+    kind: DPUNodeMaintenance
+    listKind: DPUNodeMaintenanceList
+    plural: dpunodemaintenances
+    singular: dpunodemaintenance
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: DPUNodeMaintenance is the Schema for the dpunodemaintenances
+          API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: DPUNodeMaintenanceSpec is the specification of the DPUNodeMaintenance
+              object
+            properties:
+              dpuNodeName:
+                description: DPUNodeName is the name of the DPUNode that is being
+                  maintained.
+                type: string
+              nodeEffect:
+                description: NodeEffect is the effect to be applied to the node.
+                properties:
+                  applyOnLabelChange:
+                    default: false
+                    description: |-
+                      Apply node effect when labels change on the DPU object
+                      When set to true, label changes in Ready state will trigger node effect logic
+                    type: boolean
+                  customAction:
+                    description: |-
+                      Name of a config map which contains a pod yaml definition to run which will apply the nodeEffect.
+                      The pod is expected to exit when node effect is done, if pod terminates with error then DPU would move to an error phase.
+                      The DPUNode's name will be exported as an environment variable, named as DPUNODE_NAME, to each container and init container in the pod.
+                      The labels and annotations of DPUNode will be exported in `/etc/dpu/dpf-pod-info/labels` and `/etc/dpu/dpf-pod-info/annotations` accordingly; the volume name `dpf-pod-info` is used to mount the labels and annotations.
+                      If any name confliction for env or volume, the controller will not export the name or labels/annotations of DPUNode accordingly.
+                    type: string
+                  customLabel:
+                    additionalProperties:
+                      type: string
+                    description: Add specify labels on the DPU node
+                    type: object
+                  drain:
+                    description: Drain the K8s host node by NodeMaintenance operator
+                    type: boolean
+                  force:
+                    default: false
+                    description: |-
+                      Force is the flag to indicate if the node effect should be applied immediately.
+                      If true, dpfOperatorConfig.multiDPUOperationsSyncWaitTime and dpfOperatorConfig.maxUnavailableDPUNodes will be ignored when applying node effect for DPUNodeMaintenance CR
+                    type: boolean
+                  hold:
+                    description: |-
+                      Places annotation `wait-for-external-nodeeffect` and waits for it to be removed
+                      this is the default behavior in a non K8S environment
+                    type: boolean
+                  noEffect:
+                    description: Do not do any action on the DPU node
+                    type: boolean
+                  nodeMaintenanceAdditionalRequestors:
+                    description: Additional requestors to be added to the NvidiaNodeMaintenance
+                      CR when Drain is selected
+                    items:
+                      type: string
+                    type: array
+                  taint:
+                    description: Add specify taint on the DPU node
+                    properties:
+                      effect:
+                        description: |-
+                          Required. The effect of the taint on pods
+                          that do not tolerate the taint.
+                          Valid effects are NoSchedule, PreferNoSchedule and NoExecute.
+                        type: string
+                      key:
+                        description: Required. The taint key to be applied to a node.
+                        type: string
+                      timeAdded:
+                        description: TimeAdded represents the time at which the taint
+                          was added.
+                        format: date-time
+                        type: string
+                      value:
+                        description: The taint value corresponding to the taint key.
+                        type: string
+                    required:
+                    - effect
+                    - key
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: exactly one of taint, noEffect=true, drain=true, non-empty
+                    customLabel, non-empty customAction, hold=true must be set
+                  rule: '(has(self.taint) ? 1 : 0) + ((has(self.noEffect) && self.noEffect)
+                    ? 1 : 0) + ((has(self.customLabel) && size(self.customLabel) >
+                    0) ? 1 : 0) + ((has(self.drain) && self.drain) ? 1 : 0) + ((has(self.customAction)
+                    && size(self.customAction) > 0) ? 1 : 0) + ((has(self.hold) &&
+                    self.hold) ? 1 : 0) == 1'
+              requestor:
+                description: Requestor is the list of consumers for the maintenance.
+                items:
+                  type: string
+                type: array
+            required:
+            - dpuNodeName
+            type: object
+          status:
+            description: DPUNodeMaintenanceStatus defines the observed state of DPUNodeMaintenance
+            properties:
+              conditions:
+                description: Conditions reflect the status of the object
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              maxUnavailableDPUNodes:
+                description: MaxUnavailableDPUNodes is the maximum number of DPUNodes
+                  that are unavailable during the node effect period.
+                format: int32
+                minimum: 1
+                type: integer
+              multiDPUOperationsSyncWaitTime:
+                description: MultiDPUOperationsSyncWaitTime  is the wait time between
+                  DPUs on the same node.
+                type: string
+              nodeEffectSyncStartTime:
+                description: NodeEffectSyncStartTime is the time when the node effect
+                  sync started.
+                format: date-time
+                type: string
+            type: object
+        type: object
+        x-kubernetes-validations:
+        - message: name length can't be bigger than 63 chars
+          rule: self.metadata.name.size() <= 63
+    served: true
+    storage: true
+    subresources:
+      status: {}

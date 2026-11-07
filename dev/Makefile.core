@@ -1,0 +1,138 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Standalone Core development workflows. Run from the repository root:
+#
+#   make -f dev/Makefile.core tests TEST_ARGS="..."
+#   make -f dev/Makefile.core check-isolated-package-builds
+
+SHELL := /bin/bash
+
+.DEFAULT_GOAL := tests
+
+TEST_ARGS ?=
+POSTGRES_IMAGE ?= postgres:15.13-alpine
+POSTGRES_CONTAINER_NAME ?= carbide-core-test-postgres-$(shell id -u)
+POSTGRES_USER ?= postgres
+POSTGRES_PASSWORD ?= postgres
+POSTGRES_DB ?= postgres
+TEST_BINARIES := as ar pkg-config protoc cmake date c++ ld git make tr perl \
+	touch mv rm ranlib basename cp chmod tpm2 locale parallel bash hostname \
+	sleep echo curl python3 grep sed sh ping ipmi_sim ipmitool vault
+
+CORE_MAKEFILE := $(lastword $(MAKEFILE_LIST))
+CORE_MAKE := $(MAKE) --no-print-directory -f $(CORE_MAKEFILE)
+CARGO_MAKE_TEST_FLAGS_OVERRIDE = $(if $(strip $(TEST_ARGS)),--env "CARGO_MAKE_CARGO_BUILD_TEST_FLAGS=$(TEST_ARGS)")
+
+.PHONY: help tests tests-dependencies postgres-up postgres-wait postgres-down \
+	check-isolated-package-builds
+
+help:
+	@echo 'Core development workflows:'
+	@echo '  make -f dev/Makefile.core tests TEST_ARGS="-p carbide-api-db"'
+	@echo '  make -f dev/Makefile.core check-isolated-package-builds'
+
+check-isolated-package-builds:
+	cargo make --no-workspace check-isolated-package-builds
+
+tests-dependencies:
+	@missing=""; \
+	for binary in docker cargo $(TEST_BINARIES); do \
+		command -v "$$binary" >/dev/null 2>&1 || missing="$$missing $$binary"; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		echo "Missing dependencies:$$missing" >&2; \
+		exit 1; \
+	fi
+	@cargo make --version >/dev/null 2>&1 || { \
+		echo "Cargo Make is unavailable; install it with: cargo install cargo-make" >&2; \
+		exit 1; \
+	}
+	@cargo cache --version >/dev/null 2>&1 || { \
+		echo "Cargo Cache is unavailable; install it with: cargo install cargo-cache" >&2; \
+		exit 1; \
+	}
+	@docker info >/dev/null 2>&1 || { \
+		echo "Docker is installed, but the Docker daemon is unavailable." >&2; \
+		exit 1; \
+	}
+
+# Tuning flags trade durability for speed. This database is removed after each
+# test run and is never used for persistent data.
+postgres-up: postgres-down
+	docker run -d --rm \
+		--name $(POSTGRES_CONTAINER_NAME) \
+		-p 127.0.0.1::5432 \
+		-e POSTGRES_USER=$(POSTGRES_USER) \
+		-e POSTGRES_PASSWORD=$(POSTGRES_PASSWORD) \
+		-e POSTGRES_DB=$(POSTGRES_DB) \
+		$(POSTGRES_IMAGE) \
+		-c fsync=off \
+		-c synchronous_commit=off \
+		-c full_page_writes=off \
+		-c wal_level=minimal \
+		-c max_wal_senders=0
+
+# Probe TCP so PostgreSQL's socket-only initialization server cannot report
+# readiness before the final server starts.
+postgres-wait:
+	@ready=false; \
+	for attempt in {1..60}; do \
+		if docker exec $(POSTGRES_CONTAINER_NAME) \
+			pg_isready -h 127.0.0.1 -U $(POSTGRES_USER) -d $(POSTGRES_DB) >/dev/null 2>&1; then \
+			ready=true; \
+			break; \
+		fi; \
+		sleep 1; \
+	done; \
+	if [ "$$ready" != true ]; then \
+		echo "PostgreSQL did not become ready within 60 seconds." >&2; \
+		docker logs $(POSTGRES_CONTAINER_NAME) >&2; \
+		exit 1; \
+	fi; \
+	extension_count=$$(docker exec $(POSTGRES_CONTAINER_NAME) \
+		psql -At -U $(POSTGRES_USER) -d $(POSTGRES_DB) \
+		-c "SELECT count(*) FROM pg_available_extensions WHERE name IN ('pgcrypto', 'uuid-ossp')"); \
+	if [ "$$extension_count" != 2 ]; then \
+		echo "PostgreSQL must provide the pgcrypto and uuid-ossp extensions." >&2; \
+		exit 1; \
+	fi
+
+postgres-down:
+	-docker rm -f $(POSTGRES_CONTAINER_NAME)
+
+tests: tests-dependencies
+	@postgres_container_name="$(POSTGRES_CONTAINER_NAME)-$$$$"; \
+	cleanup() { \
+		$(CORE_MAKE) postgres-down \
+			POSTGRES_CONTAINER_NAME="$$postgres_container_name" >/dev/null 2>&1 || true; \
+	}; \
+	trap cleanup EXIT; \
+	trap 'exit 130' INT; \
+	trap 'exit 143' TERM; \
+	status=0; \
+	{ \
+		$(CORE_MAKE) postgres-up POSTGRES_CONTAINER_NAME="$$postgres_container_name" && \
+		$(CORE_MAKE) postgres-wait POSTGRES_CONTAINER_NAME="$$postgres_container_name" && \
+		postgres_port=$$(docker port "$$postgres_container_name" 5432/tcp | sed 's/.*://') && \
+		test -n "$$postgres_port" && \
+		DATABASE_URL="postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@127.0.0.1:$$postgres_port" \
+		REPO_ROOT="$(CURDIR)" \
+		cargo make --no-workspace $(CARGO_MAKE_TEST_FLAGS_OVERRIDE) correctly-execute-tests; \
+	} || status=$$?; \
+	trap - EXIT INT TERM; \
+	cleanup; \
+	exit $$status

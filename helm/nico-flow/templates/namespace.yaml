@@ -1,0 +1,13 @@
+{{- if .Values.createNamespace | default true }}
+## Namespace for flow.  Labeled nico.nvidia.com/managed=true so the
+## nico-roots ClusterExternalSecret (in helm-prereqs) syncs the site CA in.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "nico-flow.namespace" . }}
+  annotations:
+    helm.sh/resource-policy: keep
+  labels:
+    {{- include "nico-flow.labels" . | nindent 4 }}
+    nico.nvidia.com/managed: "true"
+{{- end }}

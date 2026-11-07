@@ -1,0 +1,51 @@
+suite: database migration hook ordering
+templates:
+  - configmap.yaml
+  - migration-job.yaml
+tests:
+  - it: should create database ConfigMap as a pre-install hook with lower weight than migration job
+    template: configmap.yaml
+    set:
+      databaseConfig:
+        DB_HOST: "postgres.example.com"
+        DB_PORT: "5432"
+        DB_NAME: "nico"
+    documentIndex: 2
+    asserts:
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: metadata.name
+          value: nico-system-nico-database-config
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-install,pre-upgrade
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-10"
+      - equal:
+          path: metadata.annotations["helm.sh/hook-delete-policy"]
+          value: before-hook-creation
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+
+  - it: migration job hook weight should be higher than database ConfigMap
+    template: migration-job.yaml
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-install,pre-upgrade
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-5"
+
+  - it: should not create database ConfigMap when databaseConfig is empty
+    template: configmap.yaml
+    documentIndex: 2
+    asserts:
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: metadata.name
+          value: nico-web-api-hostname

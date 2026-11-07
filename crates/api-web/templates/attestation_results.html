@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+
+{% block title %}{{ "Attestation Results" }}{% endblock %}
+
+{% block content %}
+
+<h1>Journal {{ journal_id }}</h1>
+<table class="detailsview">
+	<tr>
+        <th>Journal Created At</th>
+        <td>{{ journal_time }}</td>
+    </tr>
+</table>
+
+<h2>Profile</h2>
+<table class="detailsview">
+    <tbody>
+        <tr>
+            <th>Profile Name</th>
+            <td>{{ profile_name }}</td>
+        </tr>
+        <tr>
+            <th>Profile Id</th>
+            <td>{{ profile_id }}</td>
+        </tr>
+        <tr>
+            <th>Attributes</th>
+            <td></td>
+        </tr>
+        {% for profile_attr in profile_attributes %}
+        <tr>
+            <th style="padding-left: 2rem;">{{ profile_attr.0 }}</th>
+            <td>{{ profile_attr.1 }}</td>
+        </tr>
+        {% endfor %}
+
+    </tbody>
+</table>
+
+<h2>Attestation Results</h2>
+
+<form method="POST" action="/admin/machine/{{ machine_id }}/attestation-submit-report-promotion">
+<table class="detailsview">
+    <thead>
+		<tr>
+            <th></th>
+            <th>Description</th>
+
+            {% if attestation_status != "Attested" %}
+			<th class="text-error">Partially Matching Bundle</th>
+            {% else %}
+            <th>Bundle</th>
+            {% endif %}
+
+            <th>Report</th>
+            <th>Select PCRs to Promote</th>
+		</tr>
+	</thead>
+    <tbody>
+        <tr>
+            <th>Attestation Outcome</th>
+            {% if attestation_status != "Attested" %}
+            <td colspan="4" class="text-center text-error font-bold">{{ attestation_status }}</td>
+            {% else %}
+            <td colspan="4" class="text-center text-success font-bold">{{ attestation_status }}</td>
+            {% endif %}
+        </tr>
+        <tr>
+            <th>Timestamp</th>
+            <td>-</td>
+            <td>{{ bundle_ts }}</td>
+            <td>{{ report_ts }}</td>
+            <td>-</td>
+        </tr>
+        <tr>
+            <th>ID</th>
+            <td>-</td>
+            <td>{{ bundle_id }}</td>
+            <td>{{ report_id }}</td>
+            <td>-</td>
+        </tr>
+        <tr>
+            <th>Status</th>
+            <td>-</td>
+            <td>{{ bundle_status }}</td>
+            <td>-</td>
+            <td>-</td>
+        </tr>
+        {% for pcr_row in attestation_table %}
+        <tr>
+            <th>PCR{{ pcr_row.pcr_slot }}</th>
+            <td>{{ pcr_row.description }}</td>
+
+            {% if pcr_row.report_value == pcr_row.bundle_value || pcr_row.bundle_value == "-" %}
+            <td>{{ pcr_row.bundle_value }}</td>
+            <td>{{ pcr_row.report_value }}</td>
+            {% else %}
+            <td class="text-error">{{ pcr_row.bundle_value }}</td>
+            <td class="text-error">{{ pcr_row.report_value }}</td>
+            {% endif %}
+
+            <td><input type="checkbox" name="PCR{{ pcr_row.pcr_slot }}"/></td>
+           
+        </tr>
+        {% endfor %}
+        <tr>
+            <th></th>
+            <td colspan="2"></td>
+            <td colspan="2" class="text-center">
+                <input type="hidden" name="reportname" value="{{ report_id }}"/>
+                <input type="submit" value="Promote Report" />
+            </td>
+        </tr>
+    </tbody>
+</table>
+
+
+</form>
+
+{% endblock %}

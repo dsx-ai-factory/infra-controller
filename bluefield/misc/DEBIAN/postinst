@@ -1,0 +1,62 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -e
+
+. /usr/share/debconf/confmodule
+
+if [ "$1" = "configure" ]; then
+	# Ensure the core file directory exists
+	# Must match /proc/sys/kernel/core_pattern
+	mkdir -p /var/support/core
+
+	systemctl daemon-reload
+	systemctl enable local_bmc_dev.service
+	systemctl enable forge-dpu-agent.service
+	systemctl enable otelcol-contrib.service
+	systemctl enable forge-dpu-otel-agent.service
+	systemctl enable node-exporter.service
+	systemctl enable transceiver-exporter.service
+
+	if [ -f /etc/otelcol-contrib/fd_configs/fd_discovery.yaml ]; then
+		rm -f /etc/otelcol-contrib/fd_configs/fd_discovery.yaml
+	fi
+	if [ -d /etc/otelcol-contrib/fd_configs ]; then
+		rmdir --ignore-fail-on-non-empty /etc/otelcol-contrib/fd_configs
+	fi
+	if [ -f /etc/ssl/certs/forge-dpu-otel-agent.pem ]; then
+		rm -f /etc/ssl/certs/forge-dpu-otel-agent.pem
+	fi
+	if [ -f /etc/ssl/private/forge-dpu-otel-agent.key ]; then
+		rm -f /etc/ssl/private/forge-dpu-otel-agent.key
+	fi
+
+	# Do not depend on starting services now, as this package is installed early in setup
+	# and should not hang or cause out of order steps in discovery workflows. The discovery
+	# workflow will reboot shortly after this package is installed, so it is best to rely
+	# on the reboot process to start the services enabled above.
+
+	if [ -n "$2" ]; then
+ 		# The package is being upgraded and not installed for the first time, so
+ 		# this is not the discovery workflow and otelcol-contrib can restart without
+ 		# interfering. Restart is needed to pick up any configuration changes.
+
+		systemctl restart transceiver-exporter.service
+		systemctl restart node-exporter.service
+		systemctl restart forge-dpu-otel-agent.service
+		systemctl restart otelcol-contrib.service
+	fi
+fi

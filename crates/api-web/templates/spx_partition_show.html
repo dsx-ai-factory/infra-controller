@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}Spx Partitions{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Spx Partitions</h1>
+
+<table class="sortable overview">
+	<thead>
+		<th>Id</th>
+		<th>Name</th>
+		<th>VNI</th>
+		<th>Tenant</th>
+	</thead>
+	<tbody>
+		{% for partition in partitions %}
+		<tr>
+			<td>{{ partition.id }}</a></td>
+			<td>{{ partition.name }}</td>
+			<td>{{ partition.vni }}</td>
+			<td>{{ partition.tenant_organization_id }}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+
+{% endblock %}
+

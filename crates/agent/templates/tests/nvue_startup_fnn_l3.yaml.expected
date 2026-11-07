@@ -1,0 +1,366 @@
+- header:
+    model: VX
+    nvue-api-version: nvue_v1
+    rev-id: 1.0
+    version: Cumulus Linux 5.6.0
+- set:
+    bridge:
+      domain:
+        br_default:
+          vlan:
+            '196':
+              vni:
+                '1025196': {}
+            '185':
+              vni:
+                '1025185': {}
+    evpn:
+      enable: on
+    interface:
+      lo:
+        ip:
+          address:
+            10.217.5.39/32: {}
+        type: loopback
+      pf0dpu1_if:
+        ip:
+          address:
+            169.254.169.253/30: {}
+          vrf: vpc_0
+      p0_if:
+        type: swp
+      p1_if:
+        type: swp
+      pf0vf0_if:
+        type: swp
+        bridge:
+          domain:
+            br_default:
+              access: 196
+        acl:
+          ACL_tenancy:
+            inbound: {}
+          drop_dhcp_flood_over_overlay:
+            inbound: {}
+      vlan196:
+        type: svi
+        vlan: 196
+        ip:
+          address:
+            10.217.5.169/29: {}
+      pf0hpf_if:
+        type: swp
+        bridge:
+          domain:
+            br_default:
+              access: 185
+        acl:
+          ACL_tenancy:
+            inbound: {}
+          drop_dhcp_flood_over_overlay:
+            inbound: {}
+      vlan185:
+        type: svi
+        vlan: 185
+        ip:
+          address:
+            10.217.5.161/30: {}
+    nve:
+      vxlan:
+        arp-nd-suppress: on
+        enable: on
+        source:
+          address: 10.217.5.39
+    router:
+      bgp:
+        autonomous-system: 4259912557
+        enable: on
+        router-id: 10.217.5.39
+      policy:
+        community-list:
+          BYOIP_LEAK_COMMUNITY_LIST:
+            rule:
+              '10':
+                action: permit
+                community:
+                  65000:0: {}
+        prefix-list:
+          LEAK_TO_UNDERLAY_PREFIX_LIST:
+             rule:
+              '65000':
+                action: permit
+                match:
+                   127.0.0.1/32: {}
+          DPU_FROM_INSTANCE_PREFIX_LIST:
+            rule:
+              '1000':
+                action: permit
+                match:
+                  5.255.255.0/24:
+                    min-prefix-len: 32
+              '65535':
+                action: deny
+                match:
+                  any: {}
+          DPU_FROM_INSTANCE_PREFIX_LIST_IPV6:
+            rule:
+              '65535':
+                action: deny
+                match:
+                  any: {}
+        route-map:
+          dpu_to_evpn:
+            rule:
+              '65534':
+                action:
+                  deny: {}
+                match:
+                  type: ipv4
+                  evpn-route-type: ip-prefix
+                  ip-prefix-list: DPU_TO_EVPN_DROP_PREFIX_LIST
+              '65535':
+                action:
+                  permit: {}
+          leak_to_underlay:
+            rule:
+              '65533':
+                action:
+                  permit: {}
+                match:
+                  type: ipv4
+                  ip-prefix-list: LEAK_TO_UNDERLAY_PREFIX_LIST
+              '65534':
+                action:
+                  permit: {}
+                match:
+                  community-list: BYOIP_LEAK_COMMUNITY_LIST
+              '65535':
+                action:
+                  deny: {}
+          dpu_from_instance:
+            rule:
+              '10':
+                action:
+                  permit: {}
+                match:
+                  type: ipv4
+                  ip-prefix-list: DPU_FROM_INSTANCE_PREFIX_LIST
+                set:
+                  community:
+                      65000:0: {}
+              '65535':
+                action:
+                  deny: {}
+          dpu_to_instance:
+            rule:
+              '10':
+                action:
+                  deny: {}
+          dpu_from_instance_ipv6:
+            rule:
+              '10':
+                action:
+                  permit: {}
+                match:
+                  type: ipv6
+                  ip-prefix-list: DPU_FROM_INSTANCE_PREFIX_LIST_IPV6
+                  community-list: BYOIP_LEAK_COMMUNITY_LIST
+                set:
+                  tag: 65100
+                  community:
+                      none: {}
+                  large-community:
+                    none: {}
+              '11':
+                action:
+                  permit: {}
+                match:
+                  type: ipv6
+                  ip-prefix-list: DPU_FROM_INSTANCE_PREFIX_LIST_IPV6
+                set:
+                  tag: 65101
+                  community:
+                      none: {}
+                  large-community:
+                    none: {}
+              '65535':
+                action:
+                  deny: {}
+    system:
+      api:
+        listening-address:
+          0.0.0.0: {}
+    vrf:
+      default:
+        router:
+          nexthop-tracking:
+            ipv4:
+              resolved-via-default: on
+          static:
+            10.217.5.170/31:
+              address-family: ipv4-unicast
+              via:
+                vlan196:
+                  type: interface
+            10.217.5.162/31:
+              address-family: ipv4-unicast
+              via:
+                vlan185:
+                  type: interface
+          bgp:
+            address-family:
+              ipv4-unicast:
+                network:
+                  10.217.5.39/32: {}
+                  10.217.5.170/31: {}
+                  10.217.5.162/31: {}
+                enable: on
+                multipaths:
+                  ebgp: 128
+                redistribute:
+                  connected:
+                    enable: on
+              ipv6-unicast:
+                enable: on
+                multipaths:
+                  ebgp: 128
+                redistribute:
+                  connected:
+                    enable: on
+              l2vpn-evpn:
+                enable: on
+            enable: on
+            neighbor:
+              172.43.0.1:
+                peer-group: routeserver
+                type: numbered
+              172.43.0.2:
+                peer-group: routeserver
+                type: numbered
+              p0_if:
+                peer-group: underlay
+                type: unnumbered
+              p1_if:
+                peer-group: underlay
+                type: unnumbered
+              10.217.5.170:
+                passive-mode: on
+                peer-group: tenant
+                type: numbered
+              10.217.5.162:
+                passive-mode: on
+                peer-group: tenant
+                type: numbered
+            path-selection:
+              multipath:
+                aspath-ignore: on
+                bandwidth: ignore
+            peer-group:
+              routeserver:
+                address-family:
+                  ipv4-unicast:
+                    enable: off
+                  ipv6-unicast:
+                    enable: off
+                  l2vpn-evpn:
+                    aspath:
+                      allow-my-asn:
+                        enable: on
+                    enable: on
+                multihop-ttl: 255
+                remote-as: external
+                update-source: lo
+              tenant:
+                address-family:
+                  ipv4-unicast:
+                    policy:
+                      inbound:
+                        route-map: dpu_from_instance
+                      outbound:
+                        route-map: dpu_to_instance
+                  ipv6-unicast:
+                    enable: on
+                    policy:
+                      inbound:
+                        route-map: dpu_from_instance_ipv6
+                      outbound:
+                        route-map: dpu_to_instance
+                nexthop-connected-check: off
+                remote-as: 65100
+                timers:
+                  connection-retry: 10
+                  hold: 9
+                  keepalive: 3
+                  route-advertisement: none
+              underlay:
+                remote-as: external
+                address-family:
+                  ipv4-unicast:
+                    policy:
+                      inbound:
+                        prefix-list: FORGE_FROM_UNDERLAY
+                      outbound:
+                        route-map: FORGE_TO_UNDERLAY
+                    aspath:
+                      allow-my-asn:
+                        enable: on
+                  ipv6-unicast:
+                    enable: on
+                    policy:
+                      outbound:
+                        route-map: leak_to_underlay
+    acl:
+      ACL_tenancy:
+        rule:
+          '10':
+            action:
+              permit: {}
+            match:
+              ip:
+                dest-ip: 10.217.5.160/30
+          '11':
+            action:
+              permit: {}
+            match:
+              ip:
+                dest-ip: 10.217.5.168/29
+          '20':
+            action:
+              permit: {}
+            match:
+              ip:
+                dest-ip: 10.217.5.160/30
+          '21':
+            action:
+              permit: {}
+            match:
+              ip:
+                dest-ip: 10.217.5.168/29
+          '1000':
+            action:
+              deny: {}
+            match:
+              ip:
+                dest-ip: 192.0.2.0/24
+          '1001':
+            action:
+              deny: {}
+            match:
+              ip:
+                dest-ip: 198.51.100.0/24
+        type: ipv4
+      drop_dhcp_flood_over_overlay:
+        rule:
+          '10':
+            action:
+              deny: {}
+            hw-offload: off
+            match:
+              ip:
+                dest-ip: 255.255.255.255
+                protocol: udp
+                dest-port:
+                  '67': {}
+                source-port:
+                  '68': {}
+        type: ipv4

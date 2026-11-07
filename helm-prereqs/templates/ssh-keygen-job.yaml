@@ -1,0 +1,3 @@
+## ssh-keygen-job.yaml — intentionally empty
+## SSH host key is generated inline by Helm in secrets.yaml using genPrivateKey.
+## This avoids a pre-install Job that requires apk/network access.

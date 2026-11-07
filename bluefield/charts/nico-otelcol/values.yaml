@@ -1,0 +1,95 @@
+### DPF contract ###
+serviceDaemonSet:
+  nodeSelector:
+  labels: {}
+  annotations: {}
+  updateStrategy: {}
+  resources: {}
+exposedPorts:
+  labels: {}
+  ports: {}
+
+### Cert directory + root CA filename overrides.
+certsDir: /opt/forge
+rootCaFile: forge_root.pem
+
+### Service specific values ###
+# host:port of the OTLP receiver targeted by the otlp/site exporter.
+otlpSiteEndpoint: otel-receiver.forge:443
+# Prometheus exporter and Service port; must match DPUServiceConfiguration configPorts (dpf_services).
+prometheusPort: 9999
+# Opt in to unauthenticated metrics on all DPU host interfaces for remote Service scraping.
+prometheusRemoteAccess: false
+# containerd socket on the DPU host, bind-mounted only into the
+# punt-stats-helper sidecar (see puntStatsHelper below) so it can crictl exec
+# into doca-hbn to read punt stats. The general-purpose otelcol-contrib
+# container never gets this socket.
+containerdSocket: /run/containerd/containerd.sock
+# Host:port for prometheus scrape targets (see otel_config.yaml). DPF sets these via nico-api.
+nico_dpu_agent: ""
+nico_fmds: ""
+nico_dts: ""
+image:
+  repository: ""
+  pullPolicy: IfNotPresent
+  tag: ""
+# node-exporter sidecar: provides the host metrics scraped by the
+# prometheus/node receiver in otel_config.yaml at localhost:<port>.
+# It binds to loopback only, so it is never exposed on the host's external
+# interfaces. Pinned public multi-arch image (includes arm64 for BlueField).
+nodeExporter:
+  image:
+    repository: quay.io/prometheus/node-exporter
+    tag: v1.9.1
+    pullPolicy: IfNotPresent
+  # Must match the prometheus/node scrape target (localhost:9200) in otel_config.yaml.
+  port: 9200
+  resources: {}
+# transceiver-exporter sidecar: provides optical transceiver (DOM) metrics
+# scraped by the prometheus/transceiver receiver in otel_config.yaml at
+# localhost:<port>. It binds to loopback only, so it is never exposed on the
+# host's external interfaces. Unlike node-exporter there is no public image, so
+# it is built from the wobcom transceiver-exporter release and published
+# alongside otelcol-contrib (see bluefield/containers/transceiver-exporter).
+transceiverExporter:
+  image:
+    repository: nvcr.io/0837451325059433/carbide-dev/transceiver-exporter
+    # Defaults to the otelcol-contrib image tag (built in the same CI run).
+    tag: ""
+    pullPolicy: IfNotPresent
+  # Must match the prometheus/transceiver scrape target (localhost:9300) in otel_config.yaml.
+  port: 9300
+  resources: {}
+# punt-stats-helper sidecar: the only container with containerd-socket
+# access. It crictl-execs into the named container on an interval and writes
+# the punt stats file to a shared emptyDir, which the punt_stats receiver in
+# otel_config.yaml reads directly (container_name: ""). This keeps CRI exec
+# access out of the general-purpose otelcol-contrib container.
+puntStatsHelper:
+  containerName: doca-hbn
+  srcPath: /cumulus/nl2docad/run/stats/punt
+  # Shared path both containers mount. The chart also renders it into
+  # punt_stats.file_path in otel_config.yaml. It must stay under the
+  # /var/run/punt-stats emptyDir mount.
+  dstPath: /var/run/punt-stats/punt
+  intervalSeconds: 60
+  resources: {}
+  securityContext:
+    runAsUser: 0
+    runAsGroup: 0
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+imagePullSecrets: []
+podSecurityContext: {}
+securityContext:
+  privileged: true
+  runAsUser: 0
+  runAsGroup: 0
+  capabilities:
+    add:
+      - NET_ADMIN
+      - NET_RAW
+      - NET_BIND_SERVICE
+tolerations: []

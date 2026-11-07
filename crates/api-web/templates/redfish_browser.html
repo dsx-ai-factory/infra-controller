@@ -1,0 +1,207 @@
+{% extends "base.html" %}
+
+{% block title %}Redfish Browser{% endblock %}
+
+{% block content %}
+<h1>Redfish Browser</h1>
+
+<p>
+This page allows to send queries to BMCs managed by Forge.
+Enter a valid redfish URL below to send a query and display the response.
+The query needs to be fully qualified - e.g. <b>https://127.0.0.1/redfish/v1</b>.
+</p>
+
+<form id="redfish_console" method="GET" action="/admin/redfish-browser">
+	<input type=text size="80" id="url_input" name="url" placeholder="https://127.0.0.1/redfish/v1" value="{{ url }}" />
+	<input type="submit" value="Start query">
+</form>
+
+{% if !url.is_empty() %}
+
+<h3>Metadata</h3>
+<table class="detailsview">
+	<tr><th>BMC IP</th><td>{{ bmc_ip }}</td></tr>
+	<tr><th>Machine ID</th><td>{{ machine_id|machine_id_link|safe }}</td></tr>
+	<tr><th>HTTP status</th><td>{{ status_code }} {{ status_string }}</td></tr>
+	{% if !response_headers.is_empty() %}
+	<tr>
+		<th>Response Headers</th>
+		<td>
+			<details>
+				<summary>Expand Headers</summary>
+				<table class="detailsview">
+					{% for header in response_headers %}
+					<tr>
+						<td>{{ header.name }}</td>
+						<td>{{ header.value }}</td>
+					</tr>
+					{% endfor %}
+				</table>
+			</details>
+		</td>
+	</tr>
+	{% endif %}
+</table>
+
+{% if !error.is_empty() %}
+<h3>Error</h3>
+<textarea disabled>{{ error }}</textarea>
+{% endif %}
+
+<details open>
+	<summary>Past Actions</summary>
+	<div style="overflow: scroll;">
+	{{ actions|safe }}
+	</div>
+</details>
+
+{% if !response.is_empty() %}
+
+<details open>
+  <summary>Actions</summary>
+  <table>
+  <tbody id="actions-table">
+  	<tr>
+  		<th>Name</th>
+  		<th>Parameters</th>
+  		<th>Request</th>
+  	</tr>
+  </tbody>
+  </table>
+</details>
+
+<h3>Response</h3>
+<table class="detailsview">
+<tbody>
+	<tr>
+		<td>
+			<div style="overflow: auto;">
+				<pre><code class="bmcresponse">{{ response }}</code></pre>
+			</div>
+		</td>
+	</tr>
+</tbody>
+</table>
+{% endif %}
+
+{% endif %}
+
+{% endblock %}
+
+{% block script %}
+
+const baseBmcUrl = "{{ base_bmc_url }}";
+
+function listActions(response) {
+  const actions = response["Actions"];
+  if (!actions) return;
+
+	// Per https://www.dmtf.org/sites/default/files/standards/documents/DSP0266_1.22.1.html#actions-property
+	// the actions are of the form #<ResourceType>.<ActionName>
+  // (dell has a prefix in the Oem field for Managers/iDRAC.Embedded.1)
+  // and parameters end with @Redfish.AllowableValues
+	const action_regex = new RegExp(/^.*\#[^\.]+\..+$/);
+  const parameter_regex = new RegExp(/^(?<name>[^@]+)@Redfish\.AllowableValues/);
+  const grab_parameter_name = ([prop, values]) => ({name: prop.match(parameter_regex)?.groups?.name, values});
+  const extract_actions = (obj) => {
+    let output = [];
+		for (const [action, entry] of Object.entries(obj)) {
+			if (!action.match(action_regex)) continue; 
+      // The redfish specification requires the target field to exist.
+      // so if the regex matched a non-action, we can filter out here.
+      const target = entry["target"];
+      if (!target) continue;
+      const parameters = Object.entries(entry).map(grab_parameter_name).filter(({name}) => name);
+      output.push({action, target, parameters});
+		}
+    return output;
+  };
+
+  // Extract the list of possible actions.
+  let all_actions = [];
+	all_actions = all_actions.concat(extract_actions(actions));
+  // Redfish allows fields under the Oem property (and dell puts actions in this property).
+  const oem = actions["Oem"];
+  if (oem) {
+    all_actions = all_actions.concat(extract_actions(oem));
+  }
+
+  // Fill out the possible actions table.
+  const table = document.querySelector("#actions-table");
+  for (const action of all_actions) {
+    const row = create_el("tr", {});
+
+    const name = create_el("td");
+		const input = create_el("input", {type: "text", value: action.action, title: action.target, name: "action"}, {readonly: "", form: action.target});
+		name.appendChild(input);
+    row.appendChild(name);
+
+    const options = document.createElement("td");
+    // List parameters in the table as a dropdown.
+    for (const {name, values} of action.parameters) {
+      const select = create_el("select", {name: "parameter." + name, required: true}, {form: action.target});
+      // Put the name of the parameter as the first (disabled) option.
+      const name_option = create_el("option", {innerText: name, disabled: true});
+      select.appendChild(name_option);
+      for (const value of values) {
+        const opt = create_el("option", {value, innerText: value});
+        if (value == "Default") opt.selected = true;
+        select.appendChild(opt);
+      }
+      options.appendChild(select);
+    }
+    row.appendChild(options);
+
+    const request = document.createElement("td");
+		const form = create_el("form", {method: "get", action: "/admin/redfish-actions", id: action.target});
+
+		const button = create_el("button", {innerText: "Open Action", type: "submit"});
+		form.appendChild(button);
+
+		const target_ip = create_el("input", {type: "text", value: "{{bmc_ip}}", name: "ips"});
+		target_ip.style.display = "none";
+		form.appendChild(target_ip);
+		const target_text = create_el("input", {type: "text", value: action.target, name: "target"});
+		target_text.style.display = "none";
+		form.appendChild(target_text);
+
+		request.appendChild(form);
+
+    row.appendChild(request);
+
+    table.appendChild(row);
+  }
+}
+
+function formatBmcResponse() {
+	let elems = document.getElementsByClassName("bmcresponse");
+	const re = /(?<="@odata.id":\s*")[^"]*(?=")/g;
+
+	for (elem of elems) {
+		// Pretty print response in case its JSON. This also helps
+		// with the follow-up step
+		try {
+			let jsObj = JSON.parse(elem.innerText);
+			elem.innerText = JSON.stringify(jsObj, null,4);
+      listActions(jsObj);
+		} catch (e) {
+      console.warn(e)
+		}
+
+		// For each @odata.id element that is found, generate a link
+		try {
+			let html = elem.innerHTML.replaceAll(re, path => {
+				let encodedQueryPath = encodeURIComponent(baseBmcUrl + path);
+				return `<a href="/admin/redfish-browser?url=${encodedQueryPath}">${path}</a>`;
+			});
+			elem.innerHTML = html;
+		} catch (e) {
+		}
+	}
+}
+
+document.addEventListener("DOMContentLoaded", function(event){
+	formatBmcResponse();
+});
+
+{% endblock %}

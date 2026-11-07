@@ -1,0 +1,74 @@
+### DPF contract ###
+serviceDaemonSet:
+  nodeSelector:
+  labels: {}
+  annotations: {}
+  updateStrategy: {}
+  resources: {}
+exposedPorts:
+  labels: {}
+  ports: {}
+
+### Cert directory + root CA filename overrides.
+certsDir: /opt/forge
+rootCaFile: forge_root.pem
+
+### Node-auth (issue #355).
+# When true, fmds authenticates to nico-api with short-lived bearer JWTs
+# fetched from the dpu-agent's local API socket (<certsDir>/run/agent.sock)
+# instead of the machine mTLS cert/key.
+#
+# The pod then mounts exactly two paths: <certsDir>/pub, which holds the trust
+# anchor and nothing else, and the socket directory. It does not mount the
+# credentials directory at all, so the machine private key is absent from the
+# pod rather than merely read-only. That distinction matters because the
+# container runs as UID 0, for which a read-only mount is no barrier.
+#
+# pub/ is mounted as a directory rather than a subPath so that the agent's
+# atomic republish of a rotated CA reaches a running pod.
+#
+# Requires a dpu-agent that serves the local API and publishes the CA, and
+# [node_auth] enabled on the API.
+#
+# certsDir and rootCaFile must keep their defaults in this mode: the agent
+# takes those paths from its own config, DPF gives it no config file, and it
+# has no CLI flag for either -- so it always publishes under /opt/forge. The
+# chart fails at template time rather than let fmds wait for a CA that is
+# never coming. Both remain overridable in cert mode.
+useNodeTokens: false
+
+### Service specific values ###
+# Optional primary tenant metadata listener address override. Unset by default.
+restAddress: null
+
+# Optional additional tenant metadata listener address for compatibility.
+# Unset by default.
+compatibilityRestAddress: null
+
+# Optional IPv6 metadata address alongside the existing IPv4 interface address.
+# Accepts only fd00:76b9::254/127. Include that endpoint in nico-dpu-agent's
+# fmds.networkingAddresses and set restAddress to "[::]:80" for both families.
+# A listener bound to fd00:76b9::254 serves only IPv6; retain a separate IPv4
+# listener if needed. The rendered flag overrides FMDS_INTERFACE_CIDR_V6;
+# null omits the flag and leaves the binary's environment fallback in effect.
+# The chart requires an IPv6 listener when this value is set; FMDS validates
+# its exact address at startup, including when the CIDR comes from the environment.
+interfaceCidrV6: null
+
+# Prometheus /metrics listen port (must match nico-otelcol scrape target).
+metricsPort: 8888
+image:
+  repository: ""
+  pullPolicy: IfNotPresent
+  tag: ""
+imagePullSecrets: []
+podSecurityContext: {}
+securityContext:
+  runAsUser: 0                                                                        
+  runAsGroup: 0
+  capabilities:
+    add:
+      - NET_ADMIN
+      - NET_RAW
+      - NET_BIND_SERVICE
+tolerations: []

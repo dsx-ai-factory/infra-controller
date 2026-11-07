@@ -1,0 +1,290 @@
+## nico-dhcp — DHCP server (Kea-based) for PXE boot and network assignment
+## Global settings (overridden by umbrella chart)
+global:
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []
+  certificate:
+    duration: 720h0m0s
+    renewBefore: 360h0m0s
+    privateKey:
+      algorithm: ECDSA
+      size: 384
+    issuerRef:
+      kind: ClusterIssuer
+      name: vault-nico-issuer
+      group: cert-manager.io
+  spiffe:
+    trustDomain: nico.local
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: site-controller
+
+## Override the release namespace (defaults to helm install -n <namespace>)
+namespaceOverride: ""
+
+## DHCPv4 replica count; DHCPv6 independently runs one replica.
+replicas: 1
+annotations:
+  configmap.reloader.stakater.com/reload: '{{ include "nico-dhcp.name" . }}-config'
+
+service:
+  port: 67
+  protocol: UDP
+metrics:
+  ## Metrics Service port for both pods and DHCPv6 hook port (1..65535).
+  ## Accepts an integer or a quoted decimal port number without leading zeros.
+  port: 1089
+
+## DHCPv6 is opt-in and uses its own pod, ConfigMap, and IPv6 relay Service.
+## DHCPv6 uses one replica while leases are stored in pod-local memfiles.
+dhcp:
+  v6Enabled: false
+  ## Pod interface with a routable IPv6 address; selected at container startup.
+  interface: eth0
+  ## Required when enabled: site-unique, stable 12 hexadecimal digits (quote it).
+  v6ServerIdentifier: ""
+  ## Comma-separated IPv6 literals; empty means omit the corresponding option.
+  v6DnsServers: ""
+  v6NtpServers: ""
+  ## Optional IPv6 literal for generated DHCPv6 HTTP boot URLs; empty disables generation.
+  ## Image/client requirements and reply options: docs/provisioning/dhcpv6-deployment.md#http-boot-options
+  v6ProvisioningServer: ""
+  ## Boolean: permit a single REPLY only when the client requests Rapid Commit.
+  v6RapidCommit: false
+
+## Separate IPv6 relay VIP; ignored while dhcp.v6Enabled is false.
+v6ExternalService:
+  enabled: false
+  annotations: {}
+
+apiServiceName: nico-api
+
+certificate:
+  ## serviceName is used to auto-generate dnsNames and SPIFFE URIs based on the release namespace
+  serviceName: ""
+  spiffeServiceName: ""
+  identityNamespace: ""
+  ## Fully override the auto-generated dnsNames/uris. When empty, dnsNames and
+  ## uris are generated from serviceName + namespace (extraDnsNames/extraUris
+  ## are appended to the generated list).
+  dnsNames: []
+  uris: []
+  extraDnsNames: []
+  extraUris: []
+
+## OTLP/gRPC collector endpoint. Empty leaves tracing off unless set through env.
+otlpEndpoint: ""
+
+env:
+  FORGE_ROOT_CAFILE_PATH: /var/run/secrets/spiffe.io/ca.crt
+  NICO_ROOT_CAFILE_PATH: /var/run/secrets/spiffe.io/ca.crt
+  FORGE_CLIENT_CERT_PATH: /var/run/secrets/spiffe.io/tls.crt
+  NICO_CLIENT_CERT_PATH: /var/run/secrets/spiffe.io/tls.crt
+  FORGE_CLIENT_KEY_PATH: /var/run/secrets/spiffe.io/tls.key
+  NICO_CLIENT_KEY_PATH: /var/run/secrets/spiffe.io/tls.key
+  RUST_BACKTRACE: "full"
+  RUST_LIB_BACKTRACE: "0"
+
+## ConfigMap created by this chart (config.enabled=true) or external (false).
+## The ConfigMap is mounted at /tmp in the pod, and kea-dhcp4 reads
+## /tmp/kea_config.json.
+## These controls apply to DHCPv4. Enabled DHCPv6 always gets its own chart-managed
+## ConfigMap, including the shared declineProbationPeriod and nicoApiUrl values.
+##
+## The kea_config.json content comes from one of two paths:
+##
+##   1. (DEFAULT) Structured config under `config.kea` — the chart template
+##      assembles the JSON. This is the supported per-site interface;
+##      operators override individual fields (notably the advertised
+##      service IPs under `config.kea.hookParameters`) via the umbrella
+##      values, without having to maintain a parallel copy of the full
+##      kea_config.json blob.
+##
+##   2. (ESCAPE HATCH) Set `config.keaConfigJsonRaw` to a complete kea
+##      DHCPv4 JSON string. When non-empty, the structured `config.kea`
+##      block is ignored entirely. Use this only when the structured
+##      shape can't express what you need — e.g. multiple distinct
+##      hooks-libraries entries, advanced lease-database backends, etc.
+##      Long-term any such case should be added to the structured shape
+##      and this escape hatch removed.
+config:
+  enabled: true
+
+  ## Full kea_config.json string. Empty by default — keep empty to use
+  ## the structured `config.kea` block below.
+  ##
+  ## When non-empty (after trimming whitespace), the configmap template:
+  ##   - SKIPS the structured `config.kea` block entirely — any field set
+  ##     under `kea:` is silently ignored. Don't set both at once; the
+  ##     operator-facing overrides under `helm-prereqs/values/nico-core.yaml`
+  ##     target the structured block, so a raw blob will mask them.
+  ##   - Substitutes `__NAMESPACE__` → release namespace and `__API_HOST__`
+  ##     → `.Values.apiServiceName` (default `nico-api`) so the raw string
+  ##     is portable between the nico-api / carbide-api names the same
+  ##     chart is reused for under dual-deployment (PR #2062).
+  ##
+  ## Note: placeholder substitution applies ONLY to this raw string, NOT
+  ## to values inside `config.kea` below — set those values to fully
+  ## resolved strings (or leave empty to use the helper's derivation).
+  ##
+  ## ⚠ The server-identifier pinning (issue #3663, `config.kea.serverIdentifier`
+  ## below) does NOT apply to a raw blob. Include the equivalent option-data
+  ## in the raw JSON yourself, or unicast renewals will target the ephemeral
+  ## pod IP and orphan clients on pod replacement. Setting
+  ## `config.kea.serverIdentifier` together with a raw blob fails at render
+  ## time to make this conflict loud.
+  keaConfigJsonRaw: ""
+
+  ## Structured kea-dhcp4 configuration. The configmap template assembles
+  ## these fields into kea_config.json. See the helper definition in
+  ## templates/_helpers.tpl (nico-dhcp.keaConfigJson) for the exact mapping
+  ## from these YAML fields to the kea JSON keys (which are hyphenated).
+  ##
+  ## ⚠ IGNORED when `config.keaConfigJsonRaw` above is set to a non-empty
+  ## (post-trim) string. If you need to override an IP, prefer the
+  ## structured fields below over the raw blob.
+  kea:
+    ## Listening interfaces + socket type (kea: interfaces-config).
+    interfacesConfig:
+      interfaces:
+        - eth0
+      dhcpSocketType: udp
+
+    ## Lease backend. memfile is the common in-cluster choice.
+    leaseDatabase:
+      type: memfile
+      lfcInterval: 3600
+
+    ## Other top-level kea-dhcp4 options.
+    matchClientId: false
+    authoritative: true
+    renewTimer: 900
+    rebindTimer: 1800
+    validLifetime: 3600
+    declineProbationPeriod: 900
+
+    ## DHCP server identifier (option 54) advertised to clients — issue #3663.
+    ##
+    ## Kea defaults option 54 to the POD IP, which is unreachable from BMCs.
+    ## After a pod replacement, clients unicast-renew against the dead pod IP
+    ## and stay orphaned until the rebind timer (rebindTimer above) forces a
+    ## broadcast. Pinning option 54 to the stable DHCP VIP makes unicast
+    ## renewals survive pod churn.
+    ##
+    ## Leave empty (default) to AUTO-DERIVE from the first entry of the
+    ## externalService `metallb.universe.tf/loadBalancerIPs` annotation —
+    ## sites that already pin the DHCP VIP there get the fix with no values
+    ## change. Set explicitly only when the advertised identifier must differ
+    ## from that annotation (e.g. externalService managed outside this chart).
+    ## An explicit value must be a single IPv4 address (render fails
+    ## otherwise); when neither source yields a valid IPv4 the option is
+    ## omitted and kea falls back to the pod IP (pre-#3663 behavior).
+    serverIdentifier: ""
+
+    ## libdhcp hook parameters — these become the JSON object at
+    ## Dhcp4.hooks-libraries[0].parameters and are read by the
+    ## NICo-specific kea hook (libdhcp.so).
+    ##
+    ## CRITICAL: nameservers / ntpServer / provisioningServer MUST be
+    ## set to real IPs reachable from the DPU's PXE/management network
+    ## (typically the MetalLB LoadBalancer IPs of nico-dns / your NTP
+    ## service / nico-pxe). Leaving the 127.0.0.1 placeholders causes:
+    ##   - DPU pre-ingestion failing on clock divergence (no NTP)
+    ##   - DPU agent unable to reach the API endpoint (no DNS)
+    ## These are the failure modes the operator-facing site values
+    ## under helm-prereqs/values/nico-core.yaml are supposed to fix.
+    hookParameters:
+      ## NICo API URL. Empty = derive
+      ## `https://<apiServiceName>.<release-namespace>.svc.cluster.local:1079`
+      ## at render time. apiServiceName is the top-level value above
+      ## (default `nico-api`; under the dual-deployment / carbide-named
+      ## install path it can be set to e.g. `carbide-api`). DPUs reach
+      ## this URL via the nameservers IP below.
+      nicoApiUrl: ""
+      ## DHCPv4 hook metrics bind address and port; match metrics.port for Service scraping.
+      nicoMetricsEndpoint: "[::]:1089"
+      ## DNS server IP. Operators MUST override in site values.
+      ## Set to nico-dns externalService LoadBalancer IP (single string
+      ## or comma-separated for multiple). The "REPLACE_WITH_..."
+      ## placeholder below is intentional — kea surfaces it at startup
+      ## so a missed override is loud at runtime instead of producing a
+      ## silently-non-functional cluster (which the old "127.0.0.1"
+      ## fallback did).
+      nameservers: "REPLACE_WITH_NICO_DNS_VIP"
+      ## NTP server IP(s), comma-separated. Operators MUST override in
+      ## site values. Set to the comma-joined list of nico-ntp per-pod
+      ## externalService LoadBalancer IPs (or a site-local NTP service
+      ## if you're disabling the bundled nico-ntp subchart).
+      ntpServer: "REPLACE_WITH_NICO_NTP_VIPS"
+      ## PXE / boot-artifact server IP. Operators MUST override in
+      ## site values. Set to nico-pxe externalService LoadBalancer IP.
+      provisioningServer: "REPLACE_WITH_NICO_PXE_VIP"
+
+    ## DHCPv4 subnets. Each entry maps to a kea subnet4 entry.
+    ## `pools` entries can be either:
+    ##   - a pool-range string (e.g. "0.0.0.0-255.255.255.255") — the
+    ##     helper wraps it in `{ "pool": "..." }` automatically; or
+    ##   - a full kea pool object (e.g. { pool: "...", option-data: [...] })
+    ##     — passed through verbatim via toJson.
+    ## Any other shape fails at template-render time with a pointer to the
+    ## offending subnet4[i].pools[j] index so the user can fix their value.
+    subnet4:
+      - subnet: "0.0.0.0/0"
+        pools:
+          - "0.0.0.0-255.255.255.255"
+
+    ## Path to the kea libdhcp hook library inside the kea image. Default
+    ## is the x86_64 Debian-derived install location. Override for alt
+    ## arches (aarch64 → /usr/lib/aarch64-linux-gnu/...) or custom images.
+    hookLibraryPath: "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so"
+
+    ## Additional hooks-libraries entries appended after the libdhcp entry
+    ## above. Each item is a full kea hooks-libraries object and is
+    ## serialised via toJson. Use this for `ha`, `lease_cmds`, `stat_cmds`,
+    ## or any third-party hook. Leave empty for the libdhcp-only default.
+    ##
+    ## Example:
+    ##   additionalHooksLibraries:
+    ##     - library: /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_lease_cmds.so
+    ##     - library: /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_stat_cmds.so
+    additionalHooksLibraries: []
+
+    ## kea-dhcp4 loggers. `outputOptions` is OPTIONAL per logger — when
+    ## omitted, defaults to `[{ output: stdout }]`. Set explicitly to
+    ## redirect to a file, syslog, or to tune kea's per-logger output
+    ## flushing / maxsize / pattern.
+    ##
+    ## Example: ship one logger to a file the sidecar log shipper tails
+    ##   - name: kea-dhcp4
+    ##     severity: INFO
+    ##     outputOptions:
+    ##       - output: /var/log/kea/dhcp4.log
+    ##         maxsize: 10485760
+    ##         maxver: 4
+    loggers:
+      - name: kea-dhcp4
+        severity: INFO
+      - name: kea-dhcp4.hooks
+        severity: INFO
+      - name: kea-dhcp4.nico-rust
+        severity: INFO
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 25s
+
+## External LoadBalancer Service (for bare-metal / MetalLB)
+externalService:
+  enabled: false
+  type: LoadBalancer
+  # Empty keeps the Kubernetes default (Cluster). Set Local to preserve relay
+  # source IPs. MetalLB only lets Local Services share an IP with Services
+  # that select the same pods.
+  externalTrafficPolicy: ""
+  # Annotations are passed through unchanged. To share an IP with another
+  # Service, add your load-balancer controller's sharing annotation here.
+  annotations: {}

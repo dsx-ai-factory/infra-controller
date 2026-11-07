@@ -1,0 +1,158 @@
+suite: RMS connectivity application config
+templates:
+  - configmap.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: renders rack profiles, component_manager, and rms by default
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '\[rack_profiles\.NVL72\]'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '\[rack_profiles\.NVL72_GB300\]'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^\[component_manager\]$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^compute_tray_backend = "rms"$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^compute_tray_use_state_controller = true$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^\[rms\]$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^api_url = "https://rms-api-server\.rack-manager\.svc\.cluster\.local:8801"$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^enforce_tls = true$'
+      # No cert paths by default: nv-rms-client auto-discovers the SPIFFE
+      # mount (/var/run/secrets/spiffe.io) when they are unset.
+      - notMatchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: 'root_ca_path|client_cert|client_key'
+
+  - it: omits both sections when both switches are disabled
+    documentIndex: 0
+    set:
+      componentManager:
+        enabled: false
+      rms:
+        enabled: false
+    asserts:
+      - notMatchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '\[rms\]'
+      - notMatchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '\[component_manager\]'
+
+  - it: renders component_manager alone when only componentManager is enabled
+    documentIndex: 0
+    set:
+      componentManager:
+        enabled: true
+      rms:
+        enabled: false
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^\[component_manager\]$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^compute_tray_backend = "rms"$'
+      - notMatchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '\[rms\]'
+
+  - it: renders non-default backends and state controller flags from values
+    documentIndex: 0
+    set:
+      componentManager:
+        enabled: true
+        computeTrayBackend: "core"
+        nvSwitchBackend: "nsm"
+        powerShelfBackend: "psm"
+        computeTrayUseStateController: false
+        nvSwitchUseStateController: false
+        powerShelfUseStateController: false
+      rms:
+        enabled: false
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^compute_tray_backend = "core"$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^nv_switch_backend = "nsm"$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^power_shelf_backend = "psm"$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^compute_tray_use_state_controller = false$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^nv_switch_use_state_controller = false$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^power_shelf_use_state_controller = false$'
+
+  - it: renders rms alone when only rms is enabled
+    documentIndex: 0
+    set:
+      componentManager:
+        enabled: false
+      rms:
+        enabled: true
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^\[rms\]$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^api_url = "https://rms-api-server\.rack-manager\.svc\.cluster\.local:8801"$'
+      - notMatchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '\[component_manager\]'
+
+  - it: renders explicit mTLS material overrides when set
+    documentIndex: 0
+    set:
+      rms:
+        enabled: true
+        rootCaPath: "/etc/forge/rms/ca.pem"
+        clientCert: "/etc/forge/rms/client.pem"
+        clientKey: "/etc/forge/rms/client.key"
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^root_ca_path = "/etc/forge/rms/ca\.pem"$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^client_cert = "/etc/forge/rms/client\.pem"$'
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^client_key = "/etc/forge/rms/client\.key"$'
+
+  - it: keeps the rms section out of the site-config ConfigMap
+    set:
+      siteConfig:
+        enabled: true
+        nicoApiSiteConfig: |
+          [site_explorer]
+          run_interval = "30s"
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '\[rms\]'
+        documentIndex: 0
+      - notMatchRegex:
+          path: data["carbide-api-site-config.toml"]
+          pattern: '\[rms\]'
+        documentIndex: 1

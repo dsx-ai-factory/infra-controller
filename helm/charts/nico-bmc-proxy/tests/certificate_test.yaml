@@ -1,0 +1,56 @@
+suite: certificate dnsNames and uris configurability
+templates:
+  - certificate.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: generates dnsNames and uris from serviceName and namespace by default
+    asserts:
+      - isKind:
+          of: Certificate
+      - equal:
+          path: metadata.name
+          value: nico-bmc-proxy-certificate
+      - equal:
+          path: spec.dnsNames
+          value:
+            - nico-bmc-proxy.nico-system.svc.cluster.local
+            - nico-bmc-proxy.nico-system
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://nico.local/nico-system/sa/nico-bmc-proxy
+
+  - it: fully overrides the generated dnsNames and uris when set
+    set:
+      certificate:
+        dnsNames:
+          - nico-bmc-proxy.override.example.com
+        uris:
+          - spiffe://override.local/nico-system/sa/nico-bmc-proxy
+    asserts:
+      - equal:
+          path: spec.dnsNames
+          value:
+            - nico-bmc-proxy.override.example.com
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://override.local/nico-system/sa/nico-bmc-proxy
+
+  - it: nameOverride flips the certificate resource name, dnsNames, and SPIFFE URI to the override
+    set:
+      nameOverride: carbide-bmc-proxy
+    asserts:
+      - equal:
+          path: metadata.name
+          value: carbide-bmc-proxy-certificate
+      - equal:
+          path: spec.dnsNames
+          value:
+            - carbide-bmc-proxy.nico-system.svc.cluster.local
+            - carbide-bmc-proxy.nico-system
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://nico.local/nico-system/sa/carbide-bmc-proxy

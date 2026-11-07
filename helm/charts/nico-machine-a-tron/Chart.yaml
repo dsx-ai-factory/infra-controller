@@ -1,0 +1,21 @@
+apiVersion: v2
+name: nico-machine-a-tron
+description: Helm chart for Machine-A-Tron - a mock machine simulator for NICo development
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - nico
+  - machine-a-tron
+  - mock
+  - testing
+  - development
+dependencies:
+  - name: mat-k8s-controller
+    version: "0.1.0"
+    condition: mat-k8s-controller.enabled
+    repository: ""
+  - name: nico-site-health-probe
+    version: "0.1.0"
+    condition: nico-site-health-probe.enabled
+    repository: ""

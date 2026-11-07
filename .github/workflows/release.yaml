@@ -1,0 +1,102 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+name: Carbide Release new version
+
+on:
+  workflow_dispatch:
+
+jobs:
+  # ============================================================================
+  # Release new version
+  # ============================================================================
+  release-new-version-approve:
+    runs-on: linux-amd64-cpu4
+    environment:
+      name: release-new-version-approve
+    steps:
+      - name: Release new version
+        run: echo "Releasing new version to NVIDIA Catalog"
+
+  # ============================================================================
+  # Fetch new version
+  # ============================================================================
+  fetch-new-version:
+    runs-on: linux-amd64-cpu4
+    needs:
+      - release-new-version-approve
+    outputs:
+      version: ${{ steps.fetch.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Fetch version
+        id: fetch
+        run: |
+          set -euo pipefail
+
+          # Extract full tag (e.g. v0.0.1-rc.1)
+          FULL_TAG=${GITHUB_REF#refs/tags/}
+
+          # Extract base version (e.g. v0.0.1) by removing everything after the last -rc pattern
+          # Or more simply, just regex match the vX.Y.Z part
+          VERSION=$(echo "$FULL_TAG" | grep -oE '^v[0-9]+\.[0-9]+\.[0-9]+')
+
+          echo "Full Tag: $FULL_TAG"
+          echo "Release Version: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+
+  # ============================================================================
+  # Release new version
+  # ============================================================================
+  release-new-version:
+    runs-on: linux-amd64-cpu4
+    needs:
+      - fetch-new-version
+    steps:
+      # persist-credentials is intentionally left enabled here: the "Push Git Tag"
+      # step below pushes back to the repo using the credential this checkout persists.
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Push Git Tag
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/git-tag@db3780bff4b2cbf90ba9117a63e41ddea066791b
+        with:
+          tag: ${{ needs.fetch-new-version.outputs.version }}
+      - name: Release
+        uses: softprops/action-gh-release@v3
+        if: false
+        with:
+          name: ${{ needs.fetch-new-version.outputs.version }}
+          tag_name: ${{ needs.fetch-new-version.outputs.version }}
+      - name: Release new version
+        if: false
+        run: |
+          VERSION="${{ needs.fetch-new-version.outputs.version }}"
+          REPO="${{ github.repository }}"
+          RELEASE_URL="https://github.com/$REPO/releases/tag/$VERSION"
+
+          echo "Releasing new version $VERSION to NVIDIA Catalog"
+          echo "## 🚀 Release Created" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Release carbide version: **$VERSION**" >> "$GITHUB_STEP_SUMMARY"
+          echo "🔗 [View Release Notes]($RELEASE_URL)" >> "$GITHUB_STEP_SUMMARY"

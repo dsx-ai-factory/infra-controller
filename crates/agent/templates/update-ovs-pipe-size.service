@@ -1,0 +1,17 @@
+[Unit]
+Description=Open vSwitch Pipesize Fix
+After=ovs-vswitchd.service
+Requires=ovs-vswitchd.service
+ReloadPropagatedFrom=ovs-vswitchd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=HOME=/var/run/openvswitch
+EnvironmentFile=-/etc/default/openvswitch-switch
+ExecStart=/opt/forge/update-ovs-pipe-size.sh
+ExecReload=/opt/forge/update-ovs-pipe-size.sh
+TimeoutSec=300
+
+[Install]
+WantedBy=ovs-vswitchd.service

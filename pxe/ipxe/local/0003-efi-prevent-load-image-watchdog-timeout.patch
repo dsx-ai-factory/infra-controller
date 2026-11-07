@@ -1,0 +1,52 @@
+diff --git a/src/image/efi_image.c b/src/image/efi_image.c
+index 856603703..4aa817d0d 100644
+--- a/src/image/efi_image.c
++++ b/src/image/efi_image.c
+@@ -34,6 +34,7 @@ FILE_SECBOOT ( PERMITTED );
+ #include <ipxe/efi/efi_pxe.h>
+ #include <ipxe/efi/efi_driver.h>
+ #include <ipxe/efi/efi_image.h>
++#include <ipxe/efi/efi_watchdog.h>
+ #include <ipxe/efi/efi_shim.h>
+ #include <ipxe/efi/efi_fdt.h>
+ #include <ipxe/efi/efi_utils.h>
+@@ -374,9 +375,16 @@ static int efi_image_exec ( struct image *image ) {
+ 	 * therefore use the .rwdata field rather than .data.
+ 	 */
+ 	handle = NULL;
+-	if ( ( efirc = bs->LoadImage ( FALSE, efi_image_handle, imgpath,
+-				       exec->rwdata, exec->len,
+-				       &handle ) ) != 0 ) {
++
++	/* Disable the Boot Services watchdog timer since LoadImage() can take
++	 * a long time on some platforms.
++	 */
++	bs->SetWatchdogTimer ( 0, 0, 0, NULL );
++	efi_watchdog_stop();
++	efirc = bs->LoadImage ( FALSE, efi_image_handle, imgpath,
++				 exec->rwdata, exec->len, &handle );
++	efi_watchdog_start();
++	if ( efirc != 0 ) {
+ 		/* Not an EFI image */
+ 		rc = -EEFI_LOAD ( efirc );
+ 		DBGC ( image, "EFIIMAGE %s could not load: %s\n",
+@@ -521,9 +529,16 @@ static int efi_image_probe ( struct image *image ) {
+ 	 * therefore use the .rwdata field rather than .data.
+ 	 */
+ 	handle = NULL;
+-	if ( ( efirc = bs->LoadImage ( FALSE, efi_image_handle, &empty_path,
+-				       image->rwdata, image->len,
+-				       &handle ) ) != 0 ) {
++
++	/* Disable the Boot Services watchdog timer since LoadImage() can take
++	 * a long time on some platforms.
++	 */
++	bs->SetWatchdogTimer ( 0, 0, 0, NULL );
++	efi_watchdog_stop();
++	efirc = bs->LoadImage ( FALSE, efi_image_handle, &empty_path,
++				 image->rwdata, image->len, &handle );
++	efi_watchdog_start();
++	if ( efirc != 0 ) {
+ 		/* Not an EFI image */
+ 		rc = -EEFI_LOAD ( efirc );
+ 		DBGC ( image, "EFIIMAGE %s could not load: %s\n",

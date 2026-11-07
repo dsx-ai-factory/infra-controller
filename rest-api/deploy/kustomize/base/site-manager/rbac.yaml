@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# RBAC for nico-rest-site-manager
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nico-rest-site-manager
+  labels:
+    app: nico-rest-site-manager
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nico-rest-site-manager
+  labels:
+    app: nico-rest-site-manager
+rules:
+  # Access to Site CRDs
+  - apiGroups: ["forge.nvidia.io"]
+    resources: ["sites"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["forge.nvidia.io"]
+    resources: ["sites/status"]
+    verbs: ["get", "update", "patch"]
+  # Access to secrets for TLS
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nico-rest-site-manager
+  labels:
+    app: nico-rest-site-manager
+subjects:
+  - kind: ServiceAccount
+    name: nico-rest-site-manager
+roleRef:
+  kind: Role
+  name: nico-rest-site-manager
+  apiGroup: rbac.authorization.k8s.io
+---
+# ClusterRole for CRD access across namespaces (if needed)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: nico-rest-site-manager
+  labels:
+    app: nico-rest-site-manager
+rules:
+  - apiGroups: ["forge.nvidia.io"]
+    resources: ["sites"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["forge.nvidia.io"]
+    resources: ["sites/status"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: nico-rest-site-manager
+  labels:
+    app: nico-rest-site-manager
+subjects:
+  # A ServiceAccount subject needs an explicit namespace, which the overlay's
+  # namespace transformer rewrites alongside the ServiceAccount itself.
+  - kind: ServiceAccount
+    name: nico-rest-site-manager
+    namespace: nico-rest
+roleRef:
+  kind: ClusterRole
+  name: nico-rest-site-manager
+  apiGroup: rbac.authorization.k8s.io

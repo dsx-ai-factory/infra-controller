@@ -1,0 +1,21 @@
+{
+  "generation": 3,
+  "ready": true,
+  "sources": [
+    {
+      "name": "nico-machine-a-tron-mat-0-bmc-mock",
+      "base_url": "https://nico-machine-a-tron-mat-0-bmc-mock.nico-system.svc.cluster.local:8443",
+      "pod": "mat-0"
+    },
+    {
+      "name": "nico-machine-a-tron-mat-1-bmc-mock",
+      "base_url": "https://nico-machine-a-tron-mat-1-bmc-mock.nico-system.svc.cluster.local:8443",
+      "pod": "mat-1"
+    },
+    {
+      "name": "nico-machine-a-tron-single-bmc-mock",
+      "base_url": "https://nico-machine-a-tron-single-bmc-mock.nico-system.svc.cluster.local:1266",
+      "pod": ""
+    }
+  ]
+}

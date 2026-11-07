@@ -1,0 +1,18 @@
+<div class="action-restart-notification-reminder">
+	This operation will require rebooting the host.
+</div>
+<script>
+	function action_reminder(event) {
+		event.preventDefault();
+		const cell = event.target.closest('td') || event.target.closest('.action-cell');
+		const notification = cell?.querySelector('.action-restart-notification-reminder');
+		if (notification) {
+			notification.style.display = 'inline-block';
+			notification.style.opacity = 1;
+			// Start fade-out after 1.75 seconds
+			setTimeout(() => notification.style.opacity = 0, 1750);
+			// Submit form after 2.4 seconds
+			setTimeout(() => event.target.submit(), 2400);
+		}
+	}
+</script>

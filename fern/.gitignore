@@ -1,0 +1,5 @@
+.fern/
+node_modules/
+openapi/ai_examples_override.yml
+package*.json
+pnpm*.yaml

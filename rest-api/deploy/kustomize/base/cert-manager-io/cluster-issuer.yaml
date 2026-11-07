@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# CA ClusterIssuer using pre-created CA secret
+# Uses the same CA as credsmgr for consistency
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: nico-rest-ca-issuer
+spec:
+  ca:
+    secretName: ca-signing-secret

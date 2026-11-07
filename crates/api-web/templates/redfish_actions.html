@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+
+{% block title %}Redfish Actions{% endblock %}
+
+{% block content %}
+<h1>Redfish Actions</h1>
+
+<p>
+List of pending and applied actions on Forge-managed BMCs.
+Actions are requested through Carbide's gRPC interface and then applied to 
+BMCs with appropriate credentials.
+</p>
+
+<br>
+
+{% if let Some(error) = error %}
+<h3>Error</h3>
+<textarea disabled>{{ error }}</textarea>
+{% endif %}
+
+<details open>
+	<summary>Create Request</summary>
+	<form id="redfish_requester">
+		<div>
+			<label for="ips">Comma-separated List of Machine IPs:</label>
+			<input required type=text id="ip_input" name="ips" placeholder="127.0.0.1, 0.0.0.0"/>
+		</div>
+		<div>
+			<label for="target">Redfish Target Route</label>
+			<input required type=text id="target_input" name="target" placeholder="/redfish/v1/System/Actions/Reset"/>
+		</div>
+		<div>
+			<label for="action">Action Name for Route</label>
+			<input required type=text id="action_input" name="action" placeholder="#System.Action"/>
+		</div>
+		<div>
+			<label for="parameters">Parameters</label>
+			<input required type=text id="parameter_input" name="parameters" value="{}"/>
+		</div>
+		<input required type="submit" value="Request Action">
+	</form>
+</details>
+
+<div style="overflow: scroll;">
+{{ actions|safe }}
+</div>
+
+{% endblock %}
+
+{% block script %}
+
+function fill_search_params(params, key, el_id) {
+	if (params.get(key))
+	  document.getElementById(el_id).value = params.get(key);
+}
+
+// Fill out parameters from URL if they exist.
+window.addEventListener("load", (event) => {
+	const url = new URL(document.URL);
+	const params = new URLSearchParams(url.search);
+	fill_search_params(params, "ips", "ip_input");
+	fill_search_params(params, "target", "target_input");
+	fill_search_params(params, "action", "action_input");
+	let parameters = {};
+	for (const [key, value] of params) {
+	  const split = key.split("parameter.");
+		if (split.length > 1 && split[0] == "") {
+			parameters[split[1]] = value;
+		}
+	}
+	document.getElementById("parameter_input").value = JSON.stringify(parameters);
+});
+
+document.addEventListener("DOMContentLoaded", () => {
+	document.getElementById("redfish_requester").addEventListener("submit", async (event) => {
+		event.preventDefault();
+		const data = new FormData(event.target);
+		console.log(data)
+		const body = JSON.stringify({
+			ips: data.get("ips").split(",").map(ip => ip.trim()),
+			action: data.get("action"),
+			target: data.get("target"),
+			parameters: data.get("parameters")
+		 });
+		const response = await fetch("/admin/redfish-actions/create", {
+			method: "POST",
+			headers: {"Content-Type": "application/json"},
+			body,
+		});
+		if (response.ok) {
+			location.reload();
+			return;
+		}
+		const text = await response.text();
+		event.target.after(
+			create_el("p", {
+				innerText: `Failed to execute POST, status: ${response.status}, text: ${text}.`
+			})
+		);
+	});
+});
+
+{% endblock %}

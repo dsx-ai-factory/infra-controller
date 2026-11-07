@@ -1,0 +1,35 @@
+# =============================================================================
+# operators/dpf/dpucluster.yaml.tmpl — Kamaji-backed DPU cluster control plane
+#
+# Rendered by setup.sh with:
+#   envsubst '${NICO_DPF_DPU_INTERFACE} ${NICO_DPF_DPU_CLUSTER_VIP}'
+# Only the two whitelisted variables are substituted.
+#
+# The DPU cluster runs as a Kamaji TenantControlPlane inside the host cluster;
+# DPU nodes join it through the keepalived VIP below. The VIP must be routable
+# from the DPUs (see the optional MetalLB Service in
+# dpu-cluster-vip-service.yaml.tmpl). virtualRouterID must be unique per host
+# if other keepalived instances run there (docs/manuals/dpf.md §3.3).
+# =============================================================================
+---
+apiVersion: provisioning.dpu.nvidia.com/v1alpha1
+kind: DPUCluster
+metadata:
+  name: carbide-dpf-cluster
+  namespace: dpf-operator-system
+spec:
+  type: kamaji
+  maxNodes: 1000
+  clusterEndpoint:
+    keepalived:
+      # Controller interface where the Kamaji cluster IP is configured.
+      interface: "${NICO_DPF_DPU_INTERFACE}"
+      # External IP used by the Kamaji cluster; must be reachable from DPUs.
+      vip: "${NICO_DPF_DPU_CLUSTER_VIP}"
+      virtualRouterID: 126
+      nodeSelector:
+        # kubeadm labels control-plane nodes with an empty value, but some
+        # environments use "true" — set NICO_DPF_CP_LABEL_VALUE to match.
+        # Verify with:
+        #   kubectl get node <n> -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/control-plane}'
+        node-role.kubernetes.io/control-plane: "${NICO_DPF_CP_LABEL_VALUE}"

@@ -1,0 +1,85 @@
+suite: NVSwitch NICo client certificate generation
+templates:
+  - nvswitch-nico-client-certificate.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: is absent when disabled
+    set:
+      nvSwitchTls.nicoClient.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders the NMX-C client identity by default
+    asserts:
+      - equal:
+          path: spec.secretName
+          value: nvswitch-nico-client-certificate
+      - equal:
+          path: spec.usages
+          value:
+            - digital signature
+            - client auth
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://nico.local/nico-system/sa/nico-nmxc
+      - equal:
+          path: spec.privateKey
+          value:
+            algorithm: ECDSA
+            size: 384
+            rotationPolicy: Always
+      - equal:
+          path: spec.issuerRef
+          value:
+            kind: ClusterIssuer
+            name: vault-nico-issuer
+            group: cert-manager.io
+
+  - it: derives the default identity from the trust domain and namespace
+    release:
+      namespace: forge-system
+    set:
+      global.spiffe.trustDomain: example.local
+    asserts:
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://example.local/forge-system/sa/nico-nmxc
+
+  - it: uses explicit client URI SANs
+    set:
+      nvSwitchTls.nicoClient.uris:
+        - spiffe://switch.local/nico-system/sa/nico-nmxc
+    asserts:
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://switch.local/nico-system/sa/nico-nmxc
+
+  - it: uses the global certificate issuer when nvSwitchTls.issuerRef is empty
+    set:
+      global.certificate.issuerRef.name: my-custom-issuer
+    asserts:
+      - equal:
+          path: spec.issuerRef
+          value:
+            kind: ClusterIssuer
+            name: my-custom-issuer
+            group: cert-manager.io
+
+  - it: uses an explicit nvSwitchTls issuer
+    set:
+      nvSwitchTls.issuerRef:
+        kind: Issuer
+        name: nvswitch-issuer
+        group: cert-manager.io
+    asserts:
+      - equal:
+          path: spec.issuerRef
+          value:
+            kind: Issuer
+            name: nvswitch-issuer
+            group: cert-manager.io

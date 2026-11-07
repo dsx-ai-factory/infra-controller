@@ -1,0 +1,1496 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+use std::collections::HashMap;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use futures::stream::BoxStream;
+use futures::{StreamExt, TryStreamExt};
+use nv_redfish::ServiceRoot;
+use nv_redfish::core::{Bmc, BmcError as _, BmcErrorClass, EntityTypeRef as _};
+use nv_redfish::event_service::{EventDestination, EventStreamPayload, SubscriptionType};
+use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Opts};
+use rand::RngExt;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
+use crate::HealthError;
+use crate::bmc::BmcClient;
+use crate::endpoint::BmcEndpoint;
+use crate::limiter::RateLimiter;
+use crate::metrics::{
+    CollectorRegistry, ComponentKind, MetricsManager, operation_duration_buckets_seconds,
+};
+use crate::sink::{CollectorEvent, DataSink, EventContext};
+
+/// Result of a collector iteration
+#[derive(Debug, Clone)]
+pub struct IterationResult {
+    /// Whether a refresh was triggered (data was fetched vs cached)
+    pub refresh_triggered: bool,
+    /// Number of entities collected, if applicable
+    pub entity_count: Option<usize>,
+    /// Number of partial fetch failures tolerated during the iteration
+    pub fetch_failures: usize,
+}
+
+pub trait PeriodicCollector<B: Bmc>: Send + 'static {
+    type Config: Send + 'static;
+
+    fn new_runner(
+        bmc: Arc<B>,
+        endpoint: Arc<BmcEndpoint>,
+        config: Self::Config,
+    ) -> Result<Self, HealthError>
+    where
+        Self: Sized;
+
+    fn run_iteration(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<IterationResult, HealthError>> + Send;
+
+    /// Returns the type identifier for this collector
+    fn collector_type(&self) -> &'static str;
+
+    fn stop(&mut self) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
+}
+
+pub type EventStream<'a> = BoxStream<'a, Result<CollectorEvent, HealthError>>;
+
+/// Result of opening a streaming collector connection.
+pub enum StreamingConnectResult<'a> {
+    /// The stream is accepted and should be treated as connected.
+    Connected(EventStream<'a>),
+
+    /// The connection failed before it should be marked connected, but the
+    /// collector produced events that still need to reach sinks.
+    Failed {
+        /// Events to emit before surfacing the connection failure.
+        events: Vec<CollectorEvent>,
+
+        /// Error that should drive reconnect/backoff behavior.
+        error: HealthError,
+    },
+}
+
+/// Trait for collectors that maintain a long-lived stream (SSE, gRPC, etc.)
+/// runtime.rs creates the BMC client and injects it, the collector opens the stream and maps payloads to events
+#[async_trait]
+pub trait StreamingCollector<B: Bmc>: Send + 'static {
+    type Config: Send + 'static;
+
+    fn new_runner(
+        bmc: Arc<B>,
+        endpoint: Arc<BmcEndpoint>,
+        config: Self::Config,
+    ) -> Result<Self, HealthError>
+    where
+        Self: Sized;
+
+    /// Open or reopen the streaming connection using the injected BMC.
+    async fn connect(&mut self) -> Result<StreamingConnectResult<'_>, HealthError>;
+
+    /// Called once after each opened stream closes. Must bound its own I/O.
+    async fn disconnect(&mut self, _reason: CloseReason) {}
+
+    fn collector_type(&self) -> &'static str;
+}
+
+/// Why an open stream closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseReason {
+    /// The runtime stopped the collector.
+    Cancelled,
+
+    /// The stream ended or errored.
+    Ended {
+        /// Whether the stream yielded an item.
+        received: bool,
+
+        /// How long the stream was open.
+        connected_for: Duration,
+    },
+}
+
+/// How long a cancelled `connect` may finish so its stream is still released.
+pub(crate) const CANCELLED_CONNECT_GRACE: Duration = Duration::from_secs(5);
+
+pub struct BackoffConfig {
+    pub initial: Duration,
+    pub max: Duration,
+}
+
+impl Default for BackoffConfig {
+    fn default() -> Self {
+        Self {
+            initial: Duration::from_secs(1),
+            max: Duration::from_secs(30),
+        }
+    }
+}
+
+pub struct ExponentialBackoff {
+    initial: Duration,
+    max: Duration,
+    current: Duration,
+}
+
+impl ExponentialBackoff {
+    pub fn new(config: &BackoffConfig) -> Self {
+        Self {
+            initial: config.initial,
+            max: config.max,
+            current: config.initial,
+        }
+    }
+
+    pub fn next_delay(&mut self) -> Duration {
+        let base = self.current;
+        self.current = (self.current * 2).min(self.max);
+        let jitter_ms = rand::rng().random_range(0..base.as_millis().max(1) as u64);
+        base + Duration::from_millis(jitter_ms)
+    }
+
+    pub fn reset(&mut self) {
+        self.current = self.initial;
+    }
+}
+
+type SseStream = Pin<
+    Box<
+        dyn futures::TryStream<
+                Ok = EventStreamPayload,
+                Error = HealthError,
+                Item = Result<EventStreamPayload, HealthError>,
+            > + Send,
+    >,
+>;
+
+pub(crate) enum OpenedDestination<B: Bmc> {
+    Identified(EventDestination<B>),
+
+    /// No new destination of any type appeared.
+    NoneCreated,
+
+    /// A listing failed, or the new destinations hold no single SSE one.
+    Unknown,
+}
+
+pub(crate) enum SseOpenError {
+    /// Reading `ServiceRoot` or `EventService` failed, or there is no `EventService`.
+    Setup(HealthError),
+
+    Open {
+        error: HealthError,
+        class: BmcErrorClass,
+
+        /// Whether the `Subscriptions` listing just before the open succeeded.
+        before_listed: bool,
+    },
+}
+
+impl From<SseOpenError> for HealthError {
+    fn from(error: SseOpenError) -> Self {
+        match error {
+            SseOpenError::Setup(error) | SseOpenError::Open { error, .. } => error,
+        }
+    }
+}
+
+/// Open a Redfish SSE event stream from a BMC.
+pub(crate) async fn open_sse_stream<B: Bmc + 'static>(
+    bmc: Arc<B>,
+) -> Result<(SseStream, OpenedDestination<B>), SseOpenError> {
+    let root = ServiceRoot::new(bmc)
+        .await
+        .map_err(|e| SseOpenError::Setup(HealthError::BmcError(Box::new(e))))?;
+
+    let event_service = root
+        .event_service()
+        .await
+        .map_err(|e| SseOpenError::Setup(HealthError::BmcError(Box::new(e))))?
+        .ok_or_else(|| {
+            SseOpenError::Setup(HealthError::SseNotAvailable(
+                "BMC does not expose an EventService".to_string(),
+            ))
+        })?;
+
+    let before = event_service.subscriptions().await;
+
+    let stream = event_service.events().await.map_err(|e| {
+        let class = match &e {
+            nv_redfish::Error::Bmc(cause) => cause.error_class(),
+            _ => BmcErrorClass::Other,
+        };
+
+        SseOpenError::Open {
+            error: HealthError::BmcError(Box::new(e)),
+            class,
+            before_listed: before.is_ok(),
+        }
+    })?;
+
+    let after = event_service.subscriptions().await;
+
+    let (Ok(before), Ok(after)) = (before, after) else {
+        let stream: SseStream = Box::pin(stream.map_err(|e| HealthError::BmcError(Box::new(e))));
+
+        return Ok((stream, OpenedDestination::Unknown));
+    };
+
+    let mut added = after
+        .into_iter()
+        .filter(|listed| {
+            let id = listed.raw().odata_id().clone();
+
+            before.iter().all(|known| known.raw().odata_id() != &id)
+        })
+        .peekable();
+
+    // Redfish records no owner, so a single new SSE destination is ours on a
+    // best-effort basis; a failed listing or several new ones identify none.
+    let opened = if added.peek().is_none() {
+        OpenedDestination::NoneCreated
+    } else {
+        let mut sse =
+            added.filter(|listed| listed.subscription_type() == Some(SubscriptionType::Sse));
+
+        match (sse.next(), sse.next()) {
+            (Some(destination), None) => OpenedDestination::Identified(destination),
+            _ => OpenedDestination::Unknown,
+        }
+    };
+
+    let stream: SseStream = Box::pin(stream.map_err(|e| HealthError::BmcError(Box::new(e))));
+
+    Ok((stream, opened))
+}
+
+pub struct StreamMetrics {
+    connected: IntGauge,
+    reconnections_total: Counter,
+    items_processed_total: Counter,
+    stream_errors_total: Counter,
+}
+
+impl StreamMetrics {
+    fn new(
+        registry: &prometheus::Registry,
+        prefix: &str,
+        const_labels: HashMap<String, String>,
+    ) -> Result<Self, HealthError> {
+        let connected = IntGauge::with_opts(
+            Opts::new(
+                format!("{prefix}_stream_connected"),
+                "1 while the stream is connected, 0 otherwise",
+            )
+            .const_labels(const_labels.clone()),
+        )?;
+        registry.register(Box::new(connected.clone()))?;
+
+        let reconnections_total = Counter::with_opts(
+            Opts::new(
+                format!("{prefix}_stream_reconnections_total"),
+                "Total reconnection attempts",
+            )
+            .const_labels(const_labels.clone()),
+        )?;
+        registry.register(Box::new(reconnections_total.clone()))?;
+
+        let items_processed_total = Counter::with_opts(
+            Opts::new(
+                format!("{prefix}_stream_items_processed_total"),
+                "Total stream items processed",
+            )
+            .const_labels(const_labels.clone()),
+        )?;
+        registry.register(Box::new(items_processed_total.clone()))?;
+
+        let stream_errors_total = Counter::with_opts(
+            Opts::new(
+                format!("{prefix}_stream_errors_total"),
+                "Total stream errors",
+            )
+            .const_labels(const_labels),
+        )?;
+        registry.register(Box::new(stream_errors_total.clone()))?;
+
+        Ok(Self {
+            connected,
+            reconnections_total,
+            items_processed_total,
+            stream_errors_total,
+        })
+    }
+}
+
+/// Builds collector metric labels and includes `rack_id` only when available.
+/// A uniformly random duration shorter than `interval`, at millisecond
+/// resolution.
+fn random_phase(interval: Duration) -> Duration {
+    let millis = u64::try_from(interval.as_millis()).unwrap_or(u64::MAX);
+    Duration::from_millis(rand::rng().random_range(0..millis.max(1)))
+}
+
+pub(crate) fn collector_metric_labels(
+    collector_type: &str,
+    endpoint_key: String,
+    endpoint: &BmcEndpoint,
+) -> HashMap<String, String> {
+    let mut labels = HashMap::from([
+        ("collector_type".to_string(), collector_type.to_string()),
+        ("endpoint_key".to_string(), endpoint_key),
+    ]);
+
+    if let Some(rack_id) = endpoint.rack_id.as_ref() {
+        labels.insert("rack_id".to_string(), rack_id.to_string());
+    }
+
+    labels
+}
+
+/// RAII guard: increments the passed IntGauge on construction, decrements on drop.
+/// Ensures every exit path from a connected stream (cancel, error, end, reconnect) dec's.
+pub(crate) struct StreamingConnectionGuard(IntGauge);
+
+impl StreamingConnectionGuard {
+    pub(crate) fn inc(gauge: IntGauge) -> Self {
+        gauge.inc();
+        Self(gauge)
+    }
+}
+
+impl Drop for StreamingConnectionGuard {
+    fn drop(&mut self) {
+        self.0.dec();
+    }
+}
+
+pub struct Collector {
+    handle: JoinHandle<()>,
+    cancel_token: CancellationToken,
+}
+
+pub struct CollectorStartContext {
+    pub limiter: Arc<dyn RateLimiter>,
+    pub iteration_interval: Duration,
+    pub collector_registry: Arc<CollectorRegistry>,
+    pub metrics_manager: Arc<MetricsManager>,
+}
+
+pub struct StreamingCollectorStartContext {
+    pub backoff_config: BackoffConfig,
+    pub collector_registry: Arc<CollectorRegistry>,
+}
+
+impl Collector {
+    pub fn start<C: PeriodicCollector<BmcClient>>(
+        endpoint: Arc<BmcEndpoint>,
+        bmc: Arc<BmcClient>,
+        config: C::Config,
+        start_context: CollectorStartContext,
+    ) -> Result<Self, HealthError> {
+        let CollectorStartContext {
+            limiter,
+            iteration_interval,
+            collector_registry,
+            metrics_manager,
+        } = start_context;
+
+        let cancel_token = CancellationToken::new();
+        let cancel_token_clone = cancel_token.clone();
+
+        let mut runner = C::new_runner(bmc, endpoint.clone(), config)?;
+
+        let const_labels =
+            collector_metric_labels(runner.collector_type(), endpoint.key(), &endpoint);
+
+        let registry = collector_registry.registry();
+
+        let iteration_histogram = Histogram::with_opts(
+            HistogramOpts::new(
+                format!(
+                    "{}_collector_iteration_seconds",
+                    collector_registry.prefix()
+                ),
+                "Duration of collector iterations",
+            )
+            .const_labels(const_labels.clone())
+            .buckets(operation_duration_buckets_seconds()),
+        )?;
+        registry.register(Box::new(iteration_histogram.clone()))?;
+
+        let refresh_counter = Counter::with_opts(
+            Opts::new(
+                format!("{}_collector_refresh_total", collector_registry.prefix()),
+                "Number of collector refreshes",
+            )
+            .const_labels(const_labels.clone()),
+        )?;
+        registry.register(Box::new(refresh_counter.clone()))?;
+
+        let entities_gauge = Gauge::with_opts(
+            Opts::new(
+                format!("{}_monitored_entities", collector_registry.prefix()),
+                "Number of entities being monitored",
+            )
+            .const_labels(const_labels.clone()),
+        )?;
+        registry.register(Box::new(entities_gauge.clone()))?;
+
+        let fetch_failures_counter = IntCounter::with_opts(
+            Opts::new(
+                format!(
+                    "{}_collector_fetch_failures_total",
+                    collector_registry.prefix()
+                ),
+                "Number of partial collector fetch failures",
+            )
+            .const_labels(const_labels),
+        )?;
+        registry.register(Box::new(fetch_failures_counter.clone()))?;
+
+        let component_metrics = metrics_manager.component_metrics();
+
+        let handle = tokio::spawn(async move {
+            let collector_type = runner.collector_type();
+            let _collector_registry = collector_registry;
+            // The first iteration runs at once; the sleep after it is a random
+            // part of the interval, so collectors started together do not keep
+            // iterating together.
+            let mut next_sleep = random_phase(iteration_interval);
+            loop {
+                tokio::select! {
+                    _ = cancel_token_clone.cancelled() => {
+                        tracing::info!(
+                            endpoint = ?endpoint.addr,
+                            rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                            "collector cancelled"
+                        );
+
+                        runner.stop().await;
+                        break;
+                    }
+                    _ = async {
+                        limiter.acquire().await;
+
+                        let start = Instant::now();
+                        let iteration_result = runner.run_iteration().await;
+                        let duration = start.elapsed();
+
+                        iteration_histogram.observe(duration.as_secs_f64());
+                        component_metrics.record_operation(
+                            ComponentKind::Collector,
+                            collector_type,
+                            duration,
+                            iteration_result.is_ok(),
+                        );
+
+                        match iteration_result {
+                            Ok(result) => {
+                                if result.refresh_triggered {
+                                    refresh_counter.inc();
+                                }
+
+                                if let Some(entity_count) = result.entity_count {
+                                    entities_gauge.set(entity_count as f64);
+                                }
+
+                                if result.fetch_failures > 0 {
+                                    let fetch_failures = result.fetch_failures as u64;
+                                    fetch_failures_counter.inc_by(fetch_failures);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    error = ?e,
+                                    endpoint = ?endpoint.addr,
+                                    collector_type = collector_type,
+                                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                                    "Error during collector iteration"
+                                );
+                            }
+                        }
+
+                        tokio::time::sleep(next_sleep).await;
+                        next_sleep = iteration_interval;
+                    } => {
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            handle,
+            cancel_token,
+        })
+    }
+
+    /// Starts a streaming collector and reports failures to the caller.
+    ///
+    /// The callback receives `Err` when connection establishment fails and
+    /// `Ok(connected_for)` when an accepted stream ends or returns an error.
+    /// Cancellation does not invoke the callback. Returning `false` stops the
+    /// collector.
+    pub fn start_streaming<S, F>(
+        endpoint: Arc<BmcEndpoint>,
+        bmc: Arc<BmcClient>,
+        config: S::Config,
+        data_sink: Arc<dyn DataSink>,
+        start_context: StreamingCollectorStartContext,
+        mut on_stream_failure: F,
+    ) -> Result<Self, HealthError>
+    where
+        S: StreamingCollector<BmcClient>,
+        F: FnMut(Result<Duration, &HealthError>) -> bool + Send + 'static,
+    {
+        let StreamingCollectorStartContext {
+            backoff_config,
+            collector_registry,
+        } = start_context;
+
+        let cancel_token = CancellationToken::new();
+        let cancel_clone = cancel_token.clone();
+
+        let mut collector = S::new_runner(Arc::clone(&bmc), endpoint.clone(), config)?;
+        let event_context = EventContext::from_endpoint(&endpoint, collector.collector_type());
+
+        let const_labels =
+            collector_metric_labels(collector.collector_type(), endpoint.key(), &endpoint);
+
+        let registry = collector_registry.registry();
+        let metrics = StreamMetrics::new(registry, collector_registry.prefix(), const_labels)?;
+
+        let handle = tokio::spawn(async move {
+            let collector_type = collector.collector_type();
+            let _collector_registry = collector_registry;
+            let mut backoff = ExponentialBackoff::new(&backoff_config);
+
+            loop {
+                tracing::info!(
+                    collector_type,
+                    endpoint = ?endpoint.addr,
+                    rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                    "streaming collector connecting"
+                );
+
+                // The grace below would otherwise start an attempt cancellation preempted.
+                if cancel_clone.is_cancelled() {
+                    return;
+                }
+
+                let closed = {
+                    let mut connect = collector.connect();
+
+                    let Some(connected) = cancel_clone.run_until_cancelled(&mut connect).await
+                    else {
+                        // The open may already have created a destination on the BMC.
+                        let opened = matches!(
+                            tokio::time::timeout(CANCELLED_CONNECT_GRACE, connect).await,
+                            Ok(Ok(StreamingConnectResult::Connected(_)))
+                        );
+
+                        if opened {
+                            collector.disconnect(CloseReason::Cancelled).await;
+                        }
+
+                        return;
+                    };
+
+                    match connected {
+                        Err(e) => {
+                            metrics.reconnections_total.inc();
+                            tracing::error!(
+                                error = ?e,
+                                collector_type,
+                                endpoint = ?endpoint.addr,
+                                rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                                "streaming collector connection failed"
+                            );
+
+                            if !on_stream_failure(Err(&e)) {
+                                return;
+                            }
+
+                            None
+                        }
+                        Ok(StreamingConnectResult::Failed { events, error }) => {
+                            metrics.reconnections_total.inc();
+
+                            for event in events {
+                                metrics.items_processed_total.inc();
+                                data_sink.handle_event(&event_context, &event);
+                            }
+
+                            tracing::error!(
+                                error = ?error,
+                                collector_type,
+                                endpoint = ?endpoint.addr,
+                                rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                                "streaming collector connection failed"
+                            );
+
+                            if !on_stream_failure(Err(&error)) {
+                                return;
+                            }
+
+                            None
+                        }
+                        Ok(StreamingConnectResult::Connected(mut stream)) => {
+                            // the guard lives exactly as long as we hold an open stream; Drop
+                            // handles dec for every exit path (shutdown, error, stream end).
+                            let _conn_guard =
+                                StreamingConnectionGuard::inc(metrics.connected.clone());
+
+                            let connected_at = Instant::now();
+                            let mut received = false;
+
+                            tracing::info!(
+                                collector_type,
+                                endpoint = ?endpoint.addr,
+                                rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                                "streaming collector connected"
+                            );
+
+                            let cancelled = loop {
+                                let Some(item) =
+                                    cancel_clone.run_until_cancelled(stream.next()).await
+                                else {
+                                    break true;
+                                };
+
+                                match item {
+                                    Some(Ok(event)) => {
+                                        received = true;
+                                        metrics.items_processed_total.inc();
+                                        data_sink.handle_event(&event_context, &event);
+                                    }
+                                    Some(Err(e)) => {
+                                        metrics.stream_errors_total.inc();
+                                        metrics.reconnections_total.inc();
+                                        tracing::error!(
+                                            error = ?e,
+                                            collector_type,
+                                            endpoint = ?endpoint.addr,
+                                            rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                                            "streaming collector stream error, reconnecting"
+                                        );
+
+                                        break false;
+                                    }
+                                    None => {
+                                        tracing::info!(
+                                            collector_type,
+                                            endpoint = ?endpoint.addr,
+                                            rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                                            "streaming collector stream ended, reconnecting"
+                                        );
+
+                                        break false;
+                                    }
+                                }
+                            };
+
+                            Some(if cancelled {
+                                CloseReason::Cancelled
+                            } else {
+                                CloseReason::Ended {
+                                    received,
+                                    connected_for: connected_at.elapsed(),
+                                }
+                            })
+                        }
+                    }
+                };
+
+                if let Some(reason) = closed {
+                    collector.disconnect(reason).await;
+
+                    let CloseReason::Ended {
+                        received,
+                        connected_for,
+                    } = reason
+                    else {
+                        tracing::info!(
+                            collector_type,
+                            endpoint = ?endpoint.addr,
+                            rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
+                            "streaming collector shutting down"
+                        );
+
+                        return;
+                    };
+
+                    if !on_stream_failure(Ok(connected_for)) {
+                        return;
+                    }
+
+                    // A stream that delivered data, or stayed up a full backoff
+                    // period, was healthy; one that only connected was not.
+                    if received || connected_for >= backoff_config.max {
+                        backoff.reset();
+                    }
+                }
+
+                let delay = backoff.next_delay();
+                if cancel_clone
+                    .run_until_cancelled(tokio::time::sleep(delay))
+                    .await
+                    .is_none()
+                {
+                    return;
+                }
+            }
+        });
+
+        Ok(Self {
+            handle,
+            cancel_token,
+        })
+    }
+
+    /// spawn helper for streaming collectors that don't fit `StreamingCollector`
+    /// (e.g. gNMI bidi subscribe with in-loop multiplexing). The closure gets a
+    /// CancellationToken and should return once it's cancelled.
+    pub fn spawn_task<F, Fut>(task_fn: F) -> Self
+    where
+        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let cancel_token = CancellationToken::new();
+        let cancel_clone = cancel_token.clone();
+        let handle = tokio::spawn(task_fn(cancel_clone));
+        Self {
+            handle,
+            cancel_token,
+        }
+    }
+
+    pub(crate) async fn finished(&mut self) {
+        let _ = (&mut self.handle).await;
+    }
+
+    pub async fn stop(self) {
+        self.cancel_token.cancel();
+        let _ = self.handle.await;
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.handle.is_finished()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use carbide_uuid::rack::RackId;
+
+    use super::*;
+    use crate::endpoint::test_support::{mac, test_endpoint};
+    use crate::metrics::MetricsManager;
+    use crate::sink::{LogRecord, LogSeverity};
+
+    #[derive(Default)]
+    struct CountingSink(AtomicUsize);
+
+    impl CountingSink {
+        fn log_count(&self) -> usize {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    impl DataSink for CountingSink {
+        fn sink_type(&self) -> &'static str {
+            "counting_sink"
+        }
+
+        fn try_handle_event(
+            &self,
+            _context: &EventContext,
+            event: &CollectorEvent,
+        ) -> Result<(), crate::HealthError> {
+            if matches!(event, CollectorEvent::Log(_)) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn collector_metric_labels_include_only_available_rack_id() {
+        struct TestCase {
+            name: &'static str,
+            rack_id: Option<RackId>,
+            expected_rack_id: Option<&'static str>,
+        }
+
+        let cases = [
+            TestCase {
+                name: "rack identity is available",
+                rack_id: Some(RackId::new("RACK_1")),
+                expected_rack_id: Some("RACK_1"),
+            },
+            TestCase {
+                name: "rack identity is unavailable",
+                rack_id: None,
+                expected_rack_id: None,
+            },
+        ];
+
+        for case in cases {
+            let mut endpoint = test_endpoint(mac("00:11:22:33:44:55"));
+            endpoint.rack_id = case.rack_id;
+
+            let labels = collector_metric_labels("test_collector", endpoint.key(), &endpoint);
+
+            assert_eq!(
+                labels.get("rack_id").map(String::as_str),
+                case.expected_rack_id,
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    struct TestStreamingCollector;
+
+    #[async_trait]
+    impl StreamingCollector<BmcClient> for TestStreamingCollector {
+        type Config = ();
+
+        fn new_runner(
+            _bmc: Arc<BmcClient>,
+            _endpoint: Arc<BmcEndpoint>,
+            _config: Self::Config,
+        ) -> Result<Self, HealthError> {
+            Ok(Self)
+        }
+
+        async fn connect(&mut self) -> Result<StreamingConnectResult<'_>, HealthError> {
+            let event = CollectorEvent::Log(Box::new(LogRecord {
+                body: "pre-connected rejection".to_string(),
+                severity: LogSeverity::Error,
+                attributes: Vec::new(),
+                diagnostic_record: None,
+            }));
+
+            Ok(StreamingConnectResult::Failed {
+                events: vec![event],
+                error: HealthError::GenericError("pre-connected failure".to_string()),
+            })
+        }
+
+        fn collector_type(&self) -> &'static str {
+            "test_streaming_collector"
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum StreamBehavior {
+        End,
+        EventThenEnd,
+        Error,
+        Pending,
+        PendingAfter(Duration),
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum SessionStep {
+        Opened,
+        Cancelled,
+        Ended { received: bool },
+    }
+
+    struct SessionStreamingCollector {
+        behaviors: VecDeque<StreamBehavior>,
+        steps: Arc<std::sync::Mutex<Vec<SessionStep>>>,
+    }
+
+    #[async_trait]
+    impl StreamingCollector<BmcClient> for SessionStreamingCollector {
+        type Config = (Vec<StreamBehavior>, Arc<std::sync::Mutex<Vec<SessionStep>>>);
+
+        fn new_runner(
+            _bmc: Arc<BmcClient>,
+            _endpoint: Arc<BmcEndpoint>,
+            (behaviors, steps): Self::Config,
+        ) -> Result<Self, HealthError> {
+            Ok(Self {
+                behaviors: behaviors.into(),
+                steps,
+            })
+        }
+
+        async fn connect(&mut self) -> Result<StreamingConnectResult<'_>, HealthError> {
+            self.steps.lock().unwrap().push(SessionStep::Opened);
+
+            let behavior = self
+                .behaviors
+                .pop_front()
+                .unwrap_or(StreamBehavior::Pending);
+
+            if let StreamBehavior::PendingAfter(delay) = behavior {
+                tokio::time::sleep(delay).await;
+            }
+
+            let stream: EventStream<'_> = match behavior {
+                StreamBehavior::End => Box::pin(futures::stream::empty()),
+                StreamBehavior::EventThenEnd => Box::pin(futures::stream::once(async {
+                    Ok(CollectorEvent::Log(Box::new(LogRecord {
+                        body: "event".to_string(),
+                        severity: LogSeverity::Info,
+                        attributes: Vec::new(),
+                        diagnostic_record: None,
+                    })))
+                })),
+                StreamBehavior::Error => Box::pin(futures::stream::once(async {
+                    Err(HealthError::GenericError("stream failed".to_string()))
+                })),
+                StreamBehavior::Pending | StreamBehavior::PendingAfter(_) => {
+                    Box::pin(futures::stream::pending())
+                }
+            };
+
+            Ok(StreamingConnectResult::Connected(stream))
+        }
+
+        async fn disconnect(&mut self, reason: CloseReason) {
+            let step = match reason {
+                CloseReason::Cancelled => SessionStep::Cancelled,
+                CloseReason::Ended { received, .. } => SessionStep::Ended { received },
+            };
+
+            self.steps.lock().unwrap().push(step);
+        }
+
+        fn collector_type(&self) -> &'static str {
+            "session_streaming_collector"
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_collector_emits_pre_connected_failure_events_without_connected_callback()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let endpoint = Arc::new(test_endpoint(mac("00:11:22:33:44:66")));
+        let bmc = Arc::clone(endpoint.bmc());
+        let metrics_manager = MetricsManager::new("test_streaming_runtime_preconnect_failure")?;
+
+        let collector_registry = Arc::new(metrics_manager.create_collector_registry(
+            "streaming_collector_preconnect_failure_test".to_string(),
+            "test_streaming_runtime_preconnect_failure",
+        )?);
+
+        let sink = Arc::new(CountingSink::default());
+        let data_sink: Arc<dyn DataSink> = sink.clone();
+        let (callback_tx, callback_rx) = tokio::sync::oneshot::channel();
+        let mut callback_tx = Some(callback_tx);
+
+        let collector = Collector::start_streaming::<TestStreamingCollector, _>(
+            endpoint,
+            bmc,
+            (),
+            data_sink,
+            StreamingCollectorStartContext {
+                backoff_config: BackoffConfig::default(),
+                collector_registry,
+            },
+            move |result| {
+                if let Some(tx) = callback_tx.take() {
+                    let _ = tx.send(result.is_ok());
+                }
+
+                false
+            },
+        )?;
+
+        let connected_callback =
+            tokio::time::timeout(Duration::from_secs(1), callback_rx).await??;
+
+        collector.stop().await;
+
+        assert!(!connected_callback);
+        assert_eq!(sink.log_count(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streaming_collector_disconnects_after_every_stream_and_reports_all_but_cancellation()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let endpoint = Arc::new(test_endpoint(mac("00:11:22:33:44:77")));
+        let bmc = Arc::clone(endpoint.bmc());
+        let metrics_manager = MetricsManager::new("test_streaming_runtime_stream_lifetime")?;
+
+        let collector_registry = Arc::new(metrics_manager.create_collector_registry(
+            "streaming_collector_stream_lifetime_test".to_string(),
+            "test_streaming_runtime_stream_lifetime",
+        )?);
+
+        let data_sink: Arc<dyn DataSink> = Arc::new(CountingSink::default());
+        let (callback_tx, mut callback_rx) = tokio::sync::mpsc::unbounded_channel();
+        let steps = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let collector = Collector::start_streaming::<SessionStreamingCollector, _>(
+            endpoint,
+            bmc,
+            (
+                vec![
+                    StreamBehavior::End,
+                    StreamBehavior::Error,
+                    StreamBehavior::EventThenEnd,
+                    StreamBehavior::Pending,
+                ],
+                Arc::clone(&steps),
+            ),
+            data_sink,
+            StreamingCollectorStartContext {
+                backoff_config: BackoffConfig {
+                    initial: Duration::ZERO,
+                    max: Duration::ZERO,
+                },
+                collector_registry,
+            },
+            move |result| callback_tx.send(result.is_ok()).is_ok(),
+        )?;
+
+        let callbacks = tokio::time::timeout(Duration::from_secs(1), async {
+            let callbacks = [
+                callback_rx.recv().await,
+                callback_rx.recv().await,
+                callback_rx.recv().await,
+            ];
+
+            // Cancel only once the pending stream is open.
+            while steps.lock().unwrap().len() < 7 {
+                tokio::task::yield_now().await;
+            }
+
+            callbacks
+        })
+        .await?;
+
+        collector.stop().await;
+
+        assert_eq!(callbacks, [Some(true), Some(true), Some(true)]);
+        assert!(callback_rx.try_recv().is_err());
+
+        let ended = SessionStep::Ended { received: false };
+
+        assert_eq!(
+            *steps.lock().unwrap(),
+            [
+                SessionStep::Opened,
+                ended,
+                SessionStep::Opened,
+                ended,
+                SessionStep::Opened,
+                SessionStep::Ended { received: true },
+                SessionStep::Opened,
+                SessionStep::Cancelled,
+            ],
+            "each stream must disconnect once after it closes"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_connect_disconnects_only_if_it_started_and_opens_within_the_grace()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let cases = [
+            (
+                "opens within the grace",
+                true,
+                CANCELLED_CONNECT_GRACE / 5,
+                vec![SessionStep::Opened, SessionStep::Cancelled],
+            ),
+            (
+                "still opening when the grace ends",
+                true,
+                CANCELLED_CONNECT_GRACE * 2,
+                vec![SessionStep::Opened],
+            ),
+            (
+                "stopped before connecting",
+                false,
+                CANCELLED_CONNECT_GRACE / 5,
+                vec![],
+            ),
+        ];
+
+        for (name, started, connect_takes, expected) in cases {
+            let endpoint = Arc::new(test_endpoint(mac("00:11:22:33:44:88")));
+            let bmc = Arc::clone(endpoint.bmc());
+            let metrics_manager = MetricsManager::new("test_streaming_runtime_cancelled_connect")?;
+
+            let collector_registry = Arc::new(metrics_manager.create_collector_registry(
+                "streaming_collector_cancelled_connect_test".to_string(),
+                "test_streaming_runtime_cancelled_connect",
+            )?);
+
+            let data_sink: Arc<dyn DataSink> = Arc::new(CountingSink::default());
+            let steps = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+            let collector = Collector::start_streaming::<SessionStreamingCollector, _>(
+                endpoint,
+                bmc,
+                (
+                    vec![StreamBehavior::PendingAfter(connect_takes)],
+                    Arc::clone(&steps),
+                ),
+                data_sink,
+                StreamingCollectorStartContext {
+                    backoff_config: BackoffConfig::default(),
+                    collector_registry,
+                },
+                |_| true,
+            )?;
+
+            while started && steps.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+
+            let stopping = tokio::time::Instant::now();
+            collector.stop().await;
+
+            assert!(
+                stopping.elapsed() <= CANCELLED_CONNECT_GRACE,
+                "{name}: stop took {:?}",
+                stopping.elapsed()
+            );
+
+            assert_eq!(*steps.lock().unwrap(), expected, "{name}");
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_sse_stream_identifies_only_a_single_new_sse_destination()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use axum::extract::Request;
+        use axum::http::StatusCode;
+        use axum::middleware::{self, Next};
+        use axum::response::IntoResponse;
+        use bmc_mock::test_support::{dell_poweredge_r750_router_with_event_limits, serve_https};
+        use bmc_mock::{EventServiceConfig, EventServiceLimits};
+        use serde_json::Value;
+
+        use crate::endpoint::test_support::endpoint_with_creds;
+        use crate::endpoint::{BmcAddr, BmcCredentials};
+
+        const SUBSCRIPTIONS: &str = "/redfish/v1/EventService/Subscriptions";
+
+        #[derive(Clone, Copy)]
+        enum Listing {
+            AsServed,
+            Empty,
+            Failing,
+            TypeOmitted,
+            TypeNull,
+        }
+
+        #[derive(Debug, PartialEq)]
+        enum Opened {
+            Identified,
+            NoneCreated,
+            Unknown,
+        }
+
+        let cases = [
+            (
+                "the open adds one SSE destination",
+                Listing::AsServed,
+                Opened::Identified,
+            ),
+            (
+                "the listing is unchanged",
+                Listing::Empty,
+                Opened::NoneCreated,
+            ),
+            ("the listing fails", Listing::Failing, Opened::Unknown),
+            (
+                "the new destination omits SubscriptionType",
+                Listing::TypeOmitted,
+                Opened::Unknown,
+            ),
+            (
+                "the new destination has a null SubscriptionType",
+                Listing::TypeNull,
+                Opened::Unknown,
+            ),
+        ];
+
+        for (name, listing, expected) in cases {
+            let limits = EventServiceConfig::try_from(EventServiceLimits::default())?;
+            let (router, _state) = dell_poweredge_r750_router_with_event_limits(limits);
+
+            let router = router.layer(middleware::from_fn(
+                move |request: Request, next: Next| async move {
+                    let path = request.uri().path().to_owned();
+                    let response = next.run(request).await;
+                    let member = path.starts_with(&format!("{SUBSCRIPTIONS}/"));
+
+                    match listing {
+                        Listing::Failing if path == SUBSCRIPTIONS => {
+                            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                        }
+                        Listing::Empty if path == SUBSCRIPTIONS => {}
+                        Listing::TypeOmitted | Listing::TypeNull if member => {}
+                        _ => return response,
+                    }
+
+                    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                        .await
+                        .expect("buffered body");
+
+                    let mut body: Value = serde_json::from_slice(&bytes).expect("JSON body");
+
+                    match listing {
+                        Listing::Empty => {
+                            body["Members"] = Value::Array(Vec::new());
+                            body["Members@odata.count"] = Value::from(0);
+                        }
+                        Listing::TypeOmitted => {
+                            body.as_object_mut()
+                                .expect("JSON object")
+                                .remove("SubscriptionType");
+                        }
+                        Listing::TypeNull => body["SubscriptionType"] = Value::Null,
+                        Listing::AsServed | Listing::Failing => {}
+                    }
+
+                    axum::Json(body).into_response()
+                },
+            ));
+
+            let (mut server, base_url) = serve_https("health-sse-open", router);
+
+            let endpoint = endpoint_with_creds(
+                BmcAddr {
+                    ip: "127.0.0.1".parse().unwrap(),
+                    port: base_url.port(),
+                    mac: None,
+                },
+                BmcCredentials::SessionToken {
+                    token: "fixture-token".into(),
+                },
+                None,
+                None,
+            );
+
+            let (stream, opened) = tokio::time::timeout(
+                Duration::from_secs(10),
+                open_sse_stream(Arc::clone(endpoint.bmc())),
+            )
+            .await?
+            .map_err(HealthError::from)?;
+
+            let opened = match opened {
+                OpenedDestination::Identified(destination) => {
+                    assert_eq!(
+                        destination.subscription_type(),
+                        Some(SubscriptionType::Sse),
+                        "{name}"
+                    );
+
+                    Opened::Identified
+                }
+                OpenedDestination::NoneCreated => Opened::NoneCreated,
+                OpenedDestination::Unknown => Opened::Unknown,
+            };
+
+            drop(stream);
+            server.stop().await.expect("server stops");
+
+            assert_eq!(opened, expected, "{name}");
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn streaming_backoff_grows_until_a_stream_yields_data()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let endpoint = Arc::new(test_endpoint(mac("00:11:22:33:44:88")));
+        let bmc = Arc::clone(endpoint.bmc());
+        let metrics_manager = MetricsManager::new("test_streaming_runtime_backoff")?;
+
+        let collector_registry = Arc::new(metrics_manager.create_collector_registry(
+            "streaming_collector_backoff_test".to_string(),
+            "test_streaming_runtime_backoff",
+        )?);
+
+        let data_sink: Arc<dyn DataSink> = Arc::new(CountingSink::default());
+        let (ended_tx, mut ended_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let collector = Collector::start_streaming::<SessionStreamingCollector, _>(
+            endpoint,
+            bmc,
+            (
+                vec![
+                    StreamBehavior::End,
+                    StreamBehavior::End,
+                    StreamBehavior::EventThenEnd,
+                    StreamBehavior::End,
+                ],
+                Arc::default(),
+            ),
+            data_sink,
+            StreamingCollectorStartContext {
+                backoff_config: BackoffConfig {
+                    initial: Duration::from_secs(1),
+                    max: Duration::from_secs(60),
+                },
+                collector_registry,
+            },
+            move |_| ended_tx.send(tokio::time::Instant::now()).is_ok(),
+        )?;
+
+        let mut ended = Vec::new();
+
+        for _ in 0..4 {
+            ended.push(ended_rx.recv().await.ok_or("the collector stopped early")?);
+        }
+
+        collector.stop().await;
+
+        let delays: Vec<Duration> = ended.windows(2).map(|pair| pair[1] - pair[0]).collect();
+
+        // Each delay is its base plus jitter below the base: [1s, 2s), [2s, 4s), then [1s, 2s).
+        assert!(delays[0] < Duration::from_secs(2), "{delays:?}");
+
+        assert!(
+            delays[1] >= Duration::from_secs(2),
+            "an empty stream must not reset the backoff: {delays:?}"
+        );
+
+        assert!(
+            delays[2] < Duration::from_secs(2),
+            "a stream that yields data must reset the backoff: {delays:?}"
+        );
+
+        Ok(())
+    }
+
+    /// Records the time of every iteration.
+    struct TimedCollector {
+        runs: Arc<std::sync::Mutex<Vec<tokio::time::Instant>>>,
+    }
+
+    impl PeriodicCollector<BmcClient> for TimedCollector {
+        type Config = Arc<std::sync::Mutex<Vec<tokio::time::Instant>>>;
+
+        fn new_runner(
+            _bmc: Arc<BmcClient>,
+            _endpoint: Arc<BmcEndpoint>,
+            runs: Self::Config,
+        ) -> Result<Self, HealthError> {
+            Ok(Self { runs })
+        }
+
+        async fn run_iteration(&mut self) -> Result<IterationResult, HealthError> {
+            self.runs.lock().unwrap().push(tokio::time::Instant::now());
+            Ok(IterationResult {
+                refresh_triggered: false,
+                entity_count: None,
+                fetch_failures: 0,
+            })
+        }
+
+        fn collector_type(&self) -> &'static str {
+            "timed_test_collector"
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn collectors_started_together_spread_after_their_first_iteration()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let interval = Duration::from_secs(60);
+        let metrics_manager = Arc::new(MetricsManager::new("test_periodic_phase")?);
+        let started = tokio::time::Instant::now();
+        let mut collectors = Vec::new();
+        let mut runs = Vec::new();
+        for index in 0..20_u8 {
+            let endpoint = Arc::new(test_endpoint(mac(&format!("00:11:22:33:44:{index:02x}"))));
+            let times = Arc::new(std::sync::Mutex::new(Vec::new()));
+            collectors.push(Collector::start::<TimedCollector>(
+                endpoint.clone(),
+                Arc::clone(endpoint.bmc()),
+                times.clone(),
+                CollectorStartContext {
+                    limiter: Arc::new(crate::limiter::NoopLimiter),
+                    iteration_interval: interval,
+                    collector_registry: Arc::new(metrics_manager.create_collector_registry(
+                        format!("periodic_phase_test_{index}"),
+                        "test_periodic_phase",
+                    )?),
+                    metrics_manager: metrics_manager.clone(),
+                },
+            )?);
+            runs.push(times);
+        }
+
+        tokio::time::sleep(interval * 2).await;
+        for collector in collectors {
+            collector.stop().await;
+        }
+
+        let offsets: Vec<Vec<Duration>> = runs
+            .iter()
+            .map(|runs| {
+                runs.lock()
+                    .unwrap()
+                    .iter()
+                    .map(|run| *run - started)
+                    .collect()
+            })
+            .collect();
+        for runs in &offsets {
+            assert_eq!(
+                runs[0],
+                Duration::ZERO,
+                "first iteration runs at once: {runs:?}"
+            );
+            assert!(
+                runs[1] < interval,
+                "second iteration within the first interval: {runs:?}"
+            );
+            assert_eq!(
+                runs[2] - runs[1],
+                interval,
+                "later iterations keep the interval: {runs:?}"
+            );
+        }
+        let second_runs: std::collections::HashSet<Duration> =
+            offsets.iter().map(|runs| runs[1]).collect();
+        assert!(
+            second_runs.len() > 1,
+            "second iterations spread out: {second_runs:?}"
+        );
+
+        Ok(())
+    }
+}

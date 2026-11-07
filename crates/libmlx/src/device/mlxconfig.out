@@ -1,0 +1,98 @@
+<Devices>
+    <Device pciName="0000:cc:00.0" type="BlueField3" psid="MT_0000001010" partNumber="900-9D3B4-00EN-E_Ax">
+      <Versions>
+        <FW current="32.42.1000" available="N/A"/>
+        <PXE current="3.7.0500" available="N/A"/>
+        <UEFI current="14.35.0015" available="N/A"/>
+        <UEFI_Virtio_blk current="22.4.0013" available="N/A"/>
+        <UEFI_Virtio_net current="21.4.0013" available="N/A"/>
+      </Versions>
+      <MACs Base_Mac="c470bd31eb72" />
+      <Status>No matching image found</Status>
+      <Description>NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC; 400GbE / NDR IB (default mode); Single-port QSFP112; PCIe Gen5.0 x16; 8 Arm cores; 16GB on-board DDR; integrated BMC; Crypto Enabled</Description>
+    </Device>
+    <Device pciName="0000:5e:00.0" type="BlueField3" psid="MT_0000001010" partNumber="900-9D3B4-00EN-E_Ax">
+      <Versions>
+        <FW current="32.42.1000" available="N/A"/>
+        <PXE current="3.7.0500" available="N/A"/>
+        <UEFI current="14.35.0015" available="N/A"/>
+        <UEFI_Virtio_blk current="22.4.0013" available="N/A"/>
+        <UEFI_Virtio_net current="21.4.0013" available="N/A"/>
+      </Versions>
+      <MACs Base_Mac="c470bd31eaac" />
+      <Status>No matching image found</Status>
+      <Description>NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC; 400GbE / NDR IB (default mode); Single-port QSFP112; PCIe Gen5.0 x16; 8 Arm cores; 16GB on-board DDR; integrated BMC; Crypto Enabled</Description>
+    </Device>
+    <Device pciName="0000:dc:00.0" type="BlueField3" psid="MT_0000001010" partNumber="900-9D3B4-00EN-E_Ax">
+      <Versions>
+        <FW current="32.42.1000" available="N/A"/>
+        <PXE current="3.7.0500" available="N/A"/>
+        <UEFI current="14.35.0015" available="N/A"/>
+        <UEFI_Virtio_blk current="22.4.0013" available="N/A"/>
+        <UEFI_Virtio_net current="21.4.0013" available="N/A"/>
+      </Versions>
+      <MACs Base_Mac="c470bd31edae" />
+      <Status>No matching image found</Status>
+      <Description>NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC; 400GbE / NDR IB (default mode); Single-port QSFP112; PCIe Gen5.0 x16; 8 Arm cores; 16GB on-board DDR; integrated BMC; Crypto Enabled</Description>
+    </Device>
+    <Device pciName="0000:9c:00.0" type="BlueField3" psid="MT_0000001010" partNumber="900-9D3B4-00EN-E_Ax">
+      <Versions>
+        <FW current="32.42.1000" available="N/A"/>
+        <PXE current="3.7.0500" available="N/A"/>
+        <UEFI current="14.35.0015" available="N/A"/>
+        <UEFI_Virtio_blk current="22.4.0013" available="N/A"/>
+        <UEFI_Virtio_net current="21.4.0013" available="N/A"/>
+      </Versions>
+      <MACs Base_Mac="c470bd31ed56" />
+      <Status>No matching image found</Status>
+      <Description>NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC; 400GbE / NDR IB (default mode); Single-port QSFP112; PCIe Gen5.0 x16; 8 Arm cores; 16GB on-board DDR; integrated BMC; Crypto Enabled</Description>
+    </Device>
+    <Device pciName="0000:1a:00.0" type="BlueField3" psid="MT_0000001010" partNumber="900-9D3B4-00EN-E_Ax">
+      <Versions>
+        <FW current="32.42.1000" available="N/A"/>
+        <PXE current="3.7.0500" available="N/A"/>
+        <UEFI current="14.35.0015" available="N/A"/>
+        <UEFI_Virtio_blk current="22.4.0013" available="N/A"/>
+        <UEFI_Virtio_net current="21.4.0013" available="N/A"/>
+      </Versions>
+      <MACs Base_Mac="c470bd31ea6a" />
+      <Status>No matching image found</Status>
+      <Description>NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC; 400GbE / NDR IB (default mode); Single-port QSFP112; PCIe Gen5.0 x16; 8 Arm cores; 16GB on-board DDR; integrated BMC; Crypto Enabled</Description>
+    </Device>
+    <Device pciName="0000:bc:00.0" type="BlueField3" psid="MT_0000001010" partNumber="900-9D3B4-00EN-E_Ax">
+      <Versions>
+        <FW current="32.42.1000" available="N/A"/>
+        <PXE current="3.7.0500" available="N/A"/>
+        <UEFI current="14.35.0015" available="N/A"/>
+        <UEFI_Virtio_blk current="22.4.0013" available="N/A"/>
+        <UEFI_Virtio_net current="21.4.0013" available="N/A"/>
+      </Versions>
+      <MACs Base_Mac="c470bd31ea96" />
+      <Status>No matching image found</Status>
+      <Description>NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC; 400GbE / NDR IB (default mode); Single-port QSFP112; PCIe Gen5.0 x16; 8 Arm cores; 16GB on-board DDR; integrated BMC; Crypto Enabled</Description>
+    </Device>
+    <Device pciName="0000:3c:00.0" type="BlueField3" psid="MT_0000001010" partNumber="900-9D3B4-00EN-E_Ax">
+      <Versions>
+        <FW current="32.42.1000" available="N/A"/>
+        <PXE current="3.7.0500" available="N/A"/>
+        <UEFI current="14.35.0015" available="N/A"/>
+        <UEFI_Virtio_blk current="22.4.0013" available="N/A"/>
+        <UEFI_Virtio_net current="21.4.0013" available="N/A"/>
+      </Versions>
+      <MACs Base_Mac="c470bd31eac2" />
+      <Status>No matching image found</Status>
+      <Description>NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC; 400GbE / NDR IB (default mode); Single-port QSFP112; PCIe Gen5.0 x16; 8 Arm cores; 16GB on-board DDR; integrated BMC; Crypto Enabled</Description>
+    </Device>
+    <Device pciName="0000:4d:00.0" type="BlueField3" psid="MT_0000001010" partNumber="900-9D3B4-00EN-E_Ax">
+      <Versions>
+        <FW current="32.42.1000" available="N/A"/>
+        <PXE current="3.7.0500" available="N/A"/>
+        <UEFI current="14.35.0015" available="N/A"/>
+        <UEFI_Virtio_blk current="22.4.0013" available="N/A"/>
+        <UEFI_Virtio_net current="21.4.0013" available="N/A"/>
+      </Versions>
+      <MACs Base_Mac="c470bd31eaee" />
+      <Status>No matching image found</Status>
+      <Description>NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC; 400GbE / NDR IB (default mode); Single-port QSFP112; PCIe Gen5.0 x16; 8 Arm cores; 16GB on-board DDR; integrated BMC; Crypto Enabled</Description>
+    </Device>
+</Devices>

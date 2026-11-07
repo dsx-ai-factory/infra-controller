@@ -1,0 +1,14 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "nico-ssh-console-rs.name" . }}-metrics
+  namespace: {{ include "nico-ssh-console-rs.namespace" . }}
+  labels:
+    {{- include "nico-ssh-console-rs.labels" . | nindent 4 }}
+    app.kubernetes.io/metrics: {{ include "nico-ssh-console-rs.name" . }}
+    app: {{ include "nico-ssh-console-rs.name" . }}
+    prometheus: nico-monitoring
+spec:
+  {{- include "nico-ssh-console-rs.serviceMonitorSpec" (dict "name" (include "nico-ssh-console-rs.name" .) "port" "http" "monitor" .Values.serviceMonitor "namespace" (include "nico-ssh-console-rs.namespace" .)) | nindent 2 }}
+{{- end }}

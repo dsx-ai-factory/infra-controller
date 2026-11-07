@@ -1,0 +1,47 @@
+# `nico-admin-cli redfish get-base-mac-address`
+
+*[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **get-base-mac-address***
+
+## NAME
+
+nico-admin-cli-redfish-get-base-mac-address - Get Base Mac Address (DPU
+only)
+
+## SYNOPSIS
+
+```text
+nico-admin-cli redfish get-base-mac-address [--extended]
+[--sort-by] [-h|--help]
+```
+
+## DESCRIPTION
+
+Get Base Mac Address (DPU only)
+
+## OPTIONS
+
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
+`--sort-by <SORT_BY> [default: primary-id]`
+
+Sort output by specified field
+
+*Possible values:*
+
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
+
+`-h, --help`
+
+Print help (see a summary with -h)
+
+---
+
+**Related:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)

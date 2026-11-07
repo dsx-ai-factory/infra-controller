@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: certificate dnsNames and uris configurability
+templates:
+  - certificate.yaml
+release:
+  namespace: nico-rest
+set:
+  # Provided by the nico-rest parent chart at render time; set here so the
+  # subchart's certificate template renders standalone under helm-unittest.
+  global.certificate.issuerRef.name: nico-rest-ca-issuer
+  global.certificate.issuerRef.kind: ClusterIssuer
+  global.certificate.issuerRef.group: cert-manager.io
+tests:
+  - it: generates dnsNames (including localhost) by default and emits no uris
+    asserts:
+      - isKind:
+          of: Certificate
+      - equal:
+          path: spec.dnsNames
+          value:
+            - nico-rest-site-manager
+            - nico-rest-site-manager.nico-rest
+            - nico-rest-site-manager.nico-rest.svc.cluster.local
+            - localhost
+      - notExists:
+          path: spec.uris
+
+  - it: fully overrides the generated dnsNames when certificate.dnsNames is set
+    set:
+      certificate:
+        dnsNames:
+          - site-manager.override.example.com
+          - localhost
+    asserts:
+      - equal:
+          path: spec.dnsNames
+          value:
+            - site-manager.override.example.com
+            - localhost
+
+  - it: emits uris only when certificate.uris is set
+    set:
+      certificate:
+        uris:
+          - spiffe://nico.local/nico-rest/sa/nico-rest-site-manager
+    asserts:
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://nico.local/nico-rest/sa/nico-rest-site-manager

@@ -1,0 +1,18 @@
+# HELP carbide_machine_validation_completed Number of successfully completed machine validation runs
+# TYPE carbide_machine_validation_completed gauge
+carbide_machine_validation_completed 10
+# HELP carbide_machine_validation_failed Number of failed machine validation runs
+# TYPE carbide_machine_validation_failed gauge
+carbide_machine_validation_failed 15
+# HELP carbide_machine_validation_in_progress Number of machine validation runs in progress
+# TYPE carbide_machine_validation_in_progress gauge
+carbide_machine_validation_in_progress 20
+# HELP carbide_machine_validation_oldest_active_age_seconds Age in seconds of the oldest active machine validation run
+# TYPE carbide_machine_validation_oldest_active_age_seconds gauge
+carbide_machine_validation_oldest_active_age_seconds 0
+# HELP carbide_machine_validation_stale_runs_count Number of active machine validation runs considered stale
+# TYPE carbide_machine_validation_stale_runs_count gauge
+carbide_machine_validation_stale_runs_count 0
+# HELP carbide_machine_validation_tests The details of machine validation tests
+# TYPE carbide_machine_validation_tests gauge
+carbide_machine_validation_tests{TestId="forge_Test1",isVerified="true"} 1

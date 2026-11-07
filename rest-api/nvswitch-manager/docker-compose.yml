@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres
+    container_name: nsm_postgres
+    environment:
+      POSTGRES_USER: nsmuser
+      POSTGRES_PASSWORD: nsmpassword
+      POSTGRES_DB: nsmdatabase
+    ports:
+      - "5432:5432"
+    networks:
+      - nsm_network
+
+  vault:
+    image: vault:1.9.3
+    container_name: nsm_vault
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: nsmvaultroot
+      VAULT_LOCAL_CONFIG: >
+        {
+          "backend": {"file": {"path": "/vault/file"}},
+          "listener": {"tcp": {"address": "0.0.0.0:8201", "tls_disable": 1}},
+          "ui": true,
+          "api_addr": "http://127.0.0.1:8201"
+        }
+    ports:
+      - "8201:8201"
+    networks:
+      - nsm_network
+
+networks:
+  nsm_network:
+    driver: bridge

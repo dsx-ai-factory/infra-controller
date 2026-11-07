@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+---
+# Certificate for internode/interservice communication
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: server-interservice-cert
+  namespace: temporal
+spec:
+  secretName: server-interservice-certs
+  duration: 2160h # 90 days
+  renewBefore: 360h # 15 days
+  subject:
+    organizations:
+      - NVIDIA
+  isCA: false
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+    - interservice.server.temporal.local
+    - temporal-frontend
+    - temporal-frontend.temporal
+    - temporal-frontend.temporal.svc
+    - temporal-frontend.temporal.svc.cluster.local
+    - temporal-history
+    - temporal-history.temporal
+    - temporal-history.temporal.svc
+    - temporal-history.temporal.svc.cluster.local
+    - temporal-matching
+    - temporal-matching.temporal
+    - temporal-matching.temporal.svc
+    - temporal-matching.temporal.svc.cluster.local
+    - temporal-worker
+    - temporal-worker.temporal
+    - temporal-worker.temporal.svc
+    - temporal-worker.temporal.svc.cluster.local
+  issuerRef:
+    name: nico-rest-ca-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# Certificate for cloud namespace clients
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: server-cloud-cert
+  namespace: temporal
+spec:
+  secretName: server-cloud-certs
+  duration: 2160h # 90 days
+  renewBefore: 360h # 15 days
+  subject:
+    organizations:
+      - NVIDIA
+  isCA: false
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+    - cloud.server.temporal.local
+    - cloud.temporal-frontend
+    - cloud.temporal-frontend.temporal
+    - cloud.temporal-frontend.temporal.svc.cluster.local
+  issuerRef:
+    name: nico-rest-ca-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# Certificate for site namespace clients
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: server-site-cert
+  namespace: temporal
+spec:
+  secretName: server-site-certs
+  duration: 2160h # 90 days
+  renewBefore: 360h # 15 days
+  subject:
+    organizations:
+      - NVIDIA
+  isCA: false
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+    - site.server.temporal.local
+    - site.temporal-frontend
+    - site.temporal-frontend.temporal
+    - site.temporal-frontend.temporal.svc.cluster.local
+  issuerRef:
+    name: nico-rest-ca-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io

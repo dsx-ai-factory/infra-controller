@@ -1,0 +1,115 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+use std::borrow::Cow;
+
+use nv_redfish_server_core::AdditionalProperties;
+use serde_json::json;
+
+use crate::json::JsonPatch;
+
+/// Defines minimal set of Redfish resource attributes.
+pub(crate) struct Resource<'a> {
+    pub(crate) odata_id: Cow<'a, str>,
+    pub(crate) odata_type: Cow<'a, str>,
+    pub(crate) id: Cow<'a, str>,
+    pub(crate) name: Cow<'a, str>,
+}
+
+impl<'a> Resource<'a> {
+    pub(crate) fn entity_ref(&self) -> serde_json::Value {
+        json!({
+            "@odata.id": self.odata_id
+        })
+    }
+}
+
+impl<'a> AsRef<Resource<'a>> for Resource<'a> {
+    fn as_ref(&self) -> &Self {
+        self
+    }
+}
+
+impl JsonPatch for Resource<'_> {
+    fn json_patch(&self) -> serde_json::Value {
+        json!({
+            "@odata.id": self.odata_id,
+            "@odata.type": self.odata_type,
+            "Id": self.id,
+            "Name": self.name,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Status {
+    Ok,
+    Warning,
+    Critical,
+}
+
+impl Status {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "OK",
+            Self::Warning => "Warning",
+            Self::Critical => "Critical",
+        }
+    }
+
+    pub(super) fn into_json(self) -> serde_json::Value {
+        json!({
+            "State": "Enabled",
+            "Health": self.as_str(),
+        })
+    }
+}
+
+impl From<Status> for super::schema::resource::Health {
+    fn from(value: Status) -> Self {
+        match value {
+            Status::Ok => Self::Ok,
+            Status::Warning => Self::Warning,
+            Status::Critical => Self::Critical,
+        }
+    }
+}
+
+impl From<Status> for super::schema::resource::Status {
+    fn from(value: Status) -> Self {
+        Self::new()
+            .state(super::schema::resource::State::Enabled)
+            .health(value.into())
+    }
+}
+
+impl From<Status> for super::schema::leak_detector::DetectorState {
+    fn from(value: Status) -> Self {
+        match value {
+            Status::Ok => Self::Ok,
+            Status::Warning => Self::Warning,
+            Status::Critical => Self::Critical,
+        }
+    }
+}
+
+/// Schema-authorized vendor extensions are the boundary for arbitrary JSON.
+pub(super) fn oem(properties: AdditionalProperties) -> super::schema::resource::Oem {
+    super::schema::resource::Oem {
+        additional_properties: properties,
+    }
+}

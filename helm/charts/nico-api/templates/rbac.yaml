@@ -1,0 +1,27 @@
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ include "nico-api.name" . }}
+  namespace: {{ include "nico-api.namespace" . }}
+  labels:
+    {{- include "nico-api.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificaterequests"]
+    verbs: ["create", "get", "delete"]
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ include "nico-api.name" . }}
+  namespace: {{ include "nico-api.namespace" . }}
+  labels:
+    {{- include "nico-api.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "nico-api.name" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nico-api.name" . }}
+    namespace: {{ include "nico-api.namespace" . }}

@@ -1,0 +1,200 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+replicaCount: 1
+
+nameOverride: ""
+namespaceOverride: ""
+
+podAnnotations: {}
+
+image:
+  name: nico-rest-api
+
+service:
+  type: ClusterIP
+  port: 8388
+  metricsPort: 9360
+
+nodePort:
+  # -- Expose the API over plaintext NodePort. Cannot be enabled with ingress.
+  enabled: false
+  port: 30388
+
+ingress:
+  # -- Expose the API over TLS through an ingress controller. Cannot be enabled
+  # with nodePort. The ingress routes to the chart-managed Service on
+  # service.port, so ClusterIP is sufficient and the API still serves plain
+  # HTTP inside the cluster.
+  enabled: false
+  className: contour
+  # -- Annotations for the Ingress. The default is what requires HTTPS: on
+  # Contour's Ingress path a spec.tls block alone does not redirect, because the
+  # route's HTTPSUpgrade follows force-ssl-redirect while allow-http defaults to
+  # true, so port 80 would serve the API in cleartext. Overriding this map merges
+  # with the default, so keep a redirect annotation your controller understands.
+  annotations:
+    ingress.kubernetes.io/force-ssl-redirect: "true"
+  # -- Hosts to serve. Every entry is added to spec.tls[].hosts and to the
+  # certificate dnsNames, so with both of those derived this is the only place a
+  # DNS name needs to change. Overriding either list means naming the host there
+  # as well, and the chart rejects an override that leaves a host uncovered.
+  hosts:
+    - host: nico-rest-api.local
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- Fully override spec.tls. When empty, a single entry is generated from
+  # certificate.secretName and ingress.hosts. Set this with certificate.enabled
+  # false to serve a Secret this chart does not manage, such as one issued for a
+  # fully qualified domain by an external CA. Entries must name each host in
+  # ingress.hosts exactly; a wildcard does not match, because the controller keys
+  # the virtual host it terminates TLS on by this literal string. A wildcard
+  # certificate in the Secret is fine.
+  # Example:
+  #   tls:
+  #     - secretName: api-example-com-tls
+  #       hosts:
+  #         - api.example.com
+  #   certificate:
+  #     enabled: false
+  tls: []
+  certificate:
+    # -- Create a cert-manager Certificate for the ingress TLS Secret when ingress is enabled.
+    # Set false when ingress.tls points at a pre-existing Secret.
+    enabled: true
+    secretName: nico-rest-api-ingress-tls
+    duration: 2160h
+    renewBefore: 360h
+    # -- Certificate subject common name. When empty, the first ingress.hosts entry is used.
+    commonName: ""
+    # -- Fully override the certificate dnsNames. When empty, dnsNames are
+    # generated from ingress.hosts.
+    dnsNames: []
+    # -- SPIFFE/SAN URIs for the certificate. When empty, no uris are set.
+    uris: []
+    subject:
+      # -- List of organizations for the certificate subject
+      organizations: []
+    privateKey:
+      algorithm: RSA
+      encoding: PKCS1
+      size: 2048
+
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "1000m"
+
+secrets:
+  temporalEncryptionKey: temporal-encryption-key
+  temporalClientCerts: temporal-client-cloud-certs
+  # -- Only required when keycloak is enabled
+  keycloakClientSecret: keycloak-client-secret
+  # -- Secret containing DB password at key "password". When set, db.password is ignored
+  # and the password is read from /var/secrets/db/password (supports live rotation).
+  # Created by nico-prereqs ESO (nico-rest-db-eso) when rest.enabled=true.
+  dbCreds: db-creds
+  # -- Name of the existing Kubernetes Secret mounted when direct DPS integration
+  # is enabled. The Secret must contain the keys "token" and "ca.crt". NICo does
+  # not create or renew the token.
+  dpsCreds: ""
+
+config:
+  env:
+    dev: true
+    disconnected: true
+  api:
+    name: nico
+    route:
+      version: v2
+    expectedMachineBatchRecovery:
+      # -- Create durable reservations for new Expected Machine batches. Chart
+      # default false. Upgrade every REST API and inventory worker with this off
+      # before enabling. Disabling keeps reservation guards and recovery active.
+      # Before rollback to older binaries, pending_expected_machine must be empty.
+      # Check with SELECT count(*) FROM pending_expected_machine; let recovery
+      # resolve remaining batches instead of deleting unconfirmed reservations.
+      # Rendered into config.yaml; API.EXPECTEDMACHINEBATCHRECOVERY.ENABLED wins.
+      # Changing this value requires restarting the REST API pods.
+      enabled: false
+  log:
+    level: debug
+    sentry:
+      dsn: ""
+  db:
+    host: nico-pg-cluster.postgres.svc.cluster.local
+    port: 5432
+    name: nico_rest
+    user: nico-rest.nico
+    # -- Plain-text password. Ignored when secrets.dbCreds is set.
+    password: ""
+  temporal:
+    host: temporal-frontend.temporal
+    port: 7233
+    serverName: server.temporal.local
+    namespace: cloud
+    queue: cloud
+    tls:
+      enabled: true
+      certPath: /var/secrets/temporal/certs/tls.crt
+      keyPath: /var/secrets/temporal/certs/tls.key
+      caPath: /var/secrets/temporal/certs/ca.crt
+      disableHostVerification: false
+    encryptionKeyPath: /var/secrets/temporal/encryption-key
+  siteManager:
+    enabled: true
+    svcEndpoint: "https://nico-rest-site-manager:8100/v1/site"
+  metrics:
+    enabled: true
+    port: 9360
+  tracing:
+    # -- Export spans over OTLP. Export also needs an OTEL_EXPORTER_OTLP_*
+    # endpoint in extraEnv; W3C trace-context propagation and the HTTP,
+    # Temporal, and gRPC instrumentation stay active regardless of this flag.
+    enabled: true
+    # -- service.name fallback, used when OTEL_SERVICE_NAME is not set.
+    serviceName: nico-rest-api
+  powerProvisioning:
+    dps:
+      # -- Whether NICo makes direct calls to DPS. Disabled by default.
+      enabled: false
+      # -- DPS gRPC endpoint. Required when DPS integration is enabled.
+      endpoint: ""
+      # -- Overall deadline applied independently to each DPS RPC.
+      requestTimeout: 15s
+      tokenPath: /var/secrets/dps/token
+      tls:
+        caPath: /var/secrets/dps/ca.crt
+        # -- Optional TLS server-name override. Empty uses the endpoint host.
+        serverName: ""
+  # -- JWT issuers for authentication (mutually exclusive with keycloak)
+  # When keycloak is disabled, at least one issuer must be configured.
+  # Example:
+  #   issuers:
+  #     - name: my-idp
+  #       origin: custom
+  #       jwks: https://my-idp.example.com/.well-known/jwks.json
+  #       issuer: "my-idp.example.com"
+  issuers: []
+  # -- Keycloak authentication (mutually exclusive with issuers)
+  keycloak:
+    enabled: false
+    baseURL: ""
+    externalBaseURL: ""
+    realm: ""
+    clientID: ""
+    clientSecretPath: /var/secrets/keycloak/client-secret
+    serviceAccount: false
+    serviceAccountOrgs: []
+  rateLimiter:
+    enabled: false
+    rate: 10.0
+    burst: 30
+    expiresIn: 180
+
+# -- Extra container environment, name->value. Mainly for OTEL_* variables.
+extraEnv: {}

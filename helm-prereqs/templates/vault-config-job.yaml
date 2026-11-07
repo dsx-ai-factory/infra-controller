@@ -1,0 +1,414 @@
+{{- if .Values.vault.configJob.enabled }}
+## =============================================================================
+## Vault PKI Configuration Job (post-install hook)
+## Uses only tools built into hashicorp/vault image (busybox wget/sed/grep).
+## No apk install — works on clusters without outbound internet access.
+##
+## Flow:
+##   initContainer: wait for Vault to be healthy (HTTPS, tls-skip-verify)
+##   container:     wait for site-root Secret, then:
+##     - Import site-root CA into Vault PKI engine (nicoca)
+##     - Configure PKI role (nico-cluster) with SPIFFE URI SANs
+##     - Optionally configure PKI role for NICo CLI client certificates
+##     - Enable Kubernetes auth, bind cert-manager SA
+##     - Create cert-manager-nico-policy + nico-vault-policy
+##     - Enable KV v2 at secrets/
+##     - Seed factory-default KV entries (machines/all_dpus/...)
+##     - Enable AppRole, create nico role
+##
+## Token read from vaultroottoken K8s secret (written by unseal_vault.sh).
+## =============================================================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vault-pki-config-sa
+  namespace: {{ .Values.namespace }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: before-hook-creation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vault-pki-config-reader
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: before-hook-creation
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: ["site-root"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "patch"]
+    resourceNames: ["nico-vault-approle-tokens"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vault-pki-config-reader
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "5"
+    helm.sh/hook-delete-policy: before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vault-pki-config-reader
+subjects:
+  - kind: ServiceAccount
+    name: vault-pki-config-sa
+    namespace: {{ .Values.namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vault-pki-config
+  namespace: {{ .Values.namespace }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  template:
+    spec:
+      serviceAccountName: vault-pki-config-sa
+      restartPolicy: Never
+      initContainers:
+        ## ---------------------------------------------------------------
+        ## Wait for Vault to be unsealed and accepting requests.
+        ## Uses the vault binary (same image as configure) so TLS skip-verify
+        ## works reliably with self-signed certs.
+        ## ---------------------------------------------------------------
+        - name: wait-vault
+          image: {{ .Values.vault.configJob.vaultImage | quote }}
+          env:
+            - name: VAULT_ADDR
+              value: {{ .Values.vault.address | quote }}
+            {{- with .Values.vault.namespace }}
+            - name: VAULT_NAMESPACE
+              value: {{ . | quote }}
+            {{- end }}
+            - name: VAULT_SKIP_VERIFY
+              value: "true"
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for Vault at {{ .Values.vault.address }} to be unsealed..."
+              until vault status -tls-skip-verify -format=json 2>/dev/null \
+                | grep -q '"sealed":[[:space:]]*false'; do
+                echo "  Vault sealed or unreachable, retrying in 5s..."
+                sleep 5
+              done
+              echo "Vault is unsealed, waiting 15s for leader election to stabilize..."
+              sleep 15
+              echo "Vault ready"
+      volumes:
+        ## Shared emptyDir: configure container writes AppRole credentials here,
+        ## patch-approle-secret container reads them and patches the K8s secret.
+        ## The vault image only has busybox wget (no kubectl) so the patch is done
+        ## by a separate kubectl container that mounts the same volume.
+        - name: approle-creds
+          emptyDir: {}
+      containers:
+        ## ---------------------------------------------------------------
+        ## Configure Vault PKI using only vault CLI + busybox tools
+        ## No apk install required.
+        ## ---------------------------------------------------------------
+        - name: configure
+          image: {{ .Values.vault.configJob.vaultImage | quote }}
+          env:
+            - name: VAULT_ADDR
+              value: {{ .Values.vault.address | quote }}
+            {{- with .Values.vault.namespace }}
+            - name: VAULT_NAMESPACE
+              value: {{ . | quote }}
+            {{- end }}
+            - name: VAULT_SKIP_VERIFY
+              value: "true"
+            - name: VAULT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nico-vault-token
+                  key: token
+          volumeMounts:
+            - name: approle-creds
+              mountPath: /approle-creds
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+
+              # Use env-var based API server address — avoids cluster DNS (broken on this cluster)
+              # Kubernetes supplies a bare service IP; IPv6 needs brackets in a URL.
+              APISERVER_HOST="${KUBERNETES_SERVICE_HOST}"
+              case "${APISERVER_HOST}" in
+                *:*) APISERVER_HOST="[${APISERVER_HOST}]" ;;
+              esac
+              APISERVER="https://${APISERVER_HOST}:${KUBERNETES_SERVICE_PORT}"
+              SA_TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+              OPERATORS_NS="{{ .Values.certManagerNamespace }}"
+
+              # ---- Wait for site-root Secret to exist ----
+              echo "Waiting for site-root secret in ${OPERATORS_NS}..."
+              until wget -q -O /tmp/secret.json \
+                --header "Authorization: Bearer ${SA_TOKEN}" \
+                --no-check-certificate \
+                "${APISERVER}/api/v1/namespaces/${OPERATORS_NS}/secrets/site-root" 2>/dev/null; do
+                echo "  site-root not ready, retrying in 5s..."
+                sleep 5
+              done
+              echo "site-root Secret found"
+
+              # ---- Extract CA cert and key using sed (no jq needed) ----
+              CERT_B64=$(sed -n 's/.*"tls\.crt": *"\([^"]*\)".*/\1/p' /tmp/secret.json)
+              KEY_B64=$(sed -n 's/.*"tls\.key": *"\([^"]*\)".*/\1/p' /tmp/secret.json)
+              CA_CERT=$(echo "$CERT_B64" | base64 -d)
+              CA_KEY=$(echo "$KEY_B64" | base64 -d)
+              echo "CA cert and key extracted"
+
+              # ---- Enable PKI engine ----
+              echo "Enabling PKI engine at {{ .Values.vault.pkiMount }}/..."
+              vault secrets enable -path={{ .Values.vault.pkiMount }} pki 2>/dev/null || true
+              vault secrets tune -max-lease-ttl=87600h {{ .Values.vault.pkiMount }}
+
+              # ---- Import CA bundle ----
+              echo "Importing site-root CA into Vault PKI..."
+              printf '%s\n%s' "$CA_CERT" "$CA_KEY" | \
+                vault write {{ .Values.vault.pkiMount }}/config/ca pem_bundle=-
+
+              # ---- Create PKI role ----
+              echo "Creating PKI role {{ .Values.vault.pkiRole }}..."
+              vault write {{ .Values.vault.pkiMount }}/roles/{{ .Values.vault.pkiRole }} \
+                allow_any_name=true \
+                allowed_uri_sans="spiffe://*" \
+                max_ttl=720h \
+                ttl=720h \
+                key_type=ec \
+                key_bits=256 \
+                require_cn=false \
+                use_csr_common_name=true
+
+              {{ if .Values.vault.nicoCliClientRole.enabled }}
+              # ---- Create NICo CLI client PKI role ----
+              echo "Creating PKI role {{ .Values.vault.nicoCliClientRole.name }}..."
+              vault write {{ .Values.vault.pkiMount }}/roles/{{ .Values.vault.nicoCliClientRole.name }} \
+                allow_any_name=true \
+                enforce_hostnames=false \
+                cn_validations=disabled \
+                client_flag=true \
+                server_flag=false \
+                key_type=ec \
+                key_bits=256 \
+                ttl=1h \
+                max_ttl=12h \
+                ou={{ .Values.vault.nicoCliClientRole.ou | default .Values.vault.nicoCliClientRole.name | quote }}{{ if .Values.vault.nicoCliClientRole.organization }} \
+                organization={{ .Values.vault.nicoCliClientRole.organization | quote }}{{ end }}
+              {{ end }}
+
+              # ---- Enable K8s auth ----
+              echo "Configuring Kubernetes auth..."
+              vault auth enable kubernetes 2>/dev/null || true
+              vault write auth/kubernetes/config \
+                kubernetes_host="${APISERVER}"
+
+              # ---- Policies ----
+              echo "Writing cert-manager-nico-policy..."
+              vault policy write cert-manager-nico-policy - << 'POLICY'
+              path "{{ .Values.vault.pkiMount }}/sign/{{ .Values.vault.pkiRole }}" {
+                capabilities = ["create", "update"]
+              }
+              POLICY
+
+              echo "Writing nico-vault-policy..."
+              vault policy write nico-vault-policy - << 'POLICY'
+              path "{{ .Values.vault.pkiMount }}*" {
+                capabilities = ["read", "list"]
+              }
+              path "{{ .Values.vault.pkiMount }}/sign/{{ .Values.vault.pkiRole }}" {
+                capabilities = ["create", "update"]
+              }
+              path "{{ .Values.vault.pkiMount }}/issue/{{ .Values.vault.pkiRole }}" {
+                capabilities = ["create", "update"]
+              }
+
+              path "{{ .Values.vault.kvMount }}/data/*" {
+                capabilities = ["read", "list"]
+              }
+              path "{{ .Values.vault.kvMount }}/metadata/*" {
+                capabilities = ["list"]
+              }
+              path "{{ .Values.vault.kvMount }}/data/machines*" {
+                capabilities = ["create", "read", "patch", "list", "update", "delete"]
+              }
+              path "{{ .Values.vault.kvMount }}/data/machines/*" {
+                capabilities = ["create", "read", "patch", "list", "update", "delete"]
+              }
+              path "{{ .Values.vault.kvMount }}/metadata/machines/*" {
+                capabilities = ["list", "delete"]
+              }
+              path "{{ .Values.vault.kvMount }}/destroy/machines/*" {
+                capabilities = ["delete"]
+              }
+              path "{{ .Values.vault.kvMount }}/data/ufm/*" {
+                capabilities = ["create", "read", "patch", "list", "update", "delete"]
+              }
+              path "{{ .Values.vault.kvMount }}/data/nmxm/*" {
+                capabilities = ["create", "read", "patch", "list", "update", "delete"]
+              }
+              path "{{ .Values.vault.kvMount }}/data/bgp/*" {
+                capabilities = ["create", "read", "patch", "list", "update", "delete"]
+              }
+              path "{{ .Values.vault.kvMount }}/data/firmware_artifacts/+/access-token" {
+                capabilities = ["create", "read", "update"]
+              }
+              path "{{ .Values.vault.kvMount }}/metadata/firmware_artifacts/+/access-token" {
+                capabilities = ["delete"]
+              }
+              path "{{ .Values.vault.kvMount }}/data/switch_nvos/*" {
+                capabilities = ["create", "read", "patch", "list", "update", "delete"]
+              }
+              path "{{ .Values.vault.kvMount }}/metadata/switch_nvos/*" {
+                capabilities = ["read", "list", "delete"]
+              }
+              path "{{ .Values.vault.kvMount }}/destroy/switch_nvos/*" {
+                capabilities = ["update"]
+              }
+              path "{{ .Values.vault.kvMount }}/data/racks/+/maintenance/access-token" {
+                capabilities = ["create", "update", "read"]
+              }
+              path "{{ .Values.vault.kvMount }}/metadata/racks/+/maintenance/access-token" {
+                capabilities = ["delete", "read"]
+              }
+              POLICY
+
+              # ---- K8s auth role for cert-manager ----
+              echo "Creating K8s auth role for cert-manager..."
+              vault write auth/kubernetes/role/cert-manager-nico-issuer \
+                bound_service_account_names=cert-manager-vault-nicoca-issuer \
+                bound_service_account_namespaces="{{ .Values.certManagerNamespace }}" \
+                policies=cert-manager-nico-policy \
+                ttl=1h
+
+              {{ if .Values.vault.nicoApiK8sAuth.enabled }}
+              # ---- K8s auth role for nico-api ----
+              # nico-api authenticates to in-cluster Vault via its SA JWT
+              # (vault SDK auto-detects /var/run/secrets/kubernetes.io/serviceaccount/token)
+              # and manages credentials in the KV mount (nico-vault-policy grants
+              # read/list everywhere plus scoped writes under each credential prefix
+              # nico-api owns; see CredentialPrefix in crates/secrets).
+              echo "Creating K8s auth role for nico-api..."
+              vault write auth/kubernetes/role/{{ .Values.vault.nicoApiK8sAuth.serviceAccountName }} \
+                bound_service_account_names={{ .Values.vault.nicoApiK8sAuth.serviceAccountName }} \
+                bound_service_account_namespaces="{{ .Values.namespace }}" \
+                policies=nico-vault-policy \
+                ttl={{ .Values.vault.nicoApiK8sAuth.tokenTTL }}
+              {{ end }}
+
+              # ---- KV v2 + AppRole ----
+              echo "Enabling KV v2 at {{ .Values.vault.kvMount }}/..."
+              vault secrets enable -path={{ .Values.vault.kvMount }} kv-v2 2>/dev/null || true
+
+              # Seeds are first-write only. This Job also runs on every upgrade,
+              # and several seeds are placeholders an operator fills in afterwards
+              # (`credential add-uefi`), so a key that already holds a value is
+              # left alone; -cas=0 makes Vault refuse the write if a version
+              # appeared between the check and the put.
+              #
+              # seed_once <path>, seed JSON on stdin. Only the CLI's "No value
+              # found" answer means the key is absent; any other `kv get` failure
+              # is a Vault error and fails the Job with that error instead of a
+              # misleading check-and-set error from the put that would follow.
+              # A key whose latest version was soft-deleted still answers `kv get`
+              # (metadata only), so it also counts as set.
+              seed_once() {
+                _path="$1"
+                _data="$(cat)"
+                if _out="$(vault kv get "$_path" 2>&1)"; then
+                  # Live value: latest version neither soft-deleted nor destroyed.
+                  if printf '%s\n' "$_out" | grep -Eq '^deletion_time +n/a' \
+                     && printf '%s\n' "$_out" | grep -Eq '^destroyed +false'; then
+                    echo "Keeping $_path (already set; seeds never overwrite)"
+                  else
+                    echo "Keeping $_path (has version history but no live value; seeds never overwrite, restore with 'vault kv undelete' or 'credential add-uefi')"
+                  fi
+                  return 0
+                fi
+                if ! printf '%s\n' "$_out" | grep -q 'No value found'; then
+                  echo "ERROR: could not read $_path: $_out" >&2
+                  return 1
+                fi
+                echo "Seeding $_path..."
+                if printf '%s\n' "$_data" | vault kv put -cas=0 "$_path" -; then
+                  return 0
+                fi
+                # cas=0 refused the write: another writer (for example
+                # `credential add-uefi`) created the key after the check, and
+                # that value is the one to keep.
+                if vault kv get "$_path" >/dev/null 2>&1; then
+                  echo "Keeping $_path (written concurrently; seeds never overwrite)"
+                  return 0
+                fi
+                echo "ERROR: seeding $_path failed" >&2
+                return 1
+              }
+              {{- range .Values.vault.kvSeeds }}
+              seed_once {{ $.Values.vault.kvMount }}/{{ .path }} <<'KVSEED'
+              {{ .data | toJson }}
+              KVSEED
+              {{- end }}
+
+              echo "Enabling AppRole auth..."
+              vault auth enable approle 2>/dev/null || true
+
+              vault write auth/approle/role/nico \
+                token_policies=nico-vault-policy \
+                token_ttl=1h \
+                token_max_ttl=4h
+
+              echo "Fetching AppRole credentials..."
+              vault read -field=role_id auth/approle/role/nico/role-id \
+                > /approle-creds/role-id
+              vault write -f -field=secret_id auth/approle/role/nico/secret-id \
+                > /approle-creds/secret-id
+              touch /approle-creds/done
+              echo "AppRole credentials written to shared volume"
+
+              echo ""
+              echo "=== Vault PKI configuration complete ==="
+        ## ---------------------------------------------------------------
+        ## Patch nico-vault-approle-tokens with real AppRole credentials.
+        ## Runs alongside configure; waits for /approle-creds/done sentinel
+        ## written by the configure container before patching.
+        ## Uses a kubectl image since the vault image has no kubectl.
+        ## ---------------------------------------------------------------
+        - name: patch-approle-secret
+          image: {{ .Values.vault.configJob.kubectlImage | quote }}
+          volumeMounts:
+            - name: approle-creds
+              mountPath: /approle-creds
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for AppRole credentials from configure container..."
+              until [ -f /approle-creds/done ]; do sleep 2; done
+              _ROLE_ID=$(cat /approle-creds/role-id)
+              _SECRET_ID=$(cat /approle-creds/secret-id)
+              kubectl patch secret nico-vault-approle-tokens \
+                -n {{ .Values.namespace }} \
+                --type=merge \
+                -p "{\"stringData\":{\"VAULT_ROLE_ID\":\"${_ROLE_ID}\",\"VAULT_SECRET_ID\":\"${_SECRET_ID}\"}}"
+              echo "nico-vault-approle-tokens patched with real AppRole credentials"
+{{- end }}

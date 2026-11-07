@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block title %}Compute Allocations{% endblock %}
+
+{% block content %}
+
+<h1>Compute Allocations</h1>
+
+<table class="sortable overview">
+	<thead>
+	<tr>
+		<th>ID</th>
+		<th>Tenant Organization ID</th>
+		<th>Instance Type ID</th>
+		<th>Count</th>
+		<th>Name</th>
+		<th>Description</th>
+		<th>Version</th>
+		<th>Created</th>
+		<th></th>
+	</tr>
+	</thead>
+	<tbody>
+	{% for allocation in allocations %}
+		<tr>
+			<td><a href="/admin/compute-allocation/{{ allocation.id }}">{{ allocation.id }}</a></td>
+			<td><a href="/admin/tenant/{{ allocation.tenant_organization_id }}">{{ allocation.tenant_organization_id }}</a></td>
+			<td><a href="/admin/instance-type/{{ allocation.instance_type_id }}">{{ allocation.instance_type_id }}</a></td>
+			<td>{{ allocation.count }}</td>
+			<td>{{ allocation.name }}</td>
+			<td>{{ allocation.description }}</td>
+			<td>{{ allocation.version }}</td>
+			<td>{{ allocation.created }}</td>
+			<td>
+				<form id="compute_allocation_delete_action" method="POST" action="/admin/compute-allocation/{{ allocation.id }}/delete">
+					<input type="hidden" name="tenant_organization_id" value="{{ allocation.tenant_organization_id }}">
+					<input type="submit" value="Delete">
+				</form>
+			</td>
+		</tr>
+	{% endfor %}
+	</tbody>
+	<tfoot>
+		<tr><th colspan="9">
+			{% include "pages_footer.html" %}
+		</th></tr>
+	</tfoot>
+</table>
+<br/>
+
+<h3>Add Compute Allocation</h3>
+<form id="compute_allocation_create_action" method="POST" action="/admin/compute-allocation">
+	<table class="detailsview">
+		<tr><th>ID (optional)</th><td><input name="id" type="text" value=""></td></tr>
+		<tr><th>Tenant Organization ID</th><td><input name="tenant_organization_id" type="text" value=""></td></tr>
+		<tr><th>Instance Type ID</th><td><input name="instance_type_id" type="text" value=""></td></tr>
+		<tr><th>Count</th><td><input name="count" type="number" min="0" step="1" value="1"></td></tr>
+		<tr><th>Name</th><td><input name="name" type="text" value=""></td></tr>
+		<tr><th>Description (optional)</th><td><textarea name="description"></textarea></td></tr>
+		<tr><th>Labels (optional)</th><td><textarea name="labels"></textarea></td></tr>
+		<tr><th>&nbsp;</th><td><input type="submit" value="Create"></td></tr>
+	</table>
+</form>
+
+{% endblock %}

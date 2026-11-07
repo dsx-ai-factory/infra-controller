@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+global:
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+  imagePullSecrets:
+    - name: image-pull-secret
+  certificate:
+    issuerRef:
+      kind: ClusterIssuer
+      name: nico-rest-ca-issuer
+      group: cert-manager.io
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: nico-rest
+
+nico-rest-common:
+  enabled: true
+
+nico-rest-cert-manager:
+  enabled: true
+
+nico-rest-api:
+  enabled: true
+
+nico-rest-workflow:
+  enabled: true
+
+nico-rest-site-manager:
+  enabled: true
+
+nico-rest-db:
+  enabled: true

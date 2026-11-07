@@ -1,0 +1,10 @@
+[Unit]
+Description=Setup local ipmi device on DPU reboot
+After=mlx_ipmid.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c '/usr/bin/local_bmc_dev'
+
+[Install]
+WantedBy=multi-user.target

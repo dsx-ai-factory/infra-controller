@@ -1,0 +1,319 @@
+{
+    "cpu_info": [
+        {
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "vendor": "GenuineIntel",
+            "sockets": 1,
+            "cores": 18,
+            "threads": 72
+        }
+    ],
+    "machine_type": "x86_64",
+    "nvme_devices": [
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A0D2TCD8",
+            "firmware_rev": "2.1.3"
+        }
+    ],
+    "dmi_data": {
+        "board_name": "",
+        "board_version": "",
+        "bios_version": "1.13.0",
+        "bios_date": "01/01/1971",
+        "product_serial": "Host12346",
+        "board_serial": "HostBoard12346",
+        "chassis_serial": "HostChassis12346",
+        "product_name": "DGX GB200 Compute Tray",
+        "sys_vendor": "Dell Inc."
+    },
+    "block_devices": [
+        {
+            "model": "DELLBOSS_VD",
+            "serial": "e932d5c34b090010",
+            "revision": "MV.R00-0",
+            "device_type": "disk"
+        },
+        {
+            "model": "DELLBOSS_VD",
+            "serial": "e932d5c34b090010",
+            "revision": "MV.R00-0",
+            "device_type": "partition"
+        },
+        {
+            "model": "DELLBOSS_VD",
+            "serial": "e932d5c34b090010",
+            "revision": "MV.R00-0",
+            "device_type": "partition"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A0D2TCD8",
+            "revision": "2.1.3",
+            "device_type": "disk"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A0D2TCD8",
+            "revision": "2.1.3",
+            "device_type": "partition"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A0D2TCD8",
+            "revision": "2.1.3",
+            "device_type": "partition"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A098TCD8",
+            "revision": "2.1.3",
+            "device_type": "partition"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A098TCD8",
+            "revision": "2.1.3",
+            "device_type": "partition"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A098TCD8",
+            "revision": "2.1.3",
+            "device_type": "partition"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A0B8TCD8",
+            "revision": "2.1.3",
+            "device_type": "partition"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A0B8TCD8",
+            "revision": "2.1.3",
+            "device_type": "partition"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A0B8TCD8",
+            "revision": "2.1.3",
+            "device_type": "partition"
+        }
+    ],
+    "network_interfaces": [
+        {
+            "mac_address": "70:b5:e8:f0:50:28",
+            "pci_properties": {
+                "path": "/devices/pci0000:00/0000:00:1c.5/0000:04:00.0/net/eno8303",
+                "device": "0x165f",
+                "vendor": "0x14e4",
+                "numa_node": 0,
+                "description": "NetXtreme BCM5720 2-port Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)"
+            }
+        },
+        {
+            "mac_address": "70:b5:e8:f0:50:29",
+            "pci_properties": {
+                "path": "/devices/pci0000:00/0000:00:1c.5/0000:04:00.1/net/eno8403",
+                "device": "0x165f",
+                "vendor": "0x14e4",
+                "numa_node": 0,
+                "description": "NetXtreme BCM5720 2-port Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)"
+            }
+        },
+        {
+            "mac_address": "e4:3d:1a:15:3e:d0",
+            "pci_properties": {
+                "path": "/devices/pci0000:30/0000:30:04.0/0000:31:00.0/net/eno12399np0",
+                "device": "0x16d7",
+                "vendor": "0x14e4",
+                "numa_node": 0,
+                "description": "BCM57414 NetXtreme-E 10Gb/25Gb RDMA Ethernet Controller"
+            }
+        },
+        {
+            "mac_address": "e4:3d:1a:15:3e:d1",
+            "pci_properties": {
+                "path": "/devices/pci0000:30/0000:30:04.0/0000:31:00.1/net/eno12409np1",
+                "device": "0x16d7",
+                "vendor": "0x14e4",
+                "numa_node": 0,
+                "description": "BCM57414 NetXtreme-E 10Gb/25Gb RDMA Ethernet Controller"
+            }
+        },
+        {
+            "mac_address": "08:c0:eb:cb:0e:96",
+            "pci_properties": {
+                "path": "/devices/pci0000:b0/0000:b0:04.0/0000:b1:00.0/net/enp177s0f0np0",
+                "device": "BlueField SoC",
+                "vendor": "mellanox",
+                "numa_node": 1,
+                "description": "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"
+            }
+        },
+        {
+            "mac_address": "08:c0:eb:cb:0e:97",
+            "pci_properties": {
+                "path": "/devices/pci0000:b0/0000:b0:04.0/0000:b1:00.1/net/enp177s0f1np1",
+                "device": "BlueField SoC",
+                "vendor": "mellanox",
+                "numa_node": 1,
+                "description": "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"
+            }
+        }
+    ],
+    "infiniband_interfaces": [
+        {
+            "pci_properties": {
+                "vendor": "0x15b3",
+                "device": "0x1021",
+                "path": "/devices/pci0000:b0/0000:c0:02.0/0000:c1:00.1/infiniband/ibp178s0f1",
+                "numaNode": 1,
+                "description": "MT2910 Family [ConnectX-7]",
+                "slot": "0000:c1:00.1"
+            },
+            "guid": "946dae03002ac100"
+        },
+        {
+            "pci_properties": {
+                "vendor": "0x15b3",
+                "device": "0x1021",
+                "path": "/devices/pci0000:b0/0000:c0:02.0/0000:c1:00.0/infiniband/ibp178s0f0",
+                "numaNode": 1,
+                "description": "MT2910 Family [ConnectX-7]",
+                "slot": "0000:c1:00.0"
+            },
+            "guid": "946dae03002ac101"
+        },
+        {
+            "pci_properties": {
+                "vendor": "0x15b3",
+                "device": "0x1021",
+                "path": "/devices/pci0000:b0/0000:b0:02.0/0000:b1:00.1/infiniband/ibp177s0f1",
+                "numaNode": 1,
+                "description": "MT2910 Family [ConnectX-7]",
+                "slot": "0000:b1:00.1"
+            },
+            "guid": "946dae03002ac102"
+        },
+        {
+            "pci_properties": {
+                "vendor": "0x15b3",
+                "device": "0x1021",
+                "path": "/devices/pci0000:b0/0000:b0:02.0/0000:b1:00.0/infiniband/ibp177s0f0",
+                "numaNode": 1,
+                "description": "MT2910 Family [ConnectX-7]",
+                "slot": "0000:b1:00.0"
+            },
+            "guid": "946dae03002ac103"
+        },
+        {
+            "pci_properties": {
+                "vendor": "0x15b3",
+                "device": "0x1017",
+                "path": "/devices/pci0000:97/0000:97:02.0/0000:98:00.0/infiniband/ibp152s0f0",
+                "numaNode": 1,
+                "description": "MT27800 Family [ConnectX-5]",
+                "slot": "0000:98:00.0"
+            },
+            "guid": "946dae03002ac752"
+        },
+        {
+            "pci_properties": {
+                "vendor": "0x15b3",
+                "device": "0x1017",
+                "path": "/devices/pci0000:97/0000:97:02.0/0000:98:00.1/infiniband/ibp152s0f1",
+                "numaNode": 1,
+                "description": "MT27800 Family [ConnectX-5]",
+                "slot": "0000:98:00.1"
+            },
+            "guid": "946dae03002ac753"
+        }
+    ],
+    "tpm_ek_certificate": "U29tZSBhcmJpdHJhcnkgYmFzZTY0",
+    "gpus": [
+        {
+            "name": "NVIDIA GB200",
+            "serial": "2054422005699",
+            "driver_version": "530.30.02",
+            "vbios_version": "96.00.30.00.01",
+            "inforom_version": "1010.0200.00.02",
+            "total_memory": "81559 MiB",
+            "frequency": "1755 MHz",
+            "pci_bus_id": "00000000:17:00.0",
+            "platform_info": {
+                "chassis_serial": "27ZYX27000001",
+                "slot_number": 1,
+                "tray_index": 1,
+                "host_id": 1,
+                "module_id": 1,
+                "fabric_guid": "2001"
+            }
+        },
+        {
+            "name": "NVIDIA GB200",
+            "serial": "2154422005699",
+            "driver_version": "530.30.02",
+            "vbios_version": "96.00.30.00.01",
+            "inforom_version": "1010.0200.00.02",
+            "total_memory": "81559 MiB",
+            "frequency": "1755 MHz",
+            "pci_bus_id": "00000000:17:00.1",
+            "platform_info": {
+                "chassis_serial": "27ZYX27000001",
+                "slot_number": 1,
+                "tray_index": 1,
+                "host_id": 1,
+                "module_id": 2,
+                "fabric_guid": "2002"
+            }
+        },
+        {
+            "name": "NVIDIA GB200",
+            "serial": "2254422005699",
+            "driver_version": "530.30.02",
+            "vbios_version": "96.00.30.00.01",
+            "inforom_version": "1010.0200.00.02",
+            "total_memory": "81559 MiB",
+            "frequency": "1755 MHz",
+            "pci_bus_id": "00000000:17:00.2",
+            "platform_info": {
+                "chassis_serial": "27ZYX27000001",
+                "slot_number": 1,
+                "tray_index": 1,
+                "host_id": 1,
+                "module_id": 3,
+                "fabric_guid": "2003"
+            }
+        },
+        {
+            "name": "NVIDIA GB200",
+            "serial": "2354422005699",
+            "driver_version": "530.30.02",
+            "vbios_version": "96.00.30.00.01",
+            "inforom_version": "1010.0200.00.02",
+            "total_memory": "81559 MiB",
+            "frequency": "1755 MHz",
+            "pci_bus_id": "00000000:17:00.3",
+            "platform_info": {
+                "chassis_serial": "27ZYX27000001",
+                "slot_number": 1,
+                "tray_index": 1,
+                "host_id": 1,
+                "module_id": 4,
+                "fabric_guid": "2004"
+            }
+        }
+    ],
+    "memory_devices": [
+        {
+            "size_mb": 1024,
+            "mem_type": "DDR4"
+        },
+        {
+            "size_mb": 1024,
+            "mem_type": "DDR4"
+        }
+    ]
+}

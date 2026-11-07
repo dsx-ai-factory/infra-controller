@@ -1,0 +1,47 @@
+{{- if .Values.certManager.siteRoot.create }}
+## =============================================================================
+## Self-signed bootstrap → site-root CA
+##
+## These are pre-install hooks so they run before vault-tls-certs.yaml hooks
+## (site-issuer at -5, vault cert hooks at -4) which depend on site-root.
+##
+## Hook order:
+##   -10  selfsigned-bootstrap ClusterIssuer (this file)
+##    -9  site-root Certificate              (this file)
+##    -5  site-issuer ClusterIssuer          (vault-tls-certs.yaml)
+##    -4  nicoca-vault-client Certificate   (vault-tls-certs.yaml)
+##    -4  vault-raft-tls Certificate         (vault-tls-certs.yaml)
+##
+## NOTE: setup.sh must run helmfile sync for cert-manager BEFORE vault so that
+## cert-manager is available to issue the site-root cert before vault starts.
+## =============================================================================
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-bootstrap
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: site-root
+  namespace: {{ .Values.certManagerNamespace }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-9"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  isCA: true
+  commonName: site-root
+  secretName: site-root
+  duration: 87600h  # 10 years
+  issuerRef:
+    name: selfsigned-bootstrap
+    kind: ClusterIssuer
+{{- end }}

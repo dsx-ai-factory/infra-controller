@@ -1,0 +1,494 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+use std::borrow::Cow;
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
+use serde_json::{Value, json};
+
+use crate::json::JsonExt;
+use crate::redfish::ModelExt;
+use crate::{ResourceResetType, redfish};
+
+pub(super) fn manager_collection(manager_id: &str) -> redfish::Collection<'static> {
+    let odata_id = format!("/redfish/v1/Managers/{manager_id}/LogServices");
+    redfish::Collection {
+        odata_id: Cow::Owned(odata_id),
+        odata_type: Cow::Borrowed("#LogServiceCollection.LogServiceCollection"),
+        name: Cow::Borrowed("Log Service Collection"),
+    }
+}
+
+/// A manager-scoped log service, such as HPE iLO's Integrated Event Log.
+pub(super) fn manager_resource<'a>(
+    manager_id: &str,
+    service_id: &'a str,
+    name: &'a str,
+) -> redfish::Resource<'a> {
+    let odata_id = format!("/redfish/v1/Managers/{manager_id}/LogServices/{service_id}");
+    redfish::Resource {
+        odata_id: Cow::Owned(odata_id),
+        odata_type: Cow::Borrowed(redfish::schema::log_service::LogService::ODATA_TYPE),
+        name: Cow::Borrowed(name),
+        id: Cow::Borrowed(service_id),
+    }
+}
+
+pub(super) fn manager_clear_log_target(manager_id: &str, service_id: &str) -> String {
+    format!(
+        "/redfish/v1/Managers/{manager_id}/LogServices/{service_id}/Actions/LogService.ClearLog"
+    )
+}
+
+pub(super) fn manager_entries_collection<'a>(
+    manager_id: &str,
+    service_id: &'a str,
+) -> redfish::Collection<'a> {
+    let odata_id = format!("/redfish/v1/Managers/{manager_id}/LogServices/{service_id}/Entries");
+    redfish::Collection {
+        odata_id: Cow::Owned(odata_id),
+        odata_type: Cow::Borrowed("#LogEntryCollection.LogEntryCollection"),
+        name: Cow::Borrowed("Log Entries"),
+    }
+}
+
+pub(super) fn system_collection(system_id: &str) -> redfish::Collection<'static> {
+    let odata_id = format!("/redfish/v1/Systems/{system_id}/LogServices");
+    redfish::Collection {
+        odata_id: Cow::Owned(odata_id),
+        odata_type: Cow::Borrowed("#LogServiceCollection.LogServiceCollection"),
+        name: Cow::Borrowed("Log Service Collection"),
+    }
+}
+
+pub(super) fn system_resource<'a>(system_id: &str, service_id: &'a str) -> redfish::Resource<'a> {
+    let odata_id = format!("/redfish/v1/Systems/{system_id}/LogServices/{service_id}");
+    redfish::Resource {
+        odata_id: Cow::Owned(odata_id),
+        odata_type: Cow::Borrowed(redfish::schema::log_service::LogService::ODATA_TYPE),
+        name: Cow::Borrowed("Log Service"),
+        id: Cow::Borrowed(service_id),
+    }
+}
+
+pub(super) fn system_clear_log_target(system_id: &str, service_id: &str) -> String {
+    format!(
+        "{}/Actions/LogService.ClearLog",
+        system_resource(system_id, service_id).odata_id
+    )
+}
+
+pub(super) fn system_entries_collection<'a>(
+    system_id: &str,
+    service_id: &'a str,
+) -> redfish::Collection<'a> {
+    let odata_id = format!("/redfish/v1/Systems/{system_id}/LogServices/{service_id}/Entries");
+    redfish::Collection {
+        odata_id: Cow::Owned(odata_id),
+        odata_type: Cow::Borrowed("#LogEntryCollection.LogEntryCollection"),
+        name: Cow::Borrowed("Log Entries"),
+    }
+}
+
+pub(super) fn builder(resource: &redfish::Resource<'_>) -> super::schema::log_service::LogService {
+    super::schema::log_service::LogService::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
+}
+
+pub(crate) fn event_entry(
+    collection: &redfish::Collection<'_>,
+    id: &str,
+) -> super::schema::log_entry::LogEntry {
+    use super::schema::log_entry::{LogEntry, LogEntryRequired, LogEntryType};
+    LogEntry::new(LogEntryRequired {
+        odata_id: format!("{}/{id}", collection.odata_id),
+        id: id.to_string(),
+        name: "Log Entry".to_string(),
+        entry_type: LogEntryType::Event,
+    })
+}
+
+impl super::schema::log_service::LogService {
+    pub(super) fn capacity(self, max_records: usize, clear_log_target: &str) -> serde_json::Value {
+        self.service_enabled(true)
+            .max_number_of_records(max_records.try_into().expect("log capacity fits i64"))
+            .over_write_policy(super::schema::log_service::OverWritePolicy::WrapsWhenFull)
+            .into_json()
+            // Bound actions are not emitted by the server schema generator yet.
+            .patch(json!({"Actions": {"#LogService.ClearLog": {"target": clear_log_target}}}))
+    }
+}
+
+impl super::schema::log_entry::LogEntry {
+    pub(crate) fn origin_of_condition(self, uri: &str) -> Self {
+        self.links(super::schema::log_entry::Links::new().origin_of_condition(uri))
+    }
+}
+
+/// Redfish `Health` vocabulary for mock-generated log entries and events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Severity {
+    Ok,
+    Warning,
+}
+
+/// A lifecycle record the mock appends to a system event log and publishes as
+/// a Redfish Event, the way a BMC logs and announces what it was asked to do.
+#[derive(Clone, Debug)]
+pub(crate) struct LogEntryDraft {
+    /// DMTF ResourceEvent registry identifier.
+    pub(crate) message_id: &'static str,
+    pub(crate) message: String,
+    pub(crate) severity: Severity,
+    /// `@odata.id` of the affected resource.
+    pub(crate) origin: String,
+}
+
+impl LogEntryDraft {
+    /// A `ComputerSystem.Reset` action the mock accepted.
+    pub(crate) fn reset_requested(system: &str, reset_type: ResourceResetType) -> Self {
+        let (message_id, message) = match reset_type {
+            ResourceResetType::On | ResourceResetType::ForceOn => (
+                "ResourceEvent.1.3.ResourcePoweredOn",
+                format!("The resource '{system}' has powered on."),
+            ),
+            ResourceResetType::GracefulShutdown | ResourceResetType::ForceOff => (
+                "ResourceEvent.1.3.ResourcePoweredOff",
+                format!("The resource '{system}' has powered off."),
+            ),
+            other => (
+                "ResourceEvent.1.3.ResourceStateChanged",
+                format!("The state of resource '{system}' has changed to state {other:?}."),
+            ),
+        };
+        Self {
+            message_id,
+            message,
+            severity: Severity::Ok,
+            origin: system.to_owned(),
+        }
+    }
+
+    /// A backend power command completed, worded as HPE iLO words it in its
+    /// Integrated Event Log. NICo reads "Server reset." and "Server power
+    /// restored." there as proof that a host restarted. Commands that do not
+    /// change host power state (NMI, the power button) log nothing.
+    pub(crate) fn power_command_completed(
+        system: &str,
+        reset_type: ResourceResetType,
+    ) -> Option<Self> {
+        use ResourceResetType::*;
+        let (message_id, message) = match reset_type {
+            GracefulRestart | ForceRestart | PowerCycle | FullPowerCycle => {
+                ("ResourceEvent.1.3.ResourceStateChanged", "Server reset.")
+            }
+            On | ForceOn => (
+                "ResourceEvent.1.3.ResourcePoweredOn",
+                "Server power restored.",
+            ),
+            GracefulShutdown | ForceOff => (
+                "ResourceEvent.1.3.ResourcePoweredOff",
+                "Server power removed.",
+            ),
+            _ => return None,
+        };
+        Some(Self {
+            message_id,
+            message: message.to_owned(),
+            severity: Severity::Ok,
+            origin: system.to_owned(),
+        })
+    }
+
+    /// The embedder observed the host power on.
+    pub(crate) fn powered_on(system: &str) -> Self {
+        Self {
+            message_id: "ResourceEvent.1.3.ResourcePoweredOn",
+            message: format!("The resource '{system}' has powered on."),
+            severity: Severity::Ok,
+            origin: system.to_owned(),
+        }
+    }
+
+    /// The embedder observed the host finish booting.
+    pub(crate) fn boot_completed(system: &str) -> Self {
+        Self {
+            message_id: "ResourceEvent.1.3.ResourceStateChanged",
+            message: format!("The state of resource '{system}' has changed to state Enabled."),
+            severity: Severity::Ok,
+            origin: system.to_owned(),
+        }
+    }
+
+    /// A BMC reset was requested. Logged only: the reset closes every stream.
+    pub(crate) fn manager_resetting(manager: &str, via: &str) -> Self {
+        Self {
+            message_id: "ResourceEvent.1.3.ResourceStateChanged",
+            message: format!("The manager '{manager}' is resetting ({via})."),
+            severity: Severity::Warning,
+            origin: manager.to_owned(),
+        }
+    }
+}
+
+struct StoredEntry {
+    id: u64,
+    draft: LogEntryDraft,
+    created: String,
+}
+
+/// Timestamp of profile-seeded entries, matching the captures they came from.
+const SEED_CREATED: &str = "2026-02-12T02:06:58+00:00";
+
+/// `LogService.MaxNumberOfRecords` unless a profile says otherwise: the size
+/// of a typical IPMI system event log.
+pub(crate) const DEFAULT_MAX_RECORDS: usize = 512;
+
+struct Journal {
+    /// The next entry's `Id`. Ids stay unique while the log wraps and restart
+    /// only when the log is cleared, the way a BMC's SEL numbers its records.
+    next_id: u64,
+    entries: VecDeque<StoredEntry>,
+}
+
+/// One system's runtime event log: profile-seeded entries plus the lifecycle
+/// entries the mock appends. Bounded like a real SEL — the oldest entry goes
+/// when the log is full — and clearable through `LogService.ClearLog`.
+pub(crate) struct EventLog {
+    id: &'static str,
+    capacity: usize,
+    /// Entries per collection page; `None` serves the whole log at once.
+    /// Applied by the query layer, not here.
+    page_size: Option<usize>,
+    journal: Mutex<Journal>,
+}
+
+impl EventLog {
+    pub(crate) fn new(
+        id: &'static str,
+        capacity: usize,
+        page_size: Option<usize>,
+        messages: impl IntoIterator<Item = &'static str>,
+    ) -> Self {
+        let entries: VecDeque<StoredEntry> = messages
+            .into_iter()
+            .enumerate()
+            .map(|(id, message)| StoredEntry {
+                id: id as u64,
+                draft: LogEntryDraft {
+                    message_id: "ResourceEvent.1.3.ResourceStateChanged",
+                    message: message.to_owned(),
+                    severity: Severity::Ok,
+                    origin: String::new(),
+                },
+                created: SEED_CREATED.to_owned(),
+            })
+            .collect();
+        assert!(capacity > 0, "an event log holds at least one entry");
+        assert!(
+            entries.len() <= capacity,
+            "seeded entries exceed the log's capacity"
+        );
+        Self {
+            id,
+            capacity,
+            page_size,
+            journal: Mutex::new(Journal {
+                next_id: entries.len() as u64,
+                entries,
+            }),
+        }
+    }
+
+    fn seeded(id: &'static str, messages: impl IntoIterator<Item = &'static str>) -> Self {
+        Self::new(id, DEFAULT_MAX_RECORDS, None, messages)
+    }
+
+    pub(crate) fn id(&self) -> &str {
+        self.id
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Journal> {
+        self.journal.lock().expect("event log poisoned")
+    }
+
+    /// Append an entry and return its `Id`, evicting the oldest entry when
+    /// the log is full.
+    pub(crate) fn append(&self, draft: LogEntryDraft, created: &str) -> String {
+        let mut journal = self.lock();
+        let id = journal.next_id;
+        journal.next_id += 1;
+        journal.entries.push_back(StoredEntry {
+            id,
+            draft,
+            created: created.to_owned(),
+        });
+        while journal.entries.len() > self.capacity {
+            journal.entries.pop_front();
+        }
+        id.to_string()
+    }
+
+    /// `LogService.ClearLog`: the log is empty and ids start over, so a
+    /// client that keyed on `Id` alone sees new records under old ids.
+    pub(crate) fn clear(&self) {
+        let mut journal = self.lock();
+        journal.entries.clear();
+        journal.next_id = 0;
+    }
+
+    /// Every entry under `collection`, oldest first. Paging is the query
+    /// layer's, told [`page_size`](Self::page_size) by the handler.
+    pub(super) fn entries(&self, collection: &redfish::Collection<'_>) -> Vec<Value> {
+        self.lock()
+            .entries
+            .iter()
+            .map(|entry| entry.render(collection))
+            .collect()
+    }
+
+    /// Entries per collection page, when the profile pages this log.
+    pub(super) fn page_size(&self) -> Option<usize> {
+        self.page_size
+    }
+
+    /// The LogEntry document with this `Id`, if the log still holds it.
+    pub(crate) fn entry(&self, collection: &redfish::Collection<'_>, id: &str) -> Option<Value> {
+        let id: u64 = id.parse().ok()?;
+        self.lock()
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.render(collection))
+    }
+}
+
+impl StoredEntry {
+    fn render(&self, collection: &redfish::Collection<'_>) -> Value {
+        let builder = event_entry(collection, &self.id.to_string())
+            .message(&self.draft.message)
+            .message_id(self.draft.message_id)
+            .severity(match self.draft.severity {
+                Severity::Ok => super::schema::log_entry::EventSeverity::Ok,
+                Severity::Warning => super::schema::log_entry::EventSeverity::Warning,
+            })
+            .created(&self.created);
+        if self.draft.origin.is_empty() {
+            builder
+        } else {
+            builder.origin_of_condition(&self.draft.origin)
+        }
+        .into_json()
+    }
+}
+
+/// The log services one system exposes. Every current profile that has any
+/// exposes a single `EventLog`.
+pub(crate) struct LogServices {
+    services: Vec<EventLog>,
+}
+
+impl LogServices {
+    /// One `EventLog` service seeded with informational entries.
+    pub(crate) fn event_log(messages: impl IntoIterator<Item = &'static str>) -> Self {
+        Self {
+            services: vec![EventLog::seeded("EventLog", messages)],
+        }
+    }
+
+    /// Serve entries `page_size` at a time with `Members@odata.nextLink`, as
+    /// BMCs with large logs do; a client that reads only the first page sees
+    /// only the oldest entries.
+    pub(crate) fn paged(mut self, page_size: usize) -> Self {
+        assert!(page_size > 0, "a page holds at least one entry");
+        for service in &mut self.services {
+            service.page_size = Some(page_size);
+        }
+        self
+    }
+
+    pub(crate) fn services(&self) -> &[EventLog] {
+        &self.services
+    }
+
+    pub(crate) fn find(&self, id: &str) -> Option<&EventLog> {
+        self.services.iter().find(|service| service.id() == id)
+    }
+
+    /// The log that receives lifecycle entries.
+    pub(crate) fn primary(&self) -> Option<&EventLog> {
+        self.services.first()
+    }
+}
+
+impl From<Severity> for super::schema::resource::Health {
+    fn from(value: Severity) -> Self {
+        match value {
+            Severity::Ok => Self::Ok,
+            Severity::Warning => Self::Warning,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ids(log: &EventLog) -> Vec<String> {
+        let collection = system_entries_collection("S", log.id());
+        log.entries(&collection)
+            .iter()
+            .map(|entry| entry["Id"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_full_log_drops_its_oldest_entry_and_keeps_ids_unique() {
+        let log = EventLog::new("SEL", 3, None, ["seed"]);
+        for _ in 0..3 {
+            log.append(
+                LogEntryDraft::powered_on("/redfish/v1/Systems/S"),
+                SEED_CREATED,
+            );
+        }
+        assert_eq!(ids(&log), ["1", "2", "3"], "the seed at id 0 rotated out");
+        assert_eq!(ids(&log).len(), log.capacity());
+        let collection = system_entries_collection("S", "SEL");
+        assert!(log.entry(&collection, "0").is_none());
+        assert_eq!(log.entry(&collection, "3").unwrap()["Id"], "3");
+        assert!(log.entry(&collection, "not-a-number").is_none());
+
+        log.clear();
+        assert!(ids(&log).is_empty());
+        assert_eq!(
+            log.append(
+                LogEntryDraft::powered_on("/redfish/v1/Systems/S"),
+                SEED_CREATED
+            ),
+            "0",
+            "a cleared log reuses its ids"
+        );
+    }
+}

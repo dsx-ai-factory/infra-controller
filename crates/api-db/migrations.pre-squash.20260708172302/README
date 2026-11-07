@@ -1,0 +1,8 @@
+To add a new migration:
+1) Make sure you have sqlx-cli installed
+   cargo install sqlx-cli --no-default-features --features postgres
+2) In the <REPO_ROOT>/api directory, do
+   sqlx migrate add <migration_name>
+Migrations are applied only once and sqlx knows not to apply migrations
+already applied, as it keeps track of already applied migrations in
+the _sqlx_migrations table in the DB.

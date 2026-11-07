@@ -1,0 +1,67 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Validates Fern docs configuration on pull requests.
+#
+# Fork PRs: do not run on untrusted head (copy-pr-bot FAQ). Same-repo PRs run
+# on pull_request. After /ok-to-test, copy-pr-bot pushes pull-request/<n>;
+# we run on that push like NICo Core CI (see ci.yaml).
+
+name: Fern docs (check)
+
+on:
+  pull_request:
+    paths:
+      - 'fern/**'
+      - 'docs/**'
+      - 'RELEASE.md'
+      - '.github/workflows/fern-docs-ci.yml'
+  push:
+    branches:
+      - 'pull-request/[0-9]+'
+    paths:
+      - 'fern/**'
+      - 'docs/**'
+      - 'RELEASE.md'
+      - '.github/workflows/fern-docs-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Fern Check
+    # Same-repo PR only, or trusted copy-pr-bot branch after maintainer ok-to-test
+    if: >-
+      (github.event_name == 'push' && contains(github.ref, 'refs/heads/pull-request/'))
+      || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: linux-amd64-cpu4
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+
+      - name: Install Fern CLI
+        run: npm install -g fern-api@$(node -e "console.log(require('./fern/fern.config.json').version)")
+
+      - name: Validate Fern configuration
+        run: fern check

@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+nameOverride: ""
+namespaceOverride: ""
+
+podAnnotations: {}
+
+image:
+  name: nico-rest-workflow
+
+cloudWorker:
+  replicaCount: 1
+  # -- Extra environment for the cloud worker only, merged over extraEnv with
+  # these keys winning. Use it for OTEL_SERVICE_NAME when the cloud worker
+  # needs its own service identity.
+  extraEnv: {}
+  resources:
+    requests:
+      memory: "128Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+
+siteWorker:
+  replicaCount: 1
+  # -- Extra environment for the site worker only, merged over extraEnv with
+  # these keys winning. Use it for OTEL_SERVICE_NAME when the site worker
+  # needs its own service identity.
+  extraEnv: {}
+  ## The site worker's footprint scales with the size of the site it is
+  ## reconciling, which the original 128Mi/512Mi did not account for -- it was
+  ## sized before large-fleet testing. On a 4,500-host site the steady state is
+  ## roughly 165MiB with a 195MiB peak, so 512Mi leaves under 3x headroom on a
+  ## workload whose demand grows with the inventory.
+  ##
+  ## Raise the limit to 1Gi and the request to 256Mi. The request now sits above
+  ## observed steady state so scheduling reflects real usage, and the limit
+  ## gives ~5x headroom over the measured peak without reserving memory the
+  ## worker has never been shown to need. Deliberately modest: this is
+  ## headroom for a known growth trend, not a fix for a diagnosed leak.
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "1Gi"
+      cpu: "500m"
+
+secrets:
+  temporalEncryptionKey: temporal-encryption-key
+  temporalClientCerts: temporal-client-cloud-certs
+  # -- Secret containing DB password at key "password". When set, db.password is ignored
+  # and the password is read from /var/secrets/db/password (supports live rotation).
+  dbCreds: ""
+
+config:
+  env:
+    dev: true
+  log:
+    level: debug
+  db:
+    host: postgres.postgres
+    port: 5432
+    name: nico
+    user: nico
+    # -- Plain-text password. Ignored when secrets.dbCreds is set.
+    password: nico
+  temporal:
+    host: temporal-frontend.temporal
+    port: 7233
+    serverName: server.temporal.local
+    namespace: cloud
+    queue: cloud
+    tls:
+      enabled: true
+      certPath: /var/secrets/temporal/certs/tls.crt
+      keyPath: /var/secrets/temporal/certs/tls.key
+      caPath: /var/secrets/temporal/certs/ca.crt
+      disableHostVerification: false
+    encryptionKeyPath: /var/secrets/temporal/encryption-key
+    # Only the site worker reads these, since it serves the `site` namespace.
+    siteNamespace:
+      # Retention the site worker applies to the `site` namespace on startup. It covers every
+      # closed workflow, so it's how long failed, canceled, terminated, and timed out runs are kept.
+      # `0` leaves the namespace retention unchanged.
+      retention: 72h
+      # How long a successful inventory workflow is kept before the site worker deletes it. It has
+      # to be shorter than a nonzero `retention`, otherwise the cloud and site workers exit on
+      # startup. `0` keeps it for the full `retention`.
+      successfulInventoryRetention: 24h
+  # Site Manager endpoint the cloud worker calls to rotate Site Agent Temporal certificates.
+  siteManager:
+    svcEndpoint: "https://nico-rest-site-manager:8100/v1/site"
+  ngc:
+    api:
+      baseUrl: ""
+  notifications:
+    slack:
+      webhookURL: ""
+  metrics:
+    enabled: true
+    port: 9360
+  tracing:
+    enabled: true
+    serviceName: nico-rest-workflow
+
+# -- Extra container environment shared by both workers, name->value. Mainly
+# for OTEL_* variables; cloudWorker.extraEnv and siteWorker.extraEnv override
+# it per worker.
+extraEnv: {}

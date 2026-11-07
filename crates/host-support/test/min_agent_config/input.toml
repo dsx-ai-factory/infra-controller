@@ -1,0 +1,11 @@
+[forge-system]
+api-server = "https://127.0.0.1:8001"
+
+[machine]
+interface-id = "91609f10-c91d-470d-a260-6293ea0c1234"
+
+[metadata-service]
+address = "0.0.0.0:7777"
+
+[telemetry]
+metrics-address = "0.0.0.0:8888"

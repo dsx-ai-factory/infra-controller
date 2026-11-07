@@ -1,0 +1,63 @@
+---
+{{- $obsvConfig := . }}
+receivers:
+    {{- range $obsvConfig.Prometheus}}
+    prometheus/{{ .Id }}:
+        config:
+            scrape_configs:
+                - job_name: '{{ .Name }}-{{ .Id }}'
+                  scrape_interval: {{ .ScrapeIntervalSeconds }}s
+                  static_configs:
+                      - targets: ['{{ .Endpoint }}']
+    {{- end }}
+    {{- range $obsvConfig.Logging}}
+    filelog/{{ .Id }}:
+        include:
+        - '{{ .Path }}'
+        include_file_name: false
+        include_file_path: true
+        start_at: beginning
+        storage: file_storage/cursors
+    {{- end }}
+
+processors:
+    {{- range $obsvConfig.Prometheus}}
+    resource/metrics-{{ .Id }}:
+        attributes:
+        - key: component
+          value: '{{ .Name }}'
+          action: upsert
+    {{- end }}
+    {{- range $obsvConfig.Logging}}
+    resource/logs-{{ .Id }}:
+        attributes:
+        - key: component
+          value: '{{ .Name }}'
+          action: upsert
+    {{- end }}
+
+service:
+    pipelines:
+        {{- range $obsvConfig.Prometheus}}
+            metrics/{{ .Id }}:
+                receivers: [prometheus/{{ .Id }}]
+                processors:
+                    - memory_limiter
+                    - resourcedetection
+                    - resource/metrics-{{ .Id }}
+                    - telemetry_stats
+                    - batch/metrics
+                exporters: [otlp/site, prometheus]
+            {{- end }}
+            {{- range $obsvConfig.Logging}}
+            logs/{{ .Id }}:
+                receivers: [filelog/{{ .Id }}]
+                processors:
+                    - memory_limiter
+                    - resourcedetection
+                    - fileresource
+                    - resource/logs-{{ .Id }}
+                    - telemetry_stats
+                    - batch/logs
+                exporters: [otlp/site]
+            {{- end }}

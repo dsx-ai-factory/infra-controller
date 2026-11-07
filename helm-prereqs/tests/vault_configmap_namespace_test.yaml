@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Vault ConfigMap namespace propagation
+templates:
+  - templates/configmaps.yaml
+tests:
+  - it: exposes the namespace when set
+    documentIndex: 0
+    set:
+      vault.namespace: admin/nico
+    asserts:
+      - equal:
+          path: data.VAULT_NAMESPACE
+          value: admin/nico
+
+  - it: omits the optional namespace by default
+    documentIndex: 0
+    asserts:
+      - notExists:
+          path: data.VAULT_NAMESPACE

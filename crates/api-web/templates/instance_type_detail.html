@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block title %}Instance Type {{ id }}{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Instance Type {{ id }}</h1>
+
+<table class="detailsview">
+	<tr>
+		<th>Instance Type</th>
+		<td>
+			{{ id }}
+		</td>
+	</tr>
+	<tr><th>Version</th><td>{{ version|config_version|safe }}</td></tr>
+	<tr><th>Created</th><td>{{ created }}</td></tr>	
+	<tr><th>Name</th><td>{{ name }}</td></tr>
+	<tr><th>Description</th><td>{{ description }}</td></tr>
+	<tr><th>Labels</th><td>{{ labels|label_list_fmt(false)|safe }}</td></tr>
+	<tr>
+		<th>Capability Filters</th>
+		<td style="padding: 0;">
+			<table class="sortable overview">
+				<thead>
+					<tr>
+						<th>Type</th>
+						<th>Name</th>
+						<th>Frequency</th>
+						<th>Capacity</th>
+						<th>Vendor</th>
+						<th>Count</th>
+						<th>Hardware Revision</th>
+						<th>Cores</th>
+						<th>Threads</th>
+						<th>Device Type</th>
+						<th>Inactive Devices</th>
+					</tr>
+				</thead>
+				<tbody>
+				{% for cap in capabilities %}
+				<tr>
+					<td>{{ cap.cap_type }}</td>
+					<td>{{ cap.name }}</td>
+					<td>{{ cap.frequency }}</td>
+					<td>{{ cap.capacity }}</td>
+					<td>{{ cap.vendor }}</td>
+					<td>{{ cap.count }}</td>
+					<td>{{ cap.hardware_revision }}</td>
+					<td>{{ cap.cores }}</td>
+					<td>{{ cap.threads }}</td>
+					<td>{{ cap.device_type }}</td>
+					<td>{{ cap.inactive_devices }}</td>
+				</tr>
+				{% endfor %}
+				</tbody>
+			</table>
+		</td>
+	</tr>
+	<tr>
+		<th>Associated Machines</th>
+		<td>
+			{% for m in associated_machines %}
+			{% if !loop.first %}<br>{% endif %}
+			{{ m|machine_id_link|safe }}
+			{% endfor %}
+		</td>
+	</tr>
+</table>
+
+{% endblock %}

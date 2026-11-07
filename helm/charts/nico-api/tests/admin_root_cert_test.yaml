@@ -1,0 +1,207 @@
+suite: admin client CA trust bundle
+templates:
+  - configmap.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: omits the admin root certificate by default
+    documentSelector:
+      path: metadata.name
+      value: nico-api-site-config-files
+    asserts:
+      - exists:
+          path: data["carbide-api-site-config.toml"]
+      - notExists:
+          path: data["admin_root_cert_pem"]
+
+  - it: renders a single public certificate
+    documentSelector:
+      path: metadata.name
+      value: nico-api-site-config-files
+    set:
+      siteConfig:
+        adminRootCertPem: &singleCa |
+          -----BEGIN CERTIFICATE-----
+          MIIBjTCCATOgAwIBAgIUUbTC/rqeWN6ImaPKvseBPyts3bowCgYIKoZIzj0EAwIw
+          FDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDMwNTAxMDM0NVoXDTM2MDMwMjAx
+          MDM0NVowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0D
+          AQcDQgAEZOSlatLzFeE6/9bAaRs2ZGp0tWdVJsApXZSFI+ssNpWVHfl/xbsSg3s8
+          e/EPGyoaTl52B/7B6cphYZG/XMqfFqNjMGEwHQYDVR0OBBYEFP3XbiEfU2RSQlH9
+          UtoAy5yNsMqdMB8GA1UdIwQYMBaAFP3XbiEfU2RSQlH9UtoAy5yNsMqdMA8GA1Ud
+          EwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgGGMAoGCCqGSM49BAMCA0gAMEUCICKJ
+          XR3+kEW/e4jhyGezvLuSFlotUMAPqNgcNTuS3OWZAiEA3pcRA4YgZzlFGXCW/kWj
+          YeykmVGg+RezSlkJVgMPCC4=
+          -----END CERTIFICATE-----
+    asserts:
+      - equal:
+          path: data["admin_root_cert_pem"]
+          value: *singleCa
+
+  - it: preserves a certificate rotation bundle
+    documentSelector:
+      path: metadata.name
+      value: nico-api-site-config-files
+    set:
+      siteConfig:
+        adminRootCertPem: &rotationBundle |
+          -----BEGIN CERTIFICATE-----
+          MIIBjTCCATOgAwIBAgIUUbTC/rqeWN6ImaPKvseBPyts3bowCgYIKoZIzj0EAwIw
+          FDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDMwNTAxMDM0NVoXDTM2MDMwMjAx
+          MDM0NVowFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0D
+          AQcDQgAEZOSlatLzFeE6/9bAaRs2ZGp0tWdVJsApXZSFI+ssNpWVHfl/xbsSg3s8
+          e/EPGyoaTl52B/7B6cphYZG/XMqfFqNjMGEwHQYDVR0OBBYEFP3XbiEfU2RSQlH9
+          UtoAy5yNsMqdMB8GA1UdIwQYMBaAFP3XbiEfU2RSQlH9UtoAy5yNsMqdMA8GA1Ud
+          EwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgGGMAoGCCqGSM49BAMCA0gAMEUCICKJ
+          XR3+kEW/e4jhyGezvLuSFlotUMAPqNgcNTuS3OWZAiEA3pcRA4YgZzlFGXCW/kWj
+          YeykmVGg+RezSlkJVgMPCC4=
+          -----END CERTIFICATE-----
+          -----BEGIN CERTIFICATE-----
+          MIIBtTCCAVugAwIBAgIUTNhBcId53onGW+tCzd8mTGrOIVowCgYIKoZIzj0EAwIw
+          KDEmMCQGA1UEAwwdbmljby1hZG1pbi1yb290LXRlc3Qtcm90YXRpb24wHhcNMjYw
+          NzMwMTYzMDA3WhcNMzYwNzI3MTYzMDA3WjAoMSYwJAYDVQQDDB1uaWNvLWFkbWlu
+          LXJvb3QtdGVzdC1yb3RhdGlvbjBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABM9D
+          GgSZoOGgfcgk98P4mt+OiuYEw8ekwxJXz6Nk0cdrFbCx4/tU9LWaeylx9eDxEFgn
+          Xn0LcbS+XudDq3L30/2jYzBhMB0GA1UdDgQWBBQJfDlHt7tAkEXYfLRiscF9+U4T
+          jzAfBgNVHSMEGDAWgBQJfDlHt7tAkEXYfLRiscF9+U4TjzAPBgNVHRMBAf8EBTAD
+          AQH/MA4GA1UdDwEB/wQEAwIBBjAKBggqhkjOPQQDAgNIADBFAiEAiYhlL79kmU/V
+          QW7+LtZ/av9KdNFSTApqoOs9GJEmu5oCIEupcuIneTzClxRnujG0Bvv1caK6WBW6
+          aF/IMPCgda6G
+          -----END CERTIFICATE-----
+    asserts:
+      - equal:
+          path: data["admin_root_cert_pem"]
+          value: *rotationBundle
+
+  - it: supports the nico site config mount path
+    documentSelector:
+      path: metadata.name
+      value: nico-api-site-config-files
+    set:
+      auth:
+        adminRootCafilePath: "/etc/nico/nico-api/site/admin_root_cert_pem"
+      siteConfig:
+        adminRootCertPem: *singleCa
+    asserts:
+      - equal:
+          path: data["admin_root_cert_pem"]
+          value: *singleCa
+
+  - it: rejects a path outside the mounted site config directories
+    set:
+      auth:
+        adminRootCafilePath: "/custom/admin_root_cert_pem"
+      siteConfig:
+        adminRootCertPem: *singleCa
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-api: siteConfig.adminRootCertPem requires auth.adminRootCafilePath to reference admin_root_cert_pem in a mounted site config directory"
+
+  - it: rejects a private key
+    set:
+      siteConfig:
+        adminRootCertPem: |
+          -----BEGIN CERTIFICATE-----
+          QUJDRA==
+          -----END CERTIFICATE-----
+          -----BEGIN RSA PRIVATE KEY-----
+          U0VDUkVU
+          -----END RSA PRIVATE KEY-----
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-api: siteConfig.adminRootCertPem must contain public CA certificates only; private keys are not allowed"
+
+  - it: rejects content without a certificate
+    set:
+      siteConfig:
+        adminRootCertPem: "not a certificate"
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-api: siteConfig.adminRootCertPem must contain at least one canonical PEM CERTIFICATE block"
+
+  - it: rejects non-certificate content alongside a certificate
+    set:
+      siteConfig:
+        adminRootCertPem: |
+          -----BEGIN CERTIFICATE-----
+          QUJDRA==
+          -----END CERTIFICATE-----
+          unexpected content
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-api: siteConfig.adminRootCertPem must contain only bare PEM CERTIFICATE blocks and whitespace; remove metadata/comments and fix malformed blocks"
+
+  - it: rejects OpenSSL metadata and comments with an actionable error
+    set:
+      siteConfig:
+        adminRootCertPem: |
+          subject=CN=nico-admin-client
+          issuer=CN=nico-admin-root
+          # generated by openssl
+          -----BEGIN CERTIFICATE-----
+          QUJDRA==
+          -----END CERTIFICATE-----
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-api: siteConfig.adminRootCertPem must contain only bare PEM CERTIFICATE blocks and whitespace; remove metadata/comments and fix malformed blocks"
+
+  - it: rejects malformed certificate blocks
+    set:
+      siteConfig:
+        adminRootCertPem: |
+          -----BEGIN CERTIFICATE-----
+          QUJDRA==
+          -----END CERTIFICATE
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-api: siteConfig.adminRootCertPem must contain at least one canonical PEM CERTIFICATE block"
+
+  - it: accepts CRLF line endings
+    documentSelector:
+      path: metadata.name
+      value: nico-api-site-config-files
+    set:
+      siteConfig:
+        adminRootCertPem: "-----BEGIN CERTIFICATE-----\r\nQUJDRA==\r\n-----END CERTIFICATE-----\r\n"
+    asserts:
+      - equal:
+          path: data["admin_root_cert_pem"]
+          value: &normalizedEnvelope |
+            -----BEGIN CERTIFICATE-----
+            QUJDRA==
+            -----END CERTIFICATE-----
+
+  - it: accepts a certificate without a final newline
+    documentSelector:
+      path: metadata.name
+      value: nico-api-site-config-files
+    set:
+      siteConfig:
+        adminRootCertPem: |-
+          -----BEGIN CERTIFICATE-----
+          QUJDRA==
+          -----END CERTIFICATE-----
+    asserts:
+      - equal:
+          path: data["admin_root_cert_pem"]
+          value: *normalizedEnvelope
+
+  - it: rejects a certificate when the site ConfigMap is disabled
+    set:
+      siteConfig:
+        enabled: false
+        adminRootCertPem: |
+          -----BEGIN CERTIFICATE-----
+          QUJDRA==
+          -----END CERTIFICATE-----
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-api: siteConfig.adminRootCertPem requires siteConfig.enabled=true"
+
+  - it: rejects non-string values
+    set:
+      siteConfig:
+        adminRootCertPem:
+          unexpected: value
+    asserts:
+      - failedTemplate:
+          errorMessage: "nico-api: siteConfig.adminRootCertPem must be a string containing public CA certificates"

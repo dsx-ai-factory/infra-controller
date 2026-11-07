@@ -1,0 +1,220 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Keycloak realm configuration for nico-dev
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm
+  labels:
+    app: keycloak
+data:
+  nico-dev-realm.json: |
+    {
+      "realm": "nico-dev",
+      "enabled": true,
+      "displayName": "NICo Development",
+      "sslRequired": "none",
+      "registrationAllowed": false,
+      "loginWithEmailAllowed": true,
+      "duplicateEmailsAllowed": false,
+      "resetPasswordAllowed": true,
+      "editUsernameAllowed": false,
+      "bruteForceProtected": true,
+      "roles": {
+        "realm": [
+          {
+            "name": "test-org:PROVIDER_ADMIN",
+            "description": "Provider Admin role for test-org"
+          },
+          {
+            "name": "test-org:TENANT_ADMIN",
+            "description": "Tenant Admin role for test-org"
+          },
+          {
+            "name": "test-org:PROVIDER_VIEWER",
+            "description": "Provider Viewer role for test-org"
+          },
+          {
+            "name": "admin",
+            "description": "Administrator role"
+          },
+          {
+            "name": "user",
+            "description": "Regular user role"
+          }
+        ],
+        "client": {
+          "nico-api": [
+            {
+              "name": "api-access",
+              "description": "Access to NICo API"
+            }
+          ]
+        }
+      },
+      "clients": [
+        {
+          "clientId": "nico-api",
+          "name": "NICo API",
+          "enabled": true,
+          "clientAuthenticatorType": "client-secret",
+          "secret": "nico-local-secret",
+          "redirectUris": [
+            "http://localhost:8388/*",
+            "http://localhost:3000/*"
+          ],
+          "webOrigins": [
+            "http://localhost:8388",
+            "http://localhost:3000"
+          ],
+          "publicClient": false,
+          "protocol": "openid-connect",
+          "directAccessGrantsEnabled": true,
+          "serviceAccountsEnabled": true,
+          "authorizationServicesEnabled": false,
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "fullScopeAllowed": true,
+          "defaultClientScopes": [
+            "web-origins",
+            "acr",
+            "profile",
+            "roles",
+            "email"
+          ],
+          "optionalClientScopes": [
+            "address",
+            "phone",
+            "offline_access",
+            "microprofile-jwt"
+          ],
+          "protocolMappers": [
+            {
+              "name": "audience",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-audience-mapper",
+              "consentRequired": false,
+              "config": {
+                "included.client.audience": "nico-api",
+                "id.token.claim": "true",
+                "access.token.claim": "true"
+              }
+            },
+            {
+              "name": "oidc_id",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "consentRequired": false,
+              "config": {
+                "user.attribute": "oidc_id",
+                "claim.name": "oidc_id",
+                "jsonType.label": "String",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            }
+          ]
+        }
+      ],
+      "users": [
+        {
+          "username": "testuser",
+          "email": "testuser@example.com",
+          "emailVerified": true,
+          "enabled": true,
+          "firstName": "Test",
+          "lastName": "User",
+          "credentials": [
+            {
+              "type": "password",
+              "value": "testpassword",
+              "temporary": false
+            }
+          ],
+          "realmRoles": [
+            "user",
+            "test-org:TENANT_ADMIN"
+          ],
+          "clientRoles": {
+            "nico-api": [
+              "api-access"
+            ]
+          },
+          "attributes": {
+            "oidc_id": ["testuser-oidc-001"]
+          }
+        },
+        {
+          "username": "admin",
+          "email": "admin@example.com",
+          "emailVerified": true,
+          "enabled": true,
+          "firstName": "Admin",
+          "lastName": "User",
+          "credentials": [
+            {
+              "type": "password",
+              "value": "adminpassword",
+              "temporary": false
+            }
+          ],
+          "realmRoles": [
+            "admin",
+            "user",
+            "test-org:PROVIDER_ADMIN",
+            "test-org:TENANT_ADMIN"
+          ],
+          "clientRoles": {
+            "nico-api": [
+              "api-access"
+            ]
+          },
+          "attributes": {
+            "oidc_id": ["admin-oidc-001"]
+          }
+        },
+        {
+          "username": "provider",
+          "email": "provider@example.com",
+          "emailVerified": true,
+          "enabled": true,
+          "firstName": "Provider",
+          "lastName": "Admin",
+          "credentials": [
+            {
+              "type": "password",
+              "value": "providerpassword",
+              "temporary": false
+            }
+          ],
+          "realmRoles": [
+            "user",
+            "test-org:PROVIDER_ADMIN"
+          ],
+          "clientRoles": {
+            "nico-api": [
+              "api-access"
+            ]
+          },
+          "attributes": {
+            "oidc_id": ["provider-oidc-001"]
+          }
+        }
+      ],
+      "defaultDefaultClientScopes": [
+        "role_list",
+        "profile",
+        "email",
+        "roles",
+        "web-origins",
+        "acr"
+      ],
+      "defaultOptionalClientScopes": [
+        "offline_access",
+        "address",
+        "phone",
+        "microprofile-jwt"
+      ]
+    }

@@ -1,0 +1,3 @@
+<tr><th>State SLA</th><td>{{ state_sla }}</td></tr>
+<tr><th>Time in State is above SLA</th><td>{{ time_in_state_above_sla }}</td></tr>
+<tr><th>State Handler Outcome</th><td>{{ state_reason|controller_state_reason_fmt|safe }}</td></tr>

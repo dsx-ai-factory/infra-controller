@@ -1,0 +1,51 @@
+From 85217244da5eb01b6bf99741767d310f116c258f Mon Sep 17 00:00:00 2001
+From: Vishnu Rangayyan <vrangayyan@nvidia.com>
+Date: Fri, 1 Dec 2023 12:15:29 -0800
+Subject: [PATCH] fix: update to allow iPXE to boot on BlueField NICs
+
+---
+ src/drivers/net/efi/snpnet.c | 8 +-------
+ src/interface/efi/efi_snp.c  | 1 -
+ 2 files changed, 1 insertion(+), 8 deletions(-)
+
+diff --git a/src/drivers/net/efi/snpnet.c b/src/drivers/net/efi/snpnet.c
+index 6046f0a1e..48155057b 100644
+--- a/src/drivers/net/efi/snpnet.c
++++ b/src/drivers/net/efi/snpnet.c
+@@ -341,12 +341,6 @@ static int snpnet_rx_filters ( struct net_device *netdev ) {
+ 	struct snp_nic *snp = netdev->priv;
+ 	UINT32 filters[] = {
+ 		snp->snp->Mode->ReceiveFilterMask,
+-		( EFI_SIMPLE_NETWORK_RECEIVE_UNICAST |
+-		  EFI_SIMPLE_NETWORK_RECEIVE_MULTICAST |
+-		  EFI_SIMPLE_NETWORK_RECEIVE_BROADCAST ),
+-		( EFI_SIMPLE_NETWORK_RECEIVE_UNICAST |
+-		  EFI_SIMPLE_NETWORK_RECEIVE_PROMISCUOUS_MULTICAST |
+-		  EFI_SIMPLE_NETWORK_RECEIVE_BROADCAST ),
+ 		( EFI_SIMPLE_NETWORK_RECEIVE_UNICAST |
+ 		  EFI_SIMPLE_NETWORK_RECEIVE_BROADCAST ),
+ 		( EFI_SIMPLE_NETWORK_RECEIVE_UNICAST ),
+@@ -358,7 +352,7 @@ static int snpnet_rx_filters ( struct net_device *netdev ) {
+ 	/* Try possible receive filters in turn */
+ 	for ( i = 0; i < ( sizeof ( filters ) / sizeof ( filters[0] ) ); i++ ) {
+ 		efirc = snp->snp->ReceiveFilters ( snp->snp, filters[i],
+-				EFI_SIMPLE_NETWORK_RECEIVE_MULTICAST, TRUE,
++				0, FALSE,
+ 				0, NULL );
+ 		if ( efirc == 0 )
+ 			return 0;
+diff --git a/src/interface/efi/efi_snp.c b/src/interface/efi/efi_snp.c
+index dad8b33df..89a466c9f 100644
+--- a/src/interface/efi/efi_snp.c
++++ b/src/interface/efi/efi_snp.c
+@@ -128,7 +128,6 @@ static void efi_snp_set_mode ( struct efi_snp_device *snpdev ) {
+ 	mode->MediaHeaderSize = ll_protocol->ll_header_len;
+ 	mode->MaxPacketSize = netdev->mtu;
+ 	mode->ReceiveFilterMask = ( EFI_SIMPLE_NETWORK_RECEIVE_UNICAST |
+-				    EFI_SIMPLE_NETWORK_RECEIVE_MULTICAST |
+ 				    EFI_SIMPLE_NETWORK_RECEIVE_BROADCAST );
+ 	assert ( ll_addr_len <= sizeof ( mode->CurrentAddress ) );
+ 	memcpy ( &mode->CurrentAddress, netdev->ll_addr, ll_addr_len );
+-- 
+2.39.5
+

@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-fmds.fullname" . }}
+  labels:
+    {{- include "nico-fmds.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  internalTrafficPolicy: Local
+  selector:
+    {{- include "nico-fmds.selectorLabels" . | nindent 4 }}
+    {{- with .Values.serviceDaemonSet.labels }}
+      {{- toYaml . | nindent 4 }}
+    {{- end }}
+  ports:
+    - name: grpc-service
+      protocol: TCP
+      port: {{ include "nico-fmds.serverPort" . | int }}
+      targetPort: {{ include "nico-fmds.serverPort" . | int }}
+    - name: metrics
+      protocol: TCP
+      port: {{ include "nico-fmds.metricsPort" . | int }}
+      targetPort: {{ include "nico-fmds.metricsPort" . | int }}

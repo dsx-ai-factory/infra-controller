@@ -1,0 +1,342 @@
+use std::collections::BTreeMap;
+
+use serde_json::Value as JsonValue;
+
+/// The configuration difference returned by NVUE's config diff operation.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(transparent)]
+pub struct RevisionConfigDiff(
+    // We're intentionally typing this fairly loosely for code brevity, since the
+    // sole user of this is concerned only with whether the diff is empty.
+    serde_json::Map<String, serde_json::Value>,
+);
+
+impl RevisionConfigDiff {
+    /// Return `true` for an empty diff, which means a no-op change between the
+    /// revisions.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct RevisionData {
+    pub message: Option<String>,
+    pub state: Option<String>,
+    pub transition: Option<RevisionTransition>,
+    pub last_apply: Option<JsonValue>,
+    pub additional_data: Option<JsonValue>,
+    pub auto_prompt: Option<JsonValue>,
+    pub state_controls: Option<JsonValue>,
+}
+
+impl RevisionData {
+    /// Return whether the state represents a successful apply, including a save failure.
+    pub(crate) fn is_apply_success(&self) -> bool {
+        self.state
+            .as_ref()
+            .map(|state| {
+                matches!(
+                    state.as_str(),
+                    "applied" | "applied_and_saved" | "auto_save_error"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    /// Return whether an apply has reached a known end state, excluding save-only states.
+    pub(crate) fn is_terminal_for_apply(&self) -> bool {
+        self.state
+            .as_ref()
+            .map(|state| {
+                matches!(
+                    state.as_str(),
+                    "applied"
+                        | "applied_and_saved"
+                        | "auto_save_error"
+                        | "telemetry_subscribe_error"
+                        | "invalid"
+                        | "verify_error"
+                        | "dry_run_complete"
+                        | "ready_error"
+                        | "ays_fail"
+                        | "apply_error"
+                        | "apply_fail"
+                        | "confirm_fail"
+                        | "apply_interrupted"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn transition_progress(&self) -> Option<&str> {
+        self.transition
+            .as_ref()
+            .and_then(|transition| transition.progress.as_deref())
+    }
+
+    pub(crate) fn error_issue_summaries(&self) -> Vec<RevisionIssueSummary> {
+        self.transition
+            .as_ref()
+            .and_then(|transition| transition.issue.as_ref())
+            .into_iter()
+            .flat_map(|issues| issues.iter())
+            .filter(|(_, issue)| issue.severity == Some(RevisionIssueSeverity::Error))
+            .map(|(issue_id, issue)| RevisionIssueSummary {
+                issue_id: issue_id.clone(),
+                severity: RevisionIssueSeverity::Error,
+                code: issue.code.clone(),
+                message: issue.message.clone(),
+                data: issue.data.clone(),
+            })
+            .collect()
+    }
+
+    /// Return the rollback revision advertised by a transition issue, if any.
+    pub(crate) fn rollback_target(&self) -> Option<&str> {
+        self.transition
+            .as_ref()
+            .and_then(|transition| transition.issue.as_ref())
+            .into_iter()
+            .flat_map(|issues| issues.values())
+            .filter(|issue| issue.code.as_deref() == Some("rollback"))
+            .filter_map(|issue| issue.data.as_ref())
+            .find_map(|data| data.get("rollback_target"))
+            .map(String::as_str)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevisionIssueSummary {
+    pub issue_id: String,
+    pub severity: RevisionIssueSeverity,
+    pub code: Option<String>,
+    pub message: Option<String>,
+    pub data: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct RevisionTransition {
+    pub progress: Option<String>,
+    pub issue: Option<BTreeMap<String, RevisionIssue>>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct RevisionIssue {
+    pub severity: Option<RevisionIssueSeverity>,
+    pub code: Option<String>,
+    pub message: Option<String>,
+    pub data: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum RevisionIssueSeverity {
+    Error,
+    Warning,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_revision_states_for_apply() {
+        struct Case {
+            name: &'static str,
+            json: &'static str,
+            terminal: bool,
+            success: bool,
+        }
+
+        let cases = [
+            Case {
+                name: "ignore_fail with an error issue remains pending",
+                json: r#"{"state":"ignore_fail","transition":{"issue":{"1":{"severity":"error","code":"check_failed"}}}}"#,
+                terminal: false,
+                success: false,
+            },
+            Case {
+                name: "apply failure without an issue is terminal",
+                json: r#"{"state":"apply_fail"}"#,
+                terminal: true,
+                success: false,
+            },
+            Case {
+                name: "verification failure is terminal",
+                json: r#"{"state":"verify_error"}"#,
+                terminal: true,
+                success: false,
+            },
+            Case {
+                name: "successful apply",
+                json: r#"{"state":"applied"}"#,
+                terminal: true,
+                success: true,
+            },
+            Case {
+                name: "successful apply and save",
+                json: r#"{"state":"applied_and_saved"}"#,
+                terminal: true,
+                success: true,
+            },
+            Case {
+                name: "successful apply with separate save error",
+                json: r#"{"state":"auto_save_error","transition":{"issue":{"1":{"severity":"error","code":"save_failed"}}}}"#,
+                terminal: true,
+                success: true,
+            },
+            Case {
+                name: "save-only success does not terminate apply poll",
+                json: r#"{"state":"saved"}"#,
+                terminal: false,
+                success: false,
+            },
+        ];
+
+        for case in cases {
+            let revision: RevisionData = serde_json::from_str(case.json).unwrap_or_else(|error| {
+                panic!("{}: expected revision to parse: {error}", case.name)
+            });
+            assert_eq!(
+                revision.is_terminal_for_apply(),
+                case.terminal,
+                "{}",
+                case.name
+            );
+            assert_eq!(revision.is_apply_success(), case.success, "{}", case.name);
+        }
+    }
+
+    #[test]
+    fn revision_config_diff_requires_object_root_and_reports_empty_root() {
+        struct Case {
+            name: &'static str,
+            json: &'static str,
+            expected: Option<(bool, JsonValue)>,
+        }
+
+        let cases = [
+            Case {
+                name: "empty root object means no difference",
+                json: r#"{}"#,
+                expected: Some((true, serde_json::json!({}))),
+            },
+            Case {
+                name: "nested null remains a significant removal",
+                json: r#"{"interface":{"swp1":{"link":{"state":null}}}}"#,
+                expected: Some((
+                    false,
+                    serde_json::json!({
+                        "interface": {
+                            "swp1": {
+                                "link": {
+                                    "state": null
+                                }
+                            }
+                        }
+                    }),
+                )),
+            },
+            Case {
+                name: "null root is invalid",
+                json: "null",
+                expected: None,
+            },
+            Case {
+                name: "array root is invalid",
+                json: "[]",
+                expected: None,
+            },
+            Case {
+                name: "scalar root is invalid",
+                json: r#""value""#,
+                expected: None,
+            },
+        ];
+
+        for case in cases {
+            match (
+                serde_json::from_str::<RevisionConfigDiff>(case.json),
+                case.expected,
+            ) {
+                (Ok(diff), Some((expected_empty, expected_value))) => {
+                    assert_eq!(diff.is_empty(), expected_empty, "{}", case.name);
+                    assert_eq!(JsonValue::Object(diff.0), expected_value, "{}", case.name);
+                }
+                (Err(_), None) => {}
+                (Ok(_), None) => panic!("{}: expected deserialization to fail", case.name),
+                (Err(error), Some(_)) => {
+                    panic!(
+                        "{}: expected deserialization to succeed: {error}",
+                        case.name
+                    )
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parses_revision_data_with_transition_issue() {
+        let json = r#"
+        {
+            "additional-data": {
+                "parent-revision-id": "applied"
+            },
+            "auto-prompt": {
+                "ays": "ays_yes"
+            },
+            "last-apply": {
+                "apply-id": "rev_1_apply_1"
+            },
+            "message": "apply config",
+            "state": "apply",
+            "state-controls": {
+                "apply-type": "API"
+            },
+            "transition": {
+                "progress": "checking",
+                "issue": {
+                    "1": {
+                        "severity": "warning",
+                        "code": "sample-warning",
+                        "message": "sample warning",
+                        "data": {
+                            "path": "/system"
+                        }
+                    }
+                }
+            }
+        }
+        "#;
+
+        let revision: RevisionData = serde_json::from_str(json).expect("revision should parse");
+
+        assert_eq!(revision.message.as_deref(), Some("apply config"));
+        assert_eq!(revision.state.as_deref(), Some("apply"));
+        assert!(revision.additional_data.is_some());
+        assert!(revision.auto_prompt.is_some());
+        assert!(revision.last_apply.is_some());
+        assert!(revision.state_controls.is_some());
+
+        let transition = revision.transition.expect("transition should parse");
+        assert_eq!(transition.progress.as_deref(), Some("checking"));
+
+        let issues = transition.issue.expect("issues should parse");
+        let issue = issues.get("1").expect("issue should parse");
+        assert_eq!(issue.severity, Some(RevisionIssueSeverity::Warning));
+        assert_eq!(issue.code.as_deref(), Some("sample-warning"));
+        assert_eq!(issue.message.as_deref(), Some("sample warning"));
+        assert_eq!(
+            issue
+                .data
+                .as_ref()
+                .and_then(|data| data.get("path"))
+                .map(String::as_str),
+            Some("/system")
+        );
+    }
+}

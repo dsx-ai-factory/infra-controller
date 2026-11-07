@@ -1,0 +1,115 @@
+[
+    {
+      "id": "fm100hthvos96dbmmai84gsok0dn967v9fap8ublgp34kaknd9tq7pddim0",
+      "infrastructureProviderId": "16060041-f146-43fe-8c82-be48460b5583",
+      "siteId": "bd4692bd-da95-410e-911a-d492fe2d35f8",
+      "instanceTypeId": null,
+      "controllerMachineId": "fm100hthvos96dbmmai84gsok0dn967v9fap8ublgp34kaknd9tq7pddim0",
+      "controllerMachineType": "PowerEdge R750",
+      "hostname": "sad-uniform",
+      "machineCapabilities": [
+        {
+          "type": "CPU",
+          "name": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+          "cores": 18,
+          "threads": 36,
+          "count": 2
+        },
+        {
+          "type": "Storage",
+          "name": "Dell Ent NVMe CM6 RI 1.92TB",
+          "count": 3
+        },
+        {
+          "type": "Network",
+          "name": "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller",
+          "count": 2
+        },
+        {
+          "type": "Network",
+          "name": "NetXtreme BCM5720 2-port Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)",
+          "count": 2
+        },
+        {
+          "type": "Network",
+          "name": "BCM57414 NetXtreme-E 10Gb/25Gb RDMA Ethernet Controller",
+          "count": 2
+        }
+      ],
+      "machineInterfaces": [
+        {
+          "id": "6dd628a3-cc5b-4b12-8a5b-acad0160c7c3",
+          "machineId": "fm100hthvos96dbmmai84gsok0dn967v9fap8ublgp34kaknd9tq7pddim0",
+          "controllerInterfaceId": "029a9fdf-c232-4e8d-9327-4c271ad7ea01",
+          "controllerSegmentId": "82e53d43-72ee-468f-bf19-bdebf3877d62",
+          "subnetId": null,
+          "hostname": "sad-uniform",
+          "isPrimary": true,
+          "macAddress": "B8:3F:D2:90:97:04",
+          "ipAddresses": [
+            "10.180.90.10/32"
+          ],
+          "created": "2023-05-04T14:22:17.121178Z",
+          "updated": "2023-07-06T16:16:22.777176Z"
+        }
+      ],
+      "status": "Ready",
+      "statusHistory": [],
+      "created": "2023-04-13T19:37:17.954195Z",
+      "updated": "2023-07-06T16:16:22.75737Z"
+    },
+    {
+      "id": "fm100httuapjc6t4o629o5d3uu5616gimvn0smunp199mmmp1f2134nt92g",
+      "infrastructureProviderId": "16060041-f146-43fe-8c82-be48460b5583",
+      "siteId": "bd4692bd-da95-410e-911a-d492fe2d35f8",
+      "instanceTypeId": null,
+      "controllerMachineId": "fm100httuapjc6t4o629o5d3uu5616gimvn0smunp199mmmp1f2134nt92g",
+      "controllerMachineType": "PowerEdge R750",
+      "hostname": "social-whiskey",
+      "machineCapabilities": [
+        {
+          "type": "Network",
+          "name": "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller",
+          "count": 2
+        },
+        {
+          "type": "Network",
+          "name": "NetXtreme BCM5720 2-port Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)",
+          "count": 2
+        },
+        {
+          "type": "Storage",
+          "name": "Dell Ent NVMe v2 AGN RI U.2 1.92TB",
+          "count": 2
+        },
+        {
+          "type": "CPU",
+          "name": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+          "cores": 18,
+          "threads": 36,
+          "count": 2
+        }
+      ],
+      "machineInterfaces": [
+        {
+          "id": "41847749-03af-4c8c-94b6-6722e32a603e",
+          "machineId": "fm100httuapjc6t4o629o5d3uu5616gimvn0smunp199mmmp1f2134nt92g",
+          "controllerInterfaceId": "8b7ea73b-76d1-46be-8194-4c183c816a8f",
+          "controllerSegmentId": "82e53d43-72ee-468f-bf19-bdebf3877d62",
+          "subnetId": null,
+          "hostname": "social-whiskey",
+          "isPrimary": true,
+          "macAddress": "B8:3F:D2:90:99:B4",
+          "ipAddresses": [
+            "10.180.90.15/32"
+          ],
+          "created": "2023-05-04T14:58:20.087651Z",
+          "updated": "2023-07-06T16:16:22.861989Z"
+        }
+      ],
+      "status": "Ready",
+      "statusHistory": [],
+      "created": "2023-04-25T14:19:20.895831Z",
+      "updated": "2023-07-06T16:16:22.82906Z"
+    }
+  ]

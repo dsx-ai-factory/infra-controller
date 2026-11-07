@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+service my_service {
+  rpc VoidRpc(VoidRequest) returns (SomeResponse);
+  rpc SingleMessageRpc(SingleMessageRequest) returns (SomeResponse);
+  rpc SinglePrimitiveRpc(SinglePrimitiveRequest) returns (SomeResponse);
+  rpc SingleOneOfMessageRpc(SingleOneOfMessageRequest) returns (SomeResponse);
+  rpc SingleOneOfPrimitiveRpc(SingleOneOfPrimitiveRequest) returns (SomeResponse);
+  rpc MultiRpc(MultiRequest) returns (SomeResponse);
+  rpc ExternRpc(ExternRequest) returns (SomeResponse);
+  rpc SingleStreamingMessageRpc(SingleMessageRequest) returns (stream SomeResponse);
+}
+
+message VoidRequest { }
+
+message SingleMessageRequest {
+  SingleMessage value = 1;
+}
+
+message SinglePrimitiveRequest {
+  string value = 1;
+}
+
+message SingleOneOfMessageRequest {
+  oneof value {
+    SingleMessage inner = 1;
+  }
+}
+
+message SingleOneOfPrimitiveRequest {
+  oneof value {
+    string inner = 1;
+  }
+}
+
+message SingleMessage {
+  string value = 1;
+}
+
+message EmptyMessage {
+}
+
+message MultiRequest {
+  string value_one = 1;
+  string value_two = 2;
+}
+
+message SomeResponse { }
+
+message ExternRequest {
+  ExternType value = 1;
+}
+
+message ExternType {
+  string value = 1;
+}

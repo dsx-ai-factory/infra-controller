@@ -1,0 +1,126 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[package]
+name = "carbide-libmlx"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Consolidated Mellanox NIC configuration, firmware, and device management library."
+
+[lib]
+name = "libmlx"
+
+[[bin]]
+name = "mlxconfig-device"
+path = "src/bin/mlxconfig-device.rs"
+
+[[bin]]
+name = "mlxconfig-embedded"
+path = "src/bin/mlxconfig-embedded.rs"
+
+[[bin]]
+name = "mlx-firmware-supervisor"
+path = "src/bin/mlx-firmware-supervisor.rs"
+
+[dependencies]
+# Serialization
+serde = { features = ["derive"], workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+toml = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+
+# CLI
+clap = { features = ["derive"], workspace = true }
+prettytable-rs = { workspace = true }
+
+# Async / networking
+tokio = { features = ["full"], workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+hyper-util = { features = ["tokio"], workspace = true }
+http-body-util = { workspace = true }
+tower = { features = ["util"], workspace = true }
+reqwest = { features = ["rustls"], workspace = true }
+reqwest-middleware = { workspace = true }
+reqwest-tracing = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+logfmt = { path = "../logfmt" }
+tracing = { workspace = true }
+tracing-subscriber = { features = ["env-filter"], workspace = true }
+
+# XML / protobuf
+quick-xml = { features = ["serialize"], workspace = true }
+prost-types = { workspace = true }
+
+# Utility
+async-trait = { workspace = true }
+regex = { workspace = true }
+chrono = { features = ["serde"], workspace = true }
+hostname = { workspace = true }
+mac_address = { features = ["serde"], workspace = true }
+once_cell = { workspace = true }
+uuid = { features = ["v4"], workspace = true }
+backon = { workspace = true }
+wait-timeout = { workspace = true }
+nix = { features = [
+  "fs",
+  "poll",
+  "process",
+  "signal",
+  "socket",
+  "user",
+], workspace = true }
+tempfile = { workspace = true }
+sha2 = { workspace = true }
+url = { workspace = true }
+
+# Internal
+carbide-libmlx-model = { path = "../libmlx-model" }
+carbide-rpc = { path = "../rpc" }
+carbide-tls = { path = "../tls" }
+carbide-uuid = { path = "../uuid" }
+carbide-ssh = { path = "../ssh" }
+
+[build-dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+
+[dev-dependencies]
+rustls = { workspace = true }
+axum = { workspace = true }
+rcgen = { workspace = true }
+carbide-libmlx-model = { path = "../libmlx-model", features = ["test-support"] }
+carbide-ssh = { path = "../ssh", features = ["test_support"] }
+carbide-test-support = { path = "../test-support" }
+russh = { workspace = true }
+tokio = { features = ["test-util"], workspace = true }
+
+[features]
+#default = ["mockdpa"]
+default = []
+mockdpa = []
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

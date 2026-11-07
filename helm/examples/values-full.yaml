@@ -1,0 +1,389 @@
+## =============================================================================
+## Full Values — NICo Bare Metal Manager
+## =============================================================================
+## Comprehensive example showing all configurable values with documentation.
+## Copy and modify this file for your environment.
+## See PREREQUISITES.md for required Secrets, ConfigMaps, and operators.
+##
+## Install with: helm install nico ./helm -n nico-system --create-namespace -f values-full.yaml
+## =============================================================================
+
+global:
+  ## Container image for NICo core services (REQUIRED)
+  image:
+    repository: "your-registry.example.com/nico-core"
+    tag: "v2025.12.30"
+    pullPolicy: IfNotPresent
+
+  ## Image pull secrets for private registries
+  imagePullSecrets:
+    - name: my-registry-secret
+
+  ## cert-manager Certificate defaults for all services
+  certificate:
+    duration: 720h0m0s
+    renewBefore: 360h0m0s
+    privateKey:
+      algorithm: ECDSA
+      size: 384
+    issuerRef:
+      kind: ClusterIssuer
+      name: vault-nico-issuer
+      group: cert-manager.io
+
+  ## SPIFFE trust domain for mTLS between services
+  spiffe:
+    trustDomain: nico.local
+
+  ## Common labels applied to all resources
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: site-controller
+
+## ---------------------------------------------------------------------------
+## nico-api — Core API server
+## ---------------------------------------------------------------------------
+nico-api:
+  replicas: 1
+
+  resources:
+    limits:
+      cpu: 3
+      memory: 32Gi
+    requests:
+      cpu: 1500m
+      memory: 8Gi
+
+  ## Boot-artifact init containers — volume mount at /forge-boot-artifacts/blobs/internal
+  ## is auto-injected by the template.
+  bootArtifactContainers:
+    - name: boot-artifacts-x86-64
+      repository: "your-registry.example.com/boot-artifacts-x86_64"
+      tag: "latest"
+      command: ["sh", "-c", "cp -r /x86_64 /forge-boot-artifacts/blobs/internal"]
+    - name: boot-artifacts-aarch64
+      repository: "your-registry.example.com/boot-artifacts-aarch64"
+      tag: "latest"
+      command: ["sh", "-c", "cp -r /aarch64 /apt /forge-boot-artifacts/blobs/internal"]
+    - name: machine-validation-config
+      repository: "your-registry.example.com/machine-validation-config"
+      tag: "latest"
+      command: ["sh", "-c", "cp -r /machine-validation /forge-boot-artifacts/blobs/internal"]
+
+  env:
+    VAULT_PKI_ROLE_NAME: "nico-cluster"
+    RUST_BACKTRACE: "full"
+    RUST_LIB_BACKTRACE: "0"
+
+  ## Optional NVSwitch TLS leaves issued by one existing issuer. The standard
+  ## NICo prerequisites provide vault-nico-issuer. Both leaves are off by
+  ## default. Enable switchServer only when this release should own that
+  ## artifact; an external installer or operator must install its Secret on
+  ## the switches.
+  nvSwitchTls:
+    issuerRef:
+      kind: ClusterIssuer
+      name: vault-nico-issuer
+      group: cert-manager.io
+    nicoClient:
+      enabled: false
+      name: nvswitch-nico-client-certificate
+      secretName: nvswitch-nico-client-certificate
+      mountPath: /var/run/secrets/nvswitch-client
+      duration: 720h0m0s
+      renewBefore: 360h0m0s
+      uris:
+        - spiffe://switch.local/nico-system/sa/nico-nmxc
+      privateKey:
+        algorithm: ECDSA
+        size: 384
+        rotationPolicy: Always
+    switchServer:
+      enabled: false
+      name: nvswitch-server-certificate
+      secretName: nvswitch-server-certificate
+      duration: 720h0m0s
+      renewBefore: 360h0m0s
+      ## Use dnsNames or ipAddresses to exactly match
+      ## nvlink_config.nmx_c_tls_authority.
+      dnsNames:
+        - nmxc.example.internal
+      ipAddresses: []
+      uris: []
+      privateKey:
+        algorithm: ECDSA
+        size: 384
+        rotationPolicy: Always
+
+  ## WebUI authentication defaults to Basic with a generated password Secret.
+  ## Select OAuth2 here; provider-specific settings remain in extraEnv.
+  webAuth:
+    mode: oauth2
+
+  extraEnv:
+    - name: CARBIDE_WEB_OAUTH2_AUTH_ENDPOINT
+      value: "https://login.example.com/oauth2/v2.0/authorize"
+    - name: CARBIDE_WEB_OAUTH2_TOKEN_ENDPOINT
+      value: "https://login.example.com/oauth2/v2.0/token"
+    - name: CARBIDE_WEB_OAUTH2_CLIENT_ID
+      value: "your-oauth2-client-id"
+    - name: CARBIDE_WEB_OAUTH2_CLIENT_SECRET
+      valueFrom:
+        secretKeyRef:
+          name: azure-sso-nico-web-client-secret
+          key: client_secret
+    - name: CARBIDE_WEB_ALLOWED_ACCESS_GROUPS
+      value: "nico-admins,nico-operators"
+    ## Fail-closed examples: replace with the corresponding group object IDs.
+    - name: CARBIDE_WEB_ALLOWED_ACCESS_GROUPS_ID_LIST
+      value: "00000000-0000-0000-0000-000000000001,00000000-0000-0000-0000-000000000002"
+
+  ## NICo Web UI hostname
+  hostname: "nico.example.com"
+
+  ## Site-specific config overrides
+  siteConfig:
+    enabled: true
+    nicoApiSiteConfig: |
+      dhcp_servers=["nico-dhcp.nico-system.svc.cluster.local:67"]
+      route_servers=[]
+
+  ## Create Vault and DB ConfigMaps from values (alternative to external ConfigMaps)
+  vaultClusterInfo:
+    VAULT_SERVICE: "https://vault.example.com"
+    # Optional. Used for Vault Enterprise/HCP Vault Dedicated; not a Kubernetes namespace.
+    # VAULT_NAMESPACE: "admin/nico"
+    NICO_VAULT_MOUNT: "secrets"
+    NICO_VAULT_PKI_MOUNT: "nicoca"
+  databaseConfig:
+    DB_HOST: "postgresql.nico-system.svc.cluster.local"
+    DB_PORT: "5432"
+    DB_NAME: "nico"
+
+  ## External LoadBalancer (for MetalLB or similar)
+  externalService:
+    enabled: true
+    type: LoadBalancer
+    externalTrafficPolicy: Local
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: "10.0.0.10"
+
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 25s
+
+## ---------------------------------------------------------------------------
+## nico-dhcp — DHCP server
+## ---------------------------------------------------------------------------
+nico-dhcp:
+  replicas: 1
+
+  ## kea-dhcp4 configuration — structured shape (chart assembles JSON).
+  ## See helm/charts/nico-dhcp/values.yaml for every supported field and
+  ## the matching kea JSON key. For full per-site override (multiple
+  ## hooks, custom logger destinations, advanced lease backends), set
+  ## `config.keaConfigJsonRaw` to a complete kea_config.json string
+  ## instead — the structured `kea:` block is then ignored.
+  config:
+    enabled: true
+    kea:
+      ## libdhcp hook parameters — these are the IPs the DHCP server
+      ## advertises to PXE clients (DPUs / bare-metal hosts).
+      ## CRITICAL: replace each placeholder with a real IP the client
+      ## can reach (typically MetalLB LoadBalancer IPs of nico-dns /
+      ## site NTP / nico-pxe). Leaving 127.0.0.1 breaks DPU pre-ingestion.
+      hookParameters:
+        nameservers: "10.0.0.20"           # EXAMPLE — replace with nico-dns LB IP
+        ntpServer: "10.0.0.30"             # EXAMPLE — replace with site NTP IP(s), comma-separated for multi
+        provisioningServer: "10.0.0.40"    # EXAMPLE — replace with nico-pxe LB IP
+        # nicoApiUrl: ""                   # leave empty to derive https://<apiServiceName>.<ns>.svc.cluster.local:1079
+        # nicoMetricsEndpoint: "[::]:1089" # chart default
+
+      ## Subnets the DHCP server serves leases on.
+      subnet4:
+        - subnet: "10.0.0.0/24"
+          pools:
+            - "10.0.0.100-10.0.0.200"
+
+      ## All other kea-dhcp4 fields below default to sensible values and
+      ## can usually be omitted. Shown here for completeness.
+      # interfacesConfig:
+      #   interfaces: ["eth0"]
+      #   dhcpSocketType: udp
+      # leaseDatabase:
+      #   type: memfile
+      #   lfcInterval: 3600
+      # matchClientId: false
+      # authoritative: true
+      # renewTimer: 900
+      # rebindTimer: 1800
+      # validLifetime: 3600
+      # declineProbationPeriod: 900
+      # hookLibraryPath: /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so
+      # additionalHooksLibraries: []
+      # loggers:
+      #   - name: kea-dhcp4
+      #     severity: INFO
+      #   - name: kea-dhcp4.hooks
+      #     severity: INFO
+      #   - name: kea-dhcp4.nico-rust
+      #     severity: INFO
+
+  externalService:
+    enabled: true
+    type: LoadBalancer
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: "10.0.0.11"
+
+## ---------------------------------------------------------------------------
+## nico-dns — Authoritative DNS
+## ---------------------------------------------------------------------------
+nico-dns:
+  replicas: 2
+
+  externalService:
+    enabled: true
+    type: LoadBalancer
+    perPodAnnotations:
+      - metallb.universe.tf/loadBalancerIPs: "10.0.0.20"   # pod-0
+      - metallb.universe.tf/loadBalancerIPs: "10.0.0.21"   # pod-1
+
+## ---------------------------------------------------------------------------
+## nico-dsx-exchange-consumer — DSX Exchange consumer
+## ---------------------------------------------------------------------------
+nico-dsx-exchange-consumer:
+  enabled: true
+  replicas: 1
+
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 25s
+
+## ---------------------------------------------------------------------------
+## nico-hardware-health — Hardware health metrics
+## ---------------------------------------------------------------------------
+nico-hardware-health:
+  replicas: 1
+
+  serviceMonitor:
+    enabled: true
+    interval: 30s
+    scrapeTimeout: 25s
+
+  ## Optional: scrape /telemetry for per-endpoint sensor gauges (high cardinality).
+  telemetryServiceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 25s
+
+## ---------------------------------------------------------------------------
+## nico-pxe — PXE boot server
+## ---------------------------------------------------------------------------
+nico-pxe:
+  replicas: 1
+
+  bootArtifacts:
+    servePath: /forge-boot-artifacts
+
+  bootArtifactContainers:
+    - name: boot-artifacts-x86-64
+      repository: "your-registry.example.com/boot-artifacts-x86_64"
+      tag: "latest"
+      command: ["sh", "-c", "set -e; cp -r /x86_64 /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal; chmod -R g+rX /forge-boot-artifacts/blobs/internal"]
+    - name: boot-artifacts-aarch64
+      repository: "your-registry.example.com/boot-artifacts-aarch64"
+      tag: "latest"
+      command: ["sh", "-c", "set -e; cp -r /aarch64 /apt /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal; chmod -R g+rX /forge-boot-artifacts/blobs/internal"]
+    - name: machine-validation-config
+      repository: "your-registry.example.com/machine-validation-config"
+      tag: "latest"
+      command: ["sh", "-c", "set -e; cp -r /machine-validation /forge-boot-artifacts/blobs/internal; chgrp -R 10001 /forge-boot-artifacts/blobs/internal; chmod -R g+rX /forge-boot-artifacts/blobs/internal"]
+
+  externalService:
+    enabled: true
+    type: LoadBalancer
+    externalTrafficPolicy: Local
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: "10.0.0.40"
+
+## ---------------------------------------------------------------------------
+## nico-ssh-console-rs — SSH console proxy
+## ---------------------------------------------------------------------------
+nico-ssh-console-rs:
+  replicas: 1
+
+  ## OpenTelemetry Collector Contrib sidecar for shipping console logs to Loki.
+  ## Requires a Loki instance at http://loki.loki.svc.cluster.local:3100.
+  ## If Loki is not deployed, set enabled: false to skip the sidecar.
+  lokiLogCollector:
+    enabled: true
+    image:
+      repository: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib
+      tag: "0.81.0"
+
+  externalService:
+    enabled: true
+    type: LoadBalancer
+    annotations:
+      metallb.universe.tf/loadBalancerIPs: "10.0.0.13"
+
+## ---------------------------------------------------------------------------
+## unbound — Recursive DNS resolver
+## ---------------------------------------------------------------------------
+unbound:
+  enabled: true
+
+  image:
+    repository: "your-registry.example.com/unbound"
+    tag: "1.21.1"
+    pullPolicy: IfNotPresent
+
+  exporterImage:
+    repository: "your-registry.example.com/unbound-exporter"
+    tag: "0.4.6"
+    pullPolicy: IfNotPresent
+
+  ## Configure upstream DNS forwarders
+  localConfig:
+    forwarders.conf: |
+      forward-zone:
+        name: "."
+        forward-addr: 8.8.8.8
+        forward-addr: 8.8.4.4
+        forward-addr: 1.1.1.1
+
+## ---------------------------------------------------------------------------
+## nico-bmc-proxy: Authenticating BMC redfish proxy
+## ---------------------------------------------------------------------------
+nico-bmc-proxy:
+  replicas: 2
+  configFiles:
+    enabled: true
+    nicoBmcProxyConfig: |
+      listen = "[::]:1079"
+      metrics_endpoint = "[::]:1080"
+      database_url = "postgres://replaced-by-env-var"
+      allowed_principals = ["spiffe-service-id/nico-api", "spiffe-service-id/nv-dps"]
+
+      [tls]
+      identity_pemfile_path = "/var/run/secrets/spiffe.io/tls.crt"
+      identity_keyfile_path = "/var/run/secrets/spiffe.io/tls.key"
+      root_cafile_path = "/var/run/secrets/spiffe.io/ca.crt"
+      admin_root_cafile_path = "/etc/nico/nico-bmc-proxy/site/admin_root_cert_pem"
+
+      [carbide_api]
+      api_url = "https://nico-api.nico-system.svc.cluster.local:1079"
+      root_ca = "/var/run/secrets/spiffe.io/ca.crt"
+      client_cert = "/var/run/secrets/spiffe.io/tls.crt"
+      client_key = "/var/run/secrets/spiffe.io/tls.key"
+
+      [auth.trust]
+      spiffe_trust_domain = "nico.local"
+      spiffe_service_base_paths = [
+        "/nico-system/sa/",
+        "/default/sa/",
+      ]
+      spiffe_machine_base_path = "/nico-system/machine/"
+      additional_issuer_cns = []

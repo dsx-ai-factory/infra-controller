@@ -1,0 +1,740 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+    helm.sh/resource-policy: keep
+  labels:
+    app.kubernetes.io/part-of: dpf-operator-controller-manager
+    dpu.nvidia.com/component: dpf-operator-controller-manager
+  name: dpuflavors.provisioning.dpu.nvidia.com
+spec:
+  group: provisioning.dpu.nvidia.com
+  names:
+    kind: DPUFlavor
+    listKind: DPUFlavorList
+    plural: dpuflavors
+    singular: dpuflavor
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: DPUFlavor is the Schema for the dpuflavors API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              DPUFlavorSpec defines the content of DPUFlavor.
+              Config-only fields (grub, sysctl, nvconfig, ovs, packages, systemdServices,
+              containerdConfig, agent-applied configFiles, serviceReadiness, ewNicConfigurations,
+              dma, virtualFunctions) may be updated in place.
+              Immutable fields require a new DPUFlavor.
+            properties:
+              bfcfgParameters:
+                description: BFCfgParameters are the parameters to be set in the bf.cfg
+                  file.
+                items:
+                  type: string
+                type: array
+              configFiles:
+                description: ConfigFiles are the files to be written on the DPU.
+                items:
+                  description: ConfigFile describes a file materialized from inline
+                    raw content or external contentFrom.
+                  properties:
+                    contentFrom:
+                      description: |-
+                        ContentFrom references external content for the file.
+                        Supported only when type is agent-applied.
+                      properties:
+                        configMapKeyRef:
+                          description: ConfigMapKeyRef selects a key from a ConfigMap
+                            in the DPU namespace.
+                          properties:
+                            key:
+                              description: The key to select.
+                              type: string
+                            name:
+                              default: ""
+                              description: |-
+                                Name of the referent.
+                                This field is effectively required, but due to backwards compatibility is
+                                allowed to be empty. Instances of this type with an empty value here are
+                                almost certainly wrong.
+                                More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                              type: string
+                            optional:
+                              description: Specify whether the ConfigMap or its key
+                                must be defined
+                              type: boolean
+                          required:
+                          - key
+                          type: object
+                          x-kubernetes-map-type: atomic
+                      type: object
+                    operation:
+                      description: Operation is the operation to be performed on the
+                        file.
+                      enum:
+                      - override
+                      - append
+                      type: string
+                    path:
+                      description: Path is the path of the file to be written.
+                      type: string
+                    permissions:
+                      description: Permissions are the permissions to be set on the
+                        file.
+                      type: string
+                    raw:
+                      description: |-
+                        Raw is the inline file content.
+                        Supported only when type is cloud-init. When type is omitted, type defaults
+                        to cloud-init and raw must be set.
+                      type: string
+                    type:
+                      default: cloud-init
+                      description: |-
+                        Type controls when the file content is materialized.
+                        cloud-init files use raw inline content and are written during cloud-init.
+                        agent-applied files use contentFrom and are written later by dpu-agent.
+                        Defaults to cloud-init when omitted.
+                      enum:
+                      - cloud-init
+                      - agent-applied
+                      type: string
+                  required:
+                  - path
+                  type: object
+                  x-kubernetes-validations:
+                  - message: exactly one of raw or contentFrom must be specified
+                    rule: has(self.raw) != has(self.contentFrom)
+                  - message: contentFrom.configMapKeyRef must be specified
+                    rule: '!has(self.contentFrom) || has(self.contentFrom.configMapKeyRef)'
+                  - message: type cloud-init supports raw only
+                    rule: '!has(self.type) || self.type != ''cloud-init'' || has(self.raw)'
+                  - message: type agent-applied supports contentFrom only
+                    rule: '!has(self.type) || self.type != ''agent-applied'' || has(self.contentFrom)'
+                  - message: type defaults to cloud-init, which requires raw content
+                    rule: has(self.type) || has(self.raw)
+                type: array
+              containerdConfig:
+                description: ContainerdConfig contains the configuration for containerd.
+                properties:
+                  registryEndpoint:
+                    description: RegistryEndpoint is the endpoint of the container
+                      registry.
+                    type: string
+                  sandboxImage:
+                    description: |-
+                      SandboxImage overrides the containerd sandbox (pause) image on the DPU, e.g.
+                      "registry.example.com/pause:3.9". When unset, the sandbox image shipped with the BFB is kept.
+                    maxLength: 512
+                    minLength: 1
+                    type: string
+                type: object
+              dma:
+                description: |-
+                  DMA configures the SNAP DMA SF. The agent picks the ECPF; sfnum is 8000 and MAC is derived.
+                  Ignored except on BlueField-4.
+                properties:
+                  enabled:
+                    description: Enabled creates the SNAP DMA SF on BlueField-4 socket-direct
+                      systems.
+                    type: boolean
+                type: object
+              dpuMode:
+                description: |-
+                  DpuMode is deprecated and no longer used by provisioning workflows.
+                  Deployment mode is sourced from DPFOperatorConfig and exposed on DPU.status.deploymentMode.
+                enum:
+                - dpu
+                - zero-trust
+                - nic
+                type: string
+              dpuResources:
+                additionalProperties:
+                  anyOf:
+                  - type: integer
+                  - type: string
+                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                  x-kubernetes-int-or-string: true
+                description: |-
+                  DPUResources indicates the minimum amount of resources needed for a BFB with that flavor to be installed on a
+                  DPU. Using this field, the controller can understand if that flavor can be installed on a particular DPU. It
+                  should be set to the total amount of resources the system needs + the resources that should be made available for
+                  DPUServices to consume.
+                type: object
+              ewNicConfigurations:
+                description: |-
+                  EWNicConfigurations lists per-NIC configuration for the E/W NICs.
+                  Only the first entry is applied in this release; additional entries are ignored until a future
+                  release adds multi-NIC support. The field is modeled as a list now so the API shape does not
+                  need to change when multiple entries are supported.
+                items:
+                  description: NicConfiguration is a set of configurations for the
+                    NICs
+                  properties:
+                    force:
+                      default: false
+                      description: |-
+                        Force passes `--force` to mlxconfig set commands. When set, the daemon
+                        applies the nv config batch and set_system_conf with --force, letting
+                        mlxconfig accept a batch it would otherwise refuse due to implicit
+                        parameter dependencies.
+                      type: boolean
+                    linkType:
+                      description: |-
+                        LinkType to be configured, Ethernet|Infiniband. Required unless networkBay is configured;
+                        for Network Bay the link type is governed by the system configuration and must not be set.
+                      enum:
+                      - Ethernet
+                      - Infiniband
+                      type: string
+                    networkBay:
+                      description: NetworkBay configures a ConnectX-9 Network Bay
+                        card (per-ASIC set_system_conf). Allowed only for ConnectX-9
+                        (nicType 1025).
+                      properties:
+                        conf:
+                          description: |-
+                            Conf is the mlxconfig system configuration profile name. The daemon resolves
+                            the profile parameters for the device's detected Network Bay ASIC and manages
+                            them through the regular mlxconfig validation and apply flow.
+                          type: string
+                      required:
+                      - conf
+                      type: object
+                    numVfs:
+                      description: Number of VFs to be configured
+                      type: integer
+                    rawNvConfig:
+                      description: List of arbitrary nv config parameters
+                      items:
+                        properties:
+                          name:
+                            description: Name of the arbitrary nvconfig parameter
+                            maxLength: 64
+                            type: string
+                          value:
+                            description: Value of the arbitrary nvconfig parameter
+                            maxLength: 128
+                            type: string
+                        required:
+                        - name
+                        - value
+                        type: object
+                      type: array
+                    spectrumXOptimized:
+                      description: Spectrum-X optimization settings. Works only with
+                        linkType==Ethernet && numVfs==1. RawNvConfig parameters, if
+                        provided, are merged as overrides on top of Spectrum-X calculated
+                        params.
+                      properties:
+                        enabled:
+                          description: Optimize Spectrum X
+                          type: boolean
+                        multiplaneMode:
+                          default: none
+                          description: |-
+                            Multiplane mode to be configured
+                            Can be "none", "swplb", "hwplb", or "uniplane"
+                          enum:
+                          - none
+                          - swplb
+                          - hwplb
+                          - uniplane
+                          type: string
+                        numberOfPlanes:
+                          default: 1
+                          description: Number of planes to be configured
+                          enum:
+                          - 1
+                          - 2
+                          - 4
+                          type: integer
+                        overlay:
+                          default: none
+                          description: |-
+                            Overlay mode to be configured
+                            Can be "l3" or "none"
+                          enum:
+                          - l3
+                          - none
+                          type: string
+                        version:
+                          description: Version of the Spectrum-X architecture to optimize
+                            for. Should match the name of the config map with Spectrum-X
+                            profile
+                          type: string
+                      required:
+                      - enabled
+                      - version
+                      type: object
+                      x-kubernetes-validations:
+                      - message: when MultiplaneMode is none, numberOfPlanes must
+                          be 1
+                        rule: '!has(self.multiplaneMode) || !has(self.numberOfPlanes)
+                          || self.multiplaneMode != ''none'' || self.numberOfPlanes
+                          == 1'
+                      - message: when MultiplaneMode is not none, numberOfPlanes must
+                          not be 1
+                        rule: '!has(self.multiplaneMode) || !has(self.numberOfPlanes)
+                          || self.multiplaneMode == ''none'' || self.numberOfPlanes
+                          != 1'
+                  required:
+                  - numVfs
+                  type: object
+                  x-kubernetes-validations:
+                  - message: spectrumXOptimized can be enabled only when linkType=='Ethernet'
+                      (or unset for Network Bay) and numVfs==1
+                    rule: '!(has(self.spectrumXOptimized) && self.spectrumXOptimized.enabled)
+                      || ((!has(self.linkType) || self.linkType == ''Ethernet'') &&
+                      self.numVfs == 1)'
+                  - message: linkType is required unless networkBay is configured
+                    rule: has(self.networkBay) || has(self.linkType)
+                  - message: linkType must not be set when networkBay is configured
+                      (the Network Bay link type is governed by the system configuration)
+                    rule: '!has(self.networkBay) || !has(self.linkType)'
+                  - message: networkBay.conf must not be empty
+                    rule: '!has(self.networkBay) || self.networkBay.conf != ""'
+                maxItems: 16
+                type: array
+                x-kubernetes-list-type: atomic
+              grub:
+                description: Grub contains the grub configuration for the DPUFlavor.
+                properties:
+                  kernelParameters:
+                    description: KernelParameters are the kernel parameters to be
+                      set in the grub configuration.
+                    items:
+                      type: string
+                    type: array
+                type: object
+              hostNetworkInterfaceConfigs:
+                description: HostNetworkInterfaceConfigs contains the configuration
+                  for the host-side network interfaces.
+                items:
+                  description: NetworkInterfaceConfig defines the configuration for
+                    a network interface
+                  properties:
+                    dhcp:
+                      description: DHCP is the DHCP configuration for the network
+                        interface.
+                      type: boolean
+                    mtu:
+                      description: MTU is the MTU value to be set on the network interface.
+                      format: int32
+                      maximum: 9216
+                      minimum: 1280
+                      type: integer
+                    nvconfig:
+                      description: |-
+                        NVConfig contains port-specific configuration for this network interface.
+                        This configuration is applied in addition to the global NVConfig settings in DPUFlavorSpec.
+                        Both global and per-interface NVConfig settings can coexist without collision.
+                      properties:
+                        device:
+                          description: |-
+                            Device is the device to which the configuration applies. If not specified, the configuration applies to all.
+                            Supported values: "*" (wildcard for all devices), "p0"/"P0" (port 0), "p1"/"P1" (port 1). Case-insensitive.
+                          enum:
+                          - '*'
+                          - p0
+                          - p1
+                          - P0
+                          - P1
+                          type: string
+                        force:
+                          description: |-
+                            force applies the parameters with `mlxconfig --force` and skips the `mlxconfig q` filter,
+                            so parameters firmware does not yet expose are applied now instead of deferred to a later
+                            reboot. Required when a parameter is gated behind another parameter in the same batch.
+                            Requires DOCA 3.5.0 or later; on an older DOCA version the operation fails.
+                            `--force` skips validation for the whole batch, so an invalid value is applied silently.
+                            Ignored under `spec.hostNetworkInterfaceConfigs[].nvconfig`.
+                          type: boolean
+                        parameters:
+                          description: |-
+                            Parameters are the parameters to be set for the device.
+                            DELAY_HOST_OS_INIT=ENABLE_USER (0x3) holds the host at UEFI and is rejected by the DPU agent
+                            outside zero-trust, where the agent needs the host to reach the kube-apiserver.
+                          items:
+                            maxLength: 200
+                            pattern: ^[^=\s]+=[^\s]*$
+                            type: string
+                          maxItems: 64
+                          minItems: 1
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      type: object
+                    portNumber:
+                      description: PortNumber identifies which port this configuration
+                        applies to.
+                      format: int32
+                      maximum: 1
+                      minimum: 0
+                      type: integer
+                  required:
+                  - portNumber
+                  type: object
+                type: array
+              nvconfig:
+                description: |-
+                  NVConfig contains the device-specific configuration (firmware settings, device parameters).
+                  Each entry specifies a device (wildcard '*', or port identifiers 'p0'/'P0'/'p1'/'P1') and its parameters.
+                  If device is '*' or unspecified (defaults to '*'), it applies to all devices and must be the only entry.
+                  Each device (including unspecified as '*') must be unique across all nvconfig entries (case-insensitive).
+                  Validation enforces: device enum values, parameter format (KEY=VALUE), case-insensitive uniqueness, and size limits.
+                items:
+                  properties:
+                    device:
+                      description: |-
+                        Device is the device to which the configuration applies. If not specified, the configuration applies to all.
+                        Supported values: "*" (wildcard for all devices), "p0"/"P0" (port 0), "p1"/"P1" (port 1). Case-insensitive.
+                      enum:
+                      - '*'
+                      - p0
+                      - p1
+                      - P0
+                      - P1
+                      type: string
+                    force:
+                      description: |-
+                        force applies the parameters with `mlxconfig --force` and skips the `mlxconfig q` filter,
+                        so parameters firmware does not yet expose are applied now instead of deferred to a later
+                        reboot. Required when a parameter is gated behind another parameter in the same batch.
+                        Requires DOCA 3.5.0 or later; on an older DOCA version the operation fails.
+                        `--force` skips validation for the whole batch, so an invalid value is applied silently.
+                        Ignored under `spec.hostNetworkInterfaceConfigs[].nvconfig`.
+                      type: boolean
+                    parameters:
+                      description: |-
+                        Parameters are the parameters to be set for the device.
+                        DELAY_HOST_OS_INIT=ENABLE_USER (0x3) holds the host at UEFI and is rejected by the DPU agent
+                        outside zero-trust, where the agent needs the host to reach the kube-apiserver.
+                      items:
+                        maxLength: 200
+                        pattern: ^[^=\s]+=[^\s]*$
+                        type: string
+                      maxItems: 64
+                      minItems: 1
+                      type: array
+                      x-kubernetes-list-type: atomic
+                  type: object
+                maxItems: 3
+                type: array
+                x-kubernetes-list-type: atomic
+                x-kubernetes-validations:
+                - message: when device is '*', it must be the only nvconfig entry
+                  rule: size(self) == 0 || !self.exists(x, has(x.device) && x.device
+                    == '*') || size(self) == 1
+                - message: when device is unspecified (defaults to '*'), it must be
+                    the only nvconfig entry
+                  rule: size(self) == 0 || !self.exists(x, !has(x.device)) || size(self)
+                    == 1
+                - message: each nvconfig.device (including unspecified as '*') must
+                    be unique (case-insensitive)
+                  rule: 'self.all(p1, self.exists_one(p2, (has(p1.device) ? p1.device.lowerAscii()
+                    : ''*'') == (has(p2.device) ? p2.device.lowerAscii() : ''*'')))'
+              ovs:
+                description: OVS contains the OVS configuration for the DPUFlavor.
+                properties:
+                  rawConfigScript:
+                    description: |-
+                      RawConfigScript is the raw configuration script for OVS.
+                      The DPU agent runs this script once per boot. A restart of the agent in the
+                      same boot does not re-run it; a reboot or power cycle does.
+                    type: string
+                type: object
+              packages:
+                description: Packages are the packages to reconcile on the node.
+                items:
+                  description: PackageSpec defines a package to reconcile on the node.
+                  properties:
+                    name:
+                      description: Name is the package name.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    repoFileRef:
+                      description: |-
+                        RepoFileRef constrains package resolution to a specific repository file available on the node.
+                        If empty, any configured repository may satisfy the package.
+                        If specified, only the referenced repository file may provide candidates.
+                        If that repository file does not provide the package or requested version, the dpu-agent flow does not continue.
+                      type: string
+                    version:
+                      description: |-
+                        Version constrains the package version.
+                        If empty, any installed version satisfies the spec.
+                      properties:
+                        matchPolicy:
+                          default: AtLeast
+                          description: |-
+                            MatchPolicy controls how Value is matched.
+                            If omitted, AtLeast is used.
+                          enum:
+                          - Exact
+                          - AtLeast
+                          type: string
+                        value:
+                          description: Value is the package version to compare against.
+                          minLength: 1
+                          type: string
+                      required:
+                      - value
+                      type: object
+                  required:
+                  - name
+                  type: object
+                maxItems: 64
+                type: array
+                x-kubernetes-validations:
+                - message: package names must be unique
+                  rule: self.all(x, self.exists_one(y, x.name == y.name))
+              scalableFunctions:
+                description: |-
+                  ScalableFunctions is the list of SF groups to create on the DPU, or on the host when
+                  hostDevice is set. Count is per selected device. Over-subscribe can trigger failures at
+                  create time. This field is immutable. Changing it requires a new DPUFlavor. For backward compatibility, when
+                  both this SF list and VF list are empty, SF counts are still derived from PF_TOTAL_SF
+                  (removed in a future release).
+                items:
+                  description: ScalableFunction is one group of SFs to create.
+                  properties:
+                    count:
+                      description: |-
+                        Count is SFs to create per selected device. With device "*", count 20 is 20 SFs
+                        on each port. Zero creates nothing.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    device:
+                      description: 'Device is the target port: "*", a name such as
+                        p0, or a PCI address. Defaults to "*".'
+                      pattern: ^(\*|[pP][0-9]+|[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7])$
+                      type: string
+                    hostDevice:
+                      description: |-
+                        HostDevice creates the SFs on the host (representors on the DPU). Implies
+                        controller 1; options.controller overrides. Host SFs use the host firmware
+                        budget and must not set poolName.
+                      type: boolean
+                    options:
+                      description: Options are creation settings for this group.
+                      properties:
+                        controller:
+                          description: Controller is the external controller to create
+                            on. Overrides hostDevice.
+                          format: int32
+                          maximum: 15
+                          minimum: 0
+                          type: integer
+                        cpuList:
+                          description: CPUList pins the SFs to CPUs in mlnx-sf list
+                            form, for example 0-3 or 0,2,4.
+                          maxLength: 200
+                          pattern: ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$
+                          type: string
+                        disableNetdev:
+                          description: DisableNetdev leaves the SFs without an ethernet
+                            netdev.
+                          type: boolean
+                        disableRoCE:
+                          description: DisableRoCE creates the SFs with RoCE disabled.
+                          type: boolean
+                        macAddress:
+                          description: MACAddress pins the SF MAC (colon-separated
+                            48-bit). Requires count 1.
+                          pattern: ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$
+                          type: string
+                        sfNumStart:
+                          description: |-
+                            SFNumStart is the first sfnum of the group; the rest are sequential from it.
+                            Reserved before agent-numbered groups, which fill from 0 around them.
+                          format: int32
+                          maximum: 65535
+                          minimum: 0
+                          type: integer
+                        trusted:
+                          description: Trusted creates the SFs as trusted functions.
+                          type: boolean
+                      type: object
+                    poolName:
+                      description: |-
+                        PoolName is the device-plugin resource (for example bf_sf). Unset: created in
+                        hardware only. Forbidden with hostDevice.
+                      maxLength: 63
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]*$
+                      type: string
+                  required:
+                  - count
+                  type: object
+                  x-kubernetes-validations:
+                  - message: options.macAddress requires count == 1
+                    rule: '!has(self.options) || !has(self.options.macAddress) ||
+                      self.count == 1'
+                  - message: poolName must not be set when hostDevice is true
+                    rule: '!has(self.hostDevice) || !self.hostDevice || !has(self.poolName)'
+                maxItems: 16
+                type: array
+                x-kubernetes-list-type: atomic
+              serviceReadiness:
+                description: serviceReadiness configures the Service Readiness phase.
+                properties:
+                  gate:
+                    description: |-
+                      gate is the DPU.status.operationalConditions entry that must be True before the DPU leaves
+                      the Service Readiness phase. When unset the phase does not wait, and a host hold requested
+                      via DELAY_HOST_OS_INIT is released on DPUServiceCriticalPodsReady.
+                    enum:
+                    - DPUServiceCriticalPodsReady
+                    - OperationalReady
+                    type: string
+                type: object
+              sysctl:
+                description: Sysctl contains the sysctl configuration for the DPUFlavor.
+                properties:
+                  parameters:
+                    description: Parameters are the sysctl parameters to be set.
+                    items:
+                      type: string
+                    type: array
+                type: object
+              systemReservedResources:
+                additionalProperties:
+                  anyOf:
+                  - type: integer
+                  - type: string
+                  pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                  x-kubernetes-int-or-string: true
+                description: |-
+                  SystemReservedResources indicates the resources that are consumed by the system (OS, OVS, DPF system etc) and are
+                  not made available for DPUServices to consume. DPUServices can consume the difference between DPUResources and
+                  SystemReservedResources. This field must not be specified if dpuResources are not specified.
+                type: object
+              systemdServices:
+                description: SystemdServices are the systemd services to manage on
+                  the node.
+                items:
+                  description: SystemdServiceSpec defines a systemd service to manage
+                    on the node.
+                  properties:
+                    name:
+                      description: Name is the systemd service name.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                    operation:
+                      description: Operation is the systemd operation to perform on
+                        the service.
+                      enum:
+                      - Start
+                      - Enable
+                      - EnableAndStart
+                      type: string
+                  required:
+                  - name
+                  - operation
+                  type: object
+                maxItems: 64
+                type: array
+                x-kubernetes-validations:
+                - message: systemd service names must be unique
+                  rule: self.all(x, self.exists_one(y, x.name == y.name))
+              virtualFunctions:
+                description: |-
+                  VirtualFunctions is the list of VF groups to create. Count is per selected
+                  device. Groups ending up on the same device sum to a single `sriov_numvfs` and then
+                  list order assigns contiguous index ranges. Over-subscribe can trigger failures at
+                  create time. Editing this field reprovisions the DPU.
+                items:
+                  description: VirtualFunction is one group of VFs to create.
+                  properties:
+                    count:
+                      description: |-
+                        Count is VFs to create per selected device. Groups ending up on the same device sum to
+                        a single `sriov_numvfs` and then list order assigns contiguous index ranges. Zero creates nothing.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    device:
+                      description: 'Device is the target port: "*", a name such as
+                        p0, or a PCI address. Defaults to "*".'
+                      pattern: ^(\*|[pP][0-9]+|[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7])$
+                      type: string
+                    options:
+                      description: Options are creation settings for this group.
+                      properties:
+                        macAddress:
+                          description: MACAddress sets the VF MAC (colon-separated
+                            48-bit). Requires count 1.
+                          pattern: ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$
+                          type: string
+                      type: object
+                    poolName:
+                      description: |-
+                        PoolName is the device-plugin resource (for example bf_vf). Unset: created in
+                        hardware only.
+                      maxLength: 63
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9_.-]*$
+                      type: string
+                  required:
+                  - count
+                  type: object
+                  x-kubernetes-validations:
+                  - message: options.macAddress requires count == 1
+                    rule: '!has(self.options) || !has(self.options.macAddress) ||
+                      self.count == 1'
+                maxItems: 16
+                type: array
+                x-kubernetes-list-type: atomic
+            type: object
+            x-kubernetes-validations:
+            - message: dpuMode is immutable
+              rule: (!has(self.dpuMode) && !has(oldSelf.dpuMode)) || (has(self.dpuMode)
+                && has(oldSelf.dpuMode) && self.dpuMode == oldSelf.dpuMode)
+            - message: bfcfgParameters is immutable
+              rule: (!has(self.bfcfgParameters) && !has(oldSelf.bfcfgParameters))
+                || (has(self.bfcfgParameters) && has(oldSelf.bfcfgParameters) && self.bfcfgParameters
+                == oldSelf.bfcfgParameters)
+            - message: dpuResources is immutable
+              rule: (!has(self.dpuResources) && !has(oldSelf.dpuResources)) || (has(self.dpuResources)
+                && has(oldSelf.dpuResources) && self.dpuResources == oldSelf.dpuResources)
+            - message: systemReservedResources is immutable
+              rule: (!has(self.systemReservedResources) && !has(oldSelf.systemReservedResources))
+                || (has(self.systemReservedResources) && has(oldSelf.systemReservedResources)
+                && self.systemReservedResources == oldSelf.systemReservedResources)
+            - message: hostNetworkInterfaceConfigs is immutable
+              rule: (!has(self.hostNetworkInterfaceConfigs) && !has(oldSelf.hostNetworkInterfaceConfigs))
+                || (has(self.hostNetworkInterfaceConfigs) && has(oldSelf.hostNetworkInterfaceConfigs)
+                && self.hostNetworkInterfaceConfigs == oldSelf.hostNetworkInterfaceConfigs)
+            - message: configFiles with type cloud-init (the default) are immutable
+              rule: '(has(self.configFiles) ? self.configFiles.filter(f, !has(f.type)
+                || f.type == ''cloud-init'') : []) == (has(oldSelf.configFiles) ?
+                oldSelf.configFiles.filter(f, !has(f.type) || f.type == ''cloud-init'')
+                : [])'
+            - message: scalableFunctions is immutable
+              rule: '(has(self.scalableFunctions) ? self.scalableFunctions : []) ==
+                (has(oldSelf.scalableFunctions) ? oldSelf.scalableFunctions : [])'
+        type: object
+    served: true
+    storage: true

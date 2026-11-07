@@ -1,0 +1,5 @@
+[forge-system]
+api-server = "https://10.99.0.1:1079"
+
+[machine]
+interface-id = "91609f10-c91d-470d-a260-6293ea0c1234"

@@ -1,0 +1,345 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Chart debug mode - set to true to keep failed jobs for debugging
+debug: false
+
+# Custom Service account management
+serviceAccount:
+  create: false
+  name:
+  extraAnnotations:
+
+server:
+  enabled: true
+  sidecarContainers: {}
+  image:
+    repository: temporalio/server
+    tag: 1.26.2
+    pullPolicy: IfNotPresent
+
+  # Global default settings (can be overridden per service)
+  replicaCount: 1
+  additionalEnv:
+    - name: TEMPORAL_CLI_TLS_SERVER_NAME
+      value: interservice.server.temporal.local
+    - name: TEMPORAL_CLI_TLS_ENABLE_HOST_VERIFICATION
+      value: "true"
+    - name: TEMPORAL_CLI_TLS_CERT
+      value: /var/secrets/temporal/certs/server-interservice/tls.crt
+    - name: TEMPORAL_CLI_TLS_KEY
+      value: /var/secrets/temporal/certs/server-interservice/tls.key
+    - name: TEMPORAL_CLI_TLS_CA
+      value: /var/secrets/temporal/certs/server-interservice/ca.crt
+
+  secretLabels: {}
+  secretAnnotations: {}
+
+  metrics:
+    annotations:
+      enabled: true
+    serviceMonitor:
+      enabled: false
+    prometheus:
+      timerType: histogram
+
+  podAnnotations: {}
+  podLabels: {}
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+  # Mount TLS certificates
+  additionalVolumeMounts:
+    - name: server-interservice-certs
+      mountPath: "/var/secrets/temporal/certs/server-interservice/"
+      readOnly: true
+    - name: server-cloud-certs
+      mountPath: "/var/secrets/temporal/certs/server-cloud/"
+      readOnly: true
+    - name: server-site-certs
+      mountPath: "/var/secrets/temporal/certs/server-site/"
+      readOnly: true
+  additionalVolumes:
+    - name: server-interservice-certs
+      secret:
+        secretName: server-interservice-certs
+    - name: server-cloud-certs
+      secret:
+        secretName: server-cloud-certs
+    - name: server-site-certs
+      secret:
+        secretName: server-site-certs
+
+  securityContext:
+    fsGroup: 1000
+    runAsUser: 1000
+
+  config:
+    logLevel: "debug,info"
+
+    # Keep the single-node development database responsive during inventory
+    # bursts. This value cannot be changed after Temporal initializes its data.
+    numHistoryShards: 4
+
+    persistence:
+      defaultStore: default
+      additionalStores: {}
+
+      default:
+        driver: "sql"
+
+        sql:
+          driver: "postgres12"
+          host: "postgres.postgres.svc.cluster.local."
+          port: 5432
+          database: "temporal"
+          user: "temporal"
+          existingSecret: "db-creds"
+          maxConns: 20
+          maxConnLifetime: "1h"
+
+      visibility:
+        driver: "sql"
+
+        sql:
+          driver: "postgres12"
+          host: "postgres.postgres.svc.cluster.local."
+          port: 5432
+          database: "temporal_visibility"
+          user: "temporal"
+          existingSecret: "db-creds"
+          maxConns: 20
+          maxConnLifetime: "1h"
+
+    global:
+      tls:
+        refreshInterval: 15m
+        internode:
+          server:
+            certFile: /var/secrets/temporal/certs/server-interservice/tls.crt
+            keyFile: /var/secrets/temporal/certs/server-interservice/tls.key
+            requireClientAuth: true
+            clientCaFiles:
+              - /var/secrets/temporal/certs/server-interservice/ca.crt
+          client:
+            serverName: interservice.server.temporal.local
+            rootCaFiles:
+              - /var/secrets/temporal/certs/server-interservice/ca.crt
+        frontend:
+          server:
+            certFile: /var/secrets/temporal/certs/server-interservice/tls.crt
+            keyFile: /var/secrets/temporal/certs/server-interservice/tls.key
+            requireClientAuth: true
+            clientCaFiles:
+              - /var/secrets/temporal/certs/server-interservice/ca.crt
+          client:
+            serverName: interservice.server.temporal.local
+            rootCaFiles:
+              - /var/secrets/temporal/certs/server-interservice/ca.crt
+          hostOverrides:
+            cloud.server.temporal.local:
+              certFile: /var/secrets/temporal/certs/server-cloud/tls.crt
+              keyFile: /var/secrets/temporal/certs/server-cloud/tls.key
+              requireClientAuth: true
+              clientCaFiles:
+                - /var/secrets/temporal/certs/server-interservice/ca.crt
+            site.server.temporal.local:
+              certFile: /var/secrets/temporal/certs/server-site/tls.crt
+              keyFile: /var/secrets/temporal/certs/server-site/tls.key
+              requireClientAuth: true
+              clientCaFiles:
+                - /var/secrets/temporal/certs/server-interservice/ca.crt
+
+  dynamicConfig:
+    # A failed workflow start leaves history without a workflow. The history
+    # scanner deletes it once it's older than this, instead of the default 60
+    # days. 72h matches the namespace retention.
+    worker.historyScannerDataMinAge:
+      - value: 72h
+    # Batch jobs in the site namespace, such as the hourly cleanup of
+    # successful inventory workflows, run at up to 50 operations per second by
+    # default. A lower rate spreads out the cleanup's deletes, so the database
+    # stays responsive for other workflows.
+    worker.batcherRPS:
+      - value: 20
+        constraints:
+          namespace: site
+
+  frontend:
+    replicaCount: 1
+    service:
+      annotations: {}
+      type: ClusterIP
+      port: 7233
+    metrics:
+      annotations:
+        enabled: true
+    podAnnotations: {}
+    podLabels: {}
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  history:
+    replicaCount: 1
+    service:
+      port: 7234
+    metrics:
+      annotations:
+        enabled: true
+    podAnnotations: {}
+    podLabels: {}
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  matching:
+    replicaCount: 1
+    service:
+      port: 7235
+    metrics:
+      annotations:
+        enabled: false
+    podAnnotations: {}
+    podLabels: {}
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  worker:
+    replicaCount: 1
+    service:
+      port: 7239
+    metrics:
+      annotations:
+        enabled: true
+    podAnnotations: {}
+    podLabels: {}
+    resources: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+admintools:
+  enabled: true
+  image:
+    repository: temporalio/admin-tools
+    tag: 1.26.2
+    pullPolicy: IfNotPresent
+  additionalEnv:
+    - name: TEMPORAL_CLI_TLS_SERVER_NAME
+      value: interservice.server.temporal.local
+    - name: TEMPORAL_CLI_TLS_DISABLE_HOST_VERIFICATION
+      value: "false"
+    - name: TEMPORAL_CLI_TLS_CERT
+      value: /var/secrets/temporal/certs/server-interservice/tls.crt
+    - name: TEMPORAL_CLI_TLS_KEY
+      value: /var/secrets/temporal/certs/server-interservice/tls.key
+    - name: TEMPORAL_CLI_TLS_CA
+      value: /var/secrets/temporal/certs/server-interservice/ca.crt
+  service:
+    type: ClusterIP
+    port: 22
+    annotations: {}
+  podLabels: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  volumeMounts:
+    - name: server-interservice-certs
+      mountPath: "/var/secrets/temporal/certs/server-interservice/"
+      readOnly: true
+  volumes:
+    - name: server-interservice-certs
+      secret:
+        secretName: server-interservice-certs
+
+web:
+  enabled: true
+  config:
+    auth:
+      enabled: false
+    routing:
+      default_to_namespace:
+      issue_report_link: https://github.com/temporalio/web/issues/new/choose
+  replicaCount: 1
+  additionalEnv:
+    - name: TEMPORAL_TLS_SERVER_NAME
+      value: interservice.server.temporal.local
+    - name: TEMPORAL_TLS_ENABLE_HOST_VERIFICATION
+      value: "true"
+    - name: TEMPORAL_TLS_CERT
+      value: /var/secrets/temporal/certs/server-interservice/tls.crt
+    - name: TEMPORAL_TLS_KEY
+      value: /var/secrets/temporal/certs/server-interservice/tls.key
+    - name: TEMPORAL_TLS_CA
+      value: /var/secrets/temporal/certs/server-interservice/ca.crt
+  image:
+    repository: temporalio/ui
+    tag: 2.26.2
+    pullPolicy: IfNotPresent
+  service:
+    type: NodePort
+    port: 8080
+    nodePort: 30233
+    annotations: {}
+  ingress:
+    enabled: false
+  podAnnotations: {}
+  podLabels: {}
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  volumeMounts:
+    - name: server-interservice-certs
+      mountPath: "/var/secrets/temporal/certs/server-interservice/"
+      readOnly: true
+  volumes:
+    - name: server-interservice-certs
+      secret:
+        secretName: server-interservice-certs
+
+schema:
+  setup:
+    enabled: true
+    backoffLimit: 100
+  update:
+    enabled: true
+    backoffLimit: 100
+
+# Disable elasticsearch - use postgres for visibility
+elasticsearch:
+  enabled: false
+
+prometheus:
+  enabled: false
+
+grafana:
+  enabled: false
+
+cassandra:
+  enabled: false
+
+mysql:
+  enabled: false

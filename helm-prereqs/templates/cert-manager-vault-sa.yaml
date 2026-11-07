@@ -1,0 +1,22 @@
+{{- if .Values.certManager.vaultAuthServiceAccount.create }}
+## =============================================================================
+## ServiceAccount + token Secret for cert-manager → Vault authentication
+## Used by the vault-nico-issuer ClusterIssuer to authenticate to Vault.
+## Lives in certManagerNamespace (where cert-manager is installed).
+## =============================================================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-manager-vault-nicoca-issuer
+  namespace: {{ .Values.certManagerNamespace }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vault-nicoca-issuer-token
+  namespace: {{ .Values.certManagerNamespace }}
+  annotations:
+    kubernetes.io/service-account.name: cert-manager-vault-nicoca-issuer
+type: kubernetes.io/service-account-token
+{{- end }}

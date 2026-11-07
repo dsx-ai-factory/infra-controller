@@ -1,0 +1,92 @@
+{
+    "ipv4Unicast": {
+        "routerId": "10.217.6.21",
+        "as": 4294967000,
+        "vrfId": 0,
+        "vrfName": "default",
+        "tableVersion": 2,
+        "ribCount": 3,
+        "ribMemory": 600,
+        "peerCount": 2,
+        "peerMemory": 47280,
+        "peerGroupCount": 2,
+        "peerGroupMemory": 128,
+        "peers": {
+            "p0_if": {
+                "remoteAs": 0,
+                "version": 4,
+                "msgRcvd": 0,
+                "msgSent": 0,
+                "tableVersion": 0,
+                "outq": 0,
+                "inq": 0,
+                "peerUptime": "never",
+                "peerUptimeMsec": 0,
+                "pfxRcd": 0,
+                "state": "Idle",
+                "connectionsEstablished": 0,
+                "connectionsDropped": 0,
+                "idType": "interface"
+            },
+            "p1_if": {
+                "remoteAs": 0,
+                "version": 4,
+                "msgRcvd": 0,
+                "msgSent": 0,
+                "tableVersion": 0,
+                "outq": 0,
+                "inq": 0,
+                "peerUptime": "never",
+                "peerUptimeMsec": 0,
+                "pfxRcd": 0,
+                "state": "Idle",
+                "connectionsEstablished": 0,
+                "connectionsDropped": 0,
+                "idType": "interface"
+            }
+        },
+        "failedPeers": 2,
+        "totalPeers": 2,
+        "dynamicPeers": 0,
+        "bestPath": {
+            "multiPathRelax": "true"
+        }
+    },
+    "l2VpnEvpn": {
+        "routerId": "10.217.6.21",
+        "as": 4294967000,
+        "vrfId": 0,
+        "vrfName": "default",
+        "tableVersion": 0,
+        "ribCount": 0,
+        "ribMemory": 0,
+        "peerCount": 1,
+        "peerMemory": 23640,
+        "peerGroupCount": 2,
+        "peerGroupMemory": 128,
+        "peers": {
+            "10.217.126.67": {
+                "remoteAs": 0,
+                "version": 4,
+                "msgRcvd": 0,
+                "msgSent": 0,
+                "tableVersion": 0,
+                "outq": 0,
+                "inq": 0,
+                "peerUptime": "never",
+                "peerUptimeMsec": 0,
+                "pfxRcd": 0,
+                "state": "Active",
+                "connectionsEstablished": 0,
+                "connectionsDropped": 0,
+                "idType": "ipv4"
+            }
+        },
+        "failedPeers": 1,
+        "totalPeers": 1,
+        "dynamicPeers": 0,
+        "bestPath": {
+            "multiPathRelax": "true"
+        }
+    }
+}

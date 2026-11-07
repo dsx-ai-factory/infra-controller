@@ -1,0 +1,276 @@
+{{define "updates.html"}}
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">Firmware Updates</h2>
+        <div style="display: flex; align-items: center; gap: 12px;">
+            <button class="btn" onclick="location.reload()">Refresh</button>
+        </div>
+    </div>
+    
+    <!-- Filters -->
+    <form class="filters" method="get" action="/updates" id="filterForm">
+        <input type="hidden" name="sort" value="{{.SortBy}}">
+        
+        <div class="filter-group">
+            <label>Rack:</label>
+            <select name="rack" onchange="this.form.submit()">
+                <option value="">All racks</option>
+                <option value="_none_" {{if eq .RackFilter "_none_"}}selected{{end}}>(No rack assigned)</option>
+                {{range .RackIDs}}
+                <option value="{{.}}" {{if eq $.RackFilter .}}selected{{end}}>{{.}}</option>
+                {{end}}
+            </select>
+        </div>
+        
+        <div class="filter-group">
+            <label>State:</label>
+            <select name="state" onchange="this.form.submit()">
+                <option value="">All states</option>
+                {{range .States}}
+                <option value="{{.}}" {{if eq $.StateFilter .}}selected{{end}}>{{.}}</option>
+                {{end}}
+            </select>
+        </div>
+        
+        <div class="filter-group">
+            <label>
+                <input type="checkbox" name="all" value="true" {{if .ShowAll}}checked{{end}} onchange="this.form.submit()">
+                Show completed/failed/cancelled
+            </label>
+        </div>
+    </form>
+    
+    {{if .Updates}}
+    <table>
+        <thead>
+            <tr>
+                <th style="width: 20px;"></th>
+                <th class="sortable{{if eq .SortBy "update_id"}} sorted{{end}}" onclick="sortBy('update_id')">Update ID</th>
+                <th class="sortable{{if eq .SortBy "rack_id"}} sorted{{end}}" onclick="sortBy('rack_id')">Rack ID</th>
+                <th class="sortable{{if eq .SortBy "switch"}} sorted{{end}}" onclick="sortBy('switch')">Switch</th>
+                <th class="sortable{{if eq .SortBy "component"}} sorted{{end}}" onclick="sortBy('component')">Component</th>
+                <th class="sortable{{if eq .SortBy "bundle"}} sorted{{end}}" onclick="sortBy('bundle')">Bundle</th>
+                <th class="sortable{{if eq .SortBy "state"}} sorted{{end}}" onclick="sortBy('state')">State</th>
+                <th class="sortable{{if eq .SortBy "started"}} sorted{{end}}" onclick="sortBy('started')">Started</th>
+                <th class="sortable{{if eq .SortBy "updated"}} sorted{{end}}" onclick="sortBy('updated')">Updated</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody id="updatesTable">
+            {{range .Updates}}
+            <tr class="update-row" data-update-id="{{.Id}}" onclick="toggleLog('{{.Id}}')" style="cursor: pointer;">
+                <td style="width: 20px; padding-right: 0;">
+                    <span class="expand-icon" id="icon-{{.Id}}">▶</span>
+                </td>
+                <td class="mono" style="font-size: 11px;">{{.Id}}</td>
+                <td>{{with index $.SwitchToRack .SwitchUuid}}{{.}}{{else}}<span style="color: #6e7681;">-</span>{{end}}</td>
+                <td class="mono" style="font-size: 11px;">{{.SwitchUuid}}</td>
+                <td>
+                    {{if eq .Component 1}}BMC{{end}}
+                    {{if eq .Component 2}}CPLD{{end}}
+                    {{if eq .Component 3}}BIOS{{end}}
+                    {{if eq .Component 4}}NVOS{{end}}
+                </td>
+                <td>{{.BundleVersion}}</td>
+                <td>
+                    <span class="status {{if eq .State 10}}status-completed{{else if eq .State 11}}status-failed{{else if eq .State 12}}status-cancelled{{else if eq .State 1}}status-queued{{else}}status-active{{end}}">
+                        {{if eq .State 1}}Queued{{end}}
+                        {{if eq .State 2}}Power Cycling{{end}}
+                        {{if eq .State 3}}Wait Reachable{{end}}
+                        {{if eq .State 4}}Copying{{end}}
+                        {{if eq .State 5}}Uploading{{end}}
+                        {{if eq .State 6}}Installing{{end}}
+                        {{if eq .State 7}}Polling{{end}}
+                        {{if eq .State 8}}Verifying{{end}}
+                        {{if eq .State 9}}Cleanup{{end}}
+                        {{if eq .State 10}}Completed{{end}}
+                        {{if eq .State 11}}Failed{{end}}
+                        {{if eq .State 12}}Cancelled{{end}}
+                    </span>
+                </td>
+                <td style="font-size: 12px;">
+                    {{if .CreatedAt}}{{.CreatedAt.AsTime.Format "15:04:05"}}{{end}}
+                </td>
+                <td style="font-size: 12px;">
+                    {{if .UpdatedAt}}{{.UpdatedAt.AsTime.Format "15:04:05"}}{{end}}
+                </td>
+                <td style="white-space: nowrap;" onclick="event.stopPropagation();">
+                    {{if and (ne .State 10) (ne .State 11) (ne .State 12)}}
+                    <button class="btn btn-sm btn-danger" onclick="cancelUpdate('{{.Id}}')">Cancel</button>
+                    {{end}}
+                    {{if .ErrorMessage}}
+                    <span title="{{.ErrorMessage}}" style="cursor: help; color: #f85149;">⚠</span>
+                    {{end}}
+                </td>
+            </tr>
+            <tr class="log-row" id="log-row-{{.Id}}" style="display: none;">
+                <td colspan="10" style="padding: 0; background: #0d1117;">
+                    <div class="log-container" id="log-container-{{.Id}}" style="padding: 12px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span class="log-path" id="log-path-{{.Id}}" style="font-size: 11px; color: #8b949e;"></span>
+                            <button class="btn btn-sm" onclick="event.stopPropagation(); refreshLog('{{.Id}}')">Refresh</button>
+                        </div>
+                        <pre class="log-content" id="log-content-{{.Id}}" style="margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 11px; font-family: monospace; max-height: 400px; overflow-y: auto; color: #c9d1d9;">Click to load log...</pre>
+                    </div>
+                </td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <div class="empty-state">
+        <p>No updates found</p>
+        {{if not .ShowAll}}
+        <p style="margin-top: 8px; font-size: 14px;">
+            Showing only active updates. 
+            <a href="/updates?all=true" style="color: #58a6ff;">Show all updates</a>
+        </p>
+        {{end}}
+    </div>
+    {{end}}
+</div>
+
+<!-- Error details modal -->
+<div id="errorModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 class="modal-title">Error Details</h3>
+            <button class="modal-close" onclick="closeModal('errorModal')">&times;</button>
+        </div>
+        <pre id="errorContent" style="white-space: pre-wrap; word-break: break-word; background: #0d1117; padding: 12px; border-radius: 6px; font-size: 13px;"></pre>
+        <div class="modal-footer">
+            <button class="btn" onclick="closeModal('errorModal')">Close</button>
+        </div>
+    </div>
+</div>
+
+<style>
+    .expand-icon {
+        display: inline-block;
+        width: 12px;
+        margin-right: 4px;
+        font-size: 10px;
+        transition: transform 0.2s;
+    }
+    .expand-icon.expanded {
+        transform: rotate(90deg);
+    }
+    .update-row:hover {
+        background: #21262d;
+    }
+    .log-row td {
+        border-top: none !important;
+    }
+    .sortable {
+        cursor: pointer;
+        user-select: none;
+    }
+    .sortable:hover {
+        background: #21262d;
+    }
+    .sortable.sorted {
+        color: #58a6ff;
+    }
+    .sortable::after {
+        content: ' ↕';
+        opacity: 0.3;
+        font-size: 10px;
+    }
+    .sortable.sorted::after {
+        content: ' ↓';
+        opacity: 1;
+    }
+</style>
+
+<script>
+    const expandedLogs = new Set();
+    const loadedLogs = new Set();
+    
+    function sortBy(column) {
+        const form = document.getElementById('filterForm');
+        form.querySelector('input[name="sort"]').value = column;
+        form.submit();
+    }
+    
+    async function toggleLog(updateId) {
+        const logRow = document.getElementById('log-row-' + updateId);
+        const icon = document.getElementById('icon-' + updateId);
+        
+        if (expandedLogs.has(updateId)) {
+            // Collapse
+            logRow.style.display = 'none';
+            icon.classList.remove('expanded');
+            expandedLogs.delete(updateId);
+        } else {
+            // Expand
+            logRow.style.display = 'table-row';
+            icon.classList.add('expanded');
+            expandedLogs.add(updateId);
+            
+            // Load log if not already loaded
+            if (!loadedLogs.has(updateId)) {
+                await fetchLog(updateId);
+            }
+        }
+    }
+    
+    async function fetchLog(updateId) {
+        const contentEl = document.getElementById('log-content-' + updateId);
+        const pathEl = document.getElementById('log-path-' + updateId);
+        contentEl.textContent = 'Loading...';
+        
+        try {
+            const resp = await fetch('/api/update-log?id=' + encodeURIComponent(updateId));
+            const data = await resp.json();
+            
+            if (data.found) {
+                contentEl.textContent = data.content;
+                pathEl.textContent = data.path;
+                loadedLogs.add(updateId);
+                // Scroll to bottom
+                contentEl.scrollTop = contentEl.scrollHeight;
+            } else {
+                contentEl.textContent = data.error || 'Log not found';
+            }
+        } catch (err) {
+            contentEl.textContent = 'Error loading log: ' + err.message;
+        }
+    }
+    
+    async function refreshLog(updateId) {
+        loadedLogs.delete(updateId);
+        await fetchLog(updateId);
+    }
+    
+    async function cancelUpdate(updateId) {
+        if (!confirm('Are you sure you want to cancel this update? This will also cancel any remaining updates in the bundle.')) {
+            return;
+        }
+        
+        const formData = new FormData();
+        formData.set('update_id', updateId);
+        
+        try {
+            const resp = await fetch('/api/cancel-update', {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (resp.ok) {
+                showToast('Update cancelled');
+                location.reload();
+            } else {
+                const text = await resp.text();
+                showToast('Failed: ' + text, true);
+            }
+        } catch (err) {
+            showToast('Error: ' + err.message, true);
+        }
+    }
+    
+    function showError(message) {
+        document.getElementById('errorContent').textContent = message;
+        openModal('errorModal');
+    }
+</script>
+{{end}}

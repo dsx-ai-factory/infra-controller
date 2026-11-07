@@ -1,0 +1,1 @@
+deb [signed-by=/usr/share/keyrings/fluentbit-keyring.gpg] http://packages.fluentbit.io/debian/bookworm bookworm main

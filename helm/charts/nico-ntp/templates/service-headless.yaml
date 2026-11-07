@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-ntp.name" . }}
+  namespace: {{ include "nico-ntp.namespace" . }}
+  labels:
+    {{- include "nico-ntp.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  selector:
+    {{- include "nico-ntp.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: ntp
+      protocol: UDP
+      port: 123
+      targetPort: 123

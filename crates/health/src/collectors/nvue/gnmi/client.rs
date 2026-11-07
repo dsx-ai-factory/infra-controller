@@ -1,0 +1,3376 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+use std::ops::{Deref, DerefMut};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use carbide_uuid::rack::RackId;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{Stream, StreamExt};
+use tonic::metadata::MetadataMap;
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
+use tonic::{Extensions, Request};
+
+use super::proto::g_nmi_client::GNmiClient as TonicGnmiClient;
+use super::proto::subscription_list::Mode as SubscriptionListMode;
+use super::proto::{
+    self, Encoding, Path, PathElem, SubscribeRequest, Subscription, SubscriptionList,
+    SubscriptionMode,
+};
+use crate::HealthError;
+use crate::config::{
+    MtlsProfileConfig, NvueGnmiEncoding, NvueGnmiPaths, NvueGnmiSubscriptionConfig,
+    NvueGnmiSubscriptionMode,
+};
+
+const GNMI_HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(300);
+const GNMI_HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Owns both directions of a Subscribe RPC. The request body stays open while
+/// telemetry arrives and closes when the subscription is dropped.
+pub(super) struct GnmiSubscription {
+    // Rust drops fields in order. Dropping only the response stream does not
+    // cancel the server RPC, so close the request body first.
+    _request_sender: mpsc::Sender<SubscribeRequest>,
+
+    responses: tonic::Streaming<proto::SubscribeResponse>,
+}
+
+impl Deref for GnmiSubscription {
+    type Target = tonic::Streaming<proto::SubscribeResponse>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.responses
+    }
+}
+
+impl DerefMut for GnmiSubscription {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.responses
+    }
+}
+
+impl Stream for GnmiSubscription {
+    type Item = Result<proto::SubscribeResponse, tonic::Status>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.get_mut().responses).poll_next(cx)
+    }
+}
+
+/// Builds the paths for the primary NVUE gNMI SAMPLE stream.
+///
+/// A configured interface selection uses another stream, so the primary stream
+/// must omit the broad interface subtree or it would still receive counters.
+pub(super) fn nvue_subscribe_paths(paths_config: &NvueGnmiPaths) -> Vec<Path> {
+    let mut paths = Vec::with_capacity(4);
+
+    if paths_config.components_enabled {
+        paths.push(Path {
+            elem: vec![
+                PathElem {
+                    name: "components".into(),
+                    key: Default::default(),
+                },
+                PathElem {
+                    name: "component".into(),
+                    key: Default::default(),
+                },
+            ],
+            ..Default::default()
+        });
+    }
+
+    if paths_config.interfaces_enabled && paths_config.interface_paths.is_none() {
+        paths.push(Path {
+            elem: vec![
+                PathElem {
+                    name: "interfaces".into(),
+                    key: Default::default(),
+                },
+                PathElem {
+                    name: "interface".into(),
+                    key: Default::default(),
+                },
+            ],
+            ..Default::default()
+        });
+    }
+
+    if paths_config.platform_general_enabled {
+        // `/platform-general/state` carries memory, disk, and ambient
+        // temperature leaves.
+        paths.push(Path {
+            elem: vec![
+                PathElem {
+                    name: "platform-general".into(),
+                    key: Default::default(),
+                },
+                PathElem {
+                    name: "state".into(),
+                    key: Default::default(),
+                },
+            ],
+            ..Default::default()
+        });
+        // `/platform-general/versions` carries the OS/BMC/EROT
+        // firmware version leaves
+        paths.push(Path {
+            elem: vec![
+                PathElem {
+                    name: "platform-general".into(),
+                    key: Default::default(),
+                },
+                PathElem {
+                    name: "versions".into(),
+                    key: Default::default(),
+                },
+            ],
+            ..Default::default()
+        });
+    }
+
+    paths
+}
+
+/// Builds exact interface leaves for the optional independent SAMPLE stream.
+///
+/// The unkeyed `interface` element selects each leaf for every interface.
+pub(super) fn nvue_interface_subscribe_paths(paths_config: &NvueGnmiPaths) -> Vec<Path> {
+    paths_config
+        .interface_paths
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|tail| Path {
+            elem: [
+                PathElem {
+                    name: "interfaces".into(),
+                    ..Default::default()
+                },
+                PathElem {
+                    name: "interface".into(),
+                    ..Default::default()
+                },
+            ]
+            .into_iter()
+            .chain(path_elements(tail))
+            .collect(),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Builds the path for the independent leak-sensor SAMPLE stream.
+pub(super) fn nvue_leak_sensor_subscribe_path() -> Path {
+    Path {
+        elem: vec![
+            PathElem {
+                name: "platform-general".into(),
+                key: Default::default(),
+            },
+            PathElem {
+                name: "leak-sensors".into(),
+                key: Default::default(),
+            },
+            PathElem {
+                name: "leak-sensor".into(),
+                key: Default::default(),
+            },
+            PathElem {
+                name: "state".into(),
+                key: Default::default(),
+            },
+            PathElem {
+                name: "state".into(),
+                key: Default::default(),
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+#[derive(Clone)]
+pub(super) struct GnmiClient {
+    switch_id: String,
+    rack_id: Option<RackId>,
+    host: String,
+    port: u16,
+    username: Option<String>,
+    password: Option<String>,
+    request_timeout: Duration,
+    dangerously_skip_tls_verification: bool,
+    tls_config: Option<MtlsProfileConfig>,
+}
+
+/// Configuration used to build one gNMI client instance.
+pub(super) struct GnmiClientConfig {
+    /// Switch identifier used in logs and error messages.
+    pub switch_id: String,
+
+    /// Optional rack identifier added to endpoint-scoped logs.
+    pub rack_id: Option<RackId>,
+
+    /// Switch host or IP address used for the gNMI channel.
+    pub host: String,
+
+    /// gNMI TCP port on the switch host.
+    pub port: u16,
+
+    /// Optional username sent as gNMI `username` metadata.
+    pub username: Option<String>,
+
+    /// Optional password sent as gNMI `password` metadata.
+    pub password: Option<String>,
+
+    /// Timeout applied independently to connection establishment and RPC opening.
+    pub request_timeout: Duration,
+
+    /// Whether legacy non-mTLS connections accept invalid switch certificates.
+    pub dangerously_skip_tls_verification: bool,
+
+    /// mTLS profile used when opening the gNMI channel.
+    pub tls_config: Option<MtlsProfileConfig>,
+}
+
+async fn configure_tls_endpoint(
+    endpoint: Endpoint,
+    switch_id: &str,
+    dangerously_skip_tls_verification: bool,
+    tls_config: Option<&MtlsProfileConfig>,
+) -> Result<Endpoint, HealthError> {
+    if let Some(config) = tls_config {
+        // mTLS config supplies both trust roots and client identity. Use it as
+        // the complete TLS policy for this channel.
+        let tls_config = crate::tls::tonic_tls_config(config).await?;
+
+        return endpoint.tls_config(tls_config).map_err(|e| {
+            HealthError::GnmiError(format!("switch {switch_id}: invalid gNMI TLS config: {e}"))
+        });
+    }
+
+    if !dangerously_skip_tls_verification {
+        return Ok(endpoint);
+    }
+
+    // Use tonic's verifier hook (https endpoints get a strict verifier
+    // otherwise). No roots on ClientTlsConfig — roots + verifier is an error.
+    endpoint
+        .tls_config_with_verifier(
+            ClientTlsConfig::new(),
+            crate::collectors::nvue::tls::accept_any_cert_verifier(),
+        )
+        .map_err(|e| {
+            HealthError::GnmiError(format!("switch {switch_id}: invalid gNMI TLS config: {e}"))
+        })
+}
+
+impl GnmiClient {
+    pub(super) fn new(config: GnmiClientConfig) -> Self {
+        Self {
+            switch_id: config.switch_id,
+            rack_id: config.rack_id,
+            host: config.host,
+            port: config.port,
+            username: config.username,
+            password: config.password,
+            request_timeout: config.request_timeout,
+            dangerously_skip_tls_verification: config.dangerously_skip_tls_verification,
+            tls_config: config.tls_config,
+        }
+    }
+
+    async fn connect(&self) -> Result<TonicGnmiClient<Channel>, HealthError> {
+        let target = format!("{}:{}", self.host, self.port);
+
+        let uri = http::Uri::builder()
+            .scheme("https")
+            .authority(target.as_str())
+            .path_and_query("/")
+            .build()
+            .map_err(|e| {
+                HealthError::GnmiError(format!(
+                    "switch {}: invalid endpoint URI: {e}",
+                    self.switch_id
+                ))
+            })?;
+
+        let endpoint = configure_tls_endpoint(
+            Endpoint::from(uri),
+            &self.switch_id,
+            self.dangerously_skip_tls_verification,
+            self.tls_config.as_ref(),
+        )
+        .await?
+        .connect_timeout(self.request_timeout)
+        .timeout(self.request_timeout)
+        // Periodic HTTP/2 PINGs make transport loss observable when a peer
+        // stops acknowledging frames without closing the Subscribe stream.
+        .http2_keep_alive_interval(GNMI_HTTP2_KEEPALIVE_INTERVAL)
+        .keep_alive_timeout(GNMI_HTTP2_KEEPALIVE_TIMEOUT)
+        .keep_alive_while_idle(true);
+
+        let channel = endpoint.connect().await.map_err(|e| {
+            HealthError::GnmiError(format!(
+                "switch {}: connection failed to {target}: {e}",
+                self.switch_id
+            ))
+        })?;
+
+        if self.dangerously_skip_tls_verification {
+            tracing::debug!(
+                switch_id = %self.switch_id,
+                target = %target,
+                rack_id = self.rack_id.as_ref().map(tracing::field::display),
+                "gNMI TLS channel established with certificate verification disabled"
+            );
+        } else {
+            tracing::debug!(
+                switch_id = %self.switch_id,
+                target = %target,
+                rack_id = self.rack_id.as_ref().map(tracing::field::display),
+                "gNMI TLS channel established"
+            );
+        }
+
+        Ok(TonicGnmiClient::new(channel))
+    }
+
+    /// Opens a streaming Subscribe RPC whose lifetime belongs to the returned subscription.
+    pub(super) async fn subscribe_request(
+        &self,
+        subscribe_request: SubscribeRequest,
+    ) -> Result<GnmiSubscription, HealthError> {
+        let mut client = self.connect().await?;
+        let auth = build_auth_metadata(&self.username, &self.password)?;
+        let (request_sender, request_receiver) = mpsc::channel(1);
+
+        let stream =
+            tokio_stream::once(subscribe_request).chain(ReceiverStream::new(request_receiver));
+
+        let request = Request::from_parts(auth, Extensions::default(), stream);
+
+        let response = client
+            .subscribe(request)
+            .await
+            .map_err(HealthError::GnmiStatus)?;
+
+        Ok(GnmiSubscription {
+            _request_sender: request_sender,
+            responses: response.into_inner(),
+        })
+    }
+}
+
+pub(crate) fn system_events_prefix() -> Path {
+    Path {
+        target: "nvos".to_string(),
+        elem: vec![PathElem {
+            name: "system-events".to_string(),
+            key: Default::default(),
+        }],
+        ..Default::default()
+    }
+}
+
+/// gNMI path for ON_CHANGE system event subscriptions. An empty path subscribes
+/// to all events below the `system-events` prefix.
+pub(crate) fn system_events_subscribe_path() -> Vec<Path> {
+    vec![Path::default()]
+}
+
+/// Builds the updates-only request used by built-in system-event collection.
+pub(super) fn build_on_change_subscribe_request(prefix: &Path, paths: &[Path]) -> SubscribeRequest {
+    let subscription_list = SubscriptionList {
+        prefix: Some(prefix.clone()),
+        subscription: paths
+            .iter()
+            .map(|path| Subscription {
+                path: Some(path.clone()),
+                mode: SubscriptionMode::OnChange.into(),
+                ..Default::default()
+            })
+            .collect(),
+        mode: SubscriptionListMode::Stream.into(),
+        encoding: Encoding::Json.into(),
+        updates_only: true,
+        ..Default::default()
+    };
+
+    SubscribeRequest {
+        request: Some(proto::subscribe_request::Request::Subscribe(
+            subscription_list,
+        )),
+        extension: vec![],
+    }
+}
+
+/// Builds the built-in SAMPLE request with the configured paths and cadence.
+pub(super) fn build_sample_subscribe_request(
+    paths: &[Path],
+    sample_interval_nanos: u64,
+) -> SubscribeRequest {
+    let subscription_list = SubscriptionList {
+        prefix: Some(Path {
+            target: "nvos".to_string(),
+            ..Default::default()
+        }),
+        subscription: paths
+            .iter()
+            .map(|path| Subscription {
+                path: Some(path.clone()),
+                mode: SubscriptionMode::Sample.into(),
+                sample_interval: sample_interval_nanos,
+                ..Default::default()
+            })
+            .collect(),
+        mode: SubscriptionListMode::Stream.into(),
+        encoding: Encoding::Json.into(),
+        ..Default::default()
+    };
+
+    SubscribeRequest {
+        request: Some(proto::subscribe_request::Request::Subscribe(
+            subscription_list,
+        )),
+        extension: vec![],
+    }
+}
+
+/// Reads the same scope as a live subscription without stream delivery options.
+pub(super) fn build_snapshot_request(mut request: SubscribeRequest) -> SubscribeRequest {
+    if let Some(proto::subscribe_request::Request::Subscribe(list)) = &mut request.request {
+        list.mode = SubscriptionListMode::Once.into();
+        list.updates_only = false;
+
+        for subscription in &mut list.subscription {
+            subscription.mode = SubscriptionMode::TargetDefined.into();
+            subscription.sample_interval = 0;
+            subscription.suppress_redundant = false;
+            subscription.heartbeat_interval = 0;
+        }
+    }
+
+    request
+}
+
+/// Builds a fixed-STREAM request from one validated additional subscription.
+pub(super) fn build_extended_subscribe_request(
+    config: &NvueGnmiSubscriptionConfig,
+) -> Result<SubscribeRequest, HealthError> {
+    let prefix = Path {
+        origin: config.origin.clone(),
+        elem: path_elements(&config.prefix),
+        target: config.target.clone(),
+        ..Default::default()
+    };
+
+    let subscription = config
+        .paths
+        .iter()
+        .map(|path| {
+            Ok(Subscription {
+                path: Some(Path {
+                    elem: path_elements(path),
+                    ..Default::default()
+                }),
+                mode: match config.mode {
+                    NvueGnmiSubscriptionMode::TargetDefined => SubscriptionMode::TargetDefined,
+                    NvueGnmiSubscriptionMode::OnChange => SubscriptionMode::OnChange,
+                    NvueGnmiSubscriptionMode::Sample => SubscriptionMode::Sample,
+                }
+                .into(),
+                sample_interval: duration_nanos(
+                    config.sample_interval,
+                    "sample_interval",
+                    &config.name,
+                )?,
+                suppress_redundant: config.suppress_redundant,
+                heartbeat_interval: duration_nanos(
+                    config.heartbeat_interval,
+                    "heartbeat_interval",
+                    &config.name,
+                )?,
+            })
+        })
+        .collect::<Result<Vec<_>, HealthError>>()?;
+
+    Ok(SubscribeRequest {
+        request: Some(proto::subscribe_request::Request::Subscribe(
+            SubscriptionList {
+                prefix: Some(prefix),
+                subscription,
+                mode: SubscriptionListMode::Stream.into(),
+                encoding: match config.encoding {
+                    NvueGnmiEncoding::Json => Encoding::Json,
+                    NvueGnmiEncoding::Ascii => Encoding::Ascii,
+                    NvueGnmiEncoding::JsonIetf => Encoding::JsonIetf,
+                }
+                .into(),
+                updates_only: config.updates_only,
+                ..Default::default()
+            },
+        )),
+        extension: Vec::new(),
+    })
+}
+
+fn path_elements(elements: &[String]) -> Vec<PathElem> {
+    elements
+        .iter()
+        .map(|name| PathElem {
+            name: name.clone(),
+            key: Default::default(),
+        })
+        .collect()
+}
+
+fn duration_nanos(
+    duration: Option<Duration>,
+    field: &str,
+    subscription_name: &str,
+) -> Result<u64, HealthError> {
+    let Some(duration) = duration else {
+        return Ok(0);
+    };
+
+    u64::try_from(duration.as_nanos()).map_err(|_| {
+        HealthError::GnmiError(format!(
+            "extended gNMI subscription {subscription_name:?} {field} does not fit in u64 nanoseconds"
+        ))
+    })
+}
+
+fn build_auth_metadata(
+    username: &Option<String>,
+    password: &Option<String>,
+) -> Result<MetadataMap, HealthError> {
+    let mut meta = MetadataMap::new();
+    if let Some(username) = username {
+        let value = username.parse().map_err(|e| {
+            HealthError::GnmiError(format!("invalid username for gRPC metadata: {e}"))
+        })?;
+        meta.insert("username", value);
+    }
+    if let Some(password) = password {
+        let value = password
+            .parse()
+            .map_err(|_e| HealthError::GnmiError("invalid password for gRPC metadata".into()))?;
+        meta.insert("password", value);
+    }
+    Ok(meta)
+}
+
+/// Extract a string from a `TypedValue`, handling JSON-encoded bytes as well
+/// as native string values.
+#[allow(deprecated)]
+pub(super) fn typed_value_to_string(val: &proto::TypedValue) -> Option<String> {
+    use proto::typed_value::Value;
+    match &val.value {
+        Some(Value::StringVal(s)) => Some(s.clone()),
+        Some(Value::JsonVal(bytes)) | Some(Value::JsonIetfVal(bytes)) => {
+            let s = String::from_utf8_lossy(bytes);
+            let trimmed = s.trim().trim_matches('"');
+            Some(trimmed.to_string())
+        }
+        Some(Value::AsciiVal(s)) => Some(s.clone()),
+        Some(Value::IntVal(v)) => Some(v.to_string()),
+        Some(Value::UintVal(v)) => Some(v.to_string()),
+        Some(Value::BoolVal(v)) => Some(v.to_string()),
+        Some(Value::FloatVal(v)) => Some(v.to_string()),
+        Some(Value::DoubleVal(v)) => Some(v.to_string()),
+        _ => None,
+    }
+}
+
+/// Extract a float from a `TypedValue`, handling JSON-encoded bytes, native
+/// numeric values, and string representations.
+#[allow(deprecated)]
+pub(super) fn typed_value_to_f64(val: &proto::TypedValue) -> Option<f64> {
+    use proto::typed_value::Value;
+    match &val.value {
+        Some(Value::DoubleVal(v)) => Some(*v),
+        Some(Value::FloatVal(v)) => Some(*v as f64),
+        Some(Value::IntVal(v)) => Some(*v as f64),
+        Some(Value::UintVal(v)) => Some(*v as f64),
+        Some(Value::StringVal(s)) => s.parse().ok(),
+        Some(Value::JsonVal(bytes)) | Some(Value::JsonIetfVal(bytes)) => {
+            let s = String::from_utf8_lossy(bytes);
+            s.trim().trim_matches('"').parse().ok()
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    use carbide_test_support::{Check, check_values};
+    use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntGauge};
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::transport::server::Connected;
+    use tonic::transport::{Identity, Server, ServerTlsConfig};
+
+    use super::proto::subscribe_response::Response;
+    use super::*;
+    use crate::bmc::CredentialProvider;
+    use crate::collectors::nvue::gnmi::extended_processor::EXTENDED_GNMI_STREAM_ID;
+    use crate::collectors::nvue::gnmi::on_change_processor::ON_CHANGE_STREAM_ID_SYSTEM_EVENTS;
+    use crate::collectors::nvue::gnmi::sample_processor::{
+        GnmiSampleProcessor, NVUE_GNMI_SAMPLE_STREAM_ID,
+    };
+    use crate::collectors::nvue::gnmi::subscriber::{
+        GnmiCollectorSettings, GnmiStreamMetrics, spawn_gnmi_collector,
+        spawn_gnmi_collector_with_settings,
+    };
+    use crate::config::{
+        Config, Configurable, NvueCollectorConfig, NvueGnmiConfig, NvueGnmiMetricConfig,
+        NvueGnmiMetricOutput, NvueGnmiResponseKeyLabel, NvueGnmiSubscriptionConfig,
+        NvueGnmiSubscriptionMode,
+    };
+    use crate::discovery::{DiscoveryLoopContext, run_discovery_iteration};
+    use crate::endpoint::test_support::test_endpoint;
+    use crate::endpoint::{
+        BmcAddr, BmcCredentials, EndpointMetadata, StaticEndpointSource, SwitchData,
+        SwitchEndpointRole,
+    };
+    use crate::limiter::NoopLimiter;
+    use crate::metrics::MetricsManager;
+    use crate::otlp::convert::build_metrics_export_request;
+    use crate::sharding::ShardManager;
+    use crate::sink::{
+        CollectorEvent, CompositeDataSink, DataSink, EventContext, MetricSample, PrometheusSink,
+    };
+
+    #[test]
+    fn event_snapshot_requests_current_state() {
+        let Some(proto::subscribe_request::Request::Subscribe(list)) =
+            build_snapshot_request(build_on_change_subscribe_request(
+                &system_events_prefix(),
+                &system_events_subscribe_path(),
+            ))
+            .request
+        else {
+            panic!("subscription list");
+        };
+
+        assert_eq!(list.mode, proto::subscription_list::Mode::Once as i32);
+        assert_eq!(list.encoding, proto::Encoding::Json as i32);
+        assert!(!list.updates_only);
+        assert_eq!(list.prefix, Some(system_events_prefix()));
+        assert_eq!(list.subscription.len(), 1);
+        assert!(list.subscription[0].path.as_ref().unwrap().elem.is_empty());
+    }
+
+    #[derive(Default)]
+    struct RecordingMetricSink {
+        samples: StdMutex<Vec<(EventContext, MetricSample)>>,
+        pruned_keys: StdMutex<Vec<String>>,
+        removed: StdMutex<Vec<&'static str>>,
+    }
+
+    impl DataSink for RecordingMetricSink {
+        fn sink_type(&self) -> &'static str {
+            "recording_metric"
+        }
+
+        fn prune_metric_key(
+            &self,
+            _context: &EventContext,
+            key: &str,
+            _metric_type: &str,
+            _unit: &str,
+        ) {
+            self.pruned_keys.lock().unwrap().push(key.to_string());
+        }
+
+        fn try_handle_event(
+            &self,
+            context: &EventContext,
+            event: &CollectorEvent,
+        ) -> Result<(), HealthError> {
+            if let CollectorEvent::Metric(sample) = event {
+                self.samples
+                    .lock()
+                    .expect("recording sink lock")
+                    .push((context.clone(), (**sample).clone()));
+            }
+
+            if matches!(event, CollectorEvent::CollectorRemoved) {
+                self.removed.lock().unwrap().push(context.collector_type);
+            }
+
+            Ok(())
+        }
+    }
+
+    // Panic on live or replayed late_scalar samples until the test clears the
+    // fault, exercising both stream failure and the replacement's cached replay.
+    struct PanicMetricSink {
+        recording: RecordingMetricSink,
+        enabled: AtomicBool,
+        panics: AtomicUsize,
+    }
+
+    impl DataSink for PanicMetricSink {
+        fn sink_type(&self) -> &'static str {
+            "panic_metric"
+        }
+
+        fn try_handle_event(
+            &self,
+            context: &EventContext,
+            event: &CollectorEvent,
+        ) -> Result<(), HealthError> {
+            self.recording.try_handle_event(context, event)?;
+
+            if let CollectorEvent::Metric(sample) = event
+                && sample.metric_type == "late_scalar"
+                && self.enabled.load(Ordering::SeqCst)
+            {
+                self.panics.fetch_add(1, Ordering::SeqCst);
+                panic!("injected late subscription sink panic");
+            }
+
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct TestGnmiService {
+        synchronized: Arc<AtomicBool>,
+        selected_updates: Arc<AtomicBool>,
+        active_requests: Arc<AtomicUsize>,
+        requested_paths: Arc<StdMutex<Vec<String>>>,
+        controlled_subscriptions: Arc<StdMutex<Option<mpsc::Sender<ControlledSubscription>>>>,
+    }
+
+    struct ControlledSubscription {
+        request: SubscribeRequest,
+        responses: mpsc::Sender<Result<proto::SubscribeResponse, tonic::Status>>,
+        completed: tokio::sync::oneshot::Receiver<()>,
+    }
+
+    impl ControlledSubscription {
+        fn path_root(&self) -> &str {
+            let Some(proto::subscribe_request::Request::Subscribe(list)) = &self.request.request
+            else {
+                panic!("expected subscription list");
+            };
+
+            list.prefix
+                .as_ref()
+                .and_then(|path| path.elem.first())
+                .or_else(|| {
+                    list.subscription[0]
+                        .path
+                        .as_ref()
+                        .and_then(|path| path.elem.first())
+                })
+                .expect("subscription root")
+                .name
+                .as_str()
+        }
+
+        async fn send(&self, response: proto::subscribe_response::Response) {
+            self.responses
+                .send(Ok(proto::SubscribeResponse {
+                    response: Some(response),
+                    ..Default::default()
+                }))
+                .await
+                .expect("subscription response receiver");
+        }
+
+        fn stream_index(&self) -> usize {
+            let Some(proto::subscribe_request::Request::Subscribe(list)) = &self.request.request
+            else {
+                panic!("expected subscription list");
+            };
+
+            if list
+                .prefix
+                .as_ref()
+                .and_then(|path| path.elem.first())
+                .is_some_and(|elem| elem.name == "system-events")
+            {
+                2
+            } else if list.subscription[0]
+                .path
+                .as_ref()
+                .expect("subscription path")
+                .elem[0]
+                .name
+                == "platform-general"
+            {
+                1
+            } else {
+                0
+            }
+        }
+
+        async fn publish(&self, sink: &RecordingMetricSink, marker: &str) {
+            let (path, keyed_element, key, value) = [
+                ("interfaces/interface/state/oper-status", 1, "name", "UP"),
+                (
+                    "platform-general/leak-sensors/leak-sensor/state/state",
+                    2,
+                    "id",
+                    "ok",
+                ),
+                (
+                    "system-events/system-event/state/severity",
+                    1,
+                    "event-id",
+                    "warning",
+                ),
+            ][self.stream_index()];
+
+            let notification = proto::Notification {
+                timestamp: 42,
+                update: vec![proto::Update {
+                    path: Some(Path {
+                        elem: path
+                            .split('/')
+                            .enumerate()
+                            .map(|(index, name)| PathElem {
+                                name: name.into(),
+                                key: if index == keyed_element {
+                                    [(key.into(), marker.into())].into()
+                                } else {
+                                    Default::default()
+                                },
+                            })
+                            .collect(),
+                        ..Default::default()
+                    }),
+                    val: Some(proto::TypedValue {
+                        value: Some(proto::typed_value::Value::StringVal(value.into())),
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+
+            for response in [
+                proto::subscribe_response::Response::SyncResponse(true),
+                proto::subscribe_response::Response::Update(notification),
+            ] {
+                self.responses
+                    .send(Ok(proto::SubscribeResponse {
+                        response: Some(response),
+                        ..Default::default()
+                    }))
+                    .await
+                    .expect("live response receiver");
+            }
+
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let published = sink
+                        .samples
+                        .lock()
+                        .expect("recorded metrics")
+                        .iter()
+                        .any(|(_, sample)| sample.labels.iter().any(|(_, value)| value == marker));
+
+                    if published {
+                        break;
+                    }
+
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("valid update {marker} must publish for {:?}", self.request)
+            });
+        }
+
+        #[allow(deprecated)]
+        async fn fail(&mut self, code: tonic::Code) {
+            self.responses
+                .send(Ok(proto::SubscribeResponse {
+                    response: Some(proto::subscribe_response::Response::Error(proto::Error {
+                        code: code as u32,
+                        message: "post-sync failure".into(),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                }))
+                .await
+                .expect("live error receiver");
+
+            tokio::time::timeout(Duration::from_secs(2), &mut self.completed)
+                .await
+                .expect("in-band error must abandon the old RPC")
+                .expect("request completion sender");
+        }
+    }
+
+    #[derive(Default)]
+    struct DelayedRefreshProvider {
+        fetches: AtomicUsize,
+        refresh_started: tokio::sync::Notify,
+    }
+
+    impl CredentialProvider for DelayedRefreshProvider {
+        fn fetch_credentials<'a>(
+            &'a self,
+            _endpoint: &'a BmcAddr,
+        ) -> crate::bmc::BoxFuture<'a, Result<BmcCredentials, HealthError>> {
+            Box::pin(async move {
+                if self.fetches.fetch_add(1, Ordering::SeqCst) != 0 {
+                    self.refresh_started.notify_one();
+                    std::future::pending::<()>().await;
+                }
+
+                Ok(BmcCredentials::UsernamePassword {
+                    username: "admin".into(),
+                    password: Some("password".into()),
+                })
+            })
+        }
+    }
+
+    #[tonic::async_trait]
+    impl proto::g_nmi_server::GNmi for TestGnmiService {
+        async fn capabilities(
+            &self,
+            _request: tonic::Request<proto::CapabilityRequest>,
+        ) -> Result<tonic::Response<proto::CapabilityResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("capabilities"))
+        }
+
+        async fn get(
+            &self,
+            _request: tonic::Request<proto::GetRequest>,
+        ) -> Result<tonic::Response<proto::GetResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("get"))
+        }
+
+        async fn set(
+            &self,
+            _request: tonic::Request<proto::SetRequest>,
+        ) -> Result<tonic::Response<proto::SetResponse>, tonic::Status> {
+            Err(tonic::Status::unimplemented("set"))
+        }
+
+        type SubscribeStream = ReceiverStream<Result<proto::SubscribeResponse, tonic::Status>>;
+
+        async fn subscribe(
+            &self,
+            request: tonic::Request<tonic::Streaming<proto::SubscribeRequest>>,
+        ) -> Result<tonic::Response<Self::SubscribeStream>, tonic::Status> {
+            let mut requests = request.into_inner();
+
+            let Some(initial) = requests.message().await? else {
+                return Err(tonic::Status::invalid_argument("missing subscription"));
+            };
+
+            let paths = match initial.request.clone() {
+                Some(proto::subscribe_request::Request::Subscribe(list)) => list
+                    .subscription
+                    .into_iter()
+                    .filter_map(|subscription| subscription.path)
+                    .collect::<Vec<_>>(),
+                _ => return Err(tonic::Status::invalid_argument("missing subscription list")),
+            };
+
+            *self.requested_paths.lock().expect("requested path lock") = paths
+                .iter()
+                .map(|path| {
+                    path.elem
+                        .iter()
+                        .map(|element| element.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                })
+                .collect();
+
+            let (responses, receiver) = mpsc::channel(4);
+            self.active_requests.fetch_add(1, Ordering::SeqCst);
+
+            let controlled = self
+                .controlled_subscriptions
+                .lock()
+                .expect("subscription control lock")
+                .clone();
+
+            let (completed, completion) = tokio::sync::oneshot::channel();
+            let is_controlled = controlled.is_some();
+
+            if let Some(subscriptions) = controlled {
+                subscriptions
+                    .send(ControlledSubscription {
+                        request: initial,
+                        responses: responses.clone(),
+                        completed: completion,
+                    })
+                    .await
+                    .expect("controlled subscription receiver");
+            } else if self.selected_updates.load(Ordering::SeqCst) {
+                send_selected_updates(paths, &responses).await;
+            }
+
+            let active_requests = self.active_requests.clone();
+            let keepalive = (!is_controlled).then(|| responses.clone());
+
+            // Keep the server RPC alive until the client ends its request body.
+            tokio::spawn(async move {
+                while let Ok(Some(_)) = requests.message().await {}
+
+                active_requests.fetch_sub(1, Ordering::SeqCst);
+                let _ = completed.send(());
+                drop(keepalive);
+            });
+
+            if is_controlled || self.selected_updates.load(Ordering::SeqCst) {
+                return Ok(tonic::Response::new(ReceiverStream::new(receiver)));
+            }
+
+            if self.synchronized.load(Ordering::SeqCst) {
+                let (updates, update_receiver) = mpsc::channel(4);
+
+                let initial = proto::SubscribeResponse {
+                    response: Some(proto::subscribe_response::Response::SyncResponse(true)),
+                    ..Default::default()
+                };
+
+                let _ = updates.send(Ok(initial)).await;
+
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(Duration::from_millis(20));
+                    let mut timestamp = 0;
+
+                    loop {
+                        interval.tick().await;
+                        timestamp += 1;
+
+                        let response = proto::SubscribeResponse {
+                            response: Some(proto::subscribe_response::Response::Update(
+                                proto::Notification {
+                                    timestamp,
+                                    ..Default::default()
+                                },
+                            )),
+                            ..Default::default()
+                        };
+
+                        if updates.send(Ok(response)).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+
+                return Ok(tonic::Response::new(ReceiverStream::new(update_receiver)));
+            }
+
+            Ok(tonic::Response::new(ReceiverStream::new(receiver)))
+        }
+    }
+
+    async fn send_selected_updates(
+        paths: Vec<Path>,
+        responses: &mpsc::Sender<Result<proto::SubscribeResponse, tonic::Status>>,
+    ) {
+        let paths = if paths.iter().any(|path| {
+            path.elem.len() == 2
+                && path.elem[0].name == "interfaces"
+                && path.elem[1].name == "interface"
+        }) {
+            [
+                vec!["state", "oper-status"],
+                vec!["phy-diag", "state", "raw-ber"],
+                vec!["state", "counters", "in-errors"],
+            ]
+            .into_iter()
+            .map(|tail| Path {
+                elem: ["interfaces", "interface"]
+                    .into_iter()
+                    .chain(tail)
+                    .map(|name| PathElem {
+                        name: name.to_string(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .collect()
+        } else {
+            paths
+        };
+
+        let updates = paths
+            .into_iter()
+            .filter_map(|path| {
+                let leaf = path.elem.last()?.name.as_str();
+
+                let value = match leaf {
+                    "oper-status" => proto::typed_value::Value::StringVal("UP".into()),
+                    "raw-ber" => proto::typed_value::Value::DoubleVal(0.000001),
+                    "in-errors" => proto::typed_value::Value::UintVal(7),
+                    _ => return None,
+                };
+
+                Some(proto::Update {
+                    path: Some(proto::Path {
+                        elem: path.elem.into_iter().skip(2).collect(),
+                        ..Default::default()
+                    }),
+                    val: Some(proto::TypedValue { value: Some(value) }),
+                    ..Default::default()
+                })
+            })
+            .collect();
+
+        let notification = proto::Notification {
+            timestamp: 42,
+            prefix: Some(proto::Path {
+                elem: vec![
+                    PathElem {
+                        name: "interfaces".into(),
+                        ..Default::default()
+                    },
+                    PathElem {
+                        name: "interface".into(),
+                        key: [("name".into(), "nvl0".into())].into(),
+                    },
+                ],
+                ..Default::default()
+            }),
+            update: updates,
+            ..Default::default()
+        };
+
+        responses
+            .send(Ok(proto::SubscribeResponse {
+                response: Some(proto::subscribe_response::Response::Update(
+                    notification.clone(),
+                )),
+                ..Default::default()
+            }))
+            .await
+            .expect("selective notification receiver");
+
+        responses
+            .send(Ok(proto::SubscribeResponse {
+                response: Some(proto::subscribe_response::Response::SyncResponse(true)),
+                ..Default::default()
+            }))
+            .await
+            .expect("selective sync receiver");
+
+        responses
+            .send(Ok(proto::SubscribeResponse {
+                response: Some(proto::subscribe_response::Response::Update(
+                    proto::Notification {
+                        timestamp: 43,
+                        ..notification
+                    },
+                )),
+                ..Default::default()
+            }))
+            .await
+            .expect("selective telemetry receiver");
+    }
+
+    // Count actual server sockets so response-stream tests cannot miss an RPC
+    // whose request direction remains open after the client drops it.
+    struct CountingTcpStream {
+        stream: TcpStream,
+        sockets: Arc<AtomicUsize>,
+    }
+
+    impl Drop for CountingTcpStream {
+        fn drop(&mut self) {
+            self.sockets.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    impl Connected for CountingTcpStream {
+        type ConnectInfo = ();
+
+        fn connect_info(&self) -> Self::ConnectInfo {}
+    }
+
+    impl AsyncRead for CountingTcpStream {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.stream).poll_read(cx, buf)
+        }
+    }
+
+    impl AsyncWrite for CountingTcpStream {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.stream).poll_write(cx, buf)
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.stream).poll_flush(cx)
+        }
+
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.stream).poll_shutdown(cx)
+        }
+    }
+
+    async fn wait_for_transport_shutdown(service: &TestGnmiService, sockets: &AtomicUsize) {
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while service.active_requests.load(Ordering::SeqCst) != 0
+                    || sockets.load(Ordering::SeqCst) != 0
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_ok(),
+            "abandoned RPC and socket must close before reconnect: active_requests={}, sockets={}",
+            service.active_requests.load(Ordering::SeqCst),
+            sockets.load(Ordering::SeqCst),
+        );
+    }
+
+    async fn assert_broad_counter_available(
+        client: &GnmiClient,
+        service: &TestGnmiService,
+        sockets: &AtomicUsize,
+    ) {
+        let broad_config = NvueGnmiPaths {
+            components_enabled: false,
+            platform_general_enabled: false,
+            ..Default::default()
+        };
+
+        let mut broad = client
+            .subscribe_request(build_sample_subscribe_request(
+                &nvue_subscribe_paths(&broad_config),
+                1_000_000,
+            ))
+            .await
+            .expect("open broad interface subscription");
+
+        let baseline = broad
+            .next()
+            .await
+            .expect("broad response")
+            .expect("broad status");
+
+        let Some(proto::subscribe_response::Response::Update(baseline)) = baseline.response else {
+            panic!("broad subscription should receive an update");
+        };
+
+        assert_eq!(baseline.update.len(), 3);
+
+        assert!(baseline.update.iter().any(|update| {
+            update
+                .path
+                .as_ref()
+                .is_some_and(|path| path.elem.iter().any(|element| element.name == "in-errors"))
+        }));
+
+        drop(broad);
+        wait_for_transport_shutdown(service, sockets).await;
+    }
+
+    async fn assert_selective_output(
+        client: &GnmiClient,
+        service: &TestGnmiService,
+        sockets: &AtomicUsize,
+    ) {
+        service.selected_updates.store(true, Ordering::SeqCst);
+
+        assert_broad_counter_available(client, service, sockets).await;
+
+        let selective_config = NvueGnmiPaths {
+            interface_paths: Some(vec![
+                vec!["state".into(), "oper-status".into()],
+                vec!["phy-diag".into(), "state".into(), "raw-ber".into()],
+            ]),
+            ..Default::default()
+        };
+
+        let selective_paths = nvue_interface_subscribe_paths(&selective_config);
+
+        let mut subscription = client
+            .subscribe_request(build_sample_subscribe_request(&selective_paths, 1_000_000))
+            .await
+            .expect("open selected interface subscription");
+
+        assert_eq!(
+            *service.requested_paths.lock().expect("requested path lock"),
+            [
+                "interfaces/interface/state/oper-status",
+                "interfaces/interface/phy-diag/state/raw-ber"
+            ]
+        );
+
+        let update = tokio::time::timeout(Duration::from_secs(2), subscription.next())
+            .await
+            .expect("selected update timeout")
+            .expect("selected update stream")
+            .expect("selected update status");
+
+        let Some(proto::subscribe_response::Response::Update(notification)) = &update.response
+        else {
+            panic!("selected subscription should receive an update");
+        };
+
+        assert_eq!(notification.update.len(), 2);
+        assert_eq!(notification.timestamp, 42);
+
+        let endpoint = test_endpoint(
+            "55:66:77:88:99:cc"
+                .parse()
+                .expect("test endpoint MAC address"),
+        );
+
+        let sink = Arc::new(RecordingMetricSink::default());
+
+        let processor = GnmiSampleProcessor::new(
+            Some(sink.clone()),
+            EventContext::from_endpoint(&endpoint, NVUE_GNMI_SAMPLE_STREAM_ID),
+            "test-switch".into(),
+            Some("interfaces"),
+            false,
+        );
+
+        let stream_metrics = GnmiStreamMetrics {
+            connection_state: IntGauge::new("test_connection", "test").expect("connection gauge"),
+            connected: IntGauge::new("test_connected", "test").expect("connected gauge"),
+            synchronized: IntGauge::new("test_synchronized", "test").expect("sync gauge"),
+            reconnections_total: Counter::new("test_reconnections", "test").expect("reconnects"),
+            server_initiated_closures_total: Counter::new("test_closures", "test")
+                .expect("closures"),
+            connection_established_timestamp: Gauge::new("test_established", "test")
+                .expect("established gauge"),
+            connection_established_timestamp_seconds: Gauge::new(
+                "test_established_seconds",
+                "test",
+            )
+            .expect("established seconds gauge"),
+            notifications_received_total: Counter::new("test_notifications", "test")
+                .expect("notifications"),
+            last_notification_timestamp: Gauge::new("test_last_notification", "test")
+                .expect("last notification"),
+            last_notification_timestamp_seconds: Gauge::new(
+                "test_last_notification_seconds",
+                "test",
+            )
+            .expect("last notification seconds"),
+            notification_processing_seconds: Histogram::with_opts(HistogramOpts::new(
+                "test_processing",
+                "test",
+            ))
+            .expect("processing histogram"),
+            stream_errors_total: Counter::new("test_errors", "test").expect("errors"),
+            monitored_entities: Gauge::new("test_entities", "test").expect("entities"),
+        };
+
+        processor.process_subscribe_response(&update, &stream_metrics);
+
+        let sync = subscription
+            .next()
+            .await
+            .expect("sync stream")
+            .expect("sync status");
+
+        assert!(matches!(
+            sync.response,
+            Some(proto::subscribe_response::Response::SyncResponse(true))
+        ));
+
+        let later = subscription
+            .next()
+            .await
+            .expect("later telemetry stream")
+            .expect("later telemetry status");
+
+        assert!(matches!(
+            later.response,
+            Some(proto::subscribe_response::Response::Update(
+                proto::Notification { timestamp: 43, .. }
+            ))
+        ));
+
+        assert_eq!(service.active_requests.load(Ordering::SeqCst), 1);
+
+        let samples = sink.samples.lock().expect("recorded metric lock").clone();
+        assert_eq!(samples.len(), 3);
+
+        assert!(samples.iter().all(|(context, sample)| {
+            context.collector_type == NVUE_GNMI_SAMPLE_STREAM_ID
+                && sample
+                    .labels
+                    .iter()
+                    .any(|(key, value)| key == "interface_name" && value == "nvl0")
+        }));
+
+        let export = build_metrics_export_request(&samples, 42, "carbide_hardware_health");
+        let metrics = &export.resource_metrics[0].scope_metrics[0].metrics;
+
+        let names = metrics
+            .iter()
+            .map(|metric| metric.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            [
+                "carbide_hardware_health_nvue_gnmi_interface_oper_status_state",
+                "carbide_hardware_health_nvue_gnmi_interface_raw_ber_ratio",
+            ]
+        );
+
+        let point_counts = metrics
+            .iter()
+            .map(|metric| match &metric.data {
+                Some(crate::otlp::metrics::metric::Data::Gauge(gauge)) => gauge.data_points.len(),
+                _ => panic!("selected interface metrics must be gauges"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(point_counts, [2, 1]);
+
+        assert!(metrics.iter().all(|metric| match &metric.data {
+            Some(crate::otlp::metrics::metric::Data::Gauge(gauge)) =>
+                gauge.data_points.iter().all(|point| {
+                    point
+                        .attributes
+                        .iter()
+                        .any(|attribute| attribute.key == "interface_name")
+                }),
+            _ => false,
+        }));
+
+        drop(subscription);
+        wait_for_transport_shutdown(service, sockets).await;
+    }
+
+    async fn assert_post_sync_reconnections(
+        streams: &mut Vec<ControlledSubscription>,
+        subscriptions: &mut mpsc::Receiver<ControlledSubscription>,
+        service: &TestGnmiService,
+        sink: &RecordingMetricSink,
+        sockets: &AtomicUsize,
+    ) {
+        for stream_index in 0..3 {
+            for retry in 0..2 {
+                let mut old = streams.remove(stream_index);
+
+                let code = if stream_index == 1 {
+                    tonic::Code::Unimplemented
+                } else {
+                    tonic::Code::Unavailable
+                };
+
+                // The replacement may open before the server observes this RPC end.
+                // Check the count after receiving the replacement; `fail` still
+                // awaits this RPC's completion.
+                old.fail(code).await;
+
+                if stream_index == 1 {
+                    streams[0]
+                        .publish(sink, &format!("primary-during-leak-{retry}"))
+                        .await;
+                }
+
+                let replacement =
+                    tokio::time::timeout(Duration::from_secs(5), subscriptions.recv())
+                        .await
+                        .expect("replacement subscription timeout")
+                        .expect("replacement subscription");
+
+                assert_eq!(
+                    replacement.request, old.request,
+                    "reconnect must preserve requested paths and mode"
+                );
+
+                assert_eq!(
+                    service.active_requests.load(Ordering::SeqCst),
+                    3,
+                    "active RPCs after reconnect for stream {stream_index}, retry {retry}"
+                );
+
+                replacement
+                    .publish(sink, &format!("recovered-{stream_index}-{retry}"))
+                    .await;
+
+                // Each stream uses a fresh client and one socket. Allow the old
+                // socket to close independently of the replacement opening.
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while sockets.load(Ordering::SeqCst) != 3 {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "expected 3 live sockets after stream {stream_index} recovery {retry}: sockets={}, active_requests={}",
+                        sockets.load(Ordering::SeqCst),
+                        service.active_requests.load(Ordering::SeqCst),
+                    )
+                });
+
+                streams.insert(stream_index, replacement);
+            }
+        }
+    }
+
+    async fn assert_post_sync_collector_recovery(
+        port: u16,
+        service: &TestGnmiService,
+        sockets: &AtomicUsize,
+    ) {
+        let (opened, mut subscriptions) = mpsc::channel(4);
+        *service
+            .controlled_subscriptions
+            .lock()
+            .expect("subscription control lock") = Some(opened);
+
+        let mut endpoint = test_endpoint("55:66:77:88:99:cc".parse().expect("test MAC"));
+        endpoint.addr.ip = "127.0.0.1".parse().expect("loopback address");
+
+        let metrics = MetricsManager::new("test").expect("collector metrics");
+
+        let registry = Arc::new(
+            metrics
+                .create_collector_registry("post_sync".into(), "test")
+                .expect("collector registry"),
+        );
+
+        let sink = Arc::new(RecordingMetricSink::default());
+        let credentials = Arc::new(DelayedRefreshProvider::default());
+
+        let mut config = NvueGnmiConfig {
+            gnmi_port: port,
+            request_timeout: Duration::from_secs(5),
+            dangerously_skip_tls_verification: true,
+            ..Default::default()
+        };
+
+        config.paths.components_enabled = false;
+        config.paths.platform_general_enabled = false;
+        config.paths.leak_sensors_enabled = true;
+
+        let collector = spawn_gnmi_collector_with_settings(
+            &endpoint,
+            GnmiCollectorSettings {
+                gnmi_config: &config,
+                initial_retry_delay: Duration::from_millis(10),
+            },
+            credentials.clone(),
+            registry,
+            Some(sink.clone()),
+            None,
+            &mut Default::default(),
+        )
+        .expect("real gNMI collector");
+
+        let mut streams = Vec::new();
+
+        for _ in 0..3 {
+            let stream = tokio::time::timeout(Duration::from_secs(2), subscriptions.recv())
+                .await
+                .expect("initial subscription timeout")
+                .expect("initial subscription");
+
+            stream
+                .publish(&sink, &format!("initial-{}", streams.len()))
+                .await;
+
+            streams.push(stream);
+        }
+
+        streams.sort_by_key(ControlledSubscription::stream_index);
+
+        assert_post_sync_reconnections(&mut streams, &mut subscriptions, service, &sink, sockets)
+            .await;
+
+        streams[2].fail(tonic::Code::Unauthenticated).await;
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            credentials.refresh_started.notified(),
+        )
+        .await
+        .expect("authentication failure must refresh credentials");
+
+        let families = metrics.global_registry().gather();
+
+        for (suffix, expected) in [
+            ("connection_state", 4.0),
+            ("stream_connected", 0.0),
+            ("stream_synchronized", 0.0),
+            ("stream_errors_total", 3.0),
+            ("reconnections_total", 3.0),
+        ] {
+            let name = format!("test_nvue_gnmi_events_{suffix}");
+
+            let family = families
+                .iter()
+                .find(|family| family.name() == name)
+                .expect("event stream metric");
+
+            let metric = &family.get_metric()[0];
+
+            let actual = if family.get_field_type() == prometheus::proto::MetricType::GAUGE {
+                metric.get_gauge().value()
+            } else {
+                metric.get_counter().value()
+            };
+
+            assert_eq!(
+                actual, expected,
+                "event stream metric {name} during credential refresh"
+            );
+        }
+
+        streams[0]
+            .publish(&sink, "primary-during-event-refresh")
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(2), collector.stop())
+            .await
+            .expect("cancellation must interrupt pending credential refresh");
+
+        wait_for_transport_shutdown(service, sockets).await;
+    }
+
+    async fn wait_for_rpc_close(completed: &mut tokio::sync::oneshot::Receiver<()>) {
+        tokio::time::timeout(Duration::from_secs(2), completed)
+            .await
+            .expect("collector must release the subscription RPC")
+            .expect("request completion sender");
+    }
+
+    async fn next_snapshot(
+        subscriptions: &mut mpsc::Receiver<ControlledSubscription>,
+        live: &ControlledSubscription,
+    ) -> ControlledSubscription {
+        let snapshot = tokio::time::timeout(Duration::from_secs(2), subscriptions.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            snapshot.request,
+            build_snapshot_request(live.request.clone())
+        );
+
+        snapshot
+    }
+
+    async fn assert_snapshot_retry(
+        live: &ControlledSubscription,
+        subscriptions: &mut mpsc::Receiver<ControlledSubscription>,
+        service: &TestGnmiService,
+        recording: &RecordingMetricSink,
+        metrics: &MetricsManager,
+    ) {
+        let mut incomplete = next_snapshot(subscriptions, live).await;
+
+        live.publish(recording, "concurrent-event").await;
+        incomplete
+            .send(proto::subscribe_response::Response::SyncResponse(false))
+            .await;
+
+        // A false sync must time out, release the entire RPC, and leave cached rows intact.
+        wait_for_rpc_close(&mut incomplete.completed).await;
+
+        assert!(recording.pruned_keys.lock().unwrap().is_empty());
+
+        for in_band_error in [true, false] {
+            let mut failed = next_snapshot(subscriptions, live).await;
+
+            if in_band_error {
+                failed.fail(tonic::Code::Internal).await;
+            } else {
+                drop(failed.responses);
+                wait_for_rpc_close(&mut failed.completed).await;
+            }
+
+            assert!(recording.pruned_keys.lock().unwrap().is_empty());
+        }
+
+        let mut snapshot = next_snapshot(subscriptions, live).await;
+        assert_eq!(service.active_requests.load(Ordering::SeqCst), 2);
+
+        assert!(
+            subscriptions.try_recv().is_err(),
+            "only one snapshot may be active"
+        );
+
+        snapshot
+            .send(proto::subscribe_response::Response::SyncResponse(true))
+            .await;
+
+        wait_for_rpc_close(&mut snapshot.completed).await;
+
+        let export = metrics.export_telemetry().unwrap();
+
+        let mut pruned = recording.pruned_keys.lock().unwrap().clone();
+        pruned.sort();
+
+        assert_eq!(
+            pruned,
+            [
+                "nvue_gnmi_events:concurrent-event",
+                "nvue_gnmi_events:removed-event"
+            ]
+        );
+
+        assert!(export.contains("unrelated-interface"));
+    }
+
+    fn reconciliation_config(port: u16) -> NvueGnmiConfig {
+        let mut config = NvueGnmiConfig {
+            gnmi_port: port,
+            request_timeout: Duration::from_millis(500),
+            reconcile_interval: Some(Duration::from_millis(100)),
+            system_events_enabled: false,
+            dangerously_skip_tls_verification: true,
+            ..Default::default()
+        };
+
+        config.paths.components_enabled = false;
+        config.paths.interfaces_enabled = false;
+        config.paths.platform_general_enabled = false;
+        config.paths.leak_sensors_enabled = false;
+
+        config
+    }
+
+    async fn assert_event_reconciliation(
+        port: u16,
+        service: &TestGnmiService,
+        sockets: &AtomicUsize,
+    ) {
+        let (opened, mut subscriptions) = mpsc::channel(4);
+        *service.controlled_subscriptions.lock().unwrap() = Some(opened);
+        let mut endpoint = test_endpoint("55:66:77:88:99:cd".parse().unwrap());
+        endpoint.addr.ip = "127.0.0.1".parse().unwrap();
+        let metrics = Arc::new(MetricsManager::new("test").unwrap());
+
+        let registry = Arc::new(
+            metrics
+                .create_collector_registry("reconciliation".into(), "test")
+                .unwrap(),
+        );
+
+        let recording = Arc::new(RecordingMetricSink::default());
+
+        let sink = Arc::new(CompositeDataSink::new(
+            vec![
+                recording.clone(),
+                Arc::new(PrometheusSink::new(metrics.clone(), "test_sink").unwrap()),
+            ],
+            metrics.clone(),
+        ));
+
+        let mut config = reconciliation_config(port);
+        config.system_events_enabled = true;
+
+        sink.handle_event(
+            &crate::sink::EventContext::from_endpoint(&endpoint, NVUE_GNMI_SAMPLE_STREAM_ID),
+            &CollectorEvent::Metric(Box::new(MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
+                key: "unrelated-interface".into(),
+                name: NVUE_GNMI_SAMPLE_STREAM_ID.into(),
+                metric_type: "interface_reading".into(),
+                unit: "count".into(),
+                value: 1.0,
+                labels: vec![(
+                    std::borrow::Cow::Borrowed("interface_name"),
+                    "unrelated-interface".into(),
+                )],
+                context: None,
+            })),
+        );
+
+        let collector = spawn_gnmi_collector_with_settings(
+            &endpoint,
+            GnmiCollectorSettings {
+                gnmi_config: &config,
+                initial_retry_delay: Duration::from_millis(10),
+            },
+            Arc::new(DelayedRefreshProvider::default()),
+            registry,
+            Some(sink),
+            None,
+            &mut Default::default(),
+        )
+        .unwrap();
+
+        let mut live = tokio::time::timeout(Duration::from_secs(2), subscriptions.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            live.request,
+            build_on_change_subscribe_request(
+                &system_events_prefix(),
+                &system_events_subscribe_path(),
+            )
+        );
+
+        live.publish(&recording, "removed-event").await;
+
+        assert_snapshot_retry(&live, &mut subscriptions, service, &recording, &metrics).await;
+
+        live.publish(&recording, "repopulated-event").await;
+
+        assert!(
+            !recording
+                .pruned_keys
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|key| key.ends_with(":repopulated-event"))
+        );
+
+        let mut interrupted = next_snapshot(&mut subscriptions, &live).await;
+        live.fail(tonic::Code::Unavailable).await;
+        wait_for_rpc_close(&mut interrupted.completed).await;
+
+        assert!(
+            !recording
+                .pruned_keys
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|key| key.ends_with(":repopulated-event"))
+        );
+
+        let replacement = tokio::time::timeout(Duration::from_secs(4), subscriptions.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        replacement.publish(&recording, "after-reconnect").await;
+        let mut cancelled = next_snapshot(&mut subscriptions, &live).await;
+        tokio::time::timeout(Duration::from_secs(2), collector.stop())
+            .await
+            .unwrap();
+
+        wait_for_rpc_close(&mut cancelled.completed).await;
+
+        wait_for_transport_shutdown(service, sockets).await;
+    }
+
+    async fn assert_metric_reconciliation(
+        port: u16,
+        service: &TestGnmiService,
+        sockets: &AtomicUsize,
+    ) {
+        let timeout = Duration::from_secs(2);
+
+        for extended in [false, true] {
+            let (opened, mut subscriptions) = mpsc::channel(4);
+            *service.controlled_subscriptions.lock().unwrap() = Some(opened);
+            let mut endpoint = test_endpoint("55:66:77:88:99:ce".parse().unwrap());
+            endpoint.addr.ip = "127.0.0.1".parse().unwrap();
+            let metrics = Arc::new(MetricsManager::new("test").unwrap());
+
+            let registry = Arc::new(
+                metrics
+                    .create_collector_registry("metric_reconciliation".into(), "test")
+                    .unwrap(),
+            );
+
+            let recording = Arc::new(RecordingMetricSink::default());
+
+            let sink = Arc::new(CompositeDataSink::new(
+                vec![
+                    recording.clone(),
+                    Arc::new(PrometheusSink::new(metrics.clone(), "test_sink").unwrap()),
+                ],
+                metrics.clone(),
+            ));
+
+            let mut config = reconciliation_config(port);
+            config.paths.interfaces_enabled = !extended;
+
+            if extended {
+                config
+                    .additional_subscriptions
+                    .push(NvueGnmiSubscriptionConfig {
+                        name: "external_interfaces".into(),
+                        origin: "openconfig".into(),
+                        prefix: vec!["interfaces".into()],
+                        mode: NvueGnmiSubscriptionMode::OnChange,
+                        paths: vec![vec!["interface".into()]],
+                        metrics: vec![NvueGnmiMetricConfig {
+                            path: vec!["interface".into(), "state".into(), "oper-status".into()],
+                            metric_type: "external_status".into(),
+                            labels: vec![NvueGnmiResponseKeyLabel {
+                                name: "interface_name".into(),
+                                element: "interface".into(),
+                                key: "name".into(),
+                            }],
+                            output: NvueGnmiMetricOutput::StateSet {
+                                states: vec!["UP".into(), "DOWN".into()],
+                            },
+                        }],
+                        ..Default::default()
+                    });
+            }
+
+            let collector = spawn_gnmi_collector(
+                &endpoint,
+                &config,
+                Arc::new(DelayedRefreshProvider::default()),
+                registry,
+                Some(sink),
+                None,
+                &mut Default::default(),
+            )
+            .unwrap();
+
+            let live = tokio::time::timeout(timeout, subscriptions.recv())
+                .await
+                .unwrap()
+                .unwrap();
+
+            live.publish(&recording, "removed-reading").await;
+
+            let mut incomplete = next_snapshot(&mut subscriptions, &live).await;
+
+            incomplete
+                .send(proto::subscribe_response::Response::SyncResponse(false))
+                .await;
+
+            wait_for_rpc_close(&mut incomplete.completed).await;
+
+            assert!(
+                metrics
+                    .export_telemetry()
+                    .unwrap()
+                    .contains("removed-reading")
+            );
+
+            let mut snapshot = next_snapshot(&mut subscriptions, &live).await;
+
+            let emitted = recording.samples.lock().unwrap().len();
+
+            snapshot
+                .send(proto::subscribe_response::Response::SyncResponse(true))
+                .await;
+
+            wait_for_rpc_close(&mut snapshot.completed).await;
+
+            tokio::time::timeout(timeout, async {
+                while metrics
+                    .export_telemetry()
+                    .unwrap()
+                    .contains("removed-reading")
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+
+            assert_eq!(recording.samples.lock().unwrap().len(), emitted);
+
+            live.publish(&recording, "restored-reading").await;
+
+            let mut pending = tokio::time::timeout(timeout, subscriptions.recv())
+                .await
+                .unwrap()
+                .unwrap();
+
+            tokio::time::timeout(timeout, collector.stop())
+                .await
+                .unwrap();
+
+            wait_for_rpc_close(&mut pending.completed).await;
+
+            wait_for_transport_shutdown(service, sockets).await;
+        }
+    }
+
+    async fn assert_replacement_readings(
+        live: &[ControlledSubscription],
+        recording: &RecordingMetricSink,
+        metrics: &MetricsManager,
+        text_update: proto::Update,
+    ) {
+        let export = metrics.export_telemetry().unwrap();
+
+        assert!(
+            export.contains("retained_scalar"),
+            "unchanged scalar must be republished: {export}"
+        );
+
+        assert!(
+            !export.contains("old-serial"),
+            "retired contexts must be removed: {export}"
+        );
+
+        {
+            let samples = recording.samples.lock().unwrap();
+
+            let (context, sample) = samples
+                .iter()
+                .find(|(context, sample)| {
+                    context.switch_serial() == Some("new-serial")
+                        && sample.metric_type == "retained_scalar"
+                })
+                .expect("retained scalar under the replacement context");
+
+            assert_eq!(context.switch_serial(), Some("new-serial"));
+            assert_eq!(sample.value, 7.0);
+
+            let (_, event) = samples
+                .iter()
+                .find(|(context, sample)| {
+                    context.switch_serial() == Some("new-serial")
+                        && sample
+                            .labels
+                            .iter()
+                            .any(|(key, value)| key == "instance_id" && value == "retained-event")
+                })
+                .expect("retained event must replay before any replacement update");
+            assert_eq!(event.value, 4.0);
+        }
+
+        let event = live
+            .iter()
+            .find(|subscription| subscription.stream_index() == 2)
+            .unwrap();
+
+        event
+            .send(Response::Update(proto::Notification {
+                update: vec![text_update],
+                ..Default::default()
+            }))
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !recording.samples.lock().unwrap().iter().any(|(_, sample)| {
+                sample
+                    .labels
+                    .iter()
+                    .any(|(key, value)| key == "text" && value == "changed text")
+            }) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        {
+            let samples = recording.samples.lock().unwrap();
+            let (context, sample) = samples.last().unwrap();
+
+            assert_eq!(sample.value, 4.0);
+            assert_eq!(context.switch_serial(), Some("new-serial"));
+        }
+
+        let scalar = live
+            .iter()
+            .find(|subscription| subscription.stream_index() != 2)
+            .unwrap();
+
+        scalar
+            .send(Response::Update(proto::Notification {
+                delete: vec![Path {
+                    elem: vec![PathElem {
+                        name: "value".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }))
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while metrics
+                .export_telemetry()
+                .unwrap()
+                .contains("retained_scalar")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("source Delete must remove the retained scalar");
+    }
+
+    async fn assert_metadata_replacement_retains_readings(
+        port: u16,
+        service: &TestGnmiService,
+        sockets: &AtomicUsize,
+    ) {
+        let (opened, mut subscriptions) = mpsc::channel(4);
+        *service.controlled_subscriptions.lock().unwrap() = Some(opened);
+        let mut endpoint = test_endpoint("55:66:77:88:99:cf".parse().unwrap());
+        endpoint.addr.ip = "127.0.0.1".parse().unwrap();
+        let metrics = Arc::new(MetricsManager::new("test").unwrap());
+        let recording = Arc::new(RecordingMetricSink::default());
+
+        let sink = Arc::new(CompositeDataSink::new(
+            vec![
+                recording.clone(),
+                Arc::new(PrometheusSink::new(metrics.clone(), "test_sink").unwrap()),
+            ],
+            metrics.clone(),
+        ));
+
+        let mut config = reconciliation_config(port);
+        config.reconcile_interval = None;
+        config.system_events_enabled = true;
+
+        config.additional_subscriptions = vec![NvueGnmiSubscriptionConfig {
+            name: "retained".into(),
+            mode: NvueGnmiSubscriptionMode::OnChange,
+            updates_only: true,
+            paths: vec![vec!["value".into()]],
+            metrics: vec![NvueGnmiMetricConfig {
+                path: vec!["value".into()],
+                metric_type: "retained_scalar".into(),
+                labels: Vec::new(),
+                output: NvueGnmiMetricOutput::Gauge {
+                    unit: "count".into(),
+                },
+            }],
+            ..Default::default()
+        }];
+
+        let update = |path: &str, value: &str| proto::Update {
+            path: Some(Path {
+                elem: path
+                    .split('/')
+                    .map(|name| PathElem {
+                        name: name.into(),
+                        key: if name == "system-event" {
+                            [("event-id".into(), "retained-event".into())].into()
+                        } else {
+                            Default::default()
+                        },
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+            val: Some(proto::TypedValue {
+                value: Some(proto::typed_value::Value::StringVal(value.into())),
+            }),
+            ..Default::default()
+        };
+
+        let mut retained = Default::default();
+
+        for serial in ["old-serial", "new-serial"] {
+            endpoint.metadata = Some(EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
+                id: None,
+                serial: Some(serial.into()),
+                slot_number: None,
+                tray_index: None,
+                nvlink_domain_uuid: None,
+                endpoint_role: SwitchEndpointRole::Host,
+                is_primary: false,
+                nmxc_enabled: false,
+                nmxt_enabled: false,
+            }));
+
+            let collector = spawn_gnmi_collector(
+                &endpoint,
+                &config,
+                Arc::new(DelayedRefreshProvider::default()),
+                Arc::new(
+                    metrics
+                        .create_collector_registry("replacement".into(), "test")
+                        .unwrap(),
+                ),
+                Some(sink.clone()),
+                None,
+                &mut retained,
+            )
+            .unwrap();
+
+            let mut live = Vec::new();
+
+            for _ in 0..2 {
+                let subscription =
+                    tokio::time::timeout(Duration::from_secs(2), subscriptions.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+
+                subscription.send(Response::SyncResponse(true)).await;
+                live.push(subscription);
+            }
+
+            if serial == "old-serial" {
+                let critical = update("system-events/system-event/state/severity", "critical");
+
+                for (index, update) in [(2, critical), (0, update("value", "7"))] {
+                    let stream = live
+                        .iter()
+                        .find(|stream| stream.stream_index() == index)
+                        .unwrap();
+
+                    stream
+                        .send(Response::Update(proto::Notification {
+                            update: vec![update],
+                            ..Default::default()
+                        }))
+                        .await;
+                }
+
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while recording.samples.lock().unwrap().len() < 2 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            } else {
+                assert_replacement_readings(
+                    &live,
+                    &recording,
+                    &metrics,
+                    update("system-events/system-event/state/text", "changed text"),
+                )
+                .await;
+            }
+
+            collector.stop().await;
+            wait_for_transport_shutdown(service, sockets).await;
+        }
+    }
+
+    async fn assert_stream_task_panic_recovers_on_discovery_iteration(
+        port: u16,
+        service: &TestGnmiService,
+        sockets: &AtomicUsize,
+    ) {
+        let (opened, mut subscriptions) = mpsc::channel(8);
+        *service.controlled_subscriptions.lock().unwrap() = Some(opened);
+        let mut endpoint = test_endpoint("55:66:77:88:99:d0".parse().unwrap());
+        endpoint.addr.ip = "127.0.0.1".parse().unwrap();
+        endpoint.metadata = Some(EndpointMetadata::Switch(SwitchData {
+            log_checkpoint_identity: None,
+            id: None,
+            serial: Some("task-recovery".into()),
+            slot_number: None,
+            tray_index: None,
+            nvlink_domain_uuid: None,
+            endpoint_role: SwitchEndpointRole::Host,
+            is_primary: true,
+            nmxc_enabled: false,
+            nmxt_enabled: false,
+        }));
+
+        let metrics = Arc::new(MetricsManager::new("task_recovery").unwrap());
+        let panic_sink = Arc::new(PanicMetricSink {
+            recording: RecordingMetricSink::default(),
+            enabled: AtomicBool::new(true),
+            panics: AtomicUsize::new(0),
+        });
+        let sink = Arc::new(CompositeDataSink::new(
+            vec![
+                panic_sink.clone(),
+                Arc::new(PrometheusSink::new(metrics.clone(), "task_recovery_sink").unwrap()),
+            ],
+            metrics.clone(),
+        ));
+
+        let mut gnmi = reconciliation_config(port);
+        gnmi.request_timeout = Duration::from_secs(5);
+        gnmi.reconcile_interval = None;
+        gnmi.paths.interfaces_enabled = true;
+        gnmi.system_events_enabled = true;
+        gnmi.additional_subscriptions = ["earlier", "late"]
+            .map(|name| NvueGnmiSubscriptionConfig {
+                name: name.into(),
+                mode: NvueGnmiSubscriptionMode::OnChange,
+                updates_only: true,
+                paths: vec![vec![name.into()]],
+                metrics: vec![NvueGnmiMetricConfig {
+                    path: vec![name.into()],
+                    metric_type: format!("{name}_scalar"),
+                    output: NvueGnmiMetricOutput::Gauge {
+                        unit: "count".into(),
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .into();
+
+        let mut config = Config::default();
+        config.collectors.nvue = Configurable::Enabled(NvueCollectorConfig {
+            rest: Configurable::Disabled,
+            gnmi: Configurable::Enabled(gnmi),
+        });
+        let mut context =
+            DiscoveryLoopContext::new(Arc::new(NoopLimiter), metrics.clone(), Arc::new(config))
+                .unwrap();
+        let source = Arc::new(StaticEndpointSource::new(vec![endpoint]));
+        let shard = ShardManager {
+            shard: 0,
+            shards_count: 1,
+        };
+
+        run_discovery_iteration(
+            source.clone(),
+            &shard,
+            &mut context,
+            Some(sink.clone()),
+            "task_recovery",
+        )
+        .await
+        .expect("first discovery pass");
+
+        let mut live = Vec::new();
+
+        for _ in 0..4 {
+            let subscription = tokio::time::timeout(Duration::from_secs(5), subscriptions.recv())
+                .await
+                .expect("initial stream must open")
+                .unwrap();
+            subscription.send(Response::SyncResponse(true)).await;
+            live.push(subscription);
+        }
+
+        live.iter()
+            .find(|subscription| subscription.path_root() == "interfaces")
+            .expect("primary subscription")
+            .publish(&panic_sink.recording, "primary-before-panic")
+            .await;
+
+        assert_eq!(service.active_requests.load(Ordering::SeqCst), 4);
+        assert_eq!(sockets.load(Ordering::SeqCst), 4);
+
+        assert!(
+            metrics
+                .export_metrics()
+                .unwrap()
+                .contains("nvue_gnmi_connection_state")
+        );
+        assert!(metrics.export_telemetry().unwrap().contains("nvue_gnmi"));
+        run_discovery_iteration(
+            source.clone(),
+            &shard,
+            &mut context,
+            Some(sink.clone()),
+            "task_recovery",
+        )
+        .await
+        .expect("healthy collector must survive discovery");
+        assert!(matches!(
+            subscriptions.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(service.active_requests.load(Ordering::SeqCst), 4);
+
+        for subscription in &mut live {
+            assert!(matches!(
+                subscription.completed.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+        }
+
+        // The final additional task panics while the primary and earlier
+        // subscriptions are still open. No caller cancels this collector.
+        live.iter()
+            .find(|subscription| subscription.path_root() == "late")
+            .expect("late subscription")
+            .send(Response::Update(proto::Notification {
+                update: vec![proto::Update {
+                    path: Some(Path {
+                        elem: vec![PathElem {
+                            name: "late".into(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                    val: Some(proto::TypedValue {
+                        value: Some(proto::typed_value::Value::IntVal(42)),
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }))
+            .await;
+
+        for subscription in &mut live {
+            tokio::time::timeout(Duration::from_secs(5), &mut subscription.completed)
+                .await
+                .expect("supervision must close every old RPC")
+                .unwrap();
+        }
+
+        wait_for_transport_shutdown(service, sockets).await;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while metrics.export_metrics().unwrap().contains("nvue_gnmi") {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("finished parent must release its runtime registry");
+
+        assert_eq!(panic_sink.panics.load(Ordering::SeqCst), 1);
+        assert!(!metrics.export_telemetry().unwrap().contains("nvue_gnmi"));
+        let mut removed = panic_sink.recording.removed.lock().unwrap().clone();
+        removed.sort_unstable();
+        let mut expected = vec![
+            NVUE_GNMI_SAMPLE_STREAM_ID,
+            ON_CHANGE_STREAM_ID_SYSTEM_EVENTS,
+            EXTENDED_GNMI_STREAM_ID,
+        ];
+        expected.sort_unstable();
+        assert_eq!(removed, expected);
+        // The same fault must stay within the collector when the replacement
+        // replays 42, before its source can send another update.
+        run_discovery_iteration(
+            source.clone(),
+            &shard,
+            &mut context,
+            Some(sink.clone()),
+            "task_recovery",
+        )
+        .await
+        .expect("persistent replay panic must not unwind discovery");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while panic_sink.panics.load(Ordering::SeqCst) != 2
+                || metrics.export_metrics().unwrap().contains("nvue_gnmi")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("replay failure must finish collector cleanup");
+        wait_for_transport_shutdown(service, sockets).await;
+        while let Ok(mut subscription) = subscriptions.try_recv() {
+            tokio::time::timeout(Duration::from_secs(5), &mut subscription.completed)
+                .await
+                .expect("replay failure must close replacement RPCs")
+                .unwrap();
+        }
+        assert_eq!(panic_sink.recording.removed.lock().unwrap().len(), 6);
+
+        panic_sink.enabled.store(false, Ordering::SeqCst);
+        panic_sink.recording.samples.lock().unwrap().clear();
+
+        // Discovery reuses the endpoint's retained reading after the old parent
+        // has finished cleanup, before the replacement receives source updates.
+        run_discovery_iteration(
+            source,
+            &shard,
+            &mut context,
+            Some(sink.clone()),
+            "task_recovery",
+        )
+        .await
+        .expect("next discovery pass must replace the finished collector");
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !metrics
+                .export_telemetry()
+                .unwrap()
+                .contains("late_scalar_count")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("retained reading must be replayed without a source update");
+        {
+            let retained = panic_sink.recording.samples.lock().unwrap();
+            assert!(retained.iter().any(|(_, sample)| {
+                sample.metric_type == "late_scalar" && sample.value == 42.0
+            }));
+        }
+        let telemetry = metrics.export_telemetry().unwrap();
+        assert!(telemetry.contains("late_scalar_count"), "{telemetry}");
+
+        let mut replacement = Vec::new();
+
+        for _ in 0..4 {
+            let subscription = tokio::time::timeout(Duration::from_secs(5), subscriptions.recv())
+                .await
+                .expect("replacement stream must open")
+                .unwrap();
+            subscription.send(Response::SyncResponse(true)).await;
+            replacement.push(subscription);
+        }
+
+        replacement
+            .iter()
+            .find(|subscription| subscription.path_root() == "interfaces")
+            .expect("primary subscription")
+            .publish(&panic_sink.recording, "primary-after-recovery")
+            .await;
+        replacement
+            .iter()
+            .find(|subscription| subscription.path_root() == "late")
+            .expect("recovered late subscription")
+            .send(Response::Update(proto::Notification {
+                update: vec![proto::Update {
+                    path: Some(Path {
+                        elem: vec![PathElem {
+                            name: "late".into(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                    val: Some(proto::TypedValue {
+                        value: Some(proto::typed_value::Value::IntVal(43)),
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }))
+            .await;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !panic_sink
+                .recording
+                .samples
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, sample)| sample.metric_type == "late_scalar" && sample.value == 43.0)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("previously failing stream must publish fresh telemetry");
+
+        assert_eq!(service.active_requests.load(Ordering::SeqCst), 4);
+        assert!(
+            metrics
+                .export_metrics()
+                .unwrap()
+                .contains("nvue_gnmi_connection_state")
+        );
+
+        run_discovery_iteration(
+            Arc::new(StaticEndpointSource::new(Vec::new())),
+            &shard,
+            &mut context,
+            Some(sink),
+            "task_recovery",
+        )
+        .await
+        .expect("endpoint removal must stop replacement");
+        wait_for_transport_shutdown(service, sockets).await;
+        assert!(!metrics.export_metrics().unwrap().contains("nvue_gnmi"));
+        assert_eq!(panic_sink.recording.removed.lock().unwrap().len(), 9);
+    }
+
+    #[tokio::test]
+    async fn subscriptions_release_transport_and_recover_from_stream_failures() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("test certificate");
+
+        let identity = Identity::from_pem(
+            certificate.cert.pem(),
+            certificate.signing_key.serialize_pem(),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind gNMI server");
+
+        let port = listener.local_addr().expect("server address").port();
+        let service = TestGnmiService::default();
+
+        let sockets = Arc::new(AtomicUsize::new(0));
+        let accepted_sockets = sockets.clone();
+
+        let incoming = TcpListenerStream::new(listener).map(move |accepted| {
+            accepted.map(|stream| {
+                accepted_sockets.fetch_add(1, Ordering::SeqCst);
+                CountingTcpStream {
+                    stream,
+                    sockets: accepted_sockets.clone(),
+                }
+            })
+        });
+
+        let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel::<()>();
+
+        let server = Server::builder()
+            .tls_config(ServerTlsConfig::new().identity(identity))
+            .expect("server TLS")
+            .add_service(proto::g_nmi_server::GNmiServer::new(service.clone()))
+            .serve_with_incoming_shutdown(incoming, async move {
+                let _ = shutdown_receiver.await;
+            });
+
+        let server_task = tokio::spawn(server);
+
+        let client = GnmiClient::new(GnmiClientConfig {
+            switch_id: "test-switch".to_string(),
+            rack_id: None,
+            host: "127.0.0.1".to_string(),
+            port,
+            username: None,
+            password: None,
+            request_timeout: Duration::from_secs(2),
+            dangerously_skip_tls_verification: true,
+            tls_config: None,
+        });
+
+        let prefix = system_events_prefix();
+        let paths = system_events_subscribe_path();
+
+        let extended_request = build_extended_subscribe_request(&NvueGnmiSubscriptionConfig {
+            name: "test-extra".to_string(),
+            paths: vec![vec!["state".to_string()]],
+            ..Default::default()
+        })
+        .expect("additional subscription request");
+
+        for mode in 0..3 {
+            for _retry in 0..3 {
+                let mut subscription = match mode {
+                    0 => {
+                        client
+                            .subscribe_request(build_sample_subscribe_request(&paths, 1_000_000))
+                            .await
+                    }
+                    1 => {
+                        client
+                            .subscribe_request(build_on_change_subscribe_request(&prefix, &paths))
+                            .await
+                    }
+                    _ => client.subscribe_request(extended_request.clone()).await,
+                }
+                .expect("open subscription");
+
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(70), subscription.next())
+                        .await
+                        .is_err(),
+                    "unsynchronized subscription must time out"
+                );
+
+                drop(subscription);
+                wait_for_transport_shutdown(&service, &sockets).await;
+            }
+        }
+
+        service.synchronized.store(true, Ordering::SeqCst);
+
+        for mode in 0..3 {
+            let mut subscription = match mode {
+                0 => {
+                    client
+                        .subscribe_request(build_sample_subscribe_request(&paths, 1_000_000))
+                        .await
+                }
+                1 => {
+                    client
+                        .subscribe_request(build_on_change_subscribe_request(&prefix, &paths))
+                        .await
+                }
+                _ => client.subscribe_request(extended_request.clone()).await,
+            }
+            .expect("open healthy subscription");
+
+            let first = tokio::time::timeout(Duration::from_secs(2), subscription.next())
+                .await
+                .expect("synchronization response")
+                .expect("open response stream")
+                .expect("successful response");
+
+            assert!(matches!(
+                first.response,
+                Some(proto::subscribe_response::Response::SyncResponse(true))
+            ));
+
+            for expected_timestamp in 1..=2 {
+                let update = tokio::time::timeout(Duration::from_secs(2), subscription.next())
+                    .await
+                    .expect("telemetry response")
+                    .expect("open response stream")
+                    .expect("successful response");
+
+                assert!(matches!(
+                    update.response,
+                    Some(proto::subscribe_response::Response::Update(proto::Notification {
+                        timestamp,
+                        ..
+                    })) if timestamp == expected_timestamp
+                ));
+            }
+
+            assert_eq!(service.active_requests.load(Ordering::SeqCst), 1);
+            assert_eq!(sockets.load(Ordering::SeqCst), 1);
+            drop(subscription);
+            wait_for_transport_shutdown(&service, &sockets).await;
+        }
+
+        assert_selective_output(&client, &service, &sockets).await;
+        assert_post_sync_collector_recovery(port, &service, &sockets).await;
+        assert_event_reconciliation(port, &service, &sockets).await;
+        assert_metric_reconciliation(port, &service, &sockets).await;
+        assert_metadata_replacement_retains_readings(port, &service, &sockets).await;
+        assert_stream_task_panic_recovers_on_discovery_iteration(port, &service, &sockets).await;
+
+        shutdown_sender.send(()).expect("stop server");
+        server_task
+            .await
+            .expect("server task")
+            .expect("server result");
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum AuthProjection {
+        Metadata {
+            username: Option<String>,
+            password: Option<String>,
+        },
+        InvalidUsername,
+        InvalidPassword,
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct ValueProjection {
+        as_string: Option<String>,
+        as_f64: Option<f64>,
+    }
+
+    struct AuthInput {
+        username: Option<String>,
+        password: Option<String>,
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn typed_value_projection_cases() {
+        use proto::typed_value::Value;
+
+        check_values(
+            [
+                Check {
+                    scenario: "absent value",
+                    input: proto::TypedValue { value: None },
+                    expect: ValueProjection {
+                        as_string: None,
+                        as_f64: None,
+                    },
+                },
+                Check {
+                    scenario: "native non-numeric string",
+                    input: proto::TypedValue {
+                        value: Some(Value::StringVal("healthy".to_string())),
+                    },
+                    expect: ValueProjection {
+                        as_string: Some("healthy".to_string()),
+                        as_f64: None,
+                    },
+                },
+                Check {
+                    scenario: "native numeric string",
+                    input: proto::TypedValue {
+                        value: Some(Value::StringVal("1.23".to_string())),
+                    },
+                    expect: ValueProjection {
+                        as_string: Some("1.23".to_string()),
+                        as_f64: Some(1.23),
+                    },
+                },
+                Check {
+                    scenario: "quoted non-numeric JSON",
+                    input: proto::TypedValue {
+                        value: Some(Value::JsonVal(b"\"degraded\"".to_vec())),
+                    },
+                    expect: ValueProjection {
+                        as_string: Some("degraded".to_string()),
+                        as_f64: None,
+                    },
+                },
+                Check {
+                    scenario: "quoted numeric JSON",
+                    input: proto::TypedValue {
+                        value: Some(Value::JsonVal(b"\"1.5e-3\"".to_vec())),
+                    },
+                    expect: ValueProjection {
+                        as_string: Some("1.5e-3".to_string()),
+                        as_f64: Some(0.0015),
+                    },
+                },
+                Check {
+                    scenario: "unquoted numeric JSON",
+                    input: proto::TypedValue {
+                        value: Some(Value::JsonVal(b"99.9".to_vec())),
+                    },
+                    expect: ValueProjection {
+                        as_string: Some("99.9".to_string()),
+                        as_f64: Some(99.9),
+                    },
+                },
+                Check {
+                    scenario: "IETF JSON",
+                    input: proto::TypedValue {
+                        value: Some(Value::JsonIetfVal(b"6.25".to_vec())),
+                    },
+                    expect: ValueProjection {
+                        as_string: Some("6.25".to_string()),
+                        as_f64: Some(6.25),
+                    },
+                },
+                Check {
+                    scenario: "ASCII",
+                    input: proto::TypedValue {
+                        value: Some(Value::AsciiVal("port-up".to_string())),
+                    },
+                    expect: ValueProjection {
+                        as_string: Some("port-up".to_string()),
+                        as_f64: None,
+                    },
+                },
+                Check {
+                    scenario: "signed integer",
+                    input: proto::TypedValue {
+                        value: Some(Value::IntVal(-5)),
+                    },
+                    expect: ValueProjection {
+                        as_string: Some("-5".to_string()),
+                        as_f64: Some(-5.0),
+                    },
+                },
+                Check {
+                    scenario: "unsigned integer",
+                    input: proto::TypedValue {
+                        value: Some(Value::UintVal(100)),
+                    },
+                    expect: ValueProjection {
+                        as_string: Some("100".to_string()),
+                        as_f64: Some(100.0),
+                    },
+                },
+                Check {
+                    scenario: "Boolean",
+                    input: proto::TypedValue {
+                        value: Some(Value::BoolVal(true)),
+                    },
+                    expect: ValueProjection {
+                        as_string: Some("true".to_string()),
+                        as_f64: None,
+                    },
+                },
+                Check {
+                    scenario: "float",
+                    input: proto::TypedValue {
+                        value: Some(Value::FloatVal(1.25)),
+                    },
+                    expect: ValueProjection {
+                        as_string: Some("1.25".to_string()),
+                        as_f64: Some(1.25),
+                    },
+                },
+                Check {
+                    scenario: "double",
+                    input: proto::TypedValue {
+                        value: Some(Value::DoubleVal(42.5)),
+                    },
+                    expect: ValueProjection {
+                        as_string: Some("42.5".to_string()),
+                        as_f64: Some(42.5),
+                    },
+                },
+                Check {
+                    scenario: "unsupported bytes",
+                    input: proto::TypedValue {
+                        value: Some(Value::BytesVal(vec![0, 1])),
+                    },
+                    expect: ValueProjection {
+                        as_string: None,
+                        as_f64: None,
+                    },
+                },
+                Check {
+                    scenario: "unsupported decimal",
+                    input: proto::TypedValue {
+                        value: Some(Value::DecimalVal(proto::Decimal64 {
+                            digits: 125,
+                            precision: 2,
+                        })),
+                    },
+                    expect: ValueProjection {
+                        as_string: None,
+                        as_f64: None,
+                    },
+                },
+                Check {
+                    scenario: "unsupported leaf list",
+                    input: proto::TypedValue {
+                        value: Some(Value::LeaflistVal(proto::ScalarArray {
+                            element: Vec::new(),
+                        })),
+                    },
+                    expect: ValueProjection {
+                        as_string: None,
+                        as_f64: None,
+                    },
+                },
+                Check {
+                    scenario: "unsupported arbitrary protobuf",
+                    input: proto::TypedValue {
+                        value: Some(Value::AnyVal(prost_types::Any {
+                            type_url: "type.googleapis.com/example.Value".to_string(),
+                            value: vec![0, 1],
+                        })),
+                    },
+                    expect: ValueProjection {
+                        as_string: None,
+                        as_f64: None,
+                    },
+                },
+                Check {
+                    scenario: "unsupported protobuf bytes",
+                    input: proto::TypedValue {
+                        value: Some(Value::ProtoBytes(vec![0, 1])),
+                    },
+                    expect: ValueProjection {
+                        as_string: None,
+                        as_f64: None,
+                    },
+                },
+            ],
+            |value| ValueProjection {
+                as_string: typed_value_to_string(&value),
+                as_f64: typed_value_to_f64(&value),
+            },
+        );
+    }
+
+    #[test]
+    fn auth_metadata_cases() {
+        check_values(
+            [
+                Check {
+                    scenario: "no credentials",
+                    input: AuthInput {
+                        username: None,
+                        password: None,
+                    },
+                    expect: AuthProjection::Metadata {
+                        username: None,
+                        password: None,
+                    },
+                },
+                Check {
+                    scenario: "username only",
+                    input: AuthInput {
+                        username: Some("admin".to_string()),
+                        password: None,
+                    },
+                    expect: AuthProjection::Metadata {
+                        username: Some("admin".to_string()),
+                        password: None,
+                    },
+                },
+                Check {
+                    scenario: "password only",
+                    input: AuthInput {
+                        username: None,
+                        password: Some("secret".to_string()),
+                    },
+                    expect: AuthProjection::Metadata {
+                        username: None,
+                        password: Some("secret".to_string()),
+                    },
+                },
+                Check {
+                    scenario: "username and password",
+                    input: AuthInput {
+                        username: Some("admin".to_string()),
+                        password: Some("secret".to_string()),
+                    },
+                    expect: AuthProjection::Metadata {
+                        username: Some("admin".to_string()),
+                        password: Some("secret".to_string()),
+                    },
+                },
+                Check {
+                    scenario: "invalid username",
+                    input: AuthInput {
+                        username: Some("bad\nusername".to_string()),
+                        password: Some("secret".to_string()),
+                    },
+                    expect: AuthProjection::InvalidUsername,
+                },
+                Check {
+                    scenario: "invalid password is redacted",
+                    input: AuthInput {
+                        username: Some("admin".to_string()),
+                        password: Some("bad\npassword".to_string()),
+                    },
+                    expect: AuthProjection::InvalidPassword,
+                },
+            ],
+            |AuthInput { username, password }| match build_auth_metadata(&username, &password) {
+                Ok(metadata) => {
+                    let get = |key| {
+                        metadata.get(key).map(|value| {
+                            value
+                                .to_str()
+                                .expect("test metadata should be visible ASCII")
+                                .to_string()
+                        })
+                    };
+                    AuthProjection::Metadata {
+                        username: get("username"),
+                        password: get("password"),
+                    }
+                }
+                Err(HealthError::GnmiError(message))
+                    if message.starts_with("invalid username for gRPC metadata:") =>
+                {
+                    AuthProjection::InvalidUsername
+                }
+                Err(HealthError::GnmiError(message))
+                    if message == "invalid password for gRPC metadata" =>
+                {
+                    AuthProjection::InvalidPassword
+                }
+                Err(error) => panic!("unexpected authentication metadata error: {error}"),
+            },
+        );
+    }
+
+    #[test]
+    fn primary_subscribe_paths_exclude_leak_sensors() {
+        check_values(
+            [
+                Check {
+                    scenario: "no primary paths",
+                    input: NvueGnmiPaths {
+                        components_enabled: false,
+                        interfaces_enabled: false,
+                        interface_paths: None,
+                        platform_general_enabled: false,
+                        leak_sensors_enabled: true,
+                    },
+                    expect: String::new(),
+                },
+                Check {
+                    scenario: "components only",
+                    input: NvueGnmiPaths {
+                        components_enabled: true,
+                        interfaces_enabled: false,
+                        interface_paths: None,
+                        platform_general_enabled: false,
+                        leak_sensors_enabled: true,
+                    },
+                    expect: "components/component".to_string(),
+                },
+                Check {
+                    scenario: "interfaces only",
+                    input: NvueGnmiPaths {
+                        components_enabled: false,
+                        interfaces_enabled: true,
+                        interface_paths: None,
+                        platform_general_enabled: false,
+                        leak_sensors_enabled: true,
+                    },
+                    expect: "interfaces/interface".to_string(),
+                },
+                Check {
+                    scenario: "platform general only",
+                    input: NvueGnmiPaths {
+                        components_enabled: false,
+                        interfaces_enabled: false,
+                        interface_paths: None,
+                        platform_general_enabled: true,
+                        leak_sensors_enabled: true,
+                    },
+                    expect: "platform-general/state,platform-general/versions".to_string(),
+                },
+                Check {
+                    scenario: "all primary paths",
+                    input: NvueGnmiPaths {
+                        leak_sensors_enabled: true,
+                        ..Default::default()
+                    },
+                    expect: "components/component,interfaces/interface,platform-general/state,platform-general/versions".to_string(),
+                },
+            ],
+            |config| {
+                nvue_subscribe_paths(&config)
+                    .into_iter()
+                    .map(|path| {
+                        path.elem
+                            .into_iter()
+                            .map(|elem| elem.name)
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            },
+        );
+    }
+
+    #[test]
+    fn selected_interface_paths_replace_the_primary_interface_subtree() {
+        let config = NvueGnmiPaths {
+            interface_paths: Some(vec![
+                vec!["state".into(), "oper-status".into()],
+                vec!["phy-diag".into(), "state".into(), "raw-ber".into()],
+            ]),
+            ..Default::default()
+        };
+
+        let names = |paths: Vec<Path>| {
+            paths
+                .into_iter()
+                .map(|path| {
+                    format!(
+                        "/{}",
+                        path.elem
+                            .into_iter()
+                            .map(|element| element.name)
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let primary = names(nvue_subscribe_paths(&config));
+        let interface = names(nvue_interface_subscribe_paths(&config));
+
+        assert_eq!(
+            primary,
+            [
+                "/components/component",
+                "/platform-general/state",
+                "/platform-general/versions"
+            ]
+        );
+
+        assert_eq!(
+            interface,
+            [
+                "/interfaces/interface/state/oper-status",
+                "/interfaces/interface/phy-diag/state/raw-ber"
+            ]
+        );
+    }
+
+    #[test]
+    fn leak_sensor_path_is_built_separately() {
+        let actual = nvue_leak_sensor_subscribe_path()
+            .elem
+            .into_iter()
+            .map(|elem| elem.name)
+            .collect::<Vec<_>>()
+            .join("/");
+
+        assert_eq!(
+            actual,
+            "platform-general/leak-sensors/leak-sensor/state/state"
+        );
+    }
+
+    #[test]
+    fn test_build_sample_subscribe_request() {
+        let paths = nvue_subscribe_paths(&NvueGnmiPaths::default());
+        let interval_nanos = 300_000_000_000u64;
+
+        let req = build_sample_subscribe_request(&paths, interval_nanos);
+
+        let sub_list = match req.request {
+            Some(proto::subscribe_request::Request::Subscribe(sl)) => sl,
+            _ => panic!("expected Subscribe variant"),
+        };
+
+        assert_eq!(
+            sub_list.mode,
+            i32::from(SubscriptionListMode::Stream),
+            "must use Stream mode for SAMPLE subscriptions"
+        );
+        assert_eq!(
+            sub_list.encoding,
+            i32::from(Encoding::Json),
+            "encoding must be JSON"
+        );
+
+        let prefix = sub_list.prefix.expect("prefix must be set");
+        assert_eq!(prefix.target, "nvos", "target must be nvos");
+
+        assert_eq!(sub_list.subscription.len(), 4);
+        for sub in &sub_list.subscription {
+            assert_eq!(
+                sub.mode,
+                i32::from(SubscriptionMode::Sample),
+                "each subscription must use Sample mode"
+            );
+            assert_eq!(
+                sub.sample_interval, interval_nanos,
+                "sample_interval must match the requested interval"
+            );
+            assert!(sub.path.is_some(), "each subscription must have a path");
+        }
+    }
+
+    #[test]
+    fn test_build_on_change_subscribe_request() {
+        let prefix = system_events_prefix();
+        let paths = system_events_subscribe_path();
+
+        let req = build_on_change_subscribe_request(&prefix, &paths);
+
+        let sub_list = match req.request {
+            Some(proto::subscribe_request::Request::Subscribe(sl)) => sl,
+            _ => panic!("expected Subscribe variant"),
+        };
+
+        assert_eq!(
+            sub_list.mode,
+            i32::from(SubscriptionListMode::Stream),
+            "must use Stream mode"
+        );
+        assert_eq!(
+            sub_list.encoding,
+            i32::from(Encoding::Json),
+            "encoding must be JSON"
+        );
+        assert!(sub_list.updates_only, "ON_CHANGE must use updates_only");
+
+        let req_prefix = sub_list.prefix.expect("prefix must be set");
+        assert_eq!(req_prefix.target, "nvos");
+        assert_eq!(req_prefix.elem.len(), 1);
+        assert_eq!(req_prefix.elem[0].name, "system-events");
+
+        assert_eq!(sub_list.subscription.len(), 1);
+        assert_eq!(
+            sub_list.subscription[0].mode,
+            i32::from(SubscriptionMode::OnChange),
+            "subscription must use OnChange mode"
+        );
+        assert!(
+            sub_list.subscription[0]
+                .path
+                .as_ref()
+                .is_some_and(|path| path.elem.is_empty()),
+            "empty path subscribes to all events under prefix"
+        );
+    }
+
+    #[test]
+    fn extended_subscribe_request_preserves_subscription_contract() {
+        let config = NvueGnmiSubscriptionConfig {
+            name: "external_metrics".to_string(),
+            target: "switch".to_string(),
+            origin: "openconfig".to_string(),
+            prefix: vec!["interfaces".to_string()],
+            encoding: NvueGnmiEncoding::JsonIetf,
+            updates_only: true,
+            mode: NvueGnmiSubscriptionMode::Sample,
+            sample_interval: Some(Duration::from_secs(10)),
+            suppress_redundant: true,
+            heartbeat_interval: Some(Duration::from_secs(60)),
+            paths: vec![
+                vec!["interface".to_string(), "state".to_string()],
+                vec!["interface".to_string(), "counter".to_string()],
+            ],
+            metrics: Vec::new(),
+        };
+
+        let request = build_extended_subscribe_request(&config)
+            .expect("validated extended request should build");
+
+        let snapshot = build_snapshot_request(request.clone());
+
+        let Some(proto::subscribe_request::Request::Subscribe(snapshot)) = snapshot.request else {
+            panic!("snapshot subscription list");
+        };
+
+        let Some(proto::subscribe_request::Request::Subscribe(original)) = &request.request else {
+            panic!("live subscription list");
+        };
+
+        assert_eq!(snapshot.prefix, original.prefix);
+        assert_eq!(snapshot.encoding, original.encoding);
+        assert_eq!(snapshot.mode, i32::from(SubscriptionListMode::Once));
+        assert!(!snapshot.updates_only);
+
+        for (snapshot, live) in snapshot.subscription.iter().zip(&original.subscription) {
+            assert_eq!(snapshot.path, live.path);
+            assert_eq!(snapshot.mode, i32::from(SubscriptionMode::TargetDefined));
+            assert_eq!(snapshot.sample_interval, 0);
+            assert_eq!(snapshot.heartbeat_interval, 0);
+            assert!(!snapshot.suppress_redundant);
+        }
+
+        let Some(proto::subscribe_request::Request::Subscribe(list)) = request.request else {
+            panic!("extended request should contain a subscription list");
+        };
+
+        assert_eq!(list.mode, i32::from(SubscriptionListMode::Stream));
+        assert_eq!(list.encoding, i32::from(Encoding::JsonIetf));
+        assert!(list.updates_only);
+
+        let prefix = list
+            .prefix
+            .expect("extended request should contain a prefix");
+
+        assert_eq!(prefix.target, "switch");
+        assert_eq!(prefix.origin, "openconfig");
+        assert_eq!(prefix.elem[0].name, "interfaces");
+
+        assert_eq!(list.subscription.len(), 2);
+
+        for subscription in &list.subscription {
+            assert_eq!(subscription.mode, i32::from(SubscriptionMode::Sample));
+            assert_eq!(subscription.sample_interval, 10_000_000_000);
+            assert!(subscription.suppress_redundant);
+            assert_eq!(subscription.heartbeat_interval, 60_000_000_000);
+        }
+
+        assert!(list.subscription.iter().all(|subscription| {
+            subscription
+                .path
+                .as_ref()
+                .is_some_and(|path| path.elem.iter().all(|element| element.key.is_empty()))
+        }));
+    }
+}

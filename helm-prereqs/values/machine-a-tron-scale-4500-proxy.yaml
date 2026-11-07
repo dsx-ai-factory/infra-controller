@@ -1,0 +1,125 @@
+# 4,500 hosts (13,500 machines) in SHARED-PROXY mode.
+#
+# Why this exists (#4732): controller mode gives every simulated BMC its own
+# Service. At 4,500 hosts that is ~13,500 Services, which is more than
+# a Kubernetes control plane comfortably handles -- API list latency climbs into
+# tens of seconds, CNI and DNS components start restarting, and the API server
+# becomes the bottleneck rather than the system under test.
+#
+# Shared-proxy mode needs ONE Service for the whole fleet: site-explorer dials
+# `bmc_proxy` and the Redfish client injects `Forwarded: host=<BMC IP>`, which
+# the mock's registry uses to pick the simulated BMC. BMC addresses come from
+# the simulated-oob segment (10.200.0.0/18 in nico-core-simulation.yaml), not
+# from the Service CIDR.
+#
+# OOB demand is 3 addresses per host -- one per simulated BMC -- so 4,500 hosts
+# need 13,500 and a /18 fits. Do not widen the prefix casually: the allocator
+# materialises the whole host space per request (about three times slower at
+# /16 than at /18) while holding the fleet-wide admin-segment lock.
+#
+# Single pod on purpose: the chart emits one `-bmc-mock` Service per entry in
+# `pods`, so a single routable proxy host requires a single pod. Resources are
+# sized for the whole fleet in one process accordingly.
+#
+# Deploy with:
+#   helm upgrade --install nico-machine-a-tron helm/charts/nico-machine-a-tron \
+#     -n nico-mat --create-namespace \
+#     -f helm-prereqs/values/machine-a-tron-scale-4500-proxy.yaml
+# nico-core's site config must point site_explorer.bmc_proxy at the Service
+# named in configureBmcProxyHost below, port 1266.
+
+# REQUIRED: the machine-a-tron image. Set it here or on the command line with
+# --set image.repository=<registry>/machine-a-tron --set image.tag=<tag>.
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+global:
+  imagePullSecrets:
+    - name: machine-a-tron-pull
+certificate:
+  uris:
+    - "spiffe://nico.local/nico-system/sa/machine-a-tron"
+machineATron:
+  nicoApiUrl: "https://nico-api.nico-system.svc.cluster.local:1079"
+  # The single BMC endpoint the whole fleet is reached through. Name comes from
+  # templates/service.yaml: "<chart name>-<pod key>-bmc-mock".
+  configureBmcProxyHost: "nico-machine-a-tron-default-bmc-mock.nico-mat.svc.cluster.local"
+  registerExpectedMachines: true
+  # The chart reads the site root password from the site credentials Secret
+  # and pins every mock BMC to it. hostBmcPassword/dpuBmcPassword override it.
+  # Without the Secret the mocks keep their factory passwords.
+macAddressPool:
+  enabled: true
+  basePrefix: "02:00"
+hwMacAddressRanges:
+  enabled: true
+  basePrefix: "02:01"
+# The entire point of this file: no per-BMC Services.
+mat-k8s-controller:
+  enabled: false
+# The chart ships a startupProbe with failureThreshold 120 (60 minutes). This
+# file defines hosts only (no racks, switches or power shelves) and DPUs are
+# not registered, so the pod registers 4,500 records before it binds the
+# redfish port: about 2.5h at the ~2s per record from the chart values.yaml
+# sizing rule. The startupProbe gates the generous liveness window below, so
+# the chart default would re-impose a 60-minute bring-up limit. 1200 x 30s =
+# 10h keeps headroom.
+startupProbe:
+  tcpSocket:
+    port: redfish
+  periodSeconds: 30
+  failureThreshold: 1200
+  successThreshold: 1
+  timeoutSeconds: 10
+livenessProbe:
+  tcpSocket:
+    port: redfish
+  initialDelaySeconds: 120
+  periodSeconds: 30
+  failureThreshold: 240
+  successThreshold: 1
+  timeoutSeconds: 10
+readinessProbe:
+  tcpSocket:
+    port: redfish
+  initialDelaySeconds: 30
+  periodSeconds: 30
+  failureThreshold: 240
+  successThreshold: 1
+  timeoutSeconds: 5
+# One process now simulates all 13,500 machines instead of three sharing the
+# load, so this is deliberately larger than the multipod per-pod sizing.
+resources:
+  limits:
+    cpu: "32"
+    memory: 64Gi
+  requests:
+    cpu: "8"
+    memory: 16Gi
+pods:
+  # The chart's own values.yaml ships a mat-0 pod. Null it, or this file's
+  # default pod makes the render multi-pod, which the chart rejects unless
+  # mat-k8s-controller is enabled. Removing this line breaks every
+  # proxy-mode install, so keep it.
+  mat-0: null
+  default:
+    machines:
+      rack-machines: null
+      dell-hosts:
+        hwType: dell_poweredge_r750
+        hostCount: 4500
+        dpuPerHostCount: 2
+        dpuRebootDelay: 1
+        hostRebootDelay: 1
+        scoutRunInterval: "300s"
+        runIntervalWorking: "5s"
+        runIntervalIdle: "60s"
+        networkStatusRunInterval: "120s"
+        # Gateways of [networks.simulated-oob] and [networks.simulated-underlay].
+        bmcDhcpRelayAddress: "10.200.0.1"
+        underlayDhcpRelayAddress: "10.201.0.1"
+        dpusInNicMode: false
+extraEnv:
+  - name: RUST_LOG
+    value: "info"

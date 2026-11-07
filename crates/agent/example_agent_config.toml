@@ -1,0 +1,68 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[forge-system]
+api-server = "http://localhost:50051"
+pxe-server = "http://127.0.0.1:8080"
+root-ca = "/home/amaslennikov/pcarbide/credentials/localhost.pem"
+# Unix socket where the agent serves node tokens to co-located services
+# (issue #355). Same default containerized (DPF) and on plain DPU OS.
+#local-api-socket = "/opt/forge/run/agent.sock"
+
+[machine]
+interface-id = "3048d658-0b13-4a5e-91cc-f47e45a031f9"
+mac-address = "11:22:33:44:55:66"
+hostname = "abc.forge.com"
+
+[metadata-service]
+address = "0.0.0.0:7777"
+
+# To serve embedded metadata over both families, change address above to
+# "[::]:7777" and enable this address list. Retain your configured IPv4 CIDR.
+# Restart the agent after changing these startup settings. In DPF mode, the
+# list selects the HBN peer; configure the standalone FMDS listener separately.
+# [fmds-armos-networking.config]
+# addresses = ["169.254.169.254/30", "fd00:76b9::254/127"]
+
+[telemetry]
+metrics-address = "0.0.0.0:8888"
+# Set to false to stop serving /metrics and /ready (readiness is bound to this endpoint). Default: true.
+prometheus-enabled = true
+
+# Optional [machine-identity]: rate limits and timeouts for GET …/meta-data/identity (e.g. /latest/meta-data/identity).
+# If you omit this section, defaults are: requests-per-second=3, burst=8,
+# wait-timeout-secs=2, sign-timeout-secs=5.
+# [machine-identity]
+# requests-per-second = 3   # 1–20 (sustained admission / GCRA refill per second)
+# burst = 8                 # 1–40 (max burst before rate limit)
+# wait-timeout-secs = 2     # 1–10 (max wait for a rate-limit permit)
+# sign-timeout-secs = 5     # 1–60 (Forge gRPC or HTTP proxy wall time)
+# sign-proxy-url = "https://sign-proxy.example.com/prefix"  # optional; HTTP pass-through to signing service instead of Forge gRPC
+# sign-proxy-tls-root-ca = "/etc/forge/sign_proxy_root.pem"  # optional; PEM roots for private CA (requires sign-proxy-url; HTTPS)
+
+[hbn]
+root-dir = "/var/lib/hbn"
+skip-reload = false
+
+# Optional [network]: agent-local network configuration knobs.
+# supplemental-config-path points at an RFC 7386 JSON Merge Patch document
+# (e.g. a mounted ConfigMap file) that the agent merges into the `set` section
+# of its generated NVUE config before every apply. Top-level keys must be NVUE
+# sections the agent models (bridge, evpn, interface, nve, router, system,
+# vrf, acl). The file's contents participate in change detection, so in-place
+# edits re-apply without an agent restart. If set, the file must be readable.
+# [network]
+# supplemental-config-path = "/etc/forge/supplemental-network-config/supplemental.json"

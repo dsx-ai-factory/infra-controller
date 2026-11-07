@@ -1,0 +1,6 @@
+<table class="detailsview">
+	<tr><th>Name</th><td>{{ metadata.name }}</td></tr>
+	<tr><th>Description</th><td>{{ metadata.description }}</td></tr>
+	<tr><th>Labels</th><td>{{ metadata.labels|label_list_fmt(false)|safe }}</td></tr>
+	<tr><th>Version</th><td>{{ metadata_version }}</td></tr>
+</table>

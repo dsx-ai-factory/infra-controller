@@ -1,0 +1,10 @@
+apiVersion: v2
+name: nico-bmc-proxy
+description: Helm chart for the NICo BMC proxy component
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - nico
+  - bmc-proxy
+  - nico

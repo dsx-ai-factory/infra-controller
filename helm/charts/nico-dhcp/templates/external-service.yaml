@@ -1,0 +1,28 @@
+{{- if .Values.externalService.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-dhcp.name" . }}-external
+  namespace: {{ include "nico-dhcp.namespace" . }}
+  labels:
+    {{- include "nico-dhcp.labels" . | nindent 4 }}
+  {{- with .Values.externalService.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ipFamilyPolicy: SingleStack
+  ipFamilies: [IPv4]
+  type: {{ .Values.externalService.type | default "LoadBalancer" }}
+  {{- with .Values.externalService.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
+  internalTrafficPolicy: Local
+  selector:
+    {{- include "nico-dhcp.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: 67
+      targetPort: 67
+      name: udp
+      protocol: UDP
+{{- end }}

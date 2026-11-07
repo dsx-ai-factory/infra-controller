@@ -1,0 +1,127 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[package]
+name = "carbide-bmc-proxy"
+version = "0.0.0"
+edition.workspace = true
+description = "Authenticated HTTP proxy for talking to BMC's without sharing credentials"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "carbide-bmc-proxy"
+path = "src/main.rs"
+
+[dependencies]
+carbide-instrument = { path = "../instrument" }
+# [local-dependencies]
+# DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
+carbide-authn = { path = "../authn" }
+carbide-version = { path = "../version" }
+carbide-rpc = { path = "../rpc" }
+carbide-tls = { path = "../tls" }
+logfmt = { path = "../logfmt" }
+metrics-endpoint = { path = "../metrics-endpoint" }
+carbide-utils = { path = "../utils" }
+carbide-uuid = { path = "../uuid" }
+trace-propagation = { path = "../trace-propagation" }
+libc = { workspace = true }
+# DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
+
+#these are alphabetized
+async-trait = { workspace = true }
+axum-extra = { workspace = true, features = ["cookie", "cookie-private"] }
+axum = { workspace = true, features = ["http2"] }
+bytes = { workspace = true }
+casbin = { features = ["glob"], workspace = true }
+clap = { workspace = true }
+figment = { workspace = true, features = ["toml"] }
+futures-util = { workspace = true }
+futures = { workspace = true }
+http-body-util = { workspace = true }
+http = { workspace = true }
+humantime-serde = { workspace = true }
+hyper-rustls = { workspace = true }
+hyper-timeout = { workspace = true }
+hyper-util = { workspace = true }
+hyper = { workspace = true, features = ["full"] }
+lazy_static = { workspace = true }
+mac_address = { workspace = true }
+moka = { workspace = true }
+nv-redfish-dispatcher = { workspace = true }
+opentelemetry = { workspace = true, features = ["logs"] }
+opentelemetry-otlp = { workspace = true, features = ["grpc-tonic"] }
+opentelemetry-prometheus.workspace = true
+opentelemetry-semantic-conventions = { features = [
+  "semconv_experimental",
+], workspace = true }
+opentelemetry_sdk = { workspace = true, features = [
+  "logs",
+  "rt-tokio",
+  "spec_unstable_metrics_views",
+  "testing",
+] }
+reqwest = { workspace = true, default-features = false, features = [
+  "rustls",
+  "stream",
+] }
+reqwest-middleware = { workspace = true }
+reqwest-tracing = { workspace = true }
+rustls-pemfile = { workspace = true }
+rustls-pki-types = { workspace = true }
+thiserror = { workspace = true }
+tokio-rustls = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tower = { workspace = true }
+tower-http = { features = [
+  "add-extension",
+  "auth",
+  "normalize-path",
+], workspace = true }
+tracing = { workspace = true }
+tracing-log = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { features = [
+  "env-filter",
+  "local-time",
+], workspace = true }
+urlencoding = { workspace = true }
+url = { features = ["serde"], workspace = true }
+uuid = { features = ["v4", "serde"], workspace = true }
+x509-parser = { features = ["verify"], workspace = true }
+serde = { features = ["derive"], workspace = true }
+
+[build-dependencies]
+carbide-version = { path = "../version" }
+
+[dev-dependencies]
+bmc-mock = { path = "../bmc-mock" }
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-test-support = { path = "../test-support" }
+carbide-utils = { path = "../utils", features = ["test-support"] }
+axum-server = { workspace = true, features = ["tls-rustls"] }
+rcgen = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tonic-prost = { workspace = true }
+
+[lints]
+workspace = true

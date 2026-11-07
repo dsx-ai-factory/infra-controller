@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+
+{% block title %}UFM Browser{% endblock %}
+
+{% block content %}
+<h1>UFM Browser</h1>
+
+<p>
+This page allows to send queries to UFMs managed by Forge.
+Enter a valid UFM path below to send a query and display the response.<br>
+For valid Path, please refer to the <a href="https://docs.nvidia.com/networking/display/ufmenterpriserestapiv6190">UFM Enterprise REST API Guide</a>
+</p>
+
+<form id="ufm_console" method="GET" action="/admin/ufm-browser">
+	<div>
+		<label for="fabric_id_input">Fabric to query:</label>
+		<select name="fabric_id" id="fabric_id_input">
+			{% for id in fabric_ids %}
+				{% if id == fabric_id|ref %}
+					<option value="{{ id }}" selected>{{ id }}</option>
+				{% else %}
+					<option value="{{ id }}">{{ id }}</option>
+				{% endif %}
+			{% endfor %}
+		</select>
+	</div>
+	<div>
+		<label for="path_input">Path to query:</label>
+		<input type=text size="80" id="path_input" name="path" placeholder="/app/ufm_version" value="{{ path }}" />
+	</div>
+	<input type="submit" value="Start query">
+</form>
+
+{% if !fabric_id.is_empty() && !path.is_empty() %}
+
+<h3>Metadata</h3>
+<table class="detailsview">
+	<tr><th>Fabric ID</th><td>{{ fabric_id }}</td></tr>
+	<tr><th>HTTP status</th><td>{{ status_code }} {{ status_string }}</td></tr>
+	{% if !response_headers.is_empty() %}
+	<tr>
+		<th>Response Headers</th>
+		<td>
+			<details>
+				<summary>Expand Headers</summary>
+				<table class="detailsview">
+					{% for header in response_headers %}
+					<tr>
+						<td>{{ header.name }}</td>
+						<td>{{ header.value }}</td>
+					</tr>
+					{% endfor %}
+				</table>
+			</details>
+		</td>
+	</tr>
+	{% endif %}
+</table>
+
+{% if !error.is_empty() %}
+<h3>Error</h3>
+<textarea disabled>{{ error }}</textarea>
+{% endif %}
+
+{% if !response.is_empty() %}
+<h3>Response</h3>
+<table class="detailsview">
+<tbody>
+	<tr>
+		<td>
+			<div style="overflow: auto;">
+					<pre><code>{{ response|pretty_json }}</code></pre>
+			</div>
+		</td>
+	</tr>
+</tbody>
+</table>
+{% endif %}
+
+{% endif %}
+
+{% endblock %}

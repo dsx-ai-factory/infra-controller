@@ -1,0 +1,142 @@
+# =============================================================================
+# machine-a-tron-scale.yaml — LARGE-SCALE site values (Controller Mode)
+#
+# For scale testing NICo ingestion with hundreds to thousands of simulated
+# hosts. The mat-k8s-controller dynamically creates a Service for each BMC.
+#
+# How this differs from Override Mode (values/machine-a-tron.yaml):
+#   - mat-k8s-controller.enabled: true - controller creates one Service per
+#     BMC with the BMC IP assigned by NICo DHCP published as externalIP.
+#   - site_explorer.bmc_proxy MUST BE UNSET in nico-core - site-explorer dials
+#     each BMC IP directly.
+#   - Requires the NICo siteConfig in values/nico-core-simulation.yaml
+#     (allow_insecure_discovery and the simulated-oob segment).
+#   - The BMC network must lie outside the Kubernetes ServiceCIDR, pod CIDR,
+#     node network, and networks that nodes or pods must otherwise reach
+#     (BMC IPs are Service externalIPs, for which kube-proxy programs
+#     forwarding rules on every node)
+# =============================================================================
+
+# REQUIRED: the machine-a-tron image. Set it here or on the command line with
+# --set image.repository=<registry>/machine-a-tron --set image.tag=<tag>.
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+
+global:
+  imagePullSecrets:
+    - name: machine-a-tron-pull
+
+certificate:
+  uris:
+    - "spiffe://nico.local/nico-system/sa/machine-a-tron"
+
+machineATron:
+  nicoApiUrl: "https://nico-api.nico-system.svc.cluster.local:1079"
+  configureBmcProxyHost: ""  # Not used in controller mode
+  registerExpectedMachines: true
+  # The chart reads the site root password from the site credentials Secret
+  # and pins every mock BMC to it. hostBmcPassword/dpuBmcPassword override it.
+  # Without the Secret the mocks keep their factory passwords.
+
+# Enable auto-generated MAC pools (prevents collisions in multi-pod)
+macAddressPool:
+  enabled: true
+  basePrefix: "02:00"
+
+hwMacAddressRanges:
+  enabled: true
+  basePrefix: "02:01"
+
+# Controller mode - dynamically creates Services with the BMC IP as externalIP
+mat-k8s-controller:
+  enabled: true
+  # The subchart defaults to a bare local image name with no registry or pull
+  # secret, so the controller ImagePullBackOffs on any cluster needing auth —
+  # and with no controller there are no per-BMC Services, so exploration finds
+  # nothing and the whole run silently reports zeros.
+  image:
+    # Set to your registry's mat-k8s-controller image. The subchart default is a
+    # bare local name with no registry, which ImagePullBackOffs on any real
+    # cluster -- and with no controller there are no per-BMC Services, so
+    # exploration finds nothing and the run reports zeros with no obvious cause.
+    # Set it here or with
+    #   --set mat-k8s-controller.image.repository=<registry>/mat-k8s-controller
+    #   --set mat-k8s-controller.image.tag=<tag>
+    repository: ""
+    tag: ""
+  imagePullSecrets:
+    - name: machine-a-tron-pull
+  config:
+    insecureSkipVerify: true  # For self-signed certs
+
+# Larger resources for scale testing
+
+# MAT registers all expected machines before binding the redfish port (issue
+# #4298). The startupProbe gates liveness until the port is open. Once the
+# port is bound the normal liveness/readiness probes kick in with tight
+# thresholds so real runtime hangs are still caught quickly.
+#
+# Sizing rule: see the startupProbe comment in the chart values.yaml. Pods in
+# this file define hosts only (no racks, switches or power shelves) and DPUs
+# are not registered, so records = hosts per pod. Sized for 4,500 hosts in
+# one pod: 4,500 records x 2s = 2.5h; 1200 x 30s = 10h keeps headroom.
+startupProbe:
+  tcpSocket:
+    port: redfish
+  periodSeconds: 30
+  failureThreshold: 1200
+  successThreshold: 1
+  timeoutSeconds: 10
+
+livenessProbe:
+  tcpSocket:
+    port: redfish
+  periodSeconds: 30
+  failureThreshold: 3
+  successThreshold: 1
+  timeoutSeconds: 10
+
+readinessProbe:
+  tcpSocket:
+    port: redfish
+  initialDelaySeconds: 5
+  periodSeconds: 30
+  failureThreshold: 3
+  successThreshold: 1
+  timeoutSeconds: 5
+
+# Larger resources: one tokio task per host + per DPU; at thousands of
+# machines the FSM/API chatter is CPU-bound.
+resources:
+  limits:
+    cpu: "8"
+    memory: 8Gi
+  requests:
+    cpu: "2"
+    memory: 2Gi
+
+pods:
+  default: null  # Disable default pod
+  mat-0:
+    machines:
+      # the chart's own mat-0 example deep-merges in without this
+      rack-machines: null
+      compute:
+        hwType: dell_poweredge_r750
+        hostCount: 100
+        dpuPerHostCount: 2
+        dpuRebootDelay: 1
+        hostRebootDelay: 1
+        scoutRunInterval: "300s"
+        runIntervalWorking: "5s"
+        runIntervalIdle: "60s"
+        networkStatusRunInterval: "120s"
+        bmcDhcpRelayAddress: "10.200.0.1"  # simulated-oob gateway (nico-core-simulation.yaml), outside the ServiceCIDR
+        underlayDhcpRelayAddress: "10.201.0.1"  # simulated-underlay gateway (nico-core-simulation.yaml)
+        dpusInNicMode: false
+
+extraEnv:
+  - name: RUST_LOG
+    value: "info"

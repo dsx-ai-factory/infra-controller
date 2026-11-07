@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+global:
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+  imagePullSecrets:
+    - name: image-pull-secret
+  certificate:
+    issuerRef:
+      kind: ClusterIssuer
+      name: nico-rest-ca-issuer
+      group: cert-manager.io
+
+replicaCount: 1
+
+nameOverride: ""
+namespaceOverride: ""
+
+image:
+  name: nico-rest-site-agent
+
+service:
+  type: ClusterIP
+  # Also sets ESA_PORT, the port the Site Agent serves its status page and probes on.
+  port: 8080
+  # Also sets METRICS_PORT.
+  metricsPort: 2112
+
+# Defaults for the Site Agent probes. A Site can override any field, or set `enabled: false`
+# to drop a probe (a null set in a parent chart never reaches this chart). Both target the
+# `http` container port, which follows `service.port`. An image that doesn't serve `/healthz`
+# and `/readyz` fails both, so a Site pinned to one should disable them. A failed `/healthz`
+# restarts the Site Agent, so liveness waits for a minute of failures. A failed `/readyz`
+# only marks it NotReady.
+readinessProbe:
+  enabled: true
+  httpGet:
+    path: /readyz
+    port: http
+  periodSeconds: 10
+
+livenessProbe:
+  enabled: true
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 30
+
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+secrets:
+  dbCreds: db-creds
+  siteRegistration: site-registration
+  nicoTlsCerts: core-grpc-client-site-agent-certs
+  temporalClientCerts: temporal-client-site-agent-certs
+
+certificate:
+  enabled: true
+  name: core-grpc-client-site-agent-certs
+  secretName: core-grpc-client-site-agent-certs
+  duration: 720h
+  renewBefore: 360h
+  subject:
+    # -- List of organizations for the certificate subject
+    organizations: []
+  privateKey:
+    algorithm: ECDSA
+    size: 384
+  # -- Fully override the certificate dnsNames. When empty, dnsNames are
+  # generated from the chart name and namespace.
+  dnsNames: []
+  # -- Override SPIFFE URIs for the certificate. Must match the service identifier
+  # expected by nico-api's InternalRBACRules (SiteAgent = "elektra-site-agent").
+  # For nico deployments set to: ["spiffe://nico.local/nico-system/sa/elektra-site-agent"]
+  uris: []
+
+rbac:
+  create: true
+
+bootstrap:
+  # Set to true to enable the pre-install/pre-upgrade Helm hook that registers
+  # this site with nico-rest-site-manager and creates the site-registration secret.
+  # Requires envConfig.CLUSTER_ID to be set.
+  enabled: false
+  # Set `repository` + `tag` to override (they win when both are set); otherwise the
+  # combined `image` below is used.
+  # repository: alpine/k8s
+  # tag: 1.29.4
+  image: alpine/k8s:1.29.4
+  siteManager:
+    address: nico-rest-site-manager.nico-rest:8100
+    tlsSecret: site-manager-tls
+
+envConfig:
+  DEV_MODE: "true"
+  ENABLE_DEBUG: "true"
+  ENABLE_TLS: "true"
+  # Empty by default — callers must set the Core gRPC endpoint for their
+  # environment (kind local dev sets mock-core via rest-api/Makefile --set;
+  # helm-prereqs/values/nico-site-agent.yaml sets the production nico-api address).
+  CORE_GRPC_ADDRESS: ""
+  CORE_GRPC_SEC_OPT: ""
+  CORE_GRPC_CA_CERT_PATH: "/etc/core-grpc/ca.crt"
+  CORE_GRPC_CLIENT_CERT_PATH: "/etc/core-grpc/tls.crt"
+  CORE_GRPC_CLIENT_KEY_PATH: "/etc/core-grpc/tls.key"
+  FLOW_GRPC_ENABLED: "true"
+  FLOW_GRPC_SEC_OPT: "2"
+  CLUSTER_ID: ""
+  TEMPORAL_HOST: "temporal-frontend.temporal"
+  TEMPORAL_PORT: "7233"
+  TEMPORAL_SERVER: "interservice.server.temporal.local"
+  TEMPORAL_PUBLISH_NAMESPACE: "site"
+  TEMPORAL_PUBLISH_QUEUE: "site"
+  TEMPORAL_SUBSCRIBE_NAMESPACE: ""
+  TEMPORAL_SUBSCRIBE_QUEUE: ""
+  TEMPORAL_INVENTORY_SCHEDULE: "@every 3m"
+  TEMPORAL_CERT_PATH: "/etc/temporal-certs"
+  TEMPORAL_CERT: "temporal-client-site-agent-certs"

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}iPXE Templates{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>iPXE Templates</h1>
+
+<table class="sortable overview">
+	<thead>
+		<th>Name</th>
+		<th>Description</th>
+		<th>Visibility</th>
+		<th>Required Params</th>
+		<th>Required Artifacts</th>
+	</thead>
+	<tbody>
+		{% for tmpl in templates %}
+		<tr>
+			<td><a href="/admin/ipxe-template/{{ tmpl.id|option_fmt }}">{{ tmpl.name }}</a></td>
+			<td>{{ tmpl.description }}</td>
+			<td>{{ tmpl.visibility|ipxe_template_visibility_fmt }}</td>
+			<td>{{ tmpl.required_params.len() }}</td>
+			<td>{{ tmpl.required_artifacts.len() }}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+
+{% endblock %}

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# nico-rest-site-agent Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: nico-rest-site-agent
+  labels:
+    app: nico-rest-site-agent
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+      name: http
+    - port: 2112
+      targetPort: 2112
+      name: metrics
+  selector:
+    app: nico-rest-site-agent
+

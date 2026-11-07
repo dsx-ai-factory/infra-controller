@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: temporal-client-cloud-cert dnsNames and uris configurability
+templates:
+  - certificate.yaml
+set:
+  # Provided by the nico-rest parent chart at render time; set here so the
+  # subchart's certificate template renders standalone under helm-unittest.
+  global.certificate.issuerRef.name: nico-rest-ca-issuer
+  global.certificate.issuerRef.kind: ClusterIssuer
+  global.certificate.issuerRef.group: cert-manager.io
+tests:
+  - it: keeps the configured dnsNames and emits no uris by default
+    asserts:
+      - isKind:
+          of: Certificate
+      - equal:
+          path: spec.dnsNames
+          value:
+            - temporal-client
+            - nico-rest-api
+            - cloud-worker
+            - site-worker
+      - notExists:
+          path: spec.uris
+
+  - it: emits uris only when temporalClientCloud.uris is set
+    set:
+      certificate:
+        temporalClientCloud:
+          uris:
+            - spiffe://nico.local/nico-rest/sa/temporal-client
+    asserts:
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://nico.local/nico-rest/sa/temporal-client
+
+  - it: overrides dnsNames when temporalClientCloud.dnsNames is set
+    set:
+      certificate:
+        temporalClientCloud:
+          dnsNames:
+            - temporal-client.override.example.com
+    asserts:
+      - equal:
+          path: spec.dnsNames
+          value:
+            - temporal-client.override.example.com

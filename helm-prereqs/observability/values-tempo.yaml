@@ -1,0 +1,42 @@
+# Grafana Tempo (grafana-community/tempo chart, monolithic single-binary) — the site-local
+# trace store. Receives OTLP spans forwarded by the otel-agent (which NICo services target once
+# span export is enabled — see README "Enabling traces"); Grafana queries it on :3200.
+# NOTE: the chart moved off grafana/helm-charts — the repo is grafana-community
+# (https://grafana-community.github.io/helm-charts); the plain `tempo` chart is the monolithic
+# StatefulSet (NOT tempo-distributed).
+# The Service MUST end up named `tempo` in namespace `tempo` (fullnameOverride + release tempo)
+# so the agent's exporter endpoint tempo.tempo.svc.cluster.local:4317 and Grafana's datasource
+# URL (:3200) resolve.
+fullnameOverride: tempo
+tempo:
+  reportingEnabled: false      # no usage telemetry off-site
+  retention: 360h              # 15 days, matching Loki + Prometheus (chart default is 24h)
+  storage:
+    trace:
+      backend: local
+      local:
+        path: /var/tempo/traces
+      wal:
+        path: /var/tempo/wal
+  # Accept either IP family on the OTLP ports used by the collector agent.
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "[::]:4317"
+        http:
+          endpoint: "[::]:4318"
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+persistence:
+  enabled: true
+  accessModes: [ReadWriteOnce]
+  size: 20Gi
+  storageClassName: local-path-persistent    # helm-prereqs/operators/storageclass-local-path-persistent.yaml
+serviceMonitor:
+  enabled: true    # discovered by the obs Prometheus (cluster-wide selectors)

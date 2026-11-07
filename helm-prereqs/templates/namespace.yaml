@@ -1,0 +1,15 @@
+## =============================================================================
+## nico-system namespace — created with managed label
+## =============================================================================
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.namespace }}
+  annotations:
+    # Namespace deletion cascades; never allow automated deletion.
+    # keep covers helm-CLI uninstalls, Prune=false covers Argo CD pruning.
+    "helm.sh/resource-policy": keep
+    argocd.argoproj.io/sync-options: Prune=false
+  labels:
+    nico.nvidia.com/managed: "true"

@@ -1,0 +1,361 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package workflow
+
+import (
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/rs/zerolog"
+	zlogadapter "logur.dev/adapter/zerolog"
+	"logur.dev/logur"
+
+	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/interceptor"
+	"go.temporal.io/sdk/worker"
+
+	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
+	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
+	workflowtypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/workflow"
+	swu "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/util"
+)
+
+// Orchestrator - Workflow Orchestrator
+func Orchestrator() {
+	log := ManagerAccess.Data.EB.Log
+	state := ManagerAccess.Data.EB.Managers.Workflow.State
+
+	// Health checks treat the Site Agent as connecting until this attempt finishes.
+	state.SetWorker(nil)
+
+	// Cleanup resources
+	if ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker != nil {
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.Stop()
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker = nil
+	}
+	if ManagerAccess.Data.EB.Managers.Workflow.Temporal.Publisher != nil {
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Publisher.Close()
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Publisher = nil
+	}
+	if ManagerAccess.Data.EB.Managers.Workflow.Temporal.Subscriber != nil {
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Subscriber.Close()
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Subscriber = nil
+	}
+
+	// keep track how many events we've seen.
+	state.ConnectionAttempted.Inc()
+	state.SetConnectionTime(time.Now())
+
+	status, err := workflowOrchestrator()
+	if err != nil {
+		state.HealthStatus.Store(uint64(computils.CompUnhealthy))
+		errMsg := err.Error()
+		state.SetErr(errMsg)
+		log.Error().Msg(errMsg)
+		status = workflowtypes.NewWorkerStatus()
+		status.SetErr(err)
+	} else {
+		// keep track how many succeeded.
+		state.ConnectionSucc.Inc()
+		state.HealthStatus.Store(uint64(computils.CompHealthy))
+	}
+	state.SetWorker(status)
+}
+
+// stopWorker records that the Temporal SDK stopped the worker on an error it
+// does not retry. The SDK never restarts it, so the liveness check fails from
+// here on and Kubernetes restarts the Site Agent.
+func stopWorker(eb *elektratypes.Elektra, status *workflowtypes.WorkerStatus, err error) {
+	status.SetErr(err)
+	state := eb.Managers.Workflow.State
+	// A worker that a reload already replaced has nothing left to report.
+	if state.Worker() != status {
+		return
+	}
+	eb.Log.Error().Err(err).Msg("Workflow: Temporal worker stopped, failing the liveness check")
+	state.HealthStatus.Store(uint64(computils.CompUnhealthy))
+	state.SetErr(err.Error())
+}
+
+// StartWorkflow - Workflow init function
+func workflowOrchestrator() (*workflowtypes.WorkerStatus, error) {
+	// Set the global handle here
+	log := ManagerAccess.Data.EB.Log
+
+	// Initialize Temporal client
+	log.Info().Msg("Workflow: Creating Elektra site agent Temporal workflow orchestrator")
+
+	// The shared interceptor also implements the worker interface, so the
+	// worker built from the subscriber client inherits it and must not
+	// register it again.
+	var clientInterceptors []interceptor.ClientInterceptor
+	// otelErr, not err: `var err error` is declared further down.
+	otelInterceptor, otelErr := ctemporal.TracingInterceptor()
+	if otelErr != nil {
+		return nil, fmt.Errorf("creating Temporal tracing interceptor: %w", otelErr)
+	}
+	if otelInterceptor != nil {
+		clientInterceptors = append(clientInterceptors, otelInterceptor)
+	}
+
+	// Create logger for temporal using
+	// zero logger
+	// This is optional
+	// ManagerAccess.Data.EB.Managers.Workflow.Temporal.Logger = lg.NewTemporalLogger(log)
+
+	var publishClientConnOptions client.ConnectionOptions
+	var subscribeClientConnOptions client.ConnectionOptions
+
+	if ManagerAccess.Conf.EB.EnableTLS {
+		log.Info().Msg("Workflow: Creating Forge Cluster Temporal client with TLS enable")
+
+		// TemporalCertPath should exist
+		if ManagerAccess.Conf.EB.Temporal.TemporalCertPath == "" {
+			log.Panic().Err(errors.New("unable to find temporal cert path")).Msg("Workflow: Unable to find temporal cert path")
+		}
+
+		// Load client cert
+		// CACertPath
+		fileName, TemporalCACertPath := ManagerAccess.Conf.EB.Temporal.GetTemporalCACertFilePath()
+		TemporalCACertPath = TemporalCACertPath + fileName
+
+		// ClientCertPath
+		kpFileName, TemporalClientCertPath := ManagerAccess.Conf.EB.Temporal.GetTemporalClientCertFilePath()
+		log.Info().Msgf("Workflow: Paths are client: %s, ca: %s", TemporalClientCertPath, TemporalCACertPath)
+		clientcert, err := tls.LoadX509KeyPair(fmt.Sprintf("%v/%v", TemporalClientCertPath, kpFileName[0]),
+			fmt.Sprintf("%v/%v", TemporalClientCertPath, kpFileName[1]))
+		if err != nil {
+			log.Error().Msg("Workflow: Unable to read client certificates")
+			return nil, err
+		}
+
+		// Each pod loads its own certificate on startup and reload.
+		if CertExpirationMetric != nil {
+			CertExpirationMetric.Set(float64(clientcert.Leaf.NotAfter.Unix()))
+		} else {
+			log.Warn().Msg("Workflow: Unable to update Temporal certificate expiration metric")
+		}
+
+		// Load server cert
+		caCert, err := os.ReadFile(TemporalCACertPath)
+		if err != nil {
+			log.Error().Msg("Workflow: Unable to read server certificates")
+			return nil, err
+		}
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+
+		// provide tls cert option for publishing workflows
+		publishClientConnOptions = client.ConnectionOptions{
+			TLS: &tls.Config{
+				Certificates: []tls.Certificate{clientcert},
+				ServerName:   ManagerAccess.Conf.EB.Temporal.TemporalServer,
+				RootCAs:      caCertPool,
+			},
+			KeepAliveTime:    10 * time.Second,
+			KeepAliveTimeout: 60 * time.Second,
+		}
+
+		// provide tls cert option for subscribing workflows
+		subscribeClientConnOptions = client.ConnectionOptions{
+			TLS: &tls.Config{
+				Certificates: []tls.Certificate{clientcert},
+				ServerName:   ManagerAccess.Conf.EB.Temporal.TemporalServer,
+				RootCAs:      caCertPool,
+			},
+			KeepAliveTime:    10 * time.Second,
+			KeepAliveTimeout: 60 * time.Second,
+		}
+	}
+	var err error
+	// Initialize client for publish namespace
+	tLogger := logur.LoggerToKV(zlogadapter.New(zerolog.New(os.Stderr)))
+
+	host := ManagerAccess.Conf.EB.Temporal.Host
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	target := net.JoinHostPort(host, ManagerAccess.Conf.EB.Temporal.Port)
+	log.Info().Msgf("Workflow: Connecting to %s", target)
+	clientOptions := client.Options{
+		HostPort:          target,
+		Namespace:         ManagerAccess.Conf.EB.Temporal.TemporalPublishNamespace,
+		ConnectionOptions: publishClientConnOptions,
+		DataConverter:     swu.NewTemporalDataConverter(),
+		Interceptors:      clientInterceptors,
+		Logger:            tLogger,
+	}
+
+	if ManagerAccess.Data.EB.Conf.UtMode {
+		log.Info().Msg("Workflow: UT mode Temporal client")
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Publisher, err = client.NewLazyClient(clientOptions)
+	} else {
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Publisher, err = client.Dial(clientOptions)
+	}
+	if err != nil {
+		log.Error().Msg("Workflow: Failed to create Temporal client")
+		return nil, err
+	}
+
+	// Initialize client for subscribe namespace
+	clientOptions = client.Options{
+		HostPort:          target,
+		Namespace:         ManagerAccess.Conf.EB.Temporal.TemporalSubscribeNamespace,
+		ConnectionOptions: subscribeClientConnOptions,
+		DataConverter:     swu.NewTemporalDataConverter(),
+		Interceptors:      clientInterceptors,
+		Logger:            tLogger,
+	}
+
+	if ManagerAccess.Data.EB.Conf.UtMode {
+		log.Info().Msg("Workflow: UT mode Temporal client")
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Subscriber, err = client.NewLazyClient(clientOptions)
+	} else {
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Subscriber, err = client.Dial(clientOptions)
+	}
+	if err != nil {
+		log.Error().Msg("Workflow: Failed to create Temporal client")
+		return nil, err
+	}
+
+	status := workflowtypes.NewWorkerStatus(
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Publisher,
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Subscriber)
+	eb := ManagerAccess.Data.EB
+	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker = worker.New(
+		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Subscriber,
+		ManagerAccess.Conf.EB.Temporal.TemporalSubscribeQueue,
+		worker.Options{
+			WorkflowPanicPolicy: worker.FailWorkflow,
+			OnFatalError: func(err error) {
+				stopWorker(eb, status, err)
+			},
+		})
+	log.Info().Msg("Workflow: Registering orchestrator workflows and activities for elektra cluster ")
+
+	if ManagerAccess.Conf.EB.DevMode {
+		log.Info().Msg("Workflow: Enabled orchestrator for development")
+	} else {
+		log.Info().Msg("Workflow: Enabled orchestrator for production")
+	}
+
+	// Register all manager flows here
+	err = ManagerAccess.API.Site.RegisterPublisher()
+	if err != nil {
+		return nil, err
+	}
+
+	// Only the Site publisher is required. Other registration failures are logged,
+	// but the worker still starts so successfully registered workflows can run.
+	logRegistrationError := func(registration string, err error) {
+		if err != nil {
+			log.Error().Err(err).Str("registration", registration).Msg("Failed to register workflow handler")
+		}
+	}
+
+	logRegistrationError("VPC subscriber", ManagerAccess.API.VPC.RegisterSubscriber())
+	logRegistrationError("VPC publisher", ManagerAccess.API.VPC.RegisterPublisher())
+
+	logRegistrationError("VpcPrefix subscriber", ManagerAccess.API.VpcPrefix.RegisterSubscriber())
+	logRegistrationError("VpcPrefix publisher", ManagerAccess.API.VpcPrefix.RegisterPublisher())
+
+	logRegistrationError("VpcPeering subscriber", ManagerAccess.API.VpcPeering.RegisterSubscriber())
+	logRegistrationError("VpcPeering publisher", ManagerAccess.API.VpcPeering.RegisterPublisher())
+
+	// Inventory only: SpectrumX Partition CRUD goes through the generic Core gRPC proxy.
+	err = ManagerAccess.API.SpectrumXPartition.RegisterPublisher()
+	if err != nil {
+		ManagerAccess.Data.EB.Log.Error().Err(err).Msg("SpectrumXPartition: failed to register inventory publisher")
+	}
+
+	logRegistrationError("Subnet subscriber", ManagerAccess.API.Subnet.RegisterSubscriber())
+	logRegistrationError("Subnet publisher", ManagerAccess.API.Subnet.RegisterPublisher())
+
+	logRegistrationError("InfiniBandPartition subscriber", ManagerAccess.API.InfiniBandPartition.RegisterSubscriber())
+	logRegistrationError("InfiniBandPartition publisher", ManagerAccess.API.InfiniBandPartition.RegisterPublisher())
+
+	logRegistrationError("SSHKeyGroup subscriber", ManagerAccess.API.SSHKeyGroup.RegisterSubscriber())
+	logRegistrationError("SSHKeyGroup publisher", ManagerAccess.API.SSHKeyGroup.RegisterPublisher())
+
+	logRegistrationError("Machine subscriber", ManagerAccess.API.Machine.RegisterSubscriber())
+	logRegistrationError("Machine publisher", ManagerAccess.API.Machine.RegisterPublisher())
+
+	logRegistrationError("Instance subscriber", ManagerAccess.API.Instance.RegisterSubscriber())
+	logRegistrationError("Instance publisher", ManagerAccess.API.Instance.RegisterPublisher())
+
+	logRegistrationError("Bootstrap subscriber", ManagerAccess.API.Bootstrap.RegisterSubscriber())
+
+	logRegistrationError("Tenant subscriber", ManagerAccess.API.Tenant.RegisterSubscriber())
+	logRegistrationError("Tenant publisher", ManagerAccess.API.Tenant.RegisterPublisher())
+
+	logRegistrationError("OperatingSystem subscriber", ManagerAccess.API.OperatingSystem.RegisterSubscriber())
+	// RegisterCron logs failures; publisher registration is best effort.
+	_ = ManagerAccess.API.OperatingSystem.RegisterPublisher()
+
+	logRegistrationError("MachineValidation subscriber", ManagerAccess.API.MachineValidation.RegisterSubscriber())
+
+	// Generic Core gRPC proxy: one workflow/activity for all proxied operations,
+	// registered on the Core gRPC manager that owns the connection.
+	logRegistrationError("CoreGrpc subscriber", ManagerAccess.API.CoreGrpc.RegisterSubscriber())
+
+	logRegistrationError("InstanceType subscriber", ManagerAccess.API.InstanceType.RegisterSubscriber())
+	logRegistrationError("InstanceType publisher", ManagerAccess.API.InstanceType.RegisterPublisher())
+
+	logRegistrationError("NetworkSecurityGroup subscriber", ManagerAccess.API.NetworkSecurityGroup.RegisterSubscriber())
+	logRegistrationError("NetworkSecurityGroup publisher", ManagerAccess.API.NetworkSecurityGroup.RegisterPublisher())
+
+	logRegistrationError("ExpectedMachine subscriber", ManagerAccess.API.ExpectedMachine.RegisterSubscriber())
+	logRegistrationError("ExpectedMachine publisher", ManagerAccess.API.ExpectedMachine.RegisterPublisher())
+
+	logRegistrationError("ExpectedPowerShelf subscriber", ManagerAccess.API.ExpectedPowerShelf.RegisterSubscriber())
+	logRegistrationError("ExpectedPowerShelf publisher", ManagerAccess.API.ExpectedPowerShelf.RegisterPublisher())
+
+	logRegistrationError("ExpectedRack subscriber", ManagerAccess.API.ExpectedRack.RegisterSubscriber())
+	// RegisterCron logs failures; publisher registration is best effort.
+	_ = ManagerAccess.API.ExpectedRack.RegisterPublisher()
+	err = ManagerAccess.API.ExpectedRackGroup.RegisterPublisher()
+	if err != nil {
+		ManagerAccess.Data.EB.Log.Error().Err(err).Msg("ExpectedRackGroup: failed to register publisher")
+	}
+
+	logRegistrationError("ExpectedSwitch subscriber", ManagerAccess.API.ExpectedSwitch.RegisterSubscriber())
+	logRegistrationError("ExpectedSwitch publisher", ManagerAccess.API.ExpectedSwitch.RegisterPublisher())
+
+	logRegistrationError("SKU subscriber", ManagerAccess.API.SKU.RegisterSubscriber())
+	logRegistrationError("SKU publisher", ManagerAccess.API.SKU.RegisterPublisher())
+
+	logRegistrationError("DpuExtensionService subscriber", ManagerAccess.API.DpuExtensionService.RegisterSubscriber())
+	logRegistrationError("DpuExtensionService publisher", ManagerAccess.API.DpuExtensionService.RegisterPublisher())
+
+	logRegistrationError("NVLinkLogicalPartition subscriber", ManagerAccess.API.NVLinkLogicalPartition.RegisterSubscriber())
+	logRegistrationError("NVLinkLogicalPartition publisher", ManagerAccess.API.NVLinkLogicalPartition.RegisterPublisher())
+
+	logRegistrationError("TenantIdentity subscriber", ManagerAccess.API.TenantIdentity.RegisterSubscriber())
+
+	// Flow workflows (only registered if Flow gRPC is enabled)
+	if ManagerAccess.Conf.EB.FlowGrpc.Enabled {
+		if ManagerAccess.API.FlowGrpc != nil {
+			logRegistrationError("FlowGrpc subscriber", ManagerAccess.API.FlowGrpc.RegisterSubscriber())
+		} else {
+			log.Error().Msg("FlowGrpc: Flow gRPC is enabled in config but Flow gRPC manager is not initialized")
+		}
+	}
+
+	// Start listening to the Task Queue
+	log.Info().Msg("Workflow: Starting Temporal worker")
+	err = ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.Start()
+	if err != nil {
+		log.Error().Msg("Workflow: Failed to start orchestrator worker")
+		return nil, err
+	}
+
+	return status, nil
+}

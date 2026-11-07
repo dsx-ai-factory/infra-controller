@@ -1,0 +1,425 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package inventory;
+
+import "common_nico.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "machine_discovery_nico.proto";
+import "nico_nico.proto";
+
+option go_package = "github.com/NVIDIA/infra-controller/rest-api/proto/core";
+
+// InventoryStatus - response status for inventory collection
+enum InventoryStatus {
+  INVENTORY_STATUS_UNSPECIFIED = 0;
+  INVENTORY_STATUS_SUCCESS = 1;
+  INVENTORY_STATUS_FAILED = 2;
+}
+
+// InventoryPage - pagination information about inventory
+message InventoryPage {
+  // Total number of pages
+  int32 total_pages = 1;
+  // Current page number
+  int32 current_page = 2;
+  // Number of items per page
+  int32 page_size = 3;
+  // Total number of items
+  int32 total_items = 4;
+  // IDs of all items
+  repeated string item_ids = 5;
+}
+
+// SiteAgentBuildInfo - build metadata and configuration the Site Agent reports about itself,
+// as opposed to the Core configuration it relays
+message SiteAgentBuildInfo {
+  // Site Agent build version
+  string version = 1;
+  // How often the Site Agent collects inventory, derived from its configured schedule.
+  // Cloud compares object timestamps against this to decide whether an inventory is stale.
+  google.protobuf.Duration inventory_interval = 2;
+  // Whether Flow is enabled in the Site Agent configuration
+  optional bool flow_enabled = 3;
+}
+
+// SiteConfigInventory - Site configuration reported periodically. Site-level reporting is
+// added to this message rather than as another workflow argument, so extending it does not
+// require a new workflow.
+message SiteConfigInventory {
+  // Core build metadata, advertised capabilities, and runtime configuration
+  forge.BuildInfo core_build_info = 1;
+  // Build metadata and configuration owned by the Site Agent itself
+  SiteAgentBuildInfo site_agent_build_info = 2;
+}
+
+// DpuExtensionServiceInventory - inventory of all DPU Extension Services on Site, collected periodically
+message DpuExtensionServiceInventory {
+  // Status of Inventory
+  InventoryStatus inventory_status = 1;
+  // Status message
+  string status_msg = 2;
+  // Reported timestamp of DpuExtensionService inventory
+  google.protobuf.Timestamp timestamp = 3;
+  // List of DpuExtensionServices
+  repeated forge.DpuExtensionService dpu_extension_services = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// ExpectedMachineInventory - inventory info of all Expected Machines on Site, collected periodically
+message ExpectedMachineInventory {
+  // Status of Inventory
+  InventoryStatus inventory_status = 1;
+  // Status message
+  string status_msg = 2;
+  // Reported timestamp of Expected Machine inventory
+  google.protobuf.Timestamp timestamp = 3;
+  // List of Expected Machine Partition
+  repeated forge.ExpectedMachine expected_machines = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+  // Linked Expected Machines (contains Machine ID)
+  repeated forge.LinkedExpectedMachine linked_machines = 6;
+}
+
+// ExpectedRackInventory - inventory info of all Expected Racks on Site, collected periodically
+message ExpectedRackInventory {
+  // Status of Inventory
+  InventoryStatus inventory_status = 1;
+  // Status message
+  string status_msg = 2;
+  // Reported timestamp of Expected Rack inventory
+  google.protobuf.Timestamp timestamp = 3;
+  // List of Expected Racks
+  repeated forge.ExpectedRack expected_racks = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// ExpectedPowerShelfInventory - inventory info of all Expected Power Shelves on Site, collected periodically
+message ExpectedPowerShelfInventory {
+  // Status of Inventory
+  InventoryStatus inventory_status = 1;
+  // Status message
+  string status_msg = 2;
+  // Reported timestamp of Expected Power Shelf inventory
+  google.protobuf.Timestamp timestamp = 3;
+  // List of Expected Power Shelves
+  repeated forge.ExpectedPowerShelf expected_power_shelves = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+  // Linked Expected Power Shelves (contains PowerShelf ID)
+  repeated forge.LinkedExpectedPowerShelf linked_power_shelves = 6;
+}
+
+// ExpectedSwitchInventory - inventory info of all Expected Switches on Site, collected periodically
+message ExpectedSwitchInventory {
+  // Status of Inventory
+  InventoryStatus inventory_status = 1;
+  // Status message
+  string status_msg = 2;
+  // Reported timestamp of Expected Switch inventory
+  google.protobuf.Timestamp timestamp = 3;
+  // List of Expected Switches
+  repeated forge.ExpectedSwitch expected_switches = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+  // Linked Expected Switches (contains Switch ID)
+  repeated forge.LinkedExpectedSwitch linked_switches = 6;
+}
+
+// InfiniBandPartitionInventory - inventory info of all InfiniBand Partitions on Site, collected periodically
+message InfiniBandPartitionInventory {
+  // Status of Inventory
+  InventoryStatus inventory_status = 1;
+  // Status message
+  string status_msg = 2;
+  // Reported timestamp of InfiniBand Partition inventory
+  google.protobuf.Timestamp timestamp = 3;
+  // List of InfiniBand Partition
+  repeated forge.IBPartition ib_partitions = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// SpectrumXPartitionInventory - inventory info of all SpectrumX Partitions on Site, collected periodically
+message SpectrumXPartitionInventory {
+  // Status of Inventory
+  InventoryStatus inventory_status = 1;
+  // Status message
+  string status_msg = 2;
+  // Reported timestamp of SpectrumX Partition inventory
+  google.protobuf.Timestamp timestamp = 3;
+  // List of SpectrumX Partition
+  repeated forge.SpxPartition spx_partitions = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// InstanceInventory - inventory info of all Instances on Site, collected periodically
+message InstanceInventory {
+  // List of Instances
+  repeated forge.Instance instances = 1;
+  // List of Instance propagation details
+  repeated forge.NetworkSecurityGroupPropagationObjectStatus network_security_group_propagations = 6;
+  // Reported timestamp of Instance inventory
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of Inventory
+  InventoryStatus inventory_status = 3;
+  // Message for status
+  string status_msg = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// InstanceTypeInventory - inventory info for all InstanceTypes on Site, collected periodically
+message InstanceTypeInventory {
+  // List of InstanceTypes
+  repeated forge.InstanceType instance_types = 1;
+  // Reported timestamp of inventory
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of Inventory
+  InventoryStatus inventory_status = 3;
+  // Message for status
+  string status_msg = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// MachineInfo - wrapper proto object for including discovery info in MachineInventory
+message MachineInfo {
+  forge.Machine machine = 1;
+  machine_discovery.DiscoveryInfo discovery_info = 2;
+}
+
+// MachineInventory - inventory info of all Machines on Site, collected periodically
+message MachineInventory {
+  // List of Machines
+  repeated MachineInfo machines = 1;
+  // Reported timestamp of machine inventory
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of Inventory
+  InventoryStatus inventory_status = 3;
+  // Status message regarding inventory collection, if any
+  string status_msg = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// NetworkSecurityGroupInventory - inventory info for all Network Security Groups on Site, collected periodically
+message NetworkSecurityGroupInventory {
+  // List of NetworkSecurityGroups
+  repeated forge.NetworkSecurityGroup network_security_groups = 1;
+  // Reported timestamp of inventory
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of Inventory
+  InventoryStatus inventory_status = 3;
+  // Message for status
+  string status_msg = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// NVLinkLogicalPartitionInventory - inventory info of all NVLink Logical Partitions on Site, collected periodically
+message NVLinkLogicalPartitionInventory {
+  // Status of Inventory
+  InventoryStatus inventory_status = 1;
+  // Status message
+  string status_msg = 2;
+  // Reported timestamp of NVLinkLogicalPartition inventory
+  google.protobuf.Timestamp timestamp = 3;
+  // List of NVL Partition
+  repeated forge.NVLinkLogicalPartition partitions = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// OsImageInventory - inventory info for all OS Images on Site, collected periodically
+message OsImageInventory {
+  // List of OS Images
+  repeated forge.OsImage os_images = 1;
+  // Reported timestamp of inventory
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of Inventory
+  InventoryStatus inventory_status = 3;
+  // Message for status
+  string status_msg = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// OperatingSystemInventory - inventory info for all OS definitions periodically collected from carbide-core
+message OperatingSystemInventory {
+  // List of Operating Systems (active records only; deletions are detected by absence)
+  repeated forge.OperatingSystem operating_systems = 1;
+  // Reported timestamp of inventory
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of Inventory
+  InventoryStatus inventory_status = 3;
+  // Message for status
+  string status_msg = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// IpxeTemplateInventory - inventory info of all iPXE templates periodically collected from site
+message IpxeTemplateInventory {
+  // List of iPXE templates
+  repeated forge.IpxeTemplate templates = 1;
+  // Reported timestamp of iPXE template inventory
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of Inventory
+  InventoryStatus inventory_status = 3;
+  // Status message
+  string status_msg = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// SkuInventory - inventory info of all SKUs on Site, collected periodically
+message SkuInventory {
+  // Status of Inventory
+  InventoryStatus inventory_status = 1;
+  // Status message
+  string status_msg = 2;
+  // Reported timestamp of SKU inventory
+  google.protobuf.Timestamp timestamp = 3;
+  // List of SKU
+  repeated forge.Sku skus = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// SSHKeyGroupInventory - inventory info of all SSH Key Groups (Tenant Keysets) on Site, collected periodically
+message SSHKeyGroupInventory {
+  // List of SSH keysets
+  repeated forge.TenantKeyset tenant_keysets = 1;
+  // Reported timestamp of SSH keyset inventory
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of Inventory
+  InventoryStatus inventory_status = 3;
+  // Message for status
+  string status_msg = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// SubnetInventory - inventory info of all Subnets (Network Segments) on Site, collected periodically
+message SubnetInventory {
+  // List of Network Segments
+  repeated forge.NetworkSegment segments = 1;
+  // Reported timestamp of Segment inventory
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of Inventory
+  InventoryStatus inventory_status = 3;
+  // Message for status
+  string status_msg = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// TenantInventory - inventory info for all Tenants on Site, collected periodically
+message TenantInventory {
+  // List of Tenants
+  repeated forge.Tenant tenants = 1;
+  // Reported timestamp of inventory
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of Inventory
+  InventoryStatus inventory_status = 3;
+  // Message for status
+  string status_msg = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// VpcInventory - inventory info of all VPCs on Site, collected periodically
+message VPCInventory {
+  // List of VPCs
+  repeated forge.Vpc vpcs = 1;
+  // List of VPC propagation details
+  repeated forge.NetworkSecurityGroupPropagationObjectStatus network_security_group_propagations = 6;
+  // Reported timestamp of VPC inventory
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of Inventory
+  InventoryStatus inventory_status = 3;
+  // Message for status
+  string status_msg = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// VPCPeeringInventory - inventory info of all VPC Peerings on Site, collected periodically
+message VPCPeeringInventory {
+  // List of VPC Peerings
+  repeated forge.VpcPeering vpc_peerings = 1;
+  // Reported timestamp of VPC Peering inventory
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of Inventory
+  InventoryStatus inventory_status = 3;
+  // Message for status
+  string status_msg = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// VpcPrefixInventory - inventory info for all VPC Prefixes on Site, collected periodically
+message VpcPrefixInventory {
+  // List of VPC Prefixes
+  repeated forge.VpcPrefix vpc_prefixes = 1;
+  // Reported timestamp of VPC Prefix inventory
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of Inventory
+  InventoryStatus inventory_status = 3;
+  // Message for status
+  string status_msg = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}
+
+// SitePrefixInventory reports one message from a periodic SitePrefix inventory
+// run. Every SUCCESS message uses the same timestamp and repeats the complete
+// item_ids set in SitePrefix ID order. In a complete nonempty run, the
+// site_prefixes payloads are ordered, disjoint, and together contain exactly
+// one record matching each item_ids entry. Receipt of the final page and that
+// exact union make the run complete. total_pages on a non-final page is an
+// estimate and may increase if later messages must be smaller.
+//
+// An unpaged FAILED message represents a collection failure detected before
+// any SUCCESS message was published. A failure after partial publication emits
+// no FAILED message; the non-final SUCCESS messages remain an incomplete run.
+// An empty SUCCESS run is one message with current_page 1, zero total_pages and
+// total_items, page_size set to the effective configured publish page size, and
+// empty lists. Omitted repeated fields and empty lists have the same meaning.
+// Receivers must leave REST IP Block records unchanged for a FAILED message.
+// They may process SitePrefixes present on SUCCESS pages, but must not treat
+// any ID as missing until the run is complete.
+message SitePrefixInventory {
+  // SitePrefixes included in this page
+  repeated forge.SitePrefix site_prefixes = 1;
+  // Time this inventory run began. Every page from the same run uses this value.
+  google.protobuf.Timestamp timestamp = 2;
+  // Status of inventory collection
+  InventoryStatus inventory_status = 3;
+  // Message describing the inventory status
+  string status_msg = 4;
+  // Page information, including every SitePrefix ID in a successful run
+  InventoryPage inventory_page = 5;
+}
+
+// ExpectedRackGroupInventory - inventory info of all Expected Rack Groups on Site
+message ExpectedRackGroupInventory {
+  // Status of Inventory
+  InventoryStatus inventory_status = 1;
+  // Status message
+  string status_msg = 2;
+  // Reported timestamp of Expected Rack Group inventory
+  google.protobuf.Timestamp timestamp = 3;
+  // List of Expected Rack Groups
+  repeated forge.ExpectedRackGroup expected_rack_groups = 4;
+  // Inventory page information
+  InventoryPage inventory_page = 5;
+}

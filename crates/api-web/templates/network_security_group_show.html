@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}Network Security Groups{% endblock %}
+
+{% block content %}
+
+<h1>Network Security Groups</h1>
+
+<table class="sortable overview">
+	<thead>
+	<tr>
+		<th>ID</th>
+		<th>Tenant Organization ID</th>
+		<th>Name</th>
+		<th>Description</th>
+		<th>Version</th>
+		<th>Created</th>
+		<th></th>
+	</tr>
+	</thead>
+	<tbody>
+	{% for nsg in network_security_groups %}
+		<tr>
+			<td><a href="/admin/network-security-group/{{ nsg.id }}">{{ nsg.id }}</a></td>
+			<td><a href="/admin/tenant/{{ nsg.tenant_organization_id }}">{{ nsg.tenant_organization_id }}</a></td>
+			<td>{{ nsg.name }}</td>
+			<td>{{ nsg.description }}</td>
+			<td>{{ nsg.version }}</td>
+			<td>{{ nsg.created }}</td>
+			<td>
+				<form id="nsg_delete_action" method="POST" action="/admin/network-security-group/{{ nsg.id }}/delete">
+					<input type="hidden" name="tenant_organization_id" value="{{ nsg.tenant_organization_id }}">
+					<input type="submit" value="Delete">
+				</form>
+			</td>
+		</tr>
+	{% endfor %}
+	</tbody>
+	<tfoot>
+		<tr><th colspan="7">
+			{% include "pages_footer.html" %}
+		</th></tr>
+	</tfoot>
+</table>
+<br/>
+<h3>Add Network Security Group</h3>
+<form id="nsg_create_action" method="POST" action="/admin/network-security-group">
+	<table class="detailsview">
+		<tr><th>ID (optional)</th><td><input name="id" type="text" value=""></td></tr>
+		<tr><th>Tenant Organization ID</th><td><input name="tenant_organization_id" type="text" value=""></td></tr>
+		<tr><th>Name</th><td><input name="name" type="text" value=""></td></tr>
+		<tr><th>Description (optional)</th><td><textarea name="description"></textarea></td></tr>
+		<tr><th>Labels (optional)</th><td><textarea name="labels"></textarea></td></tr>
+		<tr><th>Stateful Egress</th><td><input type="checkbox" name="stateful_egress" value="true" /></td></tr>
+		<tr><th>Rules (optional)</th><td><textarea name="rules"></textarea></td></tr>
+		<tr><th>&nbsp;</th><td><input type="submit" value="Create"></td></tr>
+	</table>
+</form>
+
+
+{% endblock %}

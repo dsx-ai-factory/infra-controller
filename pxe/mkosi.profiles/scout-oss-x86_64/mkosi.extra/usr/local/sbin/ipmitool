@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+#
+# Nonsense wrapper for handling breakage in `ipmitool` when there's anything out of the ordinary.
+#
+# This is intended to be called by `forge-scout` and if `lan print` are the
+# arguments, then it will instead run `bmc-config` from the freeipmi tools
+# disribution included in Debian as well.
+#
+# Written by MICHAEL BASNIGHT EVEN THOUGH MY NAME IS ON THE GIT BLAME I DID NOT DO THIS.
+#
+set -o pipefail
+
+if [ "$1" == "lan" ] && [ "$2" == "print" ]; then
+        exec bmc-config --checkout -S Lan_Conf | awk '/\tIP_Address / {print "IP Address              : " $2}; /\tMAC_Address / {print "MAC Address             : " $2}'
+else
+        exec /usr/bin/ipmitool $@
+fi

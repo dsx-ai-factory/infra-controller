@@ -1,0 +1,101 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[package]
+name = "carbide-ssh-console"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ssh_console"
+
+[[bin]]
+# TODO: rename to carbide-ssh-console
+name = "ssh-console"
+path = "src/main.rs"
+
+[dependencies]
+
+# local dependencies
+carbide-rpc = { path = "../rpc" }
+carbide-authn = { path = "../authn" }
+carbide-instrument = { path = "../instrument", features = ["otlp-tracing"] }
+carbide-utils = { path = "../utils", default-features = false, features = ["shutdown-handler"] }
+carbide-uuid = { path = "../uuid" }
+carbide-tls = { path = "../tls" }
+bmc-vendor = { path = "../bmc-vendor" }
+
+bytes = { workspace = true }
+arc-swap = { workspace = true }
+ctor = { workspace = true }
+lazy_static = { workspace = true }
+tokio = { workspace = true, features = [
+  "tokio-macros",
+  "rt-multi-thread",
+  "sync",
+  "macros",
+] }
+tokio-stream = { workspace = true, features = ["net"] }
+tokio-rustls = { workspace = true }
+tokio-util = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { features = ["env-filter"], workspace = true }
+uuid = { features = ["v4"], workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+serde = { features = ["derive"], workspace = true }
+clap = { features = ["color", "derive", "env"], workspace = true }
+russh = { workspace = true }
+http = { workspace = true }
+tonic = { workspace = true, features = ["default"] }
+ringbuf = { workspace = true }
+nix = { features = ["process", "term", "fs"], workspace = true }
+libc = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+duration-str = { workspace = true }
+chrono = { workspace = true }
+strip-ansi-escapes = { workspace = true }
+rand = { workspace = true }
+opentelemetry = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+prometheus = { workspace = true }
+opentelemetry-prometheus = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+http-body-util = { workspace = true }
+size = { features = ["serde"], workspace = true }
+surge-ping = { workspace = true }
+
+[dev-dependencies]
+bmc-mock = { path = "../bmc-mock" }
+carbide-machine-a-tron = { path = "../machine-a-tron" }
+carbide-test-support = { path = "../test-support" }
+temp-dir = { workspace = true }
+futures = { workspace = true }
+carbide-api-test-helper = { path = "../api-test-helper" }
+carbide-ssh-console-mock-api-server = { path = "../ssh-console-mock-api-server" }
+eyre = { workspace = true }
+indoc = { workspace = true }
+prometheus-text-parser = { path = "../prometheus-text-parser" }
+
+[lints]
+workspace = true

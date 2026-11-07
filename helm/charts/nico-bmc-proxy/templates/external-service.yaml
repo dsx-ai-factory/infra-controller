@@ -1,0 +1,23 @@
+{{- if .Values.externalService.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-bmc-proxy.name" . }}-external
+  namespace: {{ include "nico-bmc-proxy.namespace" . }}
+  labels:
+    {{- include "nico-bmc-proxy.labels" . | nindent 4 }}
+  {{- with .Values.externalService.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.externalService.type }}
+  externalTrafficPolicy: {{ .Values.externalService.externalTrafficPolicy }}
+  selector:
+    {{- include "nico-bmc-proxy.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: proxy
+      port: {{ .Values.service.proxy.port }}
+      targetPort: proxy
+      protocol: TCP
+{{- end }}

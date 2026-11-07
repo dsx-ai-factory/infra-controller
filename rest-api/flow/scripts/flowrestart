@@ -1,0 +1,11 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name=$(kubectl get pods -n flow -o jsonpath='{.items[0].metadata.name}')
+if [ -z "$name" ]; then
+    echo "flow pod is not running"
+    exit 1
+fi
+
+kubectl delete pod -n flow "$name"

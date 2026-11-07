@@ -1,0 +1,28 @@
+#cloud-config
+packages:
+  - dnsmasq
+  - nftables
+
+write_files:
+  - path: "/etc/dnsmasq.conf"
+    permissions: "0644"
+    content: |
+      port=0
+      interface=enp0s9
+      dhcp-relay=192.168.0.1,172.17.0.10
+      no-negcache
+    owner: "root:root"
+  - path: "/etc/sysctl.d/90-forwarding.conf"
+    permissions: "0644"
+    content: |
+      net.ipv4.ip_forward=1
+      net.ipv6.conf.all.forwarding=1
+    owner: root:root
+
+runcmd:
+  - [ systemctl, daemon-reload ]
+  - [ systemctl, restart, dnsmasq ]
+  - [ systemctl, restart, procps ]
+  #  - /usr/sbin/nft add table nat
+  #  - /usr/sbin/nft add chain nat postrouting '{ type nat hook postrouting priority 100; }'
+  #  - /usr/sbin/nft add rule nat postrouting masquerade

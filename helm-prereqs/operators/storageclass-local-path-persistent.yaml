@@ -1,0 +1,10 @@
+## local-path-persistent StorageClass
+## Same provisioner as "local-path" but with reclaimPolicy: Retain.
+## Used by Vault data and audit PVCs so storage survives pod deletion/scaling.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-path-persistent
+provisioner: rancher.io/local-path
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer

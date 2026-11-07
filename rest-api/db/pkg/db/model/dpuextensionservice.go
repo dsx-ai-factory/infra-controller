@@ -1,0 +1,686 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package model
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
+	"google.golang.org/protobuf/encoding/protojson"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+)
+
+const (
+	// DpuExtensionServiceTimeFormat is the time format used on Site for version info creation time
+	DpuExtensionServiceTimeFormat = "2006-01-02 15:04:05.000000 UTC"
+
+	// FabricRelationName is the relation name for the Fabric model
+	DpuExtensionServiceRelationName = "DpuExtensionService"
+)
+
+const (
+	// DpuExtensionServiceStatusPending indicates that the DpuExtensionService request was received but not yet processed
+	DpuExtensionServiceStatusPending = "Pending"
+	// DpuExtensionServiceStatusReady indicates that the DpuExtensionService is ready on the Site
+	DpuExtensionServiceStatusReady = "Ready"
+	// DpuExtensionServiceStatusError is the status of a DpuExtensionService that is in error mode
+	DpuExtensionServiceStatusError = "Error"
+	// DpuExtensionServiceStatusUpdating indicates that the DpuExtensionService is being updated on the Site
+	DpuExtensionServiceStatusUpdating = "Updating"
+	// DpuExtensionServiceStatusDeleting indicates that the DpuExtensionService is being deleted
+	DpuExtensionServiceStatusDeleting = "Deleting"
+
+	// DpuExtensionServiceOrderByDefault default field to be used for ordering when none specified
+	DpuExtensionServiceOrderByDefault = "created"
+)
+
+var (
+	// DpuExtensionServiceStatusMap is a list of valid status for the DpuExtensionService model
+	DpuExtensionServiceStatusMap = map[string]bool{
+		DpuExtensionServiceStatusPending:  true,
+		DpuExtensionServiceStatusReady:    true,
+		DpuExtensionServiceStatusError:    true,
+		DpuExtensionServiceStatusUpdating: true,
+		DpuExtensionServiceStatusDeleting: true,
+	}
+
+	// DpuExtensionServiceOrderByFields is a list of valid order by fields for the DpuExtensionService model
+	DpuExtensionServiceOrderByFields = []string{"id", "name", "status", "created", "updated"}
+	// DpuExtensionServiceRelatedEntities is a list of valid relation by fields for the DpuExtensionService model
+	DpuExtensionServiceRelatedEntities = map[string]bool{
+		SiteRelationName:     true,
+		TenantRelationName:   true,
+		InstanceRelationName: true,
+	}
+
+	// DpuExtensionServiceServiceTypeKubernetesPod indicates an extension service running as a Kubernetes pod
+	DpuExtensionServiceServiceTypeKubernetesPod = "KubernetesPod"
+	// DpuExtensionServiceServiceTypeDpfHelmChart indicates an extension service managed as a DPF Helm chart
+	DpuExtensionServiceServiceTypeDpfHelmChart = "DpfHelmChart"
+	// DpuExtensionServiceDeploymentTypeDemandDriven deploys through instance attachment.
+	DpuExtensionServiceDeploymentTypeDemandDriven = "DemandDriven"
+	// DpuExtensionServiceDeploymentTypeBaseline deploys Helm services to all DPUs managed by DPF.
+	DpuExtensionServiceDeploymentTypeBaseline = "Baseline"
+	// DpuExtensionServiceDpuTargetPrimary targets the host's primary attached DPU
+	DpuExtensionServiceDpuTargetPrimary = "Primary"
+	// DpuExtensionServiceDpuTargetAllActive targets DPUs used by the instance network configuration
+	DpuExtensionServiceDpuTargetAllActive = "AllActive"
+	// DpuExtensionServiceDpuTargetAll targets every attached DPU
+	DpuExtensionServiceDpuTargetAll = "All"
+
+	// DpuExtensionServiceServiceTypeMap is a map of valid service types for the DpuExtensionService model
+	DpuExtensionServiceServiceTypeMap = map[string]bool{
+		DpuExtensionServiceServiceTypeKubernetesPod: true,
+		DpuExtensionServiceServiceTypeDpfHelmChart:  true,
+	}
+)
+
+// dpuExtensionServiceLifecycleStatePrefix is the proto enum value prefix that Core omits from the lifecycle envelope
+const dpuExtensionServiceLifecycleStatePrefix = "DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_"
+
+// DpuExtensionServiceDeploymentTypeFromProto maps Core placement intent without
+// treating an unknown policy as safe attachment-based deployment.
+func DpuExtensionServiceDeploymentTypeFromProto(deploymentType corev1.DpuExtensionServiceDeploymentType) (string, error) {
+	switch deploymentType {
+	case corev1.DpuExtensionServiceDeploymentType_DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_DEMAND_DRIVEN:
+		return DpuExtensionServiceDeploymentTypeDemandDriven, nil
+	case corev1.DpuExtensionServiceDeploymentType_DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_BASELINE:
+		return DpuExtensionServiceDeploymentTypeBaseline, nil
+	default:
+		return "", fmt.Errorf("unrecognized deployment type %d", deploymentType)
+	}
+}
+
+// DpuExtensionServiceDpuTargetFromProto maps Core's DPU target enum to its REST representation.
+func DpuExtensionServiceDpuTargetFromProto(target *corev1.DpuExtensionServiceDpuTarget) (*string, error) {
+	if target == nil {
+		return nil, nil
+	}
+
+	var value string
+	switch *target {
+	case corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_PRIMARY:
+		value = DpuExtensionServiceDpuTargetPrimary
+	case corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE:
+		value = DpuExtensionServiceDpuTargetAllActive
+	case corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL:
+		value = DpuExtensionServiceDpuTargetAll
+	default:
+		return nil, fmt.Errorf("unrecognized DPU target %d", *target)
+	}
+
+	return &value, nil
+}
+
+// DpuExtensionServiceStatusFromLifecycleStatus maps Core's reconciliation state
+// onto a DpuExtensionService status. Core carries the state as a JSON envelope
+// rather than the proto enum, so an absent or unrecognized state is an error.
+func DpuExtensionServiceStatusFromLifecycleStatus(lifecycleStatus *corev1.LifecycleStatus) (string, error) {
+	if lifecycleStatus == nil {
+		return "", errors.New("lifecycle status is not set")
+	}
+
+	var envelope struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal([]byte(lifecycleStatus.State), &envelope); err != nil {
+		return "", fmt.Errorf("failed to parse lifecycle state %q: %w", lifecycleStatus.State, err)
+	}
+
+	state, ok := corev1.DpuExtensionServiceLifecycleState_value[dpuExtensionServiceLifecycleStatePrefix+strings.ToUpper(envelope.State)]
+	if !ok {
+		return "", fmt.Errorf("unrecognized lifecycle state %q", envelope.State)
+	}
+
+	switch corev1.DpuExtensionServiceLifecycleState(state) {
+	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_CREATING:
+		return DpuExtensionServiceStatusPending, nil
+	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_READY:
+		return DpuExtensionServiceStatusReady, nil
+	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_UPDATING:
+		return DpuExtensionServiceStatusUpdating, nil
+	// Deleted stays Deleting because the projection lives until inventory omits the service
+	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_DELETING,
+		corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_DELETED:
+		return DpuExtensionServiceStatusDeleting, nil
+	case corev1.DpuExtensionServiceLifecycleState_DPU_EXTENSION_SERVICE_LIFECYCLE_STATE_FAILED:
+		return DpuExtensionServiceStatusError, nil
+	default:
+		return "", fmt.Errorf("unmapped lifecycle state %q", envelope.State)
+	}
+}
+
+// DpuExtensionServiceVersionInfo is a data structure to capture information for a specific DPU Extension Service version
+type DpuExtensionServiceVersionInfo struct {
+	Version        string                            `json:"version"`
+	Data           string                            `json:"data"`
+	HasCredentials bool                              `json:"has_credentials"`
+	Created        time.Time                         `json:"created"`
+	Observability  *DpuExtensionServiceObservability `json:"observability,omitempty"`
+}
+
+// A light wrapper around the protobuf so
+// that we can implement our own marshal/unmarshal
+// that understands how to work with protobuf messages
+type DpuExtensionServiceObservability struct {
+	*corev1.DpuExtensionServiceObservability
+}
+
+func (o *DpuExtensionServiceObservability) UnmarshalJSON(b []byte) error {
+	if o.DpuExtensionServiceObservability == nil {
+		o.DpuExtensionServiceObservability = &corev1.DpuExtensionServiceObservability{}
+	}
+
+	// protoJsonUnmarshalOptions is set to ignore unknown fields.
+	// This means a record created on site that uses a new feature
+	// won't break things in cloud,
+	// BUT it also means that a user could
+	// create something on site and then update it in cloud without realizing
+	// that the new property for the new feature isn't in the cloud data.
+	// If they then save the change, the record on site would lose the detail.
+	// NOTE: Similar to what we do in other places (e.g., NSGs), we aren't
+	// ignoring the error here because the wrapper is on the entire observability
+	// object and not individual configs.
+	return protoJsonUnmarshalOptions.Unmarshal(b, o)
+}
+
+func (o *DpuExtensionServiceObservability) MarshalJSON() ([]byte, error) {
+	return protojson.Marshal(o)
+}
+
+// FromProto populates version info from the site-agent protobuf form.
+func (vi *DpuExtensionServiceVersionInfo) FromProto(protoVersionInfo *corev1.DpuExtensionServiceVersionInfo, fallbackTime time.Time) {
+	if vi == nil || protoVersionInfo == nil {
+		return
+	}
+
+	created, err := time.Parse(DpuExtensionServiceTimeFormat, protoVersionInfo.Created)
+	if err != nil {
+		// NOTE: This is not accurate but without a timestamp, this is the best approximation.
+		created = fallbackTime
+	}
+
+	var observability *DpuExtensionServiceObservability
+	if protoVersionInfo.Observability != nil {
+		observability = &DpuExtensionServiceObservability{
+			DpuExtensionServiceObservability: protoVersionInfo.Observability,
+		}
+	}
+
+	*vi = DpuExtensionServiceVersionInfo{
+		Version:        protoVersionInfo.Version,
+		Data:           protoVersionInfo.Data,
+		HasCredentials: protoVersionInfo.HasCredential,
+		Created:        created,
+		Observability:  observability,
+	}
+}
+
+// DpuExtensionService represents a DPU extension service
+type DpuExtensionService struct {
+	bun.BaseModel `bun:"table:dpu_extension_service,alias:des"`
+
+	ID              uuid.UUID                       `bun:"id,type:uuid,unique,pk"`
+	Name            string                          `bun:"name,notnull"`
+	Description     *string                         `bun:"description"`
+	ServiceType     string                          `bun:"service_type,notnull"`
+	DeploymentType  string                          `bun:"deployment_type,notnull,default:'DemandDriven'"`
+	DpuTarget       *string                         `bun:"dpu_target"`
+	SiteID          uuid.UUID                       `bun:"site_id,type:uuid,notnull,pk"`
+	Site            *Site                           `bun:"rel:belongs-to,join:site_id=id"`
+	TenantID        uuid.UUID                       `bun:"tenant_id,type:uuid,notnull"`
+	Tenant          *Tenant                         `bun:"rel:belongs-to,join:tenant_id=id"`
+	Version         *string                         `bun:"version"`
+	VersionInfo     *DpuExtensionServiceVersionInfo `bun:"version_info,type:jsonb"`
+	ActiveVersions  []string                        `bun:"active_versions,type:text[],default:'{}'"`
+	Status          string                          `bun:"status,notnull"`
+	IsMissingOnSite bool                            `bun:"is_missing_on_site,notnull,default:false"`
+	Created         time.Time                       `bun:"created,nullzero,notnull,default:current_timestamp"`
+	Updated         time.Time                       `bun:"updated,nullzero,notnull,default:current_timestamp"`
+	Deleted         *time.Time                      `bun:"deleted,soft_delete"`
+	CreatedBy       uuid.UUID                       `bun:"created_by,type:uuid,notnull"`
+}
+
+// ToDeletionRequestProto builds the workflow request that asks a Site to
+// delete this DPU Extension Service.
+func (des *DpuExtensionService) ToDeletionRequestProto() *corev1.DeleteDpuExtensionServiceRequest {
+	return &corev1.DeleteDpuExtensionServiceRequest{
+		ServiceId: des.ID.String(),
+	}
+}
+
+// ToVersionDeletionRequestProto builds the workflow request that asks a
+// Site to delete a single version of this DPU Extension Service. Shares
+// the `DeleteDpuExtensionServiceRequest` proto with the whole-service
+// delete; the populated `Versions` field is what scopes the request.
+func (des *DpuExtensionService) ToVersionDeletionRequestProto(versionID string) *corev1.DeleteDpuExtensionServiceRequest {
+	return &corev1.DeleteDpuExtensionServiceRequest{
+		ServiceId: des.ID.String(),
+		Versions:  []string{versionID},
+	}
+}
+
+var _ bun.BeforeAppendModelHook = (*DpuExtensionService)(nil)
+
+// BeforeAppendModel is a hook that is called before the model is appended to the query
+func (des *DpuExtensionService) BeforeAppendModel(ctx context.Context, query bun.Query) error {
+	switch query.(type) {
+	case *bun.InsertQuery:
+		des.Created = db.GetCurTime()
+		des.Updated = db.GetCurTime()
+	case *bun.UpdateQuery:
+		des.Updated = db.GetCurTime()
+	}
+	return nil
+}
+
+var _ bun.BeforeCreateTableHook = (*DpuExtensionService)(nil)
+
+// BeforeCreateTable is a hook that is called before the table is created
+func (des *DpuExtensionService) BeforeCreateTable(ctx context.Context, query *bun.CreateTableQuery) error {
+	query.ForeignKey(`("site_id") REFERENCES "site" ("id")`).
+		ForeignKey(`("tenant_id") REFERENCES "tenant" ("id")`)
+	return nil
+}
+
+// DpuExtensionServiceCreateInput is used to create a new DpuExtensionService
+type DpuExtensionServiceCreateInput struct {
+	DpuExtensionServiceID *uuid.UUID
+	Name                  string
+	Description           *string
+	ServiceType           string
+	DeploymentType        string
+	DpuTarget             *string
+	SiteID                uuid.UUID
+	TenantID              uuid.UUID
+	Version               *string
+	VersionInfo           *DpuExtensionServiceVersionInfo
+	ActiveVersions        []string
+	Status                string
+	CreatedBy             uuid.UUID
+}
+
+// DpuExtensionServiceFilterInput is used to filter the DpuExtensionService objects
+type DpuExtensionServiceFilterInput struct {
+	DpuExtensionServiceIDs []uuid.UUID
+	Names                  []string
+	ServiceTypes           []string
+	SiteIDs                []uuid.UUID
+	TenantIDs              []uuid.UUID
+	Versions               []string
+	Statuses               []string
+	SearchQuery            *string
+	// IncludeDeleted returns soft-deleted rows in addition to active rows.
+	IncludeDeleted bool
+}
+
+// DpuExtensionServiceUpdateInput is used to update a DpuExtensionService object
+type DpuExtensionServiceUpdateInput struct {
+	DpuExtensionServiceID uuid.UUID
+	Name                  *string
+	Description           *string
+	DpuTarget             *string
+	Version               *string
+	VersionInfo           *DpuExtensionServiceVersionInfo
+	ActiveVersions        []string
+	Status                *string
+	IsMissingOnSite       *bool
+}
+
+// DpuExtensionServiceClearInput is used to clear a DpuExtensionService object
+type DpuExtensionServiceClearInput struct {
+	DpuExtensionServiceID uuid.UUID
+	Description           bool
+	Version               bool
+	VersionInfo           bool
+	// Deleted clears the soft-delete timestamp.
+	Deleted bool
+}
+
+// DpuExtensionServiceDAO is an interface for interacting with the DpuExtensionService model
+type DpuExtensionServiceDAO interface {
+	//
+	Create(ctx context.Context, tx *db.Tx, input DpuExtensionServiceCreateInput) (*DpuExtensionService, error)
+	//
+	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*DpuExtensionService, error)
+	//
+	GetAll(ctx context.Context, tx *db.Tx, filter DpuExtensionServiceFilterInput, page paginator.PageInput, includeRelations []string) ([]DpuExtensionService, int, error)
+	//
+	Update(ctx context.Context, tx *db.Tx, input DpuExtensionServiceUpdateInput) (*DpuExtensionService, error)
+	//
+	Clear(ctx context.Context, tx *db.Tx, input DpuExtensionServiceClearInput) (*DpuExtensionService, error)
+	//
+	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
+}
+
+// DpuExtensionServiceSQLDAO is an implementation of the DpuExtensionServiceDAO interface
+type DpuExtensionServiceSQLDAO struct {
+	dbSession *db.Session
+	DpuExtensionServiceDAO
+}
+
+// Create creates a new DpuExtensionService
+func (dessd DpuExtensionServiceSQLDAO) Create(ctx context.Context, tx *db.Tx, input DpuExtensionServiceCreateInput) (_ *DpuExtensionService, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, desDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDAO.Create")
+	defer func() { cotel.EndSpan(desDAOSpan, retErr) }()
+	cotel.SetAttribute(desDAOSpan, attribute.String("name", input.Name))
+
+	var id uuid.UUID
+	if input.DpuExtensionServiceID != nil {
+		id = *input.DpuExtensionServiceID
+	} else {
+		id = uuid.New()
+	}
+
+	deploymentType := input.DeploymentType
+	if deploymentType == "" {
+		deploymentType = DpuExtensionServiceDeploymentTypeDemandDriven
+	}
+
+	des := &DpuExtensionService{
+		ID:             id,
+		DeploymentType: deploymentType,
+		Name:           input.Name,
+		Description:    input.Description,
+		ServiceType:    input.ServiceType,
+		DpuTarget:      input.DpuTarget,
+		SiteID:         input.SiteID,
+		TenantID:       input.TenantID,
+		Version:        input.Version,
+		VersionInfo:    input.VersionInfo,
+		ActiveVersions: input.ActiveVersions,
+		Status:         input.Status,
+		CreatedBy:      input.CreatedBy,
+	}
+
+	_, err := db.GetIDB(tx, dessd.dbSession).NewInsert().Model(des).Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	ndes, err := dessd.GetByID(ctx, tx, des.ID, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return ndes, nil
+}
+
+// GetByID returns a DpuExtensionService by ID and SiteID
+// returns db.ErrDoesNotExist error if the record is not found
+func (dessd DpuExtensionServiceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *DpuExtensionService, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, desDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDAO.GetByID")
+	defer func() { cotel.EndSpan(desDAOSpan, retErr) }()
+	cotel.SetAttribute(desDAOSpan, attribute.String("id", id.String()))
+
+	des := &DpuExtensionService{}
+
+	query := db.GetIDB(tx, dessd.dbSession).NewSelect().Model(des).Where("des.id = ?", id)
+
+	for _, relation := range includeRelations {
+		query = query.Relation(relation)
+	}
+
+	err := query.Scan(ctx)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, db.ErrDoesNotExist
+		}
+		return nil, err
+	}
+
+	return des, nil
+}
+
+// GetAll returns all DpuExtensionServices with filtering and pagination
+// errors are returned only when there is a db related error
+// if records not found, then error is nil, but length of returned slice is 0
+// if page.OrderBy is nil, then records are ordered by column specified in DpuExtensionServiceOrderByDefault in ascending order
+func (dessd DpuExtensionServiceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DpuExtensionServiceFilterInput, page paginator.PageInput, includeRelations []string) (_ []DpuExtensionService, _ int, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, desDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDAO.GetAll")
+	defer func() { cotel.EndSpan(desDAOSpan, retErr) }()
+
+	dess := []DpuExtensionService{}
+	if filter.DpuExtensionServiceIDs != nil && len(filter.DpuExtensionServiceIDs) == 0 {
+		return dess, 0, nil
+	}
+
+	query := db.GetIDB(tx, dessd.dbSession).NewSelect().Model(&dess)
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
+	}
+
+	if filter.DpuExtensionServiceIDs != nil {
+		query = query.Where("des.id IN (?)", bun.In(filter.DpuExtensionServiceIDs))
+	}
+
+	if len(filter.Names) > 0 {
+		query = query.Where("des.name IN (?)", bun.In(filter.Names))
+	}
+
+	if len(filter.ServiceTypes) > 0 {
+		query = query.Where("des.service_type IN (?)", bun.In(filter.ServiceTypes))
+	}
+
+	if len(filter.SiteIDs) > 0 {
+		query = query.Where("des.site_id IN (?)", bun.In(filter.SiteIDs))
+	}
+
+	if len(filter.TenantIDs) > 0 {
+		query = query.Where("des.tenant_id IN (?)", bun.In(filter.TenantIDs))
+	}
+
+	if len(filter.Versions) > 0 {
+		query = query.Where("des.version IN (?)", bun.In(filter.Versions))
+	}
+
+	if len(filter.Statuses) > 0 {
+		query = query.Where("des.status IN (?)", bun.In(filter.Statuses))
+	}
+
+	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
+	if ok {
+		query = query.WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			return q.
+				Where("to_tsvector('english', (coalesce(des.name, ' ') || ' ' || coalesce(des.description, ' ') || ' ' || coalesce(des.status, ' '))) @@ to_tsquery('english', ?)", *searchTokens).
+				WhereOr("des.name ILIKE ?", "%"+searchQuery+"%").
+				WhereOr("des.description ILIKE ?", "%"+searchQuery+"%").
+				WhereOr("des.status ILIKE ?", "%"+searchQuery+"%")
+		})
+		cotel.SetAttribute(desDAOSpan, attribute.String("search_query", searchQuery))
+	}
+
+	for _, relation := range includeRelations {
+		query = query.Relation(relation)
+	}
+
+	// if no order is passed, set default to make sure objects return always in the same order and pagination works properly
+	orderBy := page.OrderBy
+	if orderBy == nil {
+		orderBy = paginator.NewDefaultOrderBy(DpuExtensionServiceOrderByDefault)
+	}
+
+	paginatorObj, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, orderBy, DpuExtensionServiceOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	err = paginatorObj.Query.Limit(paginatorObj.Limit).Offset(paginatorObj.Offset).Scan(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return dess, paginatorObj.Total, nil
+}
+
+// Update updates specified fields of an existing DpuExtensionService
+// The updated fields are assumed to be set to non-null values
+func (dessd DpuExtensionServiceSQLDAO) Update(ctx context.Context, tx *db.Tx, input DpuExtensionServiceUpdateInput) (_ *DpuExtensionService, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, desDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDAO.Update")
+	defer func() { cotel.EndSpan(desDAOSpan, retErr) }()
+	cotel.SetAttribute(desDAOSpan, attribute.String("id", input.DpuExtensionServiceID.String()))
+
+	des := &DpuExtensionService{
+		ID: input.DpuExtensionServiceID,
+	}
+
+	updatedFields := []string{}
+
+	if input.Name != nil {
+		des.Name = *input.Name
+		updatedFields = append(updatedFields, "name")
+		cotel.SetAttribute(desDAOSpan, attribute.String("name", *input.Name))
+	}
+
+	if input.Description != nil {
+		des.Description = input.Description
+		updatedFields = append(updatedFields, "description")
+	}
+
+	if input.DpuTarget != nil {
+		des.DpuTarget = input.DpuTarget
+		updatedFields = append(updatedFields, "dpu_target")
+	}
+
+	if input.Version != nil {
+		des.Version = input.Version
+		updatedFields = append(updatedFields, "version")
+		cotel.SetAttribute(desDAOSpan, attribute.String("version", *input.Version))
+	}
+
+	if input.VersionInfo != nil {
+		des.VersionInfo = input.VersionInfo
+		updatedFields = append(updatedFields, "version_info")
+	}
+
+	if input.ActiveVersions != nil {
+		des.ActiveVersions = input.ActiveVersions
+		updatedFields = append(updatedFields, "active_versions")
+	}
+
+	if input.Status != nil {
+		des.Status = *input.Status
+		updatedFields = append(updatedFields, "status")
+	}
+
+	if input.IsMissingOnSite != nil {
+		des.IsMissingOnSite = *input.IsMissingOnSite
+		updatedFields = append(updatedFields, "is_missing_on_site")
+	}
+
+	if len(updatedFields) > 0 {
+		updatedFields = append(updatedFields, "updated")
+
+		query := db.GetIDB(tx, dessd.dbSession).NewUpdate().Model(des).Column(updatedFields...).Where("id = ?", input.DpuExtensionServiceID)
+
+		_, err := query.Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	udes, err := dessd.GetByID(ctx, tx, des.ID, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return udes, nil
+}
+
+// Clear clears the specified fields of a DpuExtensionService object
+func (dessd DpuExtensionServiceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input DpuExtensionServiceClearInput) (_ *DpuExtensionService, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, desDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDAO.Clear")
+	defer func() { cotel.EndSpan(desDAOSpan, retErr) }()
+
+	des := &DpuExtensionService{
+		ID: input.DpuExtensionServiceID,
+	}
+
+	updatedFields := []string{}
+
+	if input.Description {
+		des.Description = nil
+		updatedFields = append(updatedFields, "description")
+	}
+
+	if input.Version {
+		des.Version = nil
+		updatedFields = append(updatedFields, "version")
+	}
+
+	if input.VersionInfo {
+		des.VersionInfo = nil
+		updatedFields = append(updatedFields, "version_info")
+	}
+
+	if input.Deleted {
+		des.Deleted = nil
+
+		updatedFields = append(updatedFields, "deleted")
+	}
+
+	if len(updatedFields) > 0 {
+		updatedFields = append(updatedFields, "updated")
+
+		query := db.GetIDB(tx, dessd.dbSession).NewUpdate().Model(des).Column(updatedFields...).Where("id = ?", input.DpuExtensionServiceID)
+		// Soft-deleted rows are excluded by default; include them when undeleting.
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+
+		_, err := query.Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	udes, err := dessd.GetByID(ctx, tx, des.ID, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return udes, nil
+}
+
+// Delete deletes a DpuExtensionService by ID
+// error is returned only if there is a db error
+// if the object being deleted doesn't exist, error is not returned
+func (dessd DpuExtensionServiceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, desDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDAO.Delete")
+	defer func() { cotel.EndSpan(desDAOSpan, retErr) }()
+	cotel.SetAttribute(desDAOSpan, attribute.String("id", id.String()))
+
+	_, err := db.GetIDB(tx, dessd.dbSession).NewDelete().Model((*DpuExtensionService)(nil)).Where("id = ?", id).Exec(ctx)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// NewDpuExtensionServiceDAO returns a new DpuExtensionServiceDAO
+func NewDpuExtensionServiceDAO(dbSession *db.Session) DpuExtensionServiceDAO {
+	return &DpuExtensionServiceSQLDAO{
+		dbSession: dbSession,
+	}
+}

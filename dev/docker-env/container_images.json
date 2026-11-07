@@ -1,0 +1,43 @@
+{
+  "images": [
+    {
+      "id": "sha256:2a060e2e7101d419352bf82c613158587400be743482d9a537ec4a9d1b4eb93c",
+      "repoTags": [
+        "k8s.gcr.io/pause:3.2"
+      ],
+      "repoDigests": [
+      ],
+      "size": "487072",
+      "uid": null,
+      "username": "",
+      "spec": null,
+      "pinned": false
+    },
+    {
+      "id": "sha256:83b3a5f36555f77a49f2f9223f9e90640139b652bab6b929bcd5801ad9893921",
+      "repoTags": [
+        "nvcr.io/nvidia/doca/doca_hbn:2.3.0-doca2.8.0"
+      ],
+      "repoDigests": [
+      ],
+      "size": "774995407",
+      "uid": null,
+      "username": "",
+      "spec": null,
+      "pinned": false
+    },
+    {
+      "id": "sha256:da2015bb43cda1193fac2617e81df74fcbea9dfde613d9d09b003e64336a6b83",
+      "repoTags": [
+        "nvcr.io/nvidia/doca/doca_telemetry:1.14.2-doca2.2.0"
+      ],
+      "repoDigests": [
+      ],
+      "size": "386378721",
+      "uid": null,
+      "username": "",
+      "spec": null,
+      "pinned": false
+    }
+  ]
+}

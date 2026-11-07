@@ -1,0 +1,1 @@
+CREATE INDEX IF NOT EXISTS idx_machines_on_hw_sku ON machines (hw_sku);

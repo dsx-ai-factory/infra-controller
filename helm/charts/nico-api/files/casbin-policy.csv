@@ -1,0 +1,61 @@
+# This file is a Casbin policy. In Casbin, the semantics of the policy are
+# dictated by the model, and in particular the model and policy need to agree on
+# the count and order of the arguments to the `g` and `p` rules.
+#
+# This policy's model is compiled in to the nico-api binary, and can be found
+# in the source code in the `src/auth/casbin_engine.rs` file. Currently, we're
+# using the `Rbac` model there.
+#
+# On `g` rules: These associate a principal (second column) with a role name
+# (third column). This causes the named role to also be looked up as if it were
+# a principal.
+#
+# On `p` rules: These allow a principal or role (second column) to perform the
+# named action (third column). Glob matching is available on the action field.
+#
+# The names of the principals can be found in `src/auth.rs` in the
+# `Principal::as_identifier()` method.
+
+
+# Map the nico-dhcp SPIFFE ID to the nico-dhcp role.
+# FIXME: verify that this is how these SPIFFE service identifiers look in reality.
+g, spiffe-service-id/{{ .Values.auth.principals.dhcp }}, nico-dhcp
+g, spiffe-service-id/{{ .Values.auth.principals.dns }}, nico-dns
+g, spiffe-machine-id, machine
+
+# Allow the nico-dhcp role to call its methods.
+p, nico-dhcp, forge/DiscoverDhcp
+p, nico-dhcp, nico/DiscoverDhcp
+
+# Same idea for nico-dns.
+p, nico-dns, forge/LookupRecord
+p, nico-dns, nico/LookupRecord
+
+# Allow any certificate we trust to hit any NICo method.
+# FIXME: This should be removed once we have more fine-grained rule coverage.
+p, trusted-certificate, forge/*
+p, trusted-certificate, nico/*
+
+# Anonymous access to endpoints that don't modify state or expose any customer
+# or site data should be fine.
+p, anonymous, forge/Version
+p, anonymous, nico/Version
+
+# Allow anonymous access to methods used by machines that may not have their
+# certificates from us yet.
+p, anonymous, forge/DiscoverMachine
+p, anonymous, nico/DiscoverMachine
+p, anonymous, forge/ReportNicoScoutError
+p, anonymous, nico/ReportNicoScoutError
+p, anonymous, forge/AttestQuote
+p, anonymous, nico/AttestQuote
+
+# Allow anonymous access to methods used by dpu-agent. As of 2023-09-28 there
+# are probably a fair amount of agents across the environments that don't have a
+# certificate and are not ready for strict enforcement.
+p, anonymous, forge/FindInstanceByMachineID
+p, anonymous, nico/FindInstanceByMachineID
+p, anonymous, forge/GetManagedHostNetworkConfig
+p, anonymous, nico/GetManagedHostNetworkConfig
+p, anonymous, forge/RecordDpuNetworkStatus
+p, anonymous, nico/RecordDpuNetworkStatus

@@ -1,0 +1,79 @@
+suite: namespace tests
+tests:
+  - it: should use Release.Namespace when no override
+    templates:
+      - deployment.yaml
+      - charts/mat-k8s-controller/templates/deployment.yaml
+    release:
+      namespace: release-ns
+    set:
+      mat-k8s-controller:
+        enabled: true
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: release-ns
+
+  - it: should use global.namespaceOverride for parent and subchart
+    templates:
+      - deployment.yaml
+      - service-account.yaml
+      - rbac.yaml
+      - charts/mat-k8s-controller/templates/deployment.yaml
+      - charts/mat-k8s-controller/templates/serviceaccount.yaml
+      - charts/mat-k8s-controller/templates/rbac.yaml
+    set:
+      global:
+        namespaceOverride: nico-system
+      mat-k8s-controller:
+        enabled: true
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: nico-system
+
+  - it: should set controller --namespace flag from global.namespaceOverride
+    templates:
+      - charts/mat-k8s-controller/templates/deployment.yaml
+    set:
+      global:
+        namespaceOverride: nico-system
+      mat-k8s-controller:
+        enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --namespace=nico-system
+
+  - it: should create Namespace only when override and createNamespace set
+    templates:
+      - namespace.yaml
+    set:
+      global:
+        namespaceOverride: nico-system
+      createNamespace: true
+    asserts:
+      - equal:
+          path: metadata.name
+          value: nico-system
+
+  - it: should label the created Namespace for the nico-roots ClusterExternalSecret
+    templates:
+      - namespace.yaml
+    set:
+      global:
+        namespaceOverride: nico-system
+      createNamespace: true
+    asserts:
+      - equal:
+          path: metadata.labels["nico.nvidia.com/managed"]
+          value: "true"
+
+  - it: should not create Namespace without override
+    templates:
+      - namespace.yaml
+    set:
+      createNamespace: true
+    asserts:
+      - hasDocuments:
+          count: 0

@@ -1,0 +1,29 @@
+<table class="detailsview">
+	<thead>
+		<tr>
+			<th>Time</th>
+			<th>Alerts</th>
+			<th>Classifications</th>
+			<th>Details</th>
+		</tr>
+	</thead>
+	<tbody>
+	{% for record in records %}
+		<tr>
+			<td>{{ record.timestamp }}</td>
+			<td>
+				{{ record.health.alerts|health_alerts_fmt(false, true)|safe }}
+			</td>
+			<td>{{ record.health.alerts|health_alert_classifications_fmt|safe }}</td>
+			<td>
+				<details>
+					<summary>Expand</summary>
+					<div style="overflow: auto; max-height: 300px; border: 1px solid var(--border-color); border-radius: 8px; background-color: var(--bg-tertiary); margin-top: 0.5rem;">
+						<pre style="margin: 0; padding: 1rem; background-color: transparent; white-space: pre-wrap;"><code>{{ record.health|json|pretty_json }}</code></pre>
+					</div>
+				</details>
+			</td>
+		</tr>
+	{% endfor %}
+	</tbody>
+</table>

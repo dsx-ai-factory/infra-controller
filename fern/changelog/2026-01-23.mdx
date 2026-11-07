@@ -1,0 +1,24 @@
+---
+tags: ["EOL", "deployment", "gb200", "nvlink"]
+---
+
+## NVIDIA Infra Controller EA <Badge intent="error">EOL</Badge>
+
+NVIDIA Infra Controller EA introduced a self-hosted, disconnected deployment model with source and build instructions that do not depend on NGC.
+
+### GB200 and NVLink capabilities
+
+- Provision single- or dual-DPU systems.
+- Ingest GB200 compute trays, validate their SKUs, and assign instance types.
+- Create allocations and instances, create an NVLink partition, select an instance, and apply its NVLink configuration through the Admin CLI.
+
+### Deployment requirements
+
+- **Software:** Kubernetes, PostgreSQL, Vault, certificate management, and Temporal.
+- **Hardware:** Compatible x86 nodes, NIC firmware, BMCs, and switches supporting BGP, EVPN, and RFC 5549 unnumbered IP interfaces.
+- **Network:** Preconfigured L2/L3 connectivity, DHCP and PXE services, out-of-band management networks, switch-side ports, IP prefixes, ASNs, and EVPN VNIs.
+- **External systems:** DNS resolvers, NTP, an OIDC identity provider such as Azure OIDC or Keycloak, and an OpenTelemetry-compatible observability stack.
+
+Supported switch capabilities include B3220 BF-3 optics compatibility, IPv4 and IPv6 unicast BGP, EVPN BGP, external BGP ASNs, LLDP, RFC 5549 unnumbered routed ports, and DHCP relay with option 82.
+
+<Button large intent="primary" rightIcon="arrow-right" href="/infra-controller/documentation/getting-started/quick-start-guide">Deploy NVIDIA Infra Controller</Button>

@@ -1,0 +1,160 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm
+  labels:
+    app: keycloak
+data:
+  nico-realm.json: |
+    {
+      "realm": "nico",
+      "enabled": true,
+      "displayName": "NCX Infra Controller",
+      "sslRequired": "none",
+      "registrationAllowed": false,
+      "loginWithEmailAllowed": true,
+      "duplicateEmailsAllowed": false,
+      "resetPasswordAllowed": true,
+      "editUsernameAllowed": false,
+      "bruteForceProtected": true,
+      "roles": {
+        "realm": [
+          {
+            "name": "ncx:NICO_PROVIDER_ADMIN",
+            "description": "NICo Provider Administrator"
+          },
+          {
+            "name": "ncx:NICO_TENANT_ADMIN",
+            "description": "NICo Tenant Administrator"
+          },
+          {
+            "name": "ncx:NICO_PROVIDER_VIEWER",
+            "description": "NICo Provider Viewer"
+          },
+          {
+            "name": "admin",
+            "description": "Administrator role"
+          },
+          {
+            "name": "user",
+            "description": "Regular user role"
+          }
+        ],
+        "client": {
+          "nico-rest": [
+            {
+              "name": "api-access",
+              "description": "Access to NICo REST API"
+            }
+          ]
+        }
+      },
+      "clients": [
+        {
+          "clientId": "nico-rest",
+          "name": "NICo REST API",
+          "enabled": true,
+          "clientAuthenticatorType": "client-secret",
+          "secret": "nico-local-secret",
+          "redirectUris": ["*"],
+          "webOrigins": ["*"],
+          "publicClient": false,
+          "protocol": "openid-connect",
+          "directAccessGrantsEnabled": true,
+          "serviceAccountsEnabled": true,
+          "authorizationServicesEnabled": false,
+          "standardFlowEnabled": true,
+          "implicitFlowEnabled": false,
+          "fullScopeAllowed": true,
+          "defaultClientScopes": [
+            "web-origins", "acr", "profile", "roles", "email"
+          ],
+          "optionalClientScopes": [
+            "address", "phone", "offline_access", "microprofile-jwt"
+          ],
+          "protocolMappers": [
+            {
+              "name": "audience",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-audience-mapper",
+              "consentRequired": false,
+              "config": {
+                "included.client.audience": "nico-rest",
+                "id.token.claim": "true",
+                "access.token.claim": "true"
+              }
+            },
+            {
+              "name": "oidc_id",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "consentRequired": false,
+              "config": {
+                "user.attribute": "oidc_id",
+                "claim.name": "oidc_id",
+                "jsonType.label": "String",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            }
+          ]
+        },
+        {
+          "clientId": "ncx-service",
+          "name": "NICo Service Account",
+          "enabled": true,
+          "clientAuthenticatorType": "client-secret",
+          "secret": "nico-local-secret",
+          "publicClient": false,
+          "protocol": "openid-connect",
+          "directAccessGrantsEnabled": false,
+          "serviceAccountsEnabled": true,
+          "standardFlowEnabled": false,
+          "implicitFlowEnabled": false,
+          "fullScopeAllowed": true,
+          "defaultClientScopes": ["email", "profile", "roles"],
+          "attributes": {
+            "access.token.lifespan": "1800",
+            "client.session.idle.timeout": "1800",
+            "client.session.max.lifespan": "1800"
+          },
+          "protocolMappers": [
+            {
+              "name": "oidc_id",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-usermodel-attribute-mapper",
+              "consentRequired": false,
+              "config": {
+                "user.attribute": "oidc_id",
+                "claim.name": "oidc_id",
+                "jsonType.label": "String",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            }
+          ]
+        }
+      ],
+      "users": [
+        {
+          "username": "service-account-ncx-service",
+          "enabled": true,
+          "serviceAccountClientId": "ncx-service",
+          "realmRoles": [
+            "ncx:NICO_PROVIDER_ADMIN",
+            "ncx:NICO_TENANT_ADMIN"
+          ],
+          "clientRoles": {
+            "nico-rest": ["api-access"]
+          }
+        }
+      ],
+      "defaultDefaultClientScopes": [
+        "role_list", "profile", "email", "roles", "web-origins", "acr"
+      ],
+      "defaultOptionalClientScopes": [
+        "offline_access", "address", "phone", "microprofile-jwt"
+      ]
+    }

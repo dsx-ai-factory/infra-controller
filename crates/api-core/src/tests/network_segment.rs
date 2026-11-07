@@ -1,0 +1,2776 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+use std::collections::{HashMap, HashSet};
+use std::fmt::Display;
+use std::net::IpAddr;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
+use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
+use carbide_test_support::Outcome::Yields;
+use carbide_test_support::{Case, check_cases_async};
+use carbide_uuid::network::NetworkSegmentId;
+use carbide_uuid::vpc::VpcId;
+use common::network_segment::{
+    NetworkSegmentHelper, create_network_segment_with_api, get_segment_state,
+};
+use db::ObjectColumnFilter;
+use db::network_segment::VpcColumn;
+use db::vpc::IdColumn;
+use figment::Figment;
+use figment::providers::{Format, Toml};
+use mac_address::MacAddress;
+use model::address_selection_strategy::AddressSelectionStrategy;
+use model::network_prefix::NewNetworkPrefix;
+use model::network_segment;
+use model::network_segment::{
+    NetworkDefinition, NetworkDefinitionSegmentType, NetworkSegment, NetworkSegmentControllerState,
+    NetworkSegmentType, NewNetworkSegment,
+};
+use model::resource_pool::binding::{
+    INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolSelection,
+    ResourcePoolValueDomain,
+};
+use model::resource_pool::common::VLANID;
+use model::resource_pool::{
+    ResourcePool, ResourcePoolEntryState, ResourcePoolError, ResourcePoolStats, ValueType,
+};
+use model::vpc::{NewVpc, UpdateVpcVirtualization, VpcDefinition, VpcStatus};
+use prometheus_text_parser::ParsedPrometheusMetrics;
+use rpc::Metadata;
+use rpc::forge::forge_server::Forge;
+use tonic::Request;
+
+use crate::cfg::file::InitialObjectsConfig;
+use crate::db_init;
+use crate::test_support::builder::TestApiBuilder;
+use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
+use crate::tests::common;
+use crate::tests::common::api_fixtures::network_segment::FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS;
+use crate::tests::common::api_fixtures::tenant::create_fixture_tenant;
+use crate::tests::common::api_fixtures::{
+    TEST_SITE_PREFIXES, TestEnvOverrides, create_test_env, create_test_env_with_overrides,
+    get_vpc_fixture_id,
+};
+use crate::tests::common::rpc_builder::VpcCreationRequest;
+
+/// Creates a VPC with one stretchable segment for direct SVI allocation tests.
+async fn create_stretchable_segment_for_svi_test(
+    txn: &mut sqlx::PgTransaction<'_>,
+    name: &str,
+    prefixes: Vec<NewNetworkPrefix>,
+) -> Result<(VpcId, NetworkSegmentId), db::DatabaseError> {
+    create_stretchable_segment_for_svi_test_with_vpc_type(
+        txn,
+        name,
+        VpcVirtualizationType::Flat,
+        prefixes,
+    )
+    .await
+}
+
+async fn create_stretchable_segment_for_svi_test_with_vpc_type(
+    txn: &mut sqlx::PgTransaction<'_>,
+    name: &str,
+    network_virtualization_type: VpcVirtualizationType,
+    prefixes: Vec<NewNetworkPrefix>,
+) -> Result<(VpcId, NetworkSegmentId), db::DatabaseError> {
+    // Seed a VPC that can be updated through the same DB path used by handlers.
+    let vpc_id = uuid::Uuid::new_v4().into();
+    db::vpc::persist(
+        NewVpc {
+            id: vpc_id,
+            tenant_organization_id: "tenant".to_string(),
+            network_virtualization_type,
+            metadata: model::metadata::Metadata {
+                name: format!("{name}-vpc"),
+                ..Default::default()
+            },
+            network_security_group_id: None,
+            routing_profile_type: None,
+            routing_profile_overrides: None,
+            power_resource_group: None,
+            vni: None,
+            slaac_enabled: false,
+        },
+        VpcStatus { vni: None },
+        txn.as_mut(),
+    )
+    .await?;
+
+    // Attach a stretchable segment whose prefixes should receive SVI IPs.
+    let segment = db::network_segment::persist(
+        NewNetworkSegment {
+            id: uuid::Uuid::new_v4().into(),
+            name: name.to_string(),
+            subdomain_id: None,
+            vpc_id: Some(vpc_id),
+            mtu: 1500,
+            prefixes,
+            vlan_id: None,
+            vni: None,
+            segment_type: NetworkSegmentType::Admin,
+            can_stretch: Some(true),
+            allocation_strategy: Default::default(),
+            infer_slaac_eui64_addresses: false,
+        },
+        txn.as_mut(),
+        NetworkSegmentControllerState::Ready,
+    )
+    .await?;
+
+    Ok((vpc_id, segment.id))
+}
+
+#[crate::sqlx_test]
+async fn test_advance_network_prefix_state(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env =
+        create_test_env_with_overrides(pool.clone(), TestEnvOverrides::no_network_segments()).await;
+    let mut txn = env.pool.begin().await?;
+
+    let vpc = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .metadata(rpc::forge::Metadata {
+                    name: "test vpc 1".to_string(),
+                    ..Default::default()
+                })
+                .tonic_request(),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+
+    let vpc_id = vpc.id.unwrap();
+
+    let id: NetworkSegmentId = uuid::Uuid::new_v4().into();
+    let segment: NetworkSegment = db::network_segment::persist(
+        NewNetworkSegment {
+            id,
+            name: "integration_test".to_string(),
+            subdomain_id: None,
+            mtu: 1500i32,
+            vpc_id: Some(vpc_id),
+            segment_type: NetworkSegmentType::Admin,
+
+            prefixes: vec![
+                NewNetworkPrefix {
+                    prefix: "192.0.2.1/24".parse().expect("can't parse network"),
+                    gateway: "192.0.2.1".parse().ok(),
+                    dhcpv6_link_address: None,
+                    num_reserved: 1,
+                },
+                NewNetworkPrefix {
+                    prefix: "2001:db8:f::/64".parse().expect("can't parse network"),
+                    gateway: None,
+                    dhcpv6_link_address: None,
+                    num_reserved: 100,
+                },
+            ],
+
+            vlan_id: None,
+            vni: None,
+            can_stretch: None,
+            allocation_strategy: Default::default(),
+            infer_slaac_eui64_addresses: false,
+        },
+        &mut txn,
+        NetworkSegmentControllerState::Provisioning,
+    )
+    .await?;
+
+    txn.commit().await?;
+    let mut txn = pool.begin().await?;
+    let ns = db::network_segment::find_by_name(&mut txn, "integration_test")
+        .await
+        .unwrap();
+
+    assert_eq!(ns.id, id);
+
+    assert!(
+        db::network_prefix::find(&mut txn, segment.prefixes[0].id)
+            .await
+            .is_ok()
+    );
+    txn.commit().await?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_network_segment_delete_fails_with_associated_machine_interface(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let segment = create_network_segment_with_api(
+        &env,
+        false,
+        false,
+        None,
+        rpc::forge::NetworkSegmentType::Admin as i32,
+        1,
+    )
+    .await;
+
+    let mut txn = env.pool.begin().await?;
+    let db_segment = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(db::network_segment::IdColumn, &segment.id.unwrap()),
+        network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await
+    .unwrap()
+    .remove(0);
+
+    db::machine_interface::create(
+        &mut txn,
+        std::slice::from_ref(&db_segment),
+        MacAddress::from_str("ff:ff:ff:ff:ff:ff").as_ref().unwrap(),
+        true,
+        AddressSelectionStrategy::NextAvailableIp,
+        None,
+    )
+    .await?;
+    txn.commit().await.unwrap();
+
+    let delete_result = env
+        .api
+        .delete_network_segment(Request::new(rpc::forge::NetworkSegmentDeletionRequest {
+            id: segment.id,
+        }))
+        .await;
+
+    let err = delete_result.expect_err("Expected deletion to fail");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        err.message(),
+        "Network Segment can't be deleted with associated MachineInterface"
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_overlapping_prefix(pool: sqlx::PgPool) -> Result<(), eyre::Report> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+
+    // This uses prefix "192.0.2.0/24"
+    let _segment = create_network_segment_with_api(
+        &env,
+        false,
+        false,
+        None,
+        rpc::forge::NetworkSegmentType::Admin as i32,
+        1,
+    )
+    .await;
+
+    // Now try to create another one with a prefix that is contained within the exising prefix
+    let request = rpc::forge::NetworkSegmentCreationRequest {
+        id: None,
+        mtu: Some(1500),
+        name: "TEST_SEGMENT_2".to_string(),
+        prefixes: vec![rpc::forge::NetworkPrefix {
+            id: None,
+            prefix: "192.0.2.12/30".to_string(), // is inside 192.0.2.0/24
+            gateway: Some("192.0.2.13".to_string()),
+            reserve_first: 1,
+            free_ip_count: 0,
+            svi_ip: None,
+            free_ip_count_v2: None,
+            free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
+        }],
+        subdomain_id: None,
+        vpc_id: None,
+        segment_type: rpc::forge::NetworkSegmentType::Tenant as i32,
+        infer_slaac_eui64_addresses: false,
+    };
+    match env.api.create_network_segment(Request::new(request)).await {
+        Ok(_) => Err(eyre::eyre!(
+            "overlapping network prefix was allowed. DB should prevent this"
+        )),
+        Err(status) if status.code() == tonic::Code::Internal => Err(eyre::eyre!(
+            "overlapping network prefix was caught by DB constraint. should be checked earlier"
+        )),
+        Err(status) if status.code() == tonic::Code::InvalidArgument => {
+            assert_eq!(status.message(), "prefix overlaps with an existing one");
+            Ok(())
+        }
+        Err(err) => Err(err.into()), // unexpected error
+    }
+}
+
+/// Create a network segment, delete it - release its vlan_id,
+/// and then create an new network segment.
+/// The new segment should be able to re-use the vlan_id from
+/// the deleted segment.
+#[crate::sqlx_test]
+async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
+    let env =
+        create_test_env_with_overrides(db_pool.clone(), TestEnvOverrides::no_network_segments())
+            .await;
+
+    // create_test_env makes a vlan-id pool, so clean that up first
+    let mut txn = db_pool.begin().await?;
+    sqlx::query("DELETE FROM resource_pool WHERE name = $1")
+        .bind(VLANID)
+        .execute(&mut *txn)
+        .await?;
+    txn.commit().await?;
+
+    // Only one vlan-id available
+    let mut txn = db_pool.begin().await?;
+    let vlan_pool = ResourcePool::new(VLANID.to_string(), ValueType::Integer);
+    db::resource_pool::populate(&vlan_pool, &mut txn, vec!["1".to_string()], true).await?;
+    txn.commit().await?;
+
+    // Create a network segment rpc call
+    let segment = create_network_segment_with_api(
+        &env,
+        false,
+        true,
+        None,
+        rpc::forge::NetworkSegmentType::Admin as i32,
+        1,
+    )
+    .await;
+
+    // Value is allocated
+    let mut txn = db_pool.begin().await?;
+    let vni: i32 = sqlx::query_scalar("SELECT vni_id FROM network_segments WHERE id = $1")
+        .bind(segment.id)
+        .fetch_one(&mut *txn)
+        .await?;
+    assert_eq!(
+        db::resource_pool::stats(&mut *txn, vlan_pool.name()).await?,
+        ResourcePoolStats {
+            used: 1,
+            free: 0,
+            auto_assign_used: 1,
+            auto_assign_free: 0,
+            non_auto_assign_free: 0,
+            non_auto_assign_used: 0
+        }
+    );
+    txn.commit().await?;
+
+    // Delete the segment, releasing the VNI back to the pool
+    env.api
+        .delete_network_segment(Request::new(rpc::forge::NetworkSegmentDeletionRequest {
+            id: segment.id,
+        }))
+        .await?;
+    // Ready
+    env.run_network_segment_controller_iteration().await;
+    // DrainAllocatedIPs
+    env.run_network_segment_controller_iteration().await;
+    // Wait for the drain period
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Deleting
+    env.run_network_segment_controller_iteration().await;
+    // DBDelete
+    env.run_network_segment_controller_iteration().await;
+
+    // Value is free
+    let mut txn = db_pool.begin().await?;
+    let vni_entry = db::resource_pool::find_value(&mut *txn, &vni.to_string())
+        .await?
+        .into_iter()
+        .find(|entry| entry.pool_name == env.common_pools.ethernet.pool_vni.name())
+        .expect("segment VNI must remain in its pool");
+    assert_eq!(vni_entry.state.0, ResourcePoolEntryState::Free);
+    assert_eq!(
+        db::resource_pool::stats(&mut *txn, vlan_pool.name()).await?,
+        ResourcePoolStats {
+            used: 0,
+            free: 1,
+            auto_assign_used: 0,
+            auto_assign_free: 1,
+            non_auto_assign_free: 0,
+            non_auto_assign_used: 0
+        }
+    );
+    txn.commit().await?;
+
+    // Create a new segment, re-using the VLAN
+    create_network_segment_with_api(
+        &env,
+        false,
+        true,
+        None,
+        rpc::forge::NetworkSegmentType::Admin as i32,
+        1,
+    )
+    .await;
+
+    // Value allocated again
+    let mut txn = db_pool.begin().await?;
+    assert_eq!(
+        db::resource_pool::stats(&mut *txn, vlan_pool.name()).await?,
+        ResourcePoolStats {
+            used: 1,
+            free: 0,
+            auto_assign_used: 1,
+            auto_assign_free: 0,
+            non_auto_assign_free: 0,
+            non_auto_assign_used: 0
+        }
+    );
+    txn.commit().await?;
+
+    Ok(())
+}
+
+/// Builds the smallest configured underlay needed by startup reconciliation
+/// tests. Callers choose only the CIDR and gateway that distinguish each case.
+fn initial_underlay_definition(prefix: &str, gateway: &str) -> NetworkDefinition {
+    NetworkDefinition {
+        segment_type: NetworkDefinitionSegmentType::Underlay,
+        prefix: prefix.parse().unwrap(),
+        prefix_v6: None,
+        gateway: Some(gateway.parse().unwrap()),
+        dhcpv6_link_address: None,
+        mtu: 1500,
+        reserve_first: 5,
+        allocation_strategy: Default::default(),
+        infer_slaac_eui64_addresses: false,
+        vpc_name: None,
+    }
+}
+
+/// Persists an initial segment and its durable `network_def` link without
+/// creating DNS. This leaves startup as the only path that can repair the
+/// missing reverse zone.
+async fn persist_initial_network_without_reverse_zone(
+    pool: &sqlx::PgPool,
+    name: &str,
+    definition: &NetworkDefinition,
+) -> Result<NetworkSegment, Box<dyn std::error::Error>> {
+    let mut txn = pool.begin().await?;
+    let domains = db::dns::domain::find_by_name(txn.as_mut(), "dwrt1.com").await?;
+    let [domain] = domains.as_slice() else {
+        panic!("test fixture should have exactly one forward domain");
+    };
+    let mut segment = NewNetworkSegment::build_from(name, domain.id, definition)?;
+    segment.can_stretch = Some(true);
+    let segment =
+        db::network_segment::persist(segment, txn.as_mut(), NetworkSegmentControllerState::Ready)
+            .await?;
+    db::network_segment::insert_network_def(txn.as_mut(), name, segment.id, definition).await?;
+    txn.commit().await?;
+    Ok(segment)
+}
+
+#[crate::sqlx_test]
+async fn test_initial_network_toml_persists_ipv4_dual_stack_and_ipv6_only(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let config: InitialObjectsConfig = Figment::new()
+        .merge(Toml::string(
+            r#"
+                [networks.ipv4]
+                type = "underlay"
+                prefix = "192.0.2.0/24"
+                gateway = "192.0.2.1"
+                mtu = 1500
+                reserve_first = 5
+
+                [networks.dual-stack]
+                type = "underlay"
+                prefix = "198.51.100.0/24"
+                prefix_v6 = "2001:db8:1::/64"
+                gateway = "198.51.100.1"
+                dhcpv6_link_address = "2001:db8:ffff::1"
+                mtu = 1500
+                reserve_first = 5
+
+                [networks.ipv6-only]
+                type = "underlay"
+                prefix = "2001:db8:2::/64"
+                dhcpv6_link_address = "2001:db8:ffff::2"
+                mtu = 1500
+                reserve_first = 5
+            "#,
+        ))
+        .extract()?;
+    let networks = config.networks.expect("configured networks");
+    assert_eq!(networks["ipv6-only"].gateway, None);
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
+
+    let mut txn = env.pool.begin().await?;
+    assert_eq!(
+        db::network_segment::all_stored_defs(txn.as_mut()).await?,
+        networks,
+    );
+
+    for (name, expected_prefixes) in [
+        ("ipv4", vec![("192.0.2.0/24", Some("192.0.2.1"), None)]),
+        (
+            "dual-stack",
+            vec![
+                ("198.51.100.0/24", Some("198.51.100.1"), None),
+                ("2001:db8:1::/64", None, Some("2001:db8:ffff::1")),
+            ],
+        ),
+        (
+            "ipv6-only",
+            vec![("2001:db8:2::/64", None, Some("2001:db8:ffff::2"))],
+        ),
+    ] {
+        let segment = db::network_segment::find_by_name(&mut txn, name).await?;
+        assert_eq!(segment.prefixes.len(), expected_prefixes.len(), "{name}");
+        for (prefix, gateway, dhcpv6_link_address) in expected_prefixes {
+            let prefix = prefix.parse::<ipnetwork::IpNetwork>()?;
+            let stored = segment
+                .prefixes
+                .iter()
+                .find(|stored| stored.prefix == prefix)
+                .expect("configured prefix must be persisted");
+            assert_eq!(
+                stored.gateway,
+                gateway.map(str::parse).transpose()?,
+                "{name}"
+            );
+            assert_eq!(
+                stored.dhcpv6_link_address,
+                dhcpv6_link_address.map(str::parse).transpose()?,
+                "{name}",
+            );
+        }
+    }
+    txn.commit().await?;
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_initial_network_reverse_zones_follow_persisted_config_drift(
+    db_pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // The stored `network_def.segment_id` identifies the segment startup must
+    // repair. A changed config CIDR must not create a zone for data that was
+    // never persisted.
+    let env =
+        create_test_env_with_overrides(db_pool.clone(), TestEnvOverrides::no_network_segments())
+            .await;
+    let original = initial_underlay_definition("10.44.0.0/16", "10.44.0.1");
+    let drifted = initial_underlay_definition("10.55.0.0/16", "10.55.0.1");
+    let original_segment =
+        persist_initial_network_without_reverse_zone(&db_pool, "drifted-underlay", &original)
+            .await?;
+
+    // A live addition is not part of the immutable seed. Startup must preserve
+    // it while repairing the original zone and rejecting the TOML CIDR drift.
+    let added_prefix = "2001:db8:55::/64";
+    let applied = env
+        .api
+        .add_network_segment_prefix(Request::new(rpc::forge::AddNetworkSegmentPrefixRequest {
+            network_segment_id: Some(original_segment.id),
+            prefix: added_prefix.to_string(),
+            ..Default::default()
+        }))
+        .await?
+        .into_inner();
+
+    crate::db_init::create_initial_networks(
+        &env.api,
+        &env.pool,
+        &HashMap::from([("drifted-underlay".to_string(), drifted.clone())]),
+    )
+    .await?;
+
+    let mut txn = db_pool.begin().await?;
+    let segment = db::network_segment::find_by_name(&mut txn, "drifted-underlay").await?;
+    assert_eq!(segment.id, original_segment.id);
+    assert_eq!(segment.prefixes.len(), 2);
+    assert!(
+        segment
+            .prefixes
+            .iter()
+            .any(|prefix| prefix.id == original_segment.prefixes[0].id
+                && prefix.prefix == original.prefix)
+    );
+    assert!(
+        segment
+            .prefixes
+            .iter()
+            .any(|prefix| prefix.prefix.to_string() == added_prefix)
+    );
+    let persisted: rpc::forge::NetworkSegment = segment.clone().into();
+    assert_eq!(persisted.config, applied.config);
+    assert_eq!(
+        db::network_segment::stored_def(txn.as_mut(), "drifted-underlay").await?,
+        Some(original.clone()),
+        "config drift must not replace the stored declaration",
+    );
+
+    let original_zone = db::dns::cidr_to_reverse_zone(original.prefix).unwrap();
+    let original_domains =
+        db::dns::domain::find_reverse_zone_by_normalized_name(txn.as_mut(), &original_zone).await?;
+    assert_eq!(
+        original_domains.len(),
+        1,
+        "startup should create the zone for the persisted prefix",
+    );
+    // Drift must retain the added prefix's zone as well as its stored metadata.
+    let added_zone = db::dns::cidr_to_reverse_zone(added_prefix.parse()?).expect("aligned prefix");
+    assert_eq!(
+        db::dns::domain::find_reverse_zone_by_normalized_name(txn.as_mut(), &added_zone)
+            .await?
+            .len(),
+        1
+    );
+
+    let drifted_zone = db::dns::cidr_to_reverse_zone(drifted.prefix).unwrap();
+    assert!(
+        db::dns::domain::find_reverse_zone_by_normalized_name(txn.as_mut(), &drifted_zone)
+            .await?
+            .is_empty(),
+        "startup must not create an orphan zone for an unapplied declaration",
+    );
+    txn.commit().await?;
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_static_assignment_initialization_preserves_lookup_failure(
+    db_pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(db_pool).await;
+    sqlx::query("UPDATE network_segments SET allocation_strategy = 'unsupported' WHERE name = $1")
+        .bind(db::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME)
+        .execute(&env.pool)
+        .await?;
+
+    let snapshot_query = "SELECT jsonb_build_object(
+        'segments', (SELECT jsonb_agg(ns ORDER BY id) FROM network_segments ns),
+        'prefixes', (SELECT jsonb_agg(np ORDER BY id) FROM network_prefixes np))";
+    let original: serde_json::Value = sqlx::query_scalar(snapshot_query)
+        .fetch_one(&env.pool)
+        .await?;
+
+    let mut txn = db::Transaction::begin(&env.pool).await?;
+    let error = db_init::ensure_static_assignments_segment(&env.api, &mut txn, None)
+        .await
+        .expect_err("a failed anchor lookup must stop initialization");
+    let crate::CarbideError::DBError(annotated) = &error else {
+        panic!("expected DBError, got {error:?}");
+    };
+    let sqlx::Error::ColumnDecode { index, source } = &annotated.source else {
+        panic!("expected ColumnDecode, got {error:?}");
+    };
+    assert_eq!(index, "\"allocation_strategy\"");
+    assert!(source.to_string().contains("unsupported"), "{source:?}");
+
+    // The decode failure must leave this transaction usable and unchanged.
+    let pending: serde_json::Value = sqlx::query_scalar(snapshot_query)
+        .fetch_one(txn.as_pgconn())
+        .await?;
+    assert_eq!(pending, original);
+    txn.commit().await?;
+
+    let persisted: serde_json::Value = sqlx::query_scalar(snapshot_query)
+        .fetch_one(&env.pool)
+        .await?;
+    assert_eq!(persisted, original);
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_initial_network_restart_does_not_restore_deleted_static_assignment_zones(
+    db_pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // The static-assignments row may remain during soft-delete drainage, but
+    // restart must not recreate the reverse zones removed with that segment.
+    let env =
+        create_test_env_with_overrides(db_pool.clone(), TestEnvOverrides::no_network_segments())
+            .await;
+    let networks = HashMap::new();
+    crate::db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
+
+    let mut txn = db_pool.begin().await?;
+    let static_assignments = db::network_segment::static_assignments(txn.as_mut()).await?;
+    let reverse_zones = static_assignments
+        .prefixes
+        .iter()
+        .map(|prefix| db::dns::cidr_to_reverse_zone(prefix.prefix).unwrap())
+        .collect::<Vec<_>>();
+    txn.commit().await?;
+
+    env.api
+        .delete_network_segment(Request::new(rpc::forge::NetworkSegmentDeletionRequest {
+            id: Some(static_assignments.id),
+        }))
+        .await?;
+    crate::db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
+
+    let mut txn = db_pool.begin().await?;
+    let static_assignments = db::network_segment::static_assignments(txn.as_mut()).await?;
+    assert!(static_assignments.is_marked_as_deleted());
+    for reverse_zone in reverse_zones {
+        assert!(
+            db::dns::domain::find_reverse_zone_by_normalized_name(txn.as_mut(), &reverse_zone,)
+                .await?
+                .is_empty(),
+            "startup must not restore reverse zones for a soft-deleted static-assignments segment",
+        );
+    }
+    txn.commit().await?;
+    Ok(())
+}
+
+#[crate::sqlx_test]
+pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env =
+        create_test_env_with_overrides(db_pool.clone(), TestEnvOverrides::no_network_segments())
+            .await;
+    let vpcs = HashMap::from([(
+        "zero-dpu-vpc".to_string(),
+        VpcDefinition {
+            organization_id: Some(FIXTURE_TENANT_ORG_ID.to_string()),
+            network_virtualization_type: VpcVirtualizationType::Flat,
+            routing_profile_type: None,
+            routing_profile_overrides: None,
+            vni: None,
+        },
+    )]);
+    let networks = HashMap::from([(
+        "ZERO-DPU-HOST-01-SWP7".to_string(),
+        NetworkDefinition {
+            segment_type: NetworkDefinitionSegmentType::HostInband,
+            prefix: "10.217.18.192/30".parse().unwrap(),
+            prefix_v6: None,
+            gateway: Some("10.217.18.193".parse().unwrap()),
+            dhcpv6_link_address: None,
+            mtu: 1500,
+            reserve_first: 1,
+            allocation_strategy: Default::default(),
+            infer_slaac_eui64_addresses: false,
+            vpc_name: Some("zero-dpu-vpc".to_string()),
+        },
+    )]);
+
+    crate::db_init::create_initial_vpcs(&env.api, &vpcs).await?;
+    crate::db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
+
+    let mut txn = db_pool.begin().await?;
+    let seeded_vpcs = db::vpc::find_by_name(txn.as_mut(), "zero-dpu-vpc").await?;
+    assert_eq!(seeded_vpcs.len(), 1);
+    let seeded_vpc = &seeded_vpcs[0];
+    assert_eq!(
+        seeded_vpc.config.tenant_organization_id,
+        FIXTURE_TENANT_ORG_ID
+    );
+    assert_eq!(
+        seeded_vpc.config.network_virtualization_type,
+        VpcVirtualizationType::Flat
+    );
+
+    let host_inband = db::network_segment::find_by_name(&mut txn, "ZERO-DPU-HOST-01-SWP7").await?;
+    assert_eq!(
+        host_inband.config.segment_type,
+        NetworkSegmentType::HostInband
+    );
+    assert_eq!(host_inband.config.vpc_id, Some(seeded_vpc.id));
+    txn.commit().await?;
+
+    crate::db_init::create_initial_vpcs(&env.api, &vpcs).await?;
+    let seeded_vpcs = db::vpc::find_by_name(&env.pool, "zero-dpu-vpc").await?;
+    assert_eq!(
+        seeded_vpcs.len(),
+        1,
+        "second create_initial_vpcs should not create duplicate VPCs"
+    );
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InitialVpcAllocationFailure {
+    Exhausted,
+    RequestedUnavailable,
+    MissingPool,
+}
+
+impl InitialVpcAllocationFailure {
+    fn pool_name(self) -> &'static str {
+        match self {
+            Self::Exhausted => "initial-vpc-empty",
+            Self::RequestedUnavailable => "initial-vpc-requested",
+            Self::MissingPool => "initial-vpc-unconfigured",
+        }
+    }
+
+    fn requested_vni(self) -> Option<i32> {
+        match self {
+            Self::Exhausted | Self::MissingPool => None,
+            Self::RequestedUnavailable => Some(42),
+        }
+    }
+
+    fn metric_labels(self) -> [(&'static str, &'static str); 5] {
+        match self {
+            Self::Exhausted => [
+                ("operation", "allocate"),
+                ("failure", "exhausted"),
+                ("failure_policy", "required"),
+                ("allocation_mode", "automatic"),
+                ("value_type", "integer"),
+            ],
+            Self::RequestedUnavailable => [
+                ("operation", "allocate"),
+                ("failure", "requested_value_unavailable"),
+                ("failure_policy", "required"),
+                ("allocation_mode", "requested"),
+                ("value_type", "integer"),
+            ],
+            Self::MissingPool => [
+                ("operation", "allocate"),
+                ("failure", "configuration"),
+                ("failure_policy", "required"),
+                ("allocation_mode", "automatic"),
+                ("value_type", "integer"),
+            ],
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct InitialVpcAllocationFailureRecord {
+    error_kind: &'static str,
+    error_message: String,
+    metadata_name: String,
+    event_name: Option<String>,
+    metric_name: Option<String>,
+    level: tracing::Level,
+    message: String,
+    operation: Option<String>,
+    failure: Option<String>,
+    failure_policy: Option<String>,
+    allocation_mode: Option<String>,
+    value_type: Option<String>,
+    owner_id_is_vpc: bool,
+    pool: Option<String>,
+    error: Option<String>,
+}
+
+#[crate::sqlx_test]
+async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    const LIFECYCLE_FAILURES_METRIC: &str = "carbide_resource_pool_lifecycle_failures_total";
+
+    let env =
+        create_test_env_with_overrides(db_pool.clone(), TestEnvOverrides::no_network_segments())
+            .await;
+
+    check_cases_async(
+        [
+            Case {
+                scenario: "automatic pool exhaustion",
+                input: InitialVpcAllocationFailure::Exhausted,
+                expect: Yields(InitialVpcAllocationFailureRecord {
+                    error_kind: "resource_pool_empty",
+                    error_message:
+                        "resource pool database error: resource pool is empty, cannot allocate"
+                            .to_string(),
+                    metadata_name: "resource_pool_exhausted".to_string(),
+                    event_name: Some("resource_pool_exhausted".to_string()),
+                    metric_name: Some(LIFECYCLE_FAILURES_METRIC.to_string()),
+                    level: tracing::Level::ERROR,
+                    message: "Pool exhausted, cannot allocate".to_string(),
+                    operation: Some("allocate".to_string()),
+                    failure: Some("exhausted".to_string()),
+                    failure_policy: Some("required".to_string()),
+                    allocation_mode: Some("automatic".to_string()),
+                    value_type: Some("integer".to_string()),
+                    owner_id_is_vpc: true,
+                    pool: Some("initial-vpc-empty".to_string()),
+                    error: None,
+                }),
+            },
+            Case {
+                scenario: "requested VNI unavailable",
+                input: InitialVpcAllocationFailure::RequestedUnavailable,
+                expect: Yields(InitialVpcAllocationFailureRecord {
+                    error_kind: "failed_precondition",
+                    error_message:
+                        "`42` not an available value for resource-pool `initial-vpc-requested`"
+                            .to_string(),
+                    metadata_name: "resource_pool_allocation_failed".to_string(),
+                    event_name: Some("resource_pool_allocation_failed".to_string()),
+                    metric_name: Some(LIFECYCLE_FAILURES_METRIC.to_string()),
+                    level: tracing::Level::ERROR,
+                    message: "Error allocating from resource pool".to_string(),
+                    operation: Some("allocate".to_string()),
+                    failure: Some("requested_value_unavailable".to_string()),
+                    failure_policy: Some("required".to_string()),
+                    allocation_mode: Some("requested".to_string()),
+                    value_type: Some("integer".to_string()),
+                    owner_id_is_vpc: true,
+                    pool: Some("initial-vpc-requested".to_string()),
+                    error: Some(
+                        "`42` not an available value for resource-pool `initial-vpc-requested`"
+                            .to_string(),
+                    ),
+                }),
+            },
+            Case {
+                scenario: "absent pool configuration",
+                input: InitialVpcAllocationFailure::MissingPool,
+                expect: Yields(InitialVpcAllocationFailureRecord {
+                    error_kind: "failed_precondition",
+                    error_message:
+                        "resource-pool `initial-vpc-unconfigured` has no automatic allocation range"
+                            .to_string(),
+                    metadata_name: "resource_pool_allocation_failed".to_string(),
+                    event_name: Some("resource_pool_allocation_failed".to_string()),
+                    metric_name: Some(LIFECYCLE_FAILURES_METRIC.to_string()),
+                    level: tracing::Level::ERROR,
+                    message: "Error allocating from resource pool".to_string(),
+                    operation: Some("allocate".to_string()),
+                    failure: Some("configuration".to_string()),
+                    failure_policy: Some("required".to_string()),
+                    allocation_mode: Some("automatic".to_string()),
+                    value_type: Some("integer".to_string()),
+                    owner_id_is_vpc: true,
+                    pool: Some("initial-vpc-unconfigured".to_string()),
+                    error: Some(
+                        "resource-pool `initial-vpc-unconfigured` has no automatic allocation range"
+                            .to_string(),
+                    ),
+                }),
+            },
+        ],
+        |failure| {
+            let db_pool = env.pool.clone();
+            let manager = env.api.work_lock_manager_handle.clone();
+            async move {
+                let source_pool =
+                    ResourcePool::<i32>::new(failure.pool_name().to_string(), ValueType::Integer);
+                let mut txn = db_pool.begin().await.expect("begin seed transaction");
+                let auto_assign = matches!(failure, InitialVpcAllocationFailure::Exhausted);
+                if !matches!(failure, InitialVpcAllocationFailure::MissingPool) {
+                    db::resource_pool::populate(&source_pool, &mut txn, vec![43], auto_assign)
+                        .await
+                        .expect("seed an allocation range");
+                }
+                if auto_assign {
+                    db::resource_pool::allocate(
+                        &source_pool,
+                        &mut txn,
+                        model::resource_pool::OwnerType::Vpc,
+                        &VpcId::new().to_string(),
+                        None,
+                    )
+                    .await
+                    .expect("exhaust the configured automatic range");
+                }
+                txn.commit().await.expect("commit seed transaction");
+
+                let vpcs = HashMap::from([(
+                    format!("{}-vpc", failure.pool_name()),
+                    VpcDefinition {
+                        organization_id: Some(FIXTURE_TENANT_ORG_ID.to_string()),
+                        network_virtualization_type: VpcVirtualizationType::Flat,
+                        routing_profile_type: None,
+                        routing_profile_overrides: None,
+                        vni: failure.requested_vni(),
+                    },
+                )]);
+                let mut txn = db_pool.begin().await.expect("begin binding transaction");
+                let registry = ResourcePoolRegistry::resolve(
+                    PoolDefinitionSource::SeedConfiguration,
+                    &mut txn,
+                    &if matches!(failure, InitialVpcAllocationFailure::MissingPool) {
+                        HashMap::new()
+                    } else {
+                        HashMap::from([(
+                            failure.pool_name().to_string(),
+                            ResourcePoolSelection {
+                                pool_name: failure.pool_name().to_string(),
+                                value_domain: ResourcePoolValueDomain::Integer,
+                                backend_name: None,
+                                backend_kind: ResourcePoolBackendKind::Integrated,
+                                authority_id: INTEGRATED_AUTHORITY_ID.to_string(),
+                                remote_pool: failure.pool_name().to_string(),
+                            },
+                        )])
+                    },
+                )
+                .await
+                .expect("resolve configured VPC pool");
+                assert_eq!(
+                    registry.get(failure.pool_name()).is_some(),
+                    !matches!(failure, InitialVpcAllocationFailure::MissingPool)
+                );
+                txn.commit().await.expect("commit pool binding");
+                let mut common = db::resource_pool::create_common_pools(
+                    db_pool.clone(),
+                    Default::default(),
+                )
+                .await
+                .expect("create pool handles");
+                Arc::get_mut(&mut common)
+                    .expect("unshared pool handles")
+                    .ethernet
+                    .pool_vpc_vni = Arc::new(source_pool);
+                let api = TestApiBuilder::new(db_pool.clone(), common, manager)
+                    .with_resource_pool_registry(registry)
+                    .build();
+                let metrics = MetricsCapture::start();
+                let (result, logs) =
+                    capture_logs_async(crate::db_init::create_initial_vpcs(&api, &vpcs)).await;
+                let returned_error = result.expect_err("initial VPC allocation must fail");
+                let error_kind = match &returned_error {
+                    crate::CarbideError::ResourcePoolDatabaseError(
+                        db::resource_pool::ResourcePoolDatabaseError::ResourcePool(
+                            ResourcePoolError::Empty,
+                        ),
+                    ) => "resource_pool_empty",
+                    crate::CarbideError::FailedPrecondition(_) => "failed_precondition",
+                    error => panic!("unexpected initial VPC allocation error: {error:?}"),
+                };
+                let event_logs = logs
+                    .iter()
+                    .filter(|log| log.field("metric_name") == Some(LIFECYCLE_FAILURES_METRIC))
+                    .collect::<Vec<_>>();
+                assert_eq!(event_logs.len(), 1);
+                let log = event_logs[0];
+
+                // Tests without a `MetricsCapture` can increment this shared
+                // counter. The log capture above checks this request's event.
+                let observed =
+                    metrics.counter_delta(LIFECYCLE_FAILURES_METRIC, &failure.metric_labels());
+                assert!(
+                    observed >= 1.0,
+                    "expected at least one {failure:?} allocation failure, observed {observed}"
+                );
+
+
+                Ok::<_, ()>(InitialVpcAllocationFailureRecord {
+                    error_kind,
+                    error_message: returned_error.to_string(),
+                    metadata_name: log.metadata_name.clone(),
+                    event_name: log.field("event_name").map(str::to_string),
+                    metric_name: log.field("metric_name").map(str::to_string),
+                    level: log.level,
+                    message: log.message.clone(),
+                    operation: log.field("operation").map(str::to_string),
+                    failure: log.field("failure").map(str::to_string),
+                    failure_policy: log.field("failure_policy").map(str::to_string),
+                    allocation_mode: log.field("allocation_mode").map(str::to_string),
+                    value_type: log.field("value_type").map(str::to_string),
+                    owner_id_is_vpc: log
+                        .field("owner_id")
+                        .is_some_and(|owner_id| VpcId::from_str(owner_id).is_ok()),
+                    pool: log.field("pool").map(str::to_string),
+                    error: log.field("error").map(str::to_string),
+                })
+            }
+        },
+    )
+    .await;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+pub(in crate::tests) async fn test_create_initial_network_fails_for_missing_vpc_name(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env =
+        create_test_env_with_overrides(db_pool.clone(), TestEnvOverrides::no_network_segments())
+            .await;
+    let networks = HashMap::from([(
+        "ZERO-DPU-HOST-01-SWP7".to_string(),
+        NetworkDefinition {
+            segment_type: NetworkDefinitionSegmentType::HostInband,
+            prefix: "10.217.18.192/30".parse().unwrap(),
+            prefix_v6: None,
+            gateway: Some("10.217.18.193".parse().unwrap()),
+            dhcpv6_link_address: None,
+            mtu: 1500,
+            reserve_first: 1,
+            allocation_strategy: Default::default(),
+            infer_slaac_eui64_addresses: false,
+            vpc_name: Some("missing-vpc".to_string()),
+        },
+    )]);
+
+    let err = crate::db_init::create_initial_networks(&env.api, &env.pool, &networks)
+        .await
+        .expect_err("missing VPC references must fail before creating a network segment");
+
+    assert!(
+        err.to_string().contains("missing-vpc"),
+        "error should name the missing VPC: {err}"
+    );
+
+    let mut txn = db_pool.begin().await?;
+    assert!(
+        db::network_segment::find_by_name(&mut txn, "ZERO-DPU-HOST-01-SWP7")
+            .await
+            .is_err(),
+        "network segment should not be created when its VPC reference is invalid"
+    );
+    txn.commit().await?;
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_find_segment_ids(pool: sqlx::PgPool) -> Result<(), eyre::Report> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+
+    let segment = create_network_segment_with_api(
+        &env,
+        false,
+        false,
+        None,
+        rpc::forge::NetworkSegmentType::Admin as i32,
+        1,
+    )
+    .await;
+    let segment_id: NetworkSegmentId = segment.id.unwrap();
+
+    let mut txn = env.pool.begin().await?;
+    let mut segments = db::network_segment::list_segment_ids(&mut txn, None).await?;
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments.remove(0), segment_id);
+
+    let mut segments =
+        db::network_segment::list_segment_ids(&mut txn, Some(NetworkSegmentType::Admin)).await?;
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments.remove(0), segment_id);
+
+    let segments =
+        db::network_segment::list_segment_ids(&mut txn, Some(NetworkSegmentType::Underlay)).await?;
+    assert_eq!(segments.len(), 0);
+    let segments =
+        db::network_segment::list_segment_ids(&mut txn, Some(NetworkSegmentType::Tenant)).await?;
+    assert_eq!(segments.len(), 0);
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_segment_creation_with_id(pool: sqlx::PgPool) -> Result<(), eyre::Report> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+
+    let id: NetworkSegmentId = uuid::Uuid::new_v4().into();
+    let segment = create_network_segment_with_api(
+        &env,
+        false,
+        false,
+        Some(id),
+        rpc::forge::NetworkSegmentType::Admin as i32,
+        1,
+    )
+    .await;
+
+    assert_eq!(segment.id, Some(id));
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_31_prefix_not_allowed(pool: sqlx::PgPool) -> Result<(), eyre::Report> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+
+    let request = rpc::forge::NetworkSegmentCreationRequest {
+        id: None,
+        mtu: Some(1500),
+        name: "TEST_SEGMENT_1".to_string(),
+        prefixes: vec![rpc::forge::NetworkPrefix {
+            id: None,
+            prefix: "192.0.2.12/31".to_string(),
+            gateway: Some("192.0.2.13".to_string()),
+            reserve_first: 1,
+            free_ip_count: 0,
+            svi_ip: None,
+            free_ip_count_v2: None,
+            free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
+        }],
+        subdomain_id: None,
+        vpc_id: None,
+        segment_type: rpc::forge::NetworkSegmentType::Tenant as i32,
+        infer_slaac_eui64_addresses: false,
+    };
+
+    for prefix in &[31, 32] {
+        let mut request = request.clone();
+        request.prefixes[0].prefix = format!("192.0.2.21/{prefix}");
+        match env.api.create_network_segment(Request::new(request)).await {
+            Ok(_) => {
+                return Err(eyre::format_err!(
+                    "{prefix} prefix is not allowed, but still code created segment"
+                ));
+            }
+            Err(status) if status.code() == tonic::Code::InvalidArgument => {}
+            Err(err) => {
+                return Err(err.into());
+            } // unexpected error
+        };
+    }
+
+    Ok(())
+}
+
+// Attempt to use address space outside of what is configured in
+// site_fabric_prefixes. In the test environment, this is set to 192.0.2.0/24.
+#[crate::sqlx_test]
+async fn test_segment_prefix_in_unconfigured_address_space(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    env.create_vpc_and_tenant_segment().await;
+    let vpc_id = get_vpc_fixture_id(&env).await;
+    let bad_prefix_segment =
+        NetworkSegmentHelper::new_with_tenant_prefix("198.51.100.0/24", "198.51.100.1", vpc_id);
+    let response = bad_prefix_segment.create_with_api(&env.api).await;
+
+    // The API should have rejected our request with "invalid argument"; check
+    // that it did.
+    match response {
+        Err(status) => {
+            let status_code = status.code();
+            match status_code {
+                tonic::Code::InvalidArgument => Ok(()),
+                _ => Err(eyre::format_err!(
+                    "unexpected gRPC error code from API: {status_code}"
+                )),
+            }
+        }
+        Ok(segment) => {
+            let config = segment
+                .config
+                .as_ref()
+                .expect("created network segment should include config");
+            let prefixes = config.prefixes.iter().map(|p| p.prefix.as_str());
+            let prefixes = itertools::join(prefixes, ", ");
+            Err(eyre::format_err!(
+                "the API did not reject our request to create a segment using \
+                prefixes that fall outside of the site's address space: {prefixes}"
+            ))
+        }
+    }
+}
+
+async fn test_network_segment_metrics(
+    pool: sqlx::PgPool,
+    test_type: MetricsTestType,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut overrides = TestEnvOverrides::no_network_segments();
+    // Keep the segment in DrainAllocatedIPs for the metrics snapshot, including
+    // when parallel tests delay controller iterations.
+    overrides.network_segments_drain_period = Some(chrono::Duration::hours(1));
+    let env = create_test_env_with_overrides(pool.clone(), overrides.clone()).await;
+
+    let segment =
+        create_network_segment_with_api(&env, true, true, None, test_type.segment_type() as i32, 1)
+            .await;
+    let segment_id: NetworkSegmentId = segment.id.unwrap();
+
+    env.run_network_segment_controller_iteration().await;
+
+    env.run_network_segment_controller_iteration().await;
+
+    assert_eq!(
+        get_segment_state(&env.api, segment_id).await,
+        rpc::forge::TenantState::Ready
+    );
+
+    let avail_str = format!(
+        "{{fresh=\"true\",name=\"TEST_SEGMENT\",prefix=\"192.0.2.0/24\",type=\"{test_type}\"}} 253"
+    );
+
+    // We don't return stats for tenant network segments
+    // We do return stats for underlay and tor type network segments
+    if matches!(test_type, MetricsTestType::Tenant) {
+        assert!(
+            env.test_meter
+                .formatted_metric("carbide_available_ips_count")
+                .is_none()
+        );
+    } else {
+        assert_eq!(
+            env.test_meter
+                .formatted_metric("carbide_available_ips_count")
+                .unwrap(),
+            avail_str
+        );
+    }
+
+    let total_str = format!(
+        "{{fresh=\"true\",name=\"TEST_SEGMENT\",prefix=\"192.0.2.0/24\",type=\"{test_type}\"}} 256"
+    );
+
+    if matches!(test_type, MetricsTestType::Tenant) {
+        assert!(
+            env.test_meter
+                .formatted_metric("carbide_total_ips_count")
+                .is_none()
+        );
+    } else {
+        assert_eq!(
+            env.test_meter
+                .formatted_metric("carbide_total_ips_count")
+                .unwrap(),
+            total_str
+        );
+    }
+
+    let reserved_str = format!(
+        "{{fresh=\"true\",name=\"TEST_SEGMENT\",prefix=\"192.0.2.0/24\",type=\"{test_type}\"}} 1"
+    );
+
+    if matches!(test_type, MetricsTestType::Tenant) {
+        assert!(
+            env.test_meter
+                .formatted_metric("carbide_reserved_ips_count")
+                .is_none()
+        );
+    } else {
+        assert_eq!(
+            env.test_meter
+                .formatted_metric("carbide_reserved_ips_count")
+                .unwrap(),
+            reserved_str
+        );
+    }
+
+    // A dropped lock only queues its release. Drain that release through the
+    // same manager and await the final unlock before shutting the manager down.
+    env.api
+        .work_lock_manager_handle
+        .try_acquire_lock("lock_iteration::network_segments_controller_iteration_ids".into())
+        .await?
+        .release()
+        .await?;
+    drop(env);
+
+    let env = create_test_env_with_overrides(pool.clone(), overrides).await;
+
+    // Delete the segment, releasing the VNI back to the pool
+    env.api
+        .delete_network_segment(Request::new(rpc::forge::NetworkSegmentDeletionRequest {
+            id: segment.id,
+        }))
+        .await?;
+
+    // Ready
+    env.run_network_segment_controller_iteration().await;
+    // DrainAllocatedIPs
+    env.run_network_segment_controller_iteration().await;
+
+    // Check to make sure we are returning stats even when the network segment
+    // is not in the Ready state.
+    let avail_str = format!(
+        "{{fresh=\"true\",name=\"TEST_SEGMENT\",prefix=\"192.0.2.0/24\",type=\"{test_type}\"}} 253"
+    );
+
+    if matches!(test_type, MetricsTestType::Tenant) {
+        assert!(
+            env.test_meter
+                .formatted_metric("carbide_available_ips_count")
+                .is_none()
+        );
+    } else {
+        assert_eq!(
+            env.test_meter
+                .formatted_metric("carbide_available_ips_count")
+                .unwrap(),
+            avail_str
+        );
+    }
+
+    let total_str = format!(
+        "{{fresh=\"true\",name=\"TEST_SEGMENT\",prefix=\"192.0.2.0/24\",type=\"{test_type}\"}} 256"
+    );
+
+    if matches!(test_type, MetricsTestType::Tenant) {
+        assert!(
+            env.test_meter
+                .formatted_metric("carbide_total_ips_count")
+                .is_none()
+        );
+    } else {
+        assert_eq!(
+            env.test_meter
+                .formatted_metric("carbide_total_ips_count")
+                .unwrap(),
+            total_str
+        );
+    }
+
+    let reserved_str = format!(
+        "{{fresh=\"true\",name=\"TEST_SEGMENT\",prefix=\"192.0.2.0/24\",type=\"{test_type}\"}} 1"
+    );
+
+    if matches!(test_type, MetricsTestType::Tenant) {
+        assert!(
+            env.test_meter
+                .formatted_metric("carbide_reserved_ips_count")
+                .is_none()
+        );
+    } else {
+        assert_eq!(
+            env.test_meter
+                .formatted_metric("carbide_reserved_ips_count")
+                .unwrap(),
+            reserved_str
+        );
+    }
+
+    let actual_metrics = env.test_meter.export_metrics();
+
+    assert_eq!(
+        actual_metrics.parse::<ParsedPrometheusMetrics>().unwrap(),
+        test_type.fixture(),
+        "Metrics for test {} are not as expected, Actual metrics are:\n{}",
+        test_type,
+        actual_metrics
+    );
+
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum MetricsTestType {
+    Admin,
+    Tenant,
+    Tor,
+}
+
+impl Display for MetricsTestType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MetricsTestType::Admin => write!(f, "admin"),
+            MetricsTestType::Tenant => write!(f, "tenant"),
+            MetricsTestType::Tor => write!(f, "tor"),
+        }
+    }
+}
+
+impl MetricsTestType {
+    fn fixture(&self) -> ParsedPrometheusMetrics {
+        match self {
+            MetricsTestType::Admin => {
+                include_str!("metrics_fixtures/test_network_segment_metrics_admin.txt")
+                    .parse()
+                    .unwrap()
+            }
+            MetricsTestType::Tenant => {
+                include_str!("metrics_fixtures/test_network_segment_metrics_tenant.txt")
+                    .parse()
+                    .unwrap()
+            }
+            MetricsTestType::Tor => {
+                include_str!("metrics_fixtures/test_network_segment_metrics_tor.txt")
+                    .parse()
+                    .unwrap()
+            }
+        }
+    }
+
+    fn segment_type(&self) -> NetworkSegmentType {
+        match self {
+            MetricsTestType::Admin => NetworkSegmentType::Admin,
+            MetricsTestType::Tor => NetworkSegmentType::Underlay,
+            MetricsTestType::Tenant => NetworkSegmentType::Tenant,
+        }
+    }
+}
+
+#[crate::sqlx_test]
+async fn test_network_segment_metrics_admin(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    test_network_segment_metrics(pool, MetricsTestType::Admin).await
+}
+
+#[crate::sqlx_test]
+async fn test_network_segment_metrics_tenant(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    test_network_segment_metrics(pool, MetricsTestType::Tenant).await
+}
+
+#[crate::sqlx_test]
+async fn test_network_segment_metrics_tor(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    test_network_segment_metrics(pool, MetricsTestType::Tor).await
+}
+
+#[crate::sqlx_test]
+async fn test_network_segment_metrics_ipv6_total_capacity(pool: sqlx::PgPool) {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let cases = [
+        ("IPV6_SMALL", "2001:db8:1::/126", 4usize),
+        ("IPV6_LARGE", "2001:db8:2::/64", usize::MAX),
+    ];
+
+    for (name, prefix, _) in cases {
+        env.api
+            .create_network_segment(Request::new(rpc::forge::NetworkSegmentCreationRequest {
+                name: name.to_string(),
+                mtu: Some(1500),
+                prefixes: vec![rpc::forge::NetworkPrefix {
+                    prefix: prefix.to_string(),
+                    ..Default::default()
+                }],
+                segment_type: rpc::forge::NetworkSegmentType::Admin as i32,
+                ..Default::default()
+            }))
+            .await
+            .expect("create IPv6-only Admin segment");
+    }
+
+    env.run_network_segment_controller_iteration().await;
+
+    let mut expected = cases.map(|(name, prefix, count)| {
+        format!(
+            "{{fresh=\"true\",name=\"{name}\",prefix=\"{prefix}\",type=\"admin\"}} {}",
+            count as f64
+        )
+    });
+    expected.sort();
+    assert_eq!(
+        env.test_meter.formatted_metrics("carbide_total_ips_count"),
+        expected
+    );
+}
+
+#[crate::sqlx_test]
+async fn test_update_svi_ip(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    env.create_vpc_and_tenant_segment().await;
+    let vpc_id = get_vpc_fixture_id(&env).await;
+
+    let mut txn = env.pool.begin().await?;
+    let segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(VpcColumn, &vpc_id),
+        network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await?;
+
+    for segment in segments {
+        for prefix in segment.prefixes {
+            assert!(prefix.svi_ip.is_none());
+        }
+    }
+    txn.commit().await?;
+
+    let mut txn = env.pool.begin().await?;
+    let update_request = UpdateVpcVirtualization {
+        id: vpc_id,
+        if_version_match: None,
+        network_virtualization_type: carbide_network::virtualization::VpcVirtualizationType::Fnn,
+    };
+    db::vpc::update_virtualization(&update_request, &mut txn).await?;
+    txn.commit().await?;
+
+    // Already created segments must have SVI allocated.
+    let mut txn = env.pool.begin().await?;
+    let segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(VpcColumn, &vpc_id),
+        network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await?;
+
+    for segment in segments {
+        for prefix in segment.prefixes {
+            assert!(prefix.svi_ip.is_some());
+        }
+    }
+
+    // Newly created segments should have SVI allocated once created.
+    let _ = common::api_fixtures::network_segment::create_tenant_network_segment(
+        &env.api,
+        Some(vpc_id),
+        FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[1],
+        "TENANT",
+        true,
+    )
+    .await;
+
+    // Get the tenant segment into ready state
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+
+    let mut txn = env.pool.begin().await?;
+    let segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(VpcColumn, &vpc_id),
+        network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await?;
+
+    for segment in segments {
+        for prefix in segment.prefixes {
+            assert!(prefix.svi_ip.is_some());
+        }
+    }
+
+    Ok(())
+}
+
+/// Verifies that converting a VPC to FNN allocates SVI IPs for every prefix
+/// on a dual-stack segment, not just the IPv4 prefix.
+#[crate::sqlx_test]
+async fn test_update_svi_ip_dual_stack_segment(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = pool.begin().await?;
+    let (vpc_id, segment_id) = create_stretchable_segment_for_svi_test(
+        &mut txn,
+        "dual-stack-svi",
+        vec![
+            NewNetworkPrefix {
+                prefix: "198.18.40.0/24".parse().unwrap(),
+                gateway: Some("198.18.40.1".parse().unwrap()),
+                dhcpv6_link_address: None,
+                num_reserved: 3,
+            },
+            NewNetworkPrefix {
+                prefix: "2001:db8:4040::/64".parse().unwrap(),
+                gateway: None,
+                dhcpv6_link_address: None,
+                num_reserved: 3,
+            },
+        ],
+    )
+    .await?;
+
+    // Update virtualization through the DB path that refreshes SVI IPs.
+    let update_request = UpdateVpcVirtualization {
+        id: vpc_id,
+        if_version_match: None,
+        network_virtualization_type: VpcVirtualizationType::Fnn,
+    };
+    db::vpc::update_virtualization(&update_request, &mut txn).await?;
+    txn.commit().await?;
+
+    // Re-read the segment to verify both prefix families persisted SVI IPs.
+    let mut txn = pool.begin().await?;
+    let mut segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
+        network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await?;
+    let segment = segments.remove(0);
+    assert_eq!(segment.prefixes.len(), 2);
+    assert!(
+        segment
+            .prefixes
+            .iter()
+            .any(|prefix| prefix.prefix.is_ipv4() && prefix.svi_ip.is_some())
+    );
+    assert!(
+        segment
+            .prefixes
+            .iter()
+            .any(|prefix| prefix.prefix.is_ipv6() && prefix.svi_ip.is_some())
+    );
+
+    Ok(())
+}
+
+/// Verifies that startup SVI backfill repairs partially populated dual-stack
+/// segments instead of skipping them when one prefix already has an SVI IP.
+#[crate::sqlx_test]
+async fn test_update_network_segments_svi_ip_backfills_partial_dual_stack_segment(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = pool.begin().await?;
+    // Create the segment as FNN up front so this test covers the startup
+    // backfill path, not the VPC virtualization update path.
+    let (_vpc_id, segment_id) = create_stretchable_segment_for_svi_test_with_vpc_type(
+        &mut txn,
+        "partial-dual-stack-svi",
+        VpcVirtualizationType::Fnn,
+        vec![
+            NewNetworkPrefix {
+                prefix: "198.18.42.0/24".parse().unwrap(),
+                gateway: Some("198.18.42.1".parse().unwrap()),
+                dhcpv6_link_address: None,
+                num_reserved: 3,
+            },
+            NewNetworkPrefix {
+                prefix: "2001:db8:4042::/64".parse().unwrap(),
+                gateway: None,
+                dhcpv6_link_address: None,
+                num_reserved: 3,
+            },
+        ],
+    )
+    .await?;
+
+    let mut segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
+        network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await?;
+    let segment = segments.remove(0);
+    let ipv4_prefix = segment
+        .prefixes
+        .iter()
+        .find(|prefix| prefix.prefix.is_ipv4())
+        .unwrap();
+    // Seed the partial state produced by older dual-stack behavior: IPv4 has
+    // an SVI, while the IPv6 prefix still needs to be backfilled on startup.
+    let ipv4_svi_ip = "198.18.42.2".parse().unwrap();
+    db::network_prefix::set_svi_ip(txn.as_mut(), ipv4_prefix.id, &ipv4_svi_ip).await?;
+    txn.commit().await?;
+
+    // This used to skip the segment because any prefix already had an SVI.
+    // The desired behavior is to allocate SVI addresses for missing prefixes.
+    db_init::update_network_segments_svi_ip(&pool).await?;
+
+    let mut txn = pool.begin().await?;
+    let mut segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
+        network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await?;
+    let segment = segments.remove(0);
+    txn.rollback().await?;
+
+    let ipv4_prefix = segment
+        .prefixes
+        .iter()
+        .find(|prefix| prefix.prefix.is_ipv4())
+        .unwrap();
+    let ipv6_prefix = segment
+        .prefixes
+        .iter()
+        .find(|prefix| prefix.prefix.is_ipv6())
+        .unwrap();
+    assert_eq!(ipv4_prefix.svi_ip, Some(ipv4_svi_ip));
+    // The IPv6 SVI is the third address in the IPv6 prefix, matching the
+    // normal SVI allocation rule used for both address families.
+    assert_eq!(ipv6_prefix.svi_ip.unwrap().to_string(), "2001:db8:4042::2");
+
+    Ok(())
+}
+
+/// Verifies that the FNN SVI allocation path supports IPv6-only segments.
+///
+/// This protects against reintroducing the old requirement that every
+/// stretchable segment must have an IPv4 prefix before SVI allocation.
+#[crate::sqlx_test]
+async fn test_update_svi_ip_ipv6_only_segment(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = pool.begin().await?;
+    let (vpc_id, segment_id) = create_stretchable_segment_for_svi_test(
+        &mut txn,
+        "ipv6-only-svi",
+        vec![NewNetworkPrefix {
+            prefix: "2001:db8:4041::/64".parse().unwrap(),
+            gateway: None,
+            dhcpv6_link_address: None,
+            num_reserved: 3,
+        }],
+    )
+    .await?;
+
+    // Update virtualization; the old IPv4 precheck rejected this segment.
+    let update_request = UpdateVpcVirtualization {
+        id: vpc_id,
+        if_version_match: None,
+        network_virtualization_type: VpcVirtualizationType::Fnn,
+    };
+    db::vpc::update_virtualization(&update_request, &mut txn).await?;
+    txn.commit().await?;
+
+    // Re-read the segment to verify the IPv6 SVI IP persisted.
+    let mut txn = pool.begin().await?;
+    let mut segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
+        network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await?;
+    let segment = segments.remove(0);
+    assert_eq!(segment.prefixes.len(), 1);
+    assert!(segment.prefixes[0].prefix.is_ipv6());
+    assert!(segment.prefixes[0].svi_ip.is_some());
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn test_update_svi_ip_admin_segment(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+
+    // This should create VPC for admin segment
+    db_init::create_admin_vpc(&env.api, Some(10600)).await?;
+
+    let mut txn = env.pool.begin().await?;
+    let admin_segments = db::network_segment::admin(&mut txn).await?;
+
+    for admin_segment in admin_segments {
+        assert!(admin_segment.config.vpc_id.is_some());
+        let admin_vpc = db::vpc::find_by(
+            txn.as_mut(),
+            ObjectColumnFilter::One(IdColumn, &admin_segment.config.vpc_id.unwrap()),
+        )
+        .await?;
+        assert_eq!(
+            admin_vpc[0].config.network_virtualization_type,
+            VpcVirtualizationType::Fnn
+        );
+    }
+
+    db_init::update_network_segments_svi_ip(&env.pool).await?;
+    let admin_segments = db::network_segment::admin(&mut txn).await?;
+
+    for admin_segment in admin_segments {
+        for prefix in admin_segment.prefixes {
+            assert!(prefix.svi_ip.is_some());
+        }
+    }
+    Ok(())
+}
+
+/// Later instances skip persisted IPv4 and IPv6 SVIs outside the reserved range.
+#[crate::sqlx_test]
+async fn test_update_svi_ip_post_instance_allocation(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut site_prefixes = TEST_SITE_PREFIXES.to_vec();
+    site_prefixes.push("2001:db8::/32".parse()?);
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            site_prefixes: Some(site_prefixes),
+            ..Default::default()
+        }
+        .with_fnn_config(None),
+    )
+    .await;
+    let segment_id = env
+        .create_vpc_and_tenant_segment_with_vpc_details(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .metadata(Metadata {
+                    name: "test vpc 1".to_string(),
+                    ..Default::default()
+                })
+                .slaac_enabled(false)
+                .rpc(),
+        )
+        .await;
+
+    let query = "UPDATE network_prefixes SET num_reserved = 2 WHERE id=$1";
+
+    let mut txn = env.pool.begin().await?;
+    let segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
+        network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await?;
+
+    // Leave 192.0.4.2 available for the first instance, so SVI allocation
+    // must use 192.0.4.3.
+    sqlx::query(query)
+        .bind(segments[0].prefixes[0].id)
+        .execute(&mut *txn)
+        .await
+        .unwrap();
+
+    txn.commit().await?;
+
+    let mh = common::api_fixtures::create_managed_host(&env).await;
+
+    let mut txn = env
+        .pool
+        .begin()
+        .await
+        .expect("Unable to create transaction on database pool");
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &segment_id)
+            .await
+            .unwrap(),
+        0
+    );
+    txn.commit().await.unwrap();
+
+    let first_instance = mh
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+
+    // The first instance has committed 192.0.4.2 before SVI allocation.
+    let mut txn = env.pool.begin().await?;
+    let addresses = db::instance_address::find_by_segment_id(txn.as_mut(), &segment_id).await?;
+    assert_eq!(addresses.len(), 1);
+    assert_eq!(addresses[0].instance_id, first_instance.id);
+    assert_eq!(addresses[0].address, "192.0.4.2".parse::<IpAddr>().unwrap());
+    let mut segment = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
+        network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await?;
+    let segment = segment.remove(0);
+    let update_request = UpdateVpcVirtualization {
+        id: segment.config.vpc_id.unwrap(),
+        if_version_match: None,
+        network_virtualization_type: carbide_network::virtualization::VpcVirtualizationType::Fnn,
+    };
+    // The ETV fixture has no routing profile. Seed the FNN profile and IPv6
+    // prefix in the conversion transaction so the committed VPC supports both.
+    sqlx::query("UPDATE vpcs SET routing_profile_type = 'INTERNAL' WHERE id = $1")
+        .bind(update_request.id)
+        .execute(txn.as_mut())
+        .await?;
+    db::network_prefix::create_for(
+        txn.as_mut(),
+        &segment_id,
+        &[NewNetworkPrefix {
+            prefix: "2001:db8::/64".parse()?,
+            gateway: None,
+            dhcpv6_link_address: None,
+            num_reserved: 2,
+        }],
+        None,
+    )
+    .await?;
+    db::vpc::update_virtualization(&update_request, &mut txn).await?;
+    txn.commit().await?;
+
+    let mut txn = env.pool.begin().await?;
+    let mut segment = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
+        network_segment::NetworkSegmentSearchConfig::default(),
+    )
+    .await?;
+    let segment = segment.remove(0);
+    txn.rollback().await?;
+
+    // IPv4 skips the existing instance; IPv6 has no instance allocation yet.
+    assert_eq!(
+        segment
+            .prefixes
+            .iter()
+            .map(|prefix| prefix.svi_ip)
+            .collect::<HashSet<_>>(),
+        HashSet::from([
+            Some("192.0.4.3".parse::<IpAddr>()?),
+            Some("2001:db8::2".parse::<IpAddr>()?),
+        ])
+    );
+
+    // Neither 192.0.4.3 nor 2001:db8::2 has a row in `instance_addresses`.
+    // The next instance must skip both SVIs through the overlay resolver.
+    let second_host = common::api_fixtures::create_managed_host(&env).await;
+    let second_instance = second_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+
+    let mut txn = env.pool.begin().await?;
+    let addresses = db::instance_address::find_by_segment_id(txn.as_mut(), &segment_id).await?;
+    assert_eq!(
+        addresses
+            .iter()
+            .map(|address| (address.instance_id, address.address))
+            .collect::<Vec<_>>(),
+        vec![
+            (first_instance.id, "192.0.4.2".parse::<IpAddr>().unwrap()),
+            (second_instance.id, "192.0.4.4".parse::<IpAddr>().unwrap()),
+            (second_instance.id, "2001:db8::3".parse::<IpAddr>().unwrap()),
+        ]
+    );
+    assert_eq!(
+        addresses[2].prefix,
+        "2001:db8::3/128".parse::<ipnetwork::IpNetwork>()?
+    );
+
+    let mut segments = db::network_segment::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
+        network_segment::NetworkSegmentSearchConfig {
+            include_num_free_ips: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    let segment = segments.remove(0);
+    let ipv4_prefix = segment
+        .prefixes
+        .iter()
+        .find(|prefix| prefix.prefix.is_ipv4())
+        .unwrap();
+    // Of 256 addresses, .0, .1, .2, .3, .4, and .255 are unavailable.
+    assert_eq!(ipv4_prefix.num_free_ips, Some(250));
+
+    Ok(())
+}
+
+/// Verify that creating a network segment with an IPv6 prefix succeeds
+/// through the full API handler chain.
+#[crate::sqlx_test]
+async fn test_create_network_segment_with_ipv6_prefix(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+
+    let request = rpc::forge::NetworkSegmentCreationRequest {
+        id: None,
+        mtu: Some(1500),
+        name: "IPV6_SEGMENT".to_string(),
+        prefixes: vec![rpc::forge::NetworkPrefix {
+            id: None,
+            prefix: "2001:db8::/64".to_string(),
+            gateway: None,
+            reserve_first: 0,
+            free_ip_count: 0,
+            svi_ip: None,
+            free_ip_count_v2: None,
+            free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
+        }],
+        subdomain_id: None,
+        vpc_id: None,
+        segment_type: rpc::forge::NetworkSegmentType::Admin as i32,
+        infer_slaac_eui64_addresses: true,
+    };
+
+    let response = env
+        .api
+        .create_network_segment(Request::new(request))
+        .await?
+        .into_inner();
+
+    let metadata = response
+        .metadata
+        .as_ref()
+        .expect("created network segment should include metadata");
+    let config = response
+        .config
+        .as_ref()
+        .expect("created network segment should include config");
+    assert_eq!(metadata.name, "IPV6_SEGMENT");
+    assert_eq!(config.prefixes.len(), 1);
+    assert_eq!(config.prefixes[0].prefix, "2001:db8::/64");
+    assert!(config.prefixes[0].gateway.is_none());
+    assert!(config.infer_slaac_eui64_addresses);
+
+    Ok(())
+}
+
+/// Verify that creating a tenant segment with both IPv4 and IPv6 prefixes
+/// succeeds when the site fabric prefixes include both address families.
+#[crate::sqlx_test]
+async fn test_create_dual_stack_tenant_segment(pool: sqlx::PgPool) -> Result<(), eyre::Report> {
+    // Include an IPv6 site fabric prefix so the containment check passes for dual-stack segments
+    let mut site_prefixes = TEST_SITE_PREFIXES.to_vec();
+    site_prefixes.push("2001:db8::/32".parse().unwrap());
+
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            create_network_segments: Some(false),
+            site_prefixes: Some(site_prefixes),
+            ..Default::default()
+        }
+        .with_fnn_config(None),
+    )
+    .await;
+
+    // Register the tenant required by the FNN VPC before exercising dual-stack segments.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID).await?;
+
+    let vpc = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .metadata(Metadata {
+                    name: "dual-stack vpc".to_string(),
+                    ..Default::default()
+                })
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+
+    let request = rpc::forge::NetworkSegmentCreationRequest {
+        id: None,
+        mtu: Some(1500),
+        name: "DUAL_STACK_SEGMENT".to_string(),
+        prefixes: vec![
+            rpc::forge::NetworkPrefix {
+                id: None,
+                prefix: "192.0.2.0/24".to_string(),
+                gateway: Some("192.0.2.1".to_string()),
+                reserve_first: 3,
+                free_ip_count: 0,
+                svi_ip: None,
+                free_ip_count_v2: None,
+                free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
+            },
+            rpc::forge::NetworkPrefix {
+                id: None,
+                prefix: "2001:db8::/64".to_string(),
+                gateway: None,
+                reserve_first: 0,
+                free_ip_count: 0,
+                svi_ip: None,
+                free_ip_count_v2: None,
+                free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
+            },
+        ],
+        subdomain_id: None,
+        vpc_id: vpc.id,
+        segment_type: rpc::forge::NetworkSegmentType::Tenant as i32,
+        infer_slaac_eui64_addresses: false,
+    };
+
+    let response = env
+        .api
+        .create_network_segment(Request::new(request))
+        .await?
+        .into_inner();
+
+    let metadata = response
+        .metadata
+        .as_ref()
+        .expect("created network segment should include metadata");
+    let config = response
+        .config
+        .as_ref()
+        .expect("created network segment should include config");
+    assert_eq!(metadata.name, "DUAL_STACK_SEGMENT");
+    assert_eq!(config.prefixes.len(), 2);
+
+    // Verify both prefixes are present (order may vary)
+    let prefix_strs: Vec<&str> = config.prefixes.iter().map(|p| p.prefix.as_str()).collect();
+    assert!(prefix_strs.contains(&"192.0.2.0/24"), "IPv4 prefix missing");
+    assert!(
+        prefix_strs.contains(&"2001:db8::/64"),
+        "IPv6 prefix missing"
+    );
+
+    Ok(())
+}
+
+/// Verify that an IPv6 tenant segment prefix that is NOT contained in the site
+/// fabric prefixes is correctly rejected, just like an uncontained IPv4 prefix would be.
+#[crate::sqlx_test]
+async fn test_ipv6_tenant_prefix_rejected_when_not_in_site_fabric(
+    pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    // Site fabric prefixes include 2001:db8::/32 but NOT fd00::/8
+    let mut site_prefixes = TEST_SITE_PREFIXES.to_vec();
+    site_prefixes.push("2001:db8::/32".parse().unwrap());
+
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides {
+            create_network_segments: Some(false),
+            site_prefixes: Some(site_prefixes),
+            ..Default::default()
+        }
+        .with_fnn_config(None),
+    )
+    .await;
+
+    // Register the tenant required by the FNN VPC before exercising prefix containment.
+    create_fixture_tenant(&env, FIXTURE_TENANT_ORG_ID).await?;
+
+    let vpc = env
+        .api
+        .create_vpc(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .metadata(Metadata {
+                    name: "uncontained-ipv6-vpc".to_string(),
+                    description: "".to_string(),
+                    labels: vec![],
+                })
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+
+    // fd00:abcd::/48 is NOT contained in our site fabric prefixes
+    let request = rpc::forge::NetworkSegmentCreationRequest {
+        id: None,
+        mtu: Some(1500),
+        name: "UNCONTAINED_V6_SEGMENT".to_string(),
+        prefixes: vec![rpc::forge::NetworkPrefix {
+            id: None,
+            prefix: "fd00:abcd::/48".to_string(),
+            gateway: None,
+            reserve_first: 0,
+            free_ip_count: 0,
+            svi_ip: None,
+            free_ip_count_v2: None,
+            free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
+        }],
+        subdomain_id: None,
+        vpc_id: vpc.id,
+        segment_type: rpc::forge::NetworkSegmentType::Tenant as i32,
+        infer_slaac_eui64_addresses: false,
+    };
+
+    let result = env.api.create_network_segment(Request::new(request)).await;
+
+    assert!(
+        result.is_err(),
+        "Expected rejection of uncontained IPv6 prefix"
+    );
+    let status = result.unwrap_err();
+    assert!(
+        status
+            .message()
+            .contains("not contained within the configured site fabric prefixes"),
+        "Error message should mention site fabric prefix containment, got: {}",
+        status.message()
+    );
+
+    Ok(())
+}
+
+/// Verifies that state transitions written by the controller appear in
+/// the FindNetworkSegmentStateHistories response, keyed by segment ID,
+/// ordered oldest-first, and contain the correct serialized state values.
+#[crate::sqlx_test]
+async fn test_find_state_histories_records_provisioning_to_ready_transition(pool: sqlx::PgPool) {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+
+    let segment = create_network_segment_with_api(
+        &env,
+        true,
+        true,
+        None,
+        rpc::forge::NetworkSegmentType::Admin as i32,
+        1,
+    )
+    .await;
+
+    let segment_id: NetworkSegmentId = segment.id.unwrap();
+
+    env.run_network_segment_controller_iteration().await;
+    env.run_network_segment_controller_iteration().await;
+
+    assert_eq!(
+        get_segment_state(&env.api, segment_id).await,
+        rpc::forge::TenantState::Ready,
+        "segment must reach Ready before checking history"
+    );
+
+    let result = env
+        .api
+        .find_network_segment_state_histories(tonic::Request::new(
+            rpc::forge::NetworkSegmentStateHistoriesRequest {
+                network_segment_ids: vec![segment_id],
+            },
+        ))
+        .await
+        .expect("RPC must succeed")
+        .into_inner();
+
+    let records = result
+        .histories
+        .get(&segment_id.to_string())
+        .expect("response must contain an entry for the requested segment ID")
+        .records
+        .clone();
+
+    // History is ordered oldest-first (ORDER BY id ASC).
+    // The controller writes Provisioning on create, then Ready on first successful iteration.
+    let states: Vec<&str> = records.iter().map(|r| r.state.as_str()).collect();
+    let provisioning_pos = states
+        .iter()
+        .position(|s| s.contains("provisioning"))
+        .unwrap_or_else(|| panic!("history must contain a provisioning record; got: {states:?}"));
+
+    let ready_pos = states
+        .iter()
+        .position(|s| s.contains("ready"))
+        .unwrap_or_else(|| panic!("history must contain a ready record; got: {states:?}"));
+
+    assert!(
+        provisioning_pos < ready_pos,
+        "provisioning must precede ready in history (oldest-first); got: {states:?}"
+    );
+}
+
+/// Verifies that the RPC rejects an empty ID list with InvalidArgument.
+#[crate::sqlx_test]
+async fn test_find_state_histories_rejects_empty_id_list(pool: sqlx::PgPool) {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+
+    let err = env
+        .api
+        .find_network_segment_state_histories(tonic::Request::new(
+            rpc::forge::NetworkSegmentStateHistoriesRequest {
+                network_segment_ids: vec![],
+            },
+        ))
+        .await
+        .expect_err("empty ID list must be rejected");
+
+    assert_eq!(
+        err.code(),
+        tonic::Code::InvalidArgument,
+        "expected InvalidArgument, got: {err}"
+    );
+}
+
+/// Verifies that requesting history for a segment that does not exist
+/// succeeds (no error) but returns no records for that ID.
+#[crate::sqlx_test]
+async fn test_find_state_histories_unknown_segment_returns_no_records(pool: sqlx::PgPool) {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+
+    let unknown_id = NetworkSegmentId::from(uuid::Uuid::new_v4());
+
+    let result = env
+        .api
+        .find_network_segment_state_histories(tonic::Request::new(
+            rpc::forge::NetworkSegmentStateHistoriesRequest {
+                network_segment_ids: vec![unknown_id],
+            },
+        ))
+        .await
+        .expect("unknown segment ID must not cause an error")
+        .into_inner();
+
+    let records = result
+        .histories
+        .get(&unknown_id.to_string())
+        .map(|h| h.records.as_slice())
+        .unwrap_or(&[]);
+
+    assert!(
+        records.is_empty(),
+        "unknown segment must yield no history records, got: {records:?}"
+    );
+}
+
+#[crate::sqlx_test]
+async fn flat_vpc_accepts_host_inband_segment(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // The canonical Flat pairing: a Flat VPC with a HostInband segment.
+    let env =
+        create_test_env_with_overrides(pool.clone(), TestEnvOverrides::no_network_segments()).await;
+
+    let (_vpc_id, vpc) = common::api_fixtures::vpc::create_flat_vpc(
+        &env,
+        "flat".to_string(),
+        Some(FIXTURE_TENANT_ORG_ID.to_string()),
+    )
+    .await;
+
+    // Use a fixture-tenant gateway since it's guaranteed to be in TEST_SITE_PREFIXES;
+    // the segment type (HostInband) is what's being tested here, not the prefix.
+    let gw = FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[0];
+    let request = rpc::forge::NetworkSegmentCreationRequest {
+        id: None,
+        mtu: Some(1500),
+        name: "FLAT_HOST_INBAND".to_string(),
+        prefixes: vec![rpc::forge::NetworkPrefix {
+            id: None,
+            prefix: gw.network().to_string() + "/24",
+            gateway: Some(gw.ip().to_string()),
+            reserve_first: 3,
+            free_ip_count: 0,
+            svi_ip: None,
+            free_ip_count_v2: None,
+            free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
+        }],
+        subdomain_id: None,
+        vpc_id: vpc.id,
+        segment_type: rpc::forge::NetworkSegmentType::HostInband as i32,
+        infer_slaac_eui64_addresses: false,
+    };
+
+    let created = env
+        .api
+        .create_network_segment(Request::new(request))
+        .await
+        .expect("Flat VPC + HostInband segment is the canonical pairing")
+        .into_inner();
+
+    // Accepting the request is only half of it -- check the segment came back attached to
+    // the flat VPC, with the type we asked for.
+    let config = created
+        .config
+        .expect("created network segment should include config");
+    assert_eq!(config.vpc_id, vpc.id);
+    assert_eq!(
+        config.segment_type,
+        rpc::forge::NetworkSegmentType::HostInband as i32
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn flat_vpc_rejects_tenant_segment(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Flat VPCs are HostInband-only -- attempting to put a Tenant overlay
+    // segment in a Flat VPC should be rejected at create time.
+    let env =
+        create_test_env_with_overrides(pool.clone(), TestEnvOverrides::no_network_segments()).await;
+
+    let (_vpc_id, vpc) = common::api_fixtures::vpc::create_flat_vpc(
+        &env,
+        "flat".to_string(),
+        Some(FIXTURE_TENANT_ORG_ID.to_string()),
+    )
+    .await;
+
+    let request = rpc::forge::NetworkSegmentCreationRequest {
+        id: None,
+        mtu: Some(1500),
+        name: "FLAT_TENANT_REJECTED".to_string(),
+        prefixes: vec![rpc::forge::NetworkPrefix {
+            id: None,
+            prefix: FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[0].to_string(),
+            gateway: Some(FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[0].ip().to_string()),
+            reserve_first: 3,
+            free_ip_count: 0,
+            svi_ip: None,
+            free_ip_count_v2: None,
+            free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
+        }],
+        subdomain_id: None,
+        vpc_id: vpc.id,
+        segment_type: rpc::forge::NetworkSegmentType::Tenant as i32,
+        infer_slaac_eui64_addresses: false,
+    };
+
+    let err = env
+        .api
+        .create_network_segment(Request::new(request))
+        .await
+        .expect_err("Flat VPC + Tenant segment must be rejected");
+
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "got: {err}");
+    assert!(
+        err.message().contains("flat") && err.message().contains("tenant"),
+        "error should mention flat VPC rejecting tenant segment, got: {}",
+        err.message()
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn etv_vpc_rejects_host_inband_segment(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // HostInband segments must live in Flat VPCs. An ETV VPC accepting a
+    // HostInband segment would violate the Flat<->HostInband binding.
+    let env =
+        create_test_env_with_overrides(pool.clone(), TestEnvOverrides::no_network_segments()).await;
+
+    // Default `create_vpc` produces an ETV VPC (no virt type set => default).
+    let (_vpc_id, vpc) = common::api_fixtures::vpc::create_vpc(
+        &env,
+        "etv".to_string(),
+        Some(FIXTURE_TENANT_ORG_ID.to_string()),
+        None,
+    )
+    .await;
+
+    let gw = FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[0];
+    let request = rpc::forge::NetworkSegmentCreationRequest {
+        id: None,
+        mtu: Some(1500),
+        name: "ETV_HOST_INBAND_REJECTED".to_string(),
+        prefixes: vec![rpc::forge::NetworkPrefix {
+            id: None,
+            prefix: gw.network().to_string() + "/24",
+            gateway: Some(gw.ip().to_string()),
+            reserve_first: 3,
+            free_ip_count: 0,
+            svi_ip: None,
+            free_ip_count_v2: None,
+            free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
+        }],
+        subdomain_id: None,
+        vpc_id: vpc.id,
+        segment_type: rpc::forge::NetworkSegmentType::HostInband as i32,
+        infer_slaac_eui64_addresses: false,
+    };
+
+    let err = env
+        .api
+        .create_network_segment(Request::new(request))
+        .await
+        .expect_err("HostInband segment must be rejected on non-Flat VPCs");
+
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "got: {err}");
+    assert!(
+        err.message().contains("etv") && err.message().contains("host_inband"),
+        "error should mention etv VPC rejecting host_inband segment, got: {}",
+        err.message()
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn attach_host_inband_segment_to_flat_vpc_succeeds(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let (vpc_id, _vpc) =
+        common::api_fixtures::vpc::create_flat_vpc(&env, "flat".to_string(), None).await;
+    let segment = create_unattached_segment(
+        &env,
+        "ATTACH_HOST_INBAND",
+        "198.51.100.0/24",
+        "198.51.100.1",
+        rpc::forge::NetworkSegmentType::HostInband,
+    )
+    .await?;
+
+    let attached = attach_network_segment_to_vpc(&env, segment.id.unwrap(), vpc_id, false)
+        .await?
+        .into_inner();
+
+    assert_eq!(attached.config.unwrap().vpc_id, Some(vpc_id));
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn attach_host_inband_segment_to_same_vpc_is_idempotent(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let (vpc_id, _vpc) =
+        common::api_fixtures::vpc::create_flat_vpc(&env, "flat".to_string(), None).await;
+    let segment = create_unattached_segment(
+        &env,
+        "ATTACH_HOST_INBAND_IDEMPOTENT",
+        "198.51.101.0/24",
+        "198.51.101.1",
+        rpc::forge::NetworkSegmentType::HostInband,
+    )
+    .await?;
+    let segment_id = segment.id.unwrap();
+
+    let first = attach_network_segment_to_vpc(&env, segment_id, vpc_id, false)
+        .await?
+        .into_inner();
+    let second = attach_network_segment_to_vpc(&env, segment_id, vpc_id, false)
+        .await?
+        .into_inner();
+
+    assert_eq!(second.config.as_ref().unwrap().vpc_id, Some(vpc_id));
+    let second_status = second
+        .status
+        .as_ref()
+        .expect("second status should be present");
+    let second_lifecycle = second_status
+        .lifecycle
+        .as_ref()
+        .expect("second lifecycle should be present");
+    let first_status = first
+        .status
+        .as_ref()
+        .expect("first status should be present");
+    let first_lifecycle = first_status
+        .lifecycle
+        .as_ref()
+        .expect("first lifecycle should be present");
+    assert_eq!(second_lifecycle.version, first_lifecycle.version);
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn attach_host_inband_segment_to_non_flat_vpc_fails(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let (vpc_id, _vpc) =
+        common::api_fixtures::vpc::create_vpc(&env, "etv".to_string(), None, None).await;
+    let segment = create_unattached_segment(
+        &env,
+        "ATTACH_HOST_INBAND_TO_ETV",
+        "198.51.102.0/24",
+        "198.51.102.1",
+        rpc::forge::NetworkSegmentType::HostInband,
+    )
+    .await?;
+
+    let err = attach_network_segment_to_vpc(&env, segment.id.unwrap(), vpc_id, false)
+        .await
+        .expect_err("HostInband segments must not attach to non-Flat VPCs");
+
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "got: {err}");
+    assert!(
+        err.message().contains("etv") && err.message().contains("host_inband"),
+        "error should mention etv VPC rejecting host_inband segment, got: {}",
+        err.message()
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn attach_non_host_inband_segment_fails(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let (vpc_id, _vpc) =
+        common::api_fixtures::vpc::create_flat_vpc(&env, "flat".to_string(), None).await;
+    let segment = create_unattached_segment(
+        &env,
+        "ATTACH_ADMIN_REJECTED",
+        "198.51.103.0/24",
+        "198.51.103.1",
+        rpc::forge::NetworkSegmentType::Admin,
+    )
+    .await?;
+
+    let err = attach_network_segment_to_vpc(&env, segment.id.unwrap(), vpc_id, false)
+        .await
+        .expect_err("non-HostInband segments must be rejected");
+
+    assert_eq!(err.code(), tonic::Code::InvalidArgument, "got: {err}");
+    assert!(
+        err.message().contains("host_inband"),
+        "error should mention host_inband validation, got: {}",
+        err.message()
+    );
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn attach_to_different_vpc_requires_force(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
+    let (first_vpc_id, _vpc) =
+        common::api_fixtures::vpc::create_flat_vpc(&env, "flat-1".to_string(), None).await;
+    let (second_vpc_id, _vpc) =
+        common::api_fixtures::vpc::create_flat_vpc(&env, "flat-2".to_string(), None).await;
+    let segment = create_unattached_segment(
+        &env,
+        "ATTACH_HOST_INBAND_REPLACE",
+        "198.51.104.0/24",
+        "198.51.104.1",
+        rpc::forge::NetworkSegmentType::HostInband,
+    )
+    .await?;
+    let segment_id = segment.id.unwrap();
+
+    attach_network_segment_to_vpc(&env, segment_id, first_vpc_id, false).await?;
+
+    let err = attach_network_segment_to_vpc(&env, segment_id, second_vpc_id, false)
+        .await
+        .expect_err("reassignment without force must fail");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "got: {err}");
+
+    let attached = attach_network_segment_to_vpc(&env, segment_id, second_vpc_id, true)
+        .await?
+        .into_inner();
+    assert_eq!(attached.config.unwrap().vpc_id, Some(second_vpc_id));
+
+    Ok(())
+}
+
+async fn create_unattached_segment(
+    env: &common::api_fixtures::TestEnv,
+    name: &str,
+    prefix: &str,
+    gateway: &str,
+    segment_type: rpc::forge::NetworkSegmentType,
+) -> Result<rpc::forge::NetworkSegment, tonic::Status> {
+    env.api
+        .create_network_segment(Request::new(rpc::forge::NetworkSegmentCreationRequest {
+            id: None,
+            mtu: Some(1500),
+            name: name.to_string(),
+            prefixes: vec![rpc::forge::NetworkPrefix {
+                id: None,
+                prefix: prefix.to_string(),
+                gateway: Some(gateway.to_string()),
+                reserve_first: 3,
+                free_ip_count: 0,
+                svi_ip: None,
+                free_ip_count_v2: None,
+                free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
+            }],
+            subdomain_id: None,
+            vpc_id: None,
+            segment_type: segment_type as i32,
+            infer_slaac_eui64_addresses: false,
+        }))
+        .await
+        .map(|response| response.into_inner())
+}
+
+async fn attach_network_segment_to_vpc(
+    env: &common::api_fixtures::TestEnv,
+    network_segment_id: NetworkSegmentId,
+    vpc_id: VpcId,
+    allow_replace: bool,
+) -> Result<tonic::Response<rpc::forge::NetworkSegment>, tonic::Status> {
+    env.api
+        .attach_network_segment_to_vpc(Request::new(rpc::forge::AttachNetworkSegmentToVpcRequest {
+            network_segment_id: Some(network_segment_id),
+            vpc_id: Some(vpc_id),
+            allow_replace,
+        }))
+        .await
+}

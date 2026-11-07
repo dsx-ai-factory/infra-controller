@@ -1,0 +1,157 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+use std::collections::HashMap;
+
+use ::rpc::forge as rpc;
+use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
+use futures::StreamExt;
+use model::resource_pool::binding::{
+    INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolSelection,
+};
+use tonic::{Request, Response, Status};
+
+use crate::CarbideError;
+use crate::api::Api;
+
+pub(crate) async fn grow(
+    api: &Api,
+    request: Request<rpc::GrowResourcePoolRequest>,
+) -> Result<Response<rpc::GrowResourcePoolResponse>, Status> {
+    crate::api::log_request_data(&request);
+
+    let toml_text = request.into_inner().text;
+
+    let mut pools = HashMap::new();
+    let table: toml::Table = toml_text
+        .parse()
+        .map_err(|e: toml::de::Error| CarbideError::InvalidArgument(e.to_string()))?;
+    for (name, def) in table {
+        if name.trim().is_empty() {
+            return Err(CarbideError::InvalidArgument(
+                "resource pool name must not be empty".to_owned(),
+            )
+            .into());
+        }
+        let d: model::resource_pool::ResourcePoolDef = def
+            .try_into()
+            .map_err(|e: toml::de::Error| CarbideError::InvalidArgument(e.to_string()))?;
+        pools.insert(name, d);
+    }
+    let selections = pools
+        .iter()
+        .map(|(name, definition)| {
+            (
+                name.clone(),
+                ResourcePoolSelection {
+                    pool_name: name.clone(),
+                    value_domain: model::resource_pool::ValueType::from(definition.pool_type)
+                        .into(),
+                    backend_name: None,
+                    backend_kind: ResourcePoolBackendKind::Integrated,
+                    authority_id: INTEGRATED_AUTHORITY_ID.to_owned(),
+                    remote_pool: name.clone(),
+                },
+            )
+        })
+        .collect();
+    // Save bindings in the growth transaction so a rejected batch leaves both
+    // the bindings and available values unchanged.
+    let mut txn = api.txn_begin().await?;
+    ResourcePoolRegistry::resolve(PoolDefinitionSource::GrowthRequest, &mut txn, &selections)
+        .await
+        .map_err(CarbideError::from)?;
+    let reconcile_dpu_loopbacks = pools.contains_key(model::resource_pool::common::LOOPBACK_IP_V6);
+    use db::resource_pool::DefineResourcePoolError as DE;
+    match db::resource_pool::define_all_from(&mut txn, &pools).await {
+        Ok(()) => {
+            txn.commit().await?;
+            if reconcile_dpu_loopbacks {
+                // The backfill opens one transaction per DPU, so publish the
+                // new pool rows before it starts reconciliation.
+                db::machine::update_dpu_loopback_ips_v6(
+                    &api.database_connection,
+                    &api.common_pools,
+                )
+                .await
+                .map_err(CarbideError::from)?;
+            }
+            Ok(Response::new(rpc::GrowResourcePoolResponse {}))
+        }
+        Err(DE::InvalidArgument(msg)) => Err(CarbideError::InvalidArgument(msg).into()),
+        Err(DE::ResourcePoolError(msg)) => Err(CarbideError::Internal {
+            message: msg.to_string(),
+        }
+        .into()),
+        Err(DE::DatabaseError(err)) => Err(CarbideError::Internal {
+            message: err.to_string(),
+        }
+        .into()),
+        Err(err @ DE::TooBig(_, _)) => Err(tonic::Status::out_of_range(err.to_string())),
+    }
+}
+
+pub(crate) async fn list(
+    api: &Api,
+    request: Request<rpc::ListResourcePoolsRequest>,
+) -> Result<tonic::Response<rpc::ResourcePools>, tonic::Status> {
+    crate::api::log_request_data(&request);
+
+    let mut txn = api.txn_begin().await?;
+
+    // This response cannot represent unknown counts. Reject the whole listing
+    // when a remote binding exists instead of reporting a misleading zero.
+    if db::resource_pool::binding::all(txn.as_pgconn())
+        .await
+        .map_err(CarbideError::from)?
+        .iter()
+        .any(|binding| binding.backend_kind == ResourcePoolBackendKind::Grpc)
+    {
+        return Err(CarbideError::FailedPrecondition(
+            "remote resource pools require AdminInspectResourcePools".to_owned(),
+        )
+        .into());
+    }
+
+    let snapshot = db::resource_pool::all(&mut txn)
+        .await
+        .map_err(CarbideError::from)?;
+
+    txn.commit().await?;
+
+    Ok(Response::new(rpc::ResourcePools {
+        pools: snapshot.into_iter().map(|s| s.into()).collect(),
+    }))
+}
+
+/// `inspect` reads current backend statistics through the shared monitor,
+/// sorted by pool name for a stable admin listing. Unlike metrics, the listing
+/// omits local pools that have neither inventory nor a saved binding.
+pub(crate) async fn inspect(
+    api: &Api,
+    request: Request<rpc::InspectResourcePoolsRequest>,
+) -> Result<Response<rpc::InspectResourcePoolsResponse>, Status> {
+    crate::api::log_request_data(&request);
+    let mut pools: Vec<_> = api
+        .resource_pool_monitor
+        .observe(&[])
+        .await?
+        .collect()
+        .await;
+    pools.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    Ok(Response::new(rpc::InspectResourcePoolsResponse { pools }))
+}

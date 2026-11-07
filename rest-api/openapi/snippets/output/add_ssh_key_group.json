@@ -1,0 +1,27 @@
+{
+   "id": "9ffb8f90-f88f-4420-952d-e911f446d7eb",
+   "name": "demo-team-0-group",
+   "description": "Demo team group",
+   "org": "tenant-org-name",
+   "tenantId": "778086ad-35b8-46ff-a796-69b2e4c93975",
+   "version": "6a5ccd83b5daf693bd14ab32a439d3181635be6f",
+   "status": "Synced",
+   "statusHistory": [
+      {
+         "status": "Syncing",
+         "message": "received SSH Key Group creation request, syncing",
+         "created": "2023-11-01T12:37:22.649619Z",
+         "updated": "2023-11-01T12:37:22.649619Z"
+      },
+      {
+         "status": "Synced",
+         "message": "SSH Key Group has successfully been synced to all Sites",
+         "created": "2023-11-01T12:37:22.649619Z",
+         "updated": "2023-11-01T12:37:22.649619Z"
+      }
+   ],
+   "sshKeys": [],
+   "siteAssociations": [],
+   "created": "2023-11-01T12:37:22.649619Z",
+   "updated": "2023-11-01T12:37:22.693571Z"
+}

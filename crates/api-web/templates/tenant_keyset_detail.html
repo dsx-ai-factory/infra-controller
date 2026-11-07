@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+
+{% block title %}Keyset {{ keyset.organization_id}}/{{ keyset.keyset_id }}{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Keyset {{ keyset.organization_id}}/{{ keyset.keyset_id }}</h1>
+
+<table class="detailsview">
+	<tr><th>Organization ID</th><td><a href="/admin/tenant/{{ keyset.organization_id }}">{{ keyset.organization_id }}</a></td></tr>
+	<tr><th>Keyset ID</th><td>{{ keyset.keyset_id }}</td></tr>
+	<tr><th>Version</th><td>{{ keyset.version }}</td></tr>
+</table>
+
+<h2>Keys</h2>
+
+<table class="detailsview">
+	<thead>
+		<tr>
+			<th>Public Key</th>
+			<th>Description</th>
+		</tr>
+	</thead>
+	<tbody>
+	{% for key in keyset.keys %}
+		<tr>
+			<td style="overflow: auto;"><div style="max-width: 30vw;">{{ key.public_key }}</div></td>
+			<td style="overflow: auto;"><div style="max-width: 30vw;">{{ key.comment|option_fmt }}</div></td>
+		</tr>
+	{% endfor %}
+	</tbody>
+</table>
+
+{% endblock %}

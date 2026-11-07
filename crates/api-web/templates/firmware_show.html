@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}Firmware{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Firmware</h1>
+
+<h2>Desired Firmware ({{ desired_firmware.len() }})</h2>
+<table class="sortable overview">
+	<thead>
+	<tr>
+		<th>Vendor</th>
+		<th>Model</th>
+		<th>Explicit Update Start Needed</th>
+		<th>Versions</th>
+	</tr>
+	</thead>
+	<tbody>
+	{% for row in desired_firmware %}
+		<tr>
+			<td>{{ row.vendor }}</td>
+			<td>{{ row.model }}</td>
+			<td>{{ row.explicit_update_start_needed }}</td>
+			<td>
+				{% if row.versions.is_empty() %}
+					No versions
+				{% else %}
+					{% for version in row.versions %}
+						<span style="display: inline-block; margin-right: 0.75rem; white-space: nowrap;"><b>{{ version.component }}</b>: {{ version.version }}</span>
+					{% endfor %}
+				{% endif %}
+			</td>
+		</tr>
+	{% endfor %}
+	</tbody>
+</table>
+
+{% endblock %}

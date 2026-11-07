@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block title %}{{ object_type }} State History {{ id }}{% endblock %}
+
+{% block content %}
+<div id="json"><a href="/admin/{{ object_url_path }}/{{ id }}/state-history.json">JSON</a></div>
+
+<h1>{{ object_type }} State History <a href="/admin/{{ object_url_path }}/{{ id }}">{{ id }}</a></h1>
+
+{{ history|safe }}
+
+{% endblock %}

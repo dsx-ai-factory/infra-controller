@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block title %}Machine Interfaces{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Machine Interfaces ({{ page.total_items() }})</h1>
+<table class="sortable overview">
+	<thead>
+	<tr>
+		<th>ID</th>
+		<th>MAC Address</th>
+		<th>IP Address</th>
+		<th>Association Type</th>
+		<th>Association ID</th>
+		<th>Type</th>
+		<th>Hostname</th>
+		<th>Vendor</th>
+		<th>Domain Name</th>
+	</tr>
+	</thead>
+	<tbody>
+	{% for iface in interfaces %}
+		<tr>
+			<td><a href="/admin/interface/{{ iface.id }}">{{ iface.id }}</a></td>
+			<td>{{ iface.mac_address }}</td>
+			<td>{{ iface.ip_address }}</td>
+			<td>{{ iface.association_type }}</td>
+			<td>
+				{% if !iface.machine_id.is_empty() %}
+				{{ iface.machine_id|machine_id_link|safe }}
+				{% else if !iface.switch_id.is_empty() %}
+				{{ iface.switch_id|switch_id_link|safe }}
+				{% else if !iface.power_shelf_id.is_empty() %}
+				{{ iface.power_shelf_id|power_shelf_id_link|safe }}
+				{% endif %}
+			</td>
+			<td>{{ iface.interface_type }}</td>
+			<td>{{ iface.hostname }}</td>
+			<td>{{ iface.vendor }}</td>
+			<td>{{ iface.domain_name }}</td>
+		</tr>
+	{% endfor %}
+	</tbody>
+</table>
+
+{% include "pages_footer.html" %}
+
+{% endblock %}

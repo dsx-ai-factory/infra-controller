@@ -1,0 +1,2575 @@
+openapi: 3.0.3
+info:
+  title: NMX Manager Rest API OpenAPI specification
+  version: 85.1.1000
+servers:
+- url: /
+paths:
+  /nmx/v1/metrics:
+    get:
+      operationId: GetMetrics
+      parameters:
+      - in: query
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/UUID'
+      responses:
+        "200":
+          content:
+            text/plain:
+              schema:
+                description: List of metrics
+                type: string
+          description: Success - Metrics
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Invalid Request Schema
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Metric for the Domain does not exist
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Internal Error
+      summary: Get metrics
+      tags:
+      - Metrics
+  /nmx/v1/services:
+    get:
+      operationId: GetNmxServicesList
+      parameters:
+      - in: query
+        name: type
+        schema:
+          description: NMX Service Type
+          items:
+            $ref: '#/components/schemas/NmxServiceType'
+          type: array
+      - in: query
+        name: address
+        schema:
+          description: NMX Service Address
+          items:
+            $ref: '#/components/schemas/IPAddress'
+          type: array
+      - in: query
+        name: pagination
+        schema:
+          $ref: '#/components/schemas/Pagination'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/NmxService'
+                type: array
+          description: Success
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Get information on all NMX services
+      tags:
+      - Services
+    post:
+      description: "If add operation is not finished yet, you won't be able to add\
+        \ or delete a new object with the same information."
+      operationId: AddNmxService
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddNmxService_request'
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NmxService'
+          description: Success
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Bad Request
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Adds a new Telemetry or Controller using its connection information
+      tags:
+      - Services
+  /nmx/v1/services/{id}:
+    delete:
+      description: "If the service is connected, it will be disconnected from NMX-M\
+        \ Gateway."
+      operationId: DeleteNmxService
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NmxService'
+          description: Success
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Delete a NMX Service from NMX-M
+      tags:
+      - Services
+    get:
+      operationId: GetNmxService
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NmxService'
+          description: Success
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NmxService'
+          description: Success
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Get information on NMX service by its ID
+      tags:
+      - Services
+  /nmx/v1/compute-nodes:
+    get:
+      operationId: GetComputeNodesList
+      parameters:
+      - in: query
+        name: domain
+        schema:
+          description: Domain UUID list
+          items:
+            $ref: '#/components/schemas/UUID'
+          type: array
+      - in: query
+        name: pagination
+        schema:
+          $ref: '#/components/schemas/Pagination'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/ComputeNode'
+                type: array
+          description: Success
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Get list of Compute Nodes
+      tags:
+      - NetworkEntity
+  /nmx/v1/compute-nodes/count:
+    get:
+      operationId: GetComputeNodesCount
+      parameters:
+      - in: query
+        name: domain
+        schema:
+          description: Domain UUID list
+          items:
+            $ref: '#/components/schemas/UUID'
+          type: array
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkEntityCountResponse'
+          description: Success
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Get total count of Compute Nodes
+      tags:
+      - NetworkEntity
+  /nmx/v1/compute-nodes/{id}:
+    get:
+      operationId: GetComputeNode
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ComputeNode'
+          description: Success
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Compute Node information
+      tags:
+      - NetworkEntity
+    put:
+      operationId: UpdateComputeNode
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NetworkEntityUpdatePayload'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ComputeNode'
+          description: Success
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Update Compute Node information
+      tags:
+      - NetworkEntity
+  /nmx/v1/switch-nodes:
+    get:
+      operationId: GetSwitchNodesList
+      parameters:
+      - in: query
+        name: domain
+        schema:
+          description: Domain UUID list
+          items:
+            $ref: '#/components/schemas/UUID'
+          type: array
+      - in: query
+        name: pagination
+        schema:
+          $ref: '#/components/schemas/Pagination'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/SwitchNode'
+                type: array
+          description: Success
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Get list of Switch Nodes
+      tags:
+      - NetworkEntity
+  /nmx/v1/switch-nodes/count:
+    get:
+      operationId: GetSwitchNodesCount
+      parameters:
+      - in: query
+        name: domain
+        schema:
+          description: Domain UUID list
+          items:
+            $ref: '#/components/schemas/UUID'
+          type: array
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkEntityCountResponse'
+          description: Success
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Get total count of Switch Nodes
+      tags:
+      - NetworkEntity
+  /nmx/v1/switch-nodes/{id}:
+    get:
+      operationId: GetSwitchNode
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SwitchNode'
+          description: Success
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Switch Node information
+      tags:
+      - NetworkEntity
+    put:
+      operationId: UpdateSwitchNode
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NetworkEntityUpdatePayload'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SwitchNode'
+          description: Success
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Update Switch Node information
+      tags:
+      - NetworkEntity
+  /nmx/v1/ports:
+    get:
+      operationId: GetPortsList
+      parameters:
+      - in: query
+        name: domain
+        schema:
+          description: Domain UUID list
+          items:
+            $ref: '#/components/schemas/UUID'
+          type: array
+      - in: query
+        name: pagination
+        schema:
+          $ref: '#/components/schemas/Pagination'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Port'
+                type: array
+          description: Success
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Get list of Ports
+      tags:
+      - NetworkEntity
+  /nmx/v1/ports/count:
+    get:
+      operationId: GetPortsCount
+      parameters:
+      - in: query
+        name: domain
+        schema:
+          description: Domain UUID list
+          items:
+            $ref: '#/components/schemas/UUID'
+          type: array
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkEntityCountResponse'
+          description: Success
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Get total count of Ports
+      tags:
+      - NetworkEntity
+  /nmx/v1/ports/{id}:
+    get:
+      operationId: GetPort
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Port'
+          description: Success
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Port information
+      tags:
+      - NetworkEntity
+  /nmx/v1/gpus:
+    get:
+      operationId: GetGPUList
+      parameters:
+      - in: query
+        name: domain
+        schema:
+          description: Domain UUID list
+          items:
+            $ref: '#/components/schemas/UUID'
+          type: array
+      - in: query
+        name: pagination
+        schema:
+          $ref: '#/components/schemas/Pagination'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/GPU'
+                type: array
+          description: Success
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Get list of GPUs
+      tags:
+      - NetworkEntity
+  /nmx/v1/gpus/count:
+    get:
+      operationId: GetGPUCount
+      parameters:
+      - in: query
+        name: domain
+        schema:
+          description: Domain UUID list
+          items:
+            $ref: '#/components/schemas/UUID'
+          type: array
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkEntityCountResponse'
+          description: Success
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Get total count of GPUs
+      tags:
+      - NetworkEntity
+  /nmx/v1/gpus/{id}:
+    get:
+      operationId: GetGPU
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GPU'
+          description: Success
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: GPU information
+      tags:
+      - NetworkEntity
+    put:
+      operationId: UpdateGPU
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NetworkEntityUpdatePayload'
+        required: false
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GPU'
+          description: Success
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Update GPU information
+      tags:
+      - NetworkEntity
+  /nmx/v1/switches:
+    get:
+      operationId: GetSwitchesList
+      parameters:
+      - in: query
+        name: domain
+        schema:
+          description: Domain UUID list
+          items:
+            $ref: '#/components/schemas/UUID'
+          type: array
+      - in: query
+        name: pagination
+        schema:
+          $ref: '#/components/schemas/Pagination'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Switch'
+                type: array
+          description: Success
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Get list of Switches
+      tags:
+      - NetworkEntity
+  /nmx/v1/switches/count:
+    get:
+      operationId: GetSwitchesCount
+      parameters:
+      - in: query
+        name: domain
+        schema:
+          description: Domain UUID list
+          items:
+            $ref: '#/components/schemas/UUID'
+          type: array
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkEntityCountResponse'
+          description: Success
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Get total count of Switches
+      tags:
+      - NetworkEntity
+  /nmx/v1/switches/{id}:
+    get:
+      operationId: GetSwitch
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Switch'
+          description: Success
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Switch information
+      tags:
+      - NetworkEntity
+    put:
+      operationId: UpdateSwitch
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NetworkEntityUpdatePayload'
+        required: false
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Switch'
+          description: Success
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Update Switch information
+      tags:
+      - NetworkEntity
+  /nmx/v1/chassis:
+    get:
+      operationId: GetChassisList
+      parameters:
+      - in: query
+        name: domain
+        schema:
+          description: Domain UUID list
+          items:
+            $ref: '#/components/schemas/UUID'
+          type: array
+      - in: query
+        name: pagination
+        schema:
+          $ref: '#/components/schemas/Pagination'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Chassis'
+                title: ChassisListResponse
+                type: array
+                uniqueItems: true
+          description: Success
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Get list of Chassis
+      tags:
+      - NetworkEntity
+  /nmx/v1/chassis/count:
+    get:
+      operationId: GetChassisCount
+      parameters:
+      - in: query
+        name: domain
+        schema:
+          description: Domain UUID list
+          items:
+            $ref: '#/components/schemas/UUID'
+          type: array
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkEntityCountResponse'
+          description: Success
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Get total count of Chassis
+      tags:
+      - NetworkEntity
+  /nmx/v1/chassis/{id}:
+    get:
+      operationId: GetChassis
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Chassis'
+          description: Success
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Chassis information
+      tags:
+      - NetworkEntity
+    put:
+      operationId: UpdateChassis
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NetworkEntityUpdatePayload'
+        required: false
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Chassis'
+          description: Success
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Internal Error
+      summary: Update Chassis information
+      tags:
+      - NetworkEntity
+  /nmx/v1/partitions:
+    get:
+      operationId: GetPartitionsList
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Partition'
+                title: PartitionsListResponse
+                type: array
+                uniqueItems: true
+          description: Success - Partition Object List
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Internal Error
+      summary: Get a list of partitions
+      tags:
+      - Partitions
+    post:
+      operationId: CreatePartition
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePartitionRequest'
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsyncResponse'
+          description: '"Create Partition" request accepted and was assigned an async
+            Operation ID'
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Invalid Request Schema
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - GPUs do not exist
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Conflicting Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Internal Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Service Unavailable
+      summary: Create a Partition by provided information
+      tags:
+      - Partitions
+  /nmx/v1/partitions/{id}:
+    delete:
+      operationId: DeletePartition
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsyncResponse'
+          description: '"Delete Partition" request accepted and was assigned an async
+            Operation ID'
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Invalid Request Schema
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Missing ID
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Internal Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Service Unavailable
+      summary: Delete a Partition
+      tags:
+      - Partitions
+    get:
+      operationId: GetPartition
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Partition'
+          description: Success - Partition Object
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Invalid Request Schema
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Missing ID
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Internal Error
+      summary: Partition information
+      tags:
+      - Partitions
+    put:
+      operationId: UpdatePartition
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePartitionRequest'
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsyncResponse'
+          description: '"Update Partition" request accepted and was assigned an async
+            Operation ID'
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Invalid Request Schema
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Missing ID
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Conflicting Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Internal Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Service Unavailable
+      summary: Update a Partition
+      tags:
+      - Partitions
+  /nmx/v1/operations:
+    get:
+      operationId: GetOperationsList
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Operation'
+                title: OperationsListResponse
+                type: array
+                uniqueItems: true
+          description: Success - Operation Object List
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Internal Error
+      summary: Get a list of operations
+      tags:
+      - Operations
+  /nmx/v1/operations/{id}:
+    delete:
+      operationId: CancelOperation
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      responses:
+        "202":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsyncResponse'
+          description: '"Cancel Operation" request accepted and was assigned an async
+            Operation ID'
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Invalid Request Schema
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Missing ID
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Conflicting Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Internal Error
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Service Unavailable
+      summary: Delete an Operation
+      tags:
+      - Operations
+    get:
+      operationId: GetOperation
+      parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          $ref: '#/components/schemas/EntityID'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          description: Success - Operation Object
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Invalid Request Schema
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Missing ID
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Internal Error
+      summary: Get an operation
+      tags:
+      - Operations
+  /nmx/v1/kpis:
+    get:
+      operationId: GetKPI
+      parameters:
+      - in: query
+        name: filter
+        required: false
+        schema:
+          $ref: '#/components/schemas/KPIType'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetKPI_200_response'
+          description: Success - KPI Object
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+          description: Failed - Internal Error
+      summary: Get KPI
+      tags:
+      - KPI
+components:
+  schemas:
+    UUID:
+      description: Universally Unique Identifier.
+      format: uuid
+      type: string
+    Error:
+      additionalProperties: false
+      description: NMX-M Error Information
+      example:
+        httpErrorCode: 500
+        description: "Something really bad happened with resource [id: 123] and we\
+          \ are so sorry about it."
+        customErrorCode: internal-error
+      properties:
+        httpErrorCode:
+          description: HTTP error code
+          example: 500
+          type: integer
+        customErrorCode:
+          description: "A more granular, textual custom error code"
+          example: internal-error
+          type: string
+        description:
+          description: A detailed error description
+          example: "Something really bad happened with resource [id: 123] and we are\
+            \ so sorry about it."
+          type: string
+      required:
+      - customErrorCode
+      - description
+      - httpErrorCode
+      type: object
+    NmxService:
+      additionalProperties: false
+      example:
+        Status: UP
+        Description: Description
+        Address: 1.1.1.1
+        UpSince: 2000-01-23T04:56:07.000+00:00
+        Name: Name
+        ApplicationUUID: 046b6c7f-0b8a-43b9-b35d-6489e6daee91
+        Version: Version
+        StatusInfo: StatusInfo
+        ServiceType: TELEMETRY
+        ID: 551137c2f9e1fac808a5f572
+        ClusterDomainUUID: 046b6c7f-0b8a-43b9-b35d-6489e6daee91
+        PortNumber: 8001
+        RegisteredAt: 2000-01-23T04:56:07.000+00:00
+      properties:
+        ID:
+          description: System unique identifier.
+          example: 551137c2f9e1fac808a5f572
+          pattern: "^[0-9a-fA-F]{24}$"
+          type: string
+        Name:
+          description: Name of the service.
+          type: string
+        Description:
+          description: Description of the service.
+          type: string
+        ServiceType:
+          $ref: '#/components/schemas/NmxServiceType'
+        Address:
+          description: IPv4 address mask.
+          example: 1.1.1.1
+          format: ipv4
+          type: string
+        PortNumber:
+          example: 8001
+          maximum: 65535
+          minimum: 0
+          type: integer
+        ClusterDomainUUID:
+          description: Universally Unique Identifier.
+          format: uuid
+          type: string
+        ApplicationUUID:
+          description: Universally Unique Identifier.
+          format: uuid
+          type: string
+        Version:
+          description: Version of the service.
+          type: string
+        Status:
+          $ref: '#/components/schemas/NmxServiceStatus'
+        StatusInfo:
+          description: Additional information about the status.
+          type: string
+        RegisteredAt:
+          format: date-time
+          type: string
+        UpSince:
+          format: date-time
+          type: string
+      type: object
+    NmxServiceType:
+      enum:
+      - TELEMETRY
+      - CONTROLLER
+      type: string
+      x-enum-varnames:
+      - NmxServiceTypeTelemetry
+      - NmxServiceTypeController
+    NmxServiceStatus:
+      enum:
+      - UP
+      - DRAINING
+      - REMOVED
+      - DOWN
+      - RECONNECTING
+      - UNREACHABLE
+      - IN_PROGRESS
+      - ERROR
+      type: string
+      x-enum-varnames:
+      - NmxServiceStatusUp
+      - NmxServiceStatusDraining
+      - NmxServiceStatusRemoved
+      - NmxServiceStatusDown
+      - NmxServiceStatusReconnecting
+      - NmxServiceStatusUnreachable
+      - NmxServiceStatusInProgress
+      - NmxServiceStatusError
+    NmxServiceConnectionInformation:
+      additionalProperties: false
+      properties:
+        Address:
+          description: IPv4 address mask.
+          example: 1.1.1.1
+          format: ipv4
+          type: string
+        PortNumber:
+          example: 8001
+          maximum: 65535
+          minimum: 0
+          type: integer
+      required:
+      - Address
+      - PortNumber
+      type: object
+    IPAddress:
+      description: IPv4 address mask.
+      example: 1.1.1.1
+      format: ipv4
+      type: string
+    Pagination:
+      additionalProperties: false
+      properties:
+        offset:
+          default: 0
+          description: Start offset of the results
+          minimum: 0
+          type: integer
+        limit:
+          description: Items per page
+          minimum: 1
+          type: integer
+      type: object
+    EntityID:
+      description: System unique identifier.
+      example: 551137c2f9e1fac808a5f572
+      pattern: "^[0-9a-fA-F]{24}$"
+      type: string
+    ComputeNode:
+      additionalProperties: false
+      example:
+        DomainUUID: 046b6c7f-0b8a-43b9-b35d-6489e6daee91
+        Description: Description
+        Health: UNKNOWN
+        CreatedAt: 2000-01-23T04:56:07.000+00:00
+        ID: 551137c2f9e1fac808a5f572
+        UpdatedAt: 2000-01-23T04:56:07.000+00:00
+        Name: Name
+        LocationInfo:
+          SlotID: 6
+          ChassisID: 0
+          TrayIndex: 1
+          HostID: 5
+          ChassisSerialNumber: ChassisSerialNumber
+      properties:
+        ID:
+          description: System unique identifier.
+          example: 551137c2f9e1fac808a5f572
+          pattern: "^[0-9a-fA-F]{24}$"
+          type: string
+        Name:
+          description: Helpful name
+          type: string
+        Description:
+          description: Brief description
+          type: string
+        CreatedAt:
+          format: date-time
+          type: string
+        UpdatedAt:
+          format: date-time
+          type: string
+        DomainUUID:
+          description: Universally Unique Identifier.
+          format: uuid
+          type: string
+        LocationInfo:
+          $ref: '#/components/schemas/LocationInfo'
+        Health:
+          enum:
+          - UNKNOWN
+          - HEALTHY
+          - DEGRADED
+          - UNHEALTHY
+          type: string
+          x-enum-varnames:
+          - ComputeNodeHealthUnknown
+          - ComputeNodeHealthHealthy
+          - ComputeNodeHealthDegraded
+          - ComputeNodeHealthUnhealthy
+      type: object
+    NetworkEntityCountResponse:
+      additionalProperties: false
+      example:
+        total: 0
+      properties:
+        total:
+          description: Number of objects
+          format: int64
+          type: integer
+      type: object
+    NetworkEntityUpdatePayload:
+      additionalProperties: false
+      anyOf:
+      - required:
+        - Name
+        type: object
+      - required:
+        - Description
+        type: object
+      example:
+        Description: This is a description.
+        Name: Some-Name
+      properties:
+        Name:
+          example: Some-Name
+          maxLength: 64
+          minLength: 1
+          pattern: "^[\\x20-\\x7E]*$"
+          type: string
+        Description:
+          example: This is a description.
+          maxLength: 2000
+          pattern: "^[\\x20-\\x7E]*$"
+          type: string
+      type: object
+    SwitchNode:
+      additionalProperties: false
+      example:
+        DomainUUID: 046b6c7f-0b8a-43b9-b35d-6489e6daee91
+        Description: Description
+        SwitchIDList:
+        - 551137c2f9e1fac808a5f572
+        - 551137c2f9e1fac808a5f572
+        Health: UNKNOWN
+        CreatedAt: 2000-01-23T04:56:07.000+00:00
+        ID: 551137c2f9e1fac808a5f572
+        UpdatedAt: 2000-01-23T04:56:07.000+00:00
+        Name: Name
+        LocationInfo:
+          SlotID: 6
+          ChassisID: 0
+          TrayIndex: 1
+          HostID: 5
+          ChassisSerialNumber: ChassisSerialNumber
+      properties:
+        ID:
+          description: System unique identifier.
+          example: 551137c2f9e1fac808a5f572
+          pattern: "^[0-9a-fA-F]{24}$"
+          type: string
+        Name:
+          type: string
+        Description:
+          type: string
+        CreatedAt:
+          format: date-time
+          type: string
+        UpdatedAt:
+          format: date-time
+          type: string
+        DomainUUID:
+          description: Universally Unique Identifier.
+          format: uuid
+          type: string
+        LocationInfo:
+          $ref: '#/components/schemas/LocationInfo'
+        Health:
+          enum:
+          - UNKNOWN
+          - HEALTHY
+          - MISSING_NVLINK
+          - UNHEALTHY
+          type: string
+          x-enum-varnames:
+          - SwitchNodeHealthUnknown
+          - SwitchNodeHealthHealthy
+          - SwitchNodeHealthMissingNvlink
+          - SwitchNodeHealthUnhealthy
+        SwitchIDList:
+          items:
+            $ref: '#/components/schemas/EntityID'
+          type: array
+      type: object
+    Port:
+      additionalProperties: false
+      example:
+        LogicalState: NO_CHANGE
+        ComputePortNum: 2147483647
+        Plane: 988759834
+        CreatedAt: 2000-01-23T04:56:07.000+00:00
+        CageNum: 2147483647
+        SubnetPrefix: 2147483647
+        UpdatedAt: 2000-01-23T04:56:07.000+00:00
+        LocationInfo:
+          SlotID: 6
+          ChassisID: 0
+          TrayIndex: 1
+          HostID: 5
+          ChassisSerialNumber: ChassisSerialNumber
+        CagePortNum: 1553093137
+        DomainUUID: 046b6c7f-0b8a-43b9-b35d-6489e6daee91
+        Type: UNDEFINED
+        BaseLID: 2147483647
+        PeerPortNum: 2147483647
+        PhysicalState: NO_CHANGE
+        Rail: 2147483647
+        CageSplitPortNum: 870642708
+        ContainAndDrain: true
+        PortUID: 2147483647
+        PeerPortDeviceUID: 2147483647
+        SystemPortNum: 2147483647
+        ID: 551137c2f9e1fac808a5f572
+        PortNum: 2147483647
+        IsSDNPort: true
+      properties:
+        ID:
+          description: System unique identifier.
+          example: 551137c2f9e1fac808a5f572
+          pattern: "^[0-9a-fA-F]{24}$"
+          type: string
+        CreatedAt:
+          format: date-time
+          type: string
+        UpdatedAt:
+          format: date-time
+          type: string
+        DomainUUID:
+          description: Universally Unique Identifier.
+          format: uuid
+          type: string
+        LocationInfo:
+          $ref: '#/components/schemas/LocationInfo'
+        Type:
+          $ref: '#/components/schemas/PortType'
+        PortUID:
+          format: uint64
+          maximum: 18446744073709551615
+          minimum: 0
+          type: integer
+        PortNum:
+          format: uint64
+          maximum: 18446744073709551615
+          minimum: 0
+          type: integer
+        PeerPortDeviceUID:
+          format: uint64
+          maximum: 18446744073709551615
+          minimum: 0
+          type: integer
+        PeerPortNum:
+          format: uint64
+          maximum: 18446744073709551615
+          minimum: 0
+          type: integer
+        Rail:
+          format: uint32
+          maximum: 4294967295
+          minimum: 0
+          type: integer
+        Plane:
+          format: uint32
+          maximum: 4294967295
+          minimum: 0
+          type: integer
+        PhysicalState:
+          $ref: '#/components/schemas/PortPhysicalState'
+        LogicalState:
+          $ref: '#/components/schemas/PortLogicalState'
+        SubnetPrefix:
+          format: uint64
+          maximum: 18446744073709551615
+          minimum: 0
+          type: integer
+        IsSDNPort:
+          type: boolean
+        ContainAndDrain:
+          type: boolean
+        CageNum:
+          format: uint32
+          maximum: 4294967295
+          minimum: 0
+          type: integer
+        CagePortNum:
+          format: uint32
+          maximum: 4294967295
+          minimum: 0
+          type: integer
+        CageSplitPortNum:
+          format: uint32
+          maximum: 4294967295
+          minimum: 0
+          type: integer
+        BaseLID:
+          format: uint64
+          maximum: 18446744073709551615
+          minimum: 0
+          type: integer
+        SystemPortNum:
+          format: uint64
+          maximum: 18446744073709551615
+          minimum: 0
+          type: integer
+        ComputePortNum:
+          format: uint64
+          maximum: 18446744073709551615
+          minimum: 0
+          type: integer
+      required:
+      - ContainAndDrain
+      - IsSDNPort
+      - LogicalState
+      - PeerPortDeviceUID
+      - PeerPortNum
+      - PhysicalState
+      - Plane
+      - PortNum
+      - PortUID
+      - Rail
+      - SubnetPrefix
+      type: object
+    PortType:
+      enum:
+      - UNDEFINED
+      - GPU
+      - SWITCH_ACCESS
+      - SWITCH_TRUNK
+      - FNM
+      - HCA
+      type: string
+      x-enum-varnames:
+      - PortTypeUndefined
+      - PortTypeGPU
+      - PortTypeSwitchAccess
+      - PortTypeSwitchTrunk
+      - PortTypeFNM
+      - PortTypeHCA
+    PortPhysicalState:
+      enum:
+      - NO_CHANGE
+      - SLEEP
+      - POLLING
+      - DISABLED
+      - PORTCONFTRAIN
+      - LINKUP
+      - LINKERRRECOVER
+      - PHYTEST
+      type: string
+      x-enum-varnames:
+      - PortPhysicalStateNoChange
+      - PortPhysicalStateSleep
+      - PortPhysicalStatePolling
+      - PortPhysicalStateDisabled
+      - PortPhysicalStatePortConfTrain
+      - PortPhysicalStateLinkUp
+      - PortPhysicalStateLinkErrRecover
+      - PortPhysicalStatePhyTest
+    PortLogicalState:
+      enum:
+      - NO_CHANGE
+      - STATE_DOWN
+      - STATE_INIT
+      - STATE_ARMED
+      - STATE_ACTIVE
+      - STATE_ACT_DEFER
+      type: string
+      x-enum-varnames:
+      - PortLogicalStateNoChange
+      - PortLogicalStateDown
+      - PortLogicalStateInit
+      - PortLogicalStateArmed
+      - PortLogicalStateActive
+      - PortLogicalStateActDefer
+    GPU:
+      additionalProperties: false
+      example:
+        Description: Description
+        Health: UNKNOWN
+        DeviceID: 2147483647
+        CreatedAt: 2000-01-23T04:56:07.000+00:00
+        DevicePcieID: 2147483647
+        VendorID: 2147483647
+        DeviceUID: 2147483647
+        PartitionID: 988759834
+        UpdatedAt: 2000-01-23T04:56:07.000+00:00
+        Name: Name
+        LocationInfo:
+          SlotID: 6
+          ChassisID: 0
+          TrayIndex: 1
+          HostID: 5
+          ChassisSerialNumber: ChassisSerialNumber
+        DomainUUID: 046b6c7f-0b8a-43b9-b35d-6489e6daee91
+        PortIDList:
+        - 551137c2f9e1fac808a5f572
+        - 551137c2f9e1fac808a5f572
+        ID: 551137c2f9e1fac808a5f572
+        InternalDescription: InternalDescription
+        SystemUID: 2147483647
+        ALIDList:
+        - 1111
+        - 2222
+      properties:
+        ID:
+          description: System unique identifier.
+          example: 551137c2f9e1fac808a5f572
+          pattern: "^[0-9a-fA-F]{24}$"
+          type: string
+        Name:
+          type: string
+        Description:
+          description: User specified notes & description
+          type: string
+        InternalDescription:
+          description: Device internal description
+          type: string
+        CreatedAt:
+          format: date-time
+          type: string
+        UpdatedAt:
+          format: date-time
+          type: string
+        DomainUUID:
+          description: Universally Unique Identifier.
+          format: uuid
+          type: string
+        LocationInfo:
+          $ref: '#/components/schemas/LocationInfo'
+        DeviceUID:
+          format: uint64
+          maximum: 18446744073709551615
+          minimum: 0
+          type: integer
+        DeviceID:
+          format: uint32
+          maximum: 4294967295
+          minimum: 0
+          type: integer
+        DevicePcieID:
+          format: uint64
+          maximum: 18446744073709551615
+          minimum: 0
+          type: integer
+        SystemUID:
+          format: uint64
+          maximum: 18446744073709551615
+          minimum: 0
+          type: integer
+        VendorID:
+          format: uint32
+          maximum: 4294967295
+          minimum: 0
+          type: integer
+        ALIDList:
+          description: List of device labels for internal routing
+          items:
+            $ref: '#/components/schemas/uint64'
+          type: array
+        PartitionID:
+          format: uint32
+          maximum: 4294967295
+          minimum: 0
+          type: integer
+        PortIDList:
+          description: List of device ports
+          items:
+            $ref: '#/components/schemas/EntityID'
+          type: array
+        Health:
+          enum:
+          - UNKNOWN
+          - HEALTHY
+          - DEGRADED
+          - NO_NVLINK
+          - DEGRADED_BW
+          type: string
+          x-enum-varnames:
+          - GPUHealthUnknown
+          - GPUHealthHealthy
+          - GPUHealthDegraded
+          - GPUHealthNoNVL
+          - GPUHealthDegradedBW
+      required:
+      - ALIDList
+      - DeviceID
+      - DevicePcieID
+      - DeviceUID
+      - SystemUID
+      - VendorID
+      type: object
+    Switch:
+      additionalProperties: false
+      example:
+        Description: Description
+        Health: UNKNOWN
+        DeviceID: 2147483647
+        CreatedAt: 2000-01-23T04:56:07.000+00:00
+        DevicePcieID: 2147483647
+        VendorID: 2147483647
+        DeviceUID: 2147483647
+        UpdatedAt: 2000-01-23T04:56:07.000+00:00
+        Name: Name
+        LocationInfo:
+          SlotID: 6
+          ChassisID: 0
+          TrayIndex: 1
+          HostID: 5
+          ChassisSerialNumber: ChassisSerialNumber
+        DomainUUID: 046b6c7f-0b8a-43b9-b35d-6489e6daee91
+        PortIDList:
+        - 551137c2f9e1fac808a5f572
+        - 551137c2f9e1fac808a5f572
+        ID: 551137c2f9e1fac808a5f572
+        InternalDescription: InternalDescription
+        SystemUID: 2147483647
+      properties:
+        ID:
+          description: System unique identifier.
+          example: 551137c2f9e1fac808a5f572
+          pattern: "^[0-9a-fA-F]{24}$"
+          type: string
+        Name:
+          type: string
+        Description:
+          description: User specified notes & description
+          type: string
+        InternalDescription:
+          description: Device internal description
+          type: string
+        CreatedAt:
+          format: date-time
+          type: string
+        UpdatedAt:
+          format: date-time
+          type: string
+        DomainUUID:
+          description: Universally Unique Identifier.
+          format: uuid
+          type: string
+        LocationInfo:
+          $ref: '#/components/schemas/LocationInfo'
+        DeviceUID:
+          format: uint64
+          maximum: 18446744073709551615
+          minimum: 0
+          type: integer
+        DeviceID:
+          format: uint32
+          maximum: 4294967295
+          minimum: 0
+          type: integer
+        DevicePcieID:
+          format: uint64
+          maximum: 18446744073709551615
+          minimum: 0
+          type: integer
+        SystemUID:
+          format: uint64
+          maximum: 18446744073709551615
+          minimum: 0
+          type: integer
+        VendorID:
+          format: uint32
+          maximum: 4294967295
+          minimum: 0
+          type: integer
+        PortIDList:
+          description: List of device ports
+          items:
+            $ref: '#/components/schemas/EntityID'
+          type: array
+        Health:
+          enum:
+          - UNKNOWN
+          - HEALTHY
+          - MISSING_NVLINK
+          - UNHEALTHY
+          type: string
+          x-enum-varnames:
+          - SwitchHealthUnknown
+          - SwitchHealthHealthy
+          - SwitchHealthMissingNvlink
+          - SwitchHealthUnhealthy
+      required:
+      - DeviceID
+      - DevicePcieID
+      - DeviceUID
+      - SystemUID
+      - VendorID
+      type: object
+    Chassis:
+      additionalProperties: false
+      example:
+        DomainUUID: 046b6c7f-0b8a-43b9-b35d-6489e6daee91
+        InternalID: 0
+        Description: Description
+        SerialNumber: SerialNumber
+        CreatedAt: 2000-01-23T04:56:07.000+00:00
+        SwitchNodeIDList:
+        - 551137c2f9e1fac808a5f572
+        - 551137c2f9e1fac808a5f572
+        ID: 551137c2f9e1fac808a5f572
+        UpdatedAt: 2000-01-23T04:56:07.000+00:00
+        ComputeNodeIDList:
+        - 551137c2f9e1fac808a5f572
+        - 551137c2f9e1fac808a5f572
+        Name: Name
+      properties:
+        ID:
+          description: System unique identifier.
+          example: 551137c2f9e1fac808a5f572
+          pattern: "^[0-9a-fA-F]{24}$"
+          type: string
+        Name:
+          type: string
+        Description:
+          type: string
+        CreatedAt:
+          format: date-time
+          type: string
+        UpdatedAt:
+          format: date-time
+          type: string
+        DomainUUID:
+          description: Universally Unique Identifier.
+          format: uuid
+          type: string
+        InternalID:
+          description: The unique identifier of the chassis
+          type: integer
+        SerialNumber:
+          description: The unique serial number of the chassis
+          type: string
+        ComputeNodeIDList:
+          items:
+            $ref: '#/components/schemas/EntityID'
+          type: array
+        SwitchNodeIDList:
+          items:
+            $ref: '#/components/schemas/EntityID'
+          type: array
+      type: object
+    Partition:
+      additionalProperties: false
+      example:
+        Type: ID_BASED
+        Health: HEALTHY
+        CreatedAt: 2000-01-23T04:56:07.000+00:00
+        ID: 551137c2f9e1fac808a5f572
+        PartitionID: 0
+        UpdatedAt: 2000-01-23T04:56:07.000+00:00
+        Members:
+        - 551137c2f9e1fac808a5f572
+        - 551137c2f9e1fac808a5f572
+        Name: Some-Name
+      properties:
+        ID:
+          description: System unique identifier.
+          example: 551137c2f9e1fac808a5f572
+          pattern: "^[0-9a-fA-F]{24}$"
+          type: string
+        PartitionID:
+          description: Partition ID as identified by the network
+          format: uint32
+          type: integer
+        Name:
+          description: Name of the Partition.
+          example: Some-Name
+          maxLength: 244
+          minLength: 1
+          pattern: "^[\\x20-\\x7E]*$"
+          type: string
+        Type:
+          $ref: '#/components/schemas/PartitionType'
+        Health:
+          $ref: '#/components/schemas/PartitionHealth'
+        Members:
+          $ref: '#/components/schemas/PartitionMembers'
+        CreatedAt:
+          format: date-time
+          type: string
+        UpdatedAt:
+          format: date-time
+          type: string
+      required:
+      - CreatedAt
+      - Health
+      - ID
+      - Members
+      - Name
+      - PartitionID
+      - Type
+      - UpdatedAt
+      type: object
+    PartitionID:
+      description: Partition ID as identified by the network
+      format: uint32
+      type: integer
+    PartitionName:
+      description: Name of the Partition.
+      example: Some-Name
+      maxLength: 244
+      minLength: 1
+      pattern: "^[\\x20-\\x7E]*$"
+      type: string
+    PartitionType:
+      enum:
+      - ID_BASED
+      - LOCATION_BASED
+      - UNDEFINED
+      type: string
+      x-enum-varnames:
+      - PartitionTypeIDBased
+      - PartitionTypeLocationBased
+      - PartitionTypeUndefined
+    PartitionHealth:
+      enum:
+      - HEALTHY
+      - DEGRADED
+      - DEGRADED_BANDWIDTH
+      - UNHEALTHY
+      - NEW
+      - UNKNOWN
+      type: string
+      x-enum-varnames:
+      - PartitionHealthHealthy
+      - PartitionHealthDegraded
+      - PartitionHealthDegradedBandwidth
+      - PartitionHealthUnhealthy
+      - PartitionHealthIntermediate
+      - PartitionHealthUnknown
+    PartitionMembers:
+      oneOf:
+      - items:
+          description: System unique identifier.
+          example: 551137c2f9e1fac808a5f572
+          pattern: "^[0-9a-fA-F]{24}$"
+          type: string
+        minItems: 1
+        type: array
+        uniqueItems: true
+      - items:
+          $ref: '#/components/schemas/PartitionMembers_oneOf_inner'
+        minItems: 1
+        type: array
+        uniqueItems: true
+      - description: it is to handle partitions without any gpus.
+        items:
+          description: TODO default missing array inner type to string
+          type: string
+        maxItems: 0
+        nullable: true
+        type: array
+    CreatePartitionRequest:
+      additionalProperties: false
+      example:
+        Members:
+        - 551137c2f9e1fac808a5f572
+        - 551137c2f9e1fac808a5f572
+        Name: Some-Name
+      properties:
+        Name:
+          description: Name of the Partition.
+          example: Some-Name
+          maxLength: 244
+          minLength: 1
+          pattern: "^[\\x20-\\x7E]*$"
+          type: string
+        Members:
+          $ref: '#/components/schemas/PartitionMembers'
+      required:
+      - Members
+      - Name
+      type: object
+    AsyncResponse:
+      additionalProperties: false
+      description: NMX-M Asynchronous Operation ID
+      example:
+        operationId: 551137c2f9e1fac808a5f572
+      properties:
+        operationId:
+          example: 551137c2f9e1fac808a5f572
+          format: entity-db-id
+          pattern: "^[0-9a-fA-F]{24}$"
+          type: string
+      required:
+      - operationId
+      type: object
+    UpdatePartitionRequest:
+      additionalProperties: false
+      example:
+        Members:
+        - 551137c2f9e1fac808a5f572
+        - 551137c2f9e1fac808a5f572
+      properties:
+        Members:
+          $ref: '#/components/schemas/PartitionMembers'
+      required:
+      - Members
+      type: object
+    Operation:
+      additionalProperties: false
+      description: an operations represents an async request and reflects its progress
+        of execution
+      example:
+        Status: pending
+        Percentage: 8.008282
+        CreatedAt: 2000-01-23T04:56:07.000+00:00
+        Request:
+          Cancellable: true
+          Method: get
+          URI: https://openapi-generator.tech
+          Body: "{}"
+        CurrentStep: CurrentStep
+        ID: 551137c2f9e1fac808a5f572
+        UpdatedAt: 2000-01-23T04:56:07.000+00:00
+        Result:
+          Details: Details
+          Error: Error
+          Data: ""
+      properties:
+        ID:
+          description: System unique identifier.
+          example: 551137c2f9e1fac808a5f572
+          pattern: "^[0-9a-fA-F]{24}$"
+          type: string
+        CreatedAt:
+          format: date-time
+          type: string
+        UpdatedAt:
+          format: date-time
+          type: string
+        Status:
+          $ref: '#/components/schemas/OperationStatus'
+        Percentage:
+          description: The percentage of completion for the operation
+          format: float
+          maximum: 100
+          minimum: 0
+          type: number
+        CurrentStep:
+          description: Human-readable description of the current step of execution
+            in the operation
+          type: string
+        Request:
+          $ref: '#/components/schemas/OperationRequest'
+        Result:
+          $ref: '#/components/schemas/OperationResult'
+      required:
+      - CreatedAt
+      - CurrentStep
+      - ID
+      - Percentage
+      - Request
+      - Status
+      - UpdatedAt
+      type: object
+    OperationStatus:
+      description: The status of the operation
+      enum:
+      - pending
+      - in-progress
+      - failed
+      - completed
+      - cancelled
+      type: string
+      x-enum-varnames:
+      - Pending
+      - InProgress
+      - Failed
+      - Completed
+      - Cancelled
+      x-enum-descriptions:
+      - operation is recorded and pending to be picked up for processing
+      - processing of the operation has started
+      - "operation has failed, this is a terminal state"
+      - "operation has finished successfully, this is a terminal state"
+      - "operation was cancelled, this is a terminal state"
+    OperationPercentage:
+      description: The percentage of completion for the operation
+      format: float
+      maximum: 100
+      minimum: 0
+      type: number
+    OperationCurrentStep:
+      description: Human-readable description of the current step of execution in
+        the operation
+      type: string
+    OperationRequest:
+      additionalProperties: false
+      example:
+        Cancellable: true
+        Method: get
+        URI: https://openapi-generator.tech
+        Body: "{}"
+      properties:
+        Method:
+          description: The HTTP method for the original request
+          enum:
+          - get
+          - delete
+          - post
+          - put
+          - patch
+          type: string
+        URI:
+          description: The URI for the original request
+          format: uri
+          type: string
+        Body:
+          description: JSON request body
+          nullable: true
+          type: object
+        Cancellable:
+          description: Indicates if the operation can be cancelled
+          type: boolean
+      required:
+      - Cancellable
+      - Method
+      - URI
+      type: object
+    OperationResult:
+      additionalProperties: false
+      example:
+        Details: Details
+        Error: Error
+        Data: ""
+      properties:
+        Data:
+          description: The result data of the operation
+          nullable: true
+        Error:
+          description: Concise textual error code
+          type: string
+        Details:
+          description: Human-readable details of the operation result
+          type: string
+      type: object
+    InventoryResponse:
+      additionalProperties: false
+      example:
+        Inventory:
+          compute-allocation:
+            Type: histogram
+            Description: Number of resource per health state
+            Title: Health Count
+            Data: "{healthy: 15322}"
+      properties:
+        Inventory:
+          $ref: '#/components/schemas/InventoryResponse_Inventory'
+      type: object
+    KPIData:
+      additionalProperties: false
+      example:
+        Type: histogram
+        Description: Number of resource per health state
+        Title: Health Count
+        Data: "{healthy: 15322}"
+      properties:
+        Title:
+          description: "resource health count ( where resource is switch, gpu, domain,compute\
+            \ node)."
+          example: Health Count
+          type: string
+        Description:
+          description: description about resource health.
+          example: Number of resource per health state
+          type: string
+        Type:
+          description: "histogram, counter or gauge."
+          example: histogram
+          type: string
+        Data:
+          $ref: '#/components/schemas/KPIDataTypes'
+      required:
+      - Data
+      - Description
+      - Title
+      - Type
+      type: object
+    KPIDataTypes:
+      oneOf:
+      - description: histogram
+        example: "{healthy: 15322}"
+        items:
+          additionalProperties:
+            format: int32
+            type: integer
+          type: object
+        type: array
+    HealthResponse:
+      additionalProperties: false
+      properties:
+        Health:
+          $ref: '#/components/schemas/HealthResponse_Health'
+      type: object
+    KPIResponse:
+      allOf:
+      - $ref: '#/components/schemas/InventoryResponse'
+      - $ref: '#/components/schemas/HealthResponse'
+      type: object
+    KPIType:
+      enum:
+      - HEALTH
+      - SWITCH_HEALTH
+      - GPU_HEALTH
+      - DOMAIN_HEALTH
+      - COMPUTE_HEALTH
+      - INVENTORY
+      - COMPUTE_ALLOCATION
+      type: string
+      x-enum-varnames:
+      - KpiTypeHEALTH
+      - KpiTypeSwitchHealth
+      - KpiTypeGpuHealth
+      - KpiTypeDomainHealth
+      - KpiTypeComputeHealth
+      - KpiTypeInventory
+      - KpiTypeComputeAllocation
+    PortNumber:
+      example: 8001
+      maximum: 65535
+      minimum: 0
+      type: integer
+    Timestamp:
+      format: date-time
+      type: string
+    LocationInfo:
+      additionalProperties: false
+      example:
+        SlotID: 6
+        ChassisID: 0
+        TrayIndex: 1
+        HostID: 5
+        ChassisSerialNumber: ChassisSerialNumber
+      properties:
+        ChassisID:
+          description: The unique identifier of the chassis
+          type: integer
+        ChassisSerialNumber:
+          description: The unique serial number of the chassis
+          type: string
+        SlotID:
+          description: The unique identifier of the slot
+          type: integer
+        TrayIndex:
+          description: "Index of the compute/switch tray within the compute/switch\
+            \ trays group in the chassis, a number from 0"
+          type: integer
+        HostID:
+          description: The unique identifier of the host
+          type: integer
+      type: object
+    ChassisID:
+      description: The unique identifier of the chassis
+      type: integer
+    ChassisSerialNumber:
+      description: The unique serial number of the chassis
+      type: string
+    SlotID:
+      description: The unique identifier of the slot
+      type: integer
+    TrayIndex:
+      description: "Index of the compute/switch tray within the compute/switch trays\
+        \ group in the chassis, a number from 0"
+      type: integer
+    HostID:
+      description: The unique identifier of the host
+      type: integer
+    uint64:
+      format: uint64
+      maximum: 18446744073709551615
+      minimum: 0
+      type: integer
+    uint32:
+      format: uint32
+      maximum: 4294967295
+      minimum: 0
+      type: integer
+    AddNmxService_request:
+      additionalProperties: false
+      properties:
+        Name:
+          example: Some-Name
+          maxLength: 64
+          minLength: 1
+          pattern: "^[\\x20-\\x7E]*$"
+          type: string
+        Description:
+          example: This is a description.
+          maxLength: 2000
+          pattern: "^[\\x20-\\x7E]*$"
+          type: string
+        ServiceType:
+          $ref: '#/components/schemas/NmxServiceType'
+        ServiceConnectionInformation:
+          $ref: '#/components/schemas/NmxServiceConnectionInformation'
+      required:
+      - Name
+      - ServiceConnectionInformation
+      - ServiceType
+      type: object
+    GetKPI_200_response:
+      oneOf:
+      - $ref: '#/components/schemas/InventoryResponse'
+      - $ref: '#/components/schemas/HealthResponse'
+      - $ref: '#/components/schemas/KPIData'
+      - $ref: '#/components/schemas/KPIResponse'
+    PartitionMembers_oneOf_inner:
+      additionalProperties: false
+      properties:
+        DomainUUID:
+          description: Universally Unique Identifier.
+          format: uuid
+          type: string
+        ChassisID:
+          description: The unique identifier of the chassis
+          format: uint64
+          type: integer
+        SlotID:
+          description: The unique identifier of the slot
+          format: uint64
+          type: integer
+        HostID:
+          description: The unique identifier of the host
+          format: uint64
+          type: integer
+        DeviceID:
+          description: "ID of the compute/switch tray within the compute/switch trays\
+            \ group in the chassis, a number from 0"
+          format: uint32
+          type: integer
+      required:
+      - ChassisID
+      - DeviceID
+      - DomainUUID
+      - HostID
+      - SlotID
+      type: object
+    InventoryResponse_Inventory:
+      example:
+        compute-allocation:
+          Type: histogram
+          Description: Number of resource per health state
+          Title: Health Count
+          Data: "{healthy: 15322}"
+      properties:
+        compute-allocation:
+          $ref: '#/components/schemas/KPIData'
+      type: object
+    HealthResponse_Health:
+      additionalProperties: false
+      properties:
+        switch-health:
+          $ref: '#/components/schemas/KPIData'
+        gpu-health:
+          $ref: '#/components/schemas/KPIData'
+        domain-health:
+          $ref: '#/components/schemas/KPIData'
+        compute-health:
+          $ref: '#/components/schemas/KPIData'
+      type: object
+

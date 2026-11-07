@@ -1,0 +1,174 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package utils
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"strings"
+	"time"
+
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
+
+	"github.com/rs/zerolog/log"
+	"google.golang.org/protobuf/types/known/timestamppb"
+	"gopkg.in/fsnotify.v1"
+)
+
+const (
+	// SiteStatus path is status
+	SiteStatus = "/status"
+	// LivenessStatus path is healthz
+	LivenessStatus = "/healthz"
+	// ReadinessStatus path is readyz
+	ReadinessStatus = "/readyz"
+	// DefaultStatusPort is the port the Site Agent serves its status page and probes on
+	// when ESA_PORT is unset.
+	DefaultStatusPort = "8080"
+	// ParamName in URI
+	ParamName = "name"
+	// KubernetesSecretDataSymlink is the symlink Kubernetes projects Secret keys through.
+	// Kubelet replaces it atomically on every Secret update.
+	KubernetesSecretDataSymlink = "..data"
+)
+
+// IsProjectedSecretUpdate reports whether event changes a tracked file or swaps in a new
+// Kubernetes Secret data directory under dir. Removing a tracked file is not an update, since
+// there's nothing new to load, and kubelet removes the old generation's files after every swap.
+func IsProjectedSecretUpdate(event fsnotify.Event, files map[string]bool, dir string) bool {
+	eventPath := filepath.Clean(event.Name)
+	if files[eventPath] {
+		return event.Op&fsnotify.Remove == 0
+	}
+
+	return event.Op&fsnotify.Create != 0 &&
+		filepath.Dir(eventPath) == filepath.Clean(dir) &&
+		filepath.Base(eventPath) == KubernetesSecretDataSymlink
+}
+
+// CompStatus Component Status is used in prometheus metrics
+type CompStatus uint64
+
+const (
+	// CompUnhealthy component is unhealthy
+	CompUnhealthy CompStatus = iota
+	// CompHealthy component is Healthy
+	CompHealthy
+	// CompNotKnown component state is Not Known
+	CompNotKnown
+)
+
+func (e CompStatus) String() string {
+	switch e {
+	case CompUnhealthy:
+		return "Unhealthy"
+	case CompHealthy:
+		return "Healthy"
+	default:
+		return "NotKnown"
+	}
+}
+
+const (
+	// DBResDataKey - DB Resource Data key name
+	DBResDataKey = "value"
+	// NICoApiPageSize page sizing to use with paginated nico APIs
+	NICoApiPageSize = 100
+)
+
+// GetFunctionName - Get Function Name
+func GetFunctionName(temp interface{}) string {
+	strs := strings.Split((runtime.FuncForPC(reflect.ValueOf(temp).Pointer()).Name()), ".")
+	return strs[len(strs)-1]
+}
+
+func httpIsRetryable(response *http.Response) bool {
+	if response.StatusCode >= 500 && response.StatusCode < 600 {
+		return true
+	}
+	return false
+}
+
+// RetryWithExponentialBackoff : Interval 0.5s, 1s, 2s, 4s, 8s, 16s
+func RetryWithExponentialBackoff(client *http.Client, req *http.Request,
+	reqBody []byte) (*http.Response, error) {
+	delayMs := 250
+	backoff := float64(2)
+	maxAttempts := 5
+	for i := 0; i <= maxAttempts; i++ {
+		resp, err := client.Do(req)
+		if err != nil {
+			log.Error().Msgf("client connection failed: %v", err.Error())
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			badStatus := fmt.Errorf("bad status code: %v", resp.StatusCode)
+			log.Error().Msg(badStatus.Error())
+			_ = resp.Body.Close()
+			if !httpIsRetryable(resp) {
+				return nil, badStatus
+			}
+			if i == maxAttempts {
+				break
+			}
+			req.Body = io.NopCloser(bytes.NewReader(reqBody))
+			sleepTime := float64(delayMs) * math.Pow(backoff, float64(i+1))
+			retryDelay := time.Duration(sleepTime) * time.Millisecond
+			log.Info().Msgf("sleeping for %v", retryDelay)
+			timer := time.NewTimer(retryDelay)
+			select {
+			case <-timer.C:
+			case <-req.Context().Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return nil, req.Context().Err()
+			}
+		} else {
+			return resp, nil
+		}
+	}
+	return nil, fmt.Errorf("connection down")
+}
+
+// ConvertTimestampToVersion - Use Timestamp as resource version
+func ConvertTimestampToVersion(ts *timestamppb.Timestamp) (uint64, error) {
+	if err := ts.CheckValid(); err != nil {
+		return 0, err
+	}
+	stdTime := ts.AsTime()
+	return uint64(stdTime.UnixMicro()), nil
+}
+
+// StatusPort returns the port the Site Agent serves its status page and probes on.
+func StatusPort() string {
+	port := os.Getenv("ESA_PORT")
+	if port == "" {
+		return DefaultStatusPort
+	}
+	return port
+}
+
+// SiteHealth derives aggregate health from Core, Temporal, and enabled Flow state.
+// No aggregate is cached, so concurrent updates cannot leave a stale stored result.
+func SiteHealth(Elektra *elektratypes.Elektra) CompStatus {
+	coreHealthy := CompStatus(Elektra.Managers.CoreGrpc.State.HealthStatus.Load()) == CompHealthy
+	temporalHealthy := CompStatus(Elektra.Managers.Workflow.State.HealthStatus.Load()) == CompHealthy
+	flowHealthy := !Elektra.Conf.FlowGrpc.Enabled ||
+		CompStatus(Elektra.Managers.FlowGrpc.State.HealthStatus.Load()) == CompHealthy
+	if coreHealthy && temporalHealthy && flowHealthy {
+		return CompHealthy
+	}
+	return CompUnhealthy
+}

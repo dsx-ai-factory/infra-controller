@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "nico-pxe.name" . }}
+  namespace: {{ include "nico-pxe.namespace" . }}
+  labels:
+    {{- include "nico-pxe.labels" . | nindent 4 }}
+automountServiceAccountToken: true
+---
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ include "nico-pxe.name" . }}
+  namespace: {{ include "nico-pxe.namespace" . }}
+  labels:
+    {{- include "nico-pxe.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificaterequests"]
+    verbs: ["create"]
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ include "nico-pxe.name" . }}
+  namespace: {{ include "nico-pxe.namespace" . }}
+  labels:
+    {{- include "nico-pxe.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "nico-pxe.name" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nico-pxe.name" . }}
+    namespace: {{ include "nico-pxe.namespace" . }}

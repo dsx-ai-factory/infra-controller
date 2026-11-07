@@ -1,0 +1,105 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[env]
+CARGO_MAKE_EXTEND_WORKSPACE_MAKEFILE = true
+REPO_ROOT = { script = [
+  "dirname $(cargo locate-project --message-format plain --workspace)",
+] }
+
+PKG_VERSION = { script = [
+  "if [ -n \"$VERSION\" ]; then echo \"$VERSION\" | sed 's/^v//'; else v=$(git describe --tags --first-parent --always --long | sed 's/^v//'); case \"$v\" in [0-9]*) echo \"$v\" ;; *) echo \"0.0.0-$v\" ;; esac; fi",
+] }
+
+[tasks.package-component-local]
+run_task = "package-component"
+dependencies = [
+  { name = "build-component-local", path = "./Makefile-build.toml" },
+]
+
+[tasks.package-component-in-container]
+run_task = "package-component"
+dependencies = [
+  { name = "build-component-in-container", path = "./Makefile-build.toml" },
+]
+
+[tasks.package-component]
+category = "Build"
+description = "Build the .deb package"
+workspace = false
+script = '''
+    set -e
+
+    if [ "${CARBIDE_ARCH}" = "x86_64" ]
+    then
+        DEB_ARCH="amd64"
+    else
+        DEB_ARCH="arm64"
+    fi
+
+    PACKAGE_BIN=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(any(.; .name == "'${CARBIDE_CRATE}'")) | .targets[] | select(any(.kind[]; . == "bin")) | .name')
+    if [ -z "$PACKAGE_BIN" ]
+    then
+      echo "Could not determine binary for package ${CARBIDE_PACKAGE}"
+      exit 1
+    fi
+    MISC_DIR=${CARBIDE_CRATE_DIR}/misc
+    DEB_CONFIG_DIR=${MISC_DIR}/DEBIAN
+    : "${INSTALL_DIR:=/opt/forge}"
+    if [ ! -d ${DEB_CONFIG_DIR} ]
+    then
+      echo "Cannot package ${CARBIDE_PACKAGE}.  No package configuration"
+      exit 1
+    fi
+
+    echo "creating package for ${CARBIDE_ARCH} ${CARBIDE_PACKAGE} (${PACKAGE_BIN}) (${PKG_VERSION}) with install path ${INSTALL_DIR}"
+    WORKING_DIR="${REPO_ROOT}/target/${CARBIDE_ARCH}-unknown-linux-gnu/${PACKAGE_BIN}_${PKG_VERSION}_${DEB_ARCH}"
+    mkdir -p "${WORKING_DIR}/lib/systemd/system"
+    mkdir -p "${WORKING_DIR}${INSTALL_DIR}"
+    if [ "${CARBIDE_ARCH}" = "aarch64" ]
+    then
+        for path in \
+            "${REPO_ROOT}/target/${CARBIDE_ARCH}-unknown-linux-gnu/${CARBIDE_PROFILE}/${PACKAGE_BIN}" \
+            "${REPO_ROOT}/target/${CARBIDE_PROFILE}/${PACKAGE_BIN}"; do
+            bash "${REPO_ROOT}/scripts/check-aarch64-pagesize.sh" --allow-empty "${path}"
+        done
+    fi
+    cp "${REPO_ROOT}/target/${CARBIDE_ARCH}-unknown-linux-gnu/${CARBIDE_PROFILE}/${PACKAGE_BIN}" "${WORKING_DIR}${INSTALL_DIR}"
+    if [ "${CARBIDE_CRATE}" = "carbide-scout" ]
+    then
+        # Keep the helper in Scout's package so upgrades replace both protocol
+        # peers together, without changing the package's binary-derived name.
+        SUPERVISOR="${REPO_ROOT}/target/${CARBIDE_ARCH}-unknown-linux-gnu/${CARBIDE_PROFILE}/mlx-firmware-supervisor"
+        test -x "${SUPERVISOR}"
+        if [ "${CARBIDE_ARCH}" = "aarch64" ]
+        then
+            bash "${REPO_ROOT}/scripts/check-aarch64-pagesize.sh" "${SUPERVISOR}"
+        fi
+        cp "${SUPERVISOR}" "${WORKING_DIR}${INSTALL_DIR}"
+    fi
+    cp ${MISC_DIR}/*.service "${WORKING_DIR}/lib/systemd/system/"
+    cp -r ${DEB_CONFIG_DIR} "${WORKING_DIR}/"
+    echo 'Package: '${CARBIDE_PACKAGE}'
+Version: '${PKG_VERSION}'
+Section: base
+Priority: optional
+Architecture: '${DEB_ARCH}'
+Maintainer: Forge team <swngc-forge-dev@nvidia.com>
+Description: Forge scout for performaing hardware discovery
+' > ${WORKING_DIR}/DEBIAN/control
+    mkdir -p ${REPO_ROOT}/target/debs/
+    dpkg-deb --build --root-owner-group ${WORKING_DIR} ${REPO_ROOT}/target/debs/${PACKAGE_BIN}_${PKG_VERSION}_${DEB_ARCH}.deb
+'''

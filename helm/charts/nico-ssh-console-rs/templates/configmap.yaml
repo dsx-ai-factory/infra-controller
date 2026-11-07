@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nico-ssh-console-rs.name" . }}-config-files
+  namespace: {{ include "nico-ssh-console-rs.namespace" . }}
+  labels:
+    {{- include "nico-ssh-console-rs.labels" . | nindent 4 }}
+data:
+  config.toml: |
+    {{- if .Values.configFiles.config }}
+    {{- .Values.configFiles.config | nindent 4 }}
+    {{- else }}
+    {{- /* Replace hardcoded nico-system namespace with actual global.namespace */ -}}
+    {{- $config := .Files.Get "files/ssh-console-rs-config.toml" | replace "nico-system" (include "nico-ssh-console-rs.namespace" .) | replace "nico.local" .Values.global.spiffe.trustDomain | replace "/sa/nico-api" (printf "/sa/%s" .Values.apiServiceName) | replace "https://nico-api." (printf "https://%s." .Values.apiServiceName) -}}
+    {{- /* Operator certificate auth. Substitutes the empty placeholders in the packaged
+           config so a deployment can set just these two without restating the whole file.
+           Left unset, the placeholders stand and certificate auth stays disabled. */ -}}
+    {{- $sshConsole := .Values.sshConsole | default dict -}}
+    {{- with $sshConsole.opensshCertificateCaFingerprints | default list -}}
+    {{- $config = $config | replace "openssh_certificate_ca_fingerprints = []" (printf "openssh_certificate_ca_fingerprints = %s" (toJson .)) -}}
+    {{- end -}}
+    {{- with $sshConsole.adminCertificateRole | default "" -}}
+    {{- $config = $config | replace "admin_certificate_role = \"\"" (printf "admin_certificate_role = %s" (quote .)) -}}
+    {{- end -}}
+    {{- $config | nindent 4 }}
+    {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nico-ssh-console-rs.name" . }}-otelcol-config
+  namespace: {{ include "nico-ssh-console-rs.namespace" . }}
+  labels:
+    {{- include "nico-ssh-console-rs.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- if .Values.configFiles.otelcolConfig }}
+    {{- .Values.configFiles.otelcolConfig | nindent 4 }}
+    {{- else }}
+    {{- .Files.Get "files/otelcol-config.yaml" | nindent 4 }}
+    {{- end }}

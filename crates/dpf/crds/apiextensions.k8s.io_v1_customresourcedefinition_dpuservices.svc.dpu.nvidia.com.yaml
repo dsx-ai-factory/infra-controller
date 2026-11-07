@@ -1,0 +1,616 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+    helm.sh/resource-policy: keep
+  labels:
+    app.kubernetes.io/part-of: dpf-operator-controller-manager
+    dpu.nvidia.com/component: dpf-operator-controller-manager
+  name: dpuservices.svc.dpu.nvidia.com
+spec:
+  group: svc.dpu.nvidia.com
+  names:
+    kind: DPUService
+    listKind: DPUServiceList
+    plural: dpuservices
+    singular: dpuservice
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].reason
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: DPUService is the Schema for the dpuservices API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: DPUServiceSpec defines the desired state of DPUService
+            properties:
+              configPorts:
+                description: |-
+                  ConfigPorts defines the desired state of port configurations for a DPUService.
+                  This struct determines how ports are exposed from the DPU to the host cluster.
+                  A DPUService can only have a single ServiceType across all ports.
+                properties:
+                  ports:
+                    description: |-
+                      Ports defines the list of port configurations that will be exposed by the DPUService.
+                      Each port must specify a name, port number, and protocol.
+
+                      Constraints:
+                      - If ServiceType is "NodePort", ports may optionally specify a NodePort.
+                      - If ServiceType is "None" or "ClusterIP", ports **cannot** specify a NodePort.
+                    items:
+                      description: |-
+                        ConfigPort defines the configuration of a single port within a DPUService.
+                        Each port must have a unique name within the service.
+                      properties:
+                        name:
+                          description: |-
+                            Name is a unique identifier for the port within the DPUService.
+                            This name is used for reference inside the service.
+                          minLength: 1
+                          pattern: ^[a-z0-9-]+$
+                          type: string
+                        nodePort:
+                          description: |-
+                            NodePort is the external port assigned on each node in the cluster.
+                            If not set, Kubernetes will automatically allocate a NodePort.
+
+                            Constraints:
+                            - Can only be set when ServiceType is "NodePort".
+                            - Must be within the clusters valid NodePort range (Kubernetes default is 30000-32767).
+                          type: integer
+                        port:
+                          description: |-
+                            Port is the port number that will be exposed by the service.
+                            Must be within the valid range of TCP/UDP ports (1-65535).
+                          type: integer
+                        protocol:
+                          description: |-
+                            Protocol specifies the transport protocol used by the port.
+                            Supported values: TCP, UDP
+                          enum:
+                          - TCP
+                          - UDP
+                          type: string
+                      required:
+                      - name
+                      - port
+                      - protocol
+                      type: object
+                    type: array
+                  serviceType:
+                    default: NodePort
+                    description: |-
+                      ServiceType specifies the type of Kubernetes Service to create.
+                      All ports within this ConfigPorts will have the same ServiceType.
+                      The value is immutable and cannot be changed after creation.
+                      Supported values:
+                      - "NodePort": Exposes ports externally on a node.
+                      - "ClusterIP": Exposes ports internally within the cluster.
+                      - "None": Internal-only service with no cluster IP.
+                      Default: "NodePort"
+                    enum:
+                    - NodePort
+                    - ClusterIP
+                    - None
+                    type: string
+                    x-kubernetes-validations:
+                    - message: Value is immutable
+                      rule: self == oldSelf
+                required:
+                - ports
+                - serviceType
+                type: object
+                x-kubernetes-validations:
+                - message: nodePort can only be set when serviceType is NodePort
+                  rule: '!(self.serviceType != ''NodePort'' && self.ports.exists(p,
+                    has(p.nodePort)))'
+              deployInCluster:
+                description: |-
+                  DeployInCluster indicates if the DPUService Helm Chart will be deployed on
+                  the Host cluster. Default to false.
+                type: boolean
+              dpuClusterSelector:
+                description: Select the Clusters with specific labels, Applications
+                  will be created only for these Clusters
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              helmChart:
+                description: HelmChart reflects the Helm related configuration
+                properties:
+                  source:
+                    description: Source specifies information about the Helm chart
+                    properties:
+                      chart:
+                        description: Chart is the name of the helm chart.
+                        type: string
+                      path:
+                        description: Path is the location of the chart inside the
+                          repo.
+                        type: string
+                      releaseName:
+                        description: ReleaseName is the name to give to the release
+                          generate from the DPUService.
+                        type: string
+                      repoURL:
+                        description: |-
+                          RepoURL specifies the URL to the repository that contains the application Helm chart.
+                          The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
+                          OCI registry or a web-based repository.
+                        pattern: ^(oci://|https://).+$
+                        type: string
+                      version:
+                        description: Version is a semver tag for the Chart's version.
+                        minLength: 1
+                        type: string
+                    required:
+                    - repoURL
+                    - version
+                    type: object
+                  values:
+                    description: Values specifies Helm values to be passed to Helm
+                      template, defined as a map. This takes precedence over Values.
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                required:
+                - source
+                type: object
+              interfaces:
+                description: |-
+                  Interfaces specifies the DPUServiceInterface names that the DPUService
+                  uses in the same namespace.
+                items:
+                  type: string
+                maxItems: 50
+                minItems: 1
+                type: array
+              paused:
+                description: |-
+                  Paused indicates that the DPUService is paused.
+                  Underlying resources are also paused when this is set to true.
+                  No deletion of resources will occur when this is set to true.
+                type: boolean
+              security:
+                description: Security contains security-related settings for the DPUService.
+                properties:
+                  privileged:
+                    description: |-
+                      Privileged, when set to true, allows workloads governed by this security
+                      setting to run containers with `securityContext.privileged: true` in the
+                      DPUCluster. When set to false, a ValidatingAdmissionPolicy in the
+                      DPUCluster rejects such workloads. On DPUService objects, this field must
+                      be unset when deployInCluster is true. For DPUServices that target a
+                      DPUCluster, Privileged must be set explicitly. When set on a
+                      DPUServiceTemplate, the DPUDeployment controller propagates the value to
+                      generated DPUServices that target DPUClusters.
+
+                      Scope of the policy enforcement:
+                        - Only `securityContext.privileged: true` is gated. Other
+                          privilege-escalation vectors (hostPID, hostIPC, hostNetwork,
+                          allowPrivilegeEscalation, capabilities, hostPath volumes) are NOT
+                          gated by this field.
+                        - Enforcement matches workloads via the
+                          `svc.dpu.nvidia.com/service` label. The controller adds this
+                          label to the resources it manages, and to pod templates of
+                          workload-controller resources (Deployment, DaemonSet, etc.). If a
+                          Helm chart strips that label from the pod template, the parent
+                          resource will be admitted but the child Pods will be denied at
+                          Pod admission time.
+                    type: boolean
+                  spiffe:
+                    description: |-
+                      SPIFFE opts this DPUService into SPIFFE workload identity. When set, one SPIRE
+                      ClusterStaticEntry is registered per targeted DPU, parented to that DPU's SPIRE
+                      agent, so the service's pods can obtain an SVID. The identity defaults to
+                      `spiffe://<trustDomain>/dpu/<serial>/service/<namespace>/<serviceID>` and is
+                      configurable through `DPFOperatorConfig.spec.security.spiffe`.
+                      The namespace qualifies the service ID, which is only unique within one.
+
+                      Presence-gated: `spiffe: {}` enables it. It has no sub-fields yet.
+
+                      Requires `DPFOperatorConfig.spec.security.spiffe`, and only covers DPUs in SPIFFE
+                      identity mode (`DPU.status.identityMode: Spiffe`); bootstrap-token DPUs are skipped.
+                      Both are reported on the SPIFFEEntriesReady condition rather than rejected at
+                      admission. Must not be set when deployInCluster is true, since in-cluster
+                      DPUServices run on the host and have no per-DPU SPIRE agent to parent to.
+
+                      When set on a DPUServiceTemplate, the DPUDeployment controller propagates it to
+                      generated DPUServices that target DPUClusters.
+                    type: object
+                type: object
+              serviceDaemonSet:
+                description: ServiceDaemonSet specifies the configuration for the
+                  ServiceDaemonSet.
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: Annotations specifies annotations which are added
+                      to the ServiceDaemonSet.
+                    type: object
+                  labels:
+                    additionalProperties:
+                      type: string
+                    description: Labels specifies labels which are added to the ServiceDaemonSet.
+                    type: object
+                  nodeSelector:
+                    description: NodeSelector specifies which Nodes to deploy the
+                      ServiceDaemonSet to.
+                    properties:
+                      nodeSelectorTerms:
+                        description: Required. A list of node selector terms. The
+                          terms are ORed.
+                        items:
+                          description: |-
+                            A null or empty node selector term matches no objects. The requirements of
+                            them are ANDed.
+                            The TopologySelectorTerm type implements a subset of the NodeSelectorTerm.
+                          properties:
+                            matchExpressions:
+                              description: A list of node selector requirements by
+                                node's labels.
+                              items:
+                                description: |-
+                                  A node selector requirement is a selector that contains values, a key, and an operator
+                                  that relates the key and values.
+                                properties:
+                                  key:
+                                    description: The label key that the selector applies
+                                      to.
+                                    type: string
+                                  operator:
+                                    description: |-
+                                      Represents a key's relationship to a set of values.
+                                      Valid operators are In, NotIn, Exists, DoesNotExist. Gt, and Lt.
+                                    type: string
+                                  values:
+                                    description: |-
+                                      An array of string values. If the operator is In or NotIn,
+                                      the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                      the values array must be empty. If the operator is Gt or Lt, the values
+                                      array must have a single element, which will be interpreted as an integer.
+                                      This array is replaced during a strategic merge patch.
+                                    items:
+                                      type: string
+                                    type: array
+                                    x-kubernetes-list-type: atomic
+                                required:
+                                - key
+                                - operator
+                                type: object
+                              type: array
+                              x-kubernetes-list-type: atomic
+                            matchFields:
+                              description: A list of node selector requirements by
+                                node's fields.
+                              items:
+                                description: |-
+                                  A node selector requirement is a selector that contains values, a key, and an operator
+                                  that relates the key and values.
+                                properties:
+                                  key:
+                                    description: The label key that the selector applies
+                                      to.
+                                    type: string
+                                  operator:
+                                    description: |-
+                                      Represents a key's relationship to a set of values.
+                                      Valid operators are In, NotIn, Exists, DoesNotExist. Gt, and Lt.
+                                    type: string
+                                  values:
+                                    description: |-
+                                      An array of string values. If the operator is In or NotIn,
+                                      the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                      the values array must be empty. If the operator is Gt or Lt, the values
+                                      array must have a single element, which will be interpreted as an integer.
+                                      This array is replaced during a strategic merge patch.
+                                    items:
+                                      type: string
+                                    type: array
+                                    x-kubernetes-list-type: atomic
+                                required:
+                                - key
+                                - operator
+                                type: object
+                              type: array
+                              x-kubernetes-list-type: atomic
+                          type: object
+                          x-kubernetes-map-type: atomic
+                        type: array
+                        x-kubernetes-list-type: atomic
+                    required:
+                    - nodeSelectorTerms
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  resources:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: Resources specifies resources which are added to
+                      the ServiceDaemonSet.
+                    type: object
+                  updateStrategy:
+                    description: UpdateStrategy specifies the DeaemonSet update strategy
+                      for the ServiceDaemonset.
+                    properties:
+                      rollingUpdate:
+                        description: Rolling update config params. Present only if
+                          type = "RollingUpdate".
+                        properties:
+                          maxSurge:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: |-
+                              The maximum number of nodes with an existing available DaemonSet pod that
+                              can have an updated DaemonSet pod during during an update.
+                              Value can be an absolute number (ex: 5) or a percentage of desired pods (ex: 10%).
+                              This can not be 0 if MaxUnavailable is 0.
+                              Absolute number is calculated from percentage by rounding up to a minimum of 1.
+                              Default value is 0.
+                              Example: when this is set to 30%, at most 30% of the total number of nodes
+                              that should be running the daemon pod (i.e. status.desiredNumberScheduled)
+                              can have their a new pod created before the old pod is marked as deleted.
+                              The update starts by launching new pods on 30% of nodes. Once an updated
+                              pod is available (Ready for at least minReadySeconds) the old DaemonSet pod
+                              on that node is marked deleted. If the old pod becomes unavailable for any
+                              reason (Ready transitions to false, is evicted, or is drained) an updated
+                              pod is immediately created on that node without considering surge limits.
+                              Allowing surge implies the possibility that the resources consumed by the
+                              daemonset on any given node can double if the readiness check fails, and
+                              so resource intensive daemonsets should take into account that they may
+                              cause evictions during disruption.
+                            x-kubernetes-int-or-string: true
+                          maxUnavailable:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            description: |-
+                              The maximum number of DaemonSet pods that can be unavailable during the
+                              update. Value can be an absolute number (ex: 5) or a percentage of total
+                              number of DaemonSet pods at the start of the update (ex: 10%). Absolute
+                              number is calculated from percentage by rounding up.
+                              This cannot be 0 if MaxSurge is 0
+                              Default value is 1.
+                              Example: when this is set to 30%, at most 30% of the total number of nodes
+                              that should be running the daemon pod (i.e. status.desiredNumberScheduled)
+                              can have their pods stopped for an update at any given time. The update
+                              starts by stopping at most 30% of those DaemonSet pods and then brings
+                              up new DaemonSet pods in their place. Once the new pods are available,
+                              it then proceeds onto other DaemonSet pods, thus ensuring that at least
+                              70% of original number of DaemonSet pods are available at all times during
+                              the update.
+                            x-kubernetes-int-or-string: true
+                        type: object
+                      type:
+                        description: Type of daemon set update. Can be "RollingUpdate"
+                          or "OnDelete". Default is RollingUpdate.
+                        type: string
+                    type: object
+                type: object
+              serviceID:
+                description: ServiceID is the ID of the service that the DPUService
+                  is associated with.
+                type: string
+            required:
+            - helmChart
+            type: object
+            x-kubernetes-validations:
+            - message: serviceID must be provided when interfaces are provided
+              rule: (has(self.interfaces) && has(self.serviceID)) || (!has(self.interfaces)
+                && !has(self.serviceID)) || has(self.serviceID)
+            - message: configPorts cannot be set when deployInCluster is true
+              rule: '!(has(self.deployInCluster) && self.deployInCluster && has(self.configPorts))'
+            - message: dpuClusterSelector cannot be set when deployInCluster is true
+              rule: '!(has(self.deployInCluster) && self.deployInCluster && has(self.dpuClusterSelector))'
+            - message: security.privileged must not be set when deployInCluster is
+                true
+              rule: '!(has(self.deployInCluster) && self.deployInCluster && has(self.security)
+                && has(self.security.privileged))'
+            - message: security.spiffe must not be set when deployInCluster is true
+              rule: '!(has(self.deployInCluster) && self.deployInCluster && has(self.security)
+                && has(self.security.spiffe))'
+            - message: security.privileged must be set when deployInCluster is false
+              optionalOldSelf: true
+              rule: (has(self.deployInCluster) && self.deployInCluster) || (has(self.security)
+                && has(self.security.privileged)) || (oldSelf.hasValue() && !(has(oldSelf.value().deployInCluster)
+                && oldSelf.value().deployInCluster) && !(has(oldSelf.value().security)
+                && has(oldSelf.value().security.privileged)))
+          status:
+            description: DPUServiceStatus defines the observed state of DPUService
+            properties:
+              conditions:
+                description: Conditions defines current service state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              configPorts:
+                additionalProperties:
+                  items:
+                    description: |-
+                      ConfigPort defines the configuration of a single port within a DPUService.
+                      Each port must have a unique name within the service.
+                    properties:
+                      name:
+                        description: |-
+                          Name is a unique identifier for the port within the DPUService.
+                          This name is used for reference inside the service.
+                        minLength: 1
+                        pattern: ^[a-z0-9-]+$
+                        type: string
+                      nodePort:
+                        description: |-
+                          NodePort is the external port assigned on each node in the cluster.
+                          If not set, Kubernetes will automatically allocate a NodePort.
+
+                          Constraints:
+                          - Can only be set when ServiceType is "NodePort".
+                          - Must be within the clusters valid NodePort range (Kubernetes default is 30000-32767).
+                        type: integer
+                      port:
+                        description: |-
+                          Port is the port number that will be exposed by the service.
+                          Must be within the valid range of TCP/UDP ports (1-65535).
+                        type: integer
+                      protocol:
+                        description: |-
+                          Protocol specifies the transport protocol used by the port.
+                          Supported values: TCP, UDP
+                        enum:
+                        - TCP
+                        - UDP
+                        type: string
+                    required:
+                    - name
+                    - port
+                    - protocol
+                    type: object
+                  type: array
+                description: |-
+                  ConfigPorts defines the observed state of the config ports.
+                  It contains the actual port numbers that are exposed on the DPUService per cluster.
+                type: object
+              observedGeneration:
+                description: ObservedGeneration records the Generation observed on
+                  the object the last time it was patched.
+                format: int64
+                type: integer
+              serviceID:
+                description: |-
+                  ServiceID is the ID of the service that the DPUService is associated with.
+                  This is set when the DPUService is created.
+                type: string
+            type: object
+        type: object
+        x-kubernetes-validations:
+        - message: name length can't be bigger than 63 chars
+          rule: self.metadata.name.size() <= 63
+    served: true
+    storage: true
+    subresources:
+      status: {}

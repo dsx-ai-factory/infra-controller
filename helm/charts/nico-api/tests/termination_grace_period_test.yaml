@@ -1,0 +1,17 @@
+suite: termination grace period
+templates:
+  - deployment.yaml
+tests:
+  - it: should allow default state-controller work to drain
+    asserts:
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 240
+
+  - it: should allow operators to match a longer object handling timeout
+    set:
+      terminationGracePeriodSeconds: 600
+    asserts:
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 600

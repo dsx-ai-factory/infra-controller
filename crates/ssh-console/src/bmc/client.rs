@@ -1,0 +1,1080 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+use std::io;
+use std::net::SocketAddr;
+use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
+
+use carbide_uuid::machine::MachineId;
+use chrono::{DateTime, Utc};
+use opentelemetry::KeyValue;
+use russh::ChannelMsg;
+use tokio::net::TcpStream;
+use tokio::sync::{MutexGuard, broadcast, mpsc};
+use tokio::task::JoinHandle;
+use tokio::time::MissedTickBehavior;
+use tokio_util::sync::{CancellationToken, DropGuard};
+
+use crate::bmc::client_pool::BmcPoolMetrics;
+use crate::bmc::connection::{self, AtomicConnectionState, ConnectionDetails};
+use crate::bmc::message_proxy::{
+    ConnectionChangeMessage, ExecReply, ToBmcMessage, ToFrontendMessage,
+};
+use crate::config::Config;
+use crate::shutdown_handle::ShutdownHandle;
+use crate::ssh_server::ServerMetrics;
+use crate::{console_logger, fork_cancel_token};
+
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "bmc_recovery_attempted",
+    metric_name = "carbide_ssh_console_bmc_recovery_attempts_total",
+    component = "ssh-console",
+    log = off,
+    metric = counter,
+    message = "BMC connection recovery attempted",
+    describe = "Number of BMC connection recovery iterations started during this service lifetime, excluding each client's initial connection"
+)]
+pub(super) struct BmcRecoveryAttempted;
+
+/// Spawn a connection to the given BMC in the background, returning a handle. Connections will
+/// be retried indefinitely, with exponential backoff, until a shutdown is signaled (ie. by dropping
+/// the ClientHandle.)
+pub(super) fn spawn(
+    connection_details: ConnectionDetails,
+    config: Arc<Config>,
+    metrics: Arc<BmcPoolMetrics>,
+    cancel_token: CancellationToken,
+) -> ClientHandle {
+    let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
+
+    // Channel frontends can use to send messages to the BMC
+    let (to_bmc_msg_tx, to_bmc_msg_rx) = mpsc::channel::<ToBmcMessage>(1);
+    // Channel that broadcasts messages to any subscribed frontends
+    let (broadcast_to_frontend_tx, broadcast_to_frontend_rx) =
+        broadcast::channel::<ToFrontendMessage>(4096);
+
+    // Always consume messages from the frontend broadcast channel, even if there are no frontends.
+    dev_null(broadcast_to_frontend_rx);
+
+    let connection_state = Arc::new(AtomicConnectionState::default());
+    let machine_id = connection_details.machine_id();
+    let kind = connection_details.kind();
+    let (logger_handle, console_log_client) = if config.console_logging_enabled {
+        let (handle, client) = console_logger::spawn(
+            machine_id,
+            connection_details.addr(),
+            broadcast_to_frontend_tx.subscribe(),
+            config.clone(),
+            cancel_token.clone(),
+        );
+        (Some(handle), Some(client))
+    } else {
+        (None, None)
+    };
+
+    let metrics_attrs = vec![KeyValue::new("machine_id", machine_id.to_string())];
+    metrics.bmc_recovery_attempts.record(0, &metrics_attrs);
+    metrics.bmc_rx_errors_total.add(0, &metrics_attrs);
+    metrics.bmc_tx_errors_total.add(0, &metrics_attrs);
+    metrics.bmc_bytes_received_total.add(0, &metrics_attrs);
+
+    let bmc_client = BmcClient {
+        connection_details,
+        config,
+        connection_state: connection_state.clone(),
+        broadcast_to_frontend_tx: broadcast_to_frontend_tx.clone(),
+        cancel_token,
+        to_bmc_msg_rx,
+        metrics,
+        logger_handle,
+    };
+
+    let join_handle = tokio::spawn(bmc_client.run());
+
+    ClientHandle {
+        to_bmc_msg_tx,
+        broadcast_to_frontend_tx,
+        machine_id,
+        drop_guard,
+        join_handle,
+        connection_state,
+        kind,
+        console_log_client,
+    }
+}
+
+struct BmcClient {
+    connection_details: ConnectionDetails,
+    config: Arc<Config>,
+    connection_state: Arc<AtomicConnectionState>,
+    cancel_token: CancellationToken,
+    broadcast_to_frontend_tx: broadcast::Sender<ToFrontendMessage>,
+    to_bmc_msg_rx: mpsc::Receiver<ToBmcMessage>,
+    metrics: Arc<BmcPoolMetrics>,
+    logger_handle: Option<console_logger::ConsoleLoggerHandle>,
+}
+
+impl BmcClient {
+    async fn run(mut self) {
+        let machine_id = self.connection_details.machine_id();
+        let metrics_attrs = vec![KeyValue::new("machine_id", machine_id.to_string())];
+
+        let logger_handle = self.logger_handle.take();
+
+        // Keep track of when we were last disconnected, for relaying status
+        let last_disconnect_time: Arc<RwLock<Option<DateTime<Utc>>>> = Default::default();
+
+        // Spawn a message relay for communicating status to the user if the BMC is
+        // disconnected.
+        let bmc_msg_tx_placeholder = BmcMessageTxPlaceholder::default();
+        let bmc_message_relay = relay_input_to_bmc(
+            self.broadcast_to_frontend_tx.clone(),
+            self.connection_state.clone(),
+            self.to_bmc_msg_rx,
+            bmc_msg_tx_placeholder.clone(),
+            last_disconnect_time.clone(),
+            self.cancel_token.clone(),
+        );
+
+        // Keep track of the instant we do the next retry, and not the duration to wait: This helps
+        // it so that if we wait a long time for a host to be up, we don't wait longer than we need
+        // to. (e.g. if retry time is 1 minute, and the machine takes 5 minutes to be up, we don't
+        // want to wait 6 minutes.)
+        let mut next_retry = Instant::now();
+        let mut was_disconnected = false;
+
+        // Connect and reconnect, in a loop, until the client is shut down.
+        let mut retries = 0;
+        let mut previous_connection_close_was_sol_recovery = false;
+        'retry: loop {
+            if self.cancel_token.is_cancelled() {
+                break 'retry;
+            }
+            // Every retry after the first time, emit a disconnected message
+            if was_disconnected {
+                self.broadcast_to_frontend_tx
+                    .send(ToFrontendMessage::ConnectionChanged(
+                        ConnectionChangeMessage::Disconnected,
+                    ))
+                    .ok();
+                *last_disconnect_time.write().expect("lock poisoned") = Some(Utc::now());
+            } else {
+                was_disconnected = true;
+            }
+
+            self.metrics
+                .bmc_recovery_attempts
+                .record(retries, metrics_attrs.as_slice());
+            if retries == 0 {
+                self.connection_state.store(connection::State::Connecting);
+            } else {
+                carbide_instrument::emit(BmcRecoveryAttempted);
+                self.connection_state
+                    .store(connection::State::ConnectionError);
+            }
+            retries += 1;
+
+            // Wait for the host to be up, so we avoid long backoff times when the BMC is just down.
+            // This way, the moment it comes back up, we can start trying again straight away.
+            if let Err(error) = wait_until_host_is_up(
+                self.connection_details.addr(),
+                self.connection_details.kind(),
+                self.connection_details.machine_id(),
+                self.cancel_token.clone(),
+            )
+            .await
+            {
+                tracing::error!(%machine_id, %error, "error checking BMC port");
+                continue 'retry;
+            }
+
+            // Only sleep for the remaining retry time after we did the TCP halfopen check.
+            let sleep_duration = {
+                let now = Instant::now();
+                if next_retry > now {
+                    next_retry - now
+                } else {
+                    Duration::ZERO
+                }
+            };
+
+            let Some(()) = self
+                .cancel_token
+                .run_until_cancelled(tokio::time::sleep(sleep_duration))
+                .await
+            else {
+                break 'retry; // cancelled
+            };
+
+            // Subsequent retries should sleep for RETRY_BASE_DURATION and double from there
+            // until we successfully connect.
+            next_retry = Instant::now() + next_retry_backoff(&self.config, sleep_duration);
+
+            let try_start_time = Instant::now();
+
+            // Spawn a single connection to this BMC.
+            let bmc_connection_handle = match connection::spawn(
+                self.connection_details.clone(),
+                self.broadcast_to_frontend_tx.clone(),
+                self.cancel_token.clone(),
+                self.metrics.clone(),
+                self.config.clone(),
+            )
+            .await
+            {
+                Ok(handle) => handle,
+                Err(error) => {
+                    if error.is_cancelled() {
+                        break 'retry;
+                    }
+                    previous_connection_close_was_sol_recovery = false;
+                    tracing::error!(
+                        %error,
+                        %machine_id,
+                        retry_delay_seconds = next_retry
+                            .checked_duration_since(Instant::now())
+                            .unwrap_or_default()
+                            .as_secs(),
+                        "error spawning BMC connection, will retry"
+                    );
+                    continue 'retry;
+                }
+            };
+
+            // Successfully ready, give the BMC channel to the message relay and set the state
+            // to Connected. (if ready_rx is not ok, then the tx must have been dropped, and
+            // we'll report errors and retry below.)
+            bmc_msg_tx_placeholder
+                .replace(Some(bmc_connection_handle.to_bmc_msg_tx))
+                .await;
+            self.connection_state.store(connection::State::Connected);
+            self.broadcast_to_frontend_tx
+                .send(ToFrontendMessage::ConnectionChanged(
+                    ConnectionChangeMessage::Connected {
+                        last_disconnect: *last_disconnect_time.read().expect("lock poisoned"),
+                    },
+                ))
+                .ok();
+
+            // Our cancel token propagates to bmc_connection_handle, so wait for it to finish
+            let res = bmc_connection_handle
+                .join_handle
+                .await
+                .expect("task panicked");
+
+            // The connection should go forever unless we cancel it, so we always retry unless we're
+            // cancelled.
+            if self.cancel_token.is_cancelled() {
+                break 'retry;
+            }
+
+            let connection_time = try_start_time.elapsed();
+            let recovered_conflicting_sol_session =
+                res.as_ref().is_err_and(|error| error.retry_immediately());
+            if should_reset_retry_backoff(
+                connection_time,
+                self.config.successful_connection_minimum_duration,
+                &res,
+                previous_connection_close_was_sol_recovery,
+            ) {
+                if recovered_conflicting_sol_session {
+                    tracing::debug!(%machine_id, "retrying immediately after IPMI SOL session recovery");
+                } else {
+                    tracing::debug!(
+                        %machine_id,
+                        connection_duration_seconds = connection_time.as_secs_f64(),
+                        "last connection succeeded long enough; resetting backoff"
+                    );
+                }
+                next_retry = Instant::now();
+            }
+            previous_connection_close_was_sol_recovery = recovered_conflicting_sol_session;
+            let error_string = res
+                .err()
+                .map(|e| format!("{e:?}"))
+                .unwrap_or("<none>".to_string());
+            tracing::warn!(
+                %machine_id,
+                error = error_string,
+                connection_duration_seconds = connection_time.as_secs_f64(),
+                retry_delay_seconds = next_retry
+                    .checked_duration_since(Instant::now())
+                    .unwrap_or_default()
+                    .as_secs(),
+                "connection to BMC closed, will retry",
+            );
+        }
+
+        // Clean up: Shut down message relay and logger
+        bmc_message_relay.shutdown_and_wait().await;
+        if let Some(logger_handle) = logger_handle {
+            logger_handle.shutdown_and_wait().await;
+        }
+    }
+}
+
+/// Wait for an address to be "up". For SSH consoles, do a TCP half-open connection request. For
+/// IPMI machines, race ICMP ping against ASF Presence Ping - first to succeed wins.
+///
+/// ASF Presence Ping works with most hardware vendors BMC and machine-a-tron simulations,
+/// but some BMCs (eg, NVIDIA DGX GB200) ignore it. Running both ICMP and UDP ASF pings in parallel
+/// provides fast detection in all environments.
+async fn wait_until_host_is_up(
+    addr: SocketAddr,
+    kind: connection::Kind,
+    machine_id: MachineId,
+    cancel_token: CancellationToken,
+) -> io::Result<()> {
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut do_log = true;
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                match kind {
+                    connection::Kind::Ssh => {
+                        if let Some(Ok(Ok(_))) = cancel_token.run_until_cancelled(tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr))).await {
+                            break Ok(());
+                        }
+                    }
+                    connection::Kind::Ipmi => {
+                        if let Some(true) = cancel_token.run_until_cancelled(check_ipmi_reachable_racing(addr, Duration::from_secs(2))).await {
+                            break Ok(());
+                        }
+                    }
+                }
+            }
+            _ = cancel_token.cancelled() => {
+                break Ok(());
+            }
+        }
+
+        if do_log {
+            do_log = false;
+            tracing::info!(
+                %machine_id,
+                bmc_address = %addr,
+                "BMC is not listening; waiting for the port to open before connecting"
+            )
+        }
+    }
+}
+
+/// Spawn a task which will take messages from to_bmc_msg_rx and either relay them to a
+/// BMC connection, *or* reply to the user saying the BMC is disconnected, depending on
+/// whether the BMC connection is healthy.
+///
+/// - `bmc_msg_tx_placeholder`: A shareable placeholder for a channel to send messages to
+///   the BMC, once the connection is ready.
+fn relay_input_to_bmc(
+    broadcast_to_frontend_tx: broadcast::Sender<ToFrontendMessage>,
+    connection_state: Arc<AtomicConnectionState>,
+    mut to_bmc_msg_rx: mpsc::Receiver<ToBmcMessage>,
+    bmc_msg_tx_placeholder: BmcMessageTxPlaceholder,
+    last_disconnect_time: Arc<RwLock<Option<DateTime<Utc>>>>,
+    cancel_token: CancellationToken,
+) -> MessageRelayHandle {
+    let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
+    let join_handle = tokio::spawn({
+        async move {
+            while let Some(msg) = cancel_token
+                .run_until_cancelled(to_bmc_msg_rx.recv())
+                .await
+                .flatten()
+            {
+                let bmc_tx_guard = if let connection::State::Connected = connection_state.load() {
+                    Some(bmc_msg_tx_placeholder.lock().await)
+                } else {
+                    None
+                };
+
+                // If we're connected, relay the message
+                if let Some(tx) = bmc_tx_guard.as_ref().and_then(|guard| guard.as_ref()) {
+                    tx.send(msg).await.ok();
+                } else {
+                    // Otherwise, when the user types a newline, inform them the BMC
+                    // is not connected
+                    let inform_disconnected = match msg {
+                        ToBmcMessage::ChannelMsg(ChannelMsg::Data { data }) => {
+                            data.contains(&b'\r') || data.contains(&b'\n')
+                        }
+                        ToBmcMessage::EchoConnectionMessage { reply_tx: _ } => true,
+                        ToBmcMessage::Exec { reply_tx, .. } => {
+                            reply_tx
+                                .send(ExecReply {
+                                    output: b"BMC console not connected\r\n".to_vec(),
+                                    exit_status: 1,
+                                })
+                                .ok();
+                            false
+                        }
+                        _ => false,
+                    };
+
+                    if inform_disconnected {
+                        broadcast_to_frontend_tx
+                            .send(ToFrontendMessage::InformDisconnectedSince(
+                                *last_disconnect_time.read().expect("lock poisoned"),
+                            ))
+                            .ok();
+                    }
+                }
+            }
+        }
+    });
+
+    MessageRelayHandle {
+        drop_guard,
+        join_handle,
+    }
+}
+
+struct MessageRelayHandle {
+    drop_guard: DropGuard,
+    join_handle: JoinHandle<()>,
+}
+
+#[derive(Default, Clone)]
+struct BmcMessageTxPlaceholder(Arc<tokio::sync::Mutex<Option<mpsc::Sender<ToBmcMessage>>>>);
+
+impl BmcMessageTxPlaceholder {
+    #[inline]
+    async fn replace(&self, value: Option<mpsc::Sender<ToBmcMessage>>) {
+        *self.lock().await = value;
+    }
+
+    #[inline]
+    async fn lock(&self) -> MutexGuard<'_, Option<mpsc::Sender<ToBmcMessage>>> {
+        self.0.lock().await
+    }
+}
+
+impl ShutdownHandle<()> for MessageRelayHandle {
+    fn into_parts(self) -> (DropGuard, JoinHandle<()>) {
+        (self.drop_guard, self.join_handle)
+    }
+}
+
+/// Consume all the messages of a broadcast::Receiver, doing nothing with them, until the channel is
+/// closed. This is a quick and dirty way to prevent a BMC's to_frontend_tx channel from returning
+/// failures due to nobody listening. (Listeners may come and go, as logging is optional.)
+fn dev_null<T: Clone + Send + 'static>(mut rx: broadcast::Receiver<T>) {
+    tokio::spawn(async move {
+        loop {
+            if rx.recv().await.is_err() {
+                return;
+            };
+        }
+    });
+}
+
+fn should_reset_retry_backoff(
+    connection_time: Duration,
+    successful_connection_minimum_duration: Duration,
+    connection_result: &Result<(), connection::SpawnError>,
+    previous_connection_close_was_sol_recovery: bool,
+) -> bool {
+    let recovered_conflicting_sol_session = connection_result
+        .as_ref()
+        .is_err_and(|error| error.retry_immediately());
+
+    if recovered_conflicting_sol_session {
+        // Retry one activation immediately after recovery, then use normal backoff if the conflict
+        // persists so competing SOL clients cannot cause a tight deactivate/activate loop.
+        !previous_connection_close_was_sol_recovery
+    } else {
+        connection_time > successful_connection_minimum_duration
+    }
+}
+
+/// Calculate the next exponential backoff duration for retrying connections to a console
+fn next_retry_backoff(config: &Config, prev: Duration) -> Duration {
+    let duration = if prev == Duration::ZERO {
+        config.reconnect_interval_base
+    } else {
+        // Sleep a random interval between prev and prev * 3
+        let upper = (prev.as_secs_f64() * 3.0).min(config.reconnect_interval_max.as_secs_f64());
+        Duration::from_secs_f64(rand::random_range(prev.as_secs_f64()..upper))
+    };
+    tracing::debug!(
+        previous_backoff_milliseconds = prev.as_millis(),
+        next_backoff_milliseconds = duration.as_millis(),
+        "increasing connection retry backoff"
+    );
+    duration
+}
+
+pub(super) struct ClientHandle {
+    machine_id: MachineId,
+    kind: connection::Kind,
+    /// Writer to send messages (including data) to BMC
+    to_bmc_msg_tx: mpsc::Sender<ToBmcMessage>,
+    // Hold a copy of the tx for broadcasting to frontends, so that we can subscribe to it multiple
+    // times.
+    broadcast_to_frontend_tx: broadcast::Sender<ToFrontendMessage>,
+    drop_guard: DropGuard,
+    join_handle: JoinHandle<()>,
+    // Read by the pool's observable-gauge callbacks.
+    pub(super) connection_state: Arc<AtomicConnectionState>,
+    console_log_client: Option<console_logger::ConsoleLogClient>,
+}
+
+impl ShutdownHandle<()> for ClientHandle {
+    fn into_parts(self) -> (DropGuard, JoinHandle<()>) {
+        (self.drop_guard, self.join_handle)
+    }
+}
+
+impl ClientHandle {
+    pub(super) fn console_log_client(&self) -> Option<console_logger::ConsoleLogClient> {
+        self.console_log_client.clone()
+    }
+
+    pub(super) fn subscribe(&self, metrics: Arc<ServerMetrics>) -> BmcConnectionSubscription {
+        tracing::debug!("new bmc subscription");
+        metrics.total_clients.add(1, &[]);
+        metrics.bmc_clients.add(
+            1,
+            &[KeyValue::new("machine_id", self.machine_id.to_string())],
+        );
+
+        BmcConnectionSubscription {
+            machine_id: self.machine_id,
+            to_frontend_msg_weak_tx: self.broadcast_to_frontend_tx.downgrade(),
+            to_bmc_msg_tx: self.to_bmc_msg_tx.clone(),
+            metrics,
+            kind: self.kind,
+        }
+    }
+}
+
+/// An individual "subscription" to a BMC connection, expected to be used by a frontend. Metrics
+/// are affected when one is created or dropped.
+pub(crate) struct BmcConnectionSubscription {
+    pub(crate) machine_id: MachineId,
+    pub(crate) to_frontend_msg_weak_tx: broadcast::WeakSender<ToFrontendMessage>,
+    pub(crate) to_bmc_msg_tx: mpsc::Sender<ToBmcMessage>,
+    pub(crate) kind: connection::Kind,
+    // Not pub, to make sure we go through ClientHandle::subscribe() to build, so we get the
+    // right metrics
+    metrics: Arc<ServerMetrics>,
+}
+
+impl Drop for BmcConnectionSubscription {
+    // Decrement metrics when dropping
+    fn drop(&mut self) {
+        tracing::debug!("dropping bmc subscription");
+        self.metrics.total_clients.add(-1, &[]);
+        self.metrics.bmc_clients.add(
+            -1,
+            &[KeyValue::new("machine_id", self.machine_id.to_string())],
+        );
+    }
+}
+
+/// Send an ASF Presence Ping (RMCP) to check if an IPMI endpoint is reachable.
+async fn check_asf_reachable(addr: SocketAddr, timeout: Duration) -> bool {
+    // Reference: IPMI v2.0 spec, section 13.2.3
+    const ASF_PRESENCE_PING: [u8; 12] = [
+        0x06, 0x00, 0xff, 0x06, 0x00, 0x00, 0x11, 0xbe, 0x80, 0x00, 0x00, 0x00,
+    ];
+
+    let probe = async {
+        let bind_addr = if addr.is_ipv4() {
+            "0.0.0.0:0"
+        } else {
+            "[::]:0"
+        };
+        let socket = tokio::net::UdpSocket::bind(bind_addr).await?;
+        socket.send_to(&ASF_PRESENCE_PING, addr).await?;
+        let mut recv_buf = [0u8; 32];
+        socket.recv_from(&mut recv_buf).await
+    };
+
+    match tokio::time::timeout(timeout, probe).await {
+        Ok(Ok((len, _))) => {
+            tracing::debug!(%addr, response_len = len, "IPMI endpoint responded to ASF Presence Ping");
+            true
+        }
+        Ok(Err(e)) => {
+            tracing::debug!(%addr, error = %e, "ASF Presence Ping failed");
+            false
+        }
+        Err(_) => {
+            tracing::debug!(%addr, ?timeout, "ASF Presence Ping timed out");
+            false
+        }
+    }
+}
+
+/// Send an ICMP Echo Request to check if an IPMI endpoint is reachable.
+async fn check_icmp_reachable(addr: SocketAddr, timeout: Duration) -> bool {
+    use surge_ping::{Client, PingIdentifier, PingSequence};
+
+    let config = icmp_config(addr);
+
+    let client = match Client::new(&config) {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::debug!(%addr, error = %e, "failed to create ICMP client");
+            return false;
+        }
+    };
+
+    let mut pinger = client
+        .pinger(addr.ip(), PingIdentifier(rand::random()))
+        .await;
+    pinger.timeout(timeout);
+
+    match pinger.ping(PingSequence(0), &[]).await {
+        Ok((_reply, rtt)) => {
+            tracing::debug!(%addr, ?rtt, "ICMP ping succeeded");
+            true
+        }
+        Err(e) => {
+            tracing::debug!(%addr, error = %e, "ICMP ping failed");
+            false
+        }
+    }
+}
+
+fn icmp_config(addr: SocketAddr) -> surge_ping::Config {
+    let kind = if addr.is_ipv4() {
+        surge_ping::ICMP::V4
+    } else {
+        surge_ping::ICMP::V6
+    };
+    surge_ping::Config::builder().kind(kind).build()
+}
+
+/// Race ASF Presence Ping and ICMP ping to check IPMI endpoint reachability.
+async fn check_ipmi_reachable_racing(addr: SocketAddr, timeout: Duration) -> bool {
+    use std::pin::pin;
+
+    use futures::future::{Either, select};
+
+    let mut asf_fut = pin!(check_asf_reachable(addr, timeout));
+    let mut icmp_fut = pin!(check_icmp_reachable(addr, timeout));
+
+    // Wait for the first check to complete
+    match select(asf_fut.as_mut(), icmp_fut.as_mut()).await {
+        Either::Left((true, _)) => true,  // ASF succeeded
+        Either::Right((true, _)) => true, // ICMP succeeded
+        Either::Left((false, icmp_remaining)) => {
+            // ASF failed, wait for ICMP
+            icmp_remaining.await
+        }
+        Either::Right((false, asf_remaining)) => {
+            // ICMP failed, wait for ASF
+            asf_remaining.await
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+    use std::os::unix::process::ExitStatusExt;
+
+    use bmc_mock::HostnameQuerying;
+    use carbide_uuid::machine::{MachineIdSource, MachineType};
+    use machine_a_tron::{MockSshCredentials, PromptBehavior, spawn_mock_ssh_server};
+    use prometheus::proto::MetricType;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+    use tokio::process::Command;
+
+    use super::*;
+    use crate::bmc::connection_impl::{ipmi, ssh};
+    use crate::bmc::vendor::SshBmcVendor;
+    use crate::metrics::MetricsState;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_counter_survives_client_recreation() {
+        const CHILD_PROCESS_ENV: &str = "CARBIDE_SSH_RECOVERY_METRICS_TEST_CHILD";
+
+        if std::env::var_os(CHILD_PROCESS_ENV).is_none() {
+            // A fresh process prevents other tests from replacing the provider,
+            // initializing the cached Event first, or changing its shared total.
+            let output_dir = temp_dir::TempDir::with_prefix("ssh-recovery-metrics")
+                .expect("create recovery test output directory");
+            let stdout_path = output_dir.path().join("stdout");
+            let stderr_path = output_dir.path().join("stderr");
+            let mut child = Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "bmc::client::tests::recovery_counter_survives_client_recreation",
+                    "--nocapture",
+                ])
+                .env(CHILD_PROCESS_ENV, "1")
+                .stdout(std::fs::File::create(&stdout_path).expect("create child stdout file"))
+                .stderr(std::fs::File::create(&stderr_path).expect("create child stderr file"))
+                .kill_on_drop(true)
+                .spawn()
+                .expect("run recovery metrics test child");
+            // Bound the whole child even if its runtime cannot poll the inner
+            // ten-second deadline. Files keep output from filling a pipe.
+            let wait_result = tokio::time::timeout(Duration::from_secs(30), child.wait()).await;
+            let timed_out = wait_result.is_err();
+            let status = match wait_result {
+                Ok(status) => status.expect("wait for recovery metrics test child"),
+                Err(_) => {
+                    child
+                        .start_kill()
+                        .expect("terminate recovery metrics test child");
+                    child
+                        .wait()
+                        .await
+                        .expect("reap recovery metrics test child")
+                }
+            };
+            let stdout = std::fs::read(stdout_path).expect("read child stdout");
+            let stderr = std::fs::read(stderr_path).expect("read child stderr");
+            let stdout = String::from_utf8_lossy(&stdout);
+            let stderr = String::from_utf8_lossy(&stderr);
+            assert!(
+                !timed_out && status.success() && stdout.contains("1 passed; 0 failed"),
+                "recovery metrics child failed (timed out: {timed_out}, status: {status})\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            );
+            return;
+        }
+
+        tokio::time::timeout(Duration::from_secs(10), assert_recovery_metrics_lifecycle())
+            .await
+            .expect("recovery metrics lifecycle timed out");
+    }
+
+    async fn assert_recovery_metrics_lifecycle() {
+        let state = MetricsState::new();
+        let metrics = Arc::new(BmcPoolMetrics::for_test());
+        let machine_id = MachineId::new(MachineIdSource::Tpm, [0; 32], MachineType::Host);
+        assert_recovery_metrics(&state, machine_id, 0.0, None);
+        let config = Arc::new(Config {
+            console_logging_enabled: false,
+            reconnect_interval_base: Duration::ZERO,
+            reconnect_interval_max: Duration::ZERO,
+            ..Default::default()
+        });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind controlled BMC listener");
+        let connection_details = |addr| {
+            ConnectionDetails::Ssh(Arc::new(ssh::ConnectionDetails {
+                machine_id,
+                addr,
+                user: "test".to_string(),
+                password: "test".to_string(),
+                ssh_key_path: None,
+                bmc_vendor: SshBmcVendor::Dell,
+            }))
+        };
+        let cancel_token = CancellationToken::new();
+        let handle = spawn(
+            connection_details(listener.local_addr().expect("BMC listener address")),
+            config.clone(),
+            metrics.clone(),
+            cancel_token.clone(),
+        );
+
+        let mut connection = accept_connection_attempt(&listener).await;
+        assert_recovery_metrics(&state, machine_id, 0.0, Some(0.0));
+        for attempts in [1.0, 2.0] {
+            // Closing the held handshake injects a connection failure. The next
+            // handshake pauses the real retry loop after its metrics update.
+            drop(connection);
+            connection = accept_connection_attempt(&listener).await;
+            assert_recovery_metrics(&state, machine_id, attempts, Some(attempts));
+        }
+
+        handle.shutdown_and_wait().await;
+        drop(connection);
+        let bmc = spawn_mock_ssh_server(
+            None,
+            Arc::new(RecoveryTestHostname),
+            Some(MockSshCredentials {
+                user: "test".to_string(),
+                password: "test".to_string(),
+            }),
+            PromptBehavior::Dell,
+            None,
+        )
+        .await
+        .expect("start mock SSH BMC");
+        let addr = SocketAddr::from(([127, 0, 0, 1], bmc.port));
+        let handle = spawn(
+            connection_details(addr),
+            config.clone(),
+            metrics.clone(),
+            cancel_token.clone(),
+        );
+        let mut messages = handle.broadcast_to_frontend_tx.subscribe();
+        assert!(matches!(
+            next_connection_change(&mut messages).await,
+            ConnectionChangeMessage::Connected { .. }
+        ));
+        assert_eq!(handle.connection_state.load(), connection::State::Connected);
+        assert_recovery_metrics(&state, machine_id, 2.0, Some(0.0));
+
+        handle.shutdown_and_wait().await;
+        assert_recovery_metrics(&state, machine_id, 2.0, Some(0.0));
+
+        let handle = spawn(connection_details(addr), config, metrics, cancel_token);
+        let mut messages = handle.broadcast_to_frontend_tx.subscribe();
+        assert!(matches!(
+            next_connection_change(&mut messages).await,
+            ConnectionChangeMessage::Connected { .. }
+        ));
+
+        // The mock closes its established session and listener. On this
+        // current-thread runtime, the retry emits after Disconnected and before
+        // yielding to wait for reachability, so no later dial can explain it.
+        drop(bmc);
+        assert!(matches!(
+            next_connection_change(&mut messages).await,
+            ConnectionChangeMessage::Disconnected
+        ));
+        assert!(
+            TcpStream::connect(addr).await.is_err(),
+            "BMC port is closed"
+        );
+        assert_recovery_metrics(&state, machine_id, 3.0, Some(1.0));
+        handle.shutdown_and_wait().await;
+        assert_recovery_metrics(&state, machine_id, 3.0, Some(1.0));
+    }
+
+    #[derive(Debug)]
+    struct RecoveryTestHostname;
+
+    impl HostnameQuerying for RecoveryTestHostname {
+        fn get_hostname(&self) -> Cow<'_, str> {
+            Cow::Borrowed("recovery-test")
+        }
+    }
+
+    async fn next_connection_change(
+        messages: &mut broadcast::Receiver<ToFrontendMessage>,
+    ) -> ConnectionChangeMessage {
+        loop {
+            if let ToFrontendMessage::ConnectionChanged(change) =
+                messages.recv().await.expect("receive connection status")
+            {
+                return change;
+            }
+        }
+    }
+
+    async fn accept_connection_attempt(listener: &TcpListener) -> TcpStream {
+        // Reachability opens and closes a TCP connection before SSH connects.
+        let (mut probe, _) = listener.accept().await.expect("accept reachability probe");
+        assert_eq!(probe.read(&mut [0; 1]).await.expect("read probe EOF"), 0);
+
+        let (mut connection, _) = listener.accept().await.expect("accept SSH connection");
+        let mut prefix = [0; 4];
+        connection
+            .read_exact(&mut prefix)
+            .await
+            .expect("read SSH identification");
+        assert_eq!(&prefix, b"SSH-");
+        connection
+    }
+
+    fn assert_recovery_metrics(
+        state: &MetricsState,
+        machine_id: MachineId,
+        total_attempts: f64,
+        client_attempts: Option<f64>,
+    ) {
+        // Collect twice at each boundary: scraping must not count another retry.
+        for _ in 0..2 {
+            let families = state.registry.gather();
+            let counter = families
+                .iter()
+                .find(|family| family.name() == "carbide_ssh_console_bmc_recovery_attempts_total")
+                .expect("cumulative recovery counter");
+            assert_eq!(counter.get_field_type(), MetricType::COUNTER);
+            assert_eq!(
+                counter.help(),
+                "Number of BMC connection recovery iterations started during this service lifetime, excluding each client's initial connection",
+            );
+            assert_eq!(counter.get_metric().len(), 1);
+            let counter = &counter.get_metric()[0];
+            assert!(counter.get_label().is_empty());
+            assert_eq!(counter.get_counter().value(), total_attempts);
+
+            let gauge = families
+                .iter()
+                .find(|family| family.name() == "ssh_console_bmc_recovery_attempts");
+            let Some(client_attempts) = client_attempts else {
+                assert!(
+                    gauge.is_none(),
+                    "no per-client gauge before a client exists"
+                );
+                continue;
+            };
+            let gauge = gauge.expect("legacy recovery gauge");
+            assert_eq!(gauge.get_field_type(), MetricType::GAUGE);
+            assert_eq!(
+                gauge.help(),
+                "Recovery attempts made for connection or session errors",
+            );
+            assert_eq!(gauge.get_metric().len(), 1);
+            let gauge = &gauge.get_metric()[0];
+            assert_eq!(gauge.get_label().len(), 1);
+            assert_eq!(gauge.get_label()[0].name(), "machine_id");
+            assert_eq!(gauge.get_label()[0].value(), machine_id.to_string());
+            assert_eq!(gauge.get_gauge().value(), client_attempts);
+        }
+    }
+
+    #[tokio::test]
+    async fn asf_probe_reaches_both_address_families() {
+        for bind_addr in ["127.0.0.1:0", "[::1]:0"] {
+            let socket = tokio::net::UdpSocket::bind(bind_addr).await.unwrap();
+            let addr = socket.local_addr().unwrap();
+            let responder = async {
+                let mut buf = [0; 32];
+                let (len, peer) = socket.recv_from(&mut buf).await.unwrap();
+                socket.send_to(&buf[..len], peer).await.unwrap();
+            };
+            let (reachable, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(check_asf_reachable(addr, Duration::from_secs(2)), responder)
+            })
+            .await
+            .unwrap_or_else(|_| panic!("ASF responder timed out for {addr}"));
+            assert!(reachable, "{addr}");
+        }
+    }
+
+    #[tokio::test]
+    async fn asf_probe_requires_a_response() {
+        let socket = tokio::net::UdpSocket::bind("[::1]:0").await.unwrap();
+        assert!(
+            !check_asf_reachable(socket.local_addr().unwrap(), Duration::from_millis(10)).await
+        );
+    }
+
+    #[test]
+    fn icmp_config_matches_destination_family() {
+        carbide_test_support::value_scenarios!(
+            run = |addr| matches!(icmp_config(addr).kind, surge_ping::ICMP::V6);
+            "IPv4 keeps ICMPv4" {
+                "192.0.2.1:623".parse().unwrap() => false,
+            }
+            "IPv6 uses ICMPv6" {
+                "[2001:db8::1]:623".parse().unwrap() => true,
+            }
+        );
+    }
+
+    #[test]
+    fn retry_backoff_resets_only_after_healthy_connection_or_successful_sol_recovery() {
+        let minimum_healthy_duration = Duration::from_secs(60);
+        let cases = [
+            (
+                "short successful connection",
+                Duration::from_secs(1),
+                Ok(()),
+                false,
+                false,
+            ),
+            (
+                "exact minimum connection duration",
+                minimum_healthy_duration,
+                Ok(()),
+                false,
+                false,
+            ),
+            (
+                "long-lived connection",
+                minimum_healthy_duration + Duration::from_secs(1),
+                Ok(()),
+                false,
+                true,
+            ),
+            (
+                "ordinary IPMI failure",
+                Duration::from_secs(1),
+                Err(connection::SpawnError::Ipmi(
+                    ipmi::SpawnError::IpmitoolUnexpectedExit {
+                        exit_status: failed_exit_status(),
+                        output: "authentication failed".to_string(),
+                    },
+                )),
+                false,
+                false,
+            ),
+            (
+                "successful conflicting SOL session recovery",
+                Duration::from_secs(1),
+                Err(connection::SpawnError::Ipmi(
+                    ipmi::SpawnError::ConflictingSolSessionDeactivated {
+                        exit_status: failed_exit_status(),
+                        output: "SOL payload already active on another session".to_string(),
+                    },
+                )),
+                false,
+                true,
+            ),
+            (
+                "repeated successful conflicting SOL session recovery",
+                Duration::from_secs(1),
+                Err(connection::SpawnError::Ipmi(
+                    ipmi::SpawnError::ConflictingSolSessionDeactivated {
+                        exit_status: failed_exit_status(),
+                        output: "SOL payload already active on another session".to_string(),
+                    },
+                )),
+                true,
+                false,
+            ),
+            (
+                "failed conflicting SOL session recovery",
+                Duration::from_secs(1),
+                Err(connection::SpawnError::Ipmi(
+                    ipmi::SpawnError::ConflictingSolSessionDeactivationFailed {
+                        exit_status: failed_exit_status(),
+                        output: "SOL payload already active on another session".to_string(),
+                        error: ipmi::SolDeactivateError::Failure {
+                            exit_status: failed_exit_status(),
+                            output: "deactivation failed".to_string(),
+                        },
+                    },
+                )),
+                false,
+                false,
+            ),
+        ];
+
+        for (scenario, connection_time, result, previous_was_recovery, expected) in cases {
+            assert_eq!(
+                should_reset_retry_backoff(
+                    connection_time,
+                    minimum_healthy_duration,
+                    &result,
+                    previous_was_recovery,
+                ),
+                expected,
+                "{scenario}",
+            );
+        }
+    }
+
+    fn failed_exit_status() -> std::process::ExitStatus {
+        std::process::ExitStatus::from_raw(256)
+    }
+}

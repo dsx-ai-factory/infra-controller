@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if .Values.rbac.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "nico-rest-site-manager.name" . }}
+  namespace: {{ include "nico-rest-site-manager.namespace" . }}
+  labels:
+    {{- include "nico-rest-site-manager.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "nico-rest-site-manager.name" . }}
+  namespace: {{ include "nico-rest-site-manager.namespace" . }}
+  labels:
+    {{- include "nico-rest-site-manager.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["forge.nvidia.io"]
+    resources: ["sites"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["forge.nvidia.io"]
+    resources: ["sites/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "nico-rest-site-manager.name" . }}
+  namespace: {{ include "nico-rest-site-manager.namespace" . }}
+  labels:
+    {{- include "nico-rest-site-manager.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nico-rest-site-manager.name" . }}
+roleRef:
+  kind: Role
+  name: {{ include "nico-rest-site-manager.name" . }}
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "nico-rest-site-manager.name" . }}
+  labels:
+    {{- include "nico-rest-site-manager.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["forge.nvidia.io"]
+    resources: ["sites"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["forge.nvidia.io"]
+    resources: ["sites/status"]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "nico-rest-site-manager.name" . }}
+  labels:
+    {{- include "nico-rest-site-manager.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nico-rest-site-manager.name" . }}
+    namespace: {{ include "nico-rest-site-manager.namespace" . }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "nico-rest-site-manager.name" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

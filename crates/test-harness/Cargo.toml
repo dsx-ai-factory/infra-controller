@@ -1,0 +1,55 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+[package]
+name = "carbide-test-harness"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+carbide-api-core = { path = "../api-core", features = ["test-support"] }
+carbide-api-db = { path = "../api-db", default-features = false }
+carbide-api-model = { path = "../api-model", default-features = false, features = [
+  "test-support",
+] }
+carbide-site-explorer = { path = "../site-explorer", features = [
+  "test-support",
+] }
+carbide-macros = { path = "../macros", default-features = false }
+carbide-network = { path = "../network" }
+carbide-network-segment-controller = { path = "../network-segment-controller", default-features = false }
+carbide-resource-pool = { path = "../resource-pool" }
+carbide-sqlx-testing = { path = "../sqlx-testing", default-features = false }
+carbide-utils = { path = "../utils", features = ["test-support"] }
+carbide-uuid = { path = "../uuid", default-features = false }
+state-controller = { path = "../state-controller", features = ["test-support"] }
+
+chrono = { workspace = true }
+ctor = { workspace = true }
+ipnetwork = { workspace = true }
+mac_address = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tonic = { workspace = true }
+uuid = { workspace = true }
+
+[lints]
+workspace = true

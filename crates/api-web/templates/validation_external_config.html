@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}Machine Validation Tests{% endblock %}
+
+{% block content %}
+<h1>Machine Validation External Config ({{ page.total_items() }})</h1>
+<table class="sortable overview">
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Description</th>
+            <th>Version</th>
+            <th>Timerstamp</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for test in validation_configs %}
+        <tr>
+            <td>{{ test.name }}</td>
+            <td>{{ test.description }}</td>
+            <td>{{ test.version }}</td>
+            <td>{{ test.timestamp }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% include "pages_footer.html" %}
+
+{% endblock %}

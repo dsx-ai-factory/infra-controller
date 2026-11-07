@@ -1,0 +1,13 @@
+// messages.proto
+// Just a of sample protobuf message to make something
+// to play with for the mqttea library example.
+
+syntax = "proto3";
+
+package mqtt_messages;
+
+message HelloWorld {
+  string message = 1;
+  int64 timestamp = 2;
+  string device_id = 3;
+}

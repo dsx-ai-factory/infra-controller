@@ -1,0 +1,36 @@
+# Standalone DPUNode + DPUDevice for testing the simulator WITHOUT NICo.
+# Names follow the NICo scheme (crates/dpf/src/sdk.rs): node-{dpfID},
+# device-{deviceID}, where dpfID is the host BMC MAC with ':' -> '-'.
+# The DPUNode references the device via spec.dpus[].name (how the simulator
+# resolves node_id from a DPUDevice). Applying these should make the simulator
+# create DPU "node-02-00-00-00-00-01-device-dpu0" and walk it to Ready.
+apiVersion: provisioning.dpu.nvidia.com/v1alpha1
+kind: DPUNode
+metadata:
+  name: node-02-00-00-00-00-01
+  namespace: dpf-operator-system
+  labels:
+    carbide.nvidia.com/controlled.node.v2: "true"
+  # To exercise the reboot round-trip manually, the simulator ADDS
+  # provisioning.dpu.nvidia.com/dpunode-external-reboot-required: "true" here
+  # during the Rebooting phase; delete it to simulate NICo's reboot_complete
+  # and let the DPU proceed to Ready.
+spec:
+  dpus:
+    - name: device-dpu0
+---
+apiVersion: provisioning.dpu.nvidia.com/v1alpha1
+kind: DPUDevice
+metadata:
+  name: device-dpu0
+  namespace: dpf-operator-system
+  labels:
+    carbide.nvidia.com/dpu-machine-id: "00000000-0000-0000-0000-000000000001"
+    carbide.nvidia.com/controlled.device: "true"
+    # host-bmc-ip holds the host BMC's IP address (NICo sets it from
+    # info.host_bmc_ip); it is NOT the DPU identity source.
+    carbide.nvidia.com/host-bmc-ip: "10.233.0.10"
+    carbide.nvidia.com/is-primary-dpu: "true"
+spec:
+  # serialNumber is required + immutable by the DPUDevice CRD.
+  serialNumber: "MT2500SIM0001"

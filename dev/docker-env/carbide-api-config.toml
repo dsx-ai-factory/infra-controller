@@ -1,0 +1,97 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+listen = "[::]:1079"
+metrics_endpoint = "[::]:1080"
+asn = 65535
+dhcp_servers = ["172.20.0.12"]
+route_servers = ["127.0.0.1"]
+enable_route_servers = true
+dpu_ipmi_tool_impl = "test"
+initial_domain_name = "forge.local"
+initial_dpu_agent_upgrade_policy = "off"
+attestation_enabled = false
+bypass_rbac = true
+allow_insecure_discovery = true
+
+[site_explorer]
+enabled = true
+explorations_per_run = 200
+run_interval = "1s"
+create_machines = true
+#override_target_ip = "172.20.0.5"
+override_target_port = 2000
+
+[tls]
+identity_pemfile_path = "/app/code/dev/certs/server_identity.pem"
+identity_keyfile_path = "/app/code/dev/certs/server_identity.key"
+root_cafile_path = "/app/code/dev/certs/forge_developer_local_only_root_cert_pem"
+
+[auth]
+permissive_mode = true
+casbin_policy_file = "/app/code/crates/api/casbin-policy.csv"
+
+[pools.lo-ip]
+type = "ipv4"
+prefix = "10.180.62.1/26"
+
+[pools.vlan-id]
+type = "integer"
+ranges = [{ start = "100", end = "501" }]
+
+[pools.vni]
+type = "integer"
+ranges = [{ start = "1024500", end = "1024550" }]
+
+[pools.vpc-vni]
+type = "integer"
+ranges = [{ start = "2024500", end = "2024550" }]
+
+[networks.admin]
+type = "admin"
+prefix = "172.20.0.0/24"
+gateway = "172.20.0.1"
+mtu = 9000
+reserve_first = 20
+
+[networks.DEV1-C09-IPMI-01]
+type = "underlay"
+prefix = "172.21.0.0/24"
+gateway = "172.21.0.1"
+mtu = 1490
+reserve_first = 20
+
+
+[machine_state_controller]
+dpu_wait_time = "1s"
+power_down_wait = "1s"
+failure_retry_time = "1s"
+dpu_up_threshold = "52w"
+[machine_state_controller.controller]
+iteration_time = "10s"
+
+[network_segment_state_controller]
+network_segment_drain_time = "60s"
+[network_segment_state_controller.controller]
+iteration_time = "2s"
+
+[vpc_prefix_state_controller]
+vpc_prefix_drain_time = "60s"
+[vpc_prefix_state_controller.controller]
+iteration_time = "2s"
+
+[ib_partition_state_controller.controller]
+iteration_time = "60s" # Not supported in docker anyway

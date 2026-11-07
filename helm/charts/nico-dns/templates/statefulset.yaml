@@ -1,0 +1,80 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "nico-dns.name" . }}
+  namespace: {{ include "nico-dns.namespace" . }}
+  labels:
+    {{- include "nico-dns.labels" . | nindent 4 }}
+  annotations:
+    {{- tpl (toYaml .Values.annotations) . | nindent 4 }}
+spec:
+  serviceName: {{ include "nico-dns.name" . }}
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "nico-dns.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nico-dns.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "nico-dns.name" . }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ include "nico-dns.name" . }}
+          image: "{{ include "nico-dns.image" . }}"
+          # Picks {{ include "nico-dns.name" . }} (--nico-url) or carbide-dns (--carbide-url) based on which binary is in the image.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              if [ -x /opt/nico/nico-dns ]; then
+                exec /opt/nico/nico-dns run --nico-url="${NICO_API}" --listen={{ .Values.listenAddress | default "[::]:53" | quote }}
+              else
+                exec /opt/carbide/carbide-dns run --carbide-url="${NICO_API}" --listen={{ .Values.listenAddress | default "[::]:53" | quote }}
+              fi
+          env:
+            - name: NICO_API
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "nico-dns.name" . }}
+                  key: NICO_API
+            {{- if .Values.otlpEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+              value: {{ .Values.otlpEndpoint | quote }}
+            {{- end }}
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          securityContext:
+            capabilities:
+              add:
+                - SYS_PTRACE
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: udp
+              containerPort: 53
+              protocol: UDP
+            - name: tcp
+              containerPort: 53
+              protocol: TCP
+            # Prometheus metrics endpoint; scraped via a PodMonitor (no Service).
+            - name: metrics
+              containerPort: 8053
+              protocol: TCP
+          volumeMounts:
+            - name: spiffe
+              mountPath: /var/run/secrets/spiffe.io
+              readOnly: true
+      volumes:
+        - name: spiffe
+          secret:
+            secretName: {{ include "nico-dns.name" . }}-certificate

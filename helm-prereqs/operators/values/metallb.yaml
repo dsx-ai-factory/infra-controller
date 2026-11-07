@@ -1,0 +1,43 @@
+# =============================================================================
+# operators/values/metallb.yaml — MetalLB Helm chart static values
+#
+# These are cluster-level settings that do not change per site.
+# Site-specific configuration (IP pools, BGP peers, advertisements)
+# lives in values/metallb-config.yaml.
+#
+# Chart: metallb/metallb 0.14.5
+# =============================================================================
+
+speaker:
+  # ignoreExcludeLB: allow MetalLB speaker to announce IPs on nodes even if
+  # the node has the node.kubernetes.io/exclude-from-external-load-balancers
+  # taint (common on control-plane nodes in some kubespray configs).
+  ignoreExcludeLB: true
+
+  # FRR (Free Range Routing) must be enabled for BGP mode.
+  # Set frr.enabled=false only if you are using L2 advertisement exclusively
+  # and want a smaller speaker footprint.
+  frr:
+    enabled: true
+    image:
+      tag: "9.0.2"
+
+# Prometheus monitoring — enable if you have Prometheus Operator installed in your cluster.
+prometheus:
+  serviceMonitor:
+    enabled: false    # set to true when Prometheus Operator is installed
+    namespace: nico-system
+    speaker:
+      additionalLabels: {}
+    controller:
+      additionalLabels: {}
+  prometheusRule:
+    enabled: false
+
+# CRD management disabled: setup.sh applies the rendered CRDs itself
+# (server-side, idempotently) on EVERY run, before the helmfile sync. Helm
+# must not manage them because MetalLB's cert rotator takes SSA ownership of
+# the conversion-webhook caBundle after install, so a helm-managed CRD
+# upgrade conflicts on every re-sync.
+crds:
+  enabled: false

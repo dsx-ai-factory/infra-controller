@@ -1,0 +1,34 @@
+[forge-system]
+api-server = "https://127.0.0.1:8001"
+root-ca = "/opt/forge/forge_root.pem"
+client-cert = "/opt/forge/machine_cert.pem"
+client-key = "/opt/forge/machine_cert.key"
+local-api-socket = "/opt/forge/run/agent.sock"
+
+[machine]
+interface-id = "91609f10-c91d-470d-a260-6293ea0c1234"
+
+[metadata-service]
+address = "0.0.0.0:7777"
+
+[telemetry]
+metrics-address = "0.0.0.0:8888"
+prometheus-enabled = true
+
+[hbn]
+root-dir = "/var/lib/hbn"
+skip-reload = false
+
+[period]
+main-loop-idle-secs = 30
+main-loop-active-secs = 10
+network-config-fetch-secs = 30
+version-check-secs = 600
+inventory-update-secs = 3600
+discovery-retry-secs = 60
+discovery-retries-max = 10080
+
+[updates]
+
+[fmds-armos-networking.config]
+addresses = ["169.254.169.254/30"]

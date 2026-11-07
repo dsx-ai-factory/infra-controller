@@ -1,0 +1,1 @@
+https://github.com/wobcom/transceiver-exporter/releases/download/v${VERSION}/transceiver-exporter-v${VERSION}-linux-arm64.tar.gz

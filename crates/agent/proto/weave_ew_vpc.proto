@@ -1,0 +1,417 @@
+/*
+   SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+   SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+
+   NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+   property and proprietary rights in and to this material, related
+   documentation and any modifications thereto. Any use, reproduction,
+   disclosure or distribution of this material and related documentation
+   without an express license agreement from NVIDIA CORPORATION or
+   its affiliates is strictly prohibited.
+*/
+
+syntax = "proto3";
+
+package nvidia.weave.controller.v1;
+
+import "buf/validate/validate.proto";
+import "google/protobuf/timestamp.proto";
+
+// The NetworkIsolationService service provides APIs to manage virtual networks.
+service NetworkIsolationService {
+  // CreateVirtualNetwork creates a new virtual network.
+  rpc CreateVirtualNetwork(CreateVirtualNetworkRequest) returns (CreateVirtualNetworkResponse);
+  // UpdateVirtualNetwork updates a virtual network.
+  rpc UpdateVirtualNetwork(UpdateVirtualNetworkRequest) returns (UpdateVirtualNetworkResponse);
+  // DeleteVirtualNetwork deletes a virtual network.
+  rpc DeleteVirtualNetwork(DeleteVirtualNetworkRequest) returns (DeleteVirtualNetworkResponse);
+  // GetVirtualNetwork retrieves a virtual network.
+  rpc GetVirtualNetwork(GetVirtualNetworkRequest) returns (GetVirtualNetworkResponse);
+  // ListVirtualNetworks lists virtual networks.
+  rpc ListVirtualNetworks(ListVirtualNetworksRequest) returns (ListVirtualNetworksResponse);
+
+  // CreateVirtualNetworkAttachment creates a new virtual network attachment.
+  rpc CreateVirtualNetworkAttachment(CreateVirtualNetworkAttachmentRequest) returns (CreateVirtualNetworkAttachmentResponse);
+  // UpdateVirtualNetworkAttachment updates a virtual network attachment.
+  rpc UpdateVirtualNetworkAttachment(UpdateVirtualNetworkAttachmentRequest) returns (UpdateVirtualNetworkAttachmentResponse);
+  // DeleteVirtualNetworkAttachment deletes a virtual network attachment.
+  rpc DeleteVirtualNetworkAttachment(DeleteVirtualNetworkAttachmentRequest) returns (DeleteVirtualNetworkAttachmentResponse);
+  // GetVirtualNetworkAttachment retrieves a virtual network attachment.
+  rpc GetVirtualNetworkAttachment(GetVirtualNetworkAttachmentRequest) returns (GetVirtualNetworkAttachmentResponse);
+  // ListVirtualNetworkAttachments lists virtual network attachments.
+  rpc ListVirtualNetworkAttachments(ListVirtualNetworkAttachmentsRequest) returns (ListVirtualNetworkAttachmentsResponse);
+}
+
+// ObjectMetadata contains the metadata for an object.
+message ObjectMetadata {
+  // id is the object unique identifier assigned. This can be any uniquely identifiable string.
+  // If provided in Create* rpc calls, the server will use the specified id as the object identifier.
+  // On object creation, if left unset, the server will generate a unique id for the object.
+  optional string id = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 256
+  }];
+  // creation_timestamp is the timestamp when the object was created. Output only. Set by the server.
+  optional google.protobuf.Timestamp creation_timestamp = 2;
+  // deletion_timestamp is the timestamp when the object was scheduled for deletion. Output only. Set by the server.
+  optional google.protobuf.Timestamp deletion_timestamp = 3;
+  // resource_version identifies the current internal version of this object. Set by the server on every write.
+  // It is ignored in Create* rpc calls and acts as an update precondition in Update* rpc calls.
+  // It must be treated as an opaque value: callers must not parse it or assume any ordering.
+  optional string resource_version = 4 [(buf.validate.field).string.max_len = 256];
+  // user_data is a set of arbitrary key-value pairs that can be used by the caller to store data.
+  map<string, string> user_data = 5 [(buf.validate.field).map = {
+    max_pairs: 64
+    keys: {
+      string: {
+        min_len: 1
+        max_len: 256
+      }
+    }
+    values: {
+      string: {max_len: 1024}
+    }
+  }];
+}
+
+// CreateVirtualNetworkRequest is the request to create a virtual network.
+message CreateVirtualNetworkRequest {
+  // metadata contains the metadata for the virtual network.
+  ObjectMetadata metadata = 1;
+  // spec contains the specifications for the virtual network to create
+  VirtualNetworkSpec spec = 2;
+}
+
+// CreateVirtualNetworkResponse is the response to create a virtual network.
+message CreateVirtualNetworkResponse {
+  // virtual_network is the created virtual network
+  VirtualNetwork virtual_network = 1;
+}
+
+// UpdateVirtualNetworkRequest is the request to update a virtual network.
+message UpdateVirtualNetworkRequest {
+  // metadata contains the metadata for the virtual network.
+  // metadata.id is required and identifies the virtual network to update.
+  // metadata.resource_version may be set by the caller. if set, the update is performed only if it matches the
+  // resource version of the stored object, otherwise the call fails with ABORTED. if left unset, the server uses the
+  // resource version it reads while serving the request.
+  ObjectMetadata metadata = 1 [(buf.validate.field).required = true];
+
+  option (buf.validate.message).cel = {
+    id: "metadata_id_required"
+    message: "metadata.id is required"
+    expression: "has(this.metadata.id)"
+  };
+}
+
+// UpdateVirtualNetworkResponse is the response to update a virtual network.
+message UpdateVirtualNetworkResponse {
+  // virtual_network is the updated virtual network
+  VirtualNetwork virtual_network = 1;
+}
+
+// DeleteVirtualNetworkRequest is the request to delete a virtual network.
+message DeleteVirtualNetworkRequest {
+  // id is the virtual network unique identifier.
+  // virtual network matching this identifier will be deleted.
+  string id = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 256
+  }];
+}
+
+// DeleteVirtualNetworkResponse is the response to delete a virtual network.
+message DeleteVirtualNetworkResponse {}
+
+// GetVirtualNetworkRequest is the request to retrieve a virtual network.
+message GetVirtualNetworkRequest {
+  // id is the virtual network unique identifier.
+  // a virtual network matching this identifier will be retrieved.
+  string id = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 256
+  }];
+}
+
+// State represents the current state of the object.
+message State {
+  // Phase describes the current phase of the object.
+  enum Phase {
+    // PHASE_UNSPECIFIED represents an unspecified phase.
+    PHASE_UNSPECIFIED = 0;
+    // PHASE_PENDING represents a pending phase. it means the object was created but has not been processed.
+    PHASE_PENDING = 1;
+    // PHASE_READY represents a ready phase. it means the object is ready.
+    PHASE_READY = 2;
+    // PHASE_DELETING represents a deleting phase. it means the object is being deleted.
+    PHASE_DELETING = 3;
+    // PHASE_ERROR represents an error. it means the object is in an error state.
+    PHASE_ERROR = 4;
+  }
+
+  // phase is the current phase of the object.
+  Phase phase = 1;
+  // reason contains machine readable CamelCase token about the phase.
+  string reason = 2;
+  // message contains additional, human readable, information about the phase.
+  string message = 3;
+}
+
+// VirtualNetworkSpec is the specification of the virtual network.
+message VirtualNetworkSpec {
+  // vni is the Vxlan network identifier (VNI) of the virtual network. last 4 bits (20..23) of the VNI are reserved.
+  uint32 vni = 1 [(buf.validate.field).uint32 = {
+    gte: 1
+    lte: 1048575
+  }];
+
+  // subnet_ipv4 is the IPv4 subnet address of the virtual network.
+  // either subnet_ipv4 or subnet_ipv6 must be set.
+  // Set this for an IPv4 virtual network.
+  optional string subnet_ipv4 = 2 [(buf.validate.field).string.ipv4_prefix = true];
+  // subnet_ipv6 is the IPv6 subnet address of the virtual network.
+  // either subnet_ipv4 or subnet_ipv6 must be set.
+  // Set this for an IPv6 virtual network.
+  optional string subnet_ipv6 = 3 [(buf.validate.field).string.ipv6_prefix = true];
+
+  // validation rule: exactly one of subnet_ipv4 / subnet_ipv6 must be set
+  // (single-stack only, dual-stack is not supported).
+  option (buf.validate.message).cel = {
+    id: "exactly_one_subnet_required"
+    message: "exactly one of subnet_ipv4 or subnet_ipv6 must be set"
+    expression: "has(this.subnet_ipv4) != has(this.subnet_ipv6)"
+  };
+}
+
+// VirtualNetworkStatus contains the current status of the virtual network.
+message VirtualNetworkStatus {
+  // state contains the current state of the object.
+  State state = 1;
+}
+
+// VirtualNetwork is the virtual network object.
+message VirtualNetwork {
+  // metadata contains the metadata for the virtual network.
+  ObjectMetadata metadata = 1;
+  // spec contains the specification of the virtual network.
+  VirtualNetworkSpec spec = 2;
+  // status contains the current status of the virtual network.
+  VirtualNetworkStatus status = 3;
+}
+
+// GetVirtualNetworkResponse is the response to retrieve a virtual network.
+message GetVirtualNetworkResponse {
+  // virtual_network is the retrieved virtual network
+  VirtualNetwork virtual_network = 1;
+}
+
+// ListVirtualNetworksRequest is the request to list virtual networks.
+message ListVirtualNetworksRequest {
+  // vni is the Vxlan network identifier (VNI) of the virtual network. last 4 bits (20..23) of the VNI are reserved.
+  // if specified list only virtual networks with the given VNI
+  optional uint32 vni = 1 [(buf.validate.field).uint32 = {
+    gte: 1
+    lte: 1048575
+  }];
+}
+
+// ListVirtualNetworksResponse is the response to list virtual networks.
+message ListVirtualNetworksResponse {
+  // virtual_networks is the list of virtual networks
+  repeated VirtualNetwork virtual_networks = 1;
+}
+
+// AttachmentType is the type of interface attachment to a virtual network.
+enum AttachmentType {
+  // ATTACHMENT_TYPE_UNSPECIFIED represents an unspecified attachment type.
+  ATTACHMENT_TYPE_UNSPECIFIED = 0;
+  // ATTACHMENT_TYPE_PF represents a physical function (PF) attachment.
+  ATTACHMENT_TYPE_PF = 1;
+  // ATTACHMENT_TYPE_VF represent a virtual function (VF) attachment.
+  ATTACHMENT_TYPE_VF = 2;
+  // ATTACHMENT_TYPE_OVS represents an OVS bridge attachment.
+  ATTACHMENT_TYPE_OVS = 3;
+}
+
+// AttachmentPF is the attachment to a virtual network of type PF (ATTACHMENT_TYPE_PF)
+message AttachmentPF {
+  // pf_id is the host PF identifier. can be either MAC address or index(0,1,2,3). only MAC address is supported for now.
+  string pf_id = 1 [(buf.validate.field).string = {pattern: "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$"}];
+}
+
+// AttachmentVF is the attachment to a virtual network of type VF (ATTACHMENT_TYPE_VF)
+message AttachmentVF {
+  // pf_id is the host PF identifier. can be either MAC address or index(0,1,2,3). only MAC address is supported for now.
+  string pf_id = 1 [(buf.validate.field).string = {pattern: "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$"}];
+  // vf_index is the VF index
+  uint32 vf_index = 2 [(buf.validate.field).uint32 = {
+    gte: 0
+    lte: 255
+  }];
+}
+
+// AttachmentOvs is the attachment to a virtual network for OVS (ATTACHMENT_TYPE_OVS)
+message AttachmentOvs {
+  // bridge_name is the OVS bridge the attachment connects to via a patch port.
+  // The bridge is created if it does not exist. When attachment is removed, the bridge is deleted if it was created by the attachment.
+  // Note: The created OVS bridge is created with the following attributes: datapath_type=netdev, fail_mode=standalone, no internal port.
+  string bridge_name = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 32
+    pattern: "^[a-zA-Z0-9_.-]+$"
+  }];
+  // ovn_network_name is the name of the OVN network.
+  // When set, OVN bridge mappings will be set to allow OVN controller to attach to the specified bridge.
+  optional string ovn_network_name = 2 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 256
+    pattern: "^[a-zA-Z0-9_-]+$"
+  }];
+}
+
+// VirtualNetworkAttachmentSpec is the specification of the virtual network attachment.
+message VirtualNetworkAttachmentSpec {
+  // vnet_id is the virtual network identifier for which this attachment is associated.
+  string vnet_id = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 256
+  }];
+  // nic_id is the NIC identifier for which this virtual network is bound to.
+  // Can be either the NIC's Serial number or the MAC address of one of the NICs host facing PFs.
+  // Only MAC address is supported for now.
+  string nic_id = 2 [(buf.validate.field).string = {pattern: "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$"}];
+  // attachment_type is the type of attachment. currently only ATTACHMENT_TYPE_PF and ATTACHMENT_TYPE_OVS are supported.
+  AttachmentType attachment_type = 3 [(buf.validate.field).enum = {
+    in: [
+      1,
+      3
+    ]
+  }];
+  // attachment_pf is the PF attachment. set when attachment_type is ATTACHMENT_TYPE_PF.
+  optional AttachmentPF attachment_pf = 4;
+  // attachment_vf is the VF attachment. set when attachment_type is ATTACHMENT_TYPE_VF.
+  optional AttachmentVF attachment_vf = 5;
+  // attachment_ovs is the OVS attachment. set when attachment_type is ATTACHMENT_TYPE_OVS.
+  optional AttachmentOvs attachment_ovs = 6;
+
+  option (buf.validate.message).cel = {
+    id: "attachment_pf_iff_pf"
+    message: "attachment_pf must be set if and only if attachment_type is ATTACHMENT_TYPE_PF"
+    expression: "(this.attachment_type == 1) == has(this.attachment_pf)"
+  };
+  option (buf.validate.message).cel = {
+    id: "attachment_vf_iff_vf"
+    message: "attachment_vf must be set if and only if attachment_type is ATTACHMENT_TYPE_VF"
+    expression: "(this.attachment_type == 2) == has(this.attachment_vf)"
+  };
+  option (buf.validate.message).cel = {
+    id: "attachment_ovs_iff_ovs"
+    message: "attachment_ovs must be set if and only if attachment_type is ATTACHMENT_TYPE_OVS"
+    expression: "(this.attachment_type == 3) == has(this.attachment_ovs)"
+  };
+}
+
+// VirtualNetworkAttachmentStatus contains additional information about the attachment.
+// Exactly one of host_ipv4 or host_ipv6 is set to match the parent virtual network's subnet family.
+message VirtualNetworkAttachmentStatus {
+  // state contains the current state of the object.
+  State state = 1;
+  // host_ipv4 is the assigned host IPv4 address for the attachment.
+  optional string host_ipv4 = 2 [(buf.validate.field).string.ipv4 = true];
+  // host_ipv6 is the assigned host IPv6 address for the attachment.
+  optional string host_ipv6 = 3 [(buf.validate.field).string.ipv6 = true];
+}
+
+// VirtualNetworkAttachment represents an attachment to a virtual network.
+message VirtualNetworkAttachment {
+  // metadata contains the metadata for the virtual network attachment.
+  ObjectMetadata metadata = 1;
+  // spec contains the specification of the virtual network attachment.
+  VirtualNetworkAttachmentSpec spec = 2;
+  // status contains status information about the attachment.
+  VirtualNetworkAttachmentStatus status = 3;
+}
+
+// CreateVirtualNetworkAttachmentRequest is the request to create a virtual network attachment.
+message CreateVirtualNetworkAttachmentRequest {
+  // metadata contains the metadata for the virtual network attachment.
+  ObjectMetadata metadata = 1;
+  // spec contains the specification of the virtual network attachment to create
+  VirtualNetworkAttachmentSpec spec = 2;
+}
+
+// CreateVirtualNetworkAttachmentResponse is the response to create a virtual network attachment.
+message CreateVirtualNetworkAttachmentResponse {
+  // virtual_network_attachment is the created virtual network attachment
+  VirtualNetworkAttachment virtual_network_attachment = 1;
+}
+
+// UpdateVirtualNetworkAttachmentRequest is the request to update a virtual network attachment.
+message UpdateVirtualNetworkAttachmentRequest {
+  // metadata contains the metadata for the virtual network attachment.
+  // metadata.id is required and identifies the virtual network attachment to update.
+  // metadata.resource_version may be set by the caller. if set, the update is performed only if it matches the
+  // resource version of the stored object, otherwise the call fails with ABORTED. if left unset, the server uses the
+  // resource version it reads while serving the request.
+  ObjectMetadata metadata = 1 [(buf.validate.field).required = true];
+
+  option (buf.validate.message).cel = {
+    id: "metadata_id_required"
+    message: "metadata.id is required"
+    expression: "has(this.metadata.id)"
+  };
+}
+
+// UpdateVirtualNetworkAttachmentResponse is the response to update a virtual network attachment.
+message UpdateVirtualNetworkAttachmentResponse {
+  // virtual_network_attachment is the updated virtual network attachment
+  VirtualNetworkAttachment virtual_network_attachment = 1;
+}
+
+// DeleteVirtualNetworkAttachmentRequest is the request to delete a virtual network attachment.
+message DeleteVirtualNetworkAttachmentRequest {
+  // id is the virtual network attachment to delete
+  string id = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 256
+  }];
+}
+
+// DeleteVirtualNetworkAttachmentResponse is the response to delete a virtual network attachment.
+message DeleteVirtualNetworkAttachmentResponse {}
+
+// GetVirtualNetworkAttachmentRequest is the request to retrieve a virtual network attachment.
+message GetVirtualNetworkAttachmentRequest {
+  // id is the virtual network attachment to retrieve
+  string id = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 256
+  }];
+}
+
+// GetVirtualNetworkAttachmentResponse is the response to retrieve a virtual network attachment.
+message GetVirtualNetworkAttachmentResponse {
+  // virtual_network_attachment is the retrieved virtual network attachment
+  VirtualNetworkAttachment virtual_network_attachment = 1;
+}
+
+// ListVirtualNetworkAttachmentsRequest is the request to list virtual network attachments.
+message ListVirtualNetworkAttachmentsRequest {
+  // vnet_id is the virtual network identifier.
+  // if specified, list only virtual network attachments for the given virtual network
+  optional string vnet_id = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 256
+  }];
+  // nic_id is the NIC identifier for which this virtual network is bound to.
+  // Can be either the NIC's Serial number or the MAC address of one of the NICs host facing PFs.
+  // Only MAC address is supported for now.
+  // if specified, list only virtual network attachments for the given NIC
+  optional string nic_id = 2 [(buf.validate.field).string = {pattern: "^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$"}];
+}
+
+// ListVirtualNetworkAttachmentsResponse is the response to list virtual network attachments.
+message ListVirtualNetworkAttachmentsResponse {
+  // virtual_network_attachments is the list of virtual network attachments
+  repeated VirtualNetworkAttachment virtual_network_attachments = 1;
+}

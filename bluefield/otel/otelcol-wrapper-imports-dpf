@@ -1,0 +1,33 @@
+#!/usr/bin/env -S bash -p
+
+CERT_PATH=/opt/forge/machine_cert.pem
+KEY_PATH=/opt/forge/machine_cert.key
+MAX_INTERVAL=30
+MAX_INTERVAL_REPEATED_COUNT=5
+
+CONFIG_FRAGMENTS_DIR=/etc/otelcol-contrib/config-fragments
+ADDITIONAL_CONFIGS=$(ls ${CONFIG_FRAGMENTS_DIR}/*.yaml 2>/dev/null | awk 'FNR==1 {printf " --config="$1} FNR>1 {printf " --config="$1}')
+
+interval=1
+interval_repeated_count=0
+max_interval_reached=false
+
+while [[ ! -f "$CERT_PATH" || ! -f "$KEY_PATH" ]]; do
+    echo "Certs not found. Try again in ${interval}s."
+
+    sleep $interval
+
+    if [[ $max_interval_reached == "true" ]]; then
+        : # leave max interval unchanged
+    elif [[ $interval -ge $MAX_INTERVAL ]]; then
+        echo "Maximum interval reached. Continue to try every ${MAX_INTERVAL}s."
+        max_interval_reached=true
+    elif [[ $interval_repeated_count -ge $MAX_INTERVAL_REPEATED_COUNT ]]; then
+        interval=$(( (interval * 3 + 1) / 2 )) # backoff factor 1.5 rounded up
+        interval=$(( interval < MAX_INTERVAL ? interval : MAX_INTERVAL ))
+        interval_repeated_count=0
+    else
+        interval_repeated_count=$(( $interval_repeated_count + 1 ))
+    fi
+done
+

@@ -1,0 +1,17 @@
+https://ports.ubuntu.com/ubuntu-ports/pool/main/j/jq/jq_1.6-2.1ubuntu3_arm64.deb
+https://ports.ubuntu.com/ubuntu-ports/pool/main/j/jq/libjq1_1.6-2.1ubuntu3_arm64.deb
+https://ports.ubuntu.com/ubuntu-ports/pool/main/libo/libonig/libonig5_6.9.7.1-2build1_arm64.deb
+https://ports.ubuntu.com/pool/universe/libu/libuser/libuser1_0.63~dfsg-4build1_arm64.deb
+https://ports.ubuntu.com/pool/universe/libu/libuser/libuser_0.63~dfsg-4build1_arm64.deb
+https://ports.ubuntu.com/pool/universe/l/lldpd/lldpd_1.0.13-1_arm64.deb
+https://ports.ubuntu.com/ubuntu-ports/pool/main/t/tpm2-tss/libtss2-dev_3.2.0-1ubuntu1.1_arm64.deb
+https://ports.ubuntu.com/ubuntu-ports/pool/main/t/tpm2-tss/libtss2-esys-3.0.2-0_3.2.0-1ubuntu1.1_arm64.deb
+https://ports.ubuntu.com/ubuntu-ports/pool/main/t/tpm2-tss/libtss2-fapi1_3.2.0-1ubuntu1.1_arm64.deb
+https://ports.ubuntu.com/ubuntu-ports/pool/main/t/tpm2-tss/libtss2-mu0_3.2.0-1ubuntu1.1_arm64.deb
+https://ports.ubuntu.com/ubuntu-ports/pool/main/t/tpm2-tss/libtss2-rc0_3.2.0-1ubuntu1.1_arm64.deb
+https://ports.ubuntu.com/ubuntu-ports/pool/main/t/tpm2-tss/libtss2-sys1_3.2.0-1ubuntu1.1_arm64.deb
+https://ports.ubuntu.com/ubuntu-ports/pool/main/t/tpm2-tss/libtss2-tcti-cmd0_3.2.0-1ubuntu1.1_arm64.deb
+https://ports.ubuntu.com/ubuntu-ports/pool/main/t/tpm2-tss/libtss2-tcti-device0_3.2.0-1ubuntu1.1_arm64.deb
+https://ports.ubuntu.com/ubuntu-ports/pool/main/t/tpm2-tss/libtss2-tcti-mssim0_3.2.0-1ubuntu1.1_arm64.deb
+https://ports.ubuntu.com/ubuntu-ports/pool/main/t/tpm2-tss/libtss2-tcti-swtpm0_3.2.0-1ubuntu1.1_arm64.deb
+https://ports.ubuntu.com/ubuntu-ports/pool/main/t/tpm2-tss/libtss2-tctildr0_3.2.0-1ubuntu1.1_arm64.deb

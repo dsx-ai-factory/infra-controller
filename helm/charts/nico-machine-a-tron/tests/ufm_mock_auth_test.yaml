@@ -1,0 +1,25 @@
+suite: UFM mock authentication tests
+templates:
+  - ufm-mock-auth.yaml
+tests:
+  - it: should generate a 24-character authentication token
+    asserts:
+      - matchRegex:
+          path: stringData.token
+          pattern: ^[A-Za-z0-9]{24}$
+
+  - it: should not create a Secret when an existing Secret is configured
+    set:
+      ufmMock:
+        existingAuthSecret: existing-ufm-auth
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should not create a Secret when the UFM mock is disabled
+    set:
+      ufmMock:
+        enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0

@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# nico-rest-site-agent configuration (environment variables)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nico-rest-site-agent-config
+  labels:
+    app: nico-rest-site-agent
+data:
+  # Port configuration
+  ESA_PORT: "8080"
+  METRICS_PORT: "2112"
+  # Development flags
+  DEV_MODE: "true"
+  ENABLE_DEBUG: "true"
+  ENABLE_TLS: "true"
+  # NICo Core configuration
+  CORE_GRPC_ADDRESS: ""
+  CORE_GRPC_SEC_OPT: "0"
+  CORE_GRPC_CA_CERT_PATH: "/etc/core-grpc/ca.crt"
+  CORE_GRPC_CLIENT_CERT_PATH: "/etc/core-grpc/tls.crt"
+  CORE_GRPC_CLIENT_KEY_PATH: "/etc/core-grpc/tls.key"
+  # Placeholder UUID - updated by setup-local.sh site_agent with real site ID from API
+  CLUSTER_ID: "00000000-0000-4000-8000-000000000001"
+  TEMPORAL_HOST: "temporal-frontend.temporal"
+  TEMPORAL_PORT: "7233"
+  TEMPORAL_SERVER: "interservice.server.temporal.local"
+  TEMPORAL_PUBLISH_NAMESPACE: "site"
+  TEMPORAL_PUBLISH_QUEUE: "site"
+  # These are updated by setup-local.sh site_agent to match the site ID
+  TEMPORAL_SUBSCRIBE_NAMESPACE: "00000000-0000-4000-8000-000000000001"
+  TEMPORAL_SUBSCRIBE_QUEUE: "00000000-0000-4000-8000-000000000001"
+  TEMPORAL_INVENTORY_SCHEDULE: "@every 3m"
+  TEMPORAL_CERT_PATH: "/etc/temporal-certs"
+  # Name of Temporal certificate secret
+  TEMPORAL_CERT: "temporal-client-site-agent-certs"
+  # Name of the registration secret mounted at /etc/sitereg
+  BOOTSTRAP_SECRET_NAME: "site-registration"

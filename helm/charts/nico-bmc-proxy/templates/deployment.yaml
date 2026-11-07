@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nico-bmc-proxy.name" . }}
+  namespace: {{ include "nico-bmc-proxy.namespace" . }}
+  labels:
+    {{- include "nico-bmc-proxy.labels" . | nindent 4 }}
+  annotations:
+    {{- tpl (toYaml .Values.annotations) . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "nico-bmc-proxy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nico-bmc-proxy.labels" . | nindent 8 }}
+      annotations:
+        kubectl.kubernetes.io/default-container: {{ include "nico-bmc-proxy.name" . }}
+    spec:
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+      serviceAccountName: {{ include "nico-bmc-proxy.name" . }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ include "nico-bmc-proxy.name" . }}
+          image: "{{ include "nico-bmc-proxy.image" . }}"
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          command:
+            {{- toYaml .Values.command | nindent 12 }}
+          env:
+            - name: DATASTORE_USER
+              valueFrom:
+                secretKeyRef:
+                  key: username
+                  name: {{ .Values.envFrom.databaseCredentials.secretName }}
+            - name: DATASTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: {{ .Values.envFrom.databaseCredentials.secretName }}
+            - name: DATASTORE_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Values.envFrom.databaseConfig.configMapName }}
+                  key: DB_HOST
+            - name: DATASTORE_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Values.envFrom.databaseConfig.configMapName }}
+                  key: DB_PORT
+            - name: DATASTORE_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Values.envFrom.databaseConfig.configMapName }}
+                  key: DB_NAME
+            # Both names so chart works with either carbide or nico image.
+            - name: CARBIDE_BMC_PROXY_DATABASE_URL
+              value: "postgres://$(DATASTORE_USER):$(DATASTORE_PASSWORD)@$(DATASTORE_HOST):$(DATASTORE_PORT)/$(DATASTORE_NAME)"
+            - name: NICO_BMC_PROXY__DATABASE_URL
+              value: "postgres://$(DATASTORE_USER):$(DATASTORE_PASSWORD)@$(DATASTORE_HOST):$(DATASTORE_PORT)/$(DATASTORE_NAME)"
+            - name: NICO_BMC_PROXY__REDIRECTS__MODE
+              value: {{ include "nico-bmc-proxy.redirectMode" . | quote }}
+            {{- with .Values.switchTls }}
+            {{- if .enabled }}
+            - name: NICO_BMC_PROXY__TLS__SWITCH__CA_CERT_PATH
+              value: {{ .caCertPath | quote }}
+            - name: NICO_BMC_PROXY__TLS__SWITCH__CLIENT_CERT_PATH
+              value: {{ printf "%s/tls.crt" .mountPath | quote }}
+            - name: NICO_BMC_PROXY__TLS__SWITCH__CLIENT_KEY_PATH
+              value: {{ printf "%s/tls.key" .mountPath | quote }}
+            # Set even when empty, which unsets a name the TOML may give.
+            - name: NICO_BMC_PROXY__TLS__SWITCH__TLS_SERVER_NAME
+              value: {{ .tlsServerName | default "" | quote }}
+            {{- end }}
+            {{- end }}
+            - name: RUST_BACKTRACE
+              value: {{ .Values.env.RUST_BACKTRACE | quote }}
+            - name: RUST_LIB_BACKTRACE
+              value: {{ .Values.env.RUST_LIB_BACKTRACE | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: proxy
+              containerPort: {{ .Values.service.proxy.port }}
+            - name: metrics
+              containerPort: {{ .Values.service.metrics.port }}
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          volumeMounts:
+            # Mount at both legacy and renamed paths so chart works with either image variant.
+            - name: {{ include "nico-bmc-proxy.name" . }}-config-files
+              mountPath: /etc/forge/carbide-bmc-proxy
+            - name: {{ include "nico-bmc-proxy.name" . }}-config-files
+              mountPath: /etc/nico/nico-bmc-proxy
+            - name: spiffe
+              mountPath: "/var/run/secrets/spiffe.io"
+              readOnly: true
+            {{- if .Values.switchTls.enabled }}
+            - name: switch-client
+              mountPath: {{ .Values.switchTls.mountPath | quote }}
+              readOnly: true
+            {{- end }}
+            - name: nico-roots
+              mountPath: "/var/run/secrets/forge-roots"
+              readOnly: true
+            - name: nico-roots
+              mountPath: "/var/run/secrets/nico-roots"
+              readOnly: true
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: {{ include "nico-bmc-proxy.name" . }}-config-files
+          configMap:
+            name: {{ include "nico-bmc-proxy.name" . }}-config-files
+        - name: spiffe
+          secret:
+            secretName: {{ include "nico-bmc-proxy.name" . }}-certificate
+        {{- if .Values.switchTls.enabled }}
+        - name: switch-client
+          secret:
+            secretName: {{ .Values.switchTls.secretName }}
+        {{- end }}
+        - name: nico-roots
+          secret:
+            secretName: nico-roots

@@ -1,0 +1,150 @@
+{
+  "containers": [
+    {
+      "id": "261210ade8e2de7eb9053258e247a65097a4b8f7d63c7de6ea88510d8291a17c",
+      "podSandboxId": "5d927dbc803c066ae324d9ef5b3668a2b6cb371ae930141c79f1f32bfda07141",
+      "metadata": {
+        "name": "doca-hbn",
+        "attempt": 0
+      },
+      "image": {
+        "image": "sha256:83b3a5f36555f77a49f2f9223f9e90640139b652bab6b929bcd5801ad9893921",
+        "annotations": {
+        }
+      },
+      "imageRef": "sha256:83b3a5f36555f77a49f2f9223f9e90640139b652bab6b929bcd5801ad9893921",
+      "state": "CONTAINER_RUNNING",
+      "createdAt": "1702015232563000105",
+      "labels": {
+        "io.kubernetes.container.name": "doca-hbn",
+        "io.kubernetes.pod.name": "doca-hbn-service-sierra-three.qa2.frg.nvidia.com",
+        "io.kubernetes.pod.namespace": "default",
+        "io.kubernetes.pod.uid": "5670d4a619a65d8f4e230d2c933144a1"
+      },
+      "annotations": {
+        "io.kubernetes.container.hash": "11fe3b3a",
+        "io.kubernetes.container.ports": "[{\"hostPort\":8765,\"containerPort\":8765,\"protocol\":\"TCP\"}]",
+        "io.kubernetes.container.restartCount": "0",
+        "io.kubernetes.container.terminationMessagePath": "/dev/termination-log",
+        "io.kubernetes.container.terminationMessagePolicy": "File",
+        "io.kubernetes.pod.terminationGracePeriod": "30"
+      }
+    },
+    {
+      "id": "68ceee7f38344d2635e09440ea55ccf99530e90fb7ca9979960bf888e897ef04",
+      "podSandboxId": "5d927dbc803c066ae324d9ef5b3668a2b6cb371ae930141c79f1f32bfda07141",
+      "metadata": {
+        "name": "init-sfs",
+        "attempt": 0
+      },
+      "image": {
+        "image": "sha256:83b3a5f36555f77a49f2f9223f9e90640139b652bab6b929bcd5801ad9893921",
+        "annotations": {
+        }
+      },
+      "imageRef": "sha256:83b3a5f36555f77a49f2f9223f9e90640139b652bab6b929bcd5801ad9893921",
+      "state": "CONTAINER_EXITED",
+      "createdAt": "1702015158693345115",
+      "labels": {
+        "io.kubernetes.container.name": "init-sfs",
+        "io.kubernetes.pod.name": "doca-hbn-service-sierra-three.qa2.frg.nvidia.com",
+        "io.kubernetes.pod.namespace": "default",
+        "io.kubernetes.pod.uid": "5670d4a619a65d8f4e230d2c933144a1"
+      },
+      "annotations": {
+        "io.kubernetes.container.hash": "d176cb71",
+        "io.kubernetes.container.restartCount": "0",
+        "io.kubernetes.container.terminationMessagePath": "/dev/termination-log",
+        "io.kubernetes.container.terminationMessagePolicy": "File",
+        "io.kubernetes.pod.terminationGracePeriod": "30"
+      }
+    },
+    {
+      "id": "5d169593e64c6888edb971121d6298418114e9308165b37e9f36730fa1f02924",
+      "podSandboxId": "cd6a4182e0c4d8d95637d619c3524c896d0f45e41b231cea73eb308c3fb92b0b",
+      "metadata": {
+        "name": "doca-telemetry-service",
+        "attempt": 1
+      },
+      "image": {
+        "image": "sha256:da2015bb43cda1193fac2617e81df74fcbea9dfde613d9d09b003e64336a6b83",
+        "annotations": {
+        }
+      },
+      "imageRef": "sha256:da2015bb43cda1193fac2617e81df74fcbea9dfde613d9d09b003e64336a6b83",
+      "state": "CONTAINER_RUNNING",
+      "createdAt": "1702015157650658140",
+      "labels": {
+        "io.kubernetes.container.name": "doca-telemetry-service",
+        "io.kubernetes.pod.name": "doca-telemetry-service-sierra-three.qa2.frg.nvidia.com",
+        "io.kubernetes.pod.namespace": "default",
+        "io.kubernetes.pod.uid": "d78533c73e738764b8ec3665cd9fb7d9"
+      },
+      "annotations": {
+        "io.kubernetes.container.hash": "bed3b738",
+        "io.kubernetes.container.restartCount": "1",
+        "io.kubernetes.container.terminationMessagePath": "/dev/termination-log",
+        "io.kubernetes.container.terminationMessagePolicy": "File",
+        "io.kubernetes.pod.terminationGracePeriod": "30"
+      }
+    },
+    {
+      "id": "8c152fcccbd0b04b939e601dd405d29d0f9376716a89465c9bf853440ad27fd5",
+      "podSandboxId": "cd6a4182e0c4d8d95637d619c3524c896d0f45e41b231cea73eb308c3fb92b0b",
+      "metadata": {
+        "name": "init-telemetry-service",
+        "attempt": 1
+      },
+      "image": {
+        "image": "sha256:da2015bb43cda1193fac2617e81df74fcbea9dfde613d9d09b003e64336a6b83",
+        "annotations": {
+        }
+      },
+      "imageRef": "sha256:da2015bb43cda1193fac2617e81df74fcbea9dfde613d9d09b003e64336a6b83",
+      "state": "CONTAINER_EXITED",
+      "createdAt": "1702015156233299725",
+      "labels": {
+        "io.kubernetes.container.name": "init-telemetry-service",
+        "io.kubernetes.pod.name": "doca-telemetry-service-sierra-three.qa2.frg.nvidia.com",
+        "io.kubernetes.pod.namespace": "default",
+        "io.kubernetes.pod.uid": "d78533c73e738764b8ec3665cd9fb7d9"
+      },
+      "annotations": {
+        "io.kubernetes.container.hash": "7f7ed719",
+        "io.kubernetes.container.restartCount": "1",
+        "io.kubernetes.container.terminationMessagePath": "/dev/termination-log",
+        "io.kubernetes.container.terminationMessagePolicy": "File",
+        "io.kubernetes.pod.terminationGracePeriod": "30"
+      }
+    },
+    {
+      "id": "24edb01b061f9be55ef1964df2c8a3d11dafb4084f59c1450b387195ca4754a0",
+      "podSandboxId": "687c1b28d779f68c8ef5730651470195844fe10333fd28f55f634bdce7a520e0",
+      "metadata": {
+        "name": "doca-telemetry-service",
+        "attempt": 0
+      },
+      "image": {
+        "image": "sha256:da2015bb43cda1193fac2617e81df74fcbea9dfde613d9d09b003e64336a6b83",
+        "annotations": {
+        }
+      },
+      "imageRef": "sha256:da2015bb43cda1193fac2617e81df74fcbea9dfde613d9d09b003e64336a6b83",
+      "state": "CONTAINER_EXITED",
+      "createdAt": "1702013160303906065",
+      "labels": {
+        "io.kubernetes.container.name": "doca-telemetry-service",
+        "io.kubernetes.pod.name": "doca-telemetry-service-sierra-three.qa2.frg.nvidia.com",
+        "io.kubernetes.pod.namespace": "default",
+        "io.kubernetes.pod.uid": "d78533c73e738764b8ec3665cd9fb7d9"
+      },
+      "annotations": {
+        "io.kubernetes.container.hash": "bed3b738",
+        "io.kubernetes.container.restartCount": "0",
+        "io.kubernetes.container.terminationMessagePath": "/dev/termination-log",
+        "io.kubernetes.container.terminationMessagePolicy": "File",
+        "io.kubernetes.pod.terminationGracePeriod": "30"
+      }
+    }
+  ]
+}

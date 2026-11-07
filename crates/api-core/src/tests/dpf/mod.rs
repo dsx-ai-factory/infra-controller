@@ -1,0 +1,119 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+mod dpu_service_sync;
+mod dpu_service_sync_release;
+mod happy_path;
+mod reprovisioning;
+mod stale_labels;
+mod update_preflight;
+mod waiting_for_ready;
+
+use carbide_dpf::{DpuPhase, DpuPhaseObservation, DpuServiceVersion};
+use carbide_machine_controller::dpf::MockDpfOperations;
+use model::machine::ManagedHostState;
+
+use crate::tests::common::api_fixtures::TestEnv;
+use crate::tests::common::api_fixtures::test_managed_host::TestManagedHost;
+
+// The DPF suites all want the same starting point: DPF on, with a BF3 BFB URL to hand out.
+// Each of the four files below had grown its own byte-identical copy of this.
+fn dpf_config() -> crate::cfg::file::DpfConfig {
+    crate::cfg::file::DpfConfig {
+        enabled: true,
+        deployments: crate::cfg::file::DpfDeploymentsConfig {
+            bf3: crate::cfg::file::DpfDeploymentConfig {
+                bfb_url: Some("http://example.com/test.bfb".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Builds BF4 test configuration with BlueFieldSoftware so mocked ingestion satisfies the production provisioning-source contract.
+///
+/// Callers must use distinct names for deployments in the same configuration.
+pub(super) fn bf4_deployment_config(name: &str) -> crate::cfg::file::DpfDeploymentConfig {
+    crate::cfg::file::DpfDeploymentConfig {
+        bfb_url: None, // BF4 provisioning requires the BlueFieldSoftware source below.
+        bluefield_software: Some(crate::cfg::file::DpfBlueFieldSoftwareConfig {
+            os_iso: format!("http://example.com/{name}.iso"),
+            pldm_fw_bundle: std::collections::BTreeMap::from([(
+                "test-psid".to_string(),
+                format!("http://example.com/{name}.pldm"),
+            )]),
+        }),
+        flavor_name: format!("test-{name}-flavor"),
+        deployment_name: format!("test-{name}"),
+        node_label_key: format!("test.nvidia.com/{name}"),
+        ..Default::default()
+    }
+}
+
+/// Models the successful DPF service lookup after the fixture registers a DPU CR.
+pub(super) fn expect_dpf_service_inventory(mock: &mut MockDpfOperations) {
+    mock.expect_get_service_versions_for_dpu().returning(|_| {
+        Ok(vec![DpuServiceVersion {
+            name: "test-service".to_string(),
+            version: "test-version".to_string(),
+            url: "https://example.com/test-service".to_string(),
+        }])
+    });
+}
+
+// Reads the host's committed state straight from the database rather than through the RPC
+// surface, which is what these suites assert transitions against.
+async fn get_host_state(env: &TestEnv, mh: &TestManagedHost) -> ManagedHostState {
+    let mut txn = env.db_txn().await;
+    let machine = mh.host().db_machine(&mut txn).await;
+    machine.state.value
+}
+
+async fn assert_provisioning_suppressed(env: &TestEnv, mh: &TestManagedHost, expected: bool) {
+    use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem};
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&mut txn).await;
+    for mac in [
+        host.status.bmc_info.mac.unwrap(),
+        dpu.status.bmc_info.mac.unwrap(),
+    ] {
+        let row = db::bmc_suppression::find(
+            txn.as_mut(),
+            mac,
+            BmcSuppressionSubsystem::SiteExplorer,
+            BmcSuppressionSource::DpfProvisioning,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            row.is_some(),
+            expected,
+            "provisioning suppression for {mac}"
+        );
+    }
+}
+
+/// Builds an operator observation for fixtures that do not report a failure.
+pub(super) fn phase_observation(phase: DpuPhase) -> DpuPhaseObservation {
+    DpuPhaseObservation {
+        phase,
+        failure: None,
+    }
+}

@@ -1,0 +1,43 @@
+{{- $networks := .Values.serviceVpcNetworks | default dict }}
+{{- $ipv4 := get $networks "ipv4" | default dict }}
+{{- $enabled := false }}
+{{- if hasKey $ipv4 "enabled" }}
+{{- $enabled = get $ipv4 "enabled" }}
+{{- end }}
+{{- if $enabled }}
+{{- $name := "nico-service-vpc-ipv4" }}
+{{- if hasKey $ipv4 "name" }}
+{{- $name = toString (get $ipv4 "name") }}
+{{- end }}
+{{- $mtu := 9000 }}
+{{- if hasKey $ipv4 "mtu" }}
+{{- $mtu = int (get $ipv4 "mtu") }}
+{{- end }}
+{{- if ne $name "nico-service-vpc-ipv4" }}
+{{- fail (printf "serviceVpcNetworks.ipv4.name must remain nico-service-vpc-ipv4 because Core consumers use this fixed shared NAD name; got %q" $name) }}
+{{- end }}
+{{- if ne $mtu 9000 }}
+{{- fail (printf "serviceVpcNetworks.ipv4.mtu must remain 9000 because service-VPC chains and static slot interfaces use MTU 9000; got %v" $ipv4.mtu) }}
+{{- end }}
+{{- $ipam := dict "type" "dhcp" "daemonSocketPath" "/run/vpc/cni/dhcp.sock" }}
+{{- $config := dict
+  "cniVersion" "0.4.0"
+  "name" $name
+  "type" "ovs"
+  "bridge" "br-sfc"
+  "interface_type" "dpdk"
+  "mtu" $mtu
+  "ipam" $ipam
+}}
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nico-dhcp-server.labels" . | nindent 4 }}
+  annotations:
+    k8s.v1.cni.cncf.io/resourceName: nvidia.com/bf_sf
+spec:
+  config: {{ $config | toJson | quote }}
+{{- end }}

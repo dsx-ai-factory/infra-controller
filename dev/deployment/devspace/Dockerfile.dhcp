@@ -1,0 +1,17 @@
+# syntax=docker/dockerfile:1.7
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+FROM nico-devspace-core-artifacts AS artifacts
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  ca-certificates \
+  kea-dhcp4-server \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /usr/lib/x86_64-linux-gnu/kea/hooks /var/lib/kea /var/run/kea
+
+COPY --from=artifacts /artifacts/libdhcp.so /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so

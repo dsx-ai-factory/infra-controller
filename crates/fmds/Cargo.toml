@@ -1,0 +1,93 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[package]
+name = "carbide-fmds"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "fmds"
+
+[[bin]]
+name = "carbide-fmds"
+path = "src/main.rs"
+
+[dependencies]
+carbide-instrument = { path = "../instrument" }
+
+# [local-dependencies]
+carbide-dpu-agent-utils = { path = "../dpu-agent-utils" }
+carbide-dpu-fmds-shared = { path = "../dpu-fmds-shared" }
+carbide-rpc = { path = "../rpc" }
+carbide-tls = { path = "../tls" }
+carbide-uuid = { path = "../uuid" }
+carbide-version = { path = "../version" }
+logfmt = { path = "../logfmt" }
+metrics-endpoint = { path = "../metrics-endpoint" }
+
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true, features = ["macros"] }
+axum-server = { workspace = true }
+clap = { workspace = true }
+eyre = { workspace = true }
+futures-util = { workspace = true }
+governor = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+ipnetwork = { workspace = true }
+netlink-packet-route = { workspace = true }
+nonzero_ext = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry-prometheus = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = [
+  "spec_unstable_metrics_views",
+] }
+opentelemetry-semantic-conventions = { workspace = true, features = [
+  "semconv_experimental",
+] }
+prometheus = { workspace = true }
+reqwest = { default-features = false, features = ["rustls"], workspace = true }
+rtnetlink = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+tower = { workspace = true }
+tower-http = { features = ["trace"], workspace = true }
+prost = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { features = [
+  "env-filter",
+  "local-time",
+], workspace = true }
+
+[dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-test-support = { path = "../test-support" }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true, features = ["client-legacy"] }
+uuid = { features = ["v4"], workspace = true }
+
+[build-dependencies]
+carbide-version = { path = "../version" }
+
+[lints]
+workspace = true

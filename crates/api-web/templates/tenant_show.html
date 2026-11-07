@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}Tenants{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Tenants</h1>
+
+<table class="sortable overview">
+	<thead>
+	<tr>
+		<th>Organization ID</th>
+		<th>Name</th>
+		<th>Labels</th>
+	</tr>
+	</thead>
+	<tbody>
+	{% for t in tenants %}
+		<tr>
+			<td><a href="/admin/tenant/{{ t.organization_id }}">{{ t.organization_id }}</a></td>
+			<td>{{ t.metadata.name }}</td>
+			<td>{{ t.metadata.labels|label_list_fmt(true)|safe }}</td>
+		</tr>
+	{% endfor %}
+	</tbody>
+</table>
+
+{% endblock %}
+

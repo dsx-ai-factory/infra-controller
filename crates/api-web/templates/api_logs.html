@@ -1,0 +1,259 @@
+{% extends "base.html" %}
+
+{% block title %}Logs{% endblock %}
+
+{% block head %}
+<style>
+  /* Lock the Logs page to the viewport so only the log pane scrolls (no
+     page-level wiggle), and let that pane fill the leftover height. */
+  html, body { overflow: hidden; }
+  main { height: 100vh; min-height: 0; box-sizing: border-box; display: flex; flex-direction: column; }
+  .log-source-bar { display: flex; gap: .25rem; margin: .5rem 0; }
+  .log-source-bar button {
+    padding: .3rem .9rem; border: 1px solid var(--border-color); background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    cursor: pointer; border-radius: 4px; font: inherit;
+  }
+  .log-source-bar button.active { background: #2d6cdf; color: #fff; border-color: #2d6cdf; }
+  .log-source-bar button:disabled { background: var(--bg-tertiary); color: var(--text-muted); cursor: not-allowed; }
+  .log-toolbar { display: flex; gap: .6rem; align-items: center; margin: .5rem 0; flex-wrap: wrap; }
+  .log-toolbar input[type=search] { min-width: 18rem; }
+  #log-status { margin-left: auto; color: var(--text-muted); font-size: .85em; }
+  #log-output {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12px; line-height: 1.45;
+    flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-anchor: none; scrollbar-gutter: stable;
+    background: #0f1115; color: #d4d4d4;
+    border: 1px solid #333; border-radius: 6px;
+    padding: .5rem; white-space: pre-wrap; word-break: break-word;
+  }
+  .log-row { display: block; }
+  .log-row .ts  { color: #6a737d; }
+  .log-row .tgt { color: #6a9ad4; }
+  .log-row .loc { color: #6b7280; }
+  .log-row.lvl-ERROR { color: #ff6b6b; }
+  .log-row.lvl-WARN  { color: #ffd166; }
+  .log-row.lvl-INFO  { color: #d4d4d4; }
+  .log-row.lvl-DEBUG { color: #9aa5b1; }
+  .log-row.lvl-TRACE { color: #6b7280; }
+  /* SPAN lines are very frequent, so keep them just slightly dimmer than INFO.
+     TODO(chet): Consider italicizing them too. */
+  .log-row.lvl-SPAN  { color: #9a9a9a; }
+  .log-row .sid { color: #6a9ad4; cursor: pointer; text-decoration: underline dotted; }
+  .log-row.lag { color: #ffa500; font-style: italic; }
+  .log-row.hidden { display: none; }
+</style>
+{% endblock %}
+
+{% block content %}
+<h2>Logs</h2>
+<div class="log-source-bar" role="tablist">
+  <button type="button" class="active" aria-selected="true">API</button>
+  <button type="button" disabled title="Host (Scout)">Scout</button>
+  <button type="button" disabled title="DPU Agent">DPU</button>
+</div>
+<div class="log-toolbar">
+  <label>Level
+    <select id="log-level-filter">
+      <option value="0">TRACE+</option>
+      <option value="1">DEBUG+</option>
+      <option value="2" selected>INFO+</option>
+      <option value="3">WARN+</option>
+      <option value="4">ERROR</option>
+    </select>
+  </label>
+  <input type="search" id="log-text-filter" placeholder="filter by text (target, message, fields)…">
+  <button type="button" id="log-pause">Pause</button>
+  <button type="button" id="log-clear">Clear</button>
+  <label title="Show span-completion summaries"><input type="checkbox" id="log-show-spans" checked> spans</label>
+  <span id="log-status">connecting…</span>
+</div>
+<div id="log-output"></div>
+{% endblock %}
+
+{% block script %}
+{% raw %}
+(function () {
+  const out = document.getElementById('log-output');
+  if (!out) return;
+  const levelSel = document.getElementById('log-level-filter');
+  const textInput = document.getElementById('log-text-filter');
+  const pauseBtn = document.getElementById('log-pause');
+  const clearBtn = document.getElementById('log-clear');
+  const statusEl = document.getElementById('log-status');
+  const showSpans = document.getElementById('log-show-spans');
+
+  const RANK = { TRACE: 0, DEBUG: 1, INFO: 2, WARN: 3, ERROR: 4 };
+  const MAX_ROWS = 5000;
+  let paused = false;
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function rowMatches(row) {
+    if (row.dataset.level === 'SPAN') {
+      if (!showSpans.checked) return false;
+    } else {
+      const minLevel = parseInt(levelSel.value, 10);
+      if ((RANK[row.dataset.level] || 0) < minLevel) return false;
+    }
+    const q = textInput.value.trim().toLowerCase();
+    if (q && row.dataset.text.indexOf(q) === -1) return false;
+    return true;
+  }
+
+  function applyFilter(row) {
+    row.classList.toggle('hidden', !rowMatches(row));
+  }
+
+  function refilterAll() {
+    out.querySelectorAll('.log-row').forEach(applyFilter);
+  }
+
+  function atBottom() {
+    return out.scrollHeight - out.scrollTop - out.clientHeight < 40;
+  }
+
+  // Backstop on total rows held even while scrolled up reading history, so a
+  // long browse session can't grow the DOM without bound.
+  const HARD_MAX_ROWS = 20000;
+
+  // Build (but don't attach) a row element for a line. Shared by the live
+  // append path and the history-prepend path.
+  function buildRow(line) {
+    const row = document.createElement('div');
+    const level = line.level || 'INFO';
+    row.className = 'log-row lvl-' + level;
+    row.dataset.level = level;
+    row.dataset.seq = line.seq;
+
+    let fieldsStr = '';
+    if (line.fields) {
+      for (const k of Object.keys(line.fields)) fieldsStr += ' ' + k + '=' + line.fields[k];
+    }
+    row.dataset.text = ((line.target || '') + ' ' + (line.message || '') + fieldsStr + ' ' + (line.location || '') + ' ' + (line.span_id || '')).toLowerCase();
+
+    const ts = (line.timestamp || '')
+      .replace('T', ' ').replace(/\.\d+/, '').replace(/[+-]\d\d:\d\d$/, '').replace('Z', '');
+    const sid = line.span_id
+      ? ' <span class="sid" data-sid="' + escapeHtml(line.span_id) + '" title="filter to this span">' + escapeHtml(line.span_id) + '</span>'
+      : '';
+    row.innerHTML =
+      '<span class="ts">' + escapeHtml(ts) + '</span> ' +
+      escapeHtml(level) + sid + ' ' +
+      '<span class="tgt">' + escapeHtml(line.target || '') + '</span> ' +
+      escapeHtml(line.message || '') +
+      (fieldsStr ? escapeHtml(fieldsStr) : '') +
+      (line.location ? ' <span class="loc">' + escapeHtml(line.location) + '</span>' : '');
+
+    applyFilter(row);
+    return row;
+  }
+
+  // Append a live line at the bottom. We only trim from the top while tailing
+  // (at the bottom); when scrolled up reading history we leave the top alone so
+  // it isn't yanked out from under the reader (bounded by HARD_MAX_ROWS).
+  function addLine(line) {
+    const stick = !paused && atBottom();
+    out.appendChild(buildRow(line));
+    if (stick) {
+      while (out.childElementCount > MAX_ROWS) out.removeChild(out.firstChild);
+      out.scrollTop = out.scrollHeight;
+    } else {
+      while (out.childElementCount > HARD_MAX_ROWS) out.removeChild(out.firstChild);
+    }
+  }
+
+  function addLag(n) {
+    const stick = !paused && atBottom();
+    const row = document.createElement('div');
+    row.className = 'log-row lag';
+    row.dataset.level = 'ERROR';
+    row.dataset.text = 'dropped lines';
+    row.textContent = '… ' + n + ' line(s) dropped (viewer fell behind) …';
+    out.appendChild(row);
+    if (stick) out.scrollTop = out.scrollHeight;
+  }
+
+  // --- Scrollback history (infinite scroll up) ---
+  let loadingOlder = false;
+  let reachedStart = false;
+  // Fire at most once per approach to the top; only re-arm after scrolling well
+  // away again. Without this, inertial/momentum scrolling keeps the scroll
+  // pinned near the top and re-triggers loads in a runaway loop (paging all the
+  // way back to the start).
+  let armed = true;
+
+  // Fetch the page just older than the topmost line we hold and prepend it,
+  // keeping the user's scroll position stable.
+  function loadOlder() {
+    const top = out.querySelector('.log-row[data-seq]');
+    if (!top) return;
+    loadingOlder = true;
+    // Freeze the scroller for the load: switching to overflow:hidden cancels any
+    // in-flight momentum/inertial scroll (the runaway's root cause), so when we
+    // restore it below, our prepended position sticks instead of being overridden.
+    out.style.overflowY = 'hidden';
+    fetch('/admin/logs/api/history?before=' + encodeURIComponent(top.dataset.seq))
+      .then(function (r) { return r.ok ? r.json() : []; })
+      .then(function (lines) {
+        if (!lines.length) { reachedStart = true; return; }
+        // Keep the first *visible* row fixed: measure how far it moves once the
+        // older page is prepended, then scroll by exactly that. Using a visible
+        // row avoids a hidden/filtered top row (zero-size rect) defeating the
+        // measurement; with overflow-anchor off the browser won't also adjust.
+        const anchor = out.querySelector('.log-row:not(.hidden)');
+        const anchorBefore = anchor ? anchor.getBoundingClientRect().top : 0;
+        const frag = document.createDocumentFragment();
+        for (const line of lines) frag.appendChild(buildRow(line)); // oldest-first
+        out.insertBefore(frag, anchor);
+        if (anchor) {
+          out.scrollTop += anchor.getBoundingClientRect().top - anchorBefore;
+        }
+      })
+      .catch(function () { /* transient; user can retry by scrolling */ })
+      .finally(function () {
+        out.style.overflowY = ''; // unfreeze (revert to the stylesheet overflow)
+        loadingOlder = false;
+      });
+  }
+
+  out.addEventListener('scroll', function () {
+    // Re-arm only once we're well clear of the top, so momentum scrolling that
+    // piles up at the top can't re-trigger loads in a loop.
+    if (out.scrollTop > 600) armed = true;
+    if (armed && !loadingOlder && !reachedStart && out.scrollTop < 120) {
+      armed = false;
+      loadOlder();
+    }
+  });
+
+  levelSel.addEventListener('change', refilterAll);
+  textInput.addEventListener('input', refilterAll);
+  showSpans.addEventListener('change', refilterAll);
+  out.addEventListener('click', function (e) {
+    if (e.target && e.target.classList.contains('sid')) {
+      textInput.value = e.target.dataset.sid;
+      refilterAll();
+    }
+  });
+  pauseBtn.addEventListener('click', function () {
+    paused = !paused;
+    pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+    if (!paused) out.scrollTop = out.scrollHeight;
+  });
+  clearBtn.addEventListener('click', function () { out.replaceChildren(); reachedStart = false; });
+
+  const es = new EventSource('/admin/logs/api/stream');
+  es.onopen = function () { statusEl.textContent = 'streaming'; };
+  es.onmessage = function (e) {
+    try { addLine(JSON.parse(e.data)); } catch (_) { /* ignore malformed payload */ }
+  };
+  es.addEventListener('lag', function (e) { addLag(e.data); });
+  es.onerror = function () { statusEl.textContent = 'reconnecting…'; };
+})();
+{% endraw %}
+{% endblock %}

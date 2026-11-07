@@ -1,0 +1,10 @@
+Package: forge-dpu
+Version: SED__DPU_AGENT_PKG_VERSION
+Section: base
+Priority: optional
+Architecture: arm64
+Maintainer: Forge team <swngc-forge-dev@nvidia.com>
+Description: Forge specific customizations for Bluefield-2 and future DPUs.
+ Installs forge-dpu-agent, plus otelcol-contrib to export its logs and metrics.
+ Includes an agent that copies the mTLS certs of forge-dpu-agent for use by
+ otelcol-contrib and renews them independently on the same schedule.

@@ -1,0 +1,10 @@
+## Zalando postgres-operator (see helmfile.yaml for the version pin)
+## Reference: nico-external/manifests/nico-pg-operator-app/values.yaml
+
+configTarget: ConfigMap
+
+configKubernetes:
+  ## Inject nico-pg-cluster-env ConfigMap into every postgres pod as env vars.
+  ## The ConfigMap is created by nico-prereqs (templates/postgresql.yaml)
+  ## and contains site-specific values (TMP_SITE, etc.).
+  pod_environment_configmap: "postgres/nico-pg-cluster-env"

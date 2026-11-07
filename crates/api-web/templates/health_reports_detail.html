@@ -1,0 +1,265 @@
+{% extends "base.html" %}
+
+{% block title %}{{ object_label }} Health {{ id }}{% endblock %}
+
+{% block content %}
+<h1>{{ object_label }} Health: <a href="{{ object_detail_url }}">{{ id }}</a></h1>
+
+<!-- Main Aggregate Health Status -->
+{{ aggregate_health|safe }}
+
+{% if !entries.is_empty() %}
+<h2>Active Health Reports</h2>
+<table class="sortable overview">
+	<thead>
+		<tr>
+			<th>Source</th>
+			<th>Mode</th>
+			<th>Triggered By</th>
+			<th>Alerts</th>
+			<th>Classifications</th>
+			<th>Details</th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for entry in entries %}
+		<tr>
+			<td>{{ entry.health_report.source }}</td>
+			<td>{{ entry.mode }}</td>
+			<td>{% match entry.health_report.triggered_by %}{% when Some with (v) %}{{ v }}{% when None %}—{% endmatch %}</td>
+			<td>{{ entry.health_report.alerts|health_alerts_fmt(false, false)|safe }}</td>
+			<td>{{ entry.health_report.alerts|health_alert_classifications_fmt|safe }}</td>
+			<td>
+				<div class="health-report-actions">
+					<details>
+						<summary>JSON Details</summary>
+						<div style="overflow: auto; max-height: 300px; border: 1px solid var(--border-color); border-radius: 8px; background-color: var(--bg-tertiary); margin-top: 0.5rem;">
+							<pre style="margin: 0; padding: 1rem; background-color: transparent; white-space: pre-wrap;"><code>{{ entry|json|pretty_json }}</code></pre>
+						</div>
+					</details>
+					<button id="remove-health-report-{{ entry.health_report.source }}" class="delete-button">Remove</button>
+				</div>
+			</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+{% endif %}
+
+<h2>Health Report Management</h2>
+<table class="detailsview">
+	<tr>
+		<th>Quick Templates</th>
+		<td>
+			<p style="color: var(--text-muted); margin-bottom: 1rem; font-size: 0.9rem;">
+				Select a template to pre-fill the configuration below:
+			</p>
+			<div class="button-group horizontal">
+				<button onclick="setHealthReportTextBoxToTemplate(templateHealthReport)">Blank Template</button>
+				<button onclick="setHealthReportTextBoxToTemplate(templateMergeInternalMaintenance)">Internal Maintenance</button>
+				<button onclick="setHealthReportTextBoxToTemplate(templateMergeSuppressExternalAlerting)">Suppress Alerts</button>
+				<button onclick="setHealthReportTextBoxToTemplate(templateMergeSingleAlert)">Merge Alert</button>
+				<button onclick="setHealthReportTextBoxToTemplate(templateReplaceSingleAlert)">Replace Alert</button>
+				<button onclick="setHealthReportTextBoxToTemplate(templateReplaceAsHealthy)">Mark Healthy</button>
+				{% if show_machine_templates %}
+				<button onclick="setHealthReportTextBoxToTemplate(templateMergeHostUpdateMaintenance)">Host Update</button>
+				<button onclick="setHealthReportTextBoxToTemplate(templateStopRebootForRecovery)">Prevent Reboot</button>
+				<button onclick="setHealthReportTextBoxToTemplate(templateMergeOfrMaintenance)">Out for Repair</button>
+				<button onclick="setHealthReportTextBoxToTemplate(templateMergeBreakfix)">Request Repair Automation</button>
+				<button onclick="setHealthReportTextBoxToTemplate(templateMergeDegradedMaintenance)">Degraded</button>
+				<button onclick="setHealthReportTextBoxToTemplate(templateMergeValidationMaintenance)">Validation</button>
+				{% endif %}
+			</div>
+		</td>
+	</tr>
+	<tr>
+		<th>Health Report</th>
+		<td>
+			<p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 0.5rem;">
+				Required fields: <strong>id</strong> and <strong>message</strong>. Target is optional.
+			</p>
+			<textarea id="health-report" rows="16" style="width: 100%; font-family: 'Consolas', 'Monaco', monospace; margin-bottom: 1rem;"></textarea>
+			<button id="submit_add">Submit Health Report</button>
+		</td>
+	</tr>
+</table>
+
+{% if !health_contributors.is_empty() %}
+<h2>Additional Health Contributors</h2>
+<details>
+	<summary>View Health Information that is contributed besides API managed Health Report Entries</summary>
+	<div style="padding: 1rem 0;">
+		{% for health_report in health_contributors %}
+		<div style="margin-bottom: 2rem;">
+			{{ health_report|safe }}
+		</div>
+		{%endfor%}
+	</div>
+</details>
+{% endif %}
+
+<h2>Health History</h2>
+{% match history_url %}
+{% when Some with (history_url) %}
+<p style="margin-bottom: 1rem;">
+	<a href="{{ history_url }}">View extended history timeline →</a>
+</p>
+{% when None %}
+{% endmatch %}
+{{ history|safe }}
+
+{% endblock %}
+
+{% block script %}
+
+const templateHealthReport = {
+	mode: "Merge",
+	health_report: {
+		source: "carbide-web",
+		successes: [{id: "", target: null}],
+		alerts: [{id: "", target: null, message: "", tenant_message: null, classifications: [""]}]
+	}
+};
+
+const templateMergeHostUpdateMaintenance = {
+	mode: "Merge",
+	health_report: {
+		source: "host-update",
+		successes: [],
+		alerts: [{id: "HostUpdateInProgress", target: "WebUi", message: "", tenant_message: null, classifications: ["PreventAllocations", "SuppressExternalAlerting"]}]
+	}
+};
+
+const templateStopRebootForRecovery = {
+	mode: "Merge",
+	health_report: {
+		source: "manual-maintenance",
+		successes: [],
+		alerts: [{id: "Maintenance", target: "WebUi", message: "", tenant_message: null, classifications: ["StopRebootForAutomaticRecoveryFromStateMachine"]}]
+	}
+};
+
+const templateMergeInternalMaintenance = {
+	mode: "Merge",
+	health_report: {
+		source: "maintenance",
+		successes: [],
+		alerts: [{id: "Maintenance", target: null, message: "", tenant_message: null, classifications: ["PreventAllocations", "SuppressExternalAlerting", "ExcludeFromStateMachineSla"]}]
+	}
+};
+
+const templateMergeOfrMaintenance = {
+	mode: "Merge",
+	health_report: {
+		source: "manual-maintenance",
+		successes: [],
+		alerts: [{id: "Maintenance", target: "OutForRepair", message: "", tenant_message: null, classifications: ["PreventAllocations", "SuppressExternalAlerting", "ExcludeFromStateMachineSla"]}]
+	}
+};
+
+const templateMergeBreakfix = {
+	mode: "Merge",
+	health_report: {
+		source: "repair-request",
+		successes: [],
+		alerts: [{id: "RequestRepair", target: "RequestRepair", message: "Machine is broken, setting RequestRepair tag for automated repair",
+			tenant_message: null, classifications: ["PreventAllocations", "SuppressExternalAlerting"]}]
+	}
+};
+
+const templateMergeDegradedMaintenance = {
+	mode: "Merge",
+	health_report: {
+		source: "manual-maintenance",
+		successes: [],
+		alerts: [{id: "Maintenance", target: "Degraded", message: "", tenant_message: null, classifications: ["PreventAllocations", "SuppressExternalAlerting"]}]
+	}
+};
+
+const templateMergeValidationMaintenance = {
+	mode: "Merge",
+	health_report: {
+		source: "manual-maintenance",
+		successes: [],
+		alerts: [{id: "Maintenance", target: "Validation", message: "", tenant_message: null, classifications: ["SuppressExternalAlerting"]}]
+	}
+};
+
+const templateMergeSuppressExternalAlerting = {
+	mode: "Merge",
+	health_report: {
+		source: "suppress-paging",
+		successes: [],
+		alerts: [{id: "SuppressExternalAlerting", target: null, message: "Paging is suppressed for this {{ object_label }}", tenant_message: null, classifications: ["SuppressExternalAlerting"]}]
+	}
+};
+
+const templateMergeSingleAlert = {
+	mode: "Merge",
+	health_report: {
+		source: "carbide-web",
+		successes: [],
+		alerts: [{id: "", target: null, message: "", tenant_message: null, classifications: ["PreventAllocations"]}]
+	}
+};
+
+const templateReplaceSingleAlert = {
+	mode: "Replace",
+	health_report: {
+		source: "carbide-web",
+		successes: [],
+		alerts: [{id: "", target: null, message: "", tenant_message: null, classifications: ["PreventAllocations"]}]
+	}
+};
+
+const templateReplaceAsHealthy = {
+	mode: "Replace",
+	health_report: {
+		source: "carbide-web",
+		successes: [],
+		alerts: []
+	}
+};
+
+function add_click_listener([id, path, body]) {
+	document.getElementById(id).addEventListener("click", async e => {
+		e.preventDefault();
+		let base = window.location.href;
+		if (base.at(base.length - 1) == '/') {
+			base = base.substring(0, base.length - 1);
+		}
+		const response = await fetch(base + path, {
+			method: "POST",
+			headers: {"Content-Type": "application/json"},
+			body: body(),
+		});
+		if (response.ok) {
+			location.reload();
+			return;
+		}
+		const text = await response.text();
+		e.target.after(
+			create_el("p", {
+				innerText: `Failed to execute POST, status: ${response.status}, text: ${text}.`
+			})
+		);
+	});
+}
+
+function setHealthReportTextBoxToTemplate(template) {
+	document.getElementById("health-report").value = JSON.stringify(template, null, 2);
+}
+
+document.addEventListener("DOMContentLoaded", function (event) {
+	setHealthReportTextBoxToTemplate(templateHealthReport);
+	for (const item of [
+		["submit_add", "/add-report", () => document.getElementById("health-report").value],
+	]) {
+		add_click_listener(item);
+	}
+	{% for entry in entries %}
+	add_click_listener(["remove-health-report-{{ entry.health_report.source }}", "/remove-report", () => JSON.stringify({source: "{{ entry.health_report.source }}"})]);
+	{% endfor %}
+});
+
+{% endblock %}

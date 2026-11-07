@@ -1,0 +1,64 @@
+{{- if .Values.externalService.enabled }}
+{{- /*
+External LoadBalancer exposure for unbound (bare-metal / MetalLB). DPUs and bare-metal
+hosts use these VIPs as their resolver to reach the .forge zone. Two Services
+(UDP + TCP on 53) share the configured VIPs via the externalService.sharedIpAnnotation key.
+Set one address per family with externalService.annotations, for example:
+  metallb.io/loadBalancerIPs: "192.0.2.53,2001:db8::53"
+*/}}
+{{- $annotations := include "nico.sharedIpAnnotations" (dict "service" .Values.externalService "group" (printf "%s-external" (include "unbound.name" .)) "annotations" .Values.externalService.annotations) | fromYaml }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "unbound.name" . }}-external-udp
+  namespace: {{ include "unbound.namespace" . }}
+  labels:
+    {{- include "unbound.labels" . | nindent 4 }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ipFamilyPolicy: {{ .Values.externalService.ipFamilyPolicy | default "SingleStack" }}
+  ipFamilies:
+    {{- .Values.externalService.ipFamilies | default (list "IPv4") | toYaml | nindent 4 }}
+  type: {{ .Values.externalService.type | default "LoadBalancer" }}
+  {{- with .Values.externalService.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
+  selector:
+    {{- include "unbound.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: 53
+      targetPort: dns-udp
+      protocol: UDP
+      name: dns-udp
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "unbound.name" . }}-external-tcp
+  namespace: {{ include "unbound.namespace" . }}
+  labels:
+    {{- include "unbound.labels" . | nindent 4 }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ipFamilyPolicy: {{ .Values.externalService.ipFamilyPolicy | default "SingleStack" }}
+  ipFamilies:
+    {{- .Values.externalService.ipFamilies | default (list "IPv4") | toYaml | nindent 4 }}
+  type: {{ .Values.externalService.type | default "LoadBalancer" }}
+  {{- with .Values.externalService.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
+  selector:
+    {{- include "unbound.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: 53
+      targetPort: dns-tcp
+      protocol: TCP
+      name: dns-tcp
+{{- end }}

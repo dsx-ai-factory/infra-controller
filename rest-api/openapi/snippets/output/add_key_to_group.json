@@ -1,0 +1,43 @@
+{
+   "id": "9ffb8f90-f88f-4420-952d-e911f446d7eb",
+   "name": "demo-team-0-group",
+   "description": "Demo team group",
+   "org": "tenant-org-name",
+   "tenantId": "778086ad-35b8-46ff-a796-69b2e4c93975",
+   "version": "23220d11a579258cb810942060e910fb3fac9762",
+   "status": "Syncing",
+   "statusHistory": [
+      {
+         "status": "Syncing",
+         "message": "received SSH Key Group update request, syncing",
+         "created": "2023-11-01T12:37:44.969029Z",
+         "updated": "2023-11-01T12:37:44.969029Z"
+      },
+      {
+         "status": "Syncing",
+         "message": "received SSH Key Group creation request, syncing",
+         "created": "2023-11-01T12:37:22.649619Z",
+         "updated": "2023-11-01T12:37:22.649619Z"
+      },
+      {
+         "status": "Synced",
+         "message": "SSH Key Group has successfully been synced to all Sites",
+         "created": "2023-11-01T12:37:22.649619Z",
+         "updated": "2023-11-01T12:37:22.649619Z"
+      }
+   ],
+   "sshKeys": [
+      {
+         "id": "b658db7e-f06c-4140-9494-48ea1f3f7769",
+         "name": "customer-0",
+         "org": "tenant-org-name",
+         "tenantId": "778086ad-35b8-46ff-a796-69b2e4c93975",
+         "fingerprint": "LfniSSO1iwx1nbAXyP6swmwmkrW3GnW1j9v+t/Ou9Vw",
+         "created": "2023-11-01T12:37:30.554055Z",
+         "updated": "2023-11-01T12:37:30.554055Z"
+      }
+   ],
+   "siteAssociations": [],
+   "created": "2023-11-01T12:37:22.649619Z",
+   "updated": "2023-11-01T12:37:45.007738Z"
+}

@@ -1,0 +1,18 @@
+suite: API service host (apiServiceName) default nico, override carbide
+templates:
+  - configmap.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: defaults the API host to nico-api
+    asserts:
+      - equal:
+          path: data.NICO_API_HOST
+          value: nico-api.nico-system.svc.cluster.local
+  - it: apiServiceName overrides the API host to carbide-api
+    set:
+      apiServiceName: carbide-api
+    asserts:
+      - equal:
+          path: data.NICO_API_HOST
+          value: carbide-api.nico-system.svc.cluster.local

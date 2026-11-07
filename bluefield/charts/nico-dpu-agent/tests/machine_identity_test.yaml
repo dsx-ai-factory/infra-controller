@@ -1,0 +1,71 @@
+suite: machine identity configuration
+templates:
+  - daemonset.yaml
+  # The daemonset's checksum annotation includes configmap.yaml, which newer
+  # helm-unittest versions only resolve when it is listed here.
+  - configmap.yaml
+tests:
+  - it: uses the Forge signer by default
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].args
+          content: --config-path=/etc/forge/config.toml
+
+  - it: renders no agent ConfigMap by default
+    template: configmap.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: renders the agent ConfigMap when the sign proxy is set
+    template: configmap.yaml
+    set:
+      fmds:
+        sign_proxy_url: http://dsx-imds.dpf-operator-system.svc.cluster.local:8080
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: RELEASE-NAME-config
+      # Exact config.toml contents are asserted in
+      # machine_identity_configmap_test.yaml.
+      - exists:
+          path: data["config.toml"]
+
+  - it: mounts the configured agent file
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+      fmds:
+        sign_proxy_url: http://dsx-imds.dpf-operator-system.svc.cluster.local:8080
+      serviceDaemonSet:
+        annotations:
+          checksum/machine-identity-config: user-value
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --config-path=/etc/forge/config.toml
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: agent-config
+            mountPath: /etc/forge/config.toml
+            subPath: config.toml
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: agent-config
+            configMap:
+              name: RELEASE-NAME-config
+      - notEqual:
+          path: spec.template.metadata.annotations["checksum/machine-identity-config"]
+          value: user-value

@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Kustomize base configuration for NICo REST services
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: postgres
+
+resources:
+  - namespace.yaml
+  - admin-creds.yaml
+  - statefulset.yaml
+  - service.yaml
+  - init-configmap.yaml
+  - adminer.yaml

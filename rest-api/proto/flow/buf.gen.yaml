@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+version: v2
+inputs:
+  - directory: src/v1
+plugins:
+  - local: protoc-gen-go
+    out: gen/v1
+    opt:
+      - paths=source_relative
+      - Mnico_nico.proto=github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1
+  - local: protoc-gen-go-grpc
+    out: gen/v1
+    opt:
+      - paths=source_relative
+      - require_unimplemented_servers=false

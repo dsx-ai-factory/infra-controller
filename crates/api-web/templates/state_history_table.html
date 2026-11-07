@@ -1,0 +1,16 @@
+<table class="detailsview">
+	<thead>
+		<tr>
+			<th>Version</th>
+			<th>State</th>
+		</tr>
+	</thead>
+	<tbody>
+	{% for record in records %}
+		<tr>
+			<td>{{record.version|config_version|safe}}</td>
+			<td><div style="overflow: auto;"><pre><code>{{record.state|pretty_json}}</code></pre></div></td>
+		</tr>
+	{% endfor %}
+	</tbody>
+</table>

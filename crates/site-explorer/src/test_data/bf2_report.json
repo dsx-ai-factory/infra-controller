@@ -1,0 +1,158 @@
+{
+    "EndpointType": "Bmc",
+    "LastExplorationError": null,
+    "MachineId": "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80",
+    "Vendor": "Nvidia",
+    "Managers": [
+        {
+            "Id": "Bluefield_BMC",
+            "EthernetInterfaces": [
+                {
+                    "Id": "eth0",
+                    "Description": "Management Network Interface",
+                    "InterfaceEnabled": true,
+                    "MacAddress": "b8:3f:d2:90:95:f6"
+                }
+            ]
+        }
+    ],
+    "Systems": [
+        {
+            "Id": "Bluefield",
+            "Manufacturer": null,
+            "Model": null,
+            "SerialNumber": "MT2242XZ00PE",
+            "EthernetInterfaces": [
+                {
+                    "Id": "oob_net0",
+                    "Description": "1G DPU OOB network interface",
+                    "InterfaceEnabled": null,
+                    "MacAddress": "B8:3F:D2:90:96:02"
+                }
+            ]
+        }
+    ],
+    "Chassis": [
+        {
+            "Id": "Bluefield_BMC",
+            "NetworkAdapters": [
+                {
+                    "Id": "NetworkAdapter",
+                    "Manufacturer": "Nvidia",
+                    "Model": null,
+                    "PartNumber": null,
+                    "SerialNumber": ""
+                }
+            ],
+            "Manufacturer": "Nvidia",
+            "Model": "Nvidia-BMCMezz",
+            "PartNumber": "MBF2H536C-CECOT      ",
+            "SerialNumber": "MT2242XZ00PE            "
+        },
+        {
+            "Id": "Bluefield_EROT",
+            "network_adapters": [
+                {
+                    "Id": "NetworkAdapter",
+                    "Manufacturer": "Nvidia",
+                    "Model": null,
+                    "PartNumber": null,
+                    "SerialNumber": ""
+                }
+            ],
+            "Manufacturer": "Nvidia",
+            "Model": null,
+            "PartNumber": null,
+            "SerialNumber": null
+        },
+        {
+            "Id": "Card1",
+            "NetworkAdapters": [
+                {
+                    "Id": "NetworkAdapter",
+                    "Manufacturer": "Nvidia",
+                    "Model": null,
+                    "PartNumber": null,
+                    "SerialNumber": ""
+                }
+            ],
+            "Manufacturer": "Nvidia",
+            "Model": "Bluefield 2 SmartNIC Main Card",
+            "PartNumber": "MBF2H536C-CECOT      ",
+            "SerialNumber": "MT2242XZ00PE            "
+        }
+    ],
+    "Service": [
+        {
+            "Id": "FirmwareInventory",
+            "Inventories": [
+                {
+                    "Id": "63b6c138_BMC_Firmware",
+                    "Description": "BMC image",
+                    "Version": "bf-23.10-5-0-g87a8acd1708.1701259870.8631477",
+                    "ReleaseDate": null
+                },
+                {
+                    "Id": "Bluefield_FW_ERoT",
+                    "Description": "Other image",
+                    "Version": "4-15",
+                    "ReleaseDate": null
+                },
+                {
+                    "Id": "DPU_ATF",
+                    "Description": "Host image",
+                    "Version": "v2.2(release):4.5.0-37-g8408d48",
+                    "ReleaseDate": null
+                },
+                {
+                    "Id": "DPU_BOARD",
+                    "Description": "Host image",
+                    "Version": "MT_0000000768",
+                    "ReleaseDate": null
+                },
+                {
+                    "Id": "DPU_BSP",
+                    "Description": "Host image",
+                    "Version": "4.5.0.12993",
+                    "ReleaseDate": null
+                },
+                {
+                    "Id": "DPU_NIC",
+                    "Description": "Host image",
+                    "Version": "24.39.2048",
+                    "ReleaseDate": null
+                },
+                {
+                    "Id": "DPU_NODE",
+                    "Description": "Host image",
+                    "Version": "b83f:d2ff:fe90:95fb",
+                    "ReleaseDate": null
+                },
+                {
+                    "Id": "DPU_OFED",
+                    "Description": "Host image",
+                    "Version": "MLNX_OFED_LINUX-23.10-1.2.0",
+                    "ReleaseDate": null
+                },
+                {
+                    "Id": "DPU_OS",
+                    "Description": "Host image",
+                    "Version": "DOCA_2.5.0_BSP_4.5.0_Ubuntu_22.04-1.23-10.prod",
+                    "ReleaseDate": null
+                },
+                {
+                    "Id": "DPU_SYS_IMAGE",
+                    "Description": "Host image",
+                    "Version": "b83f:d203:0090:95f4",
+                    "ReleaseDate": null
+                },
+                {
+                    "Id": "DPU_UEFI",
+                    "Description": "Host image",
+                    "Version": "4.5.0-46-gf57517d",
+                    "ReleaseDate": null
+                }
+            ]
+        }
+    ]
+}

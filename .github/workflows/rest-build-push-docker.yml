@@ -1,0 +1,489 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Build and Push Docker Images
+
+on:
+  workflow_call:
+    inputs:
+      ngc_path:
+        description: 'NGC org/team for resource uploads (empty = skip)'
+        required: false
+        type: string
+        default: ''
+      runner:
+        description: "Runner type for the build jobs"
+        required: false
+        default: "linux-amd64-cpu4"
+        type: string
+      semantic_version:
+        description: "Semantic version from VERSION file"
+        required: true
+        type: string
+      short_sha:
+        description: "Short SHA for tagging"
+        required: true
+        type: string
+      branch_sha_tag:
+        description: "Combined branch name and short SHA tag (branchname-sha)"
+        required: true
+        type: string
+      target_registry:
+        description: "Target NVCR registry path"
+        required: true
+        type: string
+      push_enabled:
+        description: "Whether to push images to registry"
+        required: false
+        default: true
+        type: boolean
+      branch_name:
+        description: "Sanitized branch name for image tags"
+        required: true
+        type: string
+      is_main_branch:
+        description: "Whether to push 'latest' and version-short-sha tags (only on main) - pass 'true' or 'false' as string"
+        required: false
+        default: "false"
+        type: string
+      release_tag:
+        description: "Release tag for the build"
+        required: false
+        default: ""
+        type: string
+      helm_version:
+        description: "Helm chart version pre-computed by the prepare step (e.g. 2.0.0-rc.14)"
+        required: true
+        type: string
+    secrets:
+      NVCR_USERNAME:
+        description: "NVIDIA Container Registry username (typically '$oauthtoken')"
+        required: false
+      NVCR_TOKEN:
+        description: "NVIDIA Container Registry API token"
+        required: false
+      NICO_TARGET_REGISTRY_USERNAME:
+        description: "Username for the push target registry (falls back to NVCR_USERNAME)"
+        required: false
+      NICO_TARGET_REGISTRY_TOKEN:
+        description: "Token for the push target registry (falls back to NVCR_TOKEN)"
+        required: false
+      NICO_NGC_TOKEN:
+        description: "Key for NGC helm/resource uploads (falls back to NVCR_TOKEN)"
+        required: false
+
+jobs:
+  build-nico-rest-api:
+    name: Build nico-rest-api
+    uses: ./.github/workflows/rest-build-push-service.yml
+    with:
+      ngc_path: ${{ inputs.ngc_path }}
+      runner: ${{ inputs.runner }}
+      service_name: nico-rest-api
+      binary_name: api
+      binary_path: /app/api
+      dockerfile: ./rest-api/docker/production/Dockerfile.nico-rest-api
+      semantic_version: ${{ inputs.semantic_version }}
+      short_sha: ${{ inputs.short_sha }}
+      branch_sha_tag: ${{ inputs.branch_sha_tag }}
+      target_registry: ${{ inputs.target_registry }}
+      push_enabled: ${{ inputs.push_enabled }}
+      is_main_branch: ${{ inputs.is_main_branch }}
+      release_tag: ${{ inputs.release_tag }}
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
+
+  build-nico-rest-db:
+    name: Build nico-rest-db
+    uses: ./.github/workflows/rest-build-push-service.yml
+    with:
+      ngc_path: ${{ inputs.ngc_path }}
+      runner: ${{ inputs.runner }}
+      service_name: nico-rest-db
+      binary_name: migrations
+      binary_path: /app/migrations
+      dockerfile: ./rest-api/docker/production/Dockerfile.nico-rest-db
+      semantic_version: ${{ inputs.semantic_version }}
+      short_sha: ${{ inputs.short_sha }}
+      branch_sha_tag: ${{ inputs.branch_sha_tag }}
+      target_registry: ${{ inputs.target_registry }}
+      push_enabled: ${{ inputs.push_enabled }}
+      is_main_branch: ${{ inputs.is_main_branch }}
+      release_tag: ${{ inputs.release_tag }}
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
+
+  build-nico-rest-site-manager:
+    name: Build nico-rest-site-manager
+    uses: ./.github/workflows/rest-build-push-service.yml
+    with:
+      ngc_path: ${{ inputs.ngc_path }}
+      runner: ${{ inputs.runner }}
+      service_name: nico-rest-site-manager
+      binary_name: site-manager
+      binary_path: /app/site-manager
+      dockerfile: ./rest-api/docker/production/Dockerfile.nico-rest-site-manager
+      semantic_version: ${{ inputs.semantic_version }}
+      short_sha: ${{ inputs.short_sha }}
+      branch_sha_tag: ${{ inputs.branch_sha_tag }}
+      target_registry: ${{ inputs.target_registry }}
+      push_enabled: ${{ inputs.push_enabled }}
+      is_main_branch: ${{ inputs.is_main_branch }}
+      release_tag: ${{ inputs.release_tag }}
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
+
+  build-nico-rest-workflow:
+    name: Build nico-rest-workflow
+    uses: ./.github/workflows/rest-build-push-service.yml
+    with:
+      ngc_path: ${{ inputs.ngc_path }}
+      runner: ${{ inputs.runner }}
+      service_name: nico-rest-workflow
+      binary_name: workflow
+      binary_path: /app/workflow
+      dockerfile: ./rest-api/docker/production/Dockerfile.nico-rest-workflow
+      semantic_version: ${{ inputs.semantic_version }}
+      short_sha: ${{ inputs.short_sha }}
+      branch_sha_tag: ${{ inputs.branch_sha_tag }}
+      target_registry: ${{ inputs.target_registry }}
+      push_enabled: ${{ inputs.push_enabled }}
+      is_main_branch: ${{ inputs.is_main_branch }}
+      release_tag: ${{ inputs.release_tag }}
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
+
+  build-nico-rest-site-agent:
+    name: Build nico-rest-site-agent
+    uses: ./.github/workflows/rest-build-push-service.yml
+    with:
+      ngc_path: ${{ inputs.ngc_path }}
+      runner: ${{ inputs.runner }}
+      service_name: nico-rest-site-agent
+      binary_name: site-agent
+      binary_path: /app/site-agent
+      dockerfile: ./rest-api/docker/production/Dockerfile.nico-rest-site-agent
+      semantic_version: ${{ inputs.semantic_version }}
+      short_sha: ${{ inputs.short_sha }}
+      branch_sha_tag: ${{ inputs.branch_sha_tag }}
+      target_registry: ${{ inputs.target_registry }}
+      push_enabled: ${{ inputs.push_enabled }}
+      is_main_branch: ${{ inputs.is_main_branch }}
+      release_tag: ${{ inputs.release_tag }}
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
+
+  build-nico-rest-cert-manager:
+    name: Build nico-rest-cert-manager
+    uses: ./.github/workflows/rest-build-push-service.yml
+    with:
+      ngc_path: ${{ inputs.ngc_path }}
+      runner: ${{ inputs.runner }}
+      service_name: nico-rest-cert-manager
+      binary_name: credsmgr
+      binary_path: /app/credsmgr
+      dockerfile: ./rest-api/docker/production/Dockerfile.nico-rest-cert-manager
+      semantic_version: ${{ inputs.semantic_version }}
+      short_sha: ${{ inputs.short_sha }}
+      branch_sha_tag: ${{ inputs.branch_sha_tag }}
+      target_registry: ${{ inputs.target_registry }}
+      push_enabled: ${{ inputs.push_enabled }}
+      is_main_branch: ${{ inputs.is_main_branch }}
+      release_tag: ${{ inputs.release_tag }}
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
+
+  build-nico-flow:
+    name: Build nico-flow
+    uses: ./.github/workflows/rest-build-push-service.yml
+    with:
+      ngc_path: ${{ inputs.ngc_path }}
+      runner: ${{ inputs.runner }}
+      service_name: nico-flow
+      binary_name: flow
+      binary_path: /app/flow
+      dockerfile: ./rest-api/docker/production/Dockerfile.nico-flow
+      semantic_version: ${{ inputs.semantic_version }}
+      short_sha: ${{ inputs.short_sha }}
+      branch_sha_tag: ${{ inputs.branch_sha_tag }}
+      target_registry: ${{ inputs.target_registry }}
+      push_enabled: ${{ inputs.push_enabled }}
+      is_main_branch: ${{ inputs.is_main_branch }}
+      release_tag: ${{ inputs.release_tag }}
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
+
+  build-nico-psm:
+    name: Build nico-psm
+    uses: ./.github/workflows/rest-build-push-service.yml
+    with:
+      ngc_path: ${{ inputs.ngc_path }}
+      runner: ${{ inputs.runner }}
+      service_name: nico-psm
+      binary_name: psm
+      binary_path: /app/psm
+      dockerfile: ./rest-api/docker/production/Dockerfile.nico-psm
+      semantic_version: ${{ inputs.semantic_version }}
+      short_sha: ${{ inputs.short_sha }}
+      branch_sha_tag: ${{ inputs.branch_sha_tag }}
+      target_registry: ${{ inputs.target_registry }}
+      push_enabled: ${{ inputs.push_enabled }}
+      is_main_branch: ${{ inputs.is_main_branch }}
+      release_tag: ${{ inputs.release_tag }}
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
+
+  build-nico-nsm:
+    name: Build nico-nsm
+    uses: ./.github/workflows/rest-build-push-service.yml
+    with:
+      ngc_path: ${{ inputs.ngc_path }}
+      runner: ${{ inputs.runner }}
+      service_name: nico-nsm
+      binary_name: nsm
+      binary_path: /app/nsm
+      dockerfile: ./rest-api/docker/production/Dockerfile.nico-nsm
+      semantic_version: ${{ inputs.semantic_version }}
+      short_sha: ${{ inputs.short_sha }}
+      branch_sha_tag: ${{ inputs.branch_sha_tag }}
+      target_registry: ${{ inputs.target_registry }}
+      push_enabled: ${{ inputs.push_enabled }}
+      is_main_branch: ${{ inputs.is_main_branch }}
+      release_tag: ${{ inputs.release_tag }}
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
+
+  build-nico-mcp:
+    name: Build nico-mcp
+    uses: ./.github/workflows/rest-build-push-service.yml
+    with:
+      ngc_path: ${{ inputs.ngc_path }}
+      runner: ${{ inputs.runner }}
+      service_name: nico-mcp
+      binary_name: nico-mcp
+      binary_path: /app/nico-mcp
+      dockerfile: ./rest-api/docker/production/Dockerfile.nico-mcp
+      semantic_version: ${{ inputs.semantic_version }}
+      short_sha: ${{ inputs.short_sha }}
+      branch_sha_tag: ${{ inputs.branch_sha_tag }}
+      target_registry: ${{ inputs.target_registry }}
+      push_enabled: ${{ inputs.push_enabled }}
+      is_main_branch: ${{ inputs.is_main_branch }}
+      release_tag: ${{ inputs.release_tag }}
+      helm_version: ${{ inputs.helm_version }}
+    secrets:
+      NVCR_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      NVCR_TOKEN: ${{ secrets.NVCR_TOKEN }}
+      NICO_TARGET_REGISTRY_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME }}
+      NICO_TARGET_REGISTRY_TOKEN: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN }}
+      NICO_NGC_TOKEN: ${{ secrets.NICO_NGC_TOKEN }}
+
+  # Was GitHub-hosted because this markdown-only job spent `75s` waiting for an
+  # enterprise runner to do `3s` of work. Hosted waits now reach `~8m`, and being
+  # last in the run means a hosted queue holds the whole run open.
+  build-summary:
+    name: Build Summary
+    runs-on: linux-amd64-cpu4
+    needs:
+      - build-nico-rest-api
+      - build-nico-rest-db
+      - build-nico-rest-site-manager
+      - build-nico-rest-workflow
+      - build-nico-rest-site-agent
+      - build-nico-rest-cert-manager
+      - build-nico-flow
+      - build-nico-psm
+      - build-nico-nsm
+      - build-nico-mcp
+    if: ${{ !cancelled() }}
+    outputs:
+      build_artifacts: ${{ steps.aggregate.outputs.artifacts }}
+
+    steps:
+      - name: Generate build summary
+        env:
+          SEMANTIC_VERSION: ${{ inputs.semantic_version }}
+          SHORT_SHA: ${{ inputs.short_sha }}
+          BRANCH_NAME: ${{ inputs.branch_name }}
+          BRANCH_SHA_TAG: ${{ inputs.branch_sha_tag }}
+          TARGET_REGISTRY: ${{ inputs.target_registry }}
+          PUSH_ENABLED: ${{ inputs.push_enabled }}
+          IS_MAIN_BRANCH: ${{ inputs.is_main_branch }}
+          REF_NAME: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          echo "# Docker Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Build Information" >> $GITHUB_STEP_SUMMARY
+          echo "- **Semantic Version**: \`${SEMANTIC_VERSION}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Git SHA**: \`${SHORT_SHA}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: \`${BRANCH_NAME}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch-SHA Tag**: \`${BRANCH_SHA_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Registry**: \`${TARGET_REGISTRY}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Push Enabled**: \`${PUSH_ENABLED}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Is Main Branch**: \`${IS_MAIN_BRANCH}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Ref Name**: \`${REF_NAME}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platforms**: \`linux/amd64, linux/arm64\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${PUSH_ENABLED}" = "false" ]; then
+            echo "> **Note**: Images were built but NOT pushed to registry (build-only mode)" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "## Docker Image Tags" >> $GITHUB_STEP_SUMMARY
+          echo "All images tagged with: \`${BRANCH_SHA_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          if [ "${IS_MAIN_BRANCH}" = "true" ] || [ "${REF_NAME}" = "main" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Main branch additional tags:**" >> $GITHUB_STEP_SUMMARY
+            echo "- \`${SEMANTIC_VERSION}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- \`latest\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -n "${RELEASE_TAG}" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Release tag additional tags:**" >> $GITHUB_STEP_SUMMARY
+            echo "- \`${RELEASE_TAG}\`" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Images Built" >> $GITHUB_STEP_SUMMARY
+          echo "1. \`nico-rest-api:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "2. \`nico-rest-db:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "3. \`nico-rest-site-manager:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "4. \`nico-rest-workflow:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "5. \`nico-rest-site-agent:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "6. \`nico-rest-cert-manager:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "7. \`nico-flow:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "8. \`nico-psm:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "9. \`nico-nsm:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "10. \`nico-mcp:${BRANCH_SHA_TAG}\` (amd64 + arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${PUSH_ENABLED}" = "true" ]; then
+            echo "## Binary Artifacts Uploaded" >> $GITHUB_STEP_SUMMARY
+            echo "Each binary uploaded for both amd64 and arm64 with the publish build version." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "## Job Status" >> $GITHUB_STEP_SUMMARY
+          echo "- nico-rest-api: \`${{ needs.build-nico-rest-api.result }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- nico-rest-db: \`${{ needs.build-nico-rest-db.result }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- nico-rest-site-manager: \`${{ needs.build-nico-rest-site-manager.result }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- nico-rest-workflow: \`${{ needs.build-nico-rest-workflow.result }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- nico-rest-site-agent: \`${{ needs.build-nico-rest-site-agent.result }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- nico-rest-cert-manager: \`${{ needs.build-nico-rest-cert-manager.result }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- nico-flow: \`${{ needs.build-nico-flow.result }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- nico-psm: \`${{ needs.build-nico-psm.result }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- nico-nsm: \`${{ needs.build-nico-nsm.result }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- nico-mcp: \`${{ needs.build-nico-mcp.result }}\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Aggregate outputs
+        id: aggregate
+        run: |
+          cat <<EOF > artifacts.json
+          [
+            {
+              "service": "nico-rest-api",
+              "image_ref": "${{ needs.build-nico-rest-api.outputs.image_ref }}",
+              "binary_resource": "${{ needs.build-nico-rest-api.outputs.ngc_binary_resource }}",
+              "image_resource": "${{ needs.build-nico-rest-api.outputs.ngc_image_resource }}"
+            },
+            {
+              "service": "nico-rest-db",
+              "image_ref": "${{ needs.build-nico-rest-db.outputs.image_ref }}",
+              "binary_resource": "${{ needs.build-nico-rest-db.outputs.ngc_binary_resource }}",
+              "image_resource": "${{ needs.build-nico-rest-db.outputs.ngc_image_resource }}"
+            },
+            {
+              "service": "nico-rest-site-manager",
+              "image_ref": "${{ needs.build-nico-rest-site-manager.outputs.image_ref }}",
+              "binary_resource": "${{ needs.build-nico-rest-site-manager.outputs.ngc_binary_resource }}",
+              "image_resource": "${{ needs.build-nico-rest-site-manager.outputs.ngc_image_resource }}"
+            },
+            {
+              "service": "nico-rest-workflow",
+              "image_ref": "${{ needs.build-nico-rest-workflow.outputs.image_ref }}",
+              "binary_resource": "${{ needs.build-nico-rest-workflow.outputs.ngc_binary_resource }}",
+              "image_resource": "${{ needs.build-nico-rest-workflow.outputs.ngc_image_resource }}"
+            },
+            {
+              "service": "nico-rest-site-agent",
+              "image_ref": "${{ needs.build-nico-rest-site-agent.outputs.image_ref }}",
+              "binary_resource": "${{ needs.build-nico-rest-site-agent.outputs.ngc_binary_resource }}",
+              "image_resource": "${{ needs.build-nico-rest-site-agent.outputs.ngc_image_resource }}"
+            },
+            {
+              "service": "nico-rest-cert-manager",
+              "image_ref": "${{ needs.build-nico-rest-cert-manager.outputs.image_ref }}",
+              "binary_resource": "${{ needs.build-nico-rest-cert-manager.outputs.ngc_binary_resource }}",
+              "image_resource": "${{ needs.build-nico-rest-cert-manager.outputs.ngc_image_resource }}"
+            },
+            {
+              "service": "nico-flow",
+              "image_ref": "${{ needs.build-nico-flow.outputs.image_ref }}",
+              "binary_resource": "${{ needs.build-nico-flow.outputs.ngc_binary_resource }}",
+              "image_resource": "${{ needs.build-nico-flow.outputs.ngc_image_resource }}"
+            },
+            {
+              "service": "nico-psm",
+              "image_ref": "${{ needs.build-nico-psm.outputs.image_ref }}",
+              "binary_resource": "${{ needs.build-nico-psm.outputs.ngc_binary_resource }}",
+              "image_resource": "${{ needs.build-nico-psm.outputs.ngc_image_resource }}"
+            },
+            {
+              "service": "nico-nsm",
+              "image_ref": "${{ needs.build-nico-nsm.outputs.image_ref }}",
+              "binary_resource": "${{ needs.build-nico-nsm.outputs.ngc_binary_resource }}",
+              "image_resource": "${{ needs.build-nico-nsm.outputs.ngc_image_resource }}"
+            },
+            {
+              "service": "nico-mcp",
+              "image_ref": "${{ needs.build-nico-mcp.outputs.image_ref }}",
+              "binary_resource": "${{ needs.build-nico-mcp.outputs.ngc_binary_resource }}",
+              "image_resource": "${{ needs.build-nico-mcp.outputs.ngc_image_resource }}"
+            }
+          ]
+          EOF
+
+          ARTIFACTS=$(jq -c . artifacts.json)
+          echo "artifacts=$ARTIFACTS" >> $GITHUB_OUTPUT

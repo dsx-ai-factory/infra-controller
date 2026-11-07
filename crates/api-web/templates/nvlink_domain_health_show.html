@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}NVLink Domain Health{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="{{ json_path }}">JSON</a></div>
+<h1>NVLink Domain Health ({{ page.total_items() }})</h1>
+
+<form action="{{ page.path }}" method="get">
+	<table class="detailsview">
+		<tr>
+			<th><label for="q">Domain ID</label></th>
+			<td>
+				<input type="search" id="q" name="q" value="{{ search_query }}">
+				<input type="hidden" name="limit" value="{{ page.limit() }}">
+				<input type="submit" value="Search">
+				{% if search_query != "" %}
+				<a href="{{ page.path }}?limit={{ page.limit() }}">Clear</a>
+				{% endif %}
+			</td>
+		</tr>
+	</table>
+</form>
+
+<table class="sortable overview">
+	<thead>
+		<th>Domain ID</th>
+		<th>Health Reports</th>
+	</thead>
+	<tbody>
+		{% for domain in domains %}
+		<tr>
+			<td>{{ domain.id }}</td>
+			<td><a href="{{ domain.health_url }}">Health reports</a></td>
+		</tr>
+		{% endfor %}
+	</tbody>
+	<tfoot>
+		<tr>
+			<th>{{ domains.len() }} item{% if domains.len() != 1 %}s{% endif %}</th>
+			<th></th>
+		</tr>
+	</tfoot>
+</table>
+
+{% include "pages_footer.html" %}
+
+{% endblock %}

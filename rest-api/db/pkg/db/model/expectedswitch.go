@@ -1,0 +1,934 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package model
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+
+	"github.com/uptrace/bun"
+)
+
+const (
+	// ExpectedSwitchOrderByDefault default field to be used for ordering when none specified
+	ExpectedSwitchOrderByDefault = "created"
+)
+
+var (
+	// ExpectedSwitchOrderByFields is a list of valid order by fields for the ExpectedSwitch model
+	ExpectedSwitchOrderByFields = []string{
+		"id",
+		"site_id",
+		"bmc_mac_address",
+		"switch_serial_number",
+		"created",
+		"updated",
+	}
+	// ExpectedSwitchRelatedEntities is a list of valid relation by fields for the ExpectedSwitch model
+	ExpectedSwitchRelatedEntities = map[string]bool{
+		SiteRelationName: true,
+	}
+)
+
+// ExpectedSwitch is a record for each network switch expected to be processed by NICo
+type ExpectedSwitch struct {
+	bun.BaseModel `bun:"table:expected_switch,alias:es"`
+
+	ID                 uuid.UUID `bun:"id,pk"`
+	SiteID             uuid.UUID `bun:"site_id,type:uuid,notnull"`
+	Site               *Site     `bun:"rel:belongs-to,join:site_id=id"`
+	BmcMacAddress      string    `bun:"bmc_mac_address,notnull"`
+	SwitchSerialNumber string    `bun:"switch_serial_number,notnull"`
+	BmcIpAddress       *string   `bun:"bmc_ip_address"`
+	NvosMacAddresses   []string  `bun:"nvos_mac_addresses,array"`
+	// NvosIpAddress is the optional static address for a single NVOS port.
+	NvosIpAddress *string `bun:"nvos_ip_address"`
+	// NvosPrimaryMacAddress is the NVOS MAC the operator designates as the primary
+	// (eth0) management port. Nil makes the first stored port the REST/Core wire
+	// default.
+	NvosPrimaryMacAddress *string   `bun:"nvos_primary_mac_address"`
+	RackID                *string   `bun:"rack_id"`
+	Name                  *string   `bun:"name"`
+	Manufacturer          *string   `bun:"manufacturer"`
+	Model                 *string   `bun:"model"`
+	Description           *string   `bun:"description"`
+	SlotID                *int32    `bun:"slot_id"`
+	TrayIdx               *int32    `bun:"tray_idx"`
+	HostID                *int32    `bun:"host_id"`
+	Labels                Labels    `bun:"labels,type:jsonb"`
+	Created               time.Time `bun:"created,nullzero,notnull,default:current_timestamp"`
+	Updated               time.Time `bun:"updated,nullzero,notnull,default:current_timestamp"`
+	CreatedBy             uuid.UUID `bun:"type:uuid,notnull"`
+}
+
+// NormalizeMacAddress lowercases a MAC address and converts hyphen separators
+// to colons so equivalent spellings compare equal. It is the one home for the
+// canonical-spelling rule shared by request validation and the DAO's
+// NvosMacAddresses conflict filter.
+func NormalizeMacAddress(mac string) string {
+	return strings.ToLower(strings.ReplaceAll(mac, "-", ":"))
+}
+
+// NvosInterface is the structured view of one NVOS ethernet port derived from
+// the stored MAC list and primary selector, with the first-of-many primary
+// default applied. It is the single source both the workflow proto and the REST
+// API response convert from, so the two always agree on which port is primary.
+type NvosInterface struct {
+	MacAddress string
+	IsPrimary  bool
+	// IPAddress is present only when this is the switch's sole NVOS port.
+	IPAddress *string
+}
+
+// effectiveNvosPrimary returns the normalized MAC that should be treated as the
+// primary (eth0) port. An explicit selector wins; otherwise the first stored
+// port defaults to primary for the REST/Core wire representation. An
+// empty MAC list has no primary.
+func effectiveNvosPrimary(macs []string, primary *string) string {
+	if primary != nil && *primary != "" {
+		return NormalizeMacAddress(*primary)
+	}
+	if len(macs) > 0 {
+		return NormalizeMacAddress(macs[0])
+	}
+	return ""
+}
+
+// NvosInterfaces returns the switch's NVOS ports in stored order with the
+// effective primary flagged. A nil stored MAC list yields a nil slice so the
+// "field absent" case stays distinguishable from an empty set.
+func (es *ExpectedSwitch) NvosInterfaces() []NvosInterface {
+	if es.NvosMacAddresses == nil {
+		return nil
+	}
+	primary := effectiveNvosPrimary(es.NvosMacAddresses, es.NvosPrimaryMacAddress)
+	interfaces := make([]NvosInterface, 0, len(es.NvosMacAddresses))
+	for _, mac := range es.NvosMacAddresses {
+		interfaces = append(interfaces, NvosInterface{
+			MacAddress: mac,
+			IsPrimary:  NormalizeMacAddress(mac) == primary,
+		})
+	}
+	if len(interfaces) == 1 {
+		interfaces[0].IPAddress = es.NvosIpAddress
+	}
+	return interfaces
+}
+
+// nvosInterfacesProto builds the structured NVOS port list for the workflow
+// proto from the canonical NvosInterfaces view so the proto and REST response
+// flag the same primary.
+func (es *ExpectedSwitch) nvosInterfacesProto() []*corev1.ExpectedNvosInterface {
+	views := es.NvosInterfaces()
+	interfaces := make([]*corev1.ExpectedNvosInterface, 0, len(views))
+	for _, view := range views {
+		interfaces = append(interfaces, &corev1.ExpectedNvosInterface{
+			MacAddress: view.MacAddress,
+			IsPrimary:  view.IsPrimary,
+		})
+	}
+	return interfaces
+}
+
+// setNvosInterfacesFromProto decomposes the structured NVOS port list reported
+// by Core back into the stored MAC list plus the scalar primary selector. The
+// primary is the flagged port, if any.
+func (es *ExpectedSwitch) setNvosInterfacesFromProto(interfaces []*corev1.ExpectedNvosInterface) {
+	macs := make([]string, 0, len(interfaces))
+	var primary *string
+	for _, iface := range interfaces {
+		macs = append(macs, iface.GetMacAddress())
+		if iface.GetIsPrimary() {
+			mac := iface.GetMacAddress()
+			primary = &mac
+		}
+	}
+	if len(macs) == 0 {
+		macs = nil
+	}
+	es.NvosMacAddresses = macs
+	es.NvosPrimaryMacAddress = primary
+}
+
+// ExpectedSwitchCredentials carries the BMC and NVOS credentials for one
+// ExpectedSwitch. They live in their own type because they aren't stored
+// in the DB record and have to be threaded through to ToProto separately.
+type ExpectedSwitchCredentials struct {
+	BmcUsername  *string
+	BmcPassword  *string
+	NvosUsername *string
+	NvosPassword *string
+}
+
+// ToProto builds the workflow proto for this ExpectedSwitch. BMC and NVOS
+// credentials are passed in because they aren't persisted on the record;
+// labels are read from es.Labels.
+func (es *ExpectedSwitch) ToProto(creds ExpectedSwitchCredentials) *corev1.ExpectedSwitch {
+	proto := &corev1.ExpectedSwitch{
+		ExpectedSwitchId:   &corev1.UUID{Value: es.ID.String()},
+		BmcMacAddress:      es.BmcMacAddress,
+		SwitchSerialNumber: es.SwitchSerialNumber,
+		NvosInterfaces:     es.nvosInterfacesProto(),
+		NvosIpAddress:      es.NvosIpAddress,
+	}
+
+	if es.BmcIpAddress != nil {
+		proto.BmcIpAddress = *es.BmcIpAddress
+	}
+	if es.RackID != nil {
+		proto.RackId = &corev1.RackId{Id: *es.RackID}
+	}
+	if es.Name != nil {
+		proto.Name = es.Name
+	}
+	if es.Manufacturer != nil {
+		proto.Manufacturer = es.Manufacturer
+	}
+	if es.Model != nil {
+		proto.Model = es.Model
+	}
+	if es.Description != nil {
+		proto.Description = es.Description
+	}
+	if es.SlotID != nil {
+		proto.SlotId = es.SlotID
+	}
+	if es.TrayIdx != nil {
+		proto.TrayIdx = es.TrayIdx
+	}
+	if es.HostID != nil {
+		proto.HostId = es.HostID
+	}
+
+	if creds.BmcUsername != nil {
+		proto.BmcUsername = *creds.BmcUsername
+	}
+	if creds.BmcPassword != nil {
+		proto.BmcPassword = *creds.BmcPassword
+	}
+	if creds.NvosUsername != nil {
+		proto.NvosUsername = creds.NvosUsername
+	}
+	if creds.NvosPassword != nil {
+		proto.NvosPassword = creds.NvosPassword
+	}
+
+	metadata := &corev1.Metadata{
+		Labels: expectedComponentLabelsInput{
+			Manufacturer: es.Manufacturer,
+			Model:        es.Model,
+			SlotID:       es.SlotID,
+			TrayIdx:      es.TrayIdx,
+			HostID:       es.HostID,
+			Labels:       es.Labels,
+		}.ToProto(),
+	}
+	if es.Name != nil {
+		metadata.Name = *es.Name
+	}
+	if es.Description != nil {
+		metadata.Description = *es.Description
+	}
+	proto.Metadata = metadata
+
+	return proto
+}
+
+// FromProto populates this ExpectedSwitch from a workflow proto reported
+// by a Site. A nil proto is a no-op. An invalid or missing
+// proto.ExpectedSwitchId leaves es.ID unchanged so the caller can validate
+// the proto's UUID before calling.
+// Name and description come from `Metadata`; empty strings become nil.
+func (es *ExpectedSwitch) FromProto(proto *corev1.ExpectedSwitch) {
+	if proto == nil {
+		return
+	}
+	if proto.ExpectedSwitchId != nil {
+		if id, err := uuid.Parse(proto.ExpectedSwitchId.Value); err == nil {
+			es.ID = id
+		}
+	}
+	es.BmcMacAddress = proto.BmcMacAddress
+	es.SwitchSerialNumber = proto.SwitchSerialNumber
+	es.setNvosInterfacesFromProto(proto.NvosInterfaces)
+	es.NvosIpAddress = cutil.GetPtrIfNotZero(proto.GetNvosIpAddress())
+	if proto.BmcIpAddress != "" {
+		addr := proto.BmcIpAddress
+		es.BmcIpAddress = &addr
+	} else {
+		es.BmcIpAddress = nil
+	}
+	if proto.RackId != nil {
+		rackID := proto.RackId.Id
+		es.RackID = &rackID
+	} else {
+		es.RackID = nil
+	}
+	es.Name = cutil.GetPtrIfNotZero(proto.Metadata.GetName())
+	es.Manufacturer = proto.Manufacturer
+	es.Model = proto.Model
+	es.Description = cutil.GetPtrIfNotZero(proto.Metadata.GetDescription())
+	es.SlotID = proto.SlotId
+	es.TrayIdx = proto.TrayIdx
+	es.HostID = proto.HostId
+	es.Labels.FromProto(proto.Metadata.GetLabels())
+}
+
+// ExpectedSwitchCreateInput input parameters for Create method
+type ExpectedSwitchCreateInput struct {
+	ExpectedSwitchID      uuid.UUID
+	SiteID                uuid.UUID
+	BmcMacAddress         string
+	SwitchSerialNumber    string
+	BmcIpAddress          *string
+	NvosMacAddresses      []string
+	NvosPrimaryMacAddress *string
+	NvosIpAddress         *string
+	RackID                *string
+	Name                  *string
+	Manufacturer          *string
+	Model                 *string
+	Description           *string
+	SlotID                *int32
+	TrayIdx               *int32
+	HostID                *int32
+	Labels                map[string]string
+	CreatedBy             uuid.UUID
+}
+
+// ExpectedSwitchUpdateInput input parameters for Update method
+type ExpectedSwitchUpdateInput struct {
+	ExpectedSwitchID      uuid.UUID
+	BmcMacAddress         *string
+	SwitchSerialNumber    *string
+	BmcIpAddress          *string
+	NvosMacAddresses      []string
+	NvosPrimaryMacAddress *string
+	NvosIpAddress         *string
+	RackID                *string
+	Name                  *string
+	Manufacturer          *string
+	Model                 *string
+	Description           *string
+	SlotID                *int32
+	TrayIdx               *int32
+	HostID                *int32
+	Labels                map[string]string
+}
+
+// ExpectedSwitchClearInput input parameters for Clear method
+type ExpectedSwitchClearInput struct {
+	ExpectedSwitchID      uuid.UUID
+	BmcIpAddress          bool
+	NvosMacAddresses      bool
+	NvosPrimaryMacAddress bool
+	NvosIpAddress         bool
+	RackID                bool
+	Name                  bool
+	Manufacturer          bool
+	Model                 bool
+	Description           bool
+	SlotID                bool
+	TrayIdx               bool
+	HostID                bool
+	Labels                bool
+}
+
+// ExpectedSwitchFilterInput filtering options for GetAll method
+type ExpectedSwitchFilterInput struct {
+	ExpectedSwitchIDs []uuid.UUID
+	// ExcludeExpectedSwitchIDs drops the given switches from the result set
+	ExcludeExpectedSwitchIDs []uuid.UUID
+	SiteIDs                  []uuid.UUID
+	BmcMacAddresses          []string
+	// NvosMacAddresses matches switches whose NVOS MAC list contains any of the
+	// given addresses. Comparison ignores case and separator style since those
+	// spellings refer to the same interface.
+	NvosMacAddresses    []string
+	SwitchSerialNumbers []string
+	SearchQuery         *string
+}
+
+var _ bun.BeforeAppendModelHook = (*ExpectedSwitch)(nil)
+
+// BeforeAppendModel is a hook that is called before the model is appended to the query
+func (es *ExpectedSwitch) BeforeAppendModel(ctx context.Context, query bun.Query) error {
+	switch query.(type) {
+	case *bun.InsertQuery:
+		es.Created = db.GetCurTime()
+		es.Updated = db.GetCurTime()
+	case *bun.UpdateQuery:
+		es.Updated = db.GetCurTime()
+	}
+	return nil
+}
+
+var _ bun.BeforeCreateTableHook = (*ExpectedSwitch)(nil)
+
+// BeforeCreateTable is a hook that is called before the table is created
+// This is only used in tests
+func (es *ExpectedSwitch) BeforeCreateTable(ctx context.Context, query *bun.CreateTableQuery) error {
+	query.ForeignKey(`("site_id") REFERENCES "site" ("id")`)
+	return nil
+}
+
+// ExpectedSwitchDAO is an interface for interacting with the ExpectedSwitch model
+type ExpectedSwitchDAO interface {
+	// Create used to create new row
+	Create(ctx context.Context, tx *db.Tx, input ExpectedSwitchCreateInput) (*ExpectedSwitch, error)
+	// CreateMultiple creates multiple rows in input order
+	CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedSwitchCreateInput) ([]ExpectedSwitch, error)
+	// Update used to update row
+	Update(ctx context.Context, tx *db.Tx, input ExpectedSwitchUpdateInput) (*ExpectedSwitch, error)
+	// Delete used to delete row
+	Delete(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID) error
+	// DeleteIfUnchanged deletes only the version observed by inventory reconciliation.
+	// It returns false if the row changed or no longer exists.
+	DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID, updated time.Time) (bool, error)
+	// DeleteAll deletes all rows matching a required filter
+	DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) error
+	// ReplaceAll replaces all rows matching a required filter
+	ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput, inputs []ExpectedSwitchCreateInput) ([]ExpectedSwitch, error)
+	// Clear used to clear fields in the row
+	Clear(ctx context.Context, tx *db.Tx, input ExpectedSwitchClearInput) (*ExpectedSwitch, error)
+	// GetAll returns all the rows based on the filter and page inputs
+	GetAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedSwitch, int, error)
+	// Get returns row for specified ID
+	Get(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedSwitch, error)
+}
+
+// ExpectedSwitchSQLDAO is an implementation of the ExpectedSwitchDAO interface
+type ExpectedSwitchSQLDAO struct {
+	dbSession *db.Session
+
+	ExpectedSwitchDAO
+}
+
+// Create creates a new ExpectedSwitch from the given parameters
+// The returned ExpectedSwitch will not have any related structs filled in.
+// Since there are 2 operations (INSERT, SELECT), it is required that
+// this library call happens within a transaction
+func (essd ExpectedSwitchSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedSwitchCreateInput) (_ *ExpectedSwitch, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.Create")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
+
+	es := ExpectedSwitch{
+		ID:                    input.ExpectedSwitchID,
+		SiteID:                input.SiteID,
+		BmcMacAddress:         input.BmcMacAddress,
+		SwitchSerialNumber:    input.SwitchSerialNumber,
+		BmcIpAddress:          input.BmcIpAddress,
+		NvosMacAddresses:      input.NvosMacAddresses,
+		NvosPrimaryMacAddress: input.NvosPrimaryMacAddress,
+		NvosIpAddress:         input.NvosIpAddress,
+		RackID:                input.RackID,
+		Name:                  input.Name,
+		Manufacturer:          input.Manufacturer,
+		Model:                 input.Model,
+		Description:           input.Description,
+		SlotID:                input.SlotID,
+		TrayIdx:               input.TrayIdx,
+		HostID:                input.HostID,
+		Labels:                input.Labels,
+		CreatedBy:             input.CreatedBy,
+	}
+	// Add tracing attributes
+	cotel.SetAttribute(expectedSwitchDAOSpan, attribute.String("id", es.ID.String()))
+
+	_, err := db.GetIDB(tx, essd.dbSession).NewInsert().Model(&es).Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fetch the created expected switch
+	var result ExpectedSwitch
+	err = db.GetIDB(tx, essd.dbSession).NewSelect().Model(&result).Where("es.id = ?", es.ID).Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+// CreateMultiple creates ExpectedSwitches in input order in the caller's
+// transaction.
+func (essd ExpectedSwitchSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedSwitchCreateInput) (_ []ExpectedSwitch, retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "ExpectedSwitchDAO.CreateMultiple")
+	defer func() { cotel.EndSpan(span, retErr) }()
+	cotel.SetAttribute(span, attribute.Int("batch_size", len(inputs)))
+
+	if len(inputs) == 0 {
+		return []ExpectedSwitch{}, nil
+	}
+
+	expectedSwitches := make([]ExpectedSwitch, 0, len(inputs))
+	ids := make([]uuid.UUID, 0, len(inputs))
+	for _, input := range inputs {
+		expectedSwitches = append(expectedSwitches, ExpectedSwitch{
+			ID:                    input.ExpectedSwitchID,
+			SiteID:                input.SiteID,
+			BmcMacAddress:         input.BmcMacAddress,
+			SwitchSerialNumber:    input.SwitchSerialNumber,
+			BmcIpAddress:          input.BmcIpAddress,
+			NvosMacAddresses:      input.NvosMacAddresses,
+			NvosPrimaryMacAddress: input.NvosPrimaryMacAddress,
+			NvosIpAddress:         input.NvosIpAddress,
+			RackID:                input.RackID,
+			Name:                  input.Name,
+			Manufacturer:          input.Manufacturer,
+			Model:                 input.Model,
+			Description:           input.Description,
+			SlotID:                input.SlotID,
+			TrayIdx:               input.TrayIdx,
+			HostID:                input.HostID,
+			Labels:                input.Labels,
+			CreatedBy:             input.CreatedBy,
+		})
+		ids = append(ids, input.ExpectedSwitchID)
+	}
+	_, err := db.GetIDB(tx, essd.dbSession).NewInsert().Model(&expectedSwitches).Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var result []ExpectedSwitch
+	err = db.GetIDB(tx, essd.dbSession).NewSelect().Model(&result).Where("es.id IN (?)", bun.In(ids)).Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(result) != len(ids) {
+		return nil, fmt.Errorf("unexpected result count: got %d, expected %d", len(result), len(ids))
+	}
+	idToIndex := make(map[uuid.UUID]int, len(ids))
+	for i, id := range ids {
+		idToIndex[id] = i
+	}
+	sorted := make([]ExpectedSwitch, len(result))
+	for _, item := range result {
+		index, ok := idToIndex[item.ID]
+		if !ok {
+			return nil, fmt.Errorf("unexpected ExpectedSwitch ID returned: %s", item.ID)
+		}
+		sorted[index] = item
+	}
+	return sorted, nil
+}
+
+// Get returns an ExpectedSwitch by ID
+// returns db.ErrDoesNotExist error if the record is not found
+func (essd ExpectedSwitchSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID, includeRelations []string, forUpdate bool) (_ *ExpectedSwitch, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.Get")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedSwitchDAOSpan, attribute.String("id", expectedSwitchID.String()))
+
+	es := &ExpectedSwitch{}
+
+	query := db.GetIDB(tx, essd.dbSession).NewSelect().Model(es).Where("es.id = ?", expectedSwitchID)
+
+	if forUpdate {
+		query = query.For("UPDATE")
+	}
+
+	for _, relation := range includeRelations {
+		query = query.Relation(relation)
+	}
+
+	err := query.Scan(ctx)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, db.ErrDoesNotExist
+		}
+		return nil, err
+	}
+
+	return es, nil
+}
+
+// setQueryWithFilter populates the lookup query based on specified filter
+func (essd ExpectedSwitchSQLDAO) setQueryWithFilter(filter ExpectedSwitchFilterInput, query *bun.SelectQuery, expectedSwitchDAOSpan otrace.Span) (*bun.SelectQuery, error) {
+	if filter.SiteIDs != nil {
+		query = query.Where("es.site_id IN (?)", bun.In(filter.SiteIDs))
+	}
+
+	if filter.ExpectedSwitchIDs != nil {
+		query = query.Where("es.id IN (?)", bun.In(filter.ExpectedSwitchIDs))
+	}
+
+	if len(filter.ExcludeExpectedSwitchIDs) > 0 {
+		query = query.Where("es.id NOT IN (?)", bun.In(filter.ExcludeExpectedSwitchIDs))
+	}
+
+	if filter.BmcMacAddresses != nil {
+		query = query.Where("es.bmc_mac_address IN (?)", bun.In(filter.BmcMacAddresses))
+	}
+
+	if len(filter.NvosMacAddresses) > 0 {
+		normalized := make([]string, 0, len(filter.NvosMacAddresses))
+		for _, mac := range filter.NvosMacAddresses {
+			normalized = append(normalized, NormalizeMacAddress(mac))
+		}
+		query = query.Where("EXISTS (SELECT 1 FROM unnest(es.nvos_mac_addresses) AS m(mac) WHERE lower(replace(m.mac, '-', ':')) IN (?))", bun.In(normalized))
+	}
+
+	if filter.SwitchSerialNumbers != nil {
+		query = query.Where("es.switch_serial_number IN (?)", bun.In(filter.SwitchSerialNumbers))
+	}
+
+	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
+	if ok {
+		query = query.WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			return q.
+				Where("to_tsvector('english', (coalesce(es.bmc_mac_address, ' ') || ' ' || coalesce(es.switch_serial_number, ' ') || ' ' || coalesce(es.labels::text, ' '))) @@ to_tsquery('english', ?)", *searchTokens).
+				WhereOr("es.bmc_mac_address ILIKE ?", "%"+searchQuery+"%").
+				WhereOr("es.switch_serial_number ILIKE ?", "%"+searchQuery+"%").
+				WhereOr("es.labels::text ILIKE ?", "%"+searchQuery+"%").
+				WhereOr("es.id::text ILIKE ?", "%"+searchQuery+"%").
+				WhereOr("es.site_id::text ILIKE ?", "%"+searchQuery+"%")
+		})
+		cotel.SetAttribute(expectedSwitchDAOSpan, attribute.String("search_query", searchQuery))
+	}
+
+	return query, nil
+}
+
+// GetAll returns all ExpectedSwitches based on the filter and paging
+// Errors are returned only when there is a db related error
+// If records not found, then error is nil, but length of returned slice is 0
+// If orderBy is nil, then records are ordered by column specified in ExpectedSwitchOrderByDefault in ascending order
+func (essd ExpectedSwitchSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput, page paginator.PageInput, includeRelations []string) (_ []ExpectedSwitch, _ int, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.GetAll")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
+
+	var expectedSwitches []ExpectedSwitch
+
+	if filter.ExpectedSwitchIDs != nil && len(filter.ExpectedSwitchIDs) == 0 {
+		return expectedSwitches, 0, nil
+	}
+
+	query := db.GetIDB(tx, essd.dbSession).NewSelect().Model(&expectedSwitches)
+
+	query, err := essd.setQueryWithFilter(filter, query, expectedSwitchDAOSpan)
+	if err != nil {
+		return expectedSwitches, 0, err
+	}
+
+	// Apply relations if requested
+	for _, relation := range includeRelations {
+		query = query.Relation(relation)
+	}
+
+	// If no order is passed, set default order to make sure objects return always in the same order and pagination works properly
+	if page.OrderBy == nil {
+		page.OrderBy = paginator.NewDefaultOrderBy(ExpectedSwitchOrderByDefault)
+	}
+
+	expectedSwitchPaginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, ExpectedSwitchOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	err = expectedSwitchPaginator.Query.Limit(expectedSwitchPaginator.Limit).Offset(expectedSwitchPaginator.Offset).Scan(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return expectedSwitches, expectedSwitchPaginator.Total, nil
+}
+
+// Update updates specified fields of an existing ExpectedSwitch
+// The updated fields are assumed to be set to non-null values
+// For setting to null values, use: Clear
+// since there are 2 operations (UPDATE, SELECT), it is required that
+// this library call happens within a transaction
+func (essd ExpectedSwitchSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedSwitchUpdateInput) (_ *ExpectedSwitch, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.Update")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedSwitchDAOSpan, attribute.String("id", input.ExpectedSwitchID.String()))
+
+	es := &ExpectedSwitch{
+		ID: input.ExpectedSwitchID,
+	}
+
+	columnsSet := make(map[string]bool)
+
+	if input.BmcMacAddress != nil {
+		es.BmcMacAddress = *input.BmcMacAddress
+		columnsSet["bmc_mac_address"] = true
+	}
+	if input.SwitchSerialNumber != nil {
+		es.SwitchSerialNumber = *input.SwitchSerialNumber
+		columnsSet["switch_serial_number"] = true
+	}
+	if input.BmcIpAddress != nil {
+		es.BmcIpAddress = input.BmcIpAddress
+		columnsSet["bmc_ip_address"] = true
+	}
+	if input.NvosMacAddresses != nil {
+		es.NvosMacAddresses = input.NvosMacAddresses
+		columnsSet["nvos_mac_addresses"] = true
+	}
+	if input.NvosPrimaryMacAddress != nil {
+		es.NvosPrimaryMacAddress = input.NvosPrimaryMacAddress
+		columnsSet["nvos_primary_mac_address"] = true
+	}
+	if input.NvosIpAddress != nil {
+		es.NvosIpAddress = input.NvosIpAddress
+		columnsSet["nvos_ip_address"] = true
+	}
+	if input.RackID != nil {
+		es.RackID = input.RackID
+		columnsSet["rack_id"] = true
+	}
+	if input.Name != nil {
+		es.Name = input.Name
+		columnsSet["name"] = true
+	}
+	if input.Manufacturer != nil {
+		es.Manufacturer = input.Manufacturer
+		columnsSet["manufacturer"] = true
+	}
+	if input.Model != nil {
+		es.Model = input.Model
+		columnsSet["model"] = true
+	}
+	if input.Description != nil {
+		es.Description = input.Description
+		columnsSet["description"] = true
+	}
+	if input.SlotID != nil {
+		es.SlotID = input.SlotID
+		columnsSet["slot_id"] = true
+	}
+	if input.TrayIdx != nil {
+		es.TrayIdx = input.TrayIdx
+		columnsSet["tray_idx"] = true
+	}
+	if input.HostID != nil {
+		es.HostID = input.HostID
+		columnsSet["host_id"] = true
+	}
+	if input.Labels != nil {
+		es.Labels = input.Labels
+		columnsSet["labels"] = true
+	}
+
+	// Build column list
+	columns := make([]string, 0, len(columnsSet)+1)
+	for col := range columnsSet {
+		columns = append(columns, col)
+	}
+	columns = append(columns, "updated")
+	// Add tracing attributes
+	cotel.SetAttribute(expectedSwitchDAOSpan, attribute.String("columns_updated", strings.Join(columns, ",")))
+
+	// Execute update
+	_, err := db.GetIDB(tx, essd.dbSession).NewUpdate().
+		Model(es).
+		Column(columns...).
+		Where("id = ?", input.ExpectedSwitchID).
+		Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fetch the updated expected switch
+	var result ExpectedSwitch
+	err = db.GetIDB(tx, essd.dbSession).NewSelect().Model(&result).Where("es.id = ?", input.ExpectedSwitchID).Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return &result, nil
+}
+
+// Clear sets parameters of an existing ExpectedSwitch to null values in db
+func (essd ExpectedSwitchSQLDAO) Clear(ctx context.Context, tx *db.Tx, input ExpectedSwitchClearInput) (_ *ExpectedSwitch, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.Clear")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
+
+	es := &ExpectedSwitch{
+		ID: input.ExpectedSwitchID,
+	}
+
+	updatedFields := []string{}
+	if input.BmcIpAddress {
+		es.BmcIpAddress = nil
+		updatedFields = append(updatedFields, "bmc_ip_address")
+	}
+	if input.NvosMacAddresses {
+		es.NvosMacAddresses = nil
+		updatedFields = append(updatedFields, "nvos_mac_addresses")
+	}
+	if input.NvosPrimaryMacAddress {
+		es.NvosPrimaryMacAddress = nil
+		updatedFields = append(updatedFields, "nvos_primary_mac_address")
+	}
+	if input.NvosIpAddress {
+		es.NvosIpAddress = nil
+		updatedFields = append(updatedFields, "nvos_ip_address")
+	}
+	if input.RackID {
+		es.RackID = nil
+		updatedFields = append(updatedFields, "rack_id")
+	}
+	if input.Name {
+		es.Name = nil
+		updatedFields = append(updatedFields, "name")
+	}
+	if input.Manufacturer {
+		es.Manufacturer = nil
+		updatedFields = append(updatedFields, "manufacturer")
+	}
+	if input.Model {
+		es.Model = nil
+		updatedFields = append(updatedFields, "model")
+	}
+	if input.Description {
+		es.Description = nil
+		updatedFields = append(updatedFields, "description")
+	}
+	if input.SlotID {
+		es.SlotID = nil
+		updatedFields = append(updatedFields, "slot_id")
+	}
+	if input.TrayIdx {
+		es.TrayIdx = nil
+		updatedFields = append(updatedFields, "tray_idx")
+	}
+	if input.HostID {
+		es.HostID = nil
+		updatedFields = append(updatedFields, "host_id")
+	}
+	if input.Labels {
+		es.Labels = nil
+		updatedFields = append(updatedFields, "labels")
+	}
+
+	if len(updatedFields) > 0 {
+		updatedFields = append(updatedFields, "updated")
+
+		_, err := db.GetIDB(tx, essd.dbSession).NewUpdate().Model(es).Column(updatedFields...).Where("id = ?", input.ExpectedSwitchID).Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	nv, err := essd.Get(ctx, tx, input.ExpectedSwitchID, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	return nv, nil
+}
+
+// Delete deletes an ExpectedSwitch by ID
+// Error is returned only if there is a db error
+func (essd ExpectedSwitchSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID) (retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.Delete")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedSwitchDAOSpan, attribute.String("id", expectedSwitchID.String()))
+
+	es := &ExpectedSwitch{
+		ID: expectedSwitchID,
+	}
+
+	var err error
+
+	_, err = db.GetIDB(tx, essd.dbSession).NewDelete().Model(es).Where("id = ?", expectedSwitchID).Exec(ctx)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// DeleteIfUnchanged deletes a row only if its Updated timestamp matches updated.
+// It returns false if the row changed or no longer exists.
+func (essd ExpectedSwitchSQLDAO) DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID, updated time.Time) (_ bool, retErr error) {
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.DeleteIfUnchanged")
+	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedSwitchDAOSpan, attribute.String("id", expectedSwitchID.String()))
+
+	result, err := db.GetIDB(tx, essd.dbSession).NewDelete().Model((*ExpectedSwitch)(nil)).
+		Where("id = ?", expectedSwitchID).Where("updated = ?", updated).Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
+}
+
+// DeleteAll deletes all ExpectedSwitches matching the supplied filter. An
+// empty filter is rejected so callers cannot accidentally wipe every Site.
+func (essd ExpectedSwitchSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) (retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "ExpectedSwitchDAO.DeleteAll")
+	defer func() { cotel.EndSpan(span, retErr) }()
+
+	query := db.GetIDB(tx, essd.dbSession).NewDelete().Model((*ExpectedSwitch)(nil))
+	hasFilter := false
+	if filter.SiteIDs != nil {
+		query = query.Where("site_id IN (?)", bun.In(filter.SiteIDs))
+		hasFilter = true
+	}
+	if filter.ExpectedSwitchIDs != nil {
+		query = query.Where("id IN (?)", bun.In(filter.ExpectedSwitchIDs))
+		hasFilter = true
+	}
+	if filter.BmcMacAddresses != nil {
+		query = query.Where("bmc_mac_address IN (?)", bun.In(filter.BmcMacAddresses))
+		hasFilter = true
+	}
+	if filter.SwitchSerialNumbers != nil {
+		query = query.Where("switch_serial_number IN (?)", bun.In(filter.SwitchSerialNumbers))
+		hasFilter = true
+	}
+	if !hasFilter {
+		return db.ErrInvalidParams
+	}
+
+	_, err := query.Exec(ctx)
+	return err
+}
+
+// ReplaceAll atomically deletes all matching ExpectedSwitches and creates the
+// supplied replacement set in the caller's transaction.
+func (essd ExpectedSwitchSQLDAO) ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput, inputs []ExpectedSwitchCreateInput) (_ []ExpectedSwitch, retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "ExpectedSwitchDAO.ReplaceAll")
+	defer func() { cotel.EndSpan(span, retErr) }()
+	cotel.SetAttribute(span, attribute.Int("batch_size", len(inputs)))
+
+	err := essd.DeleteAll(ctx, tx, filter)
+	if err != nil {
+		return nil, err
+	}
+	if len(inputs) == 0 {
+		return []ExpectedSwitch{}, nil
+	}
+	return essd.CreateMultiple(ctx, tx, inputs)
+}
+
+// NewExpectedSwitchDAO returns a new ExpectedSwitchDAO
+func NewExpectedSwitchDAO(dbSession *db.Session) ExpectedSwitchDAO {
+	return &ExpectedSwitchSQLDAO{
+		dbSession: dbSession,
+	}
+}

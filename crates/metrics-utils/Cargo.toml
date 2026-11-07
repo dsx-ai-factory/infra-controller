@@ -1,0 +1,18 @@
+[package]
+name = "carbide-metrics-utils"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+opentelemetry_sdk = { workspace = true, features = [
+  "spec_unstable_metrics_views",
+] }
+glob = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

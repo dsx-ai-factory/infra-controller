@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}SKU Detail{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>SKU Detail</h1>
+
+<table class="detailsview">
+	<tr><th>ID</th><td>{{ id }}</td></tr>
+	<tr><th>Description</th><td>{{ description }}</td></tr>
+	<tr><th>Created</th><td>{{ created }}</td></tr>
+	<tr>
+		<th>Associated Machines</th>
+		<td>
+			{% for m in associated_machines %}
+			{% if !loop.first %}<br>{% endif %}
+			{{ m|machine_id_link|safe }}
+			{% endfor %}
+		</td>
+	</tr>
+	<tr>
+		<th>SKU definition</th>
+		<td>
+			<div style="overflow: auto;">
+				<pre><code>{{ components_json }}</code></pre>
+			</div>
+		</td>
+	</tr>
+</table>
+
+{% endblock %}

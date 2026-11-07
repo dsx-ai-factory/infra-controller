@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block title %}IPAM / Overlay / {{ vpc_prefix }}{% endblock %}
+
+{% block content %}
+<h1>IPAM &rsaquo; <a href="/admin/ipam/overlay">Overlay Networks</a> &rsaquo; {{ vpc_prefix }}</h1>
+
+<table class="detailsview">
+	<tr><td>VPC Prefix</td><td>{{ vpc_prefix }}</td></tr>
+	<tr><td>Name</td><td>{{ vpc_prefix_name }}</td></tr>
+	<tr><td>VPC</td><td><a href="/admin/vpc/{{ vpc_id }}">{{ vpc_name }}</a></td></tr>
+	<tr><td>VNI</td><td>{{ vni }}</td></tr>
+</table>
+
+{% if let Some(lifecycle_detail) = lifecycle_detail %}
+{{ lifecycle_detail|safe }}
+{% else %}
+<h2>Lifecycle</h2>
+<table class="detailsview">
+	<tr><th>State</th><td>Unavailable</td></tr>
+</table>
+{% endif %}
+
+<h2>State History</h2>
+{% if let Some(state_history_load_error) = state_history_load_error %}
+<p>Error loading state-history records: {{ state_history_load_error }}</p>
+{% else if state_history.is_empty() %}
+<p>No state-history records.</p>
+{% else %}
+<table class="detailsview">
+	<thead>
+		<tr>
+			<th>Version</th>
+			<th>State</th>
+		</tr>
+	</thead>
+	<tbody>
+	{% for record in state_history %}
+		<tr>
+			<td>{{ record.version|config_version|safe }}</td>
+			<td><div style="overflow: auto;"><pre><code>{{ record.state|pretty_json }}</code></pre></div></td>
+		</tr>
+	{% endfor %}
+	</tbody>
+</table>
+{% endif %}
+
+<h2>Segments</h2>
+<p>{{ segments.len() }} segment(s) carved from this prefix.</p>
+
+<table class="sortable overview">
+	<thead>
+		<tr>
+			<th>Name</th>
+			<th>Type</th>
+			<th>Prefix</th>
+			<th>Gateway</th>
+			<th>MTU</th>
+			<th>State</th>
+			<th>Allocated IPs</th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for seg in segments %}
+			<tr>
+				<td><a href="/admin/ipam/overlay/segment/{{ seg.id }}">{{ seg.name }}</a></td>
+				<td>{{ seg.segment_type }}</td>
+				<td><a href="/admin/ipam/overlay/segment/{{ seg.id }}">{{ seg.prefix }}</a></td>
+				<td>{{ seg.gateway }}</td>
+				<td>{{ seg.mtu }}</td>
+				<td>{{ seg.state }}</td>
+				<td>{{ seg.ip_count }}</td>
+			</tr>
+		{% endfor %}
+	</tbody>
+</table>
+{% endblock %}

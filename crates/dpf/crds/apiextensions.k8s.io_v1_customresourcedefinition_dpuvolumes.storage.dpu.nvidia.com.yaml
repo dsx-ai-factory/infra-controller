@@ -1,0 +1,321 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+    helm.sh/resource-policy: keep
+  labels:
+    app.kubernetes.io/part-of: dpf-operator-controller-manager
+    dpu.nvidia.com/component: dpf-operator-controller-manager
+  name: dpuvolumes.storage.dpu.nvidia.com
+spec:
+  group: storage.dpu.nvidia.com
+  names:
+    kind: DPUVolume
+    listKind: DPUVolumeList
+    plural: dpuvolumes
+    singular: dpuvolume
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.dpuStoragePolicyName
+      name: DPUStoragePolicyName
+      type: string
+    - jsonPath: .spec.volumeMode
+      name: VolumeMode
+      type: string
+    - jsonPath: .spec.resources.requests.storage
+      name: Size
+      type: string
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: DPUVolume represents a DPUVolume CR.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: DPUVolumeSpec defines the desired state of DPUVolume
+            properties:
+              accessModes:
+                description: |-
+                  Access modes define how the volume can be mounted. These modes are directly passed to the
+                  PersistentVolumeClaim created for the Vendor CSI Plugin selected by the DPUStoragePolicy.
+                items:
+                  type: string
+                maxItems: 3
+                minItems: 1
+                type: array
+                x-kubernetes-validations:
+                - message: 'accessModes must contain only valid PersistentVolumeAccessMode
+                    values: ReadWriteOnce, ReadOnlyMany, ReadWriteMany'
+                  rule: self.all(mode, mode in ['ReadWriteOnce', 'ReadOnlyMany', 'ReadWriteMany'])
+              dpuStoragePolicyName:
+                description: Name of the DPUStoragePolicyName object that will be
+                  used to create the volume.
+                minLength: 1
+                type: string
+              parameters:
+                additionalProperties:
+                  type: string
+                default: {}
+                description: Additional parameters for the volume, these parameters
+                  are merged with the values from the DPUStoragePolicy object.
+                type: object
+              resources:
+                description: |-
+                  Resources represents the storage resources requested for the volume. These resource requirements
+                  are directly passed to the PersistentVolumeClaim created for the Vendor CSI Plugin selected
+                  by the DPUStoragePolicy. Since volume resizing is not supported, modifications to the resource request are prohibited.
+                properties:
+                  limits:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Limits describes the maximum amount of compute resources allowed.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                  requests:
+                    additionalProperties:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                      x-kubernetes-int-or-string: true
+                    description: |-
+                      Requests describes the minimum amount of compute resources required.
+                      If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                      otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                      More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: resource requirements must contain storage resource
+                  rule: has(self.requests) && has(self.requests.storage)
+              volumeMode:
+                default: Filesystem
+                description: |-
+                  Volume mode defines how the volume should be mounted and used. This value is directly passed to the
+                  PersistentVolumeClaim created for the Vendor CSI Plugin selected by the DPUStoragePolicy.
+                enum:
+                - Filesystem
+                - Block
+                type: string
+            required:
+            - accessModes
+            - dpuStoragePolicyName
+            - resources
+            type: object
+            x-kubernetes-validations:
+            - message: dpuStoragePolicy field is immutable
+              rule: self.dpuStoragePolicyName == oldSelf.dpuStoragePolicyName
+            - message: parameters field is immutable
+              rule: self.parameters == oldSelf.parameters
+            - message: accessModes field is immutable
+              rule: self.accessModes == oldSelf.accessModes
+            - message: resources field is immutable
+              rule: self.resources == oldSelf.resources
+            - message: volumeMode field is immutable
+              rule: self.volumeMode == oldSelf.volumeMode
+          status:
+            description: DPUVolumeStatus defines the observed state of DPUVolume
+            properties:
+              conditions:
+                description: Conditions defines current service state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                description: ObservedGeneration records the Generation observed on
+                  the object the last time it was patched.
+                format: int64
+                type: integer
+              phase:
+                description: Phase of the volume
+                enum:
+                - Pending
+                - Bound
+                type: string
+              state:
+                description: State of the volume. This field is managed by the controller.
+                  User usually do not need to set fields from this struct.
+                properties:
+                  csiDriverName:
+                    description: CSIDriverName contains the name of the CSI driver
+                      in the DPU cluster that was selected for volume creation.
+                    type: string
+                  dpuCluster:
+                    description: DPUCluster contains the reference to the DPUCluster
+                      object that was selected for volume creation.
+                    properties:
+                      name:
+                        description: Name specifies the name of the referenced object
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: Namespace specifies the namespace where the referenced
+                          object exists
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    - namespace
+                    type: object
+                  parameters:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Parameters contains the final set of parameters for volume creation, computed by merging
+                      the parameters from the DPUStoragePolicy object with user-provided parameters.
+                    type: object
+                  persistentVolumeClaimRef:
+                    description: PersistentVolumeClaimRef contains the reference to
+                      the PersistentVolumeClaim object in the DPU cluster that was
+                      created for the volume.
+                    properties:
+                      name:
+                        description: Name specifies the name of the referenced object
+                        minLength: 1
+                        type: string
+                      namespace:
+                        description: Namespace specifies the namespace where the referenced
+                          object exists
+                        minLength: 1
+                        type: string
+                    required:
+                    - name
+                    - namespace
+                    type: object
+                  selectedDPUStorageVendorName:
+                    description: SelectedDPUStorageVendorName contains the name of
+                      the DPUStorageVendor object that was selected for volume creation.
+                    type: string
+                  storageClassName:
+                    description: StorageClassName contains the name of the storage
+                      class in the DPU cluster that was selected for volume creation.
+                    type: string
+                  storageVendorPluginName:
+                    description: StorageVendorPluginName contains the name of the
+                      storage vendor plugin deployed on the DPU cluster that was selected
+                      for volume creation.
+                    type: string
+                  volumeInfo:
+                    description: VolumeInfo contains a subset of fields from the PersistentVolume
+                      object created in the DPU cluster
+                    properties:
+                      accessModes:
+                        description: Actual access modes of the volume in the DPU
+                          cluster
+                        items:
+                          type: string
+                        type: array
+                      capacity:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: Actual capacity of the volume in the DPU cluster
+                        type: object
+                      volumeAttributes:
+                        additionalProperties:
+                          type: string
+                        description: |-
+                          VolumeAttributes from the PersistentVolume object in the DPU cluster
+                          This field usually contains parameters returned by the Vendor CSI plugin on volume creation.
+                        type: object
+                      volumeMode:
+                        description: Actual volume mode of the volume in the DPU cluster
+                        type: string
+                      volumeName:
+                        description: VolumeName contains the name of the PersistentVolume
+                          object in the DPU cluster
+                        type: string
+                    type: object
+                type: object
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}InfiniBand Partition Detail{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>InfiniBand Partition Detail</h1>
+
+<h3>Config</h3>
+<table class="detailsview">
+	<tr><th>ID</th><td>{{ id }}</td></tr>
+	<tr><th>Tenant</th><td><a href="/admin/tenant/{{ tenant_organization_id }}">{{ tenant_organization_id }}</a></td></tr>
+	<tr><th>Name</th><td>{{ metadata.name }}</td></tr>
+	<tr><th>Config Version</th><td>{{ config_version|config_version|safe }}</td></tr>
+</table>
+
+<h3>Status</h3>
+<table class="detailsview">
+			<tr><th>State</th><td>{{ state_display|safe }}</td></tr>
+	{{ state_sla_detail|safe }}
+	<tr><th>Pkey</th><td>{{ pkey }}</td></tr>
+	<tr><th>Service Level</th><td>{{ service_level }}</td></tr>
+	<tr><th>Rate Limit</th><td>{{ rate_limit }}</td></tr>
+	<tr><th>MTU</th><td>{{ mtu }}</td></tr>
+	<tr><th>Enable Sharp</th><td>{{ enable_sharp }}</td></tr>
+</table>
+
+<h3>Metadata</h3>
+<table class="detailsview">
+	<tr><th>Name</th><td>{{ metadata.name }}</td></tr>
+	<tr><th>Description</th><td>{{ metadata.description }}</td></tr>
+	<tr><th>Labels</th><td>{{ metadata.labels|label_list_fmt(false)|safe }}</td></tr>
+</table>
+
+{% endblock %}

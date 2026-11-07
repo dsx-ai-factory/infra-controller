@@ -1,0 +1,44 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+#
+# forge-dpu-agent needs 'ipmitool user list 1' to work.
+# The integration tests puts this path, hence this script, on the front of the PATH to ensure it does.
+
+USER_LIST='1,root,false,true,true,ADMINISTRATOR
+2,forge_admin,true,true,true,ADMINISTRATOR
+3,,true,false,false,NO ACCESS
+4,,true,false,false,NO ACCESS
+5,,true,false,false,NO ACCESS
+6,,true,false,false,NO ACCESS
+7,,true,false,false,NO ACCESS
+8,,true,false,false,NO ACCESS
+9,,true,false,false,NO ACCESS
+10,,true,false,false,NO ACCESS
+11,,true,false,false,NO ACCESS
+12,,true,false,false,NO ACCESS
+13,,true,false,false,NO ACCESS
+14,,true,false,false,NO ACCESS
+15,,true,false,false,NO ACCESS
+'
+
+case "$1" in
+	# ipmitool user list 1 -c
+	"user" )
+		printf "$USER_LIST"
+		;;
+esac
+

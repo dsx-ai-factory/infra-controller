@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# nico-rest-api Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: nico-rest-api
+  labels:
+    app: nico-rest-api
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8388
+      targetPort: 8388
+      name: http
+    - port: 9360
+      targetPort: 9360
+      name: metrics
+  selector:
+    app: nico-rest-api
+---
+# NodePort service for API access from host
+apiVersion: v1
+kind: Service
+metadata:
+  name: nico-rest-api-nodeport
+  labels:
+    app: nico-rest-api
+spec:
+  type: NodePort
+  ports:
+    - port: 8388
+      targetPort: 8388
+      nodePort: 30388
+      name: http
+  selector:
+    app: nico-rest-api
+

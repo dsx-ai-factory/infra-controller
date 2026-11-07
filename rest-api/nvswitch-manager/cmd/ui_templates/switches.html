@@ -1,0 +1,766 @@
+{{define "switches.html"}}
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">Registered NV-Switches ({{len .Switches}}{{if .StatusFilter}} - filtered{{end}}{{if and .RackFilter (ne .RackFilter "_none_")}} - Rack: {{.RackFilter}}{{end}})</h2>
+        <div style="display: flex; gap: 8px;">
+            <button class="btn" id="batchUpdateBtn" onclick="openBatchUpdateModal()" style="display: none;">Update Selected (<span id="selectedCount">0</span>)</button>
+            {{if and .RackFilter (ne .RackFilter "_none_")}}
+            <button class="btn btn-primary" onclick="selectAllAndOpenBatchUpdate()">Update Rack "{{.RackFilter}}"</button>
+            {{end}}
+            <button class="btn btn-primary" onclick="openModal('registerModal')">+ Register Switches</button>
+            <button class="btn" onclick="openModal('importModal')">Import JSON</button>
+            <button class="btn" onclick="location.reload()">Refresh</button>
+        </div>
+    </div>
+    
+    <!-- Filters -->
+    <form class="filters" method="get" action="/switches" id="filterForm">
+        <input type="hidden" name="sort" value="{{.SortBy}}">
+        
+        <div class="filter-group">
+            <label>Update Status:</label>
+            <select name="status" onchange="this.form.submit()">
+                <option value="">All switches</option>
+                <option value="in_progress" {{if eq .StatusFilter "in_progress"}}selected{{end}}>▶ In Progress</option>
+                <option value="queued" {{if eq .StatusFilter "queued"}}selected{{end}}>⏳ Queued</option>
+                <option value="completed" {{if eq .StatusFilter "completed"}}selected{{end}}>✓ Completed</option>
+                <option value="failed" {{if eq .StatusFilter "failed"}}selected{{end}}>✗ Failed</option>
+                <option value="no_updates" {{if eq .StatusFilter "no_updates"}}selected{{end}}>No Updates</option>
+            </select>
+        </div>
+        
+        <div class="filter-group">
+            <label>Rack:</label>
+            <select name="rack" onchange="this.form.submit()">
+                <option value="">All racks</option>
+                <option value="_none_" {{if eq .RackFilter "_none_"}}selected{{end}}>(No rack assigned)</option>
+                {{range .RackIDs}}
+                <option value="{{.}}" {{if eq $.RackFilter .}}selected{{end}}>{{.}}</option>
+                {{end}}
+            </select>
+        </div>
+    </form>
+    
+    <style>
+        .sortable {
+            cursor: pointer;
+            user-select: none;
+        }
+        .sortable:hover {
+            background: #21262d;
+        }
+        .sortable.sorted {
+            color: #58a6ff;
+        }
+        .sortable::after {
+            content: ' ↕';
+            opacity: 0.3;
+            font-size: 10px;
+        }
+        .sortable.sorted::after {
+            content: ' ↓';
+            opacity: 1;
+        }
+    </style>
+    
+    {{if .Switches}}
+    <table>
+        <thead>
+            <tr>
+                <th style="width: 30px;"><input type="checkbox" id="selectAll" onchange="toggleSelectAll()"></th>
+                <th class="sortable{{if eq .SortBy "uuid"}} sorted{{end}}" onclick="sortBy('uuid')">UUID</th>
+                <th class="sortable{{if eq .SortBy "rack_id"}} sorted{{end}}" onclick="sortBy('rack_id')">Rack ID</th>
+                <th class="sortable{{if eq .SortBy "bmc_ip"}} sorted{{end}}" onclick="sortBy('bmc_ip')">BMC IP</th>
+                <th class="sortable{{if eq .SortBy "nvos_ip"}} sorted{{end}}" onclick="sortBy('nvos_ip')">NVOS IP</th>
+                <th class="sortable{{if eq .SortBy "status"}} sorted{{end}}" onclick="sortBy('status')">Update Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Switches}}
+            <tr>
+                <td><input type="checkbox" class="switch-checkbox" value="{{.Switch.Uuid}}" onchange="updateSelectedCount()"></td>
+                <td class="mono" style="font-size: 12px;">{{.Switch.Uuid}}</td>
+                <td>{{if .Switch.RackId}}{{.Switch.RackId}}{{else}}<span style="color: #6e7681;">-</span>{{end}}</td>
+                <td class="mono">
+                    {{if .Switch.Bmc}}{{formatEndpoint .Switch.Bmc.IpAddress .Switch.Bmc.Port}}{{else}}-{{end}}
+                </td>
+                <td class="mono">
+                    {{if .Switch.Nvos}}{{formatEndpoint .Switch.Nvos.IpAddress .Switch.Nvos.Port}}{{else}}-{{end}}
+                </td>
+                <td>
+                    <a href="/updates?switch={{.Switch.Uuid}}&all=true" style="text-decoration: none;">
+                        {{if .UpdateStatus.StatusClass}}
+                        <span class="status {{.UpdateStatus.StatusClass}}">{{.UpdateStatus.StatusText}}</span>
+                        {{else}}
+                        <span style="color: #6e7681;">{{.UpdateStatus.StatusText}}</span>
+                        {{end}}
+                    </a>
+                </td>
+                <td>
+                    <button class="btn btn-sm" onclick="openUpdateModal('{{.Switch.Uuid}}')">Update</button>
+                    <div style="display:inline-block; position:relative;">
+                        <select class="btn btn-sm btn-danger" onchange="powerControl('{{.Switch.Uuid}}', this.value); this.selectedIndex=0;" style="cursor:pointer; padding: 4px 8px; border-radius: 6px; font-size: 12px;">
+                            <option value="" selected disabled>Power ▾</option>
+                            <option value="On">On</option>
+                            <option value="ForceOn">Force On</option>
+                            <option value="PowerCycle">Power Cycle</option>
+                            <option value="GracefulRestart">Graceful Restart</option>
+                            <option value="ForceRestart">Force Restart</option>
+                            <option value="GracefulShutdown">Graceful Shutdown</option>
+                            <option value="ForceOff">Force Off</option>
+                        </select>
+                    </div>
+                </td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{else}}
+    <div class="empty-state">
+        <p>No switches registered</p>
+        <p style="margin-top: 16px;">
+            <button class="btn btn-primary" onclick="openModal('registerModal')">+ Register Your First Switch</button>
+        </p>
+    </div>
+    {{end}}
+</div>
+
+<!-- Update Modal -->
+<div id="updateModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 class="modal-title">Queue Firmware Update</h3>
+            <button class="modal-close" onclick="closeModal('updateModal')">&times;</button>
+        </div>
+        <form id="updateForm" onsubmit="submitUpdate(event)">
+            <input type="hidden" id="updateSwitchUUID" name="switch_uuid">
+            
+            <div class="form-group">
+                <label class="form-label">Switch UUID</label>
+                <input type="text" id="updateSwitchDisplay" disabled>
+            </div>
+            
+            <div class="form-group">
+                <label class="form-label">Bundle Version</label>
+                <select name="bundle" required>
+                    <option value="">Select bundle...</option>
+                    {{range .Bundles}}
+                    <option value="{{.}}">{{.}}</option>
+                    {{end}}
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label class="form-label">Components (leave empty for all)</label>
+                <div style="display: flex; gap: 16px; margin-top: 8px;">
+                    <label><input type="checkbox" name="comp" value="bmc"> BMC</label>
+                    <label><input type="checkbox" name="comp" value="cpld"> CPLD</label>
+                    <label><input type="checkbox" name="comp" value="bios"> BIOS</label>
+                    <label><input type="checkbox" name="comp" value="nvos"> NVOS</label>
+                </div>
+            </div>
+            
+            <div class="modal-footer">
+                <button type="button" class="btn" onclick="closeModal('updateModal')">Cancel</button>
+                <button type="submit" class="btn btn-primary">Queue Update</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Register Switch Modal -->
+<div id="registerModal" class="modal">
+    <div class="modal-content" style="max-width: 750px; max-height: 80vh; display: flex; flex-direction: column;">
+        <div class="modal-header">
+            <h3 class="modal-title">Register NV-Switches</h3>
+            <button class="modal-close" onclick="closeModal('registerModal')">&times;</button>
+        </div>
+        <p style="padding: 0 16px; font-size: 12px; color: #8b949e;">MAC addresses are autofilled for IPv4. Enter a MAC address for each IPv6 endpoint.</p>
+        <div id="switchEntries" style="overflow-y: auto; flex: 1;">
+            <!-- Switch entries will be added here -->
+        </div>
+        <div style="padding: 12px 16px; border-top: 1px solid #30363d;">
+            <button type="button" class="btn" onclick="addSwitchEntry()">+ Add Another Switch</button>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn" onclick="closeModal('registerModal')">Cancel</button>
+            <button type="button" class="btn btn-primary" onclick="submitBatchRegister()">Register All</button>
+        </div>
+    </div>
+</div>
+
+<!-- Batch Update Modal -->
+<div id="batchUpdateModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3 class="modal-title">Queue Firmware Updates</h3>
+            <button class="modal-close" onclick="closeModal('batchUpdateModal')">&times;</button>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Selected Switches</label>
+            <div id="batchUpdateSwitchList" style="max-height: 150px; overflow-y: auto; background: #0d1117; padding: 8px; border-radius: 6px; font-size: 12px; font-family: monospace;"></div>
+        </div>
+        
+        <div class="form-group">
+            <label class="form-label">Bundle Version</label>
+            <select id="batchBundle" required>
+                <option value="">Select bundle...</option>
+                {{range .Bundles}}
+                <option value="{{.}}">{{.}}</option>
+                {{end}}
+            </select>
+        </div>
+        
+        <div class="form-group">
+            <label class="form-label">Components (leave empty for all)</label>
+            <div style="display: flex; gap: 16px; margin-top: 8px;">
+                <label><input type="checkbox" class="batch-comp" value="bmc"> BMC</label>
+                <label><input type="checkbox" class="batch-comp" value="cpld"> CPLD</label>
+                <label><input type="checkbox" class="batch-comp" value="bios"> BIOS</label>
+                <label><input type="checkbox" class="batch-comp" value="nvos"> NVOS</label>
+            </div>
+        </div>
+        
+        <div id="batchUpdateProgress" style="display: none; margin-top: 16px;">
+            <div style="margin-bottom: 8px;">Progress: <span id="batchProgressText">0/0</span></div>
+            <div style="background: #21262d; border-radius: 4px; height: 8px; overflow: hidden;">
+                <div id="batchProgressBar" style="background: #238636; height: 100%; width: 0%; transition: width 0.3s;"></div>
+            </div>
+            <div id="batchUpdateResults" style="margin-top: 12px; max-height: 200px; overflow-y: auto; font-size: 12px;"></div>
+        </div>
+        
+        <div class="modal-footer">
+            <button type="button" class="btn" onclick="closeModal('batchUpdateModal')">Cancel</button>
+            <button type="button" class="btn btn-primary" id="batchUpdateSubmitBtn" onclick="submitBatchUpdate()">Queue Updates</button>
+        </div>
+    </div>
+</div>
+
+<!-- Import JSON Modal -->
+<div id="importModal" class="modal">
+    <div class="modal-content" style="max-width: 700px;">
+        <div class="modal-header">
+            <h3 class="modal-title">Import Switches from JSON</h3>
+            <button class="modal-close" onclick="closeModal('importModal')">&times;</button>
+        </div>
+        
+        <div class="form-group">
+            <label class="form-label">Upload JSON File</label>
+            <input type="file" id="jsonFileInput" accept=".json" style="margin-top: 8px;">
+        </div>
+        
+        <div class="form-group">
+            <label class="form-label">Or paste JSON directly</label>
+            <textarea id="jsonTextInput" rows="10" placeholder='{"switches": [{"bmc": {"ip": "..."}, "nvos": {"ip": "..."}}, ...]}'
+                style="width: 100%; font-family: monospace; font-size: 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 8px; color: #c9d1d9;"></textarea>
+        </div>
+        
+        <details style="margin-bottom: 16px;">
+            <summary style="cursor: pointer; color: #58a6ff;">JSON Format Reference</summary>
+            <pre style="background: #0d1117; padding: 12px; border-radius: 6px; font-size: 11px; overflow-x: auto; margin-top: 8px;">{
+  "switches": [
+    {
+      "rack_id": "A16",
+      "bmc":  { "ip": "192.168.1.100" },
+      "nvos": { "ip": "192.168.1.101" }
+    },
+    {
+      "rack_id": "A16",
+      "bmc":  { "ip": "192.168.1.102" },
+      "nvos": { "ip": "192.168.1.103" }
+    }
+  ]
+}</pre>
+            <p style="font-size: 12px; color: #8b949e; margin-top: 8px;">
+                Each BMC and NVOS endpoint requires <code>ip</code>. Include <code>mac</code> for IPv6; IPv4 addresses can generate a MAC if omitted.<br>
+                Optional endpoint fields: <code>port</code>, <code>user</code>, <code>password</code>. Each switch can also include <code>rack_id</code>.
+            </p>
+        </details>
+        
+        <div id="importProgress" style="display: none; margin-bottom: 16px;">
+            <div style="margin-bottom: 8px;">Progress: <span id="importProgressText">0/0</span></div>
+            <div style="background: #21262d; border-radius: 4px; height: 8px; overflow: hidden;">
+                <div id="importProgressBar" style="background: #238636; height: 100%; width: 0%; transition: width 0.3s;"></div>
+            </div>
+            <div id="importResults" style="margin-top: 12px; max-height: 150px; overflow-y: auto; font-size: 12px;"></div>
+        </div>
+        
+        <div class="modal-footer">
+            <button type="button" class="btn" onclick="closeModal('importModal')">Cancel</button>
+            <button type="button" class="btn btn-primary" id="importSubmitBtn" onclick="submitJsonImport()">Import</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    let switchEntryCount = 0;
+    
+    // === MAC Address Generation ===
+    // Generates a locally administered MAC address from an IPv4 address
+    // Format: 02:TT:XX:XX:XX:XX where TT is type (00=BMC, 01=NVOS) and XX:XX:XX:XX is IP in hex
+    function generateMacFromIP(ip, type) {
+        if (!ip) return '';
+        const parts = ip.trim().split('.').map(Number);
+        if (parts.length !== 4 || parts.some(p => isNaN(p) || p < 0 || p > 255)) {
+            return ''; // Invalid IP
+        }
+        const typeHex = type === 'nvos' ? '01' : '00';
+        const ipHex = parts.map(p => p.toString(16).padStart(2, '0')).join(':');
+        return `02:${typeHex}:${ipHex}`;
+    }
+    
+    function updateGeneratedMac(entry, type) {
+        const ipInput = entry.querySelector(`.sw-${type}-ip`);
+        const macInput = entry.querySelector(`.sw-${type}-mac`);
+        if (ipInput && macInput) {
+            const mac = generateMacFromIP(ipInput.value, type);
+            // IP edits should update autofill without replacing an entered MAC.
+            if (!macInput.value || macInput.value === macInput.dataset.generatedMac) {
+                macInput.value = mac;
+                macInput.dataset.generatedMac = mac;
+            }
+        }
+    }
+    
+    function sortBy(column) {
+        const form = document.getElementById('filterForm');
+        form.querySelector('input[name="sort"]').value = column;
+        form.submit();
+    }
+    
+    // === Switch Selection for Batch Updates ===
+    function toggleSelectAll() {
+        const selectAll = document.getElementById('selectAll').checked;
+        document.querySelectorAll('.switch-checkbox').forEach(cb => cb.checked = selectAll);
+        updateSelectedCount();
+    }
+    
+    function updateSelectedCount() {
+        const selected = document.querySelectorAll('.switch-checkbox:checked').length;
+        document.getElementById('selectedCount').textContent = selected;
+        document.getElementById('batchUpdateBtn').style.display = selected > 0 ? 'inline-block' : 'none';
+        
+        // Update select all checkbox state
+        const total = document.querySelectorAll('.switch-checkbox').length;
+        const selectAll = document.getElementById('selectAll');
+        selectAll.checked = selected === total && total > 0;
+        selectAll.indeterminate = selected > 0 && selected < total;
+    }
+    
+    function getSelectedSwitchUUIDs() {
+        return Array.from(document.querySelectorAll('.switch-checkbox:checked')).map(cb => cb.value);
+    }
+    
+    // === Batch Update Modal ===
+    function openBatchUpdateModal() {
+        const uuids = getSelectedSwitchUUIDs();
+        if (uuids.length === 0) {
+            showToast('No switches selected', true);
+            return;
+        }
+        
+        document.getElementById('batchUpdateSwitchList').innerHTML = uuids.map(u => `<div>${u}</div>`).join('');
+        document.getElementById('batchBundle').value = '';
+        document.querySelectorAll('.batch-comp').forEach(c => c.checked = false);
+        document.getElementById('batchUpdateProgress').style.display = 'none';
+        document.getElementById('batchUpdateResults').innerHTML = '';
+        document.getElementById('batchUpdateSubmitBtn').disabled = false;
+        openModal('batchUpdateModal');
+    }
+    
+    // Select all switches in the current view and open the batch update modal
+    function selectAllAndOpenBatchUpdate() {
+        document.querySelectorAll('.switch-checkbox').forEach(cb => cb.checked = true);
+        updateSelectedCount();
+        openBatchUpdateModal();
+    }
+    
+    async function submitBatchUpdate() {
+        const uuids = getSelectedSwitchUUIDs();
+        const bundle = document.getElementById('batchBundle').value;
+        if (!bundle) {
+            showToast('Please select a bundle', true);
+            return;
+        }
+        
+        const components = Array.from(document.querySelectorAll('.batch-comp:checked')).map(c => c.value).join(',');
+        
+        // Show progress
+        document.getElementById('batchUpdateProgress').style.display = 'block';
+        document.getElementById('batchUpdateSubmitBtn').disabled = true;
+        const resultsDiv = document.getElementById('batchUpdateResults');
+        resultsDiv.innerHTML = 'Queuing updates...';
+        document.getElementById('batchProgressBar').style.width = '50%';
+        
+        try {
+            const resp = await fetch('/api/queue-update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ switch_uuids: uuids, bundle, components })
+            });
+            
+            document.getElementById('batchProgressBar').style.width = '100%';
+            document.getElementById('batchProgressText').textContent = `${uuids.length}/${uuids.length}`;
+            
+            if (resp.ok) {
+                const result = await resp.json();
+                resultsDiv.innerHTML = '';
+                
+                let succeeded = 0, failed = 0;
+                for (const r of (result.results || [])) {
+                    // switchUuid is camelCase from protobuf JSON
+                    const shortId = (r.switchUuid || r.switch_uuid)?.substring(0, 8) || 'unknown';
+                    // Success if updates array exists (status=0 is omitted in protobuf3 JSON)
+                    if (r.updates && r.updates.length > 0) {
+                        succeeded++;
+                        resultsDiv.innerHTML += `<div style="color: #3fb950;">✓ ${shortId}... queued (${r.updates.length} updates)</div>`;
+                    } else if (!r.status && !r.error) {
+                        // Also treat as success if no error (status 0 is default/omitted)
+                        succeeded++;
+                        resultsDiv.innerHTML += `<div style="color: #3fb950;">✓ ${shortId}... queued</div>`;
+                    } else {
+                        failed++;
+                        resultsDiv.innerHTML += `<div style="color: #f85149;">✗ ${shortId}... ${r.error || 'Unknown error'}</div>`;
+                    }
+                }
+                
+                showToast(`Batch complete: ${succeeded} succeeded, ${failed} failed`);
+            } else {
+                const text = await resp.text();
+                resultsDiv.innerHTML = `<div style="color: #f85149;">Failed: ${text}</div>`;
+                showToast('Queue failed: ' + text, true);
+            }
+        } catch (err) {
+            resultsDiv.innerHTML = `<div style="color: #f85149;">Error: ${err.message}</div>`;
+            showToast('Error: ' + err.message, true);
+        }
+        
+        document.getElementById('batchUpdateSubmitBtn').disabled = false;
+        document.getElementById('batchUpdateSubmitBtn').textContent = 'Done';
+        document.getElementById('batchUpdateSubmitBtn').onclick = () => {
+            closeModal('batchUpdateModal');
+            location.reload();
+        };
+    }
+    
+    // === Single Switch Update Modal ===
+    function openUpdateModal(uuid) {
+        document.getElementById('updateSwitchUUID').value = uuid;
+        document.getElementById('updateSwitchDisplay').value = uuid;
+        document.querySelectorAll('input[name="comp"]').forEach(c => c.checked = false);
+        openModal('updateModal');
+    }
+    
+    async function submitUpdate(e) {
+        e.preventDefault();
+        const form = e.target;
+        const formData = new FormData(form);
+        
+        const components = Array.from(document.querySelectorAll('input[name="comp"]:checked'))
+            .map(c => c.value).join(',');
+        formData.set('components', components);
+        
+        try {
+            const resp = await fetch('/api/queue-update', { method: 'POST', body: formData });
+            
+            if (resp.ok) {
+                showToast('Update queued successfully');
+                closeModal('updateModal');
+                window.location.href = '/updates?all=true';
+            } else {
+                showToast('Failed: ' + await resp.text(), true);
+            }
+        } catch (err) {
+            showToast('Error: ' + err.message, true);
+        }
+    }
+    
+    // === Batch Switch Registration ===
+    function createSwitchEntryHTML(index) {
+        return `
+            <div class="switch-entry" data-index="${index}" style="border: 1px solid #30363d; border-radius: 6px; padding: 16px; margin: 12px 16px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                    <strong>Switch #${index + 1}</strong>
+                    ${index > 0 ? `<button type="button" class="btn btn-sm btn-danger" onclick="removeSwitchEntry(${index})">Remove</button>` : ''}
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                    <div>
+                        <div style="color: #58a6ff; font-weight: 500; margin-bottom: 8px;">BMC</div>
+                        <input type="text" class="sw-bmc-ip" placeholder="IP Address *" style="margin-bottom: 6px;" required
+                               oninput="updateGeneratedMac(this.closest('.switch-entry'), 'bmc')">
+                        <input type="text" class="sw-bmc-mac" placeholder="MAC Address *" aria-label="BMC MAC address" style="margin-bottom: 6px;" required
+                               oninput="delete this.dataset.generatedMac">
+                    </div>
+                    <div>
+                        <div style="color: #58a6ff; font-weight: 500; margin-bottom: 8px;">NVOS</div>
+                        <input type="text" class="sw-nvos-ip" placeholder="IP Address *" style="margin-bottom: 6px;" required
+                               oninput="updateGeneratedMac(this.closest('.switch-entry'), 'nvos')">
+                        <input type="text" class="sw-nvos-mac" placeholder="MAC Address *" aria-label="NVOS MAC address" style="margin-bottom: 6px;" required
+                               oninput="delete this.dataset.generatedMac">
+                    </div>
+                </div>
+                <div style="margin-top: 12px;">
+                    <input type="text" class="sw-rack-id" placeholder="Rack ID (optional)" style="width: calc(50% - 6px);">
+                </div>
+            </div>
+        `;
+    }
+    
+    function addSwitchEntry() {
+        const container = document.getElementById('switchEntries');
+        const div = document.createElement('div');
+        div.innerHTML = createSwitchEntryHTML(switchEntryCount);
+        container.appendChild(div.firstElementChild);
+        switchEntryCount++;
+    }
+    
+    function removeSwitchEntry(index) {
+        const entry = document.querySelector(`.switch-entry[data-index="${index}"]`);
+        if (entry) entry.remove();
+    }
+    
+    // Initialize register modal with one entry
+    document.getElementById('registerModal').addEventListener('click', function(e) {
+        if (e.target === this) closeModal('registerModal');
+    });
+    
+    // Override openModal for register modal to initialize entries
+    const originalOpenModal = window.openModal;
+    window.openModal = function(id) {
+        if (id === 'registerModal') {
+            switchEntryCount = 0;
+            document.getElementById('switchEntries').innerHTML = '';
+            addSwitchEntry();
+        }
+        originalOpenModal(id);
+    };
+    
+    async function submitBatchRegister() {
+        const entries = document.querySelectorAll('.switch-entry');
+        if (entries.length === 0) {
+            showToast('No switches to register', true);
+            return;
+        }
+        
+        // Build array of switches
+        const switches = [];
+        for (const entry of entries) {
+            const bmcIP = entry.querySelector('.sw-bmc-ip').value.trim();
+            const nvosIP = entry.querySelector('.sw-nvos-ip').value.trim();
+            
+            // Validate required fields
+            if (!bmcIP || !nvosIP) {
+                showToast('Please fill in IP addresses for all switches', true);
+                return;
+            }
+            
+            const bmcMAC = entry.querySelector('.sw-bmc-mac').value.trim() || generateMacFromIP(bmcIP, 'bmc');
+            const nvosMAC = entry.querySelector('.sw-nvos-mac').value.trim() || generateMacFromIP(nvosIP, 'nvos');
+            
+            if (!bmcMAC || !nvosMAC) {
+                showToast('Provide BMC and NVOS MAC addresses, or valid IPv4 addresses for autofill.', true);
+                return;
+            }
+            
+            const sw = {
+                bmc: { mac: bmcMAC, ip: bmcIP },
+                nvos: { mac: nvosMAC, ip: nvosIP },
+                rack_id: entry.querySelector('.sw-rack-id').value
+            };
+            
+            switches.push(sw);
+        }
+        
+        try {
+            const resp = await fetch('/api/register-switch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ switches })
+            });
+            
+            if (resp.ok) {
+                const result = await resp.json();
+                let registered = 0, updated = 0;
+                for (const [i, r] of (result.responses || []).entries()) {
+                    if (!r.uuid) {
+                        showToast(`Switch ${i + 1}: ${r.error || 'Registration failed'}`, true);
+                        return;
+                    }
+                    // isNew is camelCase from protobuf JSON
+                    if (r.isNew || r.is_new) registered++;
+                    else updated++;
+                }
+                const parts = [];
+                if (registered > 0) parts.push(`${registered} registered`);
+                if (updated > 0) parts.push(`${updated} updated`);
+                showToast(parts.join(', ') || 'Success');
+                closeModal('registerModal');
+                location.reload();
+            } else {
+                const text = await resp.text();
+                showToast(`Failed: ${text}`, true);
+            }
+        } catch (err) {
+            showToast(`Error: ${err.message}`, true);
+        }
+    }
+    
+    // === Power Control ===
+    async function powerControl(uuid, action) {
+        if (!action) return;
+        if (!confirm(`Are you sure you want to perform "${action}" on this switch?`)) return;
+        
+        const formData = new FormData();
+        formData.set('switch_uuid', uuid);
+        formData.set('action', action);
+        
+        try {
+            const resp = await fetch('/api/power-control', { method: 'POST', body: formData });
+            if (resp.ok) {
+                showToast(`${action} initiated`);
+            } else {
+                showToast('Failed: ' + await resp.text(), true);
+            }
+        } catch (err) {
+            showToast('Error: ' + err.message, true);
+        }
+    }
+    
+    // === JSON Import ===
+    async function submitJsonImport() {
+        let jsonText = document.getElementById('jsonTextInput').value.trim();
+        const fileInput = document.getElementById('jsonFileInput');
+        
+        // If file is selected, read it
+        if (fileInput.files.length > 0) {
+            try {
+                jsonText = await fileInput.files[0].text();
+            } catch (err) {
+                showToast('Failed to read file: ' + err.message, true);
+                return;
+            }
+        }
+        
+        if (!jsonText) {
+            showToast('Please provide JSON data', true);
+            return;
+        }
+        
+        let data;
+        try {
+            data = JSON.parse(jsonText);
+        } catch (err) {
+            showToast('Invalid JSON: ' + err.message, true);
+            return;
+        }
+        
+        const switches = data.switches || [];
+        if (switches.length === 0) {
+            showToast('No switches found in JSON', true);
+            return;
+        }
+        
+        // Validate and auto-generate MACs if missing
+        for (let i = 0; i < switches.length; i++) {
+            const sw = switches[i];
+            if (!sw.bmc || !sw.nvos) {
+                showToast(`Switch ${i + 1}: missing bmc or nvos section`, true);
+                return;
+            }
+            if (!sw.bmc.ip) {
+                showToast(`Switch ${i + 1}: BMC requires ip`, true);
+                return;
+            }
+            if (!sw.nvos.ip) {
+                showToast(`Switch ${i + 1}: NVOS requires ip`, true);
+                return;
+            }
+            
+            // Generate MAC from IP if not provided
+            if (!sw.bmc.mac) {
+                sw.bmc.mac = generateMacFromIP(sw.bmc.ip, 'bmc');
+                if (!sw.bmc.mac) {
+                    showToast(`Switch ${i + 1}: BMC requires mac when ip is not an IPv4 address`, true);
+                    return;
+                }
+            }
+            if (!sw.nvos.mac) {
+                sw.nvos.mac = generateMacFromIP(sw.nvos.ip, 'nvos');
+                if (!sw.nvos.mac) {
+                    showToast(`Switch ${i + 1}: NVOS requires mac when ip is not an IPv4 address`, true);
+                    return;
+                }
+            }
+        }
+        
+        // Show progress
+        document.getElementById('importProgress').style.display = 'block';
+        document.getElementById('importSubmitBtn').disabled = true;
+        const resultsDiv = document.getElementById('importResults');
+        resultsDiv.innerHTML = 'Registering switches...';
+        document.getElementById('importProgressBar').style.width = '50%';
+        
+        try {
+            const resp = await fetch('/api/register-switch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ switches })
+            });
+            
+            document.getElementById('importProgressBar').style.width = '100%';
+            document.getElementById('importProgressText').textContent = `${switches.length}/${switches.length}`;
+            
+            if (resp.ok) {
+                const result = await resp.json();
+                resultsDiv.innerHTML = '';
+                
+                let registered = 0, updated = 0, failed = 0;
+                const responses = result.responses || [];
+                
+                for (let i = 0; i < responses.length; i++) {
+                    const r = responses[i];
+                    const sw = switches[i];
+                    const bmcIP = sw?.bmc?.ip || 'unknown';
+                    const nvosIP = sw?.nvos?.ip || 'unknown';
+                    
+                    // Success if uuid is present (isNew is camelCase from protobuf JSON)
+                    if (r.uuid) {
+                        const isNew = r.isNew || r.is_new;
+                        const action = isNew ? 'registered' : 'updated';
+                        if (isNew) registered++;
+                        else updated++;
+                        resultsDiv.innerHTML += `<div style="color: #3fb950;">✓ ${bmcIP} / ${nvosIP} → ${action} (${r.uuid.substring(0,8)}...)</div>`;
+                    } else {
+                        failed++;
+                        resultsDiv.innerHTML += `<div style="color: #f85149;">✗ ${bmcIP} / ${nvosIP}: ${r.error || 'Unknown error'}</div>`;
+                    }
+                }
+                
+                const parts = [];
+                if (registered > 0) parts.push(`${registered} registered`);
+                if (updated > 0) parts.push(`${updated} updated`);
+                if (failed > 0) parts.push(`${failed} failed`);
+                showToast(`Import complete: ${parts.join(', ')}`);
+                
+                if (registered > 0 || updated > 0) {
+                    document.getElementById('importSubmitBtn').textContent = 'Done';
+                    document.getElementById('importSubmitBtn').onclick = () => {
+                        closeModal('importModal');
+                        location.reload();
+                    };
+                }
+            } else {
+                const text = await resp.text();
+                resultsDiv.innerHTML = `<div style="color: #f85149;">Failed: ${text}</div>`;
+                showToast('Import failed: ' + text, true);
+            }
+        } catch (err) {
+            resultsDiv.innerHTML = `<div style="color: #f85149;">Error: ${err.message}</div>`;
+            showToast('Error: ' + err.message, true);
+        }
+        
+        document.getElementById('importSubmitBtn').disabled = false;
+    }
+</script>
+{{end}}

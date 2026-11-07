@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+
+{% block title %}DPU Network Status{% endblock %}
+
+{% block content %}
+{% if active_filter == "all" %}
+<div id="json"><a href="/admin/network-status.json">JSON</a></div>
+{% endif %}
+<h1>DPU Network Status - {{ active_filter|capitalize }}</h1>
+
+<form id="filter-container" action="" method="get">
+	<label><input type="radio" name="filter" value="all" {% if active_filter == "all" %}checked="checked"{% endif %}>All ({{ all_count }})</label>
+	<label><input type="radio" name="filter" value="healthy" {% if active_filter == "healthy" %}checked="checked"{% endif %}>Healthy ({{ healthy_count }})</label>
+	<label><input type="radio" name="filter" value="unhealthy" {% if active_filter == "unhealthy" %}checked="checked"{% endif %}>Unhealthy ({{ unhealthy_count }})</label>
+	<label><input type="radio" name="filter" value="outdated" {% if active_filter == "outdated" %}checked="checked"{% endif %}>Outdated ({{ outdated_count }})</label>
+</form>
+<table class="sortable overview">
+	<thead>
+	<tr>
+		<th>Last seen</th>
+		<th>DPU ID</th>
+		{% if active_filter == "unhealthy" %}
+			<th>Health Probe Alerts</th>
+			<th>Health Alert Classifications</th>
+		{% endif %}
+		<th>Agent version</th>
+		<th>Network config version</th>
+	</tr>
+	</thead>
+	<tbody>
+		{% for st in dpus %}
+		<tr>
+			<td>{{ st.observed_at }}</td>
+			<td>{{ st.dpu_machine_id|machine_id_link|safe }}</td>
+			{% if active_filter == "unhealthy" %}
+				<td>{{ st.health.alerts|health_alerts_fmt(false, false)|safe }}</td>
+				<td>{{ st.health.alerts|health_alert_classifications_fmt|safe }}</td>
+			{% endif %}
+			            <td {% if !st.is_agent_updated %}class="cell-error"{% endif %}>{{ st.agent_version }}</td>
+			<td>{{ st.network_config_version|config_version|safe }}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+	<tfoot>
+		<tr>
+			<th colspan="{% if active_filter == "unhealthy" %}6{% else %}4{% endif %}">
+				{{ dpus.len() }} item{% if dpus.len() != 1 %}s{% endif %}
+			</th>
+		</tr>
+		{% if pages > 1 %}
+		<tr>
+			<th colspan="{% if active_filter == "unhealthy" %}6{% else %}4{% endif %}">
+				<a href="/admin/network-status?current_page=0&limit={{limit}}">[&lt; First]</a>
+				{% if current_page > 0 %}
+					<a href="/admin/network-status?current_page={{previous}}&limit={{limit}}">[&lt;&lt; Previous]</a>
+				{% else %}
+					[&lt;&lt; Previous]
+				{% endif %}
+
+				{% if pages == 0 %}
+					[Next &gt;&gt;]
+					[Last &gt;]
+				{% else%}
+					{% if current_page < (pages-1) %}
+						<a href="/admin/network-status?current_page={{next}}&limit={{limit}}">[Next &gt;&gt;]</a>
+					{% else %}
+						[Next &gt;&gt;]
+					{% endif %}
+					<a href="/admin/network-status?current_page={{(pages - 1)}}&limit={{limit}}">[Last &gt;]</a>
+				{% endif %}
+
+				<br/>
+				Page: ...				    				
+					{% for p in page_range_start..page_range_end %}
+						{% if p == current_page %}
+							[{{p}}]
+						{% else %}
+							<a href="/admin/network-status?current_page={{p}}&limit={{limit}}">[{{p}}]</a> 
+						{% endif %}
+					{% endfor %}
+				...
+			</th>
+		</tr>
+		{% endif %}
+	</tfoot>
+</table>
+
+{% endblock %}
+
+{% block script %}
+document.addEventListener('DOMContentLoaded', function() {
+	const form = document.getElementById('filter-container');
+	const radioButtons = form.querySelectorAll('input[type="radio"]');
+
+	radioButtons.forEach(function(radioButton) {
+		radioButton.addEventListener('change', function() {
+			form.submit();
+		});
+	});
+});
+{% endblock %}

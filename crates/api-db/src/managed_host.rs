@@ -1,0 +1,420 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+//!
+//! Database access methods for manipulating the state of a ManagedHost (Host+DPUs)
+
+use std::collections::{HashMap, HashSet};
+
+use carbide_uuid::instance::InstanceId;
+use carbide_uuid::machine::{
+    AsMachineId, DpuMachineId, HostMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait,
+    MachineType,
+};
+use carbide_uuid::rack::RackId;
+use itertools::Itertools;
+use lazy_static::lazy_static;
+use model::machine::{
+    HardwareInfoScope, HostHealthConfig, LoadSnapshotOptions, ManagedHostStateSnapshot,
+};
+use sqlx::PgConnection;
+
+use crate::db_read::DbReader;
+use crate::{DatabaseError, queries};
+
+#[cfg(test)]
+mod tests;
+
+/// Loads a ManagedHost snapshot from the database
+pub async fn load_snapshot<DB>(
+    txn: &mut DB,
+    machine_id: &MachineId,
+    options: LoadSnapshotOptions,
+) -> Result<Option<ManagedHostStateSnapshot>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    load_snapshot_with_hardware_info_scope(txn, machine_id, options, HardwareInfoScope::Full).await
+}
+
+/// Loads a ManagedHost snapshot whose host and DPU snapshots hold only the
+/// parts of `hardware_info` that `hardware_info_scope` selects. The returned
+/// snapshot records that scope; lists outside it are empty, and a skipped
+/// `tpm_description` is `None`.
+pub async fn load_snapshot_with_hardware_info_scope<DB>(
+    txn: &mut DB,
+    machine_id: &MachineId,
+    options: LoadSnapshotOptions,
+    hardware_info_scope: HardwareInfoScope,
+) -> Result<Option<ManagedHostStateSnapshot>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    let mut snapshots = load_by_machine_ids_with_hardware_info_scope(
+        txn,
+        std::slice::from_ref(machine_id),
+        options,
+        hardware_info_scope,
+    )
+    .await?;
+    Ok(snapshots.remove(machine_id))
+}
+
+/// Loads all ManagedHosts, including predicted hosts
+pub async fn load_all(
+    txn: impl DbReader<'_>,
+    options: LoadSnapshotOptions,
+) -> Result<Vec<ManagedHostStateSnapshot>, DatabaseError> {
+    let mut query = sqlx::QueryBuilder::new(
+        managed_host_snapshots_query(&options, HardwareInfoScope::Full).to_string(),
+    );
+    query.push(" WHERE NOT starts_with(m.id, ");
+    query.push_bind(MachineType::Dpu.id_prefix());
+    query.push(")");
+    Ok(query
+        .build_query_as()
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::new("managed_host::load_all", e))?
+        .into_iter()
+        .map(|mut snapshot: ManagedHostStateSnapshot| {
+            snapshot.derive_aggregate_health(options.host_health_config);
+            snapshot
+        })
+        .collect())
+}
+
+/// Loads the IDs of every managed host (non-DPU machine), including predicted
+/// hosts.
+///
+/// This is a cheap projection of the host set used by [`load_all`]: it touches
+/// only the `machines` table and returns just IDs, skipping the expensive
+/// per-host snapshot JSON aggregation. Callers that need to process a very
+/// large fleet without holding every snapshot in memory can page the IDs and
+/// hydrate snapshots in bounded batches via [`load_by_machine_ids`].
+pub async fn load_host_ids(txn: impl DbReader<'_>) -> Result<Vec<HostMachineId>, DatabaseError> {
+    sqlx::query_scalar::<_, HostMachineId>("SELECT id FROM machines WHERE NOT starts_with(id, $1)")
+        .bind(MachineType::Dpu.id_prefix())
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::new("managed_host::load_host_ids", e))
+}
+
+/// Finds managed hosts in a rack that are assigned to instances.
+///
+/// Locks every machine row in the rack until this transaction commits.
+pub async fn find_assigned_hosts_in_rack(
+    txn: &mut PgConnection,
+    rack_id: &RackId,
+) -> Result<Vec<(MachineId, InstanceId)>, DatabaseError> {
+    let rows: Vec<(MachineId, Option<InstanceId>)> = sqlx::query_as(
+        r#"
+        SELECT m.id, i.id
+        FROM machines m
+        LEFT JOIN instances i ON i.machine_id = m.id
+        WHERE m.rack_id = $1
+        ORDER BY m.id
+        FOR UPDATE OF m
+        "#,
+    )
+    .bind(rack_id)
+    .fetch_all(txn)
+    .await
+    .map_err(|e| DatabaseError::new("managed_host::find_assigned_hosts_in_rack", e))?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(machine_id, instance_id)| {
+            instance_id.map(|instance_id| (machine_id, instance_id))
+        })
+        .collect())
+}
+
+/// Loads ManagedHost snapshots from the database for all enumerated machines
+///
+/// The method works for Host and DPU Machine IDs
+/// When used for DPU Machine IDs, the returned HashMap will contain an entry
+/// that maps from the DPU Machine ID to the ManagedHost snapshot
+pub async fn load_by_machine_ids<DB, ID>(
+    txn: &mut DB,
+    requested_machine_ids: &[ID],
+    options: LoadSnapshotOptions,
+) -> Result<HashMap<ID, ManagedHostStateSnapshot>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+    ID: MachineIdSubtypeTrait,
+    DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+{
+    load_by_machine_ids_with_hardware_info_scope(
+        txn,
+        requested_machine_ids,
+        options,
+        HardwareInfoScope::Full,
+    )
+    .await
+}
+
+async fn load_by_machine_ids_with_hardware_info_scope<DB, ID>(
+    txn: &mut DB,
+    requested_machine_ids: &[ID],
+    options: LoadSnapshotOptions,
+    hardware_info_scope: HardwareInfoScope,
+) -> Result<HashMap<ID, ManagedHostStateSnapshot>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+    ID: MachineIdSubtypeTrait,
+    DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,
+{
+    // Partition the ID's by whether or not they're DPU's. A repeated ID maps to the same result
+    // entry, so drop repeats here instead of handing a snapshot out to each of them.
+    let mut requested_dpu_ids = Vec::new();
+    let mut requested_host_ids = Vec::new();
+    let mut seen_ids = HashSet::new();
+    for machine_id in requested_machine_ids {
+        // A single-ID poll needs no deduplication or hash-set allocation.
+        if requested_machine_ids.len() > 1 && !seen_ids.insert(machine_id) {
+            continue;
+        }
+        match machine_id.host_or_dpu_id() {
+            HostOrDpuId::Dpu(dpu_machine_id) => requested_dpu_ids.push(dpu_machine_id),
+            HostOrDpuId::Host(host_machine_id) => requested_host_ids.push(host_machine_id),
+        }
+    }
+
+    // Perf optimization: Joining through machine_interfaces to look up by DPU ID is slower by 100x
+    // or so. If we're searching for DPU ID's, resolve their host ID's now.
+    let requested_host_id_strings = requested_host_ids
+        .iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>();
+    let host_ids = if !requested_dpu_ids.is_empty() {
+        [
+            requested_host_id_strings,
+            crate::machine::DpuHostAssociations::load(&mut *txn, &requested_dpu_ids)
+                .await?
+                .host_machine_ids()
+                .map(|host_id| host_id.to_string())
+                .collect::<Vec<_>>(),
+        ]
+        .concat()
+        .into_iter()
+        .unique()
+        .collect()
+    } else {
+        requested_host_id_strings
+    };
+
+    // Perf optimization: If we're only requesting one ID, do `WHERE m.id = $1`. In practice on a db
+    // with lots of hosts, this reduces the query time from ~20ms down to ~0.7ms.
+    let mut query = sqlx::QueryBuilder::new(
+        managed_host_snapshots_query(&options, hardware_info_scope).to_string(),
+    );
+    if host_ids.len() == 1 {
+        query.push(" WHERE m.id = ");
+        query.push_bind(&host_ids[0]);
+    } else {
+        query.push(" WHERE m.id = ANY(");
+        query.push_bind(host_ids);
+        query.push(")");
+    }
+
+    // Index snapshots into a HashMap by their machine_id, while calling derive_aggregate_health on
+    // each. It's mut because we are going to re-index by the ID's that the user requested, which
+    // may be different from the managed_host ID.
+    let mut snapshots_by_host_id: HashMap<HostMachineId, ManagedHostStateSnapshot> = query
+        .build_query_as()
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::new("managed_host::load_by_machine_ids", e))?
+        .into_iter()
+        .map(|mut snapshot: ManagedHostStateSnapshot| {
+            snapshot.derive_aggregate_health(options.host_health_config);
+            snapshot.hardware_info_scope = hardware_info_scope;
+            (snapshot.host_snapshot.id, snapshot)
+        })
+        .collect();
+
+    // Make another level of index that gets the host snapshot ID's by a DPU ID
+    let host_ids_by_dpu_id: HashMap<DpuMachineId, HostMachineId> = snapshots_by_host_id
+        .values()
+        .flat_map(|snapshot| {
+            snapshot
+                .dpu_snapshots
+                .iter()
+                .map(|d| (d.id, snapshot.host_snapshot.id))
+        })
+        .collect();
+
+    // Now that we've built the snapshots for all hosts that have been somehow referenced
+    // in the query, go back and fulfill the original request.
+    //
+    // Each requested ID gets its own snapshot, but a host and its DPUs can be requested in the
+    // same call and share one loaded snapshot. So group the requested IDs by host: every ID but
+    // the last gets a clone, and the last one takes the loaded snapshot itself. That way a single
+    // requested DPU, which is what `GetManagedHostNetworkConfig` loads on every DPU poll, gets its
+    // snapshot without a copy.
+    let requested_ids_by_host_id = requested_dpu_ids
+        .into_iter()
+        .filter_map(|dpu_id| Some((*host_ids_by_dpu_id.get(&dpu_id)?, dpu_id.to_machine_id())))
+        .chain(
+            requested_host_ids
+                .into_iter()
+                .map(|host_id| (host_id, host_id.to_machine_id())),
+        )
+        .into_group_map();
+
+    let mut result = HashMap::with_capacity(requested_machine_ids.len());
+    for (host_id, mut machine_ids) in requested_ids_by_host_id {
+        let (Some(snapshot), Some(last_machine_id)) =
+            (snapshots_by_host_id.remove(&host_id), machine_ids.pop())
+        else {
+            continue;
+        };
+        for machine_id in machine_ids {
+            result.insert(machine_id.try_into()?, snapshot.clone());
+        }
+        result.insert(last_machine_id.try_into()?, snapshot);
+    }
+
+    Ok(result)
+}
+
+/// Loads compact snapshots of `host_ids` for the allocation and health rules,
+/// see `sql/managed_hosts_compact.sql.template` for what is left out. Instance
+/// data is included. Missing hosts are omitted.
+pub async fn load_compact_by_host_ids(
+    txn: &mut PgConnection,
+    host_ids: &[HostMachineId],
+    host_health_config: HostHealthConfig,
+) -> Result<HashMap<HostMachineId, ManagedHostStateSnapshot>, DatabaseError> {
+    lazy_static! {
+        static ref QUERY: String = format!(
+            r#"
+        SELECT m.*, COALESCE(row_to_json(i.*), 'null') AS instance
+        FROM ({}) m
+        LEFT JOIN instances i ON i.machine_id = m.id
+        "#,
+            queries::MANAGED_HOSTS_COMPACT.as_str(),
+        );
+    }
+
+    // The singleton form is much faster, as in load_by_machine_ids.
+    let mut query = sqlx::QueryBuilder::new(QUERY.as_str());
+    if let [host_id] = host_ids {
+        query.push(" WHERE m.id = ").push_bind(host_id);
+    } else {
+        query
+            .push(" WHERE m.id = ANY(")
+            .push_bind(host_ids)
+            .push(")");
+    }
+
+    Ok(query
+        .build_query_as()
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::new("managed_host::load_compact_by_host_ids", e))?
+        .into_iter()
+        .map(|mut snapshot: ManagedHostStateSnapshot| {
+            snapshot.derive_aggregate_health(host_health_config);
+            (snapshot.host_snapshot.id, snapshot)
+        })
+        .collect())
+}
+
+/// Loads a ManagedHost snapshots from the database based on a list of Instance IDs
+pub async fn load_by_instance_ids(
+    txn: &mut PgConnection,
+    instance_ids: &[InstanceId],
+    load_snapshot_options: LoadSnapshotOptions,
+) -> Result<Vec<ManagedHostStateSnapshot>, DatabaseError> {
+    // Keep `ARRAY`: PostgreSQL resolves the requested instances to host IDs once,
+    // then filters the machine scan before building snapshots. An outer instance
+    // join can build snapshots for unrelated machines before filtering them out.
+    let query = format!(
+        r#"SELECT m.* FROM ({}) m
+        WHERE m.id = ANY(ARRAY(
+            SELECT i.machine_id FROM instances i WHERE i.id = ANY(
+    "#,
+        managed_host_snapshots_query(&load_snapshot_options, HardwareInfoScope::Full)
+    );
+    let result: Vec<ManagedHostStateSnapshot> = sqlx::QueryBuilder::new(query)
+        .push_bind(instance_ids)
+        .push(")))")
+        .build_query_as()
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::new("managed_host::load_by_instance_ids", e))?
+        .into_iter()
+        .map(|mut s: ManagedHostStateSnapshot| {
+            s.derive_aggregate_health(load_snapshot_options.host_health_config);
+            s
+        })
+        .collect();
+    Ok(result)
+}
+
+fn with_instances(managed_hosts: &str) -> String {
+    format!(
+        r#"
+        SELECT m.*, COALESCE(row_to_json(i.*), 'null') AS instance
+        FROM ({managed_hosts}) m
+        LEFT JOIN instances i ON i.machine_id = m.id
+        "#
+    )
+}
+
+// Return the appropriate query to use for finding managed hosts, depending on the options
+// and the hardware scope
+fn managed_host_snapshots_query(
+    options: &LoadSnapshotOptions,
+    hardware_info_scope: HardwareInfoScope,
+) -> &'static str {
+    // Use lazy_static so we don't have to interpolate strings every time
+    lazy_static! {
+        static ref managed_host_snapshots_with_instances_query: String =
+            with_instances(&queries::MANAGED_HOSTS_NO_HISTORY);
+        static ref managed_host_snapshots_with_instances_and_history_query: String =
+            with_instances(&queries::MANAGED_HOSTS_WITH_HISTORY);
+        static ref without_components_snapshots_with_instances_query: String =
+            with_instances(&queries::MANAGED_HOSTS_WITHOUT_COMPONENTS_NO_HISTORY);
+        static ref without_components_snapshots_with_instances_and_history_query: String =
+            with_instances(&queries::MANAGED_HOSTS_WITHOUT_COMPONENTS_WITH_HISTORY);
+    }
+
+    use HardwareInfoScope::{Full, WithoutComponents};
+    match (
+        hardware_info_scope,
+        options.include_instance_data,
+        options.include_history,
+    ) {
+        (Full, true, false) => managed_host_snapshots_with_instances_query.as_str(),
+        (Full, true, true) => managed_host_snapshots_with_instances_and_history_query.as_str(),
+        (Full, false, false) => queries::MANAGED_HOSTS_NO_HISTORY.as_str(),
+        (Full, false, true) => queries::MANAGED_HOSTS_WITH_HISTORY.as_str(),
+        (WithoutComponents, true, false) => {
+            without_components_snapshots_with_instances_query.as_str()
+        }
+        (WithoutComponents, true, true) => {
+            without_components_snapshots_with_instances_and_history_query.as_str()
+        }
+        (WithoutComponents, false, false) => {
+            queries::MANAGED_HOSTS_WITHOUT_COMPONENTS_NO_HISTORY.as_str()
+        }
+        (WithoutComponents, false, true) => {
+            queries::MANAGED_HOSTS_WITHOUT_COMPONENTS_WITH_HISTORY.as_str()
+        }
+    }
+}

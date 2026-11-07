@@ -1,0 +1,130 @@
+suite: cert directory overrides
+templates:
+  - daemonset.yaml
+  - configmap.yaml
+tests:
+  - it: should mount certs at /opt/forge by default
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nico-certs
+            mountPath: /opt/forge
+            readOnly: true
+
+  - it: should hostPath-mount /opt/forge by default
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-certs
+            hostPath:
+              path: /opt/forge
+              type: DirectoryOrCreate
+
+  - it: configmap should embed /opt/forge cert paths and forge_root.pem by default
+    template: configmap.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'ca_file:\s*/opt/forge/forge_root\.pem'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'cert_file:\s*/opt/forge/machine_cert\.pem'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'key_file:\s*/opt/forge/machine_cert\.key'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: '/var/log/pods/\*/nico-lldp-sidecar/\*\.log'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'set\(attributes\["systemd\.unit"\], "nico-lldp-sidecar"\)'
+
+  - it: should fall back to /opt/forge when certsDir is cleared
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+      certsDir: null
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nico-certs
+            mountPath: /opt/forge
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-certs
+            hostPath:
+              path: /opt/forge
+              type: DirectoryOrCreate
+
+  - it: configmap should embed /opt/forge cert paths and forge_root.pem when cleared
+    template: configmap.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+      certsDir: null
+      rootCaFile: null
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'ca_file:\s*/opt/forge/forge_root\.pem'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'cert_file:\s*/opt/forge/machine_cert\.pem'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'key_file:\s*/opt/forge/machine_cert\.key'
+
+  - it: preserves custom certificate directory and root CA filename rendering
+    set:
+      certsDir: /custom/certs
+      rootCaFile: site-root.pem
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: nico-certs
+            mountPath: /custom/certs
+            readOnly: true
+        template: daemonset.yaml
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: nico-certs
+            hostPath:
+              path: /custom/certs
+              type: DirectoryOrCreate
+        template: daemonset.yaml
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'ca_file:\s*/custom/certs/site-root\.pem'
+        template: configmap.yaml
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'cert_file:\s*/custom/certs/machine_cert\.pem'
+        template: configmap.yaml
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'key_file:\s*/custom/certs/machine_cert\.key'
+        template: configmap.yaml

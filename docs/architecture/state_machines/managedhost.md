@@ -1,0 +1,1115 @@
+# Managed Host State Diagrams
+
+This document contains the complete Finite State Machine (FSM) that illustrates the lifecycle of NICo managed hosts from discovery through ingestion through instance assignment and management.
+
+## High-Level Overview
+
+The compact diagram shows one route through the main lifecycle. The tables retain every overview transition, including alternate paths and the unreleased [NIC Firmware Recovery](#nic-firmware-recovery) engine:
+
+```mermaid
+stateDiagram-v2
+    direction TB
+    [*] --> DpuDiscoveringState
+    DpuDiscoveringState --> DPUInit
+    DPUInit --> HostInit
+    HostInit --> HostInit_HI_Discovered
+    state "HostInit/Discovered" as HostInit_HI_Discovered
+    HostInit_HI_Discovered --> Ready
+    Ready --> Assigned
+    Assigned --> WaitingForCleanup
+```
+
+For edges without a condition label in the overview, **State details** refers to the destination-specific diagrams below. `Decommissioned` is terminal.
+
+### Discovery and Preparation
+
+The following table lists these overview transitions:
+
+| From | To | Condition |
+| --- | --- | --- |
+| `[*]` | `DpuDiscoveringState` | Site Explorer creates managed host |
+| `DpuDiscoveringState` | `DPUInit` | All DPU Security Boot Configured / DPU Reboot |
+| `DpuDiscoveringState` | `HostInit` | No DPU |
+| `DPUInit` | `HostInit` | DPU Ready |
+| `HostInit` | `BomValidating` | Host Configured |
+| `HostInit` | `HostInit/Discovered` | See HostInit diagram |
+| `HostInit/Discovered` | `Ready` | State details |
+| `BomValidating` | `Validation` | BOM Valid AND Validation Enabled |
+| `BomValidating` | `HostInit/Discovered` | BOM Valid AND Validation Disabled |
+| `Validation` | `HostInit/Discovered` | Validation Complete |
+
+### Assignment and Host Work
+
+The following table lists these overview transitions:
+
+| From | To | Condition |
+| --- | --- | --- |
+| `Measuring` | `Ready` | Measurements Valid |
+| `Ready` | `HostInit` | BIOS Password Setup Needed |
+| `Ready` | `Assigned` | Instance Assigned |
+| `Ready` | `HostReprovision` | Host Reprovision Request |
+| `Ready` | `DPUReprovision` | DPU Reprovision Request |
+| `Ready` | `Measuring` | Redo Measurements Request |
+| `Ready` | `BomValidating` | BOM Validation Request |
+| `Ready` | `Validation` | Machine Validation Request |
+| `Ready` | `Decommissioning` | Decommission Request |
+| `Assigned` | `PostAssignedMeasuring` | Measurements required |
+| `Assigned` | `WaitingForCleanup` | Cleanup |
+| `Assigned` | `HostReprovision` | Host reprovision needed |
+| `Assigned` | `DPUReprovision` | State details |
+| `HostReprovision` | `Ready` | Reprovision Complete |
+| `HostReprovision` | `Assigned` | Reprovision Complete |
+| `DPUReprovision` | `Assigned` | if came from Assigned |
+| `DPUReprovision` | `HostInit/Discovered` | if came from Ready |
+| `DPUReprovision` | `HostReprovision` | Host reprovision requested |
+| `WaitingForCleanup` | `BomValidating` | State details |
+| `PostAssignedMeasuring` | `WaitingForCleanup` | Measurements complete |
+| `Decommissioning` | `Decommissioned` | Device reset and credential deletion complete |
+
+### Firmware Recovery and Failure
+
+The following table lists these overview transitions:
+
+| From | To | Condition |
+| --- | --- | --- |
+| `NicFirmwareUpdating` | `HostInit/Discovered` | Baseline initial preparation complete |
+| `NicFirmwareUpdating` | `Ready` | Baseline ready continuation complete |
+| `NicFirmwareUpdating` | `Assigned` | Allocation complete |
+| `NicFirmwareUpdating` | `Assigned` | Restored allocation failure |
+| `NicFirmwareUpdating` | `Reset` | Eligible reset after restored failure |
+| `NicFirmwareUpdating` | `WaitingForCleanup` | Baseline restoration complete |
+| `AnyNotAssignedState` | `Failed` | Failure outside NIC firmware recovery |
+| `Failed` | `AnyNotAssignedState` | Recovery |
+| `Failed` | `ForceDeletion` | Admin forced deletion |
+| `Failed` | `Failed` | Unrecoverable condition |
+| `ForceDeletion` | `[*]` | Force deletion complete |
+
+### `Failed` recovery semantics
+
+`FailureCause::BiosSetupFailed` is set when BIOS setup retries are exhausted during ingestion or instance deprovisioning. The Failed handler polls `is_bios_setup` and auto-recovers into `SetBootOrder` once the BMC reports success.
+
+## NIC Firmware Recovery
+
+This section documents unreleased recovery work in [PR #8596](https://github.com/dsx-ai-factory/infra-controller/pull/8596). The `ManagedHostState::NicFirmwareUpdating` engine reconciles an already persisted operation. Production lifecycle admission is separate work in [issue #6680](https://github.com/dsx-ai-factory/infra-controller/issues/6680); these diagrams deliberately have no incoming admission edge.
+
+NICo Core freezes the operation's purpose, ordered cards, firmware inputs, execution options, and original lockdown policies. It saves each card's progress and the supervisor's receipt, which records accepted work and its results. After a Core restart, Core reloads that operation and reconciles the retained supervisor receipt. It does not select new targets or repeat completed firmware writes. Supervisor daemon loss leaves unfinished work blocked for explicit reconciliation. A host reboot can remove the default supervisor journal. Reconcile any lost or interrupted work with the card before permitting a new mutation.
+
+### Execution and Activation
+
+Cards execute in target order. This diagram shows observation, unlock, and execution for each card. Self-loops represent the polling, retry, and readback waits defined in the [phase descriptions](#phase-behavior):
+
+```mermaid
+stateDiagram-v2
+    state "ObservingSupervisor" as Observe
+    state "Unlocking" as Unlock
+    state "UpdatingFirmware" as Update
+    state "RestoringLockdown" as Restore
+
+    Observe --> Observe
+    Observe --> Unlock : Initial supervisor saved, no receipt
+    Observe --> Update : Retained receipt
+    Unlock --> Unlock
+    Unlock --> Update : Unlocked readback
+    Update --> Update
+    Update --> Observe : Next card
+    Update --> Restore : Safely settled failure
+```
+
+After the last successful card, activation and fresh inventory lead to policy restoration. The second diagram continues from the same `UpdatingFirmware` phase:
+
+```mermaid
+stateDiagram-v2
+    state "UpdatingFirmware" as Update
+    state "Rebooting" as Reboot
+    state "Reobserving" as Inventory
+    state "RestoringLockdown" as Restore
+
+    Update --> Reboot : Last card, host reboot
+    Update --> Inventory : Last card, card reset
+    Reboot --> Reboot
+    Reboot --> Inventory : Covering reboot report
+    Inventory --> Inventory
+    Inventory --> Restore : All cards verified
+```
+
+### Restoration and Continuation
+
+Core checks every original lockdown policy before parking a failure or resuming the operation's purpose. The self-loop waits for independent policy readback:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    state "RestoringLockdown" as Restore
+    state "Failed (firmware phase)" as FirmwareFailed
+    state "HostInit/Discovered" as Prepare
+    state "Ready" as Ready
+    state "Assigned/DpaProvisioning" as Allocate
+    state "WaitingForCleanup/Init" as Cleanup
+    state "Assigned/WaitingForRebootToReady" as Release
+    state "Reset" as Reset
+
+    Restore --> Restore
+    Restore --> FirmwareFailed : Restored, failure retained
+    Restore --> Prepare : Initial preparation
+    Restore --> Ready : Baseline ready
+    Restore --> Allocate : Allocation
+    Restore --> Cleanup : Baseline restoration
+    FirmwareFailed --> Release : Deleted owner, no recorded failure
+    FirmwareFailed --> Reset : Eligible reset
+```
+
+The following table maps each saved purpose to its successful continuation:
+
+| Purpose | Continuation |
+| --- | --- |
+| Baseline initial preparation | `HostInit/Discovered`, preserving `skip_reboot_wait` |
+| Baseline ready | `Ready`, only for an already prepared host whose admitted recipe preserves readiness qualification |
+| Allocation | `Assigned/DpaProvisioning` |
+| Baseline restoration | `WaitingForCleanup/Init`, preserving the cleanup context |
+
+Firmware and lockdown checks alone do not establish readiness for the direct `Ready` continuation. Admission must preserve that qualification. Before handoff, Core transactionally rechecks the controller state version, ownership, attachments, and recorded host or DPU failures. Busy interface or DPU locks defer completion for another iteration without changing the operation.
+
+Destination-specific diagrams later on this page show their internal transitions. Firmware continuation edges are centralized in this section.
+
+### Failure and Ownership Changes
+
+A recorded host or DPU failure, or ineligible allocation ownership, stops new firmware submissions and pending unlocks. Core continues observing work that might already have started. After those effects settle safely, it restores the original policies and records failure:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    state "ObservingSupervisor" as Observe
+    state "Unlocking" as Unlock
+    state "UpdatingFirmware" as Update
+    state "Reobserving" as Inventory
+    state "RestoringLockdown" as Restore
+
+    Observe --> Restore : Failure or owner loss
+    Unlock --> Restore : Failure or owner loss
+    Update --> Restore : Failure or owner loss
+    Inventory --> Restore : Failure or owner loss
+    Restore --> Restore : New stop during success, card zero
+```
+
+Baseline work requires no instance owner. Allocation requires its original live instance. Baseline restoration permits the original deleted instance or no instance; disappearance of that cleanup owner does not stop restoration. A replacement owner is never eligible.
+
+A completed receipt establishes settled execution. An unsuccessful receipt permits restoration only when execution failed or was canceled before configuration or firmware writing, with no reported successful mutation, reset, or verification. Uncertain terminal effects require operator intervention.
+
+In `Rebooting`, Core completes the persisted activation handshake, including reboot retries, before reacting to a stop. A new stop during successful restoration restarts policy checks at the first card. Restoration already recording a failure preserves its position and original reason.
+
+### Phase Behavior
+
+- **`ObservingSupervisor`:** Core polls for the current card's receipt. During receipt-free initial observation, Core can establish or refresh `supervisor_instance_id` before permitting `Unlocking`. After leaving that phase, a missing receipt from a replacement supervisor cannot renew submission permission. A retained receipt resumes `UpdatingFirmware`. Without a stop reason or retained receipt, `InvalidTask`, `Conflict`, and `Unsupported` delivery errors require operator intervention. Unresolved terminal evidence also requires intervention.
+- **`Unlocking`:** Core observes lockdown and changes it only when needed and the saved key identity permits it. An independent unlocked readback advances to `UpdatingFirmware`. Missing replies wait; change acknowledgements and reported errors return to observation.
+- **`UpdatingFirmware`:** Core delivers the frozen request under the saved operation and supervisor identities. Without a receipt, an eligible retry resends that identical request only to the saved supervisor instance, which deduplicates it. Scout checks that instance before submitting; a replacement without the receipt blocks resubmission and requires reconciliation. Once a receipt exists or submission is prohibited, delivery only observes accepted work. Successful evidence for every requested step advances to the next card, or after the last card to `Rebooting` or `Reobserving`. A safely settled unsuccessful execution enters `RestoringLockdown` with a failure; unavailable or missing receipts alone never establish safe settlement.
+- **`Rebooting`:** Core commits activation intent and each attempt timestamp before requesting power. Health overrides can block the reboot. A failed or timed-out power call leaves this phase pending. An authenticated reboot report covering activation and the latest attempt advances to `Reobserving`.
+- **`Reobserving`:** Core waits for one inventory containing every saved card at the requested installed and running firmware version. Both collection and Core receipt times must follow the activation boundary. Missing, stale, partial, ambiguous, or mismatched evidence waits; matching evidence enters `RestoringLockdown`. A stop instead begins restoration without claiming successful inventory convergence.
+- **`RestoringLockdown`:** Core reconciles every original policy with independent readback. Originally unlocked cards remain unlocked. Missing replies wait; acknowledgements and reported errors return to observation. After all cards, a retained failure enters `NicFirmwareUpdating/Failed`; success resumes the continuation after the transactional checks above.
+- **`Failed`:** Core retains the operation and receipts after policy restoration. A deleted original allocation can resume `Assigned/WaitingForRebootToReady` when no host or DPU failure remains and the transactional checks pass. An eligible managed-host reset can enter `Reset`. Otherwise Core requires intervention and includes any current recorded failure without replacing the saved firmware reason.
+
+For host activation, the freshness boundary is the database time when Core received the covering reboot report. For card reset, it is the database time when Core processed the last card's completion. Keep the Scout host and Core database clocks synchronized. Core does not compensate for skew: an ahead clock can make old collection appear fresh, while a behind clock can delay acceptance of new inventory.
+
+Lockdown readback verifies `Locked` or `Unlocked`; it does not identify the installed key or repair external rekeying.
+
+### Recovery Diagnostics
+
+Reboot calls have a 120-second attempt deadline. The retry interval is the greater of 180 seconds and `machine_state_controller.failure_retry_time`, whose default is 90 minutes. Neither a timeout nor a lost reply abandons the operation. There is no maximum reboot-attempt count or overall workflow deadline. Active phases have no state service-level agreement (SLA); restored `Failed` has a zero SLA for observability.
+
+Missing IKM versions, credential backend errors, and credential lookup timeouts return lockdown changes to observation and retry. They do not automatically become terminal failures. For retained phase errors and controller outcomes, use [state-history diagnostics](../../playbooks/stuck_objects/diagnostic_tools.md#query-state-history). Inspect [manual intervention alerts](../../observability/alerts.md#manual-intervention-alerts), including `carbide_object_manual_intervention_required`, when the controller cannot safely proceed. During uncertain active work, preserve the operation and its evidence rather than bypassing its guards.
+
+Clearing a recorded cause does not restart a parked firmware recipe. After original-policy restoration, recovery is an [eligible managed-host reset](../../manuals/nico-admin-cli/commands/managed-host/managed-host-reset-set.md) or the deleted-allocation release described above. Reset is rejected before firmware `Failed`; its existing DPF, instance, and health preconditions still apply. Instance power requests remain rejected throughout `NicFirmwareUpdating`.
+
+Firmware handling precedes ordinary maintenance, DPU reprovisioning, restart verification, and reset dispatch. Tenant allocation status is `Updating`, or `Failed` in the firmware failure phase; baseline restoration reports `Terminating`. Operator force deletion and direct BMC power retain their existing manual semantics. They do not establish safe firmware completion or restored lockdown.
+
+The supervisor's host claim serializes cooperating callers. Mutation paths that omit the claim can bypass that protection, including direct `FirmwareFlasher` calls, legacy integrations, and independently launched vendor tools. Do not run those mutation paths concurrently with `NicFirmwareUpdating`. If completion is uncertain, preserve the operation and reconcile its process and hardware effects before another mutation.
+
+## DPU Discovery State Details (DpuDiscoveringState)
+
+Shows the complete DPU discovery and configuration process:
+
+```mermaid
+stateDiagram-v2
+    state "Initializing" as DD_Initializing
+    state if_state_dpu_nodpu <<choice>>
+    state "Configuring" as DD_Configuring
+    state "EnableRshim" as DD_EnableRshim
+    state if_bfb_supported <<choice>>
+    state "HostInit/WaitingForPlatformConfiguration" as HostInit_HI_WaitingForPlatformConfiguration
+    state "DPUInit/InstallingBFB" as DPUInit_DI_IDO_InstallingBFB
+
+    state "EnableSecureBoot" as DD_EnableSecureBoot {
+        state "CheckSecureBootStatus" as DD_SSB_E_CheckSecureBootStatus
+        state "CheckSecureBootStatusWait" as DD_SSB_E_CheckSecureBootStatusWait
+        state "SetSecureBoot" as DD_SSB_E_SetSecureBoot
+        state "RebootDPU" as DD_SSB_E_RebootDPU
+        state "RebootDPUWait" as DD_SSB_E_RebootDPUWait
+    }
+
+    state "DisableSecureBoot" as DD_DisableSecureBoot {
+        state "CheckSecureBootStatus" as DD_SSB_D_CheckSecureBootStatus
+        state "CheckSecureBootStatusWait" as DD_SSB_D_CheckSecureBootStatusWait
+        state "DisableSecureBoot" as DD_SSB_D_DisableSecureBoot
+        state "RebootDPU" as DD_SSB_D_RebootDPU
+        state "RebootDPUWait" as DD_SSB_D_RebootDPUWait
+    }
+
+    state "SetUefiHttpBoot" as DD_SetUefiHttpBoot
+    state "RebootAllDPUS" as DD_RebootAllDPUS
+    state Failed
+    state "DPUInit/Init" as DPUInit_DI_Init
+
+    [*] --> DD_Initializing : Site Explorer creates managed host
+
+    DD_Initializing --> if_state_dpu_nodpu
+    if_state_dpu_nodpu --> DD_Configuring : Assoc DPU
+    if_state_dpu_nodpu --> HostInit_HI_WaitingForPlatformConfiguration : No DPU
+
+    DD_Configuring --> DD_EnableRshim
+    DD_EnableRshim --> DD_RebootAllDPUS : DPF selected during site exploration
+    DD_EnableRshim --> if_bfb_supported : DPF not selected during site exploration
+
+    if_bfb_supported --> DD_SSB_E_CheckSecureBootStatus : BFB install supported
+    if_bfb_supported --> DD_SSB_D_CheckSecureBootStatus : BFB install not supported
+
+    DD_SSB_E_CheckSecureBootStatus --> DD_SSB_E_SetSecureBoot : Security boot is disabled
+    DD_SSB_E_CheckSecureBootStatus --> DD_SSB_E_CheckSecureBootStatusWait : 2nd reboot
+    DD_SSB_E_CheckSecureBootStatusWait --> DD_SSB_E_CheckSecureBootStatus : Wait for DPU (5min timeout)
+    DD_SSB_E_CheckSecureBootStatus --> DPUInit_DI_IDO_InstallingBFB : Security boot is enabled
+    DD_SSB_E_CheckSecureBootStatus --> DD_SSB_E_RebootDPU : Get status error
+    DD_SSB_E_CheckSecureBootStatus --> DD_SSB_E_CheckSecureBootStatus : Missing data count++ retry if count < 10
+    DD_SSB_E_CheckSecureBootStatus --> Failed : count >= 10 too many retries
+    DD_SSB_E_SetSecureBoot --> DD_SSB_E_RebootDPU
+    DD_SSB_E_RebootDPU --> DD_SSB_E_RebootDPU : Reboot again
+    DD_SSB_E_RebootDPU --> DD_SSB_E_CheckSecureBootStatus : Two reboots
+    DD_SSB_E_RebootDPU --> DD_SSB_E_RebootDPUWait
+    DD_SSB_E_RebootDPUWait --> DD_SSB_E_RebootDPU : Wait for DPU (5min timeout)
+
+    DD_SSB_D_CheckSecureBootStatus --> DD_SSB_D_DisableSecureBoot : Security boot is enabled
+    DD_SSB_D_CheckSecureBootStatus --> DD_SSB_D_CheckSecureBootStatusWait : 2nd reboot
+    DD_SSB_D_CheckSecureBootStatusWait --> DD_SSB_D_CheckSecureBootStatus : Wait for DPU (5min timeout)
+    DD_SSB_D_CheckSecureBootStatus --> DD_SetUefiHttpBoot : Security boot is disabled
+    DD_SSB_D_CheckSecureBootStatus --> DD_SSB_D_RebootDPU : Get status error
+    DD_SSB_D_CheckSecureBootStatus --> Failed : count >= 10 too many retries
+    DD_SSB_D_CheckSecureBootStatus --> DD_SSB_D_CheckSecureBootStatus : Missing data count++ retry if count < 10
+    DD_SSB_D_DisableSecureBoot --> DD_SSB_D_RebootDPU
+    DD_SSB_D_RebootDPU --> DD_SSB_D_RebootDPU : Reboot again
+    DD_SSB_D_RebootDPU --> DD_SSB_D_CheckSecureBootStatus : Two reboots
+    DD_SSB_D_RebootDPU --> DD_SSB_D_RebootDPUWait
+    DD_SSB_D_RebootDPUWait --> DD_SSB_D_RebootDPU : Wait for DPU (5min timeout)
+
+    DD_SetUefiHttpBoot --> DD_RebootAllDPUS
+    DD_RebootAllDPUS --> DPUInit_DI_Init
+```
+
+## DPU Initialization State Details (DpuInitState)
+
+Shows DPU initialization including BFB installation:
+
+```mermaid
+stateDiagram-v2
+    state "DpuDiscoveringState/CheckSecureBootStatus" as DpuDiscoveringState_DD_SSB_E_CheckSecureBootStatus
+    state "DpuDiscoveringState/RebootAllDPUS" as DpuDiscoveringState_DD_RebootAllDPUS
+
+    state "Init" as DI_Init
+    state "InstallDpuOs" as DI_InstallDpuOs {
+        state "InstallingBFB" as DI_IDO_InstallingBFB
+        state "WaitForInstallComplete" as DI_IDO_WaitForInstallComplete
+        state "Completed" as DI_IDO_Completed
+        state "InstallationError" as DI_IDO_InstallationError
+    }
+    note right of DI_IDO_InstallationError : Terminal state - waits indefinitely
+
+    state "WaitingForPlatformPowercycle" as DI_WaitingForPlatformPowercycle {
+        state "Off" as DI_W4PP_OFF
+        state "On" as DI_W4PP_ON
+    }
+
+    state "WaitingForPlatformConfiguration" as DI_WaitingForPlatformConfiguration
+    state "WaitingForNetworkConfig" as DI_WaitingForNetworkConfig
+    state "DpfStates/Provisioning" as DI_DpfStates_Provisioning
+    state "HostInit/EnableIpmiOverLan" as HostInit_HI_EnableIpmiOverLan
+
+    DpuDiscoveringState_DD_SSB_E_CheckSecureBootStatus --> DI_IDO_InstallingBFB : Security boot is enabled
+    DpuDiscoveringState_DD_RebootAllDPUS --> DI_DpfStates_Provisioning : DPF selected during site exploration
+    DpuDiscoveringState_DD_RebootAllDPUS --> DI_Init : DPF not selected during site exploration
+
+    DI_IDO_InstallingBFB --> DI_IDO_WaitForInstallComplete
+    DI_IDO_WaitForInstallComplete --> DI_IDO_WaitForInstallComplete : Task Running/New/Starting (wait more)
+    DI_IDO_WaitForInstallComplete --> DI_IDO_Completed : Task completed
+    DI_IDO_WaitForInstallComplete --> DI_IDO_InstallationError : Task exception
+    DI_IDO_Completed --> DI_Init
+
+    DI_Init --> DI_W4PP_OFF : Restart all DPUs
+    DI_W4PP_OFF --> DI_W4PP_OFF : DPUs not synchronized (wait more)
+    DI_W4PP_OFF --> DI_W4PP_ON : All DPUs synchronized, power OFF host
+    DI_W4PP_ON --> DI_WaitingForPlatformConfiguration : Power ON host
+    DI_WaitingForPlatformConfiguration --> DI_WaitingForNetworkConfig : Call machine-setup/uefi-setup and restart DPU Restart DPU to apply BIOS settings
+    DI_WaitingForNetworkConfig --> DI_WaitingForNetworkConfig : DPU network not ready (wait more, potentially reboot DPU)
+    DI_WaitingForNetworkConfig --> HostInit_HI_EnableIpmiOverLan
+```
+
+## Host Initialization State Details (HostInitState)
+
+`DisableOnboardNics` applies only to Vera Rubin hosts with managed DPUs. Other
+SKUs do not support disabling onboard NICs through the BMC and skip this state.
+After enabling IPMI over LAN, eligible hosts enter `DisableOnboardNics`.
+The controller enables onboard NICs, waits at least ten seconds, disables them,
+and waits at least ten more seconds before platform configuration. Each wait uses
+its persisted substate-entry timestamp, so controller restarts preserve progress.
+Libredfish checks that host power is On before writing. Setter errors, including
+power-state failures, leave the configure substate
+in place for retry. No AUX-cycle delay is required. The waits allow settings to
+apply, but they do not verify physical NIC state through boot options.
+
+Hosts without managed DPUs, including hosts whose DPUs are ignored or operated in
+NIC mode, skip this sequence and retain their onboard NIC settings. The existing
+no-DPU paths into platform configuration remain unchanged.
+For Vera Rubin hosts that skip `DisableOnboardNics` and keep onboard NICs enabled,
+`machine_setup_status` reports "not done" with a `HostManagementNetworkAccess` diff
+expecting `Disabled`, which is expected for these configurations.
+
+Shows host initialization including boot order and UEFI setup:
+
+```mermaid
+stateDiagram-v2
+    state "DpuDiscoveringState/Initializing" as DpuDiscoveringState_DD_Initializing
+    state "DpuInitState/WaitingForNetworkConfig" as DpuInitState_DI_WaitingForNetworkConfig
+    state "DPUReprovision/RebootHost" as DPUReprovision_DR_RebootHost
+    state "Validation/MachineValidating" as Validation_V_MachineValidating
+
+    state "SetBootOrder" as HI_SetBootOrder {
+        state hi_sbo_if_zero_dpu <<choice>>
+        state "SetBootOrder" as HI_SBO_SetBootOrder
+        state "WaitForSetBootOrderJobScheduled" as HI_SBO_WaitForSetBootOrderJobScheduled
+        state "RebootHost" as HI_SBO_RebootHost
+        state "WaitForSetBootOrderJobCompletion" as HI_SBO_WaitForSetBootOrderJobCompletion
+    }
+
+    state hi_attestation_enabled <<choice>>
+
+    state HI_Measuring {
+        state "WaitingForMeasurements" as HI_M_WaitingForMeasurements
+        state "PendingBundle" as HI_M_PendingBundle
+    }
+
+    state "UefiSetup" as HI_UefiSetup {
+        state "UnlockHost" as HI_USS_UnlockHost
+        state "SetUefiPassword" as HI_USS_SetUefiPassword
+        state "WaitForPasswordJobScheduled" as HI_USS_WaitForPasswordJobScheduled
+        state "PowercycleHost" as HI_USS_PowercycleHost
+        state "WaitForPasswordJobCompletion" as HI_USS_WaitForPasswordJobCompletion
+        state "LockdownHost" as HI_USS_LockdownHost
+    }
+
+    state "WaitingForLockdown" as HI_WaitingForLockdown {
+        state "TimeWaitForDPUDown" as HI_WFL_TimeWaitForDPUDown
+        state "WaitForDPUUp" as HI_WFL_WaitForDPUUp
+    }
+
+    state "EnableIpmiOverLan" as HI_EnableIpmiOverLan
+    state "DisableOnboardNics" as HI_DisableOnboardNics {
+        state "ConfigureOnboardNics(enable=true)" as HI_DON_Enable
+        state "WaitForConfigToBeApplied(onboard_nics_disabled=false)" as HI_DON_WaitEnabled
+        state "ConfigureOnboardNics(enable=false)" as HI_DON_Disable
+        state "WaitForConfigToBeApplied(onboard_nics_disabled=true)" as HI_DON_WaitDisabled
+    }
+    state "WaitingForPlatformConfiguration" as HI_WaitingForPlatformConfiguration
+    state "WaitingForBiosJob" as HI_WaitingForBiosJob {
+        state "HandleBiosJobFailure" as HI_WBJ_HandleBiosJobFailure
+    }
+    state "PollingBiosSetup" as HI_PollingBiosSetup
+    state "WaitingForDiscovery" as HI_WaitingForDiscovery
+    state "Discovered" as HI_Discovered
+    state "BomValidating/MatchingSku" as BomValidating_BV_MatchingSku
+    state Ready
+
+    note left of DpuDiscoveringState_DD_Initializing : In reallity any DpuDiscoveringState can be entry point but effectively only DD_Initializing
+
+    DpuDiscoveringState_DD_Initializing --> HI_WaitingForPlatformConfiguration : No DPU
+    DpuInitState_DI_WaitingForNetworkConfig --> HI_EnableIpmiOverLan
+    Failed --> HI_WFL_TimeWaitForDPUDown
+    Failed --> HI_M_WaitingForMeasurements
+    Failed --> HI_SBO_SetBootOrder : BiosSetupFailed AND is_bios_setup ok
+
+    HI_EnableIpmiOverLan --> HI_DON_Enable : IPMI configured, Vera Rubin with managed DPUs
+    HI_EnableIpmiOverLan --> HI_WaitingForPlatformConfiguration : IPMI configured, other SKU or no managed DPUs
+    HI_DON_Enable --> HI_DON_WaitEnabled : Host On, enable write succeeds
+    HI_DON_WaitEnabled --> HI_DON_Disable : At least 10 seconds since state entry
+    HI_DON_Disable --> HI_DON_WaitDisabled : Host On, disable write succeeds
+    HI_DON_WaitDisabled --> HI_WaitingForPlatformConfiguration : At least 10 seconds since state entry
+    HI_DON_Enable --> HI_DON_Enable : Host not On or write fails (retry)
+    HI_DON_Disable --> HI_DON_Disable : Host not On or write fails (retry)
+    HI_DON_WaitEnabled --> HI_DON_WaitEnabled : Less than 10 seconds (wait)
+    HI_DON_WaitDisabled --> HI_DON_WaitDisabled : Less than 10 seconds (wait)
+    HI_WaitingForPlatformConfiguration --> HI_PollingBiosSetup : Call machine setup/Restart Host
+    HI_WaitingForPlatformConfiguration --> HI_WaitingForBiosJob : Dell BIOS job scheduled
+    HI_WaitingForBiosJob --> HI_PollingBiosSetup : BIOS job completed
+    HI_WaitingForBiosJob --> HI_WBJ_HandleBiosJobFailure : BIOS job failed
+    HI_WaitingForBiosJob --> Failed : Retry budget exhausted (BiosSetupFailed)
+    HI_WBJ_HandleBiosJobFailure --> HI_WaitingForPlatformConfiguration : Power off + BMC reset + power on
+    HI_PollingBiosSetup --> HI_PollingBiosSetup : Wait for BIOS setup
+    HI_PollingBiosSetup --> HI_WBJ_HandleBiosJobFailure : Stuck > 15 min, retry budget left
+    HI_PollingBiosSetup --> Failed : Stuck > 15 min, retry budget exhausted (BiosSetupFailed)
+    HI_PollingBiosSetup --> HI_SBO_SetBootOrder : BIOS is setup
+
+    HI_SBO_SetBootOrder --> hi_sbo_if_zero_dpu
+    hi_sbo_if_zero_dpu --> HI_SBO_WaitForSetBootOrderJobCompletion : No DPU
+    hi_sbo_if_zero_dpu --> HI_SBO_WaitForSetBootOrderJobScheduled : DPU
+    HI_SBO_WaitForSetBootOrderJobScheduled --> HI_SBO_RebootHost
+    HI_SBO_RebootHost --> HI_SBO_WaitForSetBootOrderJobCompletion
+    HI_SBO_SetBootOrder --> HI_SBO_WaitForSetBootOrderJobCompletion
+    HI_SBO_WaitForSetBootOrderJobCompletion --> hi_attestation_enabled
+
+    hi_attestation_enabled --> HI_M_WaitingForMeasurements : if attestation is enabled
+    hi_attestation_enabled --> HI_WaitingForDiscovery : if attestation is disabled
+
+    HI_M_WaitingForMeasurements --> HI_M_WaitingForMeasurements : Waiting for machine to send measurement report
+    HI_M_WaitingForMeasurements --> HI_M_PendingBundle : Wait for golden values
+    HI_M_WaitingForMeasurements --> HI_WaitingForDiscovery : Measurements validated
+    HI_M_PendingBundle --> HI_M_PendingBundle : Waiting for matching measurement bundle
+    HI_M_PendingBundle --> HI_M_WaitingForMeasurements : Measurements wiped, restart
+    HI_M_PendingBundle --> HI_WaitingForDiscovery : Measurements validated
+
+    HI_WaitingForDiscovery --> HI_WaitingForDiscovery : Wait for scout to update
+    HI_WaitingForDiscovery --> HI_USS_SetUefiPassword : Discovery is Successful
+
+    HI_USS_UnlockHost --> HI_USS_SetUefiPassword
+    HI_USS_SetUefiPassword --> HI_USS_WaitForPasswordJobScheduled : job created
+    HI_USS_SetUefiPassword --> HI_USS_LockdownHost : Fail AND !Dell AND !Lenovo AND !Nvidia
+    HI_USS_WaitForPasswordJobScheduled --> HI_USS_PowercycleHost
+    HI_USS_PowercycleHost --> HI_USS_WaitForPasswordJobCompletion
+    HI_USS_WaitForPasswordJobCompletion --> HI_USS_LockdownHost
+
+    HI_USS_LockdownHost --> HI_WFL_TimeWaitForDPUDown
+
+    HI_WFL_TimeWaitForDPUDown --> HI_WFL_WaitForDPUUp
+    HI_WFL_WaitForDPUUp --> BomValidating_BV_MatchingSku
+
+    BomValidating --> HI_Discovered
+    Validation_V_MachineValidating --> HI_Discovered
+    DPUReprovision_DR_RebootHost --> HI_Discovered
+    HI_Discovered --> HI_Discovered : need reboot
+    HI_Discovered --> Ready : rebooted
+    Ready --> HI_USS_UnlockHost : Need setup BIOS password
+```
+
+## BOM Validation State Details (BomValidating)
+
+Shows the BOM (Bill of Materials) validation process:
+
+```mermaid
+stateDiagram-v2
+    state "HostInitState/WaitForDPUUp" as HostInitState_HI_WFL_WaitForDPUUp
+    state Ready
+    state "WaitingForCleanup/HostCleanup" as WaitingForCleanup_C_HostCleanup
+    state "WaitingForCleanup/LockHost" as WaitingForCleanup_C_SBV_LockHost
+
+    state bv_requested <<choice>>
+    state "MatchingSku" as BV_MatchingSku
+    state "UpdatingInventory" as BV_UpdatingInventory
+    state "VerifyingSku" as BV_VerifyingSku
+    state "SkuVerificationFailed" as BV_SkuVerificationFailed
+    state "WaitingForSkuAssignment" as BV_WaitingForSkuAssignment
+    state "SkuMissing" as BV_SkuMissing
+    state bv_validation_enabled <<choice>>
+
+    state "Validation/RebootHost" as Validation_V_RebootHost
+    state "HostInit/Discovered" as HostInit_HI_Discovered
+
+    HostInitState_HI_WFL_WaitForDPUUp --> BV_MatchingSku
+    WaitingForCleanup_C_HostCleanup --> BV_UpdatingInventory
+    WaitingForCleanup_C_SBV_LockHost --> BV_UpdatingInventory
+    Ready --> bv_requested
+
+    bv_requested --> BV_UpdatingInventory : Possible SKU match
+    bv_requested --> BV_WaitingForSkuAssignment : SKU unassigned
+    bv_requested --> BV_SkuMissing : SKU not found
+
+    BV_MatchingSku --> BV_VerifyingSku : SKU present
+    BV_MatchingSku --> BV_WaitingForSkuAssignment : SKU not present AND !matched
+    BV_UpdatingInventory --> BV_UpdatingInventory : Wait discovery
+    BV_UpdatingInventory --> BV_MatchingSku : SKU not present
+    BV_UpdatingInventory --> BV_VerifyingSku : SKU present
+    BV_VerifyingSku --> BV_MatchingSku : SKU present
+    BV_VerifyingSku --> BV_SkuMissing : SKU not found
+    BV_VerifyingSku --> BV_SkuVerificationFailed : SKU diff is not empty
+    BV_SkuVerificationFailed --> BV_WaitingForSkuAssignment : SKU not present
+    BV_SkuVerificationFailed --> BV_UpdatingInventory : Update timeout
+    BV_SkuVerificationFailed --> BV_SkuVerificationFailed : Wait update timeout
+    BV_WaitingForSkuAssignment --> BV_UpdatingInventory : SKU present OR matched
+    BV_WaitingForSkuAssignment --> BV_WaitingForSkuAssignment : wait assignment
+    BV_SkuMissing --> BV_UpdatingInventory : SKU present and found
+    BV_SkuMissing --> BV_SkuMissing : SKU present and not found
+    BV_SkuMissing --> BV_WaitingForSkuAssignment : SKU not present
+
+    BV_WaitingForSkuAssignment --> bv_validation_enabled : BOM validation disabled
+    BV_MatchingSku --> bv_validation_enabled : BOM validation disabled OR (SKU Present and matched)
+    BV_VerifyingSku --> bv_validation_enabled : SKU diff is empty
+
+    bv_validation_enabled --> Validation_V_RebootHost : validation enabled
+    bv_validation_enabled --> HostInit_HI_Discovered : validation disabled
+```
+
+## Machine Validation State Details (ValidationState)
+
+Shows the machine validation process:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    state "BomValidating/bv_validation_enabled" as BomValidating_bv_validation_enabled
+    state Ready
+
+    state "RebootHost" as V_RebootHost
+    state "MachineValidating" as V_MachineValidating
+
+    state "HostInit/Discovered" as HostInit_HI_Discovered
+    state Failed
+
+    Ready --> V_RebootHost : validation is requested
+    BomValidating_bv_validation_enabled --> V_RebootHost : validation is enabled
+    V_RebootHost --> V_MachineValidating
+    V_MachineValidating --> V_MachineValidating : validation in progress
+    V_MachineValidating --> HostInit_HI_Discovered : validation disabled OR validated successfully
+    V_MachineValidating --> Failed : validation failed
+```
+
+## Ready State Details (Ready)
+
+For hosts already provisioned through DPF, a reprovisioning request can remain
+in `Ready` while NICo checks compatibility or retries a failed DPU restart.
+Refer to [DPU Firmware Updates](../../operations/firmware-updates/dpu-firmware.md#eligibility-and-scheduling)
+for the start checks, saved start timestamps, and retry behavior behind the
+reprovisioning transitions in these diagrams.
+
+Shows what can happen in Ready state:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    state Measuring
+    state HostReprovision
+    state "HostInit/Discovered" as HostInit_HI_Discovered
+    state Ready
+    state "Validation/RebootHost" as Validation_V_RebootHost
+    state "BomValidating/bv_requested" as BomValidating_bv_requested
+    state "Assigned/WaitingForNetworkSegmentToBeReady" as Assigned_A_WaitingForNetworkSegmentToBeReady
+    state "HostInit/UefiSetup/UnlockHost" as HostInit_HI_UefiSetup_HI_USS_UnlockHost
+    state "Measuring/WaitingForMeasurements" as Measuring_M_WaitingForMeasurements
+    state "DPUReprovision/dr_bfb_check_support" as DPUReprovision_dr_bfb_check_support
+    state "HostReprovision/CheckingFirmware" as HostReprovision_HR_CheckingFirmware
+    state "Decommissioning/SuppressingSiteExplorer" as Decommissioning_SuppressingSiteExplorer
+
+    HostInit_HI_Discovered --> Ready
+    Measuring --> Ready : Measuring completed
+    HostReprovision --> Ready : Host reprovision completed
+
+    Ready --> Validation_V_RebootHost : Machine validation requested
+    Ready --> BomValidating_bv_requested : BOM validation requested
+    Ready --> DPUReprovision_dr_bfb_check_support : DPU reprovision requested
+    Ready --> HostReprovision_HR_CheckingFirmware : Host reprovision requested
+    Ready --> Assigned_A_WaitingForNetworkSegmentToBeReady : Instance assigned
+    Ready --> Measuring_M_WaitingForMeasurements : Redo measuring requested
+    Ready --> HostInit_HI_UefiSetup_HI_USS_UnlockHost : Need setup BIOS password
+    Ready --> Decommissioning_SuppressingSiteExplorer : Decommission requested
+```
+
+## Decommissioning State Details
+
+Decommissioning starts only from `Ready` and follows this top-level sequence:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    state "SuppressingSiteExplorer" as SuppressingSiteExplorer
+    state "DeconfiguringHost" as DeconfiguringHost
+    state "DeconfiguringDpus" as DeconfiguringDpus
+    state "SuppressingOobDhcp" as SuppressingOobDhcp
+    state "PowerCyclingHost" as PowerCyclingHost
+    state "PoweringOnHost" as PoweringOnHost
+    state "WaitingForOobDhcpAcknowledgement" as WaitingForOobDhcpAcknowledgement
+    state "SuppressingBmcDhcp" as SuppressingBmcDhcp
+    state "FactoryResettingBmcs" as FactoryResettingBmcs
+    state "WaitingForBmcDhcpAcknowledgement" as WaitingForBmcDhcpAcknowledgement
+    state "DeletingManagedCredentials" as DeletingManagedCredentials
+    state "Decommissioned (terminal)" as Decommissioned
+
+    [*] --> SuppressingSiteExplorer
+    SuppressingSiteExplorer --> DeconfiguringHost : Site Explorer acknowledges suppressions
+    DeconfiguringHost --> DeconfiguringDpus : Host firmware configuration reset
+    DeconfiguringDpus --> SuppressingOobDhcp : DPUs run preingestion BFB
+    SuppressingOobDhcp --> PowerCyclingHost : OOB DHCP suppressions recorded
+    PowerCyclingHost --> PoweringOnHost : AC power cycle accepted
+    PoweringOnHost --> WaitingForOobDhcpAcknowledgement : Host power state is On after power cycle
+    WaitingForOobDhcpAcknowledgement --> WaitingForOobDhcpAcknowledgement : OOB DHCP acknowledgement pending
+    WaitingForOobDhcpAcknowledgement --> SuppressingBmcDhcp : No OOB DHCP acknowledgements pending
+    SuppressingBmcDhcp --> FactoryResettingBmcs : BMC DHCP suppressions recorded
+    FactoryResettingBmcs --> WaitingForBmcDhcpAcknowledgement : BMC resets accepted
+    WaitingForBmcDhcpAcknowledgement --> WaitingForBmcDhcpAcknowledgement : BMC DHCP acknowledgement pending
+    WaitingForBmcDhcpAcknowledgement --> DeletingManagedCredentials : No BMC DHCP acknowledgements pending
+    DeletingManagedCredentials --> Decommissioned : Per-device credentials deleted
+```
+
+`DeconfiguringHost` disables lockdown, unlocks managed SuperNICs, resets UEFI
+settings, and clears the host UEFI password. `DeconfiguringDpus` removes DPF
+resources when applicable and installs the vanilla `preingestion.bfb` on every
+DPU.
+
+The OOB DHCP wait checks the host and DPU OOB interface MACs, and the BMC DHCP
+wait checks the host and DPU BMC MACs. Each DHCP wait advances after every MAC
+it checks has a recorded suppression acknowledgement or qualifies to advance
+without one. Refer to
+[DHCP Suppression Acknowledgement](../../decommissioning/index.md#dhcp-suppression-acknowledgement)
+for the shared rule.
+
+Refer to [Decommission Managed Hosts and DPUs](../../decommissioning/hosts.md) for the
+operator procedure, platform limitations, and intended post-reset state.
+
+## Instance Assignment State Details (InstanceState)
+
+Shows the complete instance assignment and management flow:
+
+```mermaid
+stateDiagram-v2
+    state Ready
+    state "DPUReprovision/DR_RebootHost" as DPUReprovision_DR_RebootHost
+    state "HostReprovision/HR_CheckingFirmware" as HostReprovision_HR_CheckingFirmware
+
+    state "WaitingForNetworkSegmentToBeReady" as A_WaitingForNetworkSegmentToBeReady
+    state "WaitingForNetworkConfig" as A_WaitingForNetworkConfig
+    state "WaitingForStorageConfig (legacy recovery)" as A_WaitingForStorageConfig
+    state "WaitingForExtensionServicesConfig (legacy recovery)" as A_WaitingForExtensionServicesConfig
+    state "WaitingForRebootToReady" as A_WaitingForRebootToReady
+    state "Assigned/Ready" as A_Ready
+    state "WaitingForDpusToUp" as A_WaitingForDpusToUp
+    state "BootingWithDiscoveryImage" as A_BootingWithDiscoveryImage
+    state "SwitchToAdminNetwork" as A_SwitchToAdminNetwork
+    state "WaitingForNetworkReconfig" as A_WaitingForNetworkReconfig
+    state a_release_instance <<choice>>
+    state "Assigned/Failed" as A_Failed
+    state "NetworkConfigUpdate" as A_NetworkConfigUpdate {
+        state "WaitingForNetworkSegmentToBeReady" as A_NCU_WaitingForNetworkSegmentToBeReady
+        state "WaitingForConfigSynced" as A_NCU_WaitingForConfigSynced
+        state "ReleaseOldResources" as A_NCU_ReleaseOldResources
+    }
+    state "HostPlatformConfiguration" as A_HostPlatformConfiguration {
+        state "FactoryResetBmc" as A_HPC_FactoryResetBmc
+        state "PowerCycle" as A_HPC_PowerCycle
+        state "UnlockHost" as A_HPC_UnlockHost {
+            state "DisableLockdown" as A_HPC_UH_DisableLockdown
+            state "RebootHost" as A_HPC_UH_RebootHost
+            state "WaitForUefiBoot" as A_HPC_UH_WaitForUefiBoot
+        }
+        state "CheckHostConfig" as A_HPC_CheckHostConfig
+        state "ConfigureBios" as A_HPC_ConfigureBios
+        state "WaitingForBiosJob" as A_HPC_WaitingForBiosJob {
+            state "HandleBiosJobFailure" as A_HPC_WBJ_HandleBiosJobFailure
+        }
+        state "PollingBiosSetup" as A_HPC_PollingBiosSetup
+        state "SetBootOrder" as A_HPC_SetBootOrder {
+            state "SetBootOrder" as A_HPC_SBO_SetBootOrder
+            state "WaitForSetBootOrderJobScheduled" as A_HPC_SBO_WaitForSetBootOrderJobScheduled
+            state "RebootHost" as A_HPC_SBO_RebootHost
+            state "WaitForSetBootOrderJobCompletion" as A_HPC_SBO_WaitForSetBootOrderJobCompletion
+        }
+        state "LockHost" as A_HPC_LockHost
+    }
+
+    state "PostAssignedMeasuring/WaitingForMeasurements" as PostAssignedMeasuring_M_WaitingForMeasurements
+    state "WaitingForCleanup/Init" as WaitingForCleanup_C_Init
+    state "DPUReprovision/dr_bfb_check_support" as DPUReprovision_dr_bfb_check_support
+
+    Ready --> A_WaitingForNetworkSegmentToBeReady : Instance assigned
+
+    A_WaitingForNetworkSegmentToBeReady --> A_WaitingForNetworkSegmentToBeReady : segments not ready
+    A_WaitingForNetworkSegmentToBeReady --> A_WaitingForNetworkConfig : No segment OR segments ready
+
+    A_WaitingForNetworkConfig --> A_WaitingForNetworkConfig : An assigned provisioning gate is not ready
+    A_WaitingForNetworkConfig --> A_WaitingForRebootToReady : Deletion requested OR all assigned provisioning gates clear
+
+    A_WaitingForStorageConfig --> A_WaitingForExtensionServicesConfig : Recover a persisted legacy state
+    A_WaitingForExtensionServicesConfig --> A_WaitingForExtensionServicesConfig : Extension services not ready
+    A_WaitingForExtensionServicesConfig --> A_WaitingForRebootToReady : No managed DPU OR no configured services OR services ready
+    A_WaitingForRebootToReady --> A_WaitingForRebootToReady : Aggregate PreventHostStateChanges OR managed DPU PXE signal
+    A_WaitingForRebootToReady --> A_Ready : Readiness checks pass OR deletion or custom iPXE bypass; ForceRestart
+
+    A_Ready --> A_NCU_WaitingForNetworkSegmentToBeReady : Update network request
+    A_Ready --> A_HPC_FactoryResetBmc : Instance deleted
+    A_Ready --> A_HPC_UH_DisableLockdown : Host or DPU reprovisioning, firmware update, or custom iPXE requested
+    A_HPC_FactoryResetBmc --> A_HPC_PowerCycle : Factory reset completes or is disabled
+
+    A_WaitingForDpusToUp --> A_WaitingForRebootToReady : DPUs ready or absent AND custom iPXE requested
+    A_WaitingForDpusToUp --> A_BootingWithDiscoveryImage : DPUs ready or absent AND no custom iPXE request
+    A_WaitingForDpusToUp --> A_WaitingForDpusToUp : Managed DPUs not ready
+
+    A_BootingWithDiscoveryImage --> A_BootingWithDiscoveryImage : Retry reboot if needed
+    A_BootingWithDiscoveryImage --> A_SwitchToAdminNetwork : If instance deleted
+    A_BootingWithDiscoveryImage --> DPUReprovision_dr_bfb_check_support : DPU reprovision needed
+    A_BootingWithDiscoveryImage --> HostReprovision_HR_CheckingFirmware : Host reprovision needed
+    A_BootingWithDiscoveryImage --> A_BootingWithDiscoveryImage : Nothing is needed. Stuck.
+
+    DPUReprovision_DR_RebootHost --> A_Ready : Reprovision completed
+    state "HostReprovision/hr_completed" as HostReprovision_hr_completed
+    HostReprovision_hr_completed --> A_Ready : Reprovision not needed
+
+    A_SwitchToAdminNetwork --> A_WaitingForNetworkReconfig : Update network config
+
+    A_WaitingForNetworkReconfig --> A_WaitingForNetworkReconfig : Network not synced
+    A_WaitingForNetworkReconfig --> a_release_instance : Delete instance & clean network config
+    a_release_instance --> PostAssignedMeasuring_M_WaitingForMeasurements : attenstation enabled
+    a_release_instance --> WaitingForCleanup_C_Init : attenstation disabled
+
+    A_NCU_WaitingForNetworkSegmentToBeReady --> A_NCU_WaitingForConfigSynced : No segments OR All ready
+    A_NCU_WaitingForNetworkSegmentToBeReady --> A_NCU_WaitingForNetworkSegmentToBeReady : Not all segments ready
+
+    A_NCU_WaitingForConfigSynced --> A_NCU_ReleaseOldResources : No associated DPU OR managed-host and instance versions current with no blocking health
+    A_NCU_WaitingForConfigSynced --> A_NCU_WaitingForConfigSynced : Missing or stale acknowledgement OR blocking health
+    A_NCU_ReleaseOldResources --> A_NCU_ReleaseOldResources : Missing or stale acknowledgement OR blocking health
+    A_NCU_ReleaseOldResources --> A_Ready : Same checks pass and old-resource cleanup commits
+
+    A_HPC_PowerCycle --> A_HPC_PowerCycle : Wait Power Off
+    A_HPC_PowerCycle --> A_HPC_UH_DisableLockdown : Power On
+    A_HPC_UH_DisableLockdown --> A_HPC_UH_RebootHost : BMC lockdown disabled
+    A_HPC_UH_RebootHost --> A_HPC_UH_WaitForUefiBoot : ForceRestart issued
+    A_HPC_UH_WaitForUefiBoot --> A_HPC_UH_WaitForUefiBoot : Waiting for UEFI boot (5 min)
+    A_HPC_UH_WaitForUefiBoot --> A_HPC_CheckHostConfig : UEFI boot wait complete
+    A_HPC_CheckHostConfig --> A_HPC_CheckHostConfig : Wait DPU Up
+    A_HPC_CheckHostConfig --> A_HPC_ConfigureBios : Need config host boot order
+    A_HPC_CheckHostConfig --> A_HPC_LockHost : No need config host boot order
+    A_HPC_ConfigureBios --> A_HPC_PollingBiosSetup : Config BIOS
+    A_HPC_ConfigureBios --> A_HPC_WaitingForBiosJob : Dell BIOS job scheduled
+    A_HPC_WaitingForBiosJob --> A_HPC_PollingBiosSetup : BIOS job completed
+    A_HPC_WaitingForBiosJob --> A_HPC_WBJ_HandleBiosJobFailure : BIOS job failed
+    A_HPC_WaitingForBiosJob --> A_Failed : Retry budget exhausted (BiosSetupFailed)
+    A_HPC_WBJ_HandleBiosJobFailure --> A_HPC_ConfigureBios : Power off + BMC reset + power on
+    A_HPC_PollingBiosSetup --> A_HPC_PollingBiosSetup : Wait for BIOS setup
+    A_HPC_PollingBiosSetup --> A_HPC_WBJ_HandleBiosJobFailure : Stuck > 15 min, retry budget left
+    A_HPC_PollingBiosSetup --> A_Failed : Stuck > 15 min, retry budget exhausted (BiosSetupFailed)
+    A_HPC_PollingBiosSetup --> A_HPC_SBO_SetBootOrder : BIOS is setup
+    A_HPC_SBO_SetBootOrder --> A_HPC_SBO_WaitForSetBootOrderJobScheduled : Set boot order job scheduled
+    A_HPC_SBO_WaitForSetBootOrderJobScheduled --> A_HPC_SBO_RebootHost : Job scheduled
+    A_HPC_SBO_RebootHost --> A_HPC_SBO_WaitForSetBootOrderJobCompletion : Reboot
+    A_HPC_SBO_WaitForSetBootOrderJobCompletion --> A_HPC_LockHost : Job completed
+    A_HPC_LockHost --> A_WaitingForDpusToUp : BMC lockdown enabled
+
+    state AnyState
+    AnyState --> A_Failed : Any failure condition
+    A_Failed --> A_Failed : Wait (stuck, manual action needed)
+    A_Failed --> A_HPC_SBO_SetBootOrder : BiosSetupFailed AND is_bios_setup ok
+```
+
+### Network Readiness Gates
+
+During initial provisioning, `WaitingForNetworkConfig` waits for all required
+network configuration observations to match their desired versions. For a host
+with associated DPUs, it also waits for aggregate health alerts that prevent
+host state changes to clear. A host without associated DPUs skips both the DPU
+observation and aggregate health checks in this state.
+
+The normal agent report gives a p0 transport failure the combination of
+`BgpPeeringTor` and `PreventAllocations`. The PXE gate matches that probe ID and
+classification; it does not inspect the alert target. A host `Replace` report
+takes precedence for this check. Without one, the primary DPU `Replace` report
+takes precedence over that DPU's `Merge` reports. Refer to
+[DPU ToR Uplink Health](../../dpu-management/dpu_configuration.md#dpu-tor-uplink-health)
+for the uplink policy and classifications.
+
+`WaitingForRebootToReady` repeats the aggregate health and primary p0 checks
+immediately before the normal PXE `ForceRestart`. This closes the interval in
+which health can change after the configuration check. Hosts without managed
+DPUs skip this PXE signal check, including one supplied by a host `Replace`
+report, but still receive the aggregate health check. In
+`WaitingForNetworkConfig`, a host `Replace` report can supply the matching
+signal before NICo looks for a primary DPU, including on a host without managed
+DPUs.
+
+Normal success proceeds directly from `WaitingForNetworkConfig` to
+`WaitingForRebootToReady`. `WaitingForStorageConfig` and
+`WaitingForExtensionServicesConfig` remain only so NICo can recover hosts that
+persisted those states on an older release.
+
+The following requests bypass these initial provisioning readiness checks:
+
+- Instance deletion proceeds through its required restart without waiting for
+  network health.
+- An explicit custom iPXE request proceeds through its requested restart.
+
+### Live Network Update Resource Release
+
+A live network update keeps old network resources until the required DPU
+reports and health checks pass. It does not restart the host or apply the
+primary p0 PXE gate.
+
+For a host with associated DPUs, NICo checks these conditions in order:
+
+1. Every DPU in the host topology reports the current managed-host network
+   configuration version. A missing DPU snapshot, observation, or version does
+   not count as an acknowledgement.
+1. The number of instance network observations matches the number of DPUs
+   required by the current instance configuration. Every recorded instance
+   observation reports the current instance network configuration version.
+1. The aggregate health report has no `PreventHostStateChanges` alert.
+
+A host without associated DPUs skips these acknowledgement and aggregate health
+checks.
+
+`NetworkConfigUpdate/WaitingForConfigSynced` runs the checks first. If they pass,
+the host enters `NetworkConfigUpdate/ReleaseOldResources`, which repeats them.
+Another DPU report can arrive after NICo saves the state change.
+
+Missing or stale acknowledgements cause a wait. Blocking health causes a
+handler error. In either case, NICo keeps the same state, old resources, and
+pending update request, then checks again on a later iteration. Instance
+deletion does not bypass these checks for a pending live update.
+
+After the repeated checks pass, NICo completes cleanup in one transaction. It
+releases old addresses and unused VPC loopbacks, marks removed generated
+segments for deletion, and clears the pending update request. The host returns
+to `Assigned/Ready`. To troubleshoot a pending update, refer to
+[Diagnose a Live Network Update](../../playbooks/stuck_objects/waiting_for_network_config.md#diagnose-a-live-network-update).
+
+A DPU that loses all tenant interfaces still belongs to the host
+topology. It must acknowledge its Admin configuration before NICo can release
+the old resources.
+
+Until that DPU reports again, its old instance observation can leave more
+instance observations than required DPUs, even if its managed-host version
+still matches. If applying Admin fails, the instance observation can disappear
+without proving that the old tenant configuration was removed. A healthy
+report or an absent instance observation is therefore not enough: NICo still
+needs the managed-host acknowledgement.
+
+NICo uses the versions and health that the agents report. It does not
+independently verify hardware forwarding. Refer to
+[Wait for Removed DPUs Before Releasing Instance Network Resources](https://github.com/dsx-ai-factory/infra-controller/issues/3895)
+for background on this removed-DPU scenario.
+
+## Host Reprovision State Details (HostReprovisionState)
+
+Shows the host firmware reprovision process:
+
+```mermaid
+stateDiagram-v2
+    state Ready
+    state "Assigned/BootingWithDiscoveryImage" as Assigned_A_BootingWithDiscoveryImage
+
+    state "CheckingFirmware" as HR_CheckingFirmware
+    state "CheckingFirmwareRepeat" as HR_CheckingFirmwareRepeat
+    state "InitialReset" as HR_InitialReset {
+        state "Start" as HR_IR_Start
+        state "BMCWasReset" as HR_IR_BMCWasReset
+        state "WaitBoot" as HR_IR_WaitBoot
+    }
+    state "WaitingForScript" as HR_WaitingForScript
+    state "WaitingForUpload" as HR_WaitingForUpload
+    state "WaitingForFirmwareUpgrade" as HR_WaitingForFirmwareUpgrade
+    state "ResetForNewFirmware" as HR_ResetForNewFirmware
+    state "NewFirmwareReportedWait" as HR_NewFirmwareReportedWait
+    state "FailedFirmwareUpgrade" as HR_FailedFirmwareUpgrade
+    state hr_completed <<choice>>
+
+    state "Assigned/Ready" as Assigned_A_Ready
+
+    Ready --> HR_CheckingFirmware : Host reprovision request
+    Assigned_A_BootingWithDiscoveryImage --> HR_CheckingFirmware : Host reprovision request
+
+    HR_CheckingFirmware --> HR_IR_Start : Firmware needs pre-update reset
+    HR_IR_Start --> HR_IR_BMCWasReset : Power Off
+    HR_IR_BMCWasReset --> HR_IR_WaitBoot : Power On
+    HR_IR_WaitBoot --> HR_IR_WaitBoot : Wait 20 min
+    HR_IR_WaitBoot --> HR_CheckingFirmwareRepeat
+    HR_CheckingFirmware --> HR_WaitingForScript : Upgrade using script
+    HR_WaitingForScript --> HR_CheckingFirmwareRepeat : Script completed
+    HR_WaitingForScript --> HR_FailedFirmwareUpgrade : Script failed
+    HR_CheckingFirmware --> HR_CheckingFirmwareRepeat : No explored endpoint data
+    HR_CheckingFirmware --> hr_completed : FW info not found
+    HR_CheckingFirmwareRepeat --> hr_completed : FW info not found
+    HR_CheckingFirmware --> HR_WaitingForUpload
+    HR_WaitingForUpload --> HR_CheckingFirmwareRepeat : No upload status upload error
+    HR_WaitingForUpload --> HR_WaitingForFirmwareUpgrade : Upload success
+    HR_WaitingForFirmwareUpgrade --> HR_WaitingForUpload : Update AND has more
+    HR_WaitingForFirmwareUpgrade --> HR_ResetForNewFirmware : Updated last
+    HR_WaitingForFirmwareUpgrade --> HR_CheckingFirmwareRepeat : Task interrupted OR get error
+    HR_WaitingForFirmwareUpgrade --> HR_FailedFirmwareUpgrade : Unknown task status
+    HR_ResetForNewFirmware --> HR_NewFirmwareReportedWait
+    HR_NewFirmwareReportedWait --> hr_completed
+    HR_FailedFirmwareUpgrade --> HR_FailedFirmwareUpgrade : Wait retry timeout
+    HR_FailedFirmwareUpgrade --> HR_CheckingFirmware : Retry after timeout
+
+    hr_completed --> Assigned_A_Ready : if Assigned state
+    hr_completed --> Ready : if source is Ready state
+```
+
+## DPU Reprovision State Details (DpuReprovisionState)
+
+Shows the DPU firmware reprovision process:
+
+```mermaid
+stateDiagram-v2
+    state Ready
+    state "Assigned/BootingWithDiscoveryImage" as Assigned_A_BootingWithDiscoveryImage
+
+    state dr_bfb_check_support <<choice>>
+    state "BmcFirmwareUpgrade" as DR_BmcFirmwareUpgrade
+    state "InstallDpuOs" as DR_InstallDpuOs {
+        state "InstallingBFB" as DR_IDO_InstallingBFB
+        state "WaitForInstallComplete" as DR_IDO_WaitForInstallComplete
+        state "Completed" as DR_IDO_Completed
+        state "InstallationError" as DR_IDO_InstallationError
+    }
+    state "FirmwareUpgrade" as DR_FirmwareUpgrade
+    state "WaitingForNetworkInstall" as DR_WaitingForNetworkInstall
+    state "PoweringOffHost" as DR_PoweringOffHost
+    state "PowerDown" as DR_PowerDown
+    state "BufferTime" as DR_BufferTime
+    state "VerifyFirmareVersions" as DR_VerifyFirmareVersions
+    state "WaitingForNetworkConfig" as DR_WaitingForNetworkConfig
+    state "RebootHostBmc" as DR_RebootHostBmc
+    state "RebootHost" as DR_RebootHost
+    state "NotUnderReprovision" as DR_NotUnderReprovision
+
+    state "Assigned/Ready" as Assigned_A_Ready
+    state "HostInit/Discovered" as HostInit_HI_Discovered
+    state "HostReprovision/CheckingFirmware" as HostReprovision_HR_CheckingFirmware
+
+    Ready --> dr_bfb_check_support : DPU reprovision request
+    Assigned_A_BootingWithDiscoveryImage --> dr_bfb_check_support : DPU reprovision request
+
+    dr_bfb_check_support --> DR_IDO_InstallingBFB : BFB install supported
+    dr_bfb_check_support --> DR_WaitingForNetworkInstall : BFB install not supported
+
+    DR_IDO_InstallingBFB --> DR_IDO_WaitForInstallComplete : Start update
+    DR_IDO_WaitForInstallComplete --> DR_IDO_Completed : Task completed
+    DR_IDO_WaitForInstallComplete --> DR_IDO_InstallationError : Task exception OR unknown state
+    DR_IDO_WaitForInstallComplete --> DR_IDO_WaitForInstallComplete : Wait task completion
+    DR_IDO_Completed --> DR_WaitingForNetworkInstall
+
+    DR_BmcFirmwareUpgrade --> DR_FirmwareUpgrade : deprecated
+    DR_FirmwareUpgrade --> DR_WaitingForNetworkInstall : deprecated
+    DR_BufferTime --> DR_VerifyFirmareVersions : deprecated
+    DR_WaitingForNetworkInstall --> DR_PoweringOffHost
+    DR_PoweringOffHost --> DR_PoweringOffHost : wait all DPU ready
+    DR_PoweringOffHost --> DR_PowerDown : DPUs ready
+    DR_PowerDown --> DR_PowerDown : Wait Power off
+    DR_PowerDown --> DR_VerifyFirmareVersions : Power is off
+    DR_VerifyFirmareVersions --> DR_WaitingForNetworkConfig
+    DR_WaitingForNetworkConfig --> DR_WaitingForNetworkConfig : Any DPU is not up OR network not synced
+    DR_WaitingForNetworkConfig --> DR_RebootHostBmc
+    DR_RebootHostBmc --> DR_RebootHost
+    DR_RebootHost --> HostInit_HI_Discovered : if entered from Ready
+    DR_RebootHost --> HostReprovision_HR_CheckingFirmware : if entered from Assigned AND host reprovision requested
+    DR_RebootHost --> Assigned_A_Ready : if entered from Assigned AND host reprovision not requested
+```
+
+## WaitingForCleanup State Details
+
+```mermaid
+stateDiagram-v2
+    state "Assigned/A_WaitingForNetworkReconfig" as Assigned_A_WaitingForNetworkReconfig
+    state Failed
+
+    state "Init" as C_Init
+    state "SecureEraseBoss" as C_SecureEraseBoss {
+        state "UnlockHost" as C_SEB_UnlockHost
+        state "SecureEraseBoss" as C_SEB_SecureEraseBoss
+        state "WaitForJobCompletion" as C_SEB_WaitForJobCompletion
+        state "HandleJobFailure" as C_SEB_HandleJobFailure
+    }
+    state C_HostCleanup
+    state C_CreateBossVolume {
+        state "CreateBossVolume" as C_SBV_CreateBossVolume
+        state "WaitForJobScheduled" as C_SBV_WaitForJobScheduled
+        state "RebootHost" as C_SBV_RebootHost
+        state "WaitForJobCompletion" as C_SBV_WaitForJobCompletion
+        state "LockHost" as C_SBV_LockHost
+        state "HandleJobFailure" as C_SBV_HandleJobFailure
+    }
+    state "DisableBIOSBMCLockdown" as C_DisableBIOSBMCLockdown
+
+    state "BomValidating/UpdatingInventory" as BomValidating_BV_UpdatingInventory
+
+    Failed --> C_Init
+    Assigned_A_WaitingForNetworkReconfig --> C_Init
+    C_Init --> C_SEB_UnlockHost : If Dell AND has Boss controller
+    C_Init --> C_HostCleanup : If not Dell OR no Boss controller
+
+    C_SEB_UnlockHost --> C_SEB_SecureEraseBoss
+    C_SEB_SecureEraseBoss --> C_SEB_WaitForJobCompletion
+    C_SEB_WaitForJobCompletion --> C_HostCleanup : Job success
+    C_SEB_WaitForJobCompletion --> C_SEB_HandleJobFailure : Job fail
+    C_SEB_WaitForJobCompletion --> C_SEB_WaitForJobCompletion : Wait job to complete
+    C_SEB_HandleJobFailure --> C_SEB_HandleJobFailure : Power off OR Power on if needed
+    C_SEB_HandleJobFailure --> C_SEB_SecureEraseBoss : Retry
+    C_SEB_HandleJobFailure --> C_SEB_HandleJobFailure : Power cycle (Off / On)
+    C_HostCleanup --> C_HostCleanup : Wait for cleanup
+    C_HostCleanup --> C_SBV_CreateBossVolume : if Boss controller present
+    C_HostCleanup --> BomValidating_BV_UpdatingInventory : if Boss controller not present
+
+    C_SBV_CreateBossVolume --> C_SBV_WaitForJobScheduled
+    C_SBV_WaitForJobScheduled --> C_SBV_RebootHost
+    C_SBV_RebootHost --> C_SBV_WaitForJobCompletion
+    C_SBV_WaitForJobCompletion --> C_SBV_HandleJobFailure : Job fail
+    C_SBV_WaitForJobCompletion --> C_SBV_LockHost : Job success
+    C_SBV_WaitForJobCompletion --> C_SBV_WaitForJobCompletion : Wait job to complete
+    C_SBV_HandleJobFailure --> C_SBV_HandleJobFailure : Power off OR Power on if needed
+    C_SBV_HandleJobFailure --> C_SBV_CreateBossVolume : Retry
+    C_SBV_HandleJobFailure --> C_SBV_HandleJobFailure : Power cycle (Off / On)
+    C_SBV_LockHost --> BomValidating_BV_UpdatingInventory
+```
+
+## Measuring and PostAssignedMeasuring State Details
+
+Shows the attestation measurement process.
+
+```mermaid
+stateDiagram-v2
+    state "Assigned/WaitingForNetworkReconfig" as Assigned_A_WaitingForNetworkReconfig
+    state Ready
+    state "WaitingForMeasurements" as M_WaitingForMeasurements
+    state "PendingBundle" as M_PendingBundle
+    state m_return_success <<choice>>
+    state Failed
+    state "WaitingForCleanup/Init" as WaitingForCleanup_C_Init
+
+    Ready --> M_WaitingForMeasurements : Redo measuring requested
+    Assigned_A_WaitingForNetworkReconfig --> M_WaitingForMeasurements : On instance delete
+    M_WaitingForMeasurements --> M_PendingBundle : Wait for golden values
+    M_WaitingForMeasurements --> M_WaitingForMeasurements : Wait for measurements
+    M_WaitingForMeasurements --> m_return_success : Measurements validated
+    M_WaitingForMeasurements --> Failed : Measurements failed
+    M_PendingBundle --> m_return_success : Measurements validated
+    M_PendingBundle --> Failed : Measurements failed
+    m_return_success --> Ready : if came from Ready state
+    m_return_success --> WaitingForCleanup_C_Init : if came from Assigned state
+```
+
+## Failed State
+
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    state AnyNotAssignedState
+    state Failed
+    state "HostInit/WaitingForLockdown/TimeWaitForDPUDown" as HostInit_HI_WaitingForLockdown_HI_WFL_TimeWaitForDPUDown
+    state "WaitingForCleanup/Init" as WaitingForCleanup_C_Init
+    state "HostInit/Measuring/WaitingForMeasurements" as HostInit_HI_Measuring_HI_M_WaitingForMeasurements
+    state "Measuring/WaitingForMeasurements" as Measuring_M_WaitingForMeasurements
+    state "PostAssignedMeasuring/WaitingForMeasurements" as PostAssignedMeasuring_M_WaitingForMeasurements
+    state "Validation/RebootHost" as Validation_V_RebootHost
+    state ForceDeletion
+
+    AnyNotAssignedState --> Failed : Failure outside NIC firmware recovery
+    Failed --> HostInit_HI_WaitingForLockdown_HI_WFL_TimeWaitForDPUDown : Discovery Failure On discovery succeeded
+    Failed --> Failed : Reboot with retry count
+    Failed --> WaitingForCleanup_C_Init : NVMECleanFailed Cleaned up successfully after a failure
+    Failed --> Measuring_M_WaitingForMeasurements : Measurements Fail Not in original failure cause anymore
+    Failed --> HostInit_HI_Measuring_HI_M_WaitingForMeasurements : Measurements Fail Not in original failure cause anymore
+    Failed --> PostAssignedMeasuring_M_WaitingForMeasurements : Measurements Fail Not in original failure cause anymore
+    Failed --> Validation_V_RebootHost : MachineValidation Fail Machine validation requested
+    Failed --> Failed : Non-recoverable cause
+    Failed --> ForceDeletion : Admin force deletion
+```

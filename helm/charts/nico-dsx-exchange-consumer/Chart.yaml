@@ -1,0 +1,10 @@
+apiVersion: v2
+name: nico-dsx-exchange-consumer
+description: Helm chart for the NICo DSX Exchange Consumer component
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - nico
+  - dsx-exchange-consumer
+  - nico

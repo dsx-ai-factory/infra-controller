@@ -1,0 +1,64 @@
+{{- $dhcp := default (dict) .Values.dhcp -}}
+{{- if $dhcp.v6Enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-dhcp.name" . }}6
+  namespace: {{ include "nico-dhcp.namespace" . }}
+spec:
+  ipFamilyPolicy: SingleStack
+  ipFamilies: [IPv6]
+  selector:
+    app.kubernetes.io/name: {{ include "nico-dhcp.name" . }}6
+    app.kubernetes.io/component: dhcp
+  ports:
+    - name: dhcp6
+      port: 547
+      targetPort: dhcp6
+      protocol: UDP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-dhcp.name" . }}6-metrics
+  namespace: {{ include "nico-dhcp.namespace" . }}
+  labels:
+    app.kubernetes.io/metrics: {{ include "nico-dhcp.name" . }}
+spec:
+  ipFamilyPolicy: PreferDualStack
+  selector:
+    app.kubernetes.io/name: {{ include "nico-dhcp.name" . }}6
+    app.kubernetes.io/component: dhcp
+  ports:
+    - name: http
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+{{- $external := default (dict) .Values.v6ExternalService }}
+{{- if $external.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-dhcp.name" . }}6-external
+  namespace: {{ include "nico-dhcp.namespace" . }}
+  {{- with $external.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: LoadBalancer
+  # Preserve relay source addresses and ports for Kea's UDP 547 replies.
+  externalTrafficPolicy: Local
+  ipFamilyPolicy: SingleStack
+  ipFamilies: [IPv6]
+  selector:
+    app.kubernetes.io/name: {{ include "nico-dhcp.name" . }}6
+    app.kubernetes.io/component: dhcp
+  ports:
+    - name: dhcp6
+      port: 547
+      targetPort: dhcp6
+      protocol: UDP
+{{- end }}
+{{- end }}

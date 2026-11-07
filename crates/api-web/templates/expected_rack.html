@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+
+{% block title %}Expected Racks{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="row">
+        <div class="col">
+            <h1>Expected Racks</h1>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">Expected Racks</h5>
+                </div>
+                <div class="card-body">
+                    {% if !racks.is_empty() %}
+                    <div class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                            <tr>
+                                <th>Rack ID</th>
+                                <th>Rack Profile</th>
+                                <th>Compute Trays</th>
+                                <th>Switches</th>
+                                <th>Power Shelves</th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            {% for rack in racks %}
+                            <tr>
+                                <td>{{ rack.rack_id|rack_id_link|safe }}</td>
+                                <td>{{ rack.rack_profile_id }}</td>
+                                <td>{{ rack.compute_trays }}</td>
+                                <td>{{ rack.switches }}</td>
+                                <td>{{ rack.power_shelves }}</td>
+                            </tr>
+                            {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    {% else %}
+                    <p class="text-muted">No expected racks found.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,20 @@
+[Unit]
+Description=OpenTelemetry Collector Contrib
+Documentation=https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/receiver/journaldreceiver
+After=networking.service network-online.target time-sync.target containerd@mgmt.service
+StartLimitIntervalSec=600
+StartLimitBurst=120
+
+[Service]
+ExecStartPre=cloud-init status --wait
+ExecStart=ip vrf exec mgmt /etc/otelcol-contrib/otelcol-wrapper
+KillMode=mixed
+Restart=always
+RestartSec=5
+
+Type=simple
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

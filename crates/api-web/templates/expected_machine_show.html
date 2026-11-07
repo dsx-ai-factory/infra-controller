@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+
+{% block title %}Expected Machines{% endblock %}
+
+{% macro expected_machines_table(machines) %}
+<table class="sortable overview">
+	<thead>
+	<tr>
+		<th>Serial number</th>
+		<th>Interface MAC address</th>
+		<th>Explored Endpoint</th>
+		<th>Managed Host</th>
+	</tr>
+	</thead>
+	<tbody>
+		{% for m in machines %}
+		<tr>
+			<td>{{ m.serial_number }}</td>
+			{% if m.interface_id.is_empty() %}
+				                <td class="cell-error">{{ m.bmc_mac_address }}</td>
+				<td></td>
+				<td></td>
+			{% else %}
+				<td><a href="/admin/interface/{{ m.interface_id }}">{{ m.bmc_mac_address }}</a></td>
+				{% if m.address.is_empty() %}
+					                <td class="cell-error">Unexplored</td>
+					<td></td>
+				{% else %}
+					<td><a href="/admin/explored-endpoint/{{ m.address }}">{{ m.address }}</a></td>
+					{% if m.machine_id.is_empty() %}
+						                <td class="cell-warning">Unlinked</td>
+					{% else %}
+						<td>{{ m.machine_id|machine_id_link|safe }}</td>
+					{% endif %}
+				{% endif %}
+			{% endif %}
+		</tr>
+		{% endfor %}
+	</tbody>
+	<tfoot>
+		<tr>
+			<th>{{ machines.len() }} item{% if machines.len() != 1 %}s{% endif %}</th>
+			<th></th>
+			<th></th>
+			<th></th>
+		</tr>
+	</tfoot>
+</table>
+{% endmacro %}
+
+{% block content %}
+{% if active_tab == "all" %}
+<div id="json">
+	<a href="/admin/expected-machine-definition.json">JSON</a>
+</div>
+{% endif %}
+<h1>Expected Machines ({{ page.total_items() }})</h1>
+{% include "site_explorer_run_status.html" %}
+
+<!-- Tab Navigation -->
+<div class="tab-nav">
+	<a class="tab-button {% if active_tab == "all" %}active{% endif %}" href="/admin/expected-machine?tab=all" title="All expected machines">All ({{ all_count }})</a>
+	<a class="tab-button {% if active_tab == "completed" %}active{% endif %}" href="/admin/expected-machine?tab=completed" title="Success">Completed ({{ completed_count }})</a>
+	<a class="tab-button {% if active_tab == "unseen" %}active{% endif %}" href="/admin/expected-machine?tab=unseen" title="Has not sent DHCP">Unseen ({{ unseen_count }})</a>
+	<a class="tab-button {% if active_tab == "unexplored" %}active{% endif %}" href="/admin/expected-machine?tab=unexplored" title="Not Redfish explored yet">Unexplored ({{ unexplored_count }})</a>
+	<a class="tab-button {% if active_tab == "unlinked" %}active{% endif %}" href="/admin/expected-machine?tab=unlinked" title="Not paired with managed host yet">Unlinked ({{ unlinked_count }})</a>
+	<a class="tab-button {% if active_tab == "unexpected" %}active{% endif %}" href="/admin/expected-machine?tab=unexpected" title="Explored BMCs not listed in expected_machines">Unexpected ({{ unexpected_count }})</a>
+	<div class="tab-indicator"></div>
+</div>
+
+{% if active_tab != "unexpected" %}
+	{% call expected_machines_table(expected_rows) %}{% endcall %}
+{% else %}
+	<table class="sortable overview">
+		<thead>
+			<tr>
+				<th>Interface MAC address</th>
+				<th>Explored Endpoint</th>
+				<th>Managed Host</th>
+			</tr>
+		</thead>
+		<tbody>
+			{% for ep in unexpected_rows %}
+			<tr>
+				<td>{{ ep.bmc_mac }}</td>
+				<td><a href="/admin/explored-endpoint/{{ ep.address }}">{{ ep.address }}</a></td>
+				{% if ep.machine_id.is_empty() %}
+					<td class="cell-error" title="Site Explorer will not ingest this endpoint until it is added to expected_machines">Not ingested (gated)</td>
+				{% else %}
+					<td class="cell-error" title="Orphan: ingested, then its expected_machines entry was removed. Site Explorer still maintains it but would not re-ingest if force-deleted.">{{ ep.machine_id|machine_id_link|safe }}</td>
+				{% endif %}
+			</tr>
+			{% endfor %}
+		</tbody>
+		<tfoot>
+			<tr>
+				<th>{{ unexpected_rows.len() }} item{% if unexpected_rows.len() != 1 %}s{% endif %}</th>
+				<th></th>
+				<th></th>
+			</tr>
+		</tfoot>
+	</table>
+{% endif %}
+
+{% include "pages_footer.html" %}
+
+{% endblock %}

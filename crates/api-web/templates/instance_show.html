@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block title %}Instances{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Instances</h1>
+
+<table class="sortable overview">
+	<thead>
+	<tr>
+		<th>#</th>
+		<th>ID</th>
+		<th>Machine ID</th>
+		<th>Tenant Org</th>
+		<th>Tenant State</th>
+		<th>Configs Synced</th>
+		<th>Name</th>
+		<th>Labels</th>
+		<th>IP Addresses</th>
+		<th>Eth IFs #</th>
+		<th>IB IFs #</th>
+		<th>Keysets #</th>
+		<th>NVLink GPUs #</th>
+	</tr>
+	</thead>
+	<tbody>
+	{% for i in instances %}
+		<tr>
+			<td>{{ loop.index }}</td> 
+			<td><a href="/admin/instance/{{ i.id }}">{{ i.id }}</a></td>
+			<td>{{ i.machine_id|machine_id_link|safe}}</td>
+			<td><a href="/admin/tenant/{{ i.tenant_org }}">{{ i.tenant_org }}</a></td>
+			<td>{{ i.tenant_state }}</td>
+			<td>{{ i.configs_synced }}</td>
+			<td>{{ i.metadata.name }}</td>
+			<td>{{ i.metadata.labels|label_list_fmt(true)|safe }}</td>
+			<td>{{ i.ip_addresses }}</td>
+			<td>{{ i.num_eth_ifs }}</td>
+			<td>{{ i.num_ib_ifs }}</td>
+			<td>{{ i.num_keysets }}</td>
+			<td>{{ i.num_nvlink_gpus }}</td>
+		</tr>
+	{% endfor %}
+	</tbody>
+</table>
+
+{% endblock %}
+

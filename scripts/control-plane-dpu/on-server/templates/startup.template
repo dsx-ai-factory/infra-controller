@@ -1,0 +1,107 @@
+- set:
+    bridge:
+      domain:
+        br_default:
+          untagged: 1
+          vlan:
+            '1': {}
+    interface:
+      lo:
+        ip:
+          address:
+            {{.Loopback}}: {}
+        type: loopback
+      p0_if,p1_if,pf0hpf_if,pf1hpf_if:
+        type: swp
+      pf0hpf_if:
+        bridge:
+          domain:
+            br_default: {}
+      vlan1:
+        ip:
+          address:
+            {{.Hostnet}}: {}
+        type: svi
+        vlan: 1
+    router:
+      bgp:
+        autonomous-system: {{.ASN}}
+        enable: on
+        router-id: {{.LoopbackIP}} 
+      policy:
+        prefix-list:
+          ADVERTISE:
+            rule:
+              '10':
+                action: permit
+                match:
+                  {{.Loopback}}: {}
+              '20':
+                action: permit
+                match:
+                  {{.Hostnet}}: {}
+              '30':
+                action: permit
+                match:
+                  {{.Rule30}}:
+                    min-prefix-len: 32
+              '40':
+                action: permit
+                match:
+                  {{.Rule40}}:
+                    min-prefix-len: 32
+        route-map:
+          ADVERTISEMAP:
+            rule:
+              '10':
+                action:
+                  permit: {}
+                match:
+                  ip-prefix-list: ADVERTISE
+                  type: ipv4
+    vrf:
+      default:
+        router:
+          bgp:
+            address-family:
+              ipv4-unicast:
+                enable: on
+                network:
+                  {{.Loopback}}: {}
+                  {{.Hostnet}}: {}
+              ipv6-unicast:
+                enable: on
+            enable: on
+            neighbor:
+              {{.BGPNeighbor}}:
+                address-family:
+                  ipv6-unicast:
+                    enable: on
+                remote-as: {{.RemoteAS}} 
+                type: numbered
+              p0_if:
+                address-family:
+                  ipv4-unicast:
+                    policy:
+                      outbound:
+                        route-map: ADVERTISEMAP
+                peer-group: HBNUNDERLAY
+                type: unnumbered
+              p1_if:
+                address-family:
+                  ipv4-unicast:
+                    policy:
+                      outbound:
+                        route-map: ADVERTISEMAP
+                peer-group: HBNUNDERLAY
+                type: unnumbered
+            path-selection:
+              multipath:
+                aspath-ignore: on
+            peer-group:
+              HBNUNDERLAY:
+                remote-as: external
+{{- if and (has . "BgpLeafSessionPassword") .BgpLeafSessionPassword }}
+                password: {{ .BgpLeafSessionPassword | quote }} # BGP TCP MD5 toward the leaf (installWithLeafPassword; rendered at build time into the encrypted artifacts)
+{{- end }}
+

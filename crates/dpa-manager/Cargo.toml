@@ -1,0 +1,53 @@
+[package]
+name = "carbide-dpa-manager"
+version = "0.0.1"
+edition.workspace = true
+description = "Carbide DPA Manager"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "carbide_dpa_manager"
+
+[features]
+default = []
+test-support = []
+
+[dependencies]
+carbide-api-db = { path = "../api-db" }
+carbide-api-model = { path = "../api-model" }
+carbide-dpa = { path = "../dpa" }
+carbide-instrument = { path = "../instrument" }
+carbide-secrets = { path = "../secrets" }
+carbide-utils = { path = "../utils" }
+carbide-uuid = { path = "../uuid" }
+config-version = { path = "../config-version" }
+
+# these are alphabetized
+async-trait = { workspace = true }
+chrono = { workspace = true }
+duration-str = { workspace = true }
+eyre = { workspace = true }
+http = { workspace = true }
+mac_address = { workspace = true }
+mqttea = { path = "../mqttea" }
+opentelemetry = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true, features = ["postgres"] }
+rand = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+uuid = { features = ["v4", "serde"], workspace = true }
+
+[dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-macros = { path = "../macros" }
+carbide-sqlx-testing = { path = "../sqlx-testing" }
+carbide-test-support = { path = "../test-support" }
+
+[lints]
+workspace = true

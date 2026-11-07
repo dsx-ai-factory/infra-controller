@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+
+{% block title %}Machine Validation Run {{ validation_id }} Test {{ test_id }}{% endblock %}
+
+{% block content %}
+<h1>Machine Validation Run <a href="/admin/machinevalidation/runs/{{ validation_id }}">{{ validation_id }}</a> Test {{ test_id }}</h1>
+
+<table class="sortable overview">
+	{% for result in validation_results %}
+	<tr>
+		<th>Validation ID</th>
+		<td><a href="/admin/machinevalidation/runs/{{ validation_id }}">{{ result.validation_id }}</a></td>
+	</tr>
+	<tr>
+		<th>Name</th>
+		<td>{{ result.name }}</td>
+	</tr>
+	<tr>
+		<th>Context</th>
+		<td>{{ result.context }}</td>
+	</tr>
+	<tr>
+		<th>Status</th>
+		                <td>{% if result.status == "0" %}<span class="bubble success">{% else %}<span class="bubble error">{% endif %}{{ result.status }}</span></td>
+	</tr>
+	<tr>
+		<th>Command</th>
+		<td>{{ result.command }}</td>
+	</tr>
+	<tr>
+		<th>Args</th>
+		<td>{{ result.args }}</td>
+	</tr>
+	<tr>
+		<th>Stdout</th>
+		<td>
+			<pre><code>{{ result.stdout|colorize_output()|safe }}</code></pre>
+		</td>
+	</tr>
+	<tr>
+		<th>Stderr</th>
+		<td>
+			<pre><code>{{ result.stderr|colorize_output()|safe }}</code></pre>
+		</td>
+	</tr>
+	<tr>
+		<th>Start Time</th>
+		<td>{{ result.start_time }}</td>
+	</tr>
+	<tr>
+		<th>End Time</th>
+		<td>{{ result.end_time }}</td>
+	</tr>
+	{% endfor %}
+</table>
+
+{% endblock %}

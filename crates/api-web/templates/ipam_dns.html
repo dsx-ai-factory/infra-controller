@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block title %}IPAM / DNS{% endblock %}
+
+{% block content %}
+<h1>IPAM &rsaquo; DNS</h1>
+
+<h2>Authoritative Zones</h2>
+<table class="sortable overview">
+	<thead>
+		<tr>
+			<th>Zone</th>
+			<th>SOA Serial</th>
+			<th>Records</th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for zone in zones %}
+			<tr>
+				<td>{{ zone.name }}</td>
+				<td>{{ zone.soa_serial }}</td>
+				<td>{{ zone.record_count }}</td>
+			</tr>
+		{% endfor %}
+	</tbody>
+</table>
+
+<h2>DNS Records</h2>
+<p>{{ records.len() }} records across {{ zones.len() }} zone(s).</p>
+
+<input type="text" id="dns-filter" placeholder="Filter by name, type, value, or zone..." style="width: 100%; padding: 8px; margin-bottom: 8px; box-sizing: border-box;">
+
+<!-- Opt out of the global auto-filter (table_filter.js): this table ships its own #dns-filter above. -->
+<table class="sortable overview" id="dns-records-table" data-no-auto-filter>
+	<thead>
+		<tr>
+			<th>FQDN</th>
+			<th>Type</th>
+			<th>Value</th>
+			<th>TTL</th>
+			<th>Zone</th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for r in records %}
+			<tr>
+				<td>{{ r.q_name }}</td>
+				<td>{{ r.q_type }}</td>
+				<td><a href="/admin/search?q={{ r.value }}">{{ r.value }}</a></td>
+				<td>{{ r.ttl }}</td>
+				<td>{{ r.zone }}</td>
+			</tr>
+		{% endfor %}
+	</tbody>
+</table>
+
+<p id="dns-filter-count" style="display:none;"></p>
+{% endblock %}
+
+{% block script %}
+(function() {
+	const filterInput = document.getElementById('dns-filter');
+	const table = document.getElementById('dns-records-table');
+	const tbody = table.querySelector('tbody');
+	const rows = Array.from(tbody.querySelectorAll('tr'));
+	const countEl = document.getElementById('dns-filter-count');
+
+	filterInput.addEventListener('input', function() {
+		const terms = this.value.toLowerCase().split(/\s+/).filter(Boolean);
+		let visible = 0;
+
+		rows.forEach(row => {
+			const text = row.textContent.toLowerCase();
+			const match = terms.length === 0 || terms.every(t => text.includes(t));
+			row.style.display = match ? '' : 'none';
+			if (match) visible++;
+		});
+
+		if (terms.length > 0) {
+			countEl.style.display = '';
+			countEl.textContent = 'Showing ' + visible + ' of ' + rows.length + ' records';
+		} else {
+			countEl.style.display = 'none';
+		}
+	});
+})();
+{% endblock %}

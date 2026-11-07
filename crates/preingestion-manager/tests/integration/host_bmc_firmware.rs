@@ -1,0 +1,1566 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+use std::fs;
+use std::net::{IpAddr, Ipv4Addr};
+use std::path::Path;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use carbide_firmware::test_support::script_setup;
+use carbide_preingestion_manager::PreingestionManager;
+use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimAction};
+use carbide_test_harness::prelude::*;
+use carbide_test_harness::test_support::default_config;
+use libredfish::{PowerState, SystemPowerControl};
+use model::DpuModel;
+use model::firmware::{
+    FirmwareComponentType, FirmwareEntry, FirmwareFileArtifact, HostFirmwareConfig,
+};
+use model::site_explorer::{InitialResetPhase, PowerDrainState, PreingestionState};
+use rpc::forge::DhcpDiscovery;
+
+use crate::common;
+
+/// An incomplete report (no version for a component with a minimum, or no host
+/// model) gets exactly one refreshed report before the check decides (#7061).
+#[sqlx_test]
+async fn test_preingestion_defers_once_on_an_incomplete_report(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        Arc::new(RedfishSim::default()),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a7", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let addr = response.address.as_str();
+    let address = IpAddr::from_str(addr)?;
+
+    struct Case {
+        scenario: &'static str,
+        model: Option<&'static str>,
+        /// Keep the report's explicit `model` field while the systems and
+        /// chassis carry none: the lookup resolves the explicit field first,
+        /// so the check must not ask for a refresh that cannot help.
+        explicit_model_only: bool,
+        bmc_version: Option<&'static str>,
+        /// What the refreshed report says (BMC version); None keeps it absent.
+        refreshed_bmc_version: Option<&'static str>,
+        expect_deferral: bool,
+        expect_upgrade: bool,
+    }
+    let cases = [
+        Case {
+            scenario: "explicit model with no firmware definition completes without a refresh",
+            model: None,
+            explicit_model_only: true,
+            bmc_version: Some("4.9"),
+            refreshed_bmc_version: Some("4.9"),
+            expect_deferral: false,
+            expect_upgrade: false,
+        },
+        Case {
+            scenario: "version arrives with the refreshed report and is below the minimum",
+            explicit_model_only: false,
+            expect_deferral: true,
+            model: Some("PowerEdge R750"),
+            bmc_version: None,
+            refreshed_bmc_version: Some("4.9"),
+            expect_upgrade: true,
+        },
+        Case {
+            scenario: "version is a placeholder that cannot be compared, then arrives with the refresh",
+            explicit_model_only: false,
+            expect_deferral: true,
+            model: Some("PowerEdge R750"),
+            bmc_version: Some("N/A"),
+            refreshed_bmc_version: Some("4.9"),
+            expect_upgrade: true,
+        },
+        Case {
+            scenario: "version is still missing after the refresh",
+            explicit_model_only: false,
+            expect_deferral: true,
+            model: Some("PowerEdge R750"),
+            bmc_version: None,
+            refreshed_bmc_version: None,
+            expect_upgrade: false,
+        },
+        Case {
+            scenario: "no host model, before and after the refresh",
+            explicit_model_only: false,
+            expect_deferral: true,
+            model: None,
+            bmc_version: Some("4.9"),
+            refreshed_bmc_version: Some("4.9"),
+            expect_upgrade: false,
+        },
+    ];
+
+    for case in cases {
+        // The helper only builds complete reports: store the incomplete one via try_update.
+        let mut txn = pool.begin().await?;
+        db::explored_endpoints::delete(&mut txn, address).await?;
+        common::insert_endpoint_version(
+            &mut txn,
+            addr,
+            case.bmc_version.unwrap_or("4.9"),
+            "1.13.2",
+            false,
+        )
+        .await?;
+        let inserted = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+            .await?
+            .remove(0);
+        let mut report = inserted.report.clone();
+        if case.model.is_none() {
+            report.systems[0].model = None;
+            report.chassis[0].model = None;
+            report.model = case
+                .explicit_model_only
+                .then(|| "Unlisted Model".to_string());
+        }
+        if case.bmc_version.is_none() {
+            report.service[0].inventories[0].version = None;
+        }
+        assert_eq!(
+            db::explored_endpoints::try_update(
+                address,
+                inserted.report_version,
+                &report,
+                false,
+                &mut txn
+            )
+            .await?,
+            db::ConditionalWrite::Applied(()),
+            "{}",
+            case.scenario
+        );
+        txn.commit().await?;
+
+        // Iteration 1 reaches SetNtpServers; iteration 2 runs the check and must defer.
+        mgr.run_single_iteration().await?;
+        mgr.run_single_iteration().await?;
+
+        let mut txn = pool.begin().await?;
+        let deferred = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+            .await?
+            .remove(0);
+        if !case.expect_deferral {
+            assert_eq!(
+                deferred.preingestion_state,
+                PreingestionState::Complete,
+                "{}: must decide on the first report",
+                case.scenario
+            );
+            assert!(
+                !deferred.waiting_for_explorer_refresh,
+                "{}: must not ask for a refresh",
+                case.scenario
+            );
+            txn.commit().await?;
+            continue;
+        }
+        assert_eq!(
+            deferred.preingestion_state,
+            PreingestionState::FirmwareCheckRefreshWait,
+            "{}: state after deferral",
+            case.scenario
+        );
+        assert!(
+            deferred.waiting_for_explorer_refresh,
+            "{}: must wait for the explorer",
+            case.scenario
+        );
+        assert!(
+            db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut())
+                .await?
+                .is_empty(),
+            "{}: a waiting endpoint leaves the work list",
+            case.scenario
+        );
+
+        // The explorer's refreshed report lands, with or without the version.
+        let mut report = deferred.report.clone();
+        report.service[0].inventories[0].version = case.refreshed_bmc_version.map(str::to_string);
+        assert_eq!(
+            db::explored_endpoints::try_update(
+                address,
+                deferred.report_version,
+                &report,
+                false,
+                &mut txn
+            )
+            .await?,
+            db::ConditionalWrite::Applied(()),
+            "{}",
+            case.scenario
+        );
+        txn.commit().await?;
+
+        // Iteration 3 re-runs the check on the refreshed report, from a fresh
+        // manager: the wait lives in the row, not in the process, so a restart
+        // in between must not defer a second time.
+        let restarted = PreingestionManager::new(
+            pool.clone(),
+            config.preingestion_manager(),
+            Arc::new(RedfishSim::default()),
+            env.test_meter.meter(),
+            None,
+            None,
+            None,
+            env.api().work_lock_manager_handle(),
+            config.ntp_servers.clone(),
+        );
+        restarted.run_single_iteration().await?;
+
+        let mut txn = pool.begin().await?;
+        let after = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+            .await?
+            .remove(0);
+        if case.expect_upgrade {
+            assert!(
+                matches!(
+                    after.preingestion_state,
+                    PreingestionState::UpgradeFirmwareWait { .. }
+                ),
+                "{}: expected an upgrade, got {:?}",
+                case.scenario,
+                after.preingestion_state
+            );
+        } else {
+            assert_eq!(
+                after.preingestion_state,
+                PreingestionState::Complete,
+                "{}: a second incomplete report completes as before",
+                case.scenario
+            );
+        }
+        txn.commit().await?;
+    }
+    Ok(())
+}
+
+/// With `firmware_global.autoupdate` off the outcome is Complete whatever the
+/// report says, so an incomplete report is not refreshed and ingestion is not
+/// delayed (#7061, review follow-up).
+#[sqlx_test]
+async fn test_preingestion_does_not_defer_when_autoupdate_is_off(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+    let mut manager_config = config.preingestion_manager();
+    manager_config.autoupdate = false;
+
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        manager_config,
+        Arc::new(RedfishSim::default()),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a8", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let addr = response.address.as_str();
+    let address = IpAddr::from_str(addr)?;
+
+    // A known model whose BMC entry reports no version: the case the check
+    // would defer with autoupdate on.
+    let mut txn = pool.begin().await?;
+    common::insert_endpoint_version(&mut txn, addr, "4.9", "1.13.2", false).await?;
+    let inserted = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+        .await?
+        .remove(0);
+    let mut report = inserted.report.clone();
+    report.service[0].inventories[0].version = None;
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            address,
+            inserted.report_version,
+            &report,
+            false,
+            &mut txn
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await?;
+
+    // Iteration 1 reaches SetNtpServers; iteration 2 runs the check.
+    mgr.run_single_iteration().await?;
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await?;
+    let after = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+        .await?
+        .remove(0);
+    assert_eq!(
+        after.preingestion_state,
+        PreingestionState::Complete,
+        "autoupdate off must decide on the incomplete report at once"
+    );
+    assert!(
+        !after.waiting_for_explorer_refresh,
+        "autoupdate off must not ask the explorer for a refresh"
+    );
+    txn.commit().await?;
+    Ok(())
+}
+
+#[sqlx_test]
+async fn lenovo_preingestion_releases_firmware_lockdown(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+    let sim = Arc::new(RedfishSim::default());
+    sim.set_lockdown(libredfish::EnabledDisabled::Enabled);
+    let manager = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("02:00:00:00:01:32", underlay.relay_address)
+                .vendor_string("Lenovo")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let address: IpAddr = response.address.parse()?;
+    let mut firmware = HostFirmwareConfig::from(config.host_models.get("1").unwrap().clone());
+    firmware.vendor = bmc_vendor::BMCVendor::Lenovo;
+    firmware.model = "ThinkSystem SR650 V4".to_string();
+    let bmc = firmware
+        .components
+        .get_mut(&FirmwareComponentType::Bmc)
+        .unwrap();
+    bmc.preingest_upgrade_when_below = Some("2.97".to_string());
+    bmc.known_firmware = vec![FirmwareEntry::standard("2.97")];
+    let mut txn = pool.begin().await?;
+    common::insert_endpoint_version(&mut txn, &response.address, "2.03", "1.13.2", false).await?;
+    let mut endpoint = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+        .await?
+        .remove(0);
+    endpoint.report.vendor = Some(bmc_vendor::BMCVendor::Lenovo);
+    endpoint.report.model = Some(firmware.model.clone());
+    for system in &mut endpoint.report.systems {
+        system.manufacturer = Some("Lenovo".to_string());
+        system.model = Some(firmware.model.clone());
+    }
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            address,
+            endpoint.report_version,
+            &endpoint.report,
+            false,
+            &mut txn
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    db::host_firmware_config::upsert(&mut txn, &firmware).await?;
+    txn.commit().await?;
+
+    let mut uploaded = false;
+    for _ in 0..4 {
+        manager.run_single_iteration().await?;
+        let mut txn = pool.begin().await?;
+        let endpoints = db::explored_endpoints::find_all_by_ip(address, &mut txn).await?;
+        if matches!(
+            endpoints[0].preingestion_state,
+            PreingestionState::UpgradeFirmwareWait { .. }
+        ) {
+            uploaded = true;
+            break;
+        }
+    }
+    assert!(
+        uploaded,
+        "Lenovo should start uploading after releasing firmware lockdown"
+    );
+    assert!(
+        sim.lockdown_states()
+            .contains(&libredfish::EnabledDisabled::Disabled)
+    );
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_preingestion_bmc_upgrade(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        Arc::new(RedfishSim::default()),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a6", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+
+    // First, a host where it's already up to date; it should go to complete
+    // after passing through the explicit NTP setup state.
+    let mut txn = pool.begin().await.unwrap();
+    let addr = response.address.as_str();
+    common::insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.13.2", false).await?;
+    txn.commit().await?;
+
+    mgr.run_single_iteration().await?;
+
+    mgr.run_single_iteration().await?;
+    let mut txn = pool.begin().await.unwrap();
+    assert!(
+        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut())
+            .await?
+            .is_empty()
+    );
+    assert!(
+        db::explored_endpoints::find_all_preingestion_complete(&mut txn)
+            .await?
+            .len()
+            == 1
+    );
+
+    // Next, one that isn't up to date but it above preingestion limits.
+    db::explored_endpoints::delete(&mut txn, IpAddr::from_str(addr).unwrap()).await?;
+    common::insert_endpoint_version(&mut txn, addr, "5.1", "1.13.2", false).await?;
+    txn.commit().await?;
+
+    mgr.run_single_iteration().await?;
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await.unwrap();
+    assert!(
+        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut())
+            .await?
+            .is_empty()
+    );
+    assert!(
+        db::explored_endpoints::find_all_preingestion_complete(&mut txn)
+            .await?
+            .len()
+            == 1
+    );
+
+    // And now, one that's low enough to trigger preingestion upgrades.
+    db::explored_endpoints::delete(&mut txn, IpAddr::from_str(addr).unwrap()).await?;
+    common::insert_endpoint_version(&mut txn, addr, "4.9", "1.13.2", false).await?;
+    txn.commit().await?;
+
+    mgr.run_single_iteration().await?;
+    mgr.run_single_iteration().await?;
+    // The "upload" is synchronous now and will be complete at this point.
+
+    // At this point, we expect that it shows as having completed upload
+    let mut txn = pool.begin().await.unwrap();
+
+    let endpoints =
+        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    assert!(endpoints.len() == 1);
+    let endpoint = endpoints.first().unwrap();
+    match &endpoint.preingestion_state {
+        // We expect it to be waiting for task completion
+        PreingestionState::UpgradeFirmwareWait {
+            task_id,
+            final_version,
+            upgrade_type,
+            ..
+        } => {
+            println!("Waiting on {task_id} {upgrade_type:?} {final_version}");
+        }
+        _ => {
+            panic!("Bad preingestion state: {endpoint:?}");
+        }
+    }
+    txn.commit().await?;
+
+    // Second firmware upload
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await.unwrap();
+    let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
+    assert!(endpoints.len() == 1);
+    let endpoint = endpoints.first().unwrap();
+    if let PreingestionState::UpgradeFirmwareWait {
+        firmware_number, ..
+    } = endpoint.preingestion_state
+    {
+        assert_eq!(firmware_number, Some(1));
+    } else {
+        panic!("Bad preingestion state: {endpoint:?}");
+    };
+    txn.commit().await?;
+
+    // Let it go to NewFirmwareReportedWait
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await.unwrap();
+    let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
+    assert!(endpoints.len() == 1);
+    let endpoint = endpoints.first().unwrap();
+    let PreingestionState::NewFirmwareReportedWait { .. } = endpoint.preingestion_state else {
+        panic!("Bad preingestion state: {endpoint:?}");
+    };
+    txn.commit().await?;
+
+    // One more, to make sure noething is weird with retrying resets
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await.unwrap();
+    let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
+    assert!(endpoints.len() == 1);
+    let mut endpoint = endpoints.into_iter().next().unwrap();
+
+    // Now we simulate site explorer coming through and reading the new updated version
+    endpoint.report.service[0].inventories[0].version = Some("6.00.30.00".to_string());
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            endpoint.address,
+            endpoint.report_version,
+            &endpoint.report,
+            false,
+            &mut txn
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+
+    txn.commit().await?;
+
+    // The next run of the state machine should see that the task shows as complete and move us back to checking again
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await.unwrap();
+    let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
+    assert!(endpoints.len() == 1);
+    let endpoint = endpoints.first().unwrap();
+    match &endpoint.preingestion_state {
+        PreingestionState::RecheckVersions => {
+            println!("Rechecking versions");
+        }
+        _ => {
+            panic!("Bad preingestion state: {endpoint:?}");
+        }
+    }
+    txn.commit().await?;
+
+    // Now it should go to completion
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await.unwrap();
+    assert!(
+        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut())
+            .await?
+            .is_empty()
+    );
+    assert!(
+        db::explored_endpoints::find_all_preingestion_complete(&mut txn)
+            .await?
+            .len()
+            == 1
+    );
+    txn.commit().await?;
+
+    Ok(())
+}
+
+/// UEFI firmware activates on the next host boot. A host that pre-ingestion
+/// found powered off refuses `ForceRestart`, so activation powers it on
+/// instead; a running host, and a host whose power state cannot be read,
+/// keep the `ForceRestart` this step always issued (#7100).
+#[sqlx_test]
+async fn test_preingestion_uefi_activation_powers_on_an_off_host(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+
+    let redfish_sim = Arc::new(RedfishSim::default());
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a6", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let addr = response.address.as_str();
+    let ip_addr = IpAddr::from_str(addr).unwrap();
+
+    struct Case {
+        scenario: &'static str,
+        power_state: Option<PowerState>,
+        power_state_unreadable: bool,
+        expected: SystemPowerControl,
+    }
+    let cases = [
+        Case {
+            scenario: "host off: powered on",
+            power_state: Some(PowerState::Off),
+            power_state_unreadable: false,
+            expected: SystemPowerControl::On,
+        },
+        Case {
+            scenario: "host on: force restarted",
+            power_state: Some(PowerState::On),
+            power_state_unreadable: false,
+            expected: SystemPowerControl::ForceRestart,
+        },
+        Case {
+            scenario: "power state unreadable: force restarted",
+            power_state: Some(PowerState::Off),
+            power_state_unreadable: true,
+            expected: SystemPowerControl::ForceRestart,
+        },
+    ];
+
+    for case in cases {
+        // BMC up to date, UEFI below the pre-ingestion minimum: the UEFI
+        // upload runs first and its completion lands in ResetForNewFirmware.
+        let mut txn = pool.begin().await?;
+        db::explored_endpoints::delete(&mut txn, ip_addr).await?;
+        common::insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.0", false).await?;
+        txn.commit().await?;
+        if let Some(power_state) = case.power_state {
+            redfish_sim.set_power_state(addr, power_state);
+        }
+
+        // Up to the upload; the task is complete as soon as it is created.
+        let mut uploaded = false;
+        for _ in 0..4 {
+            mgr.run_single_iteration().await?;
+            let mut txn = pool.begin().await?;
+            let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
+            txn.commit().await?;
+            if let PreingestionState::UpgradeFirmwareWait { upgrade_type, .. } =
+                &endpoints[0].preingestion_state
+            {
+                assert!(
+                    upgrade_type.is_uefi(),
+                    "{}: {upgrade_type:?}",
+                    case.scenario
+                );
+                uploaded = true;
+                break;
+            }
+        }
+        assert!(
+            uploaded,
+            "{}: never reached UpgradeFirmwareWait",
+            case.scenario
+        );
+
+        if case.power_state_unreadable {
+            redfish_sim.fail_next_power_state_read("sim: power state unavailable");
+        }
+        let timepoint = redfish_sim.timepoint();
+        mgr.run_single_iteration().await?;
+
+        let power_actions: Vec<_> = redfish_sim
+            .actions_since(&timepoint)
+            .for_host(addr)
+            .into_iter()
+            .filter(|action| {
+                matches!(
+                    action,
+                    RedfishSimAction::Power(_) | RedfishSimAction::PowerFailed(_)
+                )
+            })
+            .collect();
+        assert_eq!(
+            power_actions,
+            vec![RedfishSimAction::Power(case.expected)],
+            "{}",
+            case.scenario
+        );
+        let mut txn = pool.begin().await?;
+        let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
+        txn.commit().await?;
+        assert!(
+            matches!(
+                endpoints[0].preingestion_state,
+                PreingestionState::NewFirmwareReportedWait { .. }
+            ),
+            "{}: {:?}",
+            case.scenario,
+            endpoints[0].preingestion_state
+        );
+    }
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_preingestion_bmc_upgrade_uses_runtime_host_firmware_config(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        Arc::new(RedfishSim::default()),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a6", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+
+    let mut runtime_config = HostFirmwareConfig::from(config.host_models.get("1").unwrap().clone());
+    let bmc_component = runtime_config
+        .components
+        .get_mut(&FirmwareComponentType::Bmc)
+        .unwrap();
+    bmc_component.preingest_upgrade_when_below = Some("6.50.00.00".to_string());
+    bmc_component.known_firmware = vec![FirmwareEntry::standard("6.50.00.00")];
+
+    let mut txn = pool.begin().await.unwrap();
+    let addr = response.address.as_str();
+    common::insert_endpoint_version(&mut txn, addr, "5.1", "1.13.2", false).await?;
+    db::host_firmware_config::upsert(&mut txn, &runtime_config).await?;
+    txn.commit().await?;
+
+    mgr.run_single_iteration().await?;
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await.unwrap();
+    let endpoints =
+        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    assert_eq!(endpoints.len(), 1);
+    let endpoint = endpoints.first().unwrap();
+    match &endpoint.preingestion_state {
+        PreingestionState::UpgradeFirmwareWait {
+            final_version,
+            upgrade_type,
+            ..
+        } => {
+            assert_eq!(final_version.as_str(), "6.50.00.00");
+            assert_eq!(*upgrade_type, FirmwareComponentType::Bmc);
+        }
+        _ => {
+            panic!("Bad preingestion state: {endpoint:?}");
+        }
+    }
+    txn.commit().await?;
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_preingestion_bmc_upgrade_with_url_only_files_artifacts(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let tempdir = tempfile::tempdir()?;
+
+    let first_artifact = tempdir.path().join("first.bin");
+    let second_artifact = tempdir.path().join("second.bin");
+    fs::write(&first_artifact, b"firmware-one")?;
+    fs::write(&second_artifact, b"firmware-two")?;
+
+    let mut config = default_config::get();
+    config.firmware_global.firmware_download_cache_directory = tempdir.path().join("cache");
+    let bmc_component = config
+        .host_models
+        .get_mut("1")
+        .unwrap()
+        .components
+        .get_mut(&FirmwareComponentType::Bmc)
+        .unwrap();
+    bmc_component.known_firmware = vec![FirmwareEntry {
+        version: "6.00.30.00".to_string(),
+        default: true,
+        files: vec![
+            FirmwareFileArtifact {
+                filename: None,
+                url: Some(file_url(&first_artifact)),
+                sha256: "bd0d2c3b17ef6983be51bfff3e505b2c365430630afe7b9f53451e3f279d39a1"
+                    .to_string(),
+            },
+            FirmwareFileArtifact {
+                filename: None,
+                url: Some(file_url(&second_artifact)),
+                sha256: "c46897d1cfe1d2b7341d30eaacce68ffc752738de147dc820ed016e1f51b8f14"
+                    .to_string(),
+            },
+        ],
+        ..FirmwareEntry::default()
+    }];
+
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        Arc::new(RedfishSim::default()),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a6", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+
+    let mut txn = pool.begin().await.unwrap();
+    let addr = response.address.as_str();
+    common::insert_endpoint_version(&mut txn, addr, "4.9", "1.13.2", false).await?;
+    txn.commit().await?;
+
+    run_until_firmware_number(&mgr, &pool, Some(0)).await?;
+    run_until_firmware_number(&mgr, &pool, Some(1)).await?;
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_preingestion_preupdate_powercycling(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+
+    let config = default_config::get();
+    tracing::debug!(host_models = ?config.host_models, "Using host models");
+
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        Arc::new(RedfishSim::default()),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a6", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+
+    let mut txn = pool.begin().await.unwrap();
+    let addr = response.address.as_str();
+    common::insert_endpoint_version(&mut txn, addr, "4.9", "1.1", true).await?;
+    txn.commit().await?;
+
+    mgr.run_single_iteration().await?;
+    mgr.run_single_iteration().await?;
+    // The "upload" is synchronous now and will be complete at this point.
+
+    // Expect "reset" the BMC
+    let mut txn = pool.begin().await.unwrap();
+    let endpoints =
+        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    let endpoint = endpoints.first().unwrap();
+    match &endpoint.preingestion_state {
+        PreingestionState::InitialReset { phase, .. } => {
+            assert_eq!(*phase, InitialResetPhase::BMCWasReset);
+        }
+        _ => {
+            panic!("Bad preingestion state: {:?}", endpoint.preingestion_state);
+        }
+    }
+    txn.commit().await?;
+    mgr.run_single_iteration().await?;
+
+    // Expect WaitHostBoot
+    let mut txn = pool.begin().await.unwrap();
+    let endpoints =
+        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    let endpoint = endpoints.first().unwrap();
+    match &endpoint.preingestion_state {
+        PreingestionState::InitialReset { phase, .. } => {
+            assert_eq!(*phase, InitialResetPhase::WaitHostBoot);
+        }
+        _ => {
+            panic!("Bad preingestion state: {:?}", endpoint.preingestion_state);
+        }
+    }
+    // Pretend we waited
+    db::explored_endpoints::pregestion_hostboot_time_test(
+        IpAddr::V4(Ipv4Addr::from_str(addr).unwrap()),
+        &mut txn,
+    )
+    .await?;
+    txn.commit().await?;
+    mgr.run_single_iteration().await?;
+
+    // Recheck versions
+    let mut txn = pool.begin().await.unwrap();
+    let endpoints =
+        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    let endpoint = endpoints.first().unwrap();
+    assert_eq!(
+        endpoint.preingestion_state,
+        PreingestionState::RecheckVersions
+    );
+    txn.commit().await?;
+    mgr.run_single_iteration().await?;
+
+    // At this point, we expect that it shows as having completed upload
+    let mut txn = pool.begin().await.unwrap();
+
+    let endpoints =
+        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    assert!(endpoints.len() == 1);
+    let mut endpoint = endpoints.into_iter().next().unwrap();
+    match &endpoint.preingestion_state {
+        // We expect it to be waiting for task completion
+        PreingestionState::UpgradeFirmwareWait {
+            task_id,
+            final_version,
+            upgrade_type,
+            ..
+        } => {
+            println!("Waiting on {task_id} {upgrade_type:?} {final_version}");
+        }
+        _ => {
+            panic!("Bad preingestion state: {:?}", endpoint.preingestion_state);
+        }
+    }
+
+    // Now we simulate site explorer coming through and reading the new updated version
+    endpoint.report.service[0].inventories[0].version = Some("6.00.30.00".to_string());
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            endpoint.address,
+            endpoint.report_version,
+            &endpoint.report,
+            false,
+            &mut txn
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+
+    txn.commit().await?;
+
+    for state in [
+        PowerDrainState::Off,
+        PowerDrainState::Powercycle,
+        PowerDrainState::On,
+        PowerDrainState::Off,
+        PowerDrainState::Powercycle,
+        PowerDrainState::On,
+    ] {
+        mgr.run_single_iteration().await?;
+
+        let mut txn = pool.begin().await.unwrap();
+        let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
+        assert!(endpoints.len() == 1);
+        let mut endpoint = endpoints.into_iter().next().unwrap();
+        tracing::debug!(
+            expected_power_drain_state = ?state,
+            "Checking expected preingestion state"
+        );
+        match &endpoint.preingestion_state {
+            PreingestionState::ResetForNewFirmware {
+                delay_until,
+                last_power_drain_operation,
+                ..
+            } => {
+                assert!(delay_until.is_some());
+                assert_eq!(last_power_drain_operation.clone().unwrap(), state);
+                println!("Rechecking versions");
+            }
+            _ => {
+                panic!("Bad preingestion state: {:?}", endpoint.preingestion_state);
+            }
+        }
+
+        // At some point in here we would have picked up the new version
+        endpoint.report.service[0].inventories[1].version = Some("1.13.2".to_string());
+        assert_eq!(
+            db::explored_endpoints::try_update(
+                endpoint.address,
+                endpoint.report_version,
+                &endpoint.report,
+                false,
+                &mut txn
+            )
+            .await?,
+            db::ConditionalWrite::Applied(())
+        );
+
+        txn.commit().await?;
+    }
+
+    mgr.run_single_iteration().await?;
+    let mut txn = pool.begin().await.unwrap();
+    let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
+    txn.commit().await?;
+    assert!(endpoints.len() == 1);
+    let endpoint = endpoints.first().unwrap();
+    let PreingestionState::RecheckVersions = endpoint.preingestion_state else {
+        panic!("Not in recheck versions: {:?}", endpoint.preingestion_state);
+    };
+
+    // Now it should go to completion
+    mgr.run_single_iteration().await?;
+    let mut txn = pool.begin().await.unwrap();
+    assert!(
+        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut())
+            .await?
+            .is_empty()
+    );
+    assert!(
+        db::explored_endpoints::find_all_preingestion_complete(&mut txn)
+            .await?
+            .len()
+            == 1
+    );
+    txn.commit().await?;
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_preingestion_preupdate_fails_if_host_never_reaches_on_after_restart(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+
+    let redfish_sim = Arc::new(RedfishSim::default());
+    redfish_sim.set_paused_when_off(true);
+    redfish_sim.set_force_restart_leaves_power_unchanged(true);
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a8", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let ip_addr = IpAddr::from_str(&response.address)?;
+
+    let mut txn = pool.begin().await?;
+    common::insert_endpoint_version(&mut txn, &response.address, "4.9", "1.1", true).await?;
+    common::mark_endpoint_bluefield3(&mut txn, ip_addr).await?;
+    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        .await?
+        .pop()
+        .expect("endpoint should exist");
+    assert_eq!(endpoint.report.identify_dpu(), Some(DpuModel::BlueField3));
+    txn.commit().await?;
+
+    mgr.run_single_iteration().await?;
+    mgr.run_single_iteration().await?;
+    let mut txn = pool.begin().await?;
+    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        .await?
+        .pop()
+        .expect("endpoint should exist");
+    assert!(matches!(
+        endpoint.preingestion_state,
+        PreingestionState::InitialReset {
+            phase: InitialResetPhase::BMCWasReset,
+            ..
+        }
+    ));
+    txn.commit().await?;
+
+    let restart_timepoint = redfish_sim.timepoint();
+    let mut txn = pool.begin().await?;
+    db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
+    txn.commit().await?;
+    mgr.run_single_iteration().await?;
+    let mut txn = pool.begin().await?;
+    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        .await?
+        .pop()
+        .expect("endpoint should exist");
+    assert!(matches!(
+        endpoint.preingestion_state,
+        PreingestionState::InitialReset {
+            phase: InitialResetPhase::WaitHostBoot,
+            ..
+        }
+    ));
+    txn.commit().await?;
+    assert!(
+        redfish_sim
+            .actions_since(&restart_timepoint)
+            .for_host(&ip_addr.to_string())
+            .contains(&RedfishSimAction::Power(SystemPowerControl::ForceRestart)),
+        "the simulator should accept ForceRestart while leaving the DPU paused"
+    );
+
+    let mut txn = pool.begin().await?;
+    db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
+    txn.commit().await?;
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await?;
+    let state = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        .await?
+        .pop()
+        .expect("endpoint should exist")
+        .preingestion_state;
+    txn.commit().await?;
+    assert_ne!(state, PreingestionState::RecheckVersions);
+    match state {
+        PreingestionState::Failed { reason } => assert_eq!(
+            reason,
+            "Host never reached On after restart during firmware pre-update reset"
+        ),
+        other => panic!("expected Failed before RecheckVersions, got: {other:?}"),
+    }
+
+    Ok(())
+}
+
+/// A non-DPU host that stays unreachable after the BMC reset fails the pre-update
+/// reset 30 minutes after the reset, without ever being sent On.
+#[sqlx_test]
+async fn test_preingestion_preupdate_fails_if_host_never_powers_on_after_bmc_reset(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+
+    let redfish_sim = Arc::new(RedfishSim::default());
+    redfish_sim.set_bmc_reset_unavailable_polls(usize::MAX);
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a9", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let ip_addr = IpAddr::from_str(&response.address)?;
+
+    let mut txn = pool.begin().await?;
+    common::insert_endpoint_version(&mut txn, &response.address, "4.9", "1.1", true).await?;
+    txn.commit().await?;
+
+    let timepoint = redfish_sim.timepoint();
+    mgr.run_single_iteration().await?;
+    mgr.run_single_iteration().await?;
+    let mut txn = pool.begin().await?;
+    let endpoint = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        .await?
+        .pop()
+        .expect("endpoint should exist");
+    txn.commit().await?;
+    assert!(matches!(
+        endpoint.preingestion_state,
+        PreingestionState::InitialReset {
+            phase: InitialResetPhase::BMCWasReset,
+            ..
+        }
+    ));
+
+    let mut txn = pool.begin().await?;
+    db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
+    txn.commit().await?;
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await?;
+    let state = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+        .await?
+        .pop()
+        .expect("endpoint should exist")
+        .preingestion_state;
+    txn.commit().await?;
+    match state {
+        PreingestionState::Failed { reason } => assert_eq!(
+            reason,
+            "Host did not power on within 30 minutes of the BMC reset"
+        ),
+        other => panic!("expected Failed, got: {other:?}"),
+    }
+    assert!(
+        !redfish_sim
+            .actions_since(&timepoint)
+            .for_host(&ip_addr.to_string())
+            .contains(&RedfishSimAction::Power(SystemPowerControl::On)),
+        "On must not be sent while the BMC is still unavailable"
+    );
+
+    Ok(())
+}
+
+/// A host still reporting PoweringOn at the boot-wait check is rechecked on the
+/// next iteration instead of failing the pre-update reset.
+#[sqlx_test]
+async fn test_preingestion_preupdate_rechecks_host_still_powering_on(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+
+    let redfish_sim = Arc::new(RedfishSim::default());
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        redfish_sim.clone(),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:aa", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let ip_addr = IpAddr::from_str(&response.address)?;
+
+    let mut txn = pool.begin().await?;
+    common::insert_endpoint_version(&mut txn, &response.address, "4.9", "1.1", true).await?;
+    txn.commit().await?;
+
+    async fn state_of(
+        pool: &sqlx::PgPool,
+        ip_addr: IpAddr,
+    ) -> Result<PreingestionState, Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        let state = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
+            .await?
+            .pop()
+            .expect("endpoint should exist")
+            .preingestion_state;
+        txn.commit().await?;
+        Ok(state)
+    }
+
+    mgr.run_single_iteration().await?;
+    mgr.run_single_iteration().await?;
+    assert!(matches!(
+        state_of(&pool, ip_addr).await?,
+        PreingestionState::InitialReset {
+            phase: InitialResetPhase::BMCWasReset,
+            ..
+        }
+    ));
+    mgr.run_single_iteration().await?;
+    assert!(matches!(
+        state_of(&pool, ip_addr).await?,
+        PreingestionState::InitialReset {
+            phase: InitialResetPhase::WaitHostBoot,
+            ..
+        }
+    ));
+
+    for transient in [PowerState::PoweringOn, PowerState::Reset] {
+        redfish_sim.set_power_state(&ip_addr.to_string(), transient);
+        let mut txn = pool.begin().await?;
+        db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
+        txn.commit().await?;
+        mgr.run_single_iteration().await?;
+        assert!(
+            matches!(
+                state_of(&pool, ip_addr).await?,
+                PreingestionState::InitialReset {
+                    phase: InitialResetPhase::WaitHostBoot,
+                    ..
+                }
+            ),
+            "{transient:?} must be rechecked, not failed"
+        );
+    }
+
+    redfish_sim.set_power_state(&ip_addr.to_string(), PowerState::On);
+    let mut txn = pool.begin().await?;
+    db::explored_endpoints::pregestion_hostboot_time_test(ip_addr, &mut txn).await?;
+    txn.commit().await?;
+    mgr.run_single_iteration().await?;
+    assert_eq!(
+        state_of(&pool, ip_addr).await?,
+        PreingestionState::RecheckVersions
+    );
+
+    Ok(())
+}
+
+fn file_url(path: &Path) -> String {
+    format!("file://{}", path.display())
+}
+
+async fn run_until_firmware_number(
+    mgr: &PreingestionManager,
+    pool: &PgPool,
+    expected_firmware_number: Option<u32>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut last_state = None;
+    for _ in 0..10 {
+        mgr.run_single_iteration().await?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut txn = pool.begin().await?;
+        let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
+        txn.commit().await?;
+        let Some(endpoint) = endpoints.first() else {
+            continue;
+        };
+        last_state = Some(endpoint.preingestion_state.clone());
+
+        if let PreingestionState::UpgradeFirmwareWait {
+            firmware_number, ..
+        } = endpoint.preingestion_state
+            && firmware_number == expected_firmware_number
+        {
+            return Ok(());
+        }
+    }
+
+    panic!(
+        "Expected preingestion firmware_number {expected_firmware_number:?}, last state: {last_state:?}"
+    );
+}
+
+#[sqlx_test]
+async fn test_preingestion_upgrade_script(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let mut config = default_config::get();
+
+    let (_tmpdir, host_models) = script_setup();
+    config.host_models = host_models;
+
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        Arc::new(RedfishSim::default()),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a6", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+
+    let addr = response.address.as_str();
+    let mut txn = pool.begin().await.unwrap();
+    db::explored_endpoints::delete(&mut txn, IpAddr::from_str(addr).unwrap()).await?;
+    common::insert_endpoint_version(&mut txn, addr, "0", "0", false).await?;
+    txn.commit().await?;
+
+    mgr.run_single_iteration().await?;
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await.unwrap();
+    let endpoints =
+        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    assert!(endpoints.len() == 1);
+    let endpoint = endpoints.first().unwrap();
+    match &endpoint.preingestion_state {
+        // We expect it to be waiting for task completion
+        PreingestionState::ScriptRunning => {}
+        _ => {
+            panic!("Bad preingestion state: {endpoint:?}");
+        }
+    }
+    txn.commit().await?;
+
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await.unwrap();
+    let endpoints =
+        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
+    assert!(endpoints.len() == 1);
+    let endpoint = endpoints.first().unwrap();
+    match &endpoint.preingestion_state {
+        // We expect it to be have gone back to rechecking versions, we won't bother testing that here
+        PreingestionState::RecheckVersions => {}
+        _ => {
+            panic!("Bad preingestion state: {endpoint:?}");
+        }
+    }
+    txn.commit().await?;
+
+    Ok(())
+}

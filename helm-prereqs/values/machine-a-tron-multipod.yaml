@@ -1,0 +1,96 @@
+# machine-a-tron site values — MULTI-POD Controller Mode
+#
+# Multiple machine-a-tron pods with controller-managed per-BMC Services.
+# Each pod simulates hosts + DPUs, and the mat-k8s-controller automatically
+# creates Services with the BMC IP as externalIP.
+#
+# Deploy with:
+#   helm upgrade -i nico-machine-a-tron helm/charts/nico-machine-a-tron \
+#       -n nico-system -f <your-copy>.yaml
+#
+# Requirements:
+#  * The BMC network must lie outside the Kubernetes ServiceCIDR, pod CIDR,
+#    node network, and networks that nodes or pods must otherwise reach
+#    (BMC IPs are Service externalIPs). Default ServiceCIDRs to stay clear of:
+#    - vanilla k8s: 10.96.0.0/12
+#    - kind: 10.96.0.0/16
+#    - k3d: 10.43.0.0/16
+#  * NICo siteConfig needs:
+#    - allow_insecure_discovery = true
+#    - Network covering the BMC IP range
+#  * MAC address pools are AUTO-GENERATED per pod by the Helm chart
+
+certificate:
+  uris:
+    - spiffe://nico.local/nico-system/sa/machine-a-tron
+
+extraEnv:
+  - name: RUST_LOG
+    value: info
+
+global:
+  imagePullSecrets:
+    - name: machine-a-tron-pull
+
+# REQUIRED: the machine-a-tron image. Set it here or on the command line with
+# --set image.repository=<registry>/machine-a-tron --set image.tag=<tag>.
+image:
+  pullPolicy: IfNotPresent
+  repository: ""
+  tag: ""
+
+machineATron:
+  configureBmcProxyHost: ""
+  # The chart reads the site root password from the site credentials Secret
+  # and pins every mock BMC to it. hostBmcPassword/dpuBmcPassword override it.
+  # Without the Secret the mocks keep their factory passwords.
+  nicoApiUrl: https://nico-api.nico-system.svc.cluster.local:1079
+  registerExpectedMachines: true
+
+# Enable auto-generated MAC pools (prevents collisions in multi-pod)
+macAddressPool:
+  enabled: true
+  basePrefix: "02:00"
+
+hwMacAddressRanges:
+  enabled: true
+  basePrefix: "02:01"
+
+# Controller mode - dynamically creates Services with the BMC IP as externalIP
+mat-k8s-controller:
+  enabled: true
+  config:
+    insecureSkipVerify: true  # For self-signed certs
+
+pods:
+  default: null  # Disable default pod
+  mat-0:
+    machines:
+      # the chart's own mat-0 example deep-merges in without this
+      rack-machines: null
+      compute:
+        hwType: wiwynn_gb200_nvl
+        hostCount: 100
+        dpuPerHostCount: 2
+        bmcDhcpRelayAddress: "10.200.0.1"  # All pods share same relay
+        underlayDhcpRelayAddress: "10.201.0.1"  # simulated-underlay gateway (nico-core-simulation.yaml)
+  mat-1:
+    machines:
+      compute:
+        hwType: wiwynn_gb200_nvl
+        hostCount: 100
+        dpuPerHostCount: 2
+        bmcDhcpRelayAddress: "10.200.0.1"  # NICo assigns unique IPs
+        underlayDhcpRelayAddress: "10.201.0.1"  # simulated-underlay gateway (nico-core-simulation.yaml)
+
+resources:
+  limits:
+    cpu: "2"
+    memory: 2Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+# NOTE: Only use configFiles.matConfigs for advanced TOML overrides not exposed in values.
+configFiles:
+  matConfigs: {}

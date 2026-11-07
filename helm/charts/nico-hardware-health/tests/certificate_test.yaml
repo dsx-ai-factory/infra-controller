@@ -1,0 +1,56 @@
+suite: certificate dnsNames and uris configurability
+templates:
+  - certificate.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: generates dnsNames and uris from serviceName and namespace by default
+    asserts:
+      - isKind:
+          of: Certificate
+      - equal:
+          path: metadata.name
+          value: nico-hardware-health-certificate
+      - equal:
+          path: spec.dnsNames
+          value:
+            - nico-hardware-health.nico-system.svc.cluster.local
+            - nico-hardware-health.nico-system
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://nico.local/nico-system/sa/nico-hardware-health
+
+  - it: fully overrides the generated dnsNames and uris when set
+    set:
+      certificate:
+        dnsNames:
+          - nico-hardware-health.override.example.com
+        uris:
+          - spiffe://override.local/nico-system/sa/nico-hardware-health
+    asserts:
+      - equal:
+          path: spec.dnsNames
+          value:
+            - nico-hardware-health.override.example.com
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://override.local/nico-system/sa/nico-hardware-health
+
+  - it: nameOverride flips the certificate resource name, dnsNames, and SPIFFE URI to the override
+    set:
+      nameOverride: carbide-hardware-health
+    asserts:
+      - equal:
+          path: metadata.name
+          value: carbide-hardware-health-certificate
+      - equal:
+          path: spec.dnsNames
+          value:
+            - carbide-hardware-health.nico-system.svc.cluster.local
+            - carbide-hardware-health.nico-system
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://nico.local/nico-system/sa/carbide-hardware-health

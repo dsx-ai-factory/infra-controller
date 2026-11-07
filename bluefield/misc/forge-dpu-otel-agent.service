@@ -1,0 +1,18 @@
+[Unit]
+Description=Forge DPU OpenTelemetry mTLS certificate renewal agent
+After=networking.service network-online.target time-sync.target containerd@mgmt.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+ExecStart=ip vrf exec mgmt /usr/local/bin/otel-agent
+KillMode=mixed
+Restart=always
+RestartSec=5
+
+Type=simple
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

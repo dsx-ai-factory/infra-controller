@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+
+{% block title %}Paired Explored Endpoints{% endblock %}
+
+{% block content %}
+<h1>Explored Managed Hosts ({{ page.total_items() }})</h1>
+
+{% include "missing_credentials_warning.html" %}
+{% include "site_explorer_run_status.html" %}
+
+<table class="sortable overview">
+	<thead>
+		<tr>
+			<th>Host BMC IP</th>
+			<th>Host Vendor</th>
+			<th>Host Serial Nrs</th>
+			<th>DPUs</th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for mh in managed_hosts %}
+		<tr>
+			<td><a href="/admin/explored-endpoint/{{ mh.host_bmc_ip }}">{{ mh.host_bmc_ip }}</a></td>
+			<td>{{ mh.host_vendor|capitalize }}</td>
+			<td>{{ mh.host_serial_numbers|join("\n")|escape|linebreaksbr|safe }}</td>
+
+			<td style="padding: 0;">
+				{% for dpu in mh.dpus %}
+				<table>
+					<thead>
+						<tr>
+							<th>DPU BMC IP</th>
+							<th>DPU Machine ID</th>
+							<th>DPU Serial Nrs</th>
+							<th>Host PF MAC</th>
+							<th>DPU OOB MAC</th>
+						</tr>
+					</thead>
+					<tbody>
+						<tr>
+							<td><a href="/admin/explored-endpoint/{{ dpu.dpu_bmc_ip }}">{{ dpu.dpu_bmc_ip }}</a></td>
+							<td>{{ dpu.dpu_machine_id|machine_id_link|safe }}</td>
+							<td>{{ dpu.dpu_serial_numbers|join("\n")|escape|linebreaksbr|safe }}</td>
+							<td>{{ dpu.host_pf_mac }}</td>
+							<td>{{ dpu.dpu_oob_mac }}</td>
+						</tr>
+					</tbody>
+
+				</table>
+				{% endfor %}
+			</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+	<tfoot>
+		<tr>
+			<th>{{ managed_hosts.len() }} item{% if managed_hosts.len() != 1 %}s{% endif %}</th>
+			<th></th>
+			<th></th>
+			<th></th>
+		</tr>
+	</tfoot>
+</table>
+
+{% include "pages_footer.html" %}
+
+{% endblock %}

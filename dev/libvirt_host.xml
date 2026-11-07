@@ -1,0 +1,76 @@
+<domain type='kvm' xmlns:qemu='http://libvirt.org/schemas/domain/qemu/1.0'>
+	<name>ManagedHost</name>
+	<memory unit='MiB'>4096</memory>
+	<os>
+		<bootmenu enable='yes'/>
+		<smbios mode='sysinfo'/>
+		<type arch='x86_64'>hvm</type>
+		<loader readonly='yes' secure='no' type='pflash'>/usr/share/OVMF/OVMF_CODE.fd</loader>
+		<boot dev='network'/>
+	</os>
+	<sysinfo type='smbios'>
+		<bios>
+			<entry name='vendor'>LENOVO</entry>
+			<entry name='version'>0B37F812</entry>
+			<entry name='release'>11.22</entry>
+			<entry name='date'>03/01/2023</entry>
+		</bios>
+		<system>
+			<entry name='manufacturer'>Fedora</entry>
+			<entry name='product'>Virt-Manager</entry>
+			<entry name='version'>0.9.4</entry>
+		</system>
+		<baseBoard>
+			<entry name='manufacturer'>LENOVO</entry>
+			<entry name='product'>20BE0061MC</entry>
+			<entry name='version'>0B98401 Pro</entry>
+			<entry name='serial'>W1KS427111E</entry>
+		</baseBoard>
+		<chassis>
+			<entry name='manufacturer'>Dell Inc.</entry>
+			<entry name='version'>2.12</entry>
+			<entry name='serial'>65X0XF2</entry>
+			<entry name='asset'>40000101</entry>
+			<entry name='sku'>Type3Sku1</entry>
+		</chassis>
+		<oemStrings>
+			<entry>myappname:some arbitrary data</entry>
+			<entry>otherappname:more arbitrary data</entry>
+		</oemStrings>
+	</sysinfo>
+	<features>
+		<acpi />
+	</features>
+	<devices>
+		<serial type='pty'>
+			<target port='0'/>
+		</serial>
+		<controller type='virtio-serial' index='1'>
+			<address type='pci' domain='0x0000' bus='0x00' slot='0x0a' function='0x0'/>
+		</controller>
+		<interface type='bridge'>
+			<mac address='00:11:22:33:44:66'/>
+			<source bridge='carbide0'/>
+			<target dev='carbidevm'/>
+		</interface>
+		<tpm model='tpm-tis'>
+			<backend type='emulator' version='2.0'>
+				<active_pcr_banks>
+					<sha256/>
+				</active_pcr_banks>
+			</backend>
+		</tpm>
+	</devices>
+	<qemu:commandline>
+		<qemu:arg value='-chardev'/>
+		<qemu:arg value='socket,id=ipmi0,host=localhost,port=9002,reconnect=10'/>
+	</qemu:commandline>
+	<qemu:commandline>
+		<qemu:arg value='-device'/>
+		<qemu:arg value='ipmi-bmc-extern,id=bmc0,chardev=ipmi0'/>
+	</qemu:commandline>
+	<qemu:commandline>
+		<qemu:arg value='-device'/>
+                <qemu:arg value='pci-ipmi-bt,bmc=bmc0,addr=05.0'/>
+	</qemu:commandline>
+</domain>

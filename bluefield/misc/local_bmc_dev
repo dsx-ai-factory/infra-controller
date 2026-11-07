@@ -1,0 +1,47 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+bffamily=$(/usr/bin/bffamily | tr -d '[:space:]')
+IPMB_DEV_INT_ADD=0x1030
+IPMB_HOST_ADD=0x1011
+IPMB_HOST_CLIENTADDR=0x10
+
+if [ "$bffamily" = "Bluewhale" ]; then
+        i2cbus=2
+elif [ "$bffamily" = "BlueSphere" ] || [ "$bffamily" = "PRIS" ] ||
+     [ "$bffamily" = "Camelantis" ] || [ "$bffamily" = "Aztlan" ] ||
+     [ "$bffamily" = "Dell-Camelantis" ] || [ "$bffamily" = "Roy" ] ||
+     [ "$bffamily" = "El-Dorado" ]; then
+        i2cbus=1
+else
+        exit 0;
+fi
+
+I2C_NEW_DEV=/sys/bus/i2c/devices/i2c-$i2cbus/new_device
+
+restricted=$(/usr/bin/mlxprivhost -d /dev/mst/mt*_pciconf0 q | grep -i restricted 2>/dev/null)
+if [ $? = 0 ]; then
+	pinging=$(ping -c 1 192.168.100.1 2>/dev/null)
+	if [ $? = 0 ]; then
+		# Instantiate the ipmb-dev device
+		if [ ! -c "/dev/ipmb-$i2cbus" ]; then
+			echo ipmb-dev $IPMB_DEV_INT_ADD > $I2C_NEW_DEV
+		fi
+		modprobe ipmi_devintf ipmi_msghandler
+		modprobe ipmb_host slave_add=$IPMB_HOST_CLIENTADDR
+		echo ipmb-host $IPMB_HOST_ADD > $I2C_NEW_DEV
+	fi
+fi

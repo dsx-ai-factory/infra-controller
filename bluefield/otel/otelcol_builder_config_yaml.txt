@@ -1,0 +1,52 @@
+dist:
+  name: otelcol-contrib
+  module: otelcol-contrib
+  description: Custom OpenTelemetry Collector build for DPU logging
+  output_path: ./ocb-build
+  otelcol_version: ${VERSION}
+
+exporters:
+  - gomod:
+      go.opentelemetry.io/collector/exporter/debugexporter v${VERSION}
+  - gomod:
+      github.com/open-telemetry/opentelemetry-collector-contrib/exporter/fileexporter v${VERSION}
+  - gomod:
+      go.opentelemetry.io/collector/exporter/otlpexporter v${VERSION}
+  - gomod:
+      github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusexporter v${VERSION}
+
+extensions:
+  - gomod:
+      github.com/open-telemetry/opentelemetry-collector-contrib/extension/storage/filestorage v${VERSION}
+
+processors:
+  - gomod:
+      go.opentelemetry.io/collector/processor/batchprocessor v${VERSION}
+  - gomod: fileresourceprocessor v${FILERESOURCE_VERSION}
+  - gomod:
+      go.opentelemetry.io/collector/processor/memorylimiterprocessor v${VERSION}
+  - gomod: telemetrystatsprocessor v${TELEMETRYSTATS_VERSION}
+  - gomod:
+      github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourcedetectionprocessor v${VERSION}
+  - gomod:
+      github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourceprocessor v${VERSION}
+  - gomod:
+      github.com/open-telemetry/opentelemetry-collector-contrib/processor/transformprocessor v${VERSION}
+
+receivers:
+  - gomod:
+      github.com/open-telemetry/opentelemetry-collector-contrib/receiver/filelogreceiver v${VERSION}
+  - gomod:
+      github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver v${VERSION}
+  - gomod:
+      github.com/open-telemetry/opentelemetry-collector-contrib/receiver/journaldreceiver v${VERSION}
+  - gomod:
+      go.opentelemetry.io/collector/receiver/otlpreceiver v${VERSION}
+  - gomod:
+      github.com/open-telemetry/opentelemetry-collector-contrib/receiver/prometheusreceiver v${VERSION}
+  - gomod: puntstatsreceiver v${PUNTSTATS_VERSION}
+
+replaces:
+  - fileresourceprocessor => ../fileresourceprocessor
+  - telemetrystatsprocessor => ../telemetrystatsprocessor
+  - puntstatsreceiver => ../puntstatsreceiver

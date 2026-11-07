@@ -1,0 +1,133 @@
+## nico-dns — Authoritative DNS server for managed machines and VPCs
+## Global settings (overridden by umbrella chart)
+global:
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []
+  certificate:
+    duration: 720h0m0s
+    renewBefore: 360h0m0s
+    privateKey:
+      algorithm: ECDSA
+      size: 384
+    issuerRef:
+      kind: ClusterIssuer
+      name: vault-nico-issuer
+      group: cert-manager.io
+  spiffe:
+    trustDomain: nico.local
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: site-controller
+
+## Override the release namespace (defaults to helm install -n <namespace>)
+namespaceOverride: ""
+
+replicas: 2
+annotations:
+  configmap.reloader.stakater.com/reload: '{{ include "nico-dns.name" . }}, {{ include "nico-dns.name" . }}-config'
+
+## DNS server bind address. Default keeps the existing dual-stack/IPv6
+## listener; set to "0.0.0.0:53" for IPv4-only Kubernetes clusters.
+listenAddress: "[::]:53"
+
+service:
+  ports:
+    - port: 53
+      name: tcp
+      protocol: TCP
+    - port: 53
+      name: udp
+      protocol: UDP
+
+apiServiceName: nico-api
+
+## Pod resource requests/limits for the nico-dns container. Rendered verbatim,
+## so override any field as needed. Defaults: no CPU limit (a hard CPU cap would
+## throttle the latency-sensitive DNS path) and a 256Mi memory limit sized for
+## the negative cache plus allocator high-water under load.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+## OTLP gRPC endpoint that DNS traces are exported to (e.g.
+## "http://opentelemetry-collector.otel.svc.cluster.local:4317"). Empty by
+## default, which disables trace export.
+otlpEndpoint: ""
+
+## PodMonitor for the Prometheus Operator to scrape the metrics container port
+## (8053) directly off each pod. Disabled by default; requires the Prometheus
+## Operator CRDs (monitoring.coreos.com/v1).
+podMonitor:
+  enabled: false
+  ## Label your Prometheus instance's podMonitorSelector matches to discover it.
+  labels:
+    prometheus: nico-monitoring
+  ## Metrics HTTP path served by nico-dns.
+  path: /metrics
+  ## Optional scrape tuning; left blank, so the operator defaults apply.
+  interval: ""
+  scrapeTimeout: ""
+
+certificate:
+  ## serviceName is used to auto-generate dnsNames and SPIFFE URIs based on the release namespace
+  serviceName: ""
+  spiffeServiceName: ""
+  identityNamespace: ""
+  ## Fully override the auto-generated dnsNames/uris. When empty, dnsNames and
+  ## uris are generated from serviceName + namespace (extraDnsNames/extraUris
+  ## are appended to the generated list).
+  dnsNames: []
+  uris: []
+  extraDnsNames: []
+  extraUris: []
+
+env:
+  FORGE_ROOT_CA_PATH: /run/secrets/spiffe.io/ca.crt
+  NICO_ROOT_CA_PATH: /run/secrets/spiffe.io/ca.crt
+  RUST_BACKTRACE: "full"
+  RUST_LIB_BACKTRACE: "0"
+
+## ConfigMap settings for the env ConfigMap
+config:
+  ## NICO_API, NICO_API_HOST, NICO_API_PORT are auto-generated
+  ## from the release namespace in the configmap template
+  nicoApiPort: "1079"
+  extraData: {}  # additional keys to add to the ConfigMap
+
+envFrom:
+  nicoDnsConfig:
+    configMapName: nico-dns
+
+## External LoadBalancer Services (per-pod, for bare-metal / MetalLB)
+externalService:
+  enabled: false
+  type: LoadBalancer
+  # Empty values keep Kubernetes defaults. Use SingleStack with [IPv6] for an
+  # IPv6-only Service, or RequireDualStack with [IPv4, IPv6] for both families.
+  # PreferDualStack allows fallback on a single-stack cluster. An existing
+  # Service's primary family (the first entry) cannot be changed in place.
+  ipFamilyPolicy: ""
+  ipFamilies: []
+  # Empty keeps the Kubernetes default (Cluster). Set Local to preserve client
+  # source IPs. MetalLB only lets Local Services share an IP with Services
+  # that select the same pods.
+  externalTrafficPolicy: ""
+  # Annotation key that lets the UDP and TCP Services of one replica share an
+  # IP. Its value is <name>-instance-<ordinal>. Change the key for a
+  # load-balancer controller that does not use MetalLB annotations, or set it
+  # to "" to omit the annotation. A perPodAnnotations entry under either
+  # MetalLB spelling replaces the built-in annotation, for example to share
+  # the IP with another Service; one with the same key overrides its value.
+  sharedIpAnnotation: metallb.universe.tf/allow-shared-ip
+  ## Per-pod annotations (index matches pod ordinal)
+  ## Each entry is a map of annotations for that pod's external services
+  perPodAnnotations: []
+  # perPodAnnotations:
+  #   - metallb.universe.tf/loadBalancerIPs: "10.x.x.1"  # pod-0
+  #   - metallb.universe.tf/loadBalancerIPs: "10.x.x.2"  # pod-1

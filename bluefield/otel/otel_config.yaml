@@ -1,0 +1,547 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+extensions:
+  file_storage/cursors:
+    directory: /var/lib/otelcol-contrib/cursors
+    fsync: true
+
+receivers:
+  # OTLP receiver for DPU workloads to emit tracing spans
+  otlp/workloads:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+
+  filelog/doca:
+    include:
+      - /var/log/doca/hbn/frr/frr.log
+      - /var/log/doca/hbn/nl2docad.log
+      - /var/log/doca/hbn/nvued.log
+      - /var/log/doca/hbn/supervisor/supervisord.log
+      - /var/log/doca/hbn/syslog
+    include_file_name: false
+    include_file_path: true
+    start_at: beginning
+    storage: file_storage/cursors
+
+  filelog/auth:
+    include:
+      - /var/log/auth.log
+    include_file_name: false
+    include_file_path: true
+    start_at: beginning
+    storage: file_storage/cursors
+
+  journald/forge-dpu-agent:
+    directory: /var/log/journal
+    units:
+      - forge-dpu-agent
+    storage: file_storage/cursors
+    operators:
+      # If you want to extract more than a few key=value pairs, use
+      # key_value_parser in place of regex_parser to just parse them all then
+      # drop unwanted pairs in the transform processor.
+      - type: regex_parser
+        regex: 'level=(?P<level>\w+)'
+        parse_from: body.MESSAGE
+        severity:
+          parse_from: attributes.level
+          mapping:
+            error: 'ERROR'
+            warn: 'WARN'
+            info: 'INFO'
+            debug: 'DEBUG'
+
+  journald/kernel:
+    directory: /var/log/journal
+    dmesg: true
+    storage: file_storage/cursors
+    operators:
+      - type: severity_parser
+        parse_from: body.PRIORITY
+        mapping:
+          fatal:
+            - 0
+            - 1
+          error:
+            - 2
+            - 3
+          warn: 4
+          info: 5
+          debug: 6
+          trace: 7
+        overwrite_text: true
+
+  prometheus/fmds:
+    config:
+      scrape_configs:
+        - job_name: 'forge-metrics'
+          scrape_interval: 10s
+          static_configs:
+            - targets: ['localhost:8888']
+
+  prometheus/node:
+    config:
+      scrape_configs:
+        - job_name: 'node-exporter-metrics'
+          scrape_interval: 1m
+          static_configs:
+            - targets: ['localhost:9200']
+          metric_relabel_configs:
+            - source_labels: [__name__]
+              regex: "^(?:node_network_carrier|\
+                node_network_carrier_down_changes_total|\
+                node_network_carrier_up_changes_total|\
+                node_network_info|\
+                node_network_mtu_bytes|\
+                node_network_receive_bytes_total|\
+                node_network_receive_drop_total|\
+                node_network_receive_errs_total|\
+                node_network_receive_packets_total|\
+                node_network_speed_bytes|\
+                node_network_transmit_bytes_total|\
+                node_network_transmit_drop_total|\
+                node_network_transmit_errs_total|\
+                node_network_transmit_packets_total|\
+                node_network_up|\
+                node_arp_entries|\
+                node_boot_time_seconds|\
+                node_pressure_.*|\
+                node_timex_.*)$"
+              action: keep
+
+  prometheus/transceiver:
+    config:
+      scrape_configs:
+        - job_name: 'transceiver-exporter-metrics'
+          scrape_interval: 1m
+          static_configs:
+            - targets: ['localhost:9300']
+
+  prometheus/dts:
+    config:
+      scrape_configs:
+        - job_name: 'doca-telemetry'
+          scrape_interval: 1m
+          static_configs:
+            - targets: ['${env:NICO_DTS_METRICS_TARGET}']
+          metric_relabel_configs:
+            # This filter limits the set of DOCA metrics exported from the DPU
+            # to keep CPU and memory load in check on the site controller.
+            # Metrics are limited to categories of interest:
+            #   - port state
+            #   - interface flapping
+            #   - interface errors
+            #   - interface drops
+            #
+            # 'regex: >-' syntax converts newlines into single space, which the
+            # Prometheus regular expression parser can't handle. The multiline
+            # regex needs to be concatenated into a single-line string with no
+            # delimiting whitespace at all.
+            - source_labels: [__name__]
+              regex: "^(?:hw_port_state|\
+                ib_port_state|\
+                link_downed|\
+                link_error_recovery|\
+                .*_eth_(?:rx|tx)(?:_.*)?_errors|\
+                .*_eth_(?:rx|tx)_dropped)$"
+              action: keep
+            # Apply the prefix to a new label called "device"
+            - source_labels: [__name__]
+              regex: '^(.*)_eth_(?:rx|tx)(?:_.*)?_errors$'
+              target_label: device
+              replacement: '$$1'
+              action: replace
+            - source_labels: [__name__]
+              regex: '^(.*)_eth_(?:rx|tx)_dropped$'
+              target_label: device
+              replacement: '$$1'
+              action: replace
+            # Strip the prefix from the metric name
+            - source_labels: [__name__]
+              regex: '^.*_(eth_(?:rx|tx)(?:_.*)?_errors)$'
+              target_label: __name__
+              replacement: '$$1'
+              action: replace
+            - source_labels: [__name__]
+              regex: '^.*_(eth_(?:rx|tx)_dropped)$'
+              target_label: __name__
+              replacement: '$$1'
+              action: replace
+
+  prometheus/log-stats:
+    config:
+      scrape_configs:
+        - job_name: log-stats
+          scrape_interval: 1m
+          static_configs:
+            - targets: ["127.0.0.1:8890"]
+
+  hostmetrics:
+    collection_interval: 10s
+    initial_delay: 5s
+    scrapers:
+      load:
+      cpu:
+      memory:
+      process:
+        mute_process_cgroup_error: true
+        mute_process_exe_error: true
+        mute_process_name_error: true
+        mute_process_io_error: true
+        include:
+          match_type: strict
+          names:
+            - bgpd
+            - clx
+            - forge-dpu-agent
+            - neighmgrd
+            - nl2docad
+            - nvued
+            - otelcol-contrib
+            - ovs-vswitchd
+            - ovsdb-server
+            - rsyslogd
+            - supervisord
+            - zebra
+      network:
+      processes:
+
+  hostmetrics/disk:
+    collection_interval: 1m
+    scrapers:
+      disk:
+      filesystem:
+      paging:
+
+  punt_stats:
+    file_path: /cumulus/nl2docad/run/stats/punt
+    container_name: doca-hbn
+    # 5m hits Prometheus staleness limit, causing a discontinuity in the
+    # graphed time series.
+    scrape_interval: 4m
+
+processors:
+  batch/logs:
+    send_batch_size: 8192
+    timeout: 5s
+  batch/metrics:
+    send_batch_size: 8192
+    timeout: 15s
+  batch/metrics-disk:
+    send_batch_size: 8192
+    timeout: 75s
+  batch/traces:
+    send_batch_size: 8192
+    timeout: 5s
+  fileresource:
+    file_paths:
+      - /run/otelcol-contrib/machine-id
+      - /run/otelcol-contrib/host-machine-id
+    poll_interval: 5s
+  telemetry_stats:
+    metric_scrape_interval: 1m
+    metric_groupings:
+      - name: metrics_by_component
+        by_metric_name: false
+        by_metric_type: false
+        by_label:
+          names:
+            - component
+    log_stats_port: 8890
+    log_groupings:
+      - name: logs_by_component
+        by_label:
+          names:
+            - component
+            - host.machine.id
+            - log.file.path
+            - machine.id
+            - systemd.unit
+    labels:
+      - name: component
+        value: telemetry_stats
+    include_telemetry_stats: false
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 50
+    spike_limit_percentage: 20
+  resource/hostmetrics:
+    attributes:
+      - key: component
+        value: hostmetrics
+        action: insert
+  resource/hostmetrics-disk:
+    attributes:
+      - key: component
+        value: hostmetrics-disk
+        action: insert
+  resource/logs-journald:
+    attributes:
+      - key: component
+        value: journald
+        action: upsert
+  resource/logs-hbn:
+    attributes:
+      - key: component
+        value: hbn
+        action: upsert
+  resource/logs-auth:
+    attributes:
+      - key: component
+        value: dpu-auth-filelog
+        action: upsert
+  resource/log-stats:
+    attributes:
+      - key: component
+        value: telemetry_stats
+        action: upsert
+  resource/metrics-dts:
+    attributes:
+      - key: component
+        value: dts
+        action: upsert
+  resource/metrics-fmds:
+    attributes:
+      - key: component
+        value: fmds
+        action: upsert
+  resource/metrics-node-exporter:
+    attributes:
+      - key: component
+        value: node-exporter
+        action: upsert
+  resource/metrics-transceiver:
+    attributes:
+      - key: component
+        value: transceiver-exporter
+        action: upsert
+  resource/traces-workloads:
+    attributes:
+      - key: component
+        value: dpu-workloads
+        action: upsert
+  resource/punt-stats:
+    attributes:
+      - key: component
+        value: punt_stats
+        action: upsert
+  resourcedetection:
+    # Add hostname at the resource level
+    detectors: ["system"]
+    system:
+      resource_attributes:
+        host.name:
+          enabled: true
+        os.type:
+          enabled: false
+        host.id:
+          enabled: false
+  # Remove all but the "MESSAGE" and "_SYSTEMD_UNIT" keys from each log record
+  transform/journald:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - keep_keys(body, ["MESSAGE", "_SYSTEMD_UNIT"])
+          - set(attributes["systemd.unit"], body["_SYSTEMD_UNIT"])
+          - set(body, body["MESSAGE"])
+          - delete_key(attributes, "level")
+  transform/journald-kernel:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          # kernel is not actually a systemd unit, but treat it like one to
+          # facilitate grouping in grafana.
+          - set(attributes["systemd.unit"], "kernel")
+          # Even though this strips the log body down to just the message, it
+          # retains the structured format so we can restore fields such as
+          # PRIORITY or _KERNEL_DEVICE without changing the exported format.
+          - keep_keys(body, ["MESSAGE"])
+  transform/metrics-dts:
+    error_mode: ignore
+    metric_statements:
+      - context: datapoint
+        statements:
+          - |
+            set(attributes["category"], "doca_eth_dropped")
+            where IsMatch(metric.name, "^eth_(?:rx|tx)_dropped$")
+          - |
+            set(attributes["category"], "doca_eth_errors")
+            where IsMatch(metric.name, "^eth_(?:rx|tx)(?:_.*)?_errors$")
+          - |
+            set(attributes["category"], "doca_flapping")
+            where metric.name == "link_downed"
+            or metric.name == "link_error_recovery"
+          - |
+            set(attributes["category"], "doca_ports")
+            where metric.name == "hw_port_state"
+            or metric.name == "ib_port_state"
+
+exporters:
+  otlp/site:
+    endpoint: otel-receiver.forge:443
+    tls:
+      ca_file: /etc/otelcol-contrib/certs/ca.pem
+      cert_file: /etc/otelcol-contrib/certs/otel-cert.pem
+      key_file: /etc/otelcol-contrib/certs/private/otel-key.pem
+      reload_interval: 1h
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 1h
+  prometheus:
+    endpoint: "127.0.0.1:9999"
+    resource_to_telemetry_conversion:
+      enabled: true
+
+service:
+  pipelines:
+    # Traces pipeline for DPU workloads (eg, ovnkube-node)
+    traces/workloads:
+      receivers: [otlp/workloads]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - fileresource
+        - resource/traces-workloads
+        - batch/traces
+      exporters: [otlp/site]
+    logs/journald:
+      receivers: [journald/forge-dpu-agent]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - fileresource
+        - resource/logs-journald
+        - transform/journald
+        - telemetry_stats
+        - batch/logs
+      exporters: [otlp/site]
+    logs/journald-kernel:
+      receivers: [journald/kernel]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - fileresource
+        - resource/logs-journald
+        - transform/journald-kernel
+        - telemetry_stats
+        - batch/logs
+      exporters: [otlp/site]
+    logs/hbn:
+      receivers: [filelog/doca]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - fileresource
+        - resource/logs-hbn
+        - telemetry_stats
+        - batch/logs
+      exporters: [otlp/site]
+    logs/auth:
+      receivers: [filelog/auth]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - fileresource
+        - resource/logs-auth
+        - telemetry_stats
+        - batch/logs
+      exporters: [otlp/site]
+    metrics/fmds:
+      receivers: [prometheus/fmds]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - resource/metrics-fmds
+        - telemetry_stats
+        - batch/metrics
+      exporters: [otlp/site, prometheus]
+    metrics/node-exporter:
+      receivers: [prometheus/node]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - resource/metrics-node-exporter
+        - telemetry_stats
+        - batch/metrics
+      exporters: [otlp/site, prometheus]
+    metrics/dts:
+      receivers: [prometheus/dts]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - resource/metrics-dts
+        - transform/metrics-dts
+        - telemetry_stats
+        - batch/metrics
+      exporters: [otlp/site, prometheus]
+    metrics/transceiver-exporter:
+      receivers: [prometheus/transceiver]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - resource/metrics-transceiver
+        - telemetry_stats
+        - batch/metrics
+      exporters: [otlp/site, prometheus]
+    metrics/hostmetrics:
+      receivers: [hostmetrics]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - resource/hostmetrics
+        - telemetry_stats
+        - batch/metrics
+      exporters: [otlp/site, prometheus]
+    metrics/hostmetrics-disk:
+      receivers: [hostmetrics/disk]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - resource/hostmetrics-disk
+        - telemetry_stats
+        - batch/metrics-disk
+      exporters: [otlp/site, prometheus]
+    metrics/log-stats:
+      receivers: [prometheus/log-stats]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - resource/log-stats
+        - batch/metrics
+      exporters: [otlp/site, prometheus]
+    metrics/punt-stats:
+      receivers: [punt_stats]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - resource/punt-stats
+        - telemetry_stats
+        - batch/metrics
+      exporters: [otlp/site, prometheus]
+
+  extensions: [file_storage/cursors]
+  # Internal otel collector metrics by default are exposed on port 8888,
+  # already in use by Forge, causing otelcol-contrib to terminate with an
+  # error.
+  telemetry:
+    metrics:
+      level: none

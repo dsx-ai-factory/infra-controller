@@ -1,0 +1,56 @@
+suite: certificate dnsNames and uris configurability
+templates:
+  - certificate.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: generates dnsNames and uris from serviceName and namespace by default
+    asserts:
+      - isKind:
+          of: Certificate
+      - equal:
+          path: metadata.name
+          value: nico-dsx-exchange-consumer-certificate
+      - equal:
+          path: spec.dnsNames
+          value:
+            - nico-dsx-exchange-consumer.nico-system.svc.cluster.local
+            - nico-dsx-exchange-consumer.nico-system
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://nico.local/nico-system/sa/nico-dsx-exchange-consumer
+
+  - it: fully overrides the generated dnsNames and uris when set
+    set:
+      certificate:
+        dnsNames:
+          - nico-dsx-exchange-consumer.override.example.com
+        uris:
+          - spiffe://override.local/nico-system/sa/nico-dsx-exchange-consumer
+    asserts:
+      - equal:
+          path: spec.dnsNames
+          value:
+            - nico-dsx-exchange-consumer.override.example.com
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://override.local/nico-system/sa/nico-dsx-exchange-consumer
+
+  - it: nameOverride flips the certificate resource name, dnsNames, and SPIFFE URI to the override
+    set:
+      nameOverride: carbide-dsx-exchange-consumer
+    asserts:
+      - equal:
+          path: metadata.name
+          value: carbide-dsx-exchange-consumer-certificate
+      - equal:
+          path: spec.dnsNames
+          value:
+            - carbide-dsx-exchange-consumer.nico-system.svc.cluster.local
+            - carbide-dsx-exchange-consumer.nico-system
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://nico.local/nico-system/sa/carbide-dsx-exchange-consumer

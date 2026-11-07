@@ -1,0 +1,34 @@
+suite: NOTES optional component listing
+templates:
+  - NOTES.txt
+tests:
+  - it: lists default-on optional services and omits default-off ones
+    asserts:
+      - matchRegexRaw:
+          pattern: "nico-ntp"
+      - matchRegexRaw:
+          pattern: "nico-dsx-exchange-consumer"
+      - notMatchRegexRaw:
+          pattern: "unbound"
+      - notMatchRegexRaw:
+          pattern: "nico-machine-a-tron"
+
+  - it: omits default-on optional services when explicitly disabled
+    set:
+      nico-ntp.enabled: false
+      nico-dsx-exchange-consumer.enabled: false
+    asserts:
+      - notMatchRegexRaw:
+          pattern: "nico-ntp"
+      - notMatchRegexRaw:
+          pattern: "nico-dsx-exchange-consumer"
+
+  - it: lists default-off optional services when enabled
+    set:
+      unbound.enabled: true
+      nico-machine-a-tron.enabled: true
+    asserts:
+      - matchRegexRaw:
+          pattern: "unbound"
+      - matchRegexRaw:
+          pattern: "nico-machine-a-tron"

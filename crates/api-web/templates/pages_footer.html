@@ -1,0 +1,44 @@
+{% if page.pages() > 1 || page.total_items() >= 25 %}
+<div class="pagination-footer">
+    {% if page.pages() > 1 %}
+    <div class="pagination-controls">
+        {% if page.current_page() > 0 %}
+            <a class="page-link" href="{{ page.path }}?current_page=0&amp;limit={{page.limit()}}{{page.extra_query_params}}" title="First page">First</a>
+            <a class="page-link" href="{{ page.path }}?current_page={{page.previous()}}&amp;limit={{page.limit()}}{{page.extra_query_params}}" title="Previous page">Prev</a>
+        {% else %}
+            <span class="page-link disabled">First</span>
+            <span class="page-link disabled">Prev</span>
+        {% endif %}
+
+        {% for p in page.page_range_start()..page.page_range_end() %}
+            {% if p == page.current_page() %}
+                <span class="page-link active">{{ p + 1 }}</span>
+            {% else %}
+                <a class="page-link" href="{{ page.path }}?current_page={{p}}&amp;limit={{page.limit()}}{{page.extra_query_params}}">{{ p + 1 }}</a>
+            {% endif %}
+        {% endfor %}
+
+        {% if page.current_page() < page.pages() - 1 %}
+            <a class="page-link" href="{{ page.path }}?current_page={{page.next()}}&amp;limit={{page.limit()}}{{page.extra_query_params}}" title="Next page">Next</a>
+            <a class="page-link" href="{{ page.path }}?current_page={{page.pages() - 1}}&amp;limit={{page.limit()}}{{page.extra_query_params}}" title="Last page">Last</a>
+        {% else %}
+            <span class="page-link disabled">Next</span>
+            <span class="page-link disabled">Last</span>
+        {% endif %}
+    </div>
+    {% endif %}
+
+    <div class="pagination-info">
+        {% if page.pages() > 1 %}
+        <span class="page-status">Page {{ page.current_page().saturating_add(1) }} of {{ page.pages() }}</span>
+        {% endif %}
+        {% if page.total_items() >= 25 %}
+        <span class="page-size-label">Show</span>
+        {% if page.limit() == 25 %}<span class="page-link active">25</span>{% else %}<a class="page-link" href="{{ page.path }}?current_page=0&amp;limit=25{{page.extra_query_params}}">25</a>{% endif %}
+        {% if page.limit() == 50 %}<span class="page-link active">50</span>{% else %}<a class="page-link" href="{{ page.path }}?current_page=0&amp;limit=50{{page.extra_query_params}}">50</a>{% endif %}
+        {% if page.limit() == 100 %}<span class="page-link active">100</span>{% else %}<a class="page-link" href="{{ page.path }}?current_page=0&amp;limit=100{{page.extra_query_params}}">100</a>{% endif %}
+        {% if page.limit() == 0 %}<span class="page-link active" title="Show all items on one page">All</span>{% else %}<a class="page-link" href="{{ page.path }}?current_page=0&amp;limit=0{{page.extra_query_params}}" title="Show all items on one page">All</a>{% endif %}
+        {% endif %}
+    </div>
+</div>
+{% endif %}

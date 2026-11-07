@@ -1,0 +1,101 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[package]
+name = "carbide-machine-a-tron"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "machine_a_tron"
+
+[[bin]]
+name = "machine-a-tron"
+path = "src/main.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = { features = ["derive", "env"], workspace = true }
+lazy_static = { workspace = true }
+logfmt = { path = "../logfmt" }
+tracing = { workspace = true }
+tracing-subscriber = { features = ["env-filter"], workspace = true }
+uuid = { features = ["v4", "v5"], workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
+tonic = { workspace = true }
+dhcproto = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+mac_address = { workspace = true }
+futures = { workspace = true }
+figment = { features = ["toml"], workspace = true }
+reqwest = { default-features = false, features = [
+  "json",
+  "rustls",
+  "stream",
+  "socks",
+  "multipart",
+], workspace = true }
+eyre = { workspace = true }
+tempfile = { workspace = true }
+duration-str = { workspace = true }
+rand = { workspace = true }
+nv-redfish = { workspace = true }
+russh = { workspace = true }
+
+# [local-dependencies]
+carbide-api-model = { path = "../api-model" }
+carbide-ipmi = { path = "../ipmi" }
+carbide-rpc = { path = "../rpc", features = ["model"] }
+bmc-mock = { path = "../bmc-mock" }
+carbide-tls = { path = "../tls" }
+carbide-version = { path = "../version" }
+carbide-uuid = { path = "../uuid" }
+carbide-network = { path = "../network" }
+carbide-utils = { path = "../utils", features = ["test-support"] }
+metrics-endpoint = { path = "../metrics-endpoint" }
+ufm-mock = { package = "carbide-ufm-mock", path = "../ufm-mock" }
+rms-mock = { package = "carbide-rms-mock", path = "../rms-mock" }
+nmxc-mock = { package = "carbide-nmxc-mock", path = "../nmxc-mock" }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tonic-client-wrapper = { path = "../tonic-client-wrapper", default-features = false }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["http2", "server"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+prost = { workspace = true }
+carbide-test-support = { path = "../test-support" }
+tokio = { workspace = true, features = ["test-util"] }
+toml = { workspace = true }
+
+[build-dependencies]
+carbide-version = { path = "../version" }
+
+[lints]
+workspace = true

@@ -1,0 +1,28 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package carbide.codegen.v1;
+
+import "codegen/v1/derive.proto";
+import "google/protobuf/descriptor.proto";
+
+message ExternPathMapping {
+  string protobuf_type = 1;
+  string rust_type = 2;
+}
+
+extend google.protobuf.MessageOptions {
+  string message_extern_path = 51102;
+}
+
+extend google.protobuf.EnumOptions {
+  string enum_extern_path = 51103;
+}
+
+extend google.protobuf.FileOptions {
+  repeated string imported_extern_path = 51104;
+}
+
+option (carbide.codegen.v1.imported_extern_path) = "invalid";

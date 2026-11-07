@@ -1,0 +1,38 @@
+# This is the configuration file for the prometheus instance in docker-compose
+
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+
+  # Attach these labels to any time series or alerts when communicating with
+  # external systems (federation, remote storage, Alertmanager).
+  external_labels:
+      monitor: 'docker-host-alpha'
+
+# Load and evaluate rules in this file every 'evaluation_interval' seconds.
+rule_files:
+  - "alert.rules"
+
+# A scrape configuration containing exactly one endpoint to scrape.
+scrape_configs:
+  - job_name: 'prometheus'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'carbide-api'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['172.20.0.14:1080']
+
+  - job_name: 'carbide-dhcp'
+    scrape_interval: 10s
+    static_configs:
+      - targets: [ '172.20.0.12:1089' ]
+
+# alerting:
+#   alertmanagers:
+#   - scheme: http
+#     static_configs:
+#     - targets: 
+#       - 'alertmanager:9093'

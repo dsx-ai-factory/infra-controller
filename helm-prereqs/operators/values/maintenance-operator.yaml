@@ -1,0 +1,32 @@
+# =============================================================================
+# operators/values/maintenance-operator.yaml — NVIDIA maintenance-operator static values
+#
+# DPF prerequisite (installed by default; skip with --skip-dpf).
+# Copied from NVIDIA/doca-platform deploy/helmfiles/values at tag v26.4.0 —
+# keep in sync with the helm-prereqs/doca-platform submodule pin when bumping DPF.
+#
+# Chart: oci://ghcr.io/mellanox/maintenance-operator-chart 0.3.0
+# =============================================================================
+
+# Maintenance Operator Chart configuration
+operatorConfig:
+  deploy: true
+  maxParallelOperations: 60%
+operator:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: "node-role.kubernetes.io/master"
+                operator: Exists
+          - matchExpressions:
+              - key: "node-role.kubernetes.io/control-plane"
+                operator: Exists
+  tolerations:
+    - key: node-role.kubernetes.io/master
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule

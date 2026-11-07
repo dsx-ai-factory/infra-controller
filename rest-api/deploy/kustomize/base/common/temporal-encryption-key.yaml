@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: temporal-encryption-key
+  labels:
+    app.kubernetes.io/part-of: nico-rest
+type: Opaque
+# Replace with real key before applying outside local dev.
+# The local overlay patches this placeholder with the dev default.
+stringData:
+  temporal-encryption-key: "local-dev"

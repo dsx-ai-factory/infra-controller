@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Overlay for db (migrations) and postgres deployment customization.
+# Customize images or add patches for the db Job (migrations) and postgres here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nico-rest
+
+resources:
+  - ../../base/site-agent
+
+images:
+  - name: nico-rest-site-agent
+    newName: localhost:5000/nico-rest-site-agent
+    newTag: latest
+
+patches:
+  - target:
+      kind: StatefulSet
+      name: nico-rest-site-agent
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/imagePullSecrets
+        value: []

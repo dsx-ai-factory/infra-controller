@@ -1,0 +1,90 @@
+<table style="width: auto;">
+<tbody>
+	<tr>
+		<th></th>
+		<th>Name</th>
+		<th>Approvers</th>
+		<th>Applied</th>
+		<th>Parameters</th>
+		<th>Machine IPs</th>
+		<th>Target</th>
+		<th>Results</th>
+	</tr>
+	{% for request in action_requests %}
+	<tr>
+		<td class="cancel-cell">
+			{% if request.applied_at == None %}
+				<button onclick="post_handler(&quot;/admin/redfish-actions/cancel&quot;, () => &quot;{{ request.request_id }}&quot;, event)" class="cancel">
+					X
+				</button>
+			{% endif %}
+		</td>
+		<td>{{ request.action }}</td>
+		<td>
+		<table style="margin: 0pt;">
+
+		{% for approver in request.approvers %}
+			<tr>
+				<td>{{ approver }}</td>
+				<td style="text-wrap: nowrap;">{{ request.approver_dates[loop.index0]|date_fmt }}</td>
+			</tr>
+		{% endfor %}
+		</table>
+		</td>
+		{% if let Some(applied_at) = request.applied_at %}
+			<td>{{ applied_at|date_fmt }}{% if let Some(applier) = request.applier %} by <b>{{ applier }}</b> {% endif %} </td>
+		{% else %}
+		  {% if request.approvers.len() >= required_approvals %}
+				<td>
+					<button onclick="post_handler(&quot;/admin/redfish-actions/apply&quot;, () => &quot;{{ request.request_id }}&quot;, event)">
+						Apply ({{ request.approvers.len() }}/{{ required_approvals }})
+					</button>
+				</td>
+			{% else %}
+				{% if let Some(name) = current_user_name %}
+					<!-- askama does support if let and && in the latest version but would require
+						upgrading our rust version-->
+					{% if !(request.approvers|contains_name(name)) %}
+						<td><button onclick="post_handler(&quot;/admin/redfish-actions/approve&quot;, () => &quot;{{ request.request_id }}&quot;, event)">
+							Approve ({{ request.approvers.len() }}/{{ required_approvals }})
+						</button></td>
+					{% else %}
+						<td><button disabled>Pending ({{ request.approvers.len() }}/{{ required_approvals }})</button></td>
+					{% endif %}
+				{% else %}
+					<td><button disabled>Pending ({{ request.approvers.len() }}/{{ required_approvals }})</button></td>
+				{% endif %}
+			{% endif %}
+		{% endif %}
+		<td><pre><code>{{ request.parameters|pretty_json }}</code></pre></td>
+		<td>{{ request.machine_ips|machine_ips_fmt|safe }}</td>
+		<td>{{ request.target }}</td>
+		<td style="text-wrap: nowrap;">{{ request.results|to_json|join("\n ")|linebreaksbr|safe }}</td>
+	</tr>
+	{% endfor %}
+</tbody>
+
+</table>
+
+<script>
+
+async function post_handler(url, body_callback, event) {
+	// Strip out the query string.
+	const response = await fetch(url, {
+		method: "POST",
+		headers: {"Content-Type": "application/json"},
+		body: body_callback(),
+	});
+	if (response.ok) {
+		location.reload();
+		return;
+	}
+	const text = await response.text();
+	event.target.after(
+		create_el("p", {
+			innerText: `Failed to execute POST, status: ${response.status}, text: ${text}.`
+		})
+	);
+}
+
+</script>

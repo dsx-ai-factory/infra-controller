@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# nico-rest-api configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nico-rest-api-config
+  labels:
+    app: nico-rest-api
+data:
+  config.yaml: |
+    env:
+      dev: true
+      disconnected: true
+
+    api:
+      name: nico
+      route:
+        version: v2
+
+    log:
+      level: debug
+      sentry:
+        dsn: ""
+
+    db:
+      host: postgres.postgres
+      port: 5432
+      name: nico
+      user: nico
+      password: nico
+
+    temporal:
+      host: temporal-frontend.temporal
+      port: 7233
+      serverName: server.temporal.local
+      namespace: cloud
+      queue: cloud
+      tls:
+        enabled: true
+        certPath: /var/secrets/temporal/certs/tls.crt
+        keyPath: /var/secrets/temporal/certs/tls.key
+        caPath: /var/secrets/temporal/certs/ca.crt
+        disableHostVerification: false
+      encryptionKeyPath: /var/secrets/temporal/encryption-key
+
+    siteManager:
+      enabled: true
+      svcEndpoint: "https://nico-rest-site-manager:8100/v1/site"
+
+    metrics:
+      enabled: true
+      port: 9360
+
+    tracing:
+      enabled: false
+      serviceName: nico-rest-api
+
+    keycloak:
+      enabled: true
+      baseURL: http://keycloak:8082
+      externalBaseURL: http://localhost:8082
+      realm: nico-dev
+      clientID: nico-api
+      clientSecretPath: /var/secrets/keycloak/client-secret
+      serviceAccount: true
+      serviceAccountOrgs: [test-org]
+
+    rateLimiter:
+      enabled: false
+      rate: 10.0
+      burst: 30
+      expiresIn: 180

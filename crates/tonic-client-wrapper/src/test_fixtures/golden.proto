@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+service GoldenService {
+  rpc GoldenRpc(GoldenRequest) returns (GoldenResponse);
+}
+
+message GoldenRequest {}
+message GoldenResponse {}

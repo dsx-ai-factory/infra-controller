@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}{{ "Attestation Summary" }}{% endblock %}
+
+{% block content %}
+
+<h1>Attestation Summary</h1>
+<div><em>(if the machine is not listed in the table below, this means the scout has never had a chance to run)</em></div>
+<table class="sortable overview">
+    <thead>
+		<tr>
+			<th>Machine</th>
+            <th>Attestation Status</th>
+            <th>Profile Name</th>
+            <th>Journal Timestamp</th>
+		</tr>
+	</thead>
+    <tbody>
+        {% for attested_machine in attestations %}
+        <tr>
+            <td>{{ attested_machine.machine_id|machine_id_link|safe }}</td>
+            {% if attested_machine.bundle_id.is_none() %}
+            <td>
+                <a class="text-error" href="/admin/machine/{{ attested_machine.machine_id.to_string() }}/attestation-results">Attestation Failed</a>
+            </td>
+            {% else %}
+            <td>
+                <a class="text-success" href="/admin/machine/{{ attested_machine.machine_id.to_string() }}/attestation-results">Attestation Successful</a>
+            </td>
+            {% endif %}
+            <td>{{ attested_machine.profile_name }}</td>
+            <td>{{ attested_machine.ts.to_string() }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+{% endblock %}

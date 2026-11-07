@@ -1,0 +1,1514 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+
+use axum::routing::get;
+use axum::{Json, Router};
+use axum_http_client::AxumRouterHttpClient;
+use mac_address::MacAddress;
+use nv_redfish::bmc_http::{BmcCredentials, CacheSettings, HttpBmc};
+use nv_redfish::schema::resource::PowerState;
+use tokio::sync::{Notify, oneshot};
+use url::Url;
+
+use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult};
+use crate::injection::{Action, Rule, RuleId, Selector};
+use crate::mac_address_pool::{
+    Config as MacAddressConfig, MacAddressPool, PoolConfig as MacAddressPoolConfig,
+    RangesConfig as MacAddressRangesConfig,
+};
+use crate::machine_info::DpuSettings;
+use crate::redfish::computer_system::SystemState;
+use crate::{
+    ActionError, BmcState, Callbacks, CombinedServer, DeviceEffect, DpuMachineInfo,
+    EventServiceConfig, EventServiceOverride, HardwareType, HostMachineInfo, ListenerOrAddress,
+    MachineInfo, MachineRouterOptions, POWER_CYCLE_DELAY, ResourceResetType,
+};
+
+pub mod axum_http_client;
+
+/// Test backend handle. Reset commands are applied by its paired actor;
+/// successful commands, device effects and refresh notifications remain available
+/// for assertions.
+#[derive(Debug, Default)]
+pub struct TestCallbacks {
+    pub(crate) commands: Mutex<Vec<ResourceResetType>>,
+    pub(crate) effects: Mutex<Vec<DeviceEffect>>,
+    pub(crate) refresh_count: AtomicUsize,
+    command_received: Notify,
+    actor: Mutex<Option<TestActorHandle>>,
+}
+
+#[derive(Debug)]
+struct TestActorHandle {
+    mailbox: ActorMailbox<TestMessage>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for TestActorHandle {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[derive(Debug)]
+enum TestMessage {
+    Reset {
+        reset_type: ResourceResetType,
+        reply: oneshot::Sender<Result<(), ActionError>>,
+    },
+    DeviceEffect {
+        effect: DeviceEffect,
+        reply: oneshot::Sender<Result<(), ActionError>>,
+    },
+    /// Completes the power cycle that was scheduled as `generation`; ignored if a
+    /// later transition has superseded it.
+    PowerCycleCompleted { generation: u64 },
+}
+
+/// Owns power transitions and publishes observations to the controlled system.
+struct TestActor {
+    power_state: PowerState,
+    power_cycle_pending: bool,
+    /// Identifies the latest power cycle or device effect, so a completion scheduled
+    /// before it cannot publish `On` afterwards.
+    cycle_generation: u64,
+    state: Weak<SystemState<TestCallbacks>>,
+    callbacks: Weak<TestCallbacks>,
+}
+
+impl TestActor {
+    fn publish(&mut self, power_state: PowerState) {
+        self.power_state = power_state;
+        if let Some(state) = self.state.upgrade() {
+            state.set_power_state(power_state);
+        }
+    }
+
+    fn reset(
+        &mut self,
+        mailbox: &ActorMailbox<TestMessage>,
+        reset_type: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        if self.power_cycle_pending {
+            return Err(ActionError::BadRequest(eyre::eyre!(
+                "test backend is in the middle of power cycling",
+            )));
+        }
+        use ResourceResetType::*;
+        crate::validate_power_reset(self.power_state, reset_type)?;
+        match reset_type {
+            On | ForceOn | GracefulRestart | ForceRestart | PushPowerButton | Pause | Resume => {
+                self.publish(PowerState::On);
+            }
+            GracefulShutdown | ForceOff | Nmi | Suspend | Sleep | Hibernate => {
+                self.publish(PowerState::Off);
+            }
+            PowerCycle | FullPowerCycle => {
+                self.cycle_generation += 1;
+                mailbox
+                    .send_at(
+                        (tokio::time::Instant::now() + POWER_CYCLE_DELAY).into(),
+                        TestMessage::PowerCycleCompleted {
+                            generation: self.cycle_generation,
+                        },
+                    )
+                    .map_err(|error| ActionError::Internal(error.into()))?;
+                self.power_cycle_pending = true;
+                self.publish(PowerState::Off);
+            }
+            UnsupportedValue => {}
+        }
+        if let Some(callbacks) = self.callbacks.upgrade() {
+            callbacks.commands.lock().unwrap().push(reset_type);
+            callbacks.command_received.notify_one();
+        }
+        Ok(())
+    }
+}
+
+impl TestActor {
+    /// Applies a device effect the way the contract describes: whatever the power
+    /// state is, the device ends `Off`.
+    async fn device_effect(&mut self, effect: DeviceEffect) -> Result<(), ActionError> {
+        match effect {
+            DeviceEffect::AuxPowerCycle => {
+                self.cycle_generation += 1;
+                self.power_cycle_pending = false;
+                self.publish(PowerState::Off);
+                if let Some(callbacks) = self.callbacks.upgrade() {
+                    callbacks
+                        .effects
+                        .lock()
+                        .unwrap()
+                        .push(DeviceEffect::AuxPowerCycle);
+                }
+            }
+            DeviceEffect::ResetBmcToDefaults(update) => {
+                update.commit().await?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ActorCallbacks<TestMessage> for TestActor {
+    async fn message(
+        &mut self,
+        mailbox: &ActorMailbox<TestMessage>,
+        message: TestMessage,
+    ) -> ActorResult {
+        match message {
+            TestMessage::Reset { reset_type, reply } => {
+                let result = self.reset(mailbox, reset_type);
+                reply.send(result).ok();
+            }
+            TestMessage::DeviceEffect { effect, reply } => {
+                let result = self.device_effect(effect).await;
+                reply.send(result).ok();
+            }
+            TestMessage::PowerCycleCompleted { generation } => {
+                if generation == self.cycle_generation {
+                    self.power_cycle_pending = false;
+                    self.publish(PowerState::On);
+                }
+            }
+        }
+        ActorResult::Noop
+    }
+}
+
+/// Initial configuration owned by the test backend actor.
+pub(crate) struct TestBmcConfig {
+    pub(crate) power_state: PowerState,
+}
+
+impl Default for TestBmcConfig {
+    fn default() -> Self {
+        Self {
+            power_state: PowerState::On,
+        }
+    }
+}
+
+/// Builds the router and state, and starts the configured power actor.
+/// Dropping the callbacks stops the task.
+pub(crate) fn create_test_bmc(
+    machine_info: &MachineInfo,
+    config: TestBmcConfig,
+    machine_id: String,
+    redfish_auth: bool,
+    options: MachineRouterOptions,
+) -> (Router, BmcState<TestCallbacks>) {
+    let callbacks = Arc::new(TestCallbacks::default());
+    let (router, state) = crate::machine_router(
+        machine_info,
+        callbacks.clone(),
+        machine_id,
+        redfish_auth,
+        options,
+    );
+    let (actor, mailbox) = Actor::new();
+    let mut backend = TestActor {
+        power_state: config.power_state,
+        power_cycle_pending: false,
+        cycle_generation: 0,
+        state: Arc::downgrade(&state.system_state),
+        callbacks: Arc::downgrade(&callbacks),
+    };
+    backend.publish(config.power_state);
+    *callbacks.actor.lock().unwrap() = Some(TestActorHandle {
+        mailbox,
+        task: tokio::spawn(actor.run(backend)),
+    });
+    (router, state)
+}
+
+impl TestCallbacks {
+    /// Waits up to five seconds for the expected number of applied commands.
+    #[cfg(test)]
+    pub(crate) async fn wait_for_command_count(&self, expected_count: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let command_received = self.command_received.notified();
+                if self.commands.lock().unwrap().len() >= expected_count {
+                    return;
+                }
+                command_received.await;
+            }
+        })
+        .await
+        .expect("timed out waiting for BMC power commands");
+    }
+}
+
+impl Callbacks for TestCallbacks {
+    async fn computer_system_reset(
+        &self,
+        reset_type: ResourceResetType,
+    ) -> Result<(), ActionError> {
+        let (reply, response) = oneshot::channel();
+        let mailbox = self
+            .actor
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|actor| actor.mailbox.clone())
+            .ok_or_else(|| ActionError::Internal(eyre::eyre!("test power actor is not running")))?;
+        mailbox
+            .send(TestMessage::Reset { reset_type, reply })
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))?
+    }
+
+    async fn device_effect(&self, effect: DeviceEffect) -> Result<(), ActionError> {
+        let (reply, response) = oneshot::channel();
+        let mailbox = self
+            .actor
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|actor| actor.mailbox.clone())
+            .ok_or_else(|| ActionError::Internal(eyre::eyre!("test power actor is not running")))?;
+        mailbox
+            .send(TestMessage::DeviceEffect { effect, reply })
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))?
+    }
+
+    fn state_refresh_indication(&self) {
+        self.refresh_count.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub type TestBmc = HttpBmc<AxumRouterHttpClient>;
+
+lazy_static::lazy_static! {
+    pub static ref TEST_MAC_POOL: Arc<Mutex<MacAddressPool>> =
+        Arc::new(Mutex::new(MacAddressPool::new(MacAddressConfig {
+            pool: Some(MacAddressPoolConfig::new(MacAddress::new([2, 0, 0, 0, 0, 0]), 32).unwrap()),
+            ranges: Some(MacAddressRangesConfig::new(MacAddress::new([6, 0, 0, 0, 0, 0]), 32, 8).unwrap()),
+        })));
+}
+
+pub struct TestBmcHandle<C: Callbacks = TestCallbacks> {
+    pub service_root: Arc<nv_redfish::ServiceRoot<TestBmc>>,
+    /// The client behind `service_root`, for collectors that take the BMC
+    /// directly rather than a service root.
+    pub bmc: Arc<TestBmc>,
+    /// The router client behind `bmc`, which records every request.
+    pub http_client: AxumRouterHttpClient,
+    pub state: BmcState<C>,
+}
+
+impl<C: Callbacks> Clone for TestBmcHandle<C> {
+    fn clone(&self) -> Self {
+        Self {
+            service_root: self.service_root.clone(),
+            bmc: self.bmc.clone(),
+            http_client: self.http_client.clone(),
+            state: self.state.clone(),
+        }
+    }
+}
+
+async fn test_bmc<C: Callbacks>((router, state): (axum::Router, BmcState<C>)) -> TestBmcHandle<C> {
+    let client = AxumRouterHttpClient::new(router);
+    let endpoint = Url::parse("https://bmc-mock.local").expect("valid URL");
+    let credentials = BmcCredentials::new("root".to_string(), "password".to_string());
+    let bmc = Arc::new(HttpBmc::new(
+        client.clone(),
+        endpoint,
+        credentials,
+        CacheSettings::with_capacity(32),
+    ));
+    TestBmcHandle {
+        service_root: nv_redfish::ServiceRoot::new(bmc.clone())
+            .await
+            .unwrap()
+            .into(),
+        bmc,
+        http_client: client,
+        state,
+    }
+}
+
+/// Serve `router` over HTTPS on an ephemeral loopback port with the mock's
+/// bundled certificate. Returns the running server and its base URL. Use this
+/// where the in-process `TestBmcHandle` cannot: real TLS, HTTP/2, and SSE.
+pub fn serve_https(name: &str, router: Router) -> (CombinedServer, Url) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+    let server = CombinedServer::run_router(
+        name,
+        router,
+        Some(ListenerOrAddress::Listener(listener)),
+        crate::tls::server_config(None::<&str>).expect("bundled mock TLS certificate"),
+    );
+    let base = Url::parse(&format!("https://{}", server.address)).expect("valid URL");
+    (server, base)
+}
+
+pub async fn bmc_for_machine(machine_info: MachineInfo) -> TestBmcHandle {
+    let machine_id = match &machine_info {
+        MachineInfo::Host(_) => "test-host-id",
+        MachineInfo::Dpu(_) => "test-dpu-id",
+    };
+    test_bmc(create_test_bmc(
+        &machine_info,
+        TestBmcConfig::default(),
+        machine_id.to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+pub(super) fn host_info(hw_type: HardwareType) -> MachineInfo {
+    let ndpu = hw_type.fixed_number_of_dpu().unwrap_or(0);
+    let mut pool = TEST_MAC_POOL.lock().unwrap();
+    let ranges_config = pool.allocate_range_config().unwrap();
+    MachineInfo::Host(HostMachineInfo::new(
+        hw_type,
+        (0..ndpu)
+            .map(|_| DpuMachineInfo::new(hw_type, &mut pool, DpuSettings::default()))
+            .collect(),
+        &mut pool,
+        ranges_config,
+    ))
+}
+
+pub async fn wiwynn_gb200_bmc() -> TestBmcHandle {
+    test_bmc(create_test_bmc(
+        &host_info(HardwareType::WiwynnGB200Nvl),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+pub async fn wiwynn_gb200_bmc_at_rack_position(position: u8) -> TestBmcHandle {
+    let mut machine_info = host_info(HardwareType::WiwynnGB200Nvl);
+    let MachineInfo::Host(host) = &mut machine_info else {
+        unreachable!("Wiwynn GB200 test fixture must be a host")
+    };
+    host.rack_placement = Some(
+        crate::RackInfo {
+            rack_type: crate::RackType::WiwynnGb200Nvl72,
+        }
+        .placement(position),
+    );
+
+    test_bmc(create_test_bmc(
+        &machine_info,
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+pub async fn lenovo_gb300_bmc() -> TestBmcHandle {
+    test_bmc(create_test_bmc(
+        &host_info(HardwareType::LenovoGB300Nvl),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+pub async fn nvidia_dgx_h100_bmc() -> TestBmcHandle {
+    test_bmc(create_test_bmc(
+        &host_info(HardwareType::NvidiaDgxH100),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+pub async fn dgx_gb300_bmc() -> TestBmcHandle {
+    test_bmc(create_test_bmc(
+        &host_info(HardwareType::NvidiaDgxGb300),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+/// Host-mode mock for the NvidiaDgxVr hardware type ("vr-tray" in machine-a-tron
+/// configs). Unlike the other GB300-family types (Lenovo, Nvidia DGX GB300,
+/// Supermicro), this one previously only had a DPU-mode helper
+/// (`nvidia_dgx_vr_bluefield4_dpu_bmc`), so there was no way to test exploring
+/// it as a host tray at all. Added while investigating #3159.
+pub async fn nvidia_dgx_vr_host_bmc() -> TestBmcHandle {
+    test_bmc(create_test_bmc(
+        &host_info(HardwareType::NvidiaDgxVr),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+pub async fn supermicro_gb300_bmc() -> TestBmcHandle {
+    test_bmc(create_test_bmc(
+        &host_info(HardwareType::SupermicroGb300Nvl),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+/// Creates a generic Supermicro test BMC that is initially powered on.
+pub async fn generic_supermicro_bmc() -> TestBmcHandle {
+    test_bmc(create_test_bmc(
+        &host_info(HardwareType::GenericSupermicro),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+/// Creates a generic Supermicro test BMC with the supplied backend callbacks.
+pub async fn generic_supermicro_bmc_with_callbacks<C: Callbacks>(
+    callbacks: Arc<C>,
+) -> TestBmcHandle<C> {
+    test_bmc(crate::machine_router(
+        &host_info(HardwareType::GenericSupermicro),
+        callbacks,
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+/// Builds a LiteOn power shelf router that enforces Redfish authentication,
+/// as `bmc-mock --redfish-auth` does. Power shelves accept their factory-default
+/// password, [`crate::DUMMY_FACTORY_PASSWORD`] for [`crate::DUMMY_FACTORY_USERNAME`];
+/// rotate it with `state.account_service_state.change_factory_default_password`.
+/// Serve the router with [`serve_https`].
+pub fn liteon_powershelf_router_with_auth() -> (Router, BmcState<TestCallbacks>) {
+    create_test_bmc(
+        &host_info(HardwareType::LiteOnPowerShelf),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        true,
+        MachineRouterOptions::default(),
+    )
+}
+
+/// Lite-On power shelf with an undeclared but available Systems collection.
+pub async fn liteon_powershelf_bmc() -> TestBmcHandle {
+    test_bmc(create_test_bmc(
+        &host_info(HardwareType::LiteOnPowerShelf),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+pub async fn delta_powershelf_bmc() -> TestBmcHandle {
+    test_bmc(create_test_bmc(
+        &host_info(HardwareType::DeltaPowerShelf),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+/// Delta power shelf whose PSUs report the given per-bay on/off states under
+/// `Oem.deltaenergysystems.Power`. Lets tests exercise off and mixed shelves
+/// (the default [`delta_powershelf_bmc`] is an all-on six-bay shelf).
+pub async fn delta_powershelf_bmc_with_psu_power(states: Vec<bool>) -> TestBmcHandle {
+    let machine_info = match host_info(HardwareType::DeltaPowerShelf) {
+        MachineInfo::Host(host) => MachineInfo::Host(host.with_delta_psu_power(states)),
+        MachineInfo::Dpu(_) => unreachable!("Delta power shelf must be a host"),
+    };
+    test_bmc(create_test_bmc(
+        &machine_info,
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+pub async fn nvidia_switch_nd5200_ld_bmc() -> TestBmcHandle {
+    test_bmc(create_test_bmc(
+        &host_info(HardwareType::NvidiaSwitchNd5200Ld),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+pub async fn nvidia_switch_n5700_ld_bmc() -> TestBmcHandle {
+    test_bmc(create_test_bmc(
+        &host_info(HardwareType::NvidiaSwitchN5700Ld),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+pub async fn dell_poweredge_r750_bmc() -> TestBmcHandle {
+    test_bmc(create_test_bmc(
+        &host_info(HardwareType::DellPowerEdgeR750),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+/// A Dell R750 router whose EventService uses `limits`, and its state.
+pub fn dell_poweredge_r750_router_with_event_limits(
+    limits: EventServiceConfig,
+) -> (Router, BmcState<TestCallbacks>) {
+    create_test_bmc(
+        &host_info(HardwareType::DellPowerEdgeR750),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions {
+            event_service: EventServiceOverride::Limits(limits),
+            ..Default::default()
+        },
+    )
+}
+
+const TEST_DELL_STORAGE: &str = "/redfish/v1/Systems/System.Embedded.1/Storage";
+
+/// Builds a Dell PowerEdge R750 whose Storage collection lists `storages`.
+/// Every Storage and drive resource is served at its own `@odata.id`, so a
+/// Storage can link a drive that is not served to model a partly failing walk.
+pub async fn dell_poweredge_r750_bmc_with_storage(
+    storages: Vec<serde_json::Value>,
+    drives: Vec<serde_json::Value>,
+) -> TestBmcHandle {
+    let (router, state) = create_test_bmc(
+        &host_info(HardwareType::DellPowerEdgeR750),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    );
+    state.injection.upsert(Rule {
+        id: RuleId::from("storage-collection"),
+        selector: Selector::Path {
+            method: Some("GET".to_string()),
+            glob: TEST_DELL_STORAGE.to_string(),
+        },
+        action: Action::Replace(serde_json::json!({
+            "@odata.id": TEST_DELL_STORAGE,
+            "@odata.type": "#StorageCollection.StorageCollection",
+            "Name": "Storage Collection",
+            "Members": storages
+                .iter()
+                .map(|storage| serde_json::json!({ "@odata.id": storage["@odata.id"] }))
+                .collect::<Vec<_>>()
+        })),
+        remaining: None,
+    });
+    let router = storages
+        .into_iter()
+        .chain(drives)
+        .fold(router, |router, resource| {
+            let path = resource["@odata.id"].as_str().unwrap().to_string();
+            let resource = Arc::new(resource);
+            router.route(
+                &path,
+                get(move || {
+                    let resource = Arc::clone(&resource);
+                    async move { Json((*resource).clone()) }
+                }),
+            )
+        });
+    test_bmc((router, state)).await
+}
+
+pub async fn dell_poweredge_r750_bluefield3_bmc(settings: DpuSettings) -> TestBmcHandle {
+    let machine_info = {
+        let mut mac_pool = TEST_MAC_POOL.lock().unwrap();
+        MachineInfo::Dpu(DpuMachineInfo::new(
+            HardwareType::DellPowerEdgeR750,
+            &mut mac_pool,
+            settings,
+        ))
+    };
+    test_bmc(create_test_bmc(
+        &machine_info,
+        TestBmcConfig::default(),
+        "test-dpu-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+pub async fn dell_poweredge_r760_bluefield4_bmc(dpu: DpuMachineInfo) -> TestBmcHandle {
+    let machine_info = MachineInfo::Dpu(dpu);
+    test_bmc(create_test_bmc(
+        &machine_info,
+        TestBmcConfig::default(),
+        "test-dpu-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+pub async fn nvidia_dgx_vr_bluefield4_dpu_bmc(settings: DpuSettings) -> TestBmcHandle {
+    let machine_info = {
+        let mut mac_pool = TEST_MAC_POOL.lock().unwrap();
+        MachineInfo::Dpu(DpuMachineInfo::new(
+            HardwareType::NvidiaDgxVr,
+            &mut mac_pool,
+            settings,
+        ))
+    };
+    test_bmc(create_test_bmc(
+        &machine_info,
+        TestBmcConfig::default(),
+        "test-dpu-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+pub async fn hpe_proliant_dl380a_gen11_bmc() -> TestBmcHandle {
+    test_bmc(create_test_bmc(
+        &host_info(HardwareType::HpeProliantDl380aGen11),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+pub async fn generic_ami_bmc() -> TestBmcHandle {
+    test_bmc(create_test_bmc(
+        &host_info(HardwareType::GenericAmi),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    ))
+    .await
+}
+
+/// A Giga Computing R263-ZG0 as the explorer sees it. Values come from a lab
+/// R263-ZG0 (AMI MegaRAC BMC 13.06.29, BIOS R23_F20).
+pub async fn giga_computing_ami_bmc() -> TestBmcHandle {
+    let (router, state) = create_test_bmc(
+        &host_info(HardwareType::GenericAmi),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    );
+    let get = |glob: &str| Selector::Path {
+        method: Some("GET".to_string()),
+        glob: glob.to_string(),
+    };
+    state.injection.put(vec![
+        Rule {
+            id: RuleId::from("giga-system-identity"),
+            selector: get("/redfish/v1/Systems/Self"),
+            action: Action::JsonMerge(serde_json::json!({
+                "Manufacturer": "Giga Computing",
+                "Model": "R263-ZG0-AAL2-000",
+                "SKU": "1786441451",
+            })),
+            remaining: None,
+        },
+        Rule {
+            id: RuleId::from("giga-chassis-identity"),
+            selector: get("/redfish/v1/Chassis/Self"),
+            action: Action::JsonMerge(serde_json::json!({
+                "ChassisType": "RackMount",
+                "Manufacturer": "Giga Computing",
+                "Model": "R263-ZG0-AAL2-000",
+            })),
+            remaining: None,
+        },
+        Rule {
+            // The configured state libredfish `machine_setup` leaves behind,
+            // as read from the lab box.
+            id: RuleId::from("giga-bios"),
+            selector: get("/redfish/v1/Systems/Self/Bios"),
+            action: Action::JsonMerge(serde_json::json!({
+                "Attributes": {
+                    "TER001": "Enabled",
+                    "TER010": "Enabled",
+                    "TER06B": "COM1/SOL",
+                    "TER021": "115200",
+                    "TER020": "115200",
+                    "TER012": "VT100Plus",
+                    "TER011": "VT-UTF8",
+                    "TER05D": "None",
+                    "CPU005": "Enabled",
+                    "PCIS007": "Enabled",
+                    "NWSK000": "Enabled",
+                    "NWSK001": "Disabled",
+                    "NWSK006": "Enabled",
+                    "NWSK002": "Disabled",
+                    "NWSK007": "Disabled",
+                    "GBT0183": "Disabled",
+                }
+            })),
+            remaining: None,
+        },
+        Rule {
+            // Factory-open host interface, as shipped.
+            id: RuleId::from("giga-host-interface"),
+            selector: get("/redfish/v1/Managers/Self/HostInterfaces/Self"),
+            action: Action::JsonMerge(serde_json::json!({
+                "InterfaceEnabled": true,
+                "AuthenticationModes": ["AuthNone"],
+                "AuthNoneRoleId": "HostInterfaceAdministrator",
+                "CredentialBootstrapping": {
+                    "EnableAfterReset": false,
+                    "Enabled": true,
+                    "RoleId": "HostInterfaceAdministrator",
+                },
+            })),
+            remaining: None,
+        },
+    ]);
+    test_bmc((router, state)).await
+}
+
+/// Build a router from the recorded GH200 system with swapped Managers order.
+/// `HGX_BMC_0` is intentionally listed before `BMC_0`, to check that the explorer
+/// picks `BMC_0` (linked to `System_0`) regardless of the order.
+pub fn nvidia_gh200_swapped_managers_router() -> Router {
+    let archive_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("gh200.tar.gz");
+    let default_router =
+        crate::tar_router::tar_router(crate::tar_router::TarGzOption::Disk(&archive_path), None)
+            .expect("NVIDIA GH200 archive must be readable");
+
+    let router = Router::new().route(
+        "/redfish/v1/Managers",
+        get(|| async move {
+            Json(serde_json::json!({
+                    "@odata.id": "/redfish/v1/Managers",
+                    "@odata.type": "#ManagerCollection.ManagerCollection",
+                    "Members": [
+                        {
+                            "@odata.id": "/redfish/v1/Managers/HGX_BMC_0"
+                        },
+                        {
+                            "@odata.id": "/redfish/v1/Managers/BMC_0"
+                        }
+                    ],
+                    "Members@odata.count": 2,
+                    "Name": "Manager Collection"
+            }))
+        }),
+    );
+    router.fallback_service(default_router)
+}
+
+/// Builds a router from the recorded Lenovo ThinkSystem SR670 Redfish tree.
+pub fn lenovo_thinksystem_sr670_router() -> Router {
+    let archive_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("lenovo_thinksystem_sr670.tar.gz");
+    crate::tar_router::tar_router(crate::tar_router::TarGzOption::Disk(&archive_path), None)
+        .expect("Lenovo ThinkSystem SR670 archive must be readable")
+}
+
+/// Builds the recorded Lenovo XCC router with five usable System interfaces
+/// and the ConnectX-7 MAC reported only through its linked adapter Port.
+pub fn lenovo_xcc_router_with_partial_system_network_inventory() -> Router {
+    const SYSTEM_INTERFACES: &str = "/redfish/v1/Systems/1/EthernetInterfaces";
+    const ADAPTERS: &str = "/redfish/v1/Chassis/1/NetworkAdapters";
+    const ADAPTER: &str = "/redfish/v1/Chassis/1/NetworkAdapters/slot-15";
+    const PORTS: &str = "/redfish/v1/Chassis/1/NetworkAdapters/slot-15/Ports";
+    const PORT: &str = "/redfish/v1/Chassis/1/NetworkAdapters/slot-15/Ports/2";
+
+    let interfaces = [
+        ("ToManager", "0a:8f:c3:a5:8a:41"),
+        ("NIC1", "00:62:0b:4c:28:a8"),
+        ("NIC2", "00:62:0b:4c:28:a9"),
+        ("NIC3", "00:62:0b:4c:28:aa"),
+        ("NIC4", "00:62:0b:4c:28:ab"),
+    ];
+    let interface_members = interfaces
+        .iter()
+        .map(|(id, _)| serde_json::json!({ "@odata.id": format!("{SYSTEM_INTERFACES}/{id}") }))
+        .collect::<Vec<_>>();
+    let mut router = Router::new().route(
+        SYSTEM_INTERFACES,
+        get(move || {
+            let interface_members = interface_members.clone();
+            async move {
+                Json(serde_json::json!({
+                    "@odata.id": SYSTEM_INTERFACES,
+                    "@odata.type": "#EthernetInterfaceCollection.EthernetInterfaceCollection",
+                    "Name": "Ethernet Interface Collection",
+                    "Members": interface_members,
+                }))
+            }
+        }),
+    );
+    for (id, mac_address) in interfaces {
+        let path = format!("{SYSTEM_INTERFACES}/{id}");
+        let interface_odata_id = path.clone();
+        router = router.route(
+            &path,
+            get(move || {
+                let interface_odata_id = interface_odata_id.clone();
+                async move {
+                    Json(serde_json::json!({
+                        "@odata.id": interface_odata_id,
+                        "@odata.type": "#EthernetInterface.v1_12_0.EthernetInterface",
+                        "Id": id,
+                        "Name": id,
+                        "InterfaceEnabled": true,
+                        "MACAddress": mac_address,
+                        "Status": { "State": "Enabled" },
+                    }))
+                }
+            }),
+        );
+    }
+
+    router
+        .route(
+            ADAPTERS,
+            get(|| async {
+                Json(serde_json::json!({
+                    "@odata.id": ADAPTERS,
+                    "@odata.type": "#NetworkAdapterCollection.NetworkAdapterCollection",
+                    "Name": "Network Adapter Collection",
+                    "Members": [{ "@odata.id": ADAPTER }],
+                }))
+            }),
+        )
+        .route(
+            ADAPTER,
+            get(|| async {
+                Json(serde_json::json!({
+                    "@odata.id": ADAPTER,
+                    "@odata.type": "#NetworkAdapter.v1_7_0.NetworkAdapter",
+                    "Id": "slot-15",
+                    "Name": "ConnectX-7",
+                    "Manufacturer": "NVIDIA",
+                    "Model": "ConnectX-7",
+                    "Ports": { "@odata.id": PORTS },
+                }))
+            }),
+        )
+        .route(
+            PORTS,
+            get(|| async {
+                Json(serde_json::json!({
+                    "@odata.id": PORTS,
+                    "@odata.type": "#PortCollection.PortCollection",
+                    "Name": "Port Collection",
+                    "Members": [{ "@odata.id": PORT }],
+                }))
+            }),
+        )
+        .route(
+            PORT,
+            get(|| async {
+                Json(serde_json::json!({
+                    "@odata.id": PORT,
+                    "@odata.type": "#Port.v1_6_0.Port",
+                    "Id": "2",
+                    "Name": "Port 2",
+                    "Oem": {
+                        "Lenovo": { "PhysicalPortMacAddress": "94:6d:ae:53:cb:9b" },
+                    },
+                }))
+            }),
+        )
+        .fallback_service(lenovo_thinksystem_sr670_router())
+}
+
+const TEST_ADAPTERS: &str = "/redfish/v1/Chassis/Self/NetworkAdapters";
+const TEST_ADAPTER: &str = "/redfish/v1/Chassis/Self/NetworkAdapters/1";
+const TEST_PORTS: &str = "/redfish/v1/Chassis/Self/NetworkAdapters/1/Ports";
+const TEST_SYSTEM_INTERFACES: &str = "/redfish/v1/Systems/Self/EthernetInterfaces";
+const TEST_DISABLED_INTERFACE: &str = "/redfish/v1/Systems/Self/EthernetInterfaces/disabled";
+
+/// Builds a generic host router with supplemental network adapter ports.
+pub fn generic_ami_router_with_network_adapter_ports(
+    ports: Vec<serde_json::Value>,
+) -> (axum::Router, BmcState<TestCallbacks>) {
+    let (router, state) = create_test_bmc(
+        &host_info(HardwareType::GenericAmi),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions::default(),
+    );
+    state.injection.put(vec![Rule {
+        id: RuleId::from("network-adapters-link"),
+        selector: Selector::Path {
+            method: Some("GET".to_string()),
+            glob: "/redfish/v1/Chassis/Self".to_string(),
+        },
+        action: Action::JsonMerge(serde_json::json!({
+            "NetworkAdapters": { "@odata.id": TEST_ADAPTERS }
+        })),
+        remaining: None,
+    }]);
+
+    let port_ids = ports
+        .iter()
+        .enumerate()
+        .map(|(index, _)| format!("{TEST_PORTS}/{}", index + 1))
+        .collect::<Vec<_>>();
+    let collection_port_ids = port_ids.clone();
+    let mut router = router
+        .route(
+            TEST_ADAPTERS,
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "@odata.id": TEST_ADAPTERS,
+                    "@odata.type": "#NetworkAdapterCollection.NetworkAdapterCollection",
+                    "Name": "Network Adapter Collection",
+                    "Members": [{ "@odata.id": TEST_ADAPTER }]
+                }))
+            }),
+        )
+        .route(
+            TEST_ADAPTER,
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "@odata.id": TEST_ADAPTER,
+                    "@odata.type": "#NetworkAdapter.v1_7_0.NetworkAdapter",
+                    "Id": "1",
+                    "Name": "Network Adapter",
+                    "Ports": { "@odata.id": TEST_PORTS }
+                }))
+            }),
+        )
+        .route(
+            TEST_PORTS,
+            axum::routing::get(move || {
+                let port_ids = collection_port_ids.clone();
+                async move {
+                    axum::Json(serde_json::json!({
+                        "@odata.id": TEST_PORTS,
+                        "@odata.type": "#PortCollection.PortCollection",
+                        "Name": "Port Collection",
+                        "Members": port_ids
+                            .into_iter()
+                            .map(|id| serde_json::json!({ "@odata.id": id }))
+                            .collect::<Vec<_>>()
+                    }))
+                }
+            }),
+        );
+    for (port_id, port) in port_ids.into_iter().zip(ports) {
+        let port = Arc::new(port);
+        router = router.route(
+            &port_id,
+            axum::routing::get(move || {
+                let port = Arc::clone(&port);
+                async move { axum::Json((*port).clone()) }
+            }),
+        );
+    }
+
+    (router, state)
+}
+
+/// Builds a generic host router with one supplemental network adapter port.
+pub fn generic_ami_router_with_network_adapter_port(
+    port: serde_json::Value,
+) -> (axum::Router, BmcState<TestCallbacks>) {
+    generic_ami_router_with_network_adapter_ports(vec![port])
+}
+
+/// Adds a disabled System EthernetInterface containing an invalid MAC to the
+/// adapter-port test router.
+pub fn generic_ami_router_with_network_adapter_port_and_disabled_system_mac(
+    port: serde_json::Value,
+) -> (axum::Router, BmcState<TestCallbacks>) {
+    let (router, state) = generic_ami_router_with_network_adapter_port(port);
+    state.injection.upsert(Rule {
+        id: RuleId::from("disabled-system-interface"),
+        selector: Selector::Path {
+            method: Some("GET".to_string()),
+            glob: TEST_SYSTEM_INTERFACES.to_string(),
+        },
+        action: Action::Replace(serde_json::json!({
+            "@odata.id": TEST_SYSTEM_INTERFACES,
+            "@odata.type": "#EthernetInterfaceCollection.EthernetInterfaceCollection",
+            "Name": "Ethernet Interface Collection",
+            "Members": [{ "@odata.id": TEST_DISABLED_INTERFACE }]
+        })),
+        remaining: None,
+    });
+    let router = router.route(
+        TEST_DISABLED_INTERFACE,
+        axum::routing::get(|| async {
+            axum::Json(serde_json::json!({
+                "@odata.id": TEST_DISABLED_INTERFACE,
+                "@odata.type": "#EthernetInterface.v1_12_0.EthernetInterface",
+                "Id": "disabled",
+                "Name": "Disabled Ethernet Interface",
+                "InterfaceEnabled": false,
+                "MACAddress": "not-a-mac"
+            }))
+        }),
+    );
+    (router, state)
+}
+
+pub async fn generic_ami_bmc_with_network_adapter_port(port: serde_json::Value) -> TestBmcHandle {
+    test_bmc(generic_ami_router_with_network_adapter_port(port)).await
+}
+
+pub async fn generic_ami_bmc_with_network_adapter_ports(
+    ports: Vec<serde_json::Value>,
+) -> TestBmcHandle {
+    test_bmc(generic_ami_router_with_network_adapter_ports(ports)).await
+}
+
+#[cfg(test)]
+mod test {
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use nv_redfish::bmc_http::{BmcCredentials, HttpClient};
+    use nv_redfish::core::NoRepair;
+    use tower::ServiceExt;
+    use url::Url;
+
+    use super::*;
+    use crate::injection::{Action, InjectionStore, Rule, RuleId, Selector};
+    use crate::test_support::axum_http_client::Error;
+    use crate::test_support::host_info;
+
+    #[tokio::test(start_paused = true)]
+    async fn power_actor_keeps_cycle_off_and_rejects_resets_until_completion() {
+        let (router, state) = create_test_bmc(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            TestBmcConfig::default(),
+            "test-host-id".to_string(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        let callbacks = state.callbacks.as_ref().unwrap();
+        let system = "/redfish/v1/Systems/System.Embedded.1";
+        async fn power(router: &Router, system: &str) -> serde_json::Value {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(system).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            body["PowerState"].clone()
+        }
+        async fn reset(router: &Router, system: &str, reset_type: &str) -> StatusCode {
+            router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("{system}/Actions/ComputerSystem.Reset"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({"ResetType": reset_type}).to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status()
+        }
+        assert_eq!(power(&router, system).await, "On");
+        for cycle in ["PowerCycle", "FullPowerCycle"] {
+            assert_eq!(reset(&router, system, cycle).await, StatusCode::OK);
+            assert_eq!(power(&router, system).await, "Off");
+            tokio::time::advance(POWER_CYCLE_DELAY - std::time::Duration::from_secs(1)).await;
+            assert_eq!(power(&router, system).await, "Off");
+            assert_eq!(reset(&router, system, "On").await, StatusCode::BAD_REQUEST);
+            assert_eq!(reset(&router, system, cycle).await, StatusCode::BAD_REQUEST);
+            tokio::time::advance(std::time::Duration::from_secs(1)).await;
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while power(&router, system).await != "On" {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("power cycle did not complete");
+        }
+        assert_eq!(reset(&router, system, "ForceOff").await, StatusCode::OK);
+        assert_eq!(power(&router, system).await, "Off");
+        assert_eq!(reset(&router, system, "On").await, StatusCode::OK);
+        assert_eq!(power(&router, system).await, "On");
+        assert_eq!(
+            *callbacks.commands.lock().unwrap(),
+            vec![
+                ResourceResetType::PowerCycle,
+                ResourceResetType::FullPowerCycle,
+                ResourceResetType::ForceOff,
+                ResourceResetType::On,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn caller_provided_injection_store_is_active() {
+        let injection = Arc::new(InjectionStore::new());
+        injection.upsert(Rule {
+            id: RuleId::from("unavailable"),
+            selector: Selector::Path {
+                method: Some("GET".to_string()),
+                glob: "/redfish/v1".to_string(),
+            },
+            action: Action::Status(StatusCode::SERVICE_UNAVAILABLE.as_u16()),
+            remaining: None,
+        });
+        let (router, state) = crate::machine_router_with_injection_store(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            Arc::new(TestCallbacks::default()),
+            "test-host-id".to_string(),
+            false,
+            injection.clone(),
+            crate::MachineRouterOptions::default(),
+        );
+
+        assert!(Arc::ptr_eq(&injection, &state.injection));
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/redfish/v1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// End-to-end BMC self-reset window (epic #3796 issue 4): the manager
+    /// reset is acknowledged, then EVERY request gets 503 until the window
+    /// expires, recovery is lazy, and the server's power is never touched.
+    #[tokio::test]
+    async fn manager_reset_takes_bmc_offline_then_recovers() {
+        use std::time::Duration;
+
+        let (router, state) = create_test_bmc(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            TestBmcConfig::default(),
+            "test-host-id".to_string(),
+            false,
+            MachineRouterOptions {
+                bmc_reset_duration: Some(Duration::from_millis(100)),
+                ..Default::default()
+            },
+        );
+        let callbacks = state.callbacks.as_ref().unwrap();
+
+        let get = |path: &str| {
+            router
+                .clone()
+                .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+        };
+
+        // discover the manager's reset action target
+        let response = get("/redfish/v1/Managers").await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let managers: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let manager_path = managers["Members"][0]["@odata.id"]
+            .as_str()
+            .expect("at least one manager")
+            .to_string();
+        let reset_target = format!("{manager_path}/Actions/Manager.Reset");
+
+        // trigger the self-reset: acknowledged before going dark
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&reset_target)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // inside the window: EVERYTHING answers 503
+        for path in ["/redfish/v1", &manager_path, "/redfish/v1/Systems"] {
+            let response = get(path).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{path} should be offline during the reset window"
+            );
+        }
+
+        // after the window: silently back online
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let response = get("/redfish/v1").await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // a BMC reset must not touch the server's power
+        assert!(callbacks.commands.lock().unwrap().is_empty());
+    }
+
+    /// Regression guard: a ZERO `bmc_reset_duration` (e.g. from a profile
+    /// or override with a zero timing) must behave exactly like `None` —
+    /// the pre-existing no-op reset, with no offline window at all.
+    #[tokio::test]
+    async fn zero_reset_duration_keeps_the_old_noop_behavior() {
+        use std::time::Duration;
+
+        let (router, state) = create_test_bmc(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            TestBmcConfig::default(),
+            "test-host-id".to_string(),
+            false,
+            MachineRouterOptions {
+                bmc_reset_duration: Some(Duration::ZERO),
+                ..Default::default()
+            },
+        );
+        assert!(state.availability.is_none(), "zero must disable entirely");
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/redfish/v1/Managers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let managers: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let manager_path = managers["Members"][0]["@odata.id"]
+            .as_str()
+            .expect("at least one manager");
+
+        // reset is acknowledged and the BMC stays online — old behavior
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("{manager_path}/Actions/Manager.Reset"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/redfish/v1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn transport_supports_expand_query_through_mock_expander() {
+        let client = AxumRouterHttpClient::new(
+            create_test_bmc(
+                &host_info(HardwareType::DellPowerEdgeR750),
+                TestBmcConfig::default(),
+                "test-host-id".to_string(),
+                false,
+                MachineRouterOptions::default(),
+            )
+            .0,
+        );
+        let url =
+            Url::parse("https://bmc-mock.local/redfish/v1/Chassis?$expand=.($levels=1)").unwrap();
+
+        let response: serde_json::Value = client
+            .get(
+                url,
+                &BmcCredentials::new("root".to_string(), "password".to_string()),
+                None,
+                &axum::http::HeaderMap::new(),
+                &NoRepair,
+            )
+            .await
+            .expect("expanded GET should succeed");
+
+        let members = response
+            .get("Members")
+            .and_then(|m| m.as_array())
+            .expect("expanded response should contain Members array");
+        assert!(!members.is_empty(), "expanded Members must not be empty");
+        assert!(
+            members[0].get("@odata.id").is_some() && members[0].get("Name").is_some(),
+            "expanded member should contain entity fields from expander router"
+        );
+    }
+
+    #[tokio::test]
+    async fn unroutable_request_returns_404_from_transport() {
+        let client = AxumRouterHttpClient::new(Router::new());
+        let url = Url::parse("https://bmc-mock.local/redfish/v1").unwrap();
+        let result: Result<serde_json::Value, _> = client
+            .get(
+                url,
+                &BmcCredentials::new("root".to_string(), "password".to_string()),
+                None,
+                &axum::http::HeaderMap::new(),
+                &NoRepair,
+            )
+            .await;
+        let err = result.expect_err("empty router should return transport error");
+
+        match err {
+            Error::InvalidResponse { status, .. } => {
+                assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+            }
+            other => panic!("expected invalid response error, got: {other}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    async fn power_state_of(router: &axum::Router) -> String {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/redfish/v1/Systems/System.Embedded.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        body["PowerState"].as_str().unwrap().to_owned()
+    }
+
+    /// Lets the power actor drain its mailbox at the current (paused) time.
+    async fn settle() {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// A power cycle scheduled before an AC cycle must not power the device back on,
+    /// even while a newer cycle is pending, and the newer cycle completes at its
+    /// own deadline.
+    #[tokio::test(start_paused = true)]
+    async fn aux_power_cycle_supersedes_a_scheduled_power_cycle() {
+        let (router, state) = create_test_bmc(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            TestBmcConfig::default(),
+            String::new(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        let callbacks = state.callbacks.clone().unwrap();
+        let step = std::time::Duration::from_secs(1);
+
+        // Old cycle at t=0 (deadline T1=5s), AC cycle at t=1s, new cycle at t=2s
+        // (deadline T2=7s). The new cycle starts before T1, so both timers overlap.
+        callbacks
+            .computer_system_reset(ResourceResetType::PowerCycle)
+            .await
+            .unwrap();
+        tokio::time::advance(step).await;
+        callbacks
+            .device_effect(DeviceEffect::AuxPowerCycle)
+            .await
+            .unwrap();
+        tokio::time::advance(step).await;
+        callbacks
+            .computer_system_reset(ResourceResetType::PowerCycle)
+            .await
+            .unwrap();
+
+        tokio::time::advance(POWER_CYCLE_DELAY - step * 2).await;
+        settle().await;
+        assert_eq!(
+            power_state_of(&router).await,
+            "Off",
+            "stale completion at T1"
+        );
+        tokio::time::advance(step * 2 - std::time::Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(power_state_of(&router).await, "Off", "completed before T2");
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(power_state_of(&router).await, "On");
+    }
+}

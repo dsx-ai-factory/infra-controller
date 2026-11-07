@@ -1,0 +1,26 @@
+suite: API admission control
+templates:
+  - configmap.yaml
+tests:
+  - it: renders the binary default when unset
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^\[api_admission_control\]\nenabled = true$'
+
+  - it: renders the configured value
+    documentIndex: 0
+    set:
+      apiAdmissionControl.enabled: false
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^\[api_admission_control\]\nenabled = false$'
+
+  - it: rejects a value that is not a boolean
+    set:
+      apiAdmissionControl.enabled: "false"
+    asserts:
+      - failedTemplate:
+          errorPattern: apiAdmissionControl.enabled must be true or false

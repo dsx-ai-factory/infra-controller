@@ -1,0 +1,99 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Container for building PXE boot artifacts without polluting the host.
+# Must be run with --privileged so mkosi can use Linux user namespaces.
+#
+# Ubuntu 24.04 matches the mkosi ToolsTreeRelease=noble used by the PXE profiles.
+#
+# Build: cargo make build-pxe-build-container
+# Use:   cargo make pxe-docker-x86
+#
+FROM ubuntu:24.04
+
+ARG RUST_VERSION=1.97.1
+
+RUN apt-get update && \
+	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+	# Rust install
+	curl \
+	ca-certificates \
+	# For carbide-scout (Rust binary deps)
+	binutils-aarch64-linux-gnu \
+	build-essential \
+	kea-dev \
+	kea-dhcp4-server \
+	kea-dhcp6-server \
+	libboost-dev \
+	libgrpc-dev \
+	libgrpc++-dev \
+	libprotobuf-dev \
+	libssl-dev \
+	libtss2-dev \
+	libudev-dev \
+	lld \
+	pkg-config \
+	protobuf-compiler \
+	# For iPXE build
+	liblzma-dev \
+	# For mkosi (OS image builder) — the binary comes from the pxe/mkosi submodule;
+	# these are the host-side deps mkosi needs for image construction
+	apt-utils \
+	bubblewrap \
+	btrfs-progs \
+	cpio \
+	debian-archive-keyring \
+	debootstrap \
+	dosfstools \
+	e2fsprogs \
+	erofs-utils \
+	fakeroot \
+	mtools \
+	python3-pefile \
+	qemu-utils \
+	squashfs-tools \
+	systemd-boot \
+	systemd-ukify \
+	ubuntu-keyring \
+	uidmap \
+	xfsprogs \
+	xz-utils \
+	zstd \
+	# For apt repo setup
+	dpkg-dev \
+	# General tooling
+	git \
+	jq \
+	zip \
+	&& rm -rf /var/lib/apt/lists/*
+
+# Install Rust via rustup, pinned to match rust-toolchain.toml
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+	sh -s -- -y --default-toolchain ${RUST_VERSION} --profile minimal && \
+	rm -rf /root/.cargo/registry
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Use lld for Rust linking (lower RAM use than ld).
+# tokio_unstable enables tokio::task::Builder used by several crates.
+# Note: iPXE uses its own Makefile with gcc/ld directly; RUSTFLAGS does not affect it.
+ENV RUSTFLAGS="-C link-arg=-fuse-ld=lld --cfg tokio_unstable"
+
+RUN cargo install cargo-make sccache --locked && \
+	rm -rf /root/.cargo/registry
+
+ENV RUSTC_WRAPPER=sccache
+ENV SCCACHE_DIR=/sccache

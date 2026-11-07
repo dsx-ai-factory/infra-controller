@@ -1,0 +1,63 @@
+# Makefile for carbide-dpf
+# Refreshes committed CRD YAML inputs used by build.rs generation
+
+[config]
+default_to_workspace = false
+
+[env]
+DOCA_REPO_URL = "https://github.com/NVIDIA/doca-platform.git"
+DOCA_BRANCH = "v30.0.0"
+# Comment out DOCA_COMMIT when a tag/branch exists.
+DOCA_COMMIT = "a23b3ae3b1ebdfbd38659eba3f5bc11080c881d7"                        # DOCA v30.0.0-684c268a-stable (2026-10-19)
+DOCA_CLONE_DIR = "${CARGO_MAKE_WORKING_DIRECTORY}/doca-platform"
+CRD_SOURCE_PATH = "${DOCA_CLONE_DIR}/deploy/charts/dpf-operator/templates/crds"
+CRD_DEST_PATH = "${CARGO_MAKE_WORKING_DIRECTORY}/crds"
+
+[tasks.clone-doca]
+description = "Clone NVIDIA doca-platform repository"
+script = '''
+set -eu
+rm -rf "${DOCA_CLONE_DIR}"
+echo "Cloning NVIDIA doca-platform repository..."
+if [ -z "${DOCA_COMMIT:-}" ]; then
+    git clone --depth 1 --branch ${DOCA_BRANCH} ${DOCA_REPO_URL} "${DOCA_CLONE_DIR}"
+else
+    # Fetch the commit directly: nightly commits often live on histories that
+    # are not reachable from the default branch, so cloning and deepening the
+    # default branch alone cannot resolve them.
+    git init -q "${DOCA_CLONE_DIR}"
+    git -C "${DOCA_CLONE_DIR}" remote add origin ${DOCA_REPO_URL}
+    git -C "${DOCA_CLONE_DIR}" fetch --depth 1 origin "${DOCA_COMMIT}"
+    git -C "${DOCA_CLONE_DIR}" checkout --detach FETCH_HEAD
+fi
+echo "Repository cloned"
+'''
+
+[tasks.refresh-crds]
+description = "Refresh committed CRD YAML files from NVIDIA DOCA Platform"
+dependencies = ["clone-doca"]
+script = '''
+set -eu
+mkdir -p "${CRD_DEST_PATH}"
+rm -f "${CRD_DEST_PATH}"/*.yaml
+cp "${CRD_SOURCE_PATH}"/*.yaml "${CRD_DEST_PATH}/"
+echo "CRD YAML files refreshed"
+[ -d "${DOCA_CLONE_DIR}" ] && rm -rf "${DOCA_CLONE_DIR}"
+'''
+
+[tasks.verify]
+description = "Verify that build.rs generation compiles"
+dependencies = ["refresh-crds"]
+command = "cargo"
+args = ["check"]
+
+[tasks.generate]
+description = "Refresh committed CRDs and verify build.rs generation"
+dependencies = ["refresh-crds", "verify"]
+
+[tasks.clean-generated]
+description = "Remove committed CRD YAML files"
+script = '''
+rm -f "${CRD_DEST_PATH}"/*.yaml
+echo "Committed CRD YAML files removed"
+'''

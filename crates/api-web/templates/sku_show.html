@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}SKUs{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>SKUs</h1>
+
+<table class="sortable overview">
+	<thead>
+		<th>Id</th>
+		<th>Associated Machine Count</th>
+		<th>Architecture</th>
+		<th>Model</th>
+		<th>Vendor</th>
+		<th>CPUs</th>
+		<th>GPUs</th>
+		<th>IB Devices</th>
+		<th>Memory</th>
+	</thead>
+	<tbody>
+		{% for sku in skus %}
+		<tr>
+			<td><a href="/admin/sku/{{ sku.id }}">{{ sku.id }}</a></td>
+			<td>{{ sku.associated_machine_count }}</td>
+			<td>{{ sku.architecture }}</td>
+			<td>{{ sku.model }}</td>
+			<td>{{ sku.vendor }}</td>
+			<td>{{ sku.num_cpus }}</td>
+			<td>{{ sku.num_gpus }}</td>
+			<td>{{ sku.num_ib_devices }}</td>
+			<td>{{ sku.memory_capacity }}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+
+{% endblock %}

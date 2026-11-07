@@ -1,0 +1,2557 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{self, Duration};
+
+use ::carbide_utils::HostPortPair;
+use ::machine_a_tron::lifecycle_timings::{LifecycleTimingOverrides, PartialLifecycleTimings};
+use ::machine_a_tron::{
+    BmcMockRegistry, DeviceHandle, DhcpType, DpuMachineHandle, LogFormat, MachineATronConfig,
+    MachineConfig,
+};
+use api_test_helper::api_server::{TEST_BMC_DHCP_RELAY_ADDRESS, TEST_BMC_NETWORK_PREFIX};
+use api_test_helper::machine_a_tron::{
+    MachineATronHandle, wait_for_dpu_state, wait_for_host_state,
+};
+use api_test_helper::utils::TestApiServerArgs;
+use api_test_helper::{
+    IntegrationTestEnvironment, domain, instance, machine, measured_boot, metrics, scout_stream,
+    subnet, tenant, utils, vpc, vpc_prefix,
+};
+use bmc_mock::test_support::TEST_MAC_POOL;
+use bmc_mock::{HardwareType, ListenerOrAddress};
+use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::machine::StableHostMachineId;
+use carbide_uuid::power_shelf::{PowerShelfId, PowerShelfIdSource, PowerShelfType};
+use carbide_uuid::rack::RackId;
+use carbide_uuid::site_prefix::SitePrefixId;
+use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
+use config_version::ConfigVersion;
+use eyre::{ContextCompat, WrapErr};
+use futures::FutureExt;
+use futures::future::join_all;
+use itertools::Itertools;
+use mac_address::MacAddress;
+use model::extension_service::{DpuTarget, ExtensionServiceDeploymentType, ExtensionServiceType};
+use model::machine_boot_interface::BootInterfaceSelectionSource;
+use model::metadata::Metadata;
+use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
+use model::rack::RackConfig;
+use model::resource_pool::binding::INTEGRATED_AUTHORITY_ID;
+use model::resource_pool::{ResourcePoolBackendKind, ResourcePoolValueDomain};
+use model::site_prefix::{NewTenantManagedSitePrefix, SitePrefixLifecycleState};
+use model::switch::{NewSwitch, SwitchConfig};
+use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
+
+const UNDERLAY_DHCP_RELAY_ADDRESS: Ipv4Addr = Ipv4Addr::new(172, 20, 1, 1);
+const SSH_METRIC_CATALOGUE_OUTPUT: &str = "CARBIDE_SSH_METRIC_CATALOGUE_OUTPUT";
+
+#[ctor::ctor(unsafe)]
+fn setup() {
+    api_test_helper::setup_logging()
+}
+
+/// Run multiple machine-a-tron integration tests in parallel against a shared carbide API instance.
+#[test]
+fn test_integration() -> eyre::Result<()> {
+    if let Some(output_path) = std::env::var_os(SSH_METRIC_CATALOGUE_OUTPUT) {
+        return utils::api_server_runtime_builder()
+            .worker_threads(2)
+            .build()?
+            .block_on(write_ssh_console_metric_info(output_path.into()));
+    }
+    utils::api_server_runtime_builder()
+        .build()?
+        .block_on(run_integration())
+}
+
+/// Runs the shared API lifecycle and parallel machine-a-tron assertions.
+async fn run_integration() -> eyre::Result<()> {
+    // NOTE: These tests run two carbide-api servers, and the clients are configured to randomly
+    // switch between them on every API call. This helps prevent issues that arise when multiple API
+    // severs may be running in production.
+    let Some(mut test_env) =
+        IntegrationTestEnvironment::try_from_environment(2, "api_server_test_integration").await?
+    else {
+        println!("test_integration: SKIPPED (set REPO_ROOT and DATABASE_URL to run)");
+        return Ok(());
+    };
+    // Enable SPDM so its controller metrics appear in the catalogue scrape.
+    test_env.spdm_enabled = true;
+
+    db::migrations::migrate(&test_env.db_pool).await?;
+    // An empty profile set is the precondition for skipping SPDM verification.
+    assert!(
+        db::attestation_profile::list(&test_env.db_pool)
+            .await?
+            .is_empty(),
+        "SPDM metrics coverage requires an empty attestation profile set at startup"
+    );
+
+    // Persist a predecessor root without a protection request before either API
+    // starts, then verify that the background controller makes it ready.
+    let mut txn = test_env.db_pool.begin().await?;
+    let recovery_tenant_id = "site-prefix-recovery";
+    db::tenant::create_and_persist(
+        recovery_tenant_id.to_string(),
+        Metadata {
+            name: "SitePrefix Recovery".to_string(),
+            ..Default::default()
+        },
+        None,
+        &mut txn,
+    )
+    .await?;
+    let site_prefix = db::site_prefix::create_tenant_managed(
+        NewTenantManagedSitePrefix {
+            id: SitePrefixId::new(),
+            tenant_organization_id: recovery_tenant_id.parse()?,
+            prefix: "10.250.0.0/24".parse()?,
+            metadata: Metadata {
+                name: "readiness-recovery".to_string(),
+                ..Default::default()
+            },
+        },
+        1,
+        &mut txn,
+    )
+    .await?
+    .site_prefix;
+    // Switch, rack and power-shelf controller families only appear in the
+    // catalogue scrape once their controllers process an object.
+    db::rack::create(
+        &mut txn,
+        &RackId::new("metric-catalogue-rack"),
+        None,
+        &RackConfig::default(),
+        None,
+    )
+    .await?;
+    db::switch::create(
+        &mut txn,
+        &NewSwitch {
+            id: SwitchId::new(SwitchIdSource::Tpm, [1u8; 32], SwitchType::NvLink),
+            config: SwitchConfig {
+                name: "metric-catalogue-switch".to_string(),
+                enable_nmxc: false,
+                fabric_manager_config: None,
+            },
+            bmc_mac_address: None,
+            metadata: None,
+            rack_id: None,
+            slot_number: None,
+            tray_index: None,
+        },
+    )
+    .await?;
+    db::power_shelf::create(
+        &mut txn,
+        &NewPowerShelf {
+            id: PowerShelfId::new(
+                PowerShelfIdSource::ProductBoardChassisSerial,
+                [1u8; 32],
+                PowerShelfType::Rack,
+            ),
+            config: PowerShelfConfig {
+                name: "metric-catalogue-power-shelf".to_string(),
+                capacity: None,
+                voltage: None,
+            },
+            bmc_mac_address: None,
+            metadata: None,
+            rack_id: None,
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    assert_eq!(
+        site_prefix.status.lifecycle_state,
+        SitePrefixLifecycleState::Provisioning,
+    );
+
+    let bmc_address_registry = BmcMockRegistry::default();
+    let certs_dir = PathBuf::from(format!("{}/crates/bmc-mock", test_env.root_dir.display()));
+    let server_config = bmc_mock::tls::server_config(Some(certs_dir)).unwrap();
+    let mut bmc_mock_handle = bmc_mock::CombinedServer::run(
+        "bmc-mock",
+        bmc_address_registry.clone(),
+        Some(ListenerOrAddress::Listener(
+            // let OS choose available port
+            TcpListener::bind("127.0.0.1:0")?,
+        )),
+        server_config,
+    );
+
+    // For preingestion firmware checks to work, carbide needs a directory which exists to be
+    // configured as the firmware_directory. It can be empty, because our mocks should be showing
+    // the desired firmware verisions to carbide (and thus it won't try to update.) This folder will
+    // be deleted on Drop.
+    let empty_firmware_dir = temp_dir::TempDir::with_prefix("firmware")?;
+
+    // Begin the integration test by starting an API server. This will be shared between multiple
+    // individual machine-a-tron-based tests, which can run in parallel against the same instance.
+    let cancel_token = CancellationToken::new();
+    let server_handle_1 = utils::start_api_server(
+        &mut test_env,
+        TestApiServerArgs {
+            bmc_proxy: Some(HostPortPair::HostAndPort(
+                "127.0.0.1".to_string(),
+                bmc_mock_handle.address.port(),
+            )),
+            firmware_directory: empty_firmware_dir.path().to_owned(),
+            addr_index: 0,
+            put_dev_bin_in_path: true,
+            insecure_discovery: true,
+        },
+        cancel_token.clone(),
+    )
+    .await?;
+    let first_startup_bindings = db::resource_pool::binding::all(&test_env.db_pool).await?;
+    let vni_binding = first_startup_bindings
+        .iter()
+        .find(|binding| binding.pool_name == "vni")
+        .context("first authoritative startup did not bind the configured VNI pool")?;
+    assert_eq!(vni_binding.value_domain, ResourcePoolValueDomain::Integer);
+    assert_eq!(
+        vni_binding.backend_kind,
+        ResourcePoolBackendKind::Integrated
+    );
+    assert_eq!(vni_binding.authority_id, INTEGRATED_AUTHORITY_ID);
+    assert_eq!(vni_binding.remote_pool, "vni");
+    assert_eq!(vni_binding.backend_name, None);
+    assert!(!vni_binding.binding_id.is_nil());
+
+    let server_handle_2 = utils::start_api_server(
+        &mut test_env,
+        TestApiServerArgs {
+            bmc_proxy: Some(HostPortPair::HostAndPort(
+                "127.0.0.1".to_string(),
+                bmc_mock_handle.address.port(),
+            )),
+            firmware_directory: empty_firmware_dir.path().to_owned(),
+            addr_index: 1,
+            put_dev_bin_in_path: true,
+            insecure_discovery: true,
+        },
+        cancel_token.clone(),
+    )
+    .await?;
+
+    assert_eq!(
+        db::resource_pool::binding::all(&test_env.db_pool).await?,
+        first_startup_bindings,
+        "the second server must reuse the first server's pool bindings"
+    );
+
+    // Startup rejects remote bindings, so add this fixture after both servers
+    // start. Its missing accepted definition makes the direct poll below emit
+    // the unavailable counter for the catalogue.
+    let mut txn = test_env.db_pool.begin().await?;
+    db::resource_pool::binding::bind_or_verify(
+        &mut txn,
+        &model::resource_pool::ResourcePoolSelection {
+            pool_name: "metrics-unregistered-pool".into(),
+            value_domain: ResourcePoolValueDomain::Integer,
+            backend_name: Some("metrics-provider".into()),
+            backend_kind: ResourcePoolBackendKind::Grpc,
+            authority_id: "metrics-provider".into(),
+            remote_pool: "metrics-pool".into(),
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    // Observable MQTT instruments export their initial zeros without a broker
+    // connection. Register them on the server's meter for the catalogue scrape.
+    let mqtt_client =
+        mqttea::MqtteaClient::new("localhost", 1883, "test-metric-catalogue", None).await?;
+    mqtt_client.register_metrics(&server_handle_2.ready.meter, "test_catalogue");
+
+    assert_ne!(test_env.carbide_api_addrs[0], test_env.carbide_api_addrs[1]);
+    assert_ne!(
+        test_env.carbide_metrics_addrs[0],
+        test_env.carbide_metrics_addrs[1]
+    );
+    let carbide_api_addrs = &test_env.carbide_api_addrs;
+
+    let tenant_org_id = "tenant_organization";
+    tenant::create(carbide_api_addrs, tenant_org_id, "Tenant Organization").await?;
+    // Extension-service controller families only appear in the catalogue
+    // scrape once the controller processes an object. The controller only
+    // reconciles DPF Helm chart services; without DPF this one waits in Creating.
+    let mut txn = test_env.db_pool.begin().await?;
+    db::extension_service::create(
+        &mut txn,
+        ConfigVersion::initial(),
+        &ExtensionServiceId::new(),
+        &ExtensionServiceType::DpfHelmChart,
+        ExtensionServiceDeploymentType::DemandDriven,
+        Some(DpuTarget::Primary),
+        "metric-catalogue-service",
+        &tenant_org_id.parse()?,
+        None,
+        &[],
+        r#"{"repoURL":"oci://registry.example.com/charts","chartName":"metric-catalogue","chartVersion":"1.0.0","serviceID":"metric-catalogue","deployInCluster":false,"security":{"privileged":false}}"#,
+        Some("metric-catalogue"),
+        None,
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+
+    // The first enqueue is immediate; allow later 30-second passes and jitter.
+    tokio::time::timeout(Duration::from_secs(120), async {
+        loop {
+            let stored = db::site_prefix::find_by_ids(&test_env.db_pool, &[site_prefix.id])
+                .await?
+                .pop()
+                .context("readiness fixture SitePrefix disappeared")?;
+            if stored.status.lifecycle_state == SitePrefixLifecycleState::Ready {
+                return Ok::<(), eyre::Report>(());
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        eyre::eyre!(
+            "SitePrefix {} did not become ready within 120 seconds",
+            site_prefix.id,
+        )
+    })??;
+
+    let tenant1_vpc = vpc::create(carbide_api_addrs, tenant_org_id).await?;
+    let domain_id = domain::create(carbide_api_addrs, "tenant-1.local").await?;
+    let managed_segment_id =
+        subnet::create(carbide_api_addrs, &tenant1_vpc, &domain_id, 10, false).await?;
+
+    // HostInband segments must live in a Flat VPC -- those VPC types are
+    // mutually bound. Create one for the HostInband fixture.
+    let flat_vpc = vpc::create_flat(carbide_api_addrs, tenant_org_id).await?;
+    let host_inband_segment_id =
+        subnet::create(carbide_api_addrs, &flat_vpc, &domain_id, 11, true).await?;
+
+    // Create FNN VPC + VPC prefixes (IPv4 + IPv6) for dual-stack L3 linknet testing.
+    let fnn_vpc = vpc::create_fnn(carbide_api_addrs, tenant_org_id).await?;
+    let v4_vpc_prefix_id =
+        vpc_prefix::create(carbide_api_addrs, &fnn_vpc, "10.10.12.0/24", "fnn-v4").await?;
+    let v6_vpc_prefix_id =
+        vpc_prefix::create(carbide_api_addrs, &fnn_vpc, "2001:db8:12::/48", "fnn-v6").await?;
+
+    // Create dual-stack L2 segment on the FNN VPC for L2 dual-stack testing.
+    let dual_stack_l2_segment_id =
+        subnet::create_dual_stack(carbide_api_addrs, &fnn_vpc, &domain_id, 13).await?;
+
+    // Measured-boot collection needs DMI on every discovered host in this
+    // inventory; one missing identity prevents the entire collector pass.
+    // Run several tests in parallel.
+    let all_tests = join_all([
+        test_force_delete_waits_for_instance_dpu(
+            &test_env,
+            &bmc_address_registry,
+            &managed_segment_id,
+        )
+        .boxed(),
+        test_machine_a_tron_multidpu(
+            HardwareType::DellPowerEdgeR750,
+            &test_env,
+            &bmc_address_registry,
+            &managed_segment_id,
+            UNDERLAY_DHCP_RELAY_ADDRESS,
+        )
+        .boxed(),
+        test_machine_a_tron_multidpu(
+            HardwareType::NvidiaDgxH100,
+            &test_env,
+            &bmc_address_registry,
+            &managed_segment_id,
+            UNDERLAY_DHCP_RELAY_ADDRESS,
+        )
+        .boxed(),
+        test_machine_a_tron_multidpu(
+            HardwareType::WiwynnGB200Nvl,
+            &test_env,
+            &bmc_address_registry,
+            &managed_segment_id,
+            UNDERLAY_DHCP_RELAY_ADDRESS,
+        )
+        .boxed(),
+        test_machine_a_tron_multidpu(
+            HardwareType::LenovoGB300Nvl,
+            &test_env,
+            &bmc_address_registry,
+            &managed_segment_id,
+            UNDERLAY_DHCP_RELAY_ADDRESS,
+        )
+        .boxed(),
+        test_machine_a_tron_multidpu(
+            HardwareType::NvidiaDgxGb300,
+            &test_env,
+            &bmc_address_registry,
+            &managed_segment_id,
+            UNDERLAY_DHCP_RELAY_ADDRESS,
+        )
+        .boxed(),
+        test_machine_a_tron_multidpu(
+            HardwareType::SupermicroGb300Nvl,
+            &test_env,
+            &bmc_address_registry,
+            &managed_segment_id,
+            UNDERLAY_DHCP_RELAY_ADDRESS,
+        )
+        .boxed(),
+        test_machine_a_tron_zerodpu(
+            HardwareType::DellPowerEdgeR750,
+            &test_env,
+            &bmc_address_registry,
+            &flat_vpc,
+        )
+        .boxed(),
+        test_machine_a_tron_nic_mode(
+            HardwareType::DellPowerEdgeR750,
+            &test_env,
+            &bmc_address_registry,
+            &flat_vpc,
+            &host_inband_segment_id,
+        )
+        .boxed(),
+        test_machine_a_tron_nic_mode(
+            HardwareType::HpeProliantDl380aGen11,
+            &test_env,
+            &bmc_address_registry,
+            &flat_vpc,
+            &host_inband_segment_id,
+        )
+        .boxed(),
+        test_machine_a_tron_nic_mode(
+            HardwareType::WiwynnGB200Nvl,
+            &test_env,
+            &bmc_address_registry,
+            &flat_vpc,
+            &host_inband_segment_id,
+        )
+        .boxed(),
+        test_machine_a_tron_nic_mode(
+            HardwareType::SupermicroGb300Nvl,
+            &test_env,
+            &bmc_address_registry,
+            &flat_vpc,
+            &host_inband_segment_id,
+        )
+        .boxed(),
+        // TODO: https://github.com/NVIDIA/infra-controller/issues/3709
+        // Re-enable `test_machine_a_tron_dpu_to_nic_mode_reregistration` after the
+        // Admin-to-HostInband re-ingestion race is fixed. The scenario currently flakes in CI when
+        // the host-facing DPU MAC is re-created on the Admin segment before the NIC-mode
+        // transition completes.
+        test_machine_a_tron_dual_stack(
+            HardwareType::DellPowerEdgeR750,
+            &test_env,
+            &bmc_address_registry,
+            tenant_org_id,
+            &v4_vpc_prefix_id,
+            &v6_vpc_prefix_id,
+            UNDERLAY_DHCP_RELAY_ADDRESS,
+        )
+        .boxed(),
+        test_machine_a_tron_dual_stack_l2(
+            HardwareType::DellPowerEdgeR750,
+            &test_env,
+            &bmc_address_registry,
+            &dual_stack_l2_segment_id,
+            UNDERLAY_DHCP_RELAY_ADDRESS,
+        )
+        .boxed(),
+        test_machine_a_tron_scout_stream(
+            &test_env,
+            &bmc_address_registry,
+            UNDERLAY_DHCP_RELAY_ADDRESS,
+        )
+        .boxed(),
+    ]);
+
+    let mat_handles: Vec<MachineATronHandle> = tokio::select! {
+        results = all_tests => results.into_iter().try_collect()?,
+        _ = tokio::time::sleep(Duration::from_secs(20 * 60)) => {
+            panic!("Tests did not complete after 20 minutes")
+        }
+    };
+
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        r#"carbide_site_explorer_boot_interface_selections_total{mechanism="redfish_chassis_id"}"#,
+    )
+    .await?;
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        r#"carbide_site_explorer_boot_interface_selections_total{mechanism="redfish_serial_number"}"#,
+    )
+    .await?;
+    // The Wiwynn mock deliberately gives the `RedfishChassisId` selection the higher
+    // scout PCI slot so the integration path exercises automatic reconciliation.
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        r#"carbide_scout_pci_evaluations_total{result="differs_from_stored"}"#,
+    )
+    .await?;
+
+    exercise_dpf_exploration_suppression(&test_env).await?;
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        r#"carbide_site_explorer_dpf_explorations_deferred_total{request="refresh"}"#,
+    )
+    .await?;
+
+    exercise_admin_address_reconcile_failures(&test_env).await?;
+    exercise_ib_partition_mtu_fallback(&test_env).await?;
+    exercise_nvlink_partition_monitor(&test_env, server_handle_2.ready.meter.clone()).await?;
+
+    carbide_api_core::test_support::poll_resource_pool_stats(test_env.db_pool.clone()).await?;
+    // The live exporters supply local gauges; the direct poll emits the failure
+    // counter without updating their samples. `test_service_health_metrics`
+    // checks unavailable gauge rendering, while `resource_pool_inspection`
+    // exercises the sampler's failure and recovery paths.
+    for line in [
+        r#"carbide_resourcepool_used_count{pool="vpc-vni"}"#,
+        r#"carbide_resourcepool_free_count{pool="vpc-vni"}"#,
+        r#"carbide_resourcepool_stats_available{pool="vpc-vni"} 1"#,
+        r#"carbide_resourcepool_stats_fresh{pool="vpc-vni"} 1"#,
+        r#"carbide_resourcepool_stats_last_success_timestamp_seconds{pool="vpc-vni"}"#,
+        r#"carbide_resourcepool_stats_poll_failures_total{backend="grpc",failure="unavailable"}"#,
+    ] {
+        metrics::wait_for_metric_line(&test_env.carbide_metrics_addrs, line).await?;
+    }
+
+    let metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
+    assert!(
+        metric_infos.iter().any(|metric| {
+            metric.name == "carbide_site_explorer_boot_interface_selections_total"
+        }),
+        "the multi-DPU integration paths must exercise boot-interface selection observability",
+    );
+    assert!(
+        metric_infos
+            .iter()
+            .any(|metric| metric.name == "carbide_scout_pci_evaluations_total"),
+        "the MaT scout path must exercise PCI comparison observability",
+    );
+    for name in [
+        "carbide_api_host_admin_address_reconcile_failures_total",
+        "carbide_site_explorer_host_admin_address_reconcile_failures_total",
+    ] {
+        assert!(
+            metric_infos
+                .iter()
+                .any(|metric| metric.name == name && metric.ty == "counter"),
+            "{name} must come from the fresh scrape, not from the checked-in catalogue",
+        );
+    }
+    for (name, metric_type) in [
+        ("carbide_nvlink_partition_monitor_groups_total", "counter"),
+        (
+            "carbide_nvlink_partition_monitor_iteration_overruns_total",
+            "counter",
+        ),
+        (
+            "carbide_nvlink_partition_monitor_stage_latency_milliseconds",
+            "histogram",
+        ),
+    ] {
+        assert!(
+            metric_infos
+                .iter()
+                .any(|metric| metric.name == name && metric.ty == metric_type),
+            "{name} must come from the fresh scrape, not from the checked-in catalogue",
+        );
+    }
+    for object_type in ["switches", "racks", "power_shelves"] {
+        for (family, metric_type) in [
+            ("object_tasks_completed_total", "counter"),
+            ("per_state", "gauge"),
+        ] {
+            metrics::wait_for_metric_line(
+                &test_env.carbide_metrics_addrs,
+                &format!("# TYPE carbide_{object_type}_{family} {metric_type}\n"),
+            )
+            .await?;
+        }
+    }
+    // The extension service never leaves Creating, so the state-transition
+    // families are not expected here.
+    for (family, metric_type) in [
+        ("object_tasks_dispatched_total", "counter"),
+        ("object_tasks_completed_total", "counter"),
+        ("object_tasks_requeued_total", "counter"),
+        ("handler_latency_in_state_milliseconds", "histogram"),
+        ("per_state", "gauge"),
+        ("per_state_above_sla", "gauge"),
+        ("with_state_handling_errors_per_state", "gauge"),
+    ] {
+        metrics::wait_for_metric_line(
+            &test_env.carbide_metrics_addrs,
+            &format!("# TYPE carbide_extension_services_{family} {metric_type}\n"),
+        )
+        .await?;
+    }
+    wait_for_count_metric_aliases(&test_env).await?;
+    prepare_measured_boot_metric_aliases(&test_env).await?;
+    // The VPC prefixes created above feed this gauge, so its catalogue row comes
+    // from the scrape rather than being retained from the existing file.
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        "# TYPE carbide_vpc_prefixes_with_state_handling_errors_per_state gauge\n",
+    )
+    .await?;
+    // Every authoritative API instance starts this sampler, even with Integrated pools.
+    // Require a fresh sample from each before collecting the catalogue.
+    for endpoint in &test_env.carbide_metrics_addrs {
+        metrics::wait_for_metric_line(
+            std::slice::from_ref(endpoint),
+            r#"carbide_resource_pool_cleanup_pending{fresh="true"} 0"#,
+        )
+        .await?;
+    }
+    let mut metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
+    metric_infos.push(collect_ssh_console_metric_info().await?);
+    metric_infos.extend(collect_dhcp_metric_infos().await?);
+    metric_infos.extend(metrics::parse_metric_infos(
+        &carbide_health::test_support::hardware_metric_exposition()?,
+    ));
+    for name in [
+        "carbide_dpu_client_certificate_expiration_time",
+        "carbide_dpu_client_certificate_expiration_time_seconds",
+    ] {
+        let info = metric_infos
+            .iter()
+            .find(|info| info.name == name)
+            .with_context(|| format!("final catalogue scrape did not expose {name}"))?;
+        assert_eq!(info.ty, "gauge");
+        assert_eq!(
+            info.help,
+            "The expiration time (epoch seconds) for the client certificate associated with a given DPU.",
+        );
+    }
+    generate_core_metric_docs(metric_infos);
+    drop(mqtt_client);
+
+    // MaT opens ScoutStream on its primary API address and shares ordinary RPCs across both.
+    // Keep it running until both servers have drained their connections.
+    let scout_stream_addrs = &test_env.carbide_api_addrs[..1];
+    let connections = scout_stream::connections(scout_stream_addrs).await?;
+    let machine_id = connections
+        .first()
+        .and_then(|connection| connection.machine_id)
+        .context("server must have a live ScoutStream before shutdown")?;
+    assert_eq!(
+        scout_stream::ping(scout_stream_addrs, machine_id).await?,
+        format!("pong from {machine_id}"),
+    );
+
+    cancel_token.cancel();
+    let shutdown_result = tokio::time::timeout(Duration::from_secs(65), async {
+        let (first, second) = tokio::join!(server_handle_1.wait(), server_handle_2.wait());
+        first?;
+        second
+    })
+    .await
+    .wrap_err("API servers did not shut down while MaT remained running");
+    let mat_results = join_all(
+        mat_handles
+            .into_iter()
+            .map(MachineATronHandle::shutdown_without_api_cleanup),
+    )
+    .await;
+    shutdown_result??;
+    for result in mat_results {
+        result?;
+    }
+    test_env.db_pool.close().await;
+    bmc_mock_handle.stop().await?;
+    Ok(())
+}
+
+/// Waits for both count names before the catalogue scrape.
+async fn wait_for_count_metric_aliases(test_env: &IntegrationTestEnvironment) -> eyre::Result<()> {
+    for (legacy, alias) in [
+        ("carbide_preingestion_total", "carbide_preingestion_count"),
+        ("carbide_machines_total", "carbide_machines_count"),
+        (
+            "carbide_network_segments_total",
+            "carbide_network_segments_count",
+        ),
+        ("carbide_vpc_prefixes_total", "carbide_vpc_prefixes_count"),
+        (
+            "carbide_extension_services_total",
+            "carbide_extension_services_count",
+        ),
+        (
+            "carbide_spdm_attestation_total",
+            "carbide_spdm_attestation_count",
+        ),
+        ("carbide_ib_partitions_total", "carbide_ib_partitions_count"),
+        ("carbide_power_shelves_total", "carbide_power_shelves_count"),
+        ("carbide_racks_total", "carbide_racks_count"),
+        ("carbide_switches_total", "carbide_switches_count"),
+    ] {
+        for name in [legacy, alias] {
+            metrics::wait_for_metric_line(
+                &test_env.carbide_metrics_addrs,
+                &format!("# TYPE {name} gauge\n"),
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Collects DHCP certificate-expiry metadata from a fixture using the real HTTP exporter.
+/// The fixture registers the gauge and alias without starting the Kea hook or
+/// certificate loop.
+async fn collect_dhcp_metric_infos() -> eyre::Result<Vec<metrics::MetricInfo>> {
+    use metrics_endpoint::{MetricsEndpointConfig, run_metrics_endpoint_with_listener};
+
+    let expiry = 1_893_456_000;
+    let setup = dhcp::test_support::metrics_setup_with_certificate_expiry(expiry)?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let config = MetricsEndpointConfig {
+        address,
+        registry: setup.registry.clone(),
+        health_controller: None,
+        additional_prefix: None,
+    };
+    let cancel_token = CancellationToken::new();
+    let server_token = cancel_token.clone();
+    let server = tokio::spawn(async move {
+        run_metrics_endpoint_with_listener(&config, server_token, listener).await
+    });
+
+    let scrape_result = metrics::collect_metric_infos(&[address])
+        .and_then(|infos| metrics::metrics(&address).map(|samples| (infos, samples)));
+    cancel_token.cancel();
+    let server_result = server.await.wrap_err("joining the DHCP metrics endpoint")?;
+    // Keep setup.meter_provider alive through both HTTP scrapes so it retains the callbacks.
+    drop(setup);
+    server_result.wrap_err("serving the DHCP metrics endpoint")?;
+    let (infos, samples) = scrape_result?;
+
+    for name in [
+        "carbide_dhcp_certificate_expiration_time",
+        "carbide_dhcp_certificate_expiration_time_seconds",
+    ] {
+        let info = infos
+            .iter()
+            .find(|info| info.name == name)
+            .with_context(|| format!("DHCP endpoint did not expose {name}"))?;
+        assert_eq!(info.ty, "gauge");
+        assert_eq!(info.help, "The certificate expiration time (epoch seconds)");
+        metrics::assert_metric_line(&samples, &format!("\n{name} {expiry}\n"));
+    }
+    Ok(infos)
+}
+
+/// Seeds measured-boot data and waits for both names before the catalogue scrape.
+async fn prepare_measured_boot_metric_aliases(
+    test_env: &IntegrationTestEnvironment,
+) -> eyre::Result<()> {
+    use rpc::protos::measured_boot::{
+        CreateMeasurementBundleRequest, CreateMeasurementSystemProfileRequest,
+        MeasurementBundleStatePb, PcrRegisterValuePb,
+    };
+
+    // Deliberately avoid matching any fixture hardware so the bundle has
+    // no associated machine measurements. Its PCR count must still be one.
+    let profile = measured_boot::create_profile(
+        &test_env.carbide_api_addrs,
+        CreateMeasurementSystemProfileRequest {
+            name: Some("metric-catalogue-profile".to_string()),
+            vendor: "metric-catalogue".to_string(),
+            product: "metric-catalogue".to_string(),
+            extra_attrs: Vec::new(),
+        },
+    )
+    .await?;
+    measured_boot::create_bundle(
+        &test_env.carbide_api_addrs,
+        CreateMeasurementBundleRequest {
+            profile_id: profile.profile_id,
+            name: Some("metric-catalogue-bundle".to_string()),
+            pcr_values: vec![PcrRegisterValuePb {
+                pcr_register: 0,
+                sha_any: "aa".to_string(),
+            }],
+            state: MeasurementBundleStatePb::Active.into(),
+        },
+    )
+    .await?;
+
+    // The seed supplies profile, bundle, and PCR observations; discovered
+    // MaT machines supply the bundle-state and machine-state observations.
+    for (legacy, alias) in [
+        (
+            "carbide_measured_boot_profiles_total",
+            "carbide_measured_boot_profiles_count",
+        ),
+        (
+            "carbide_measured_boot_bundles_total",
+            "carbide_measured_boot_bundles_count",
+        ),
+        (
+            "carbide_measured_boot_machines_total",
+            "carbide_measured_boot_machines_count",
+        ),
+        (
+            "carbide_measured_boot_machines_per_profile_total",
+            "carbide_measured_boot_machines_per_profile_count",
+        ),
+        (
+            "carbide_measured_boot_machines_per_bundle_total",
+            "carbide_measured_boot_machines_per_bundle_count",
+        ),
+        (
+            "carbide_measured_boot_machines_per_bundle_state_total",
+            "carbide_measured_boot_machines_per_bundle_state_count",
+        ),
+        (
+            "carbide_measured_boot_machines_per_machine_state_total",
+            "carbide_measured_boot_machines_per_machine_state_count",
+        ),
+        (
+            "carbide_measured_boot_machines_per_pcr_value_total",
+            "carbide_measured_boot_bundles_per_pcr_value_count",
+        ),
+    ] {
+        for name in [legacy, alias] {
+            metrics::wait_for_metric_line(
+                &test_env.carbide_metrics_addrs,
+                &format!("# TYPE {name} gauge\n"),
+            )
+            .await?;
+        }
+    }
+    for name in [
+        "carbide_measured_boot_machines_per_pcr_value_total",
+        "carbide_measured_boot_bundles_per_pcr_value_count",
+    ] {
+        metrics::wait_for_metric_line(
+            &test_env.carbide_metrics_addrs,
+            &format!("\n{name}{{pcr_index=\"0\",pcr_value=\"aa\"}} 1\n"),
+        )
+        .await?;
+    }
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        "# HELP carbide_measured_boot_machines_count Number of discovered candidate machines, including machines without measurements.\n",
+    )
+    .await?;
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        "# HELP carbide_measured_boot_bundles_per_pcr_value_count Number of measured boot bundles containing a given PCR value at a given PCR index.\n",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn exercise_dpf_exploration_suppression(
+    test_env: &IntegrationTestEnvironment,
+) -> eyre::Result<()> {
+    use model::bmc_suppression::{
+        BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression,
+    };
+    use rpc::forge_api_client::ForgeApiClient;
+    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+
+    let (address, mac): (std::net::IpAddr, MacAddress) = sqlx::query_as(
+        "SELECT e.address, mi.mac_address FROM explored_endpoints e
+         JOIN machine_interface_addresses mia ON mia.address = e.address
+         JOIN machine_interfaces mi ON mi.id = mia.interface_id
+         ORDER BY e.address LIMIT 1",
+    )
+    .fetch_one(&test_env.db_pool)
+    .await?;
+    let mut txn = test_env.db_pool.begin().await?;
+    db::bmc_suppression::upsert(
+        &mut txn,
+        &NewBmcSuppression {
+            bmc_mac_address: mac,
+            subsystem: BmcSuppressionSubsystem::SiteExplorer,
+            source: BmcSuppressionSource::DpfProvisioning,
+            reason: "DPF provisioning".to_string(),
+        },
+    )
+    .await?;
+    txn.commit().await?;
+    let certs = &api_test_helper::utils::LOCALHOST_CERTS;
+    let config = ForgeClientConfig::new(
+        certs.ca_cert.to_string_lossy().into_owned(),
+        Some(forge_tls::client_config::ClientCert {
+            cert_path: certs.client_cert.to_string_lossy().into_owned(),
+            key_path: certs.client_key.to_string_lossy().into_owned(),
+        }),
+    );
+    let client = ForgeApiClient::new(&ApiConfig::new(
+        &format!("https://{}", test_env.carbide_api_addrs[0]),
+        &config,
+    ));
+    let result = client
+        .refresh_endpoint_report(rpc::forge::RefreshEndpointReportRequest {
+            ip_address: address.to_string(),
+        })
+        .await;
+    let mut txn = test_env.db_pool.begin().await?;
+    db::bmc_suppression::delete(
+        &mut txn,
+        mac,
+        BmcSuppressionSubsystem::SiteExplorer,
+        BmcSuppressionSource::DpfProvisioning,
+    )
+    .await?;
+    txn.commit().await?;
+    let queued = result?;
+    eyre::ensure!(
+        queued.exploration_requested,
+        "provisioning must queue refresh"
+    );
+    Ok(())
+}
+
+/// Leaves a host whose primary admin interface is DPU-backed without any
+/// primary, then drives the two paths whose post-commit admin address
+/// reconcile fails on that: a rediscovery of its DPU, and the explorer's
+/// steady-state repair of the host once its BMC endpoint is flagged for
+/// exploration. Each counts a failure. The primary flag is restored after.
+async fn exercise_admin_address_reconcile_failures(
+    test_env: &IntegrationTestEnvironment,
+) -> eyre::Result<()> {
+    use carbide_uuid::machine::{MachineId, MachineInterfaceId};
+    use model::machine::machine_search_config::MachineSearchConfig;
+    use rpc::forge_api_client::ForgeApiClient;
+    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use rpc::{DiscoveryData, DiscoveryInfo, MachineDiscoveryInfo};
+
+    // A DPU's own OOB interface is primary and attached to itself; a host's
+    // link is attached to a different machine.
+    let (primary_id, host_id, dpu_id): (MachineInterfaceId, MachineId, MachineId) = sqlx::query_as(
+        "SELECT id, machine_id, attached_dpu_machine_id FROM machine_interfaces
+         WHERE primary_interface AND machine_id IS NOT NULL
+           AND attached_dpu_machine_id IS NOT NULL
+           AND attached_dpu_machine_id <> machine_id
+         ORDER BY machine_id, id LIMIT 1",
+    )
+    .fetch_one(&test_env.db_pool)
+    .await?;
+    eyre::ensure!(
+        !host_id.machine_type().is_dpu(),
+        "the selected primary admin interface must belong to a host, got {host_id}"
+    );
+    let host_bmc_ip: std::net::IpAddr = sqlx::query_scalar(
+        "SELECT e.address FROM explored_endpoints e
+         JOIN machine_interface_addresses mia ON mia.address = e.address
+         JOIN machine_interfaces bmc ON bmc.id = mia.interface_id
+         WHERE bmc.machine_id = $1 AND bmc.interface_type = 'Bmc'
+         ORDER BY e.address LIMIT 1",
+    )
+    .bind(host_id)
+    .fetch_one(&test_env.db_pool)
+    .await?;
+    // The DPU OS interface is the DPU's primary; its BMC row is not.
+    let dpu_interface_id: MachineInterfaceId = sqlx::query_scalar(
+        "SELECT id FROM machine_interfaces WHERE machine_id = $1 AND primary_interface
+         ORDER BY id LIMIT 1",
+    )
+    .bind(dpu_id)
+    .fetch_one(&test_env.db_pool)
+    .await?;
+    let hardware_info = db::machine::find_one(
+        &test_env.db_pool,
+        &dpu_id,
+        MachineSearchConfig {
+            include_dpus: true,
+            ..Default::default()
+        },
+    )
+    .await?
+    .context("the chosen host's DPU exists")?
+    .status
+    .hardware_info
+    .context("the chosen host's DPU recorded hardware info")?;
+
+    let mut txn = test_env.db_pool.begin().await?;
+    db::machine_interface::set_primary_interface(&primary_id, false, &mut txn).await?;
+    // The next explorer run revisits the host and its steady-state repair
+    // fails the same way.
+    db::explored_endpoints::request_exploration_for_addresses(&[host_bmc_ip], &mut txn).await?;
+    txn.commit().await?;
+
+    let certs = &api_test_helper::utils::LOCALHOST_CERTS;
+    let config = ForgeClientConfig::new(
+        certs.ca_cert.to_string_lossy().into_owned(),
+        Some(forge_tls::client_config::ClientCert {
+            cert_path: certs.client_cert.to_string_lossy().into_owned(),
+            key_path: certs.client_key.to_string_lossy().into_owned(),
+        }),
+    );
+    let client = ForgeApiClient::new(&ApiConfig::new(
+        &format!("https://{}", test_env.carbide_api_addrs[0]),
+        &config,
+    ));
+    // The discovery commits and its own reconcile finds no primary to repair.
+    client
+        .discover_machine(MachineDiscoveryInfo {
+            machine_interface_id: Some(dpu_interface_id),
+            discovery_data: Some(DiscoveryData::Info(
+                DiscoveryInfo::try_from(hardware_info)
+                    .map_err(|error| eyre::eyre!("hardware info conversion: {error:?}"))?,
+            )),
+            create_machine: true,
+            ..Default::default()
+        })
+        .await?;
+    for metric in [
+        "carbide_api_host_admin_address_reconcile_failures_total",
+        "carbide_site_explorer_host_admin_address_reconcile_failures_total",
+    ] {
+        metrics::wait_for_metric_line(
+            &test_env.carbide_metrics_addrs,
+            &format!("# TYPE {metric} counter\n"),
+        )
+        .await?;
+    }
+
+    let mut txn = test_env.db_pool.begin().await?;
+    db::machine_interface::set_primary_interface(&primary_id, true, &mut txn).await?;
+    txn.commit().await?;
+    Ok(())
+}
+
+/// Proves `FindIBPartitionsByIds` returns a row with an unrecognized stored MTU
+/// and exports the fallback counter for the generated catalogue.
+async fn exercise_ib_partition_mtu_fallback(
+    test_env: &IntegrationTestEnvironment,
+) -> eyre::Result<()> {
+    use carbide_uuid::infiniband::IBPartitionId;
+    use rpc::forge_api_client::ForgeApiClient;
+    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+
+    let id = IBPartitionId::new();
+    sqlx::query(
+        "INSERT INTO ib_partitions
+            (id, name, organization_id, config_version, controller_state_version,
+             mtu, rate_limit, service_level)
+         VALUES ($1, 'mtu-fallback-partition', 'mtu-fallback-tenant', $2, $2, 3, 200, 0)",
+    )
+    .bind(id)
+    .bind(ConfigVersion::initial())
+    .execute(&test_env.db_pool)
+    .await?;
+
+    let certs = &api_test_helper::utils::LOCALHOST_CERTS;
+    let config = ForgeClientConfig::new(
+        certs.ca_cert.to_string_lossy().into_owned(),
+        Some(forge_tls::client_config::ClientCert {
+            cert_path: certs.client_cert.to_string_lossy().into_owned(),
+            key_path: certs.client_key.to_string_lossy().into_owned(),
+        }),
+    );
+    let client = ForgeApiClient::new(&ApiConfig::new(
+        &format!("https://{}", test_env.carbide_api_addrs[0]),
+        &config,
+    ));
+    let response = client
+        .find_ib_partitions_by_ids(rpc::forge::IbPartitionsByIdsRequest {
+            ib_partition_ids: vec![id],
+            include_history: false,
+        })
+        .await;
+    sqlx::query("DELETE FROM ib_partitions WHERE id = $1")
+        .bind(id)
+        .execute(&test_env.db_pool)
+        .await?;
+    let partitions = response?.ib_partitions;
+    assert_eq!(partitions.len(), 1);
+    assert_eq!(partitions[0].id, Some(id));
+
+    let name = "carbide_ib_partition_mtu_fallback_total";
+    let sample_prefix = format!("{name} ");
+    let samples = metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        &format!("\n{sample_prefix}"),
+    )
+    .await?;
+    metrics::assert_metric_line(&samples, &format!("\n# TYPE {name} counter\n"));
+    metrics::assert_metric_line(
+        &samples,
+        &format!(
+            "\n# HELP {name} Number of IB partition MTU fallbacks for unrecognized stored integers during row decoding\n"
+        ),
+    );
+    let count: f64 = samples
+        .lines()
+        .find_map(|line| line.strip_prefix(&sample_prefix))
+        .context("IB partition MTU fallback sample missing from live scrape")?
+        .parse()?;
+    assert!(count >= 1.0, "MTU fallback must increment the live counter");
+    Ok(())
+}
+
+/// Runs one partition monitor pass on the shared database so its Events reach
+/// the catalogue scrape. A zero interval makes the pass an overrun.
+async fn exercise_nvlink_partition_monitor(
+    test_env: &IntegrationTestEnvironment,
+    meter: opentelemetry::metrics::Meter,
+) -> eyre::Result<()> {
+    use carbide_nvlink_manager::NvlPartitionMonitor;
+    use carbide_nvlink_manager::config::NvLinkConfig;
+    use model::machine::HostHealthConfig;
+
+    let mut work_lock_tasks = tokio::task::JoinSet::new();
+    let work_lock_manager_handle = db::work_lock_manager::start(
+        &mut work_lock_tasks,
+        test_env.db_pool.clone(),
+        db::work_lock_manager::KeepaliveConfig::default(),
+    )
+    .await?;
+    let nmxc_client_pool = libnmxc::NmxcClientPool::builder()
+        .build()
+        .map_err(|error| eyre::eyre!("NMX-C client pool: {error}"))?;
+    let monitor = NvlPartitionMonitor::new(
+        test_env.db_pool.clone(),
+        Arc::new(nmxc_client_pool),
+        meter,
+        NvLinkConfig {
+            monitor_run_interval: Duration::ZERO,
+            ..Default::default()
+        },
+        HostHealthConfig::default(),
+        work_lock_manager_handle,
+    );
+    monitor.run_single_iteration().await?;
+    for line in [
+        "# TYPE carbide_nvlink_partition_monitor_groups_total counter\n",
+        r#"carbide_nvlink_partition_monitor_groups_total{outcome="unreachable"}"#,
+        "# TYPE carbide_nvlink_partition_monitor_iteration_overruns_total counter\n",
+        "# TYPE carbide_nvlink_partition_monitor_stage_latency_milliseconds histogram\n",
+    ] {
+        metrics::wait_for_metric_line(&test_env.carbide_metrics_addrs, line).await?;
+    }
+    work_lock_tasks.shutdown().await;
+    Ok(())
+}
+
+async fn collect_ssh_console_metric_info() -> eyre::Result<metrics::MetricInfo> {
+    // A separate process prevents SSH Console from replacing the API server's
+    // global meter provider or binding its cached Events to that provider.
+    let output_dir = temp_dir::TempDir::with_prefix("ssh-metric-catalogue")?;
+    let output_path = output_dir.path().join("metric.json");
+    let mut child = tokio::process::Command::new(std::env::current_exe()?)
+        .args(["--exact", "test_integration", "--nocapture"])
+        .env(SSH_METRIC_CATALOGUE_OUTPUT, &output_path)
+        .kill_on_drop(true)
+        .spawn()?;
+    // This child only starts local listeners, scrapes once, and shuts down.
+    let status = match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
+        Ok(status) => status?,
+        Err(error) => {
+            child.kill().await?;
+            return Err(error).wrap_err("SSH metric catalogue subprocess timed out");
+        }
+    };
+    eyre::ensure!(
+        status.success(),
+        "SSH metric catalogue subprocess failed: {status}"
+    );
+    let (name, ty, help): (String, String, String) =
+        serde_json::from_slice(&std::fs::read(output_path)?)?;
+    Ok(metrics::MetricInfo { name, ty, help })
+}
+
+async fn write_ssh_console_metric_info(output_path: PathBuf) -> eyre::Result<()> {
+    use ssh_console::shutdown_handle::ShutdownHandle;
+
+    let certs = &utils::LOCALHOST_CERTS;
+    let config = ssh_console::config::Config {
+        listen_address: "127.0.0.1:0".parse()?,
+        metrics_address: "127.0.0.1:0".parse()?,
+        api_listen_address: "127.0.0.1:0".parse()?,
+        carbide_uri: "https://localhost:1".parse()?,
+        override_bmcs: Some(Vec::new()),
+        host_key_path: utils::REPO_ROOT
+            .join("crates/ssh-console/tests/fixtures/ssh_host_ed25519_key"),
+        forge_root_ca_path: certs.ca_cert.clone(),
+        client_cert_path: certs.client_cert.clone(),
+        client_key_path: certs.client_key.clone(),
+        console_logging_enabled: false,
+        ..Default::default()
+    };
+    let handle = ssh_console::spawn(config, None).await?;
+    let infos = metrics::collect_metric_infos(&[handle.metrics_address()]);
+    handle.shutdown_and_wait().await;
+    let info = infos?
+        .into_iter()
+        .find(|info| info.name == "carbide_ssh_console_bmc_recovery_attempts_total")
+        .context("SSH console did not export its BMC recovery counter")?;
+    assert_eq!(info.ty, "counter");
+    assert!(
+        !info.help.is_empty(),
+        "the SSH recovery counter needs HELP text"
+    );
+    std::fs::write(
+        output_path,
+        serde_json::to_vec(&(info.name, info.ty, info.help))?,
+    )?;
+    Ok(())
+}
+
+fn generate_core_metric_docs(mut infos: Vec<metrics::MetricInfo>) {
+    retain_existing_core_metric_infos(&mut infos);
+
+    // Delete everything with "alt_metric_" prefix
+    let mut infos: Vec<_> = infos
+        .into_iter()
+        .filter(|metric| !metric.name.starts_with("alt_metric"))
+        .collect();
+
+    // Sort metrics for consistency
+    infos.sort_by(|e1, e2| e1.name.cmp(&e2.name));
+
+    let mut docs = "# NVIDIA Infra Controller (NICo) Core Metrics\n\n".to_string();
+    use std::fmt::Write;
+
+    use askama_escape::Escaper;
+
+    writeln!(
+        &mut docs,
+        "This file contains a list of metrics exported by NVIDIA Infra Controller (NICo). \
+        The list is auto-generated from an integration test (`test_integration`). \
+        Metrics no test exercises are added with `cargo xtask check-metric-docs --fix`. \
+        NVLink partition monitor's metrics are documented in the manual: \
+        [NVLink Partitioning](../manuals/nvlink_partitioning.md#metrics)."
+    )
+    .unwrap();
+    writeln!(&mut docs).unwrap();
+    writeln!(&mut docs, "<table>").unwrap();
+    writeln!(
+        &mut docs,
+        "<tr><td>Name</td><td>Type</td><td>Description</td></tr>"
+    )
+    .unwrap();
+
+    for info in &infos {
+        write!(&mut docs, "<tr>").unwrap();
+        write!(&mut docs, "<td>{}</td>", info.name).unwrap();
+        write!(&mut docs, "<td>{}</td>", info.ty).unwrap();
+        write!(&mut docs, "<td>").unwrap();
+        askama_escape::Html
+            .write_escaped(&mut docs, &info.help)
+            .unwrap();
+        write!(&mut docs, "</td>").unwrap();
+        writeln!(&mut docs, "</tr>").unwrap();
+    }
+    writeln!(&mut docs, "</table>").unwrap();
+
+    let path = std::path::Path::new(METRIC_DOC_PATH);
+    assert!(
+        path.exists(),
+        "Metric path at {} does not exist. Did the directory structure change?",
+        path.to_str().unwrap()
+    );
+
+    std::fs::write(path, docs).unwrap();
+}
+
+fn retain_existing_core_metric_infos(infos: &mut Vec<metrics::MetricInfo>) {
+    let mut infos_by_name = infos
+        .drain(..)
+        .map(|info| (info.name.clone(), info))
+        .collect::<HashMap<_, _>>();
+
+    for line in std::fs::read_to_string(METRIC_DOC_PATH)
+        .unwrap_or_default()
+        .lines()
+    {
+        if let Some(info) = metrics::MetricInfo::parse_from_docs_line(line) {
+            infos_by_name.entry(info.name.clone()).or_insert(info);
+        }
+    }
+
+    infos.extend(infos_by_name.into_values());
+}
+
+trait ParseFromHtmlDocs {
+    fn parse_from_docs_line(line: &str) -> Option<Self>
+    where
+        Self: Sized;
+}
+
+impl ParseFromHtmlDocs for metrics::MetricInfo {
+    fn parse_from_docs_line(line: &str) -> Option<Self> {
+        let row = line.strip_prefix("<tr><td>")?.strip_suffix("</td></tr>")?;
+        let cells = row.split("</td><td>").collect::<Vec<_>>();
+        let [name, ty, help] = cells.as_slice() else {
+            return None;
+        };
+
+        if *name == "Name" {
+            return None;
+        }
+
+        let unescape_html_cell = |value: &str| -> String {
+            if value.contains('&') {
+                value
+                    .replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&#39;", "'")
+                    .replace("&quot;", "\"")
+                    .replace("&amp;", "&")
+            } else {
+                value.to_string()
+            }
+        };
+
+        Some(metrics::MetricInfo {
+            name: unescape_html_cell(name),
+            ty: unescape_html_cell(ty),
+            help: unescape_html_cell(help),
+        })
+    }
+}
+
+pub(crate) const METRIC_DOC_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../docs/observability/core_metrics.md"
+);
+
+/// Run integration tests with machine-a-tron, asserting on metrics. This has to run as its own
+/// test, to make the values in the metrics buckets predictable.
+#[test]
+fn test_metrics_integration() -> eyre::Result<()> {
+    utils::api_server_runtime_builder()
+        .worker_threads(10)
+        .build()?
+        .block_on(run_metrics_integration())
+}
+
+/// Runs the isolated API lifecycle and machine-a-tron metric assertions.
+async fn run_metrics_integration() -> eyre::Result<()> {
+    let Some(mut test_env) =
+        IntegrationTestEnvironment::try_from_environment(1, "api_server_test_metrics_integration")
+            .await?
+    else {
+        return Ok(());
+    };
+
+    let bmc_address_registry = BmcMockRegistry::default();
+    let certs_dir = PathBuf::from(format!("{}/crates/bmc-mock", test_env.root_dir.display()));
+    let server_config = bmc_mock::tls::server_config(Some(certs_dir)).unwrap();
+    let mut bmc_mock_handle = bmc_mock::CombinedServer::run(
+        "bmc-mock",
+        bmc_address_registry.clone(),
+        Some(ListenerOrAddress::Listener(
+            // let OS choose available port
+            TcpListener::bind("127.0.0.1:0")?,
+        )),
+        server_config,
+    );
+
+    // For preingestion firmware checks to work, carbide needs a directory which exists to be
+    // configured as the firmware_directory. It can be empty, because our mocks should be showing
+    // the desired firmware verisions to carbide (and thus it won't try to update.) This folder will
+    // be deleted on Drop.
+    let empty_firmware_dir = temp_dir::TempDir::with_prefix("firmware")?;
+
+    // Begin the integration test by starting an API server. This will be shared between multiple
+    // individual machine-a-tron-based tests, which can run in parallel against the same instance.
+    let cancel_token = CancellationToken::new();
+    let server_handle = utils::start_api_server(
+        &mut test_env,
+        TestApiServerArgs {
+            bmc_proxy: Some(HostPortPair::HostAndPort(
+                "127.0.0.1".to_string(),
+                bmc_mock_handle.address.port(),
+            )),
+            firmware_directory: empty_firmware_dir.path().to_owned(),
+            addr_index: 0,
+            put_dev_bin_in_path: true,
+            insecure_discovery: true,
+        },
+        cancel_token.clone(),
+    )
+    .await?;
+
+    // Save typing after the server has replaced the port-zero placeholders.
+    let IntegrationTestEnvironment {
+        carbide_api_addrs,
+        root_dir: _,
+        carbide_metrics_addrs,
+        db_pool,
+        metrics: _,
+        db_url: _,
+        credential_config: _,
+        spdm_enabled: _,
+        _vault_handle,
+    } = test_env.clone();
+
+    // Before the initial host bootstrap, the dns_records view
+    // should contain 0 entries.
+    assert_eq!(0i64, db::test_support::dns::record_count(&db_pool).await);
+
+    let mat_handle = run_machine_a_tron_machine_test(
+        HardwareType::DellPowerEdgeR750,
+        1,
+        1,
+        false,
+        &test_env,
+        &bmc_address_registry,
+        UNDERLAY_DHCP_RELAY_ADDRESS,
+        |machine_handle| {
+            let db_pool = db_pool.clone();
+            let carbide_api_addrs = carbide_api_addrs.to_vec();
+            let carbide_metrics_addrs = carbide_metrics_addrs.to_vec();
+            async move {
+                wait_for_dpu_state(
+                    &carbide_api_addrs,
+                    &machine_handle.dpus()[0],
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
+
+                // After the host_bootstrap, the dns_records view
+                // should contain 8 entries:
+                // - 2x "human friendly" (BMC) for Host + DPU.
+                // - 2x "human friendly" (ADM) for Host + DPU.
+                // - 2x Machine ID (BMC) for Host + DPU.
+                // - 2x Machine ID (ADM) for Host + DPU.
+                assert_eq!(8i64, db::test_support::dns::record_count(&db_pool).await);
+
+                // Metrics are only updated after the machine state controller run one more
+                // time since the emitted metrics are for states at the start of the iteration.
+                // Therefore wait for the updated metrics to show up.
+                let metrics = metrics::wait_for_metric_line(
+                    &carbide_metrics_addrs,
+                    r#"carbide_machines_per_state{fresh="true",state="ready",substate=""} 1"#,
+                )
+                    .await?;
+                metrics::assert_metric_line(&metrics, r#"carbide_machines_total{fresh="true"} 1"#);
+                for name in ["carbide_spdm_attestation_total", "carbide_spdm_attestation_count"] {
+                    metrics::assert_not_metric_line(&metrics, name);
+                }
+                // Also check that metrics are emitted under the configured `alt_metric_prefix`
+                metrics::assert_metric_line(&metrics, r#"alt_metric_machines_total{fresh="true"} 1"#);
+                metrics::assert_not_metric_line(
+                    &metrics,
+                    "machine_reboot_attempts_in_booting_with_discovery_image",
+                );
+
+                let tenant_org_id = "tenant_organization";
+                tenant::create(&carbide_api_addrs, tenant_org_id, "Tenant Organization").await?;
+                let vpc_id = vpc::create(&carbide_api_addrs, tenant_org_id).await?;
+                let domain_id = domain::create(&carbide_api_addrs, "tenant-1.local").await?;
+                let segment_id = subnet::create(&carbide_api_addrs, &vpc_id, &domain_id, 10, false).await?;
+                let host_machine_id: StableHostMachineId = machine_handle
+                    .observed_machine_id()
+                    .expect("Should have gotten a machine ID by now")
+                    .try_into()?;
+
+                // Create instance with phone_home enabled
+                let instance_id = instance::create(
+                    &carbide_api_addrs,
+                    &host_machine_id,
+                    &segment_id,
+                    Some("test"),
+                    true,
+                    true,
+                    &[],
+                ).await?;
+
+                let metrics = metrics::wait_for_metric_line(
+                    &carbide_metrics_addrs,
+                    r#"carbide_machines_per_state{fresh="true",state="assigned",substate="ready"} 1"#,
+                )
+                    .await?;
+                metrics::assert_metric_line(&metrics, r#"carbide_machines_total{fresh="true"} 1"#);
+                metrics::assert_not_metric_line(
+                    &metrics,
+                    r#"carbide_machines_per_state{fresh="true",state="ready",substate=""}"#,
+                );
+                metrics::assert_not_metric_line(
+                    &metrics,
+                    "machine_reboot_attempts_in_booting_with_discovery_image",
+                );
+
+                instance::release(&carbide_api_addrs, &host_machine_id, &instance_id, true).await?;
+
+                let metrics = metrics::wait_for_metric_line(&carbide_metrics_addrs, r#"carbide_machines_per_state{fresh="true",state="waitingforcleanup",substate="hostcleanup"} 1"#).await?;
+                metrics::assert_metric_line(&metrics, r#"carbide_machines_total{fresh="true"} 1"#);
+
+                machine::wait_for_state(
+                    &carbide_api_addrs,
+                    &host_machine_id,
+                    "MachineValidation",
+                ).await?;
+
+                machine::wait_for_state(&carbide_api_addrs, &host_machine_id, "Discovered").await?;
+
+                // It stays in Discovered until we notify that reboot happened, which this test doesn't
+                let metrics = metrics::wait_for_metric_line(
+                    &carbide_metrics_addrs,
+                    r#"carbide_machines_per_state{fresh="true",state="hostnotready",substate="discovered"} 1"#,
+                )
+                    .await?;
+                metrics::assert_not_metric_line(
+                    &metrics,
+                    r#"carbide_machines_per_state{fresh="true",state="assigned""#,
+                );
+
+                // Explicitly test that the histogram for `carbide_reboot_attempts_in_booting_with_discovery_image_bucket`
+                // uses the custom buckets we defined for retries/attempts
+                for &(bucket, count) in &[(0, 0), (1, 1), (2, 1), (3, 1), (5, 1), (10, 1)] {
+                    metrics::assert_metric_line(
+                        &metrics,
+                        &format!(
+                            r#"carbide_reboot_attempts_in_booting_with_discovery_image_bucket{{le="{bucket}"}} {count}"#
+                        ),
+                    );
+                }
+                metrics::assert_not_metric_line(
+                    &metrics,
+                    r#"carbide_reboot_attempts_in_booting_with_discovery_image_bucket{le="4"}"#,
+                );
+                metrics::assert_not_metric_line(
+                    &metrics,
+                    r#"carbide_reboot_attempts_in_booting_with_discovery_image_bucket{le="6"}"#,
+                );
+                metrics::assert_metric_line(
+                    &metrics,
+                    r#"carbide_reboot_attempts_in_booting_with_discovery_image_bucket{le="+Inf"} 1"#,
+                );
+                metrics::assert_metric_line(
+                    &metrics,
+                    "carbide_reboot_attempts_in_booting_with_discovery_image_sum 1",
+                );
+                metrics::assert_metric_line(
+                    &metrics,
+                    "carbide_reboot_attempts_in_booting_with_discovery_image_count 1",
+                );
+
+                Ok(())
+            }
+        },
+    ).await?;
+
+    mat_handle.shutdown().await?;
+    sleep(time::Duration::from_millis(500)).await;
+    bmc_mock_handle.stop().await?;
+    cancel_token.cancel();
+    server_handle.wait().await?;
+    db_pool.close().await;
+    Ok(())
+}
+
+/// The opt-in RPC waits for a running simulated DPU to apply Admin networking.
+async fn test_force_delete_waits_for_instance_dpu(
+    test_env: &IntegrationTestEnvironment,
+    bmc_mock_registry: &BmcMockRegistry,
+    segment_id: &str,
+) -> eyre::Result<MachineATronHandle> {
+    run_machine_a_tron_machine_test(
+        HardwareType::DellPowerEdgeR750,
+        1,
+        1,
+        false,
+        test_env,
+        bmc_mock_registry,
+        UNDERLAY_DHCP_RELAY_ADDRESS,
+        |machine_handle| async move {
+            wait_for_host_state(
+                &test_env.carbide_api_addrs,
+                &machine_handle,
+                "Ready",
+                Duration::from_secs(90),
+            )
+            .await?;
+            let machine_ids = [
+                machine_handle
+                    .observed_machine_id()
+                    .context("ready host has no observed machine ID")?,
+                machine_handle.dpus()[0]
+                    .observed_machine_id()
+                    .context("ready DPU has no observed machine ID")?,
+            ];
+            let host_id: StableHostMachineId = machine_ids[0].try_into()?;
+            let instance_id = instance::create(
+                &test_env.carbide_api_addrs,
+                &host_id,
+                segment_id,
+                None,
+                false,
+                true,
+                &[],
+            )
+            .await?;
+            let network_config =
+                db::machine::get_network_config(&test_env.db_pool, &machine_ids[0]).await?;
+            assert_eq!(network_config.value.use_admin_network, Some(false));
+
+            let request = rpc::forge::AdminForceDeleteMachineRequest {
+                host_query: host_id.to_string(),
+                delete_interfaces: true,
+                delete_bmc_interfaces: true,
+                wait_for_instance_dpu: true,
+                allow_delete_with_instance: true,
+                ..Default::default()
+            };
+            let response =
+                machine::force_delete(&test_env.carbide_api_addrs, request.clone()).await?;
+            assert!(!response.all_done);
+            let instance_id = instance_id.parse()?;
+            assert!(
+                db::instance::find_by_id(&test_env.db_pool, instance_id)
+                    .await?
+                    .is_some()
+            );
+
+            // Keep the actors running so the DPU acknowledges the Admin request.
+            tokio::time::timeout(Duration::from_secs(90), async {
+                loop {
+                    let response =
+                        machine::force_delete(&test_env.carbide_api_addrs, request.clone()).await?;
+                    if response.all_done {
+                        return Ok::<(), eyre::Report>(());
+                    }
+                    sleep(Duration::from_secs(1)).await;
+                }
+            })
+            .await
+            .wrap_err("timed out waiting for force deletion after the DPU acknowledgement")??;
+
+            assert!(
+                db::instance::find_by_id(&test_env.db_pool, instance_id)
+                    .await?
+                    .is_none(),
+                "force deletion must remove the assigned Instance",
+            );
+            for machine_id in machine_ids {
+                assert!(
+                    db::machine::find_one(&test_env.db_pool, &machine_id, Default::default())
+                        .await?
+                        .is_none(),
+                    "force deletion must remove machine {machine_id}",
+                );
+            }
+            Ok(())
+        },
+    )
+    .await
+}
+
+async fn test_machine_a_tron_multidpu(
+    hw_type: HardwareType,
+    test_env: &IntegrationTestEnvironment,
+    bmc_mock_registry: &BmcMockRegistry,
+    segment_id: &str,
+    underlay_dhcp_relay_address: Ipv4Addr,
+) -> eyre::Result<MachineATronHandle> {
+    run_machine_a_tron_machine_test(
+        hw_type,
+        1,
+        2,
+        false,
+        test_env,
+        bmc_mock_registry,
+        underlay_dhcp_relay_address,
+        |machine_handle| {
+            let segment_id = segment_id.to_string();
+            let carbide_api_addrs = &test_env.carbide_api_addrs;
+            let db_pool = test_env.db_pool.clone();
+            let expected_selection = (hw_type == HardwareType::WiwynnGB200Nvl).then(|| {
+                let dpu = machine_handle
+                    .host_info()
+                    .dpus
+                    .get(1)
+                    .expect("Wiwynn GB200 host should contain its DPU with the lower scout PCI slot");
+                (
+                    dpu.host_mac_address,
+                    BootInterfaceSelectionSource::ScoutReportPci,
+                )
+            });
+            async move {
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
+                let machine_id: StableHostMachineId = machine_handle
+                    .observed_machine_id()
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
+                if let Some(expected_selection) = expected_selection {
+                    let selection: (MacAddress, BootInterfaceSelectionSource) = sqlx::query_as(
+                        "SELECT desired_mac_address, selection_source
+                         FROM machine_boot_interfaces
+                         WHERE machine_id = $1",
+                    )
+                    .bind(machine_id)
+                    .fetch_one(&db_pool)
+                    .await?;
+                    assert_eq!(
+                        selection, expected_selection,
+                        "the Wiwynn mock must replace its RedfishChassisId selection with the lower scout PCI slot",
+                    );
+                }
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine has made it to Ready, allocating instance",
+                );
+                let instance_id = instance::create(
+                    carbide_api_addrs,
+                    &machine_id,
+                    &segment_id,
+                    None,
+                    false,
+                    false,
+                    &[],
+                )
+                .await?;
+
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Assigned/Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
+
+                let instances = instance::get_by_machine_id(
+                    carbide_api_addrs,
+                    machine_handle
+                        .observed_machine_id()
+                        .expect("HostMachine should have a Machine ID once it's in ready state")
+                        .to_string()
+                        .as_str(),
+                )
+                .await?;
+                let interface = instances
+                    .instances
+                    .first()
+                    .and_then(|instance| instance.status.as_ref())
+                    .and_then(|status| status.network.as_ref())
+                    .and_then(|network| network.interfaces.first())
+                    .context("allocated instance has no network status interface")?;
+                assert_eq!(interface.addresses.len(), 1);
+                assert_eq!(interface.gateways.len(), 1);
+
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine has made it to Assigned/Ready, releasing instance",
+                );
+                instance::release(carbide_api_addrs, &machine_id, &instance_id, false).await?;
+
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine has made it to Ready again, all done",
+                );
+                Ok::<(), eyre::Report>(())
+            }
+        },
+    )
+    .await
+}
+
+async fn test_machine_a_tron_zerodpu(
+    hw_type: HardwareType,
+    test_env: &IntegrationTestEnvironment,
+    bmc_mock_registry: &BmcMockRegistry,
+    flat_vpc_id: &str,
+) -> eyre::Result<MachineATronHandle> {
+    run_machine_a_tron_machine_test(
+        hw_type,
+        1,
+        0,
+        false,
+        test_env,
+        bmc_mock_registry,
+        UNDERLAY_DHCP_RELAY_ADDRESS,
+        |machine_handle| {
+            let carbide_api_addrs = &test_env.carbide_api_addrs;
+            let flat_vpc_id = flat_vpc_id.to_string();
+            async move {
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
+                let machine_id: StableHostMachineId = machine_handle
+                    .observed_machine_id()
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine has made it to Ready, allocating instance",
+                );
+
+                let instance_id = instance::create_with_auto_host_inband_networking(
+                    carbide_api_addrs,
+                    &machine_id,
+                    &flat_vpc_id,
+                )
+                .await?;
+
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Assigned/Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
+                assert_auto_instance_network(carbide_api_addrs, &instance_id, &flat_vpc_id).await?;
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine has made it to Assigned/Ready, releasing instance",
+                );
+
+                instance::release(carbide_api_addrs, &machine_id, &instance_id, false).await?;
+
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine has made it to Ready again, all done",
+                );
+                Ok::<(), eyre::Report>(())
+            }
+        },
+    )
+    .await
+}
+
+async fn test_machine_a_tron_nic_mode(
+    hw_type: HardwareType,
+    test_env: &IntegrationTestEnvironment,
+    bmc_mock_registry: &BmcMockRegistry,
+    flat_vpc_id: &str,
+    host_inband_segment_id: &str,
+) -> eyre::Result<MachineATronHandle> {
+    run_machine_a_tron_machine_test(
+        hw_type,
+        1,
+        1,
+        true,
+        test_env,
+        bmc_mock_registry,
+        UNDERLAY_DHCP_RELAY_ADDRESS,
+        |machine_handle| {
+            let carbide_api_addrs = &test_env.carbide_api_addrs;
+            let flat_vpc_id = flat_vpc_id.to_string();
+            let host_inband_segment_id = host_inband_segment_id.to_string();
+            let expected_host_mac = machine_handle
+                .host_info()
+                .dpus
+                .first()
+                .expect("NIC-mode host should contain at least one DPU NIC")
+                .host_mac_address
+                .to_string();
+            async move {
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
+                let machine_id: StableHostMachineId = machine_handle
+                    .observed_machine_id()
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine has made it to Ready, allocating instance",
+                );
+
+                assert_nic_mode_host(
+                    carbide_api_addrs,
+                    &machine_id,
+                    &expected_host_mac,
+                    &host_inband_segment_id,
+                )
+                .await?;
+
+                let instance_id = instance::create_with_auto_host_inband_networking(
+                    carbide_api_addrs,
+                    &machine_id,
+                    &flat_vpc_id,
+                )
+                .await?;
+
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Assigned/Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
+                assert_auto_instance_network(carbide_api_addrs, &instance_id, &flat_vpc_id).await?;
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine has made it to Assigned/Ready, releasing instance",
+                );
+
+                instance::release(carbide_api_addrs, &machine_id, &instance_id, false).await?;
+
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine has made it to Ready again, all done",
+                );
+                Ok::<(), eyre::Report>(())
+            }
+        },
+    )
+    .await
+}
+
+async fn assert_nic_mode_host(
+    carbide_api_addrs: &[SocketAddr],
+    machine_id: &carbide_uuid::machine::MachineId,
+    expected_host_mac: &str,
+    host_inband_segment_id: &str,
+) -> eyre::Result<()> {
+    let machine = machine::get_by_id(carbide_api_addrs, machine_id).await?;
+    let status = machine
+        .status
+        .context("NIC-mode host has no machine status")?;
+    let associated_dpus = &status.associated_dpu_machine_ids;
+    eyre::ensure!(
+        associated_dpus.is_empty(),
+        "NIC-mode host {machine_id} still has associated DPUs: {associated_dpus:?}"
+    );
+
+    let interfaces = &status.interfaces;
+    eyre::ensure!(
+        interfaces
+            .iter()
+            .all(|interface| interface.attached_dpu_machine_id.is_none()),
+        "NIC-mode host {machine_id} still has a DPU-backed interface: {interfaces:?}"
+    );
+
+    let has_expected_primary_host_inband_interface = interfaces.iter().any(|interface| {
+        interface
+            .mac_address
+            .eq_ignore_ascii_case(expected_host_mac)
+            && interface.primary_interface
+            && interface
+                .segment_id
+                .is_some_and(|id| id.to_string() == host_inband_segment_id)
+            && interface.interface_type != Some(rpc::forge::InterfaceType::Bmc as i32)
+    });
+    eyre::ensure!(
+        has_expected_primary_host_inband_interface,
+        "NIC-mode host {machine_id} did not promote DPU host-facing PF {expected_host_mac} as its primary HostInband interface"
+    );
+    Ok(())
+}
+
+async fn assert_auto_instance_network(
+    carbide_api_addrs: &[SocketAddr],
+    instance_id: &str,
+    flat_vpc_id: &str,
+) -> eyre::Result<()> {
+    let instance = instance::get_by_id(carbide_api_addrs, instance_id).await?;
+    let network = instance
+        .config
+        .as_ref()
+        .and_then(|config| config.network.as_ref())
+        .context("automatically-networked instance has no network config")?;
+    eyre::ensure!(
+        network.auto_config.is_some(),
+        "instance {instance_id} did not retain auto networking: {network:?}"
+    );
+    eyre::ensure!(
+        network.interfaces.is_empty(),
+        "instance {instance_id} exposed resolved interfaces in its external config: {network:?}"
+    );
+    eyre::ensure!(
+        network
+            .auto_config
+            .as_ref()
+            .and_then(|config| config.vpc_id)
+            .is_some_and(|id| id.to_string() == flat_vpc_id),
+        "instance {instance_id} did not retain flat VPC {flat_vpc_id}: {network:?}"
+    );
+
+    let network_status = instance
+        .status
+        .as_ref()
+        .and_then(|status| status.network.as_ref())
+        .context("automatically-networked instance has no network status")?;
+    let status_interfaces = &network_status.interfaces;
+    eyre::ensure!(
+        !status_interfaces.is_empty()
+            && status_interfaces.iter().all(|interface| {
+                interface
+                    .vpc_id
+                    .is_some_and(|id| id.to_string() == flat_vpc_id)
+                    && interface
+                        .mac_address
+                        .as_ref()
+                        .is_some_and(|mac| !mac.is_empty())
+                    && !interface.addresses.is_empty()
+                    && !interface.gateways.is_empty()
+                    && !interface.prefixes.is_empty()
+            }),
+        "instance {instance_id} status does not contain resolved flat VPC networking: {status_interfaces:?}"
+    );
+    eyre::ensure!(
+        network_status.configs_synced == rpc::forge::SyncState::Synced as i32,
+        "instance {instance_id} network status is not synced: {network_status:?}"
+    );
+    Ok(())
+}
+
+async fn test_machine_a_tron_dual_stack(
+    hw_type: HardwareType,
+    test_env: &IntegrationTestEnvironment,
+    bmc_mock_registry: &BmcMockRegistry,
+    tenant_organization_id: &str,
+    v4_vpc_prefix_id: &str,
+    v6_vpc_prefix_id: &str,
+    underlay_dhcp_relay_address: Ipv4Addr,
+) -> eyre::Result<MachineATronHandle> {
+    run_machine_a_tron_machine_test(
+        hw_type,
+        1,
+        1,
+        false,
+        test_env,
+        bmc_mock_registry,
+        underlay_dhcp_relay_address,
+        |machine_handle| {
+            let v4_prefix_id = v4_vpc_prefix_id.to_string();
+            let v6_prefix_id = v6_vpc_prefix_id.to_string();
+            let tenant_organization_id = tenant_organization_id.to_string();
+            let carbide_api_addrs = &test_env.carbide_api_addrs;
+            async move {
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
+                let machine_id: StableHostMachineId = machine_handle
+                    .observed_machine_id()
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine is Ready, allocating dual-stack instance via ipv6 config",
+                );
+                let instance_id = instance::create_with_vpc_prefixes(
+                    carbide_api_addrs,
+                    &machine_id,
+                    &tenant_organization_id,
+                    &[&v4_prefix_id, &v6_prefix_id],
+                )
+                .await?;
+
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Assigned/Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
+
+                // Wait for the agent to report interface addresses. The agent runs
+                // a network observation loop that populates addresses asynchronously
+                // after the instance reaches Assigned/Ready.
+                let machine_id_str = machine_id.to_string();
+                let mut addrs = vec![];
+                for _ in 0..30 {
+                    let instances = instance::get_by_machine_id(
+                        carbide_api_addrs,
+                        &machine_id_str,
+                    )
+                    .await?;
+                    if let Some(addresses) = instances
+                        .instances
+                        .first()
+                        .and_then(|instance| instance.status.as_ref())
+                        .and_then(|status| status.network.as_ref())
+                        .and_then(|network| network.interfaces.first())
+                        .map(|interface| &interface.addresses)
+                        && !addresses.is_empty()
+                    {
+                        addrs = addresses.clone();
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+
+                let addr_strings: Vec<&str> = addrs.iter().map(String::as_str).collect();
+                let has_ipv4 = addr_strings.iter().any(|a| a.contains('.'));
+                let has_ipv6 = addr_strings.iter().any(|a| a.contains(':'));
+                assert!(
+                    has_ipv4,
+                    "Dual-stack interface should have an IPv4 address, got: {addr_strings:?}"
+                );
+                assert!(
+                    has_ipv6,
+                    "Dual-stack interface should have an IPv6 address, got: {addr_strings:?}"
+                );
+                assert_eq!(
+                    addr_strings.len(),
+                    2,
+                    "Dual-stack interface should have exactly 2 addresses (IPv4 + IPv6), got: {addr_strings:?}"
+                );
+
+                tracing::info!(
+                    machine_id = %machine_id,
+                    addresses = ?addr_strings,
+                    "Machine dual-stack allocation verified",
+                );
+
+                instance::release(carbide_api_addrs, &machine_id, &instance_id, false)
+                    .await?;
+
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine back to Ready after dual-stack release",
+                );
+                Ok::<(), eyre::Report>(())
+            }
+        },
+    )
+    .await
+}
+
+/// Tests dual-stack on an FNN L2 segment (shared subnet with SVI/VRR).
+/// The segment is pre-created with both IPv4 and IPv6 prefixes, and the
+/// handler allocates SVI IPs for both. Instances get one IP per prefix.
+/// After release, leaves the DPU paused with an expiry observation for the metric catalogue.
+async fn test_machine_a_tron_dual_stack_l2(
+    hw_type: HardwareType,
+    test_env: &IntegrationTestEnvironment,
+    bmc_mock_registry: &BmcMockRegistry,
+    dual_stack_segment_id: &str,
+    underlay_dhcp_relay_address: Ipv4Addr,
+) -> eyre::Result<MachineATronHandle> {
+    run_machine_a_tron_machine_test(
+        hw_type,
+        1,
+        1,
+        false,
+        test_env,
+        bmc_mock_registry,
+        underlay_dhcp_relay_address,
+        |machine_handle| {
+            let segment_id = dual_stack_segment_id.to_string();
+            let carbide_api_addrs = &test_env.carbide_api_addrs;
+            async move {
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
+                let machine_id: StableHostMachineId = machine_handle
+                    .observed_machine_id()
+                    .expect("Machine ID should be set if host is ready")
+                    .try_into()?;
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine is Ready, allocating dual-stack L2 instance",
+                );
+                let instance_id = instance::create(
+                    carbide_api_addrs,
+                    &machine_id,
+                    &segment_id,
+                    None,
+                    false,
+                    false,
+                    &[],
+                )
+                .await?;
+
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Assigned/Ready",
+                    Duration::from_secs(120),
+                )
+                .await?;
+
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine dual-stack L2 instance allocated and reached Assigned/Ready",
+                );
+
+                instance::release(carbide_api_addrs, &machine_id, &instance_id, false).await?;
+
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
+                tracing::info!(
+                    machine_id = %machine_id,
+                    "Machine back to Ready after dual-stack L2 release",
+                );
+                prepare_dpu_certificate_expiry(&machine_handle.dpus()[0], test_env).await?;
+                Ok::<(), eyre::Report>(())
+            }
+        },
+    )
+    .await
+}
+
+/// Keeps a DPU expiry observable through catalogue collection, leaving its simulator paused.
+async fn prepare_dpu_certificate_expiry(
+    dpu: &DpuMachineHandle,
+    test_env: &IntegrationTestEnvironment,
+) -> eyre::Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    wait_for_dpu_state(
+        &test_env.carbide_api_addrs,
+        dpu,
+        "Ready",
+        deadline.saturating_duration_since(tokio::time::Instant::now()),
+    )
+    .await?;
+    // MaT reports no expiry; pause it so later reports cannot replace the persisted timestamp.
+    dpu.pause_and_wait(deadline.saturating_duration_since(tokio::time::Instant::now()))
+        .await?;
+    let dpu_id: carbide_uuid::machine::DpuMachineId = dpu
+        .observed_machine_id()
+        .context("ready DPU has no observed machine ID")?
+        .try_into()?;
+    let mut txn = test_env.db_pool.begin().await?;
+    let mut observation = db::machine::find_one(
+        &mut *txn,
+        &dpu_id,
+        model::machine::machine_search_config::MachineSearchConfig {
+            include_dpus: true,
+            for_update: true,
+            ..Default::default()
+        },
+    )
+    .await?
+    .context("ready DPU is absent from the database")?
+    .network_status_observation
+    .context("ready DPU has no network observation")?;
+    let expiry = 1_893_456_000;
+    observation.client_certificate_expiry = Some(expiry);
+    assert_eq!(
+        db::machine::update_network_status_observation(&mut txn, &dpu_id, &observation).await?,
+        db::ConditionalWrite::Applied(()),
+    );
+    txn.commit().await?;
+    for name in [
+        "carbide_dpu_client_certificate_expiration_time",
+        "carbide_dpu_client_certificate_expiration_time_seconds",
+    ] {
+        let samples = metrics::wait_for_metric_line(
+            &test_env.carbide_metrics_addrs,
+            &format!("\n{name}{{dpu_machine_id=\"{dpu_id}\",fresh=\"true\"}} {expiry}\n"),
+        )
+        .await?;
+        metrics::assert_metric_line(&samples, &format!("\n# TYPE {name} gauge\n"));
+    }
+    Ok(())
+}
+
+async fn test_machine_a_tron_scout_stream(
+    test_env: &IntegrationTestEnvironment,
+    bmc_mock_registry: &BmcMockRegistry,
+    underlay_dhcp_relay_address: Ipv4Addr,
+) -> eyre::Result<MachineATronHandle> {
+    let scout_stream_api_addrs = vec![
+        *test_env
+            .carbide_api_addrs
+            .first()
+            .context("no carbide API addresses configured")?,
+    ];
+
+    run_machine_a_tron_machine_test(
+        HardwareType::DellPowerEdgeR750,
+        2,
+        0,
+        false,
+        test_env,
+        bmc_mock_registry,
+        underlay_dhcp_relay_address,
+        move |machine_handle| {
+            let scout_stream_api_addrs = scout_stream_api_addrs.clone();
+            let carbide_metrics_addrs = test_env.carbide_metrics_addrs.clone();
+            let db_pool = test_env.db_pool.clone();
+            async move {
+                wait_for_host_state(
+                    &test_env.carbide_api_addrs,
+                    &machine_handle,
+                    "Ready",
+                    Duration::from_secs(90),
+                )
+                .await?;
+                let machine_id = machine_handle
+                    .observed_machine_id()
+                    .context("ready machine has no observed machine ID")?;
+
+                scout_stream::wait_for_connection_state(&scout_stream_api_addrs, machine_id, true)
+                    .await?;
+                let own_connection_count = scout_stream::connections(&scout_stream_api_addrs)
+                    .await?
+                    .iter()
+                    .filter(|connection| connection.machine_id == Some(machine_id))
+                    .count();
+                assert_eq!(own_connection_count, 1);
+                assert_eq!(
+                    scout_stream::ping(&scout_stream_api_addrs, machine_id).await?,
+                    format!("pong from {machine_id}")
+                );
+                scout_stream::check_unsupported_request(&scout_stream_api_addrs, machine_id)
+                    .await?;
+
+                assert!(scout_stream::disconnect(&scout_stream_api_addrs, machine_id).await?);
+                scout_stream::wait_for_connection_state(&scout_stream_api_addrs, machine_id, false)
+                    .await?;
+                scout_stream::wait_for_connection_state(&scout_stream_api_addrs, machine_id, true)
+                    .await?;
+
+                machine_handle.abort_and_wait().await?;
+                scout_stream::wait_for_connection_state(&scout_stream_api_addrs, machine_id, false)
+                    .await?;
+
+                // The aborted scout no longer reports, so the back-dated contact stays timed out.
+                sqlx::query(
+                    "UPDATE machines SET last_scout_contact_time = NOW() - INTERVAL '2 years' WHERE id = $1",
+                )
+                .bind(machine_id)
+                .execute(&db_pool)
+                .await?;
+                let expected_metric = format!(
+                    r#"carbide_hosts_with_scout_heartbeat_timeout{{fresh="true",host_machine_id="{machine_id}"}} 1"#
+                );
+                metrics::wait_for_metric_line(&carbide_metrics_addrs, &expected_metric).await?;
+                Ok(())
+            }
+        },
+    )
+    .await
+}
+
+/// Simulates `host_count` hosts of `hw_type` with machine-a-tron against the
+/// integration test API and hands the ingested state to the caller's check.
+/// Returns the running simulator group so the caller controls teardown order.
+#[allow(clippy::too_many_arguments)]
+async fn run_machine_a_tron_machine_test<F, O>(
+    hw_type: HardwareType,
+    host_count: u32,
+    dpu_per_host_count: u32,
+    dpus_in_nic_mode: bool,
+    test_env: &IntegrationTestEnvironment,
+    bmc_mock_registry: &BmcMockRegistry,
+    underlay_dhcp_relay_address: Ipv4Addr,
+    run_assertions: F,
+) -> eyre::Result<MachineATronHandle>
+where
+    F: Fn(DeviceHandle) -> O,
+    O: Future<Output = eyre::Result<()>>,
+{
+    let api_addr = test_env
+        .carbide_api_addrs
+        .first()
+        .copied()
+        .context("no carbide API addresses configured")?;
+    let additional_api_urls = test_env.carbide_api_addrs[1..]
+        .iter()
+        .map(|a| format!("https://{}:{}", a.ip(), a.port()))
+        .collect();
+    let mat_config = MachineATronConfig {
+        racks: BTreeMap::new(),
+        machines: BTreeMap::from([(
+            "config".to_string(),
+            Arc::new(MachineConfig {
+                rack_id: None,
+                rack_placement: None,
+                hw_type,
+                host_count,
+                dpu_per_host_count,
+                dpu_reboot_delay: 1,
+                host_reboot_delay: 1,
+                timing_overrides: Some(LifecycleTimingOverrides {
+                    host: PartialLifecycleTimings {
+                        power_off_force: Some(Duration::from_millis(100)),
+                        reboot: Some(Duration::from_secs(1)),
+                        // ZERO disables the BMC self-reset offline window entirely,
+                        // keeping ingestion at its pre-feature pace
+                        bmc_reset: Some(Duration::ZERO),
+                        ..Default::default()
+                    },
+                    dpu: PartialLifecycleTimings {
+                        power_off_force: Some(Duration::from_millis(100)),
+                        reboot: Some(Duration::from_secs(1)),
+                        // ZERO disables the BMC self-reset offline window entirely,
+                        // keeping ingestion at its pre-feature pace
+                        bmc_reset: Some(Duration::ZERO),
+                        ..Default::default()
+                    },
+                }),
+                acceleration_factor: 1.0,
+                underlay_dhcp_relay_address,
+                // Keep this distinct from the DPU Underlay relay so NIC-mode tests fail if
+                // machine-a-tron sends direct host DHCP through the DPU network.
+                host_inband_dhcp_relay_address: Some(Ipv4Addr::new(10, 10, 11, 2)),
+                bmc_dhcp_relay_address: TEST_BMC_DHCP_RELAY_ADDRESS,
+                run_interval_idle: Duration::from_secs(1),
+                run_interval_working: Duration::from_millis(100),
+                network_status_run_interval: Duration::from_secs(1),
+                scout_run_interval: Duration::from_secs(1),
+                discovery_retry_interval: Duration::from_millis(100),
+                dpus_in_nic_mode,
+                dpf_enabled: true,
+                dpu_firmware_versions: None,
+                host_firmware_versions: None,
+                dpu_agent_version: None,
+            }),
+        )]),
+        carbide_api_url: format!("https://{}:{}", api_addr.ip(), api_addr.port()),
+        dhcp: DhcpType::Api {},
+        bmc_dhcp_renewal_interval: Duration::from_secs(900),
+        log_file: None,
+        log_format: LogFormat::Compact,
+        bmc_mock_port: 0, // unused, we're using dynamic ports on localhost
+        bmc_mock_certs_dir: None,
+        configure_carbide_bmc_proxy_host: None,
+        persist_dir: None,
+        cleanup_on_quit: false,
+        register_expected_machines: true,
+        host_bmc_password: None,
+        dpu_bmc_password: None,
+        api_refresh_interval: Duration::from_millis(500),
+        scout_stream_reconnect_interval: Duration::from_secs(1),
+        mock_bmc_ssh_server: false,
+        enable_ipmi_simulation: false,
+        hw_mac_address_ranges: None,
+        mac_address_pool: None,
+        ufm_mock: Default::default(),
+        rms_mock: Default::default(),
+        nmxc_mock: Default::default(),
+    };
+
+    let (provisionable_handles, mat_handle) = api_test_helper::machine_a_tron::run_local(
+        mat_config,
+        additional_api_urls,
+        &test_env.root_dir,
+        bmc_mock_registry.clone(),
+        TEST_MAC_POOL.clone(),
+    )
+    .await
+    .unwrap();
+
+    let results = join_all(provisionable_handles.into_iter().map(|machine_handle| {
+        let relay_assertion_handle = machine_handle.clone();
+        let assertions = run_assertions(machine_handle);
+        async move {
+            assertions.await?;
+            assert_relay_selection(
+                &relay_assertion_handle,
+                dpus_in_nic_mode,
+                underlay_dhcp_relay_address,
+            )
+        }
+    }))
+    .await;
+    let result_count = results.len();
+    let assertion_result: eyre::Result<()> = results.into_iter().try_collect();
+    assert_eq!(result_count, host_count as usize);
+    if let Err(error) = assertion_result {
+        mat_handle.shutdown().await?;
+        return Err(error);
+    }
+    Ok(mat_handle)
+}
+
+fn assert_relay_selection(
+    machine_handle: &DeviceHandle,
+    dpus_in_nic_mode: bool,
+    underlay_dhcp_relay_address: Ipv4Addr,
+) -> eyre::Result<()> {
+    let host_bmc_ip = machine_handle
+        .bmc_ip()
+        .context("host BMC DHCP did not return an address")?;
+    eyre::ensure!(
+        TEST_BMC_NETWORK_PREFIX.contains(&host_bmc_ip),
+        "host BMC DHCP used the underlay relay: {host_bmc_ip}"
+    );
+
+    for dpu in machine_handle.dpus() {
+        let dpu_bmc_ip = dpu.bmc_ip().context("DPU doesn't have BMC IP")?;
+        eyre::ensure!(
+            TEST_BMC_NETWORK_PREFIX.contains(&dpu_bmc_ip),
+            "DPU BMC DHCP used the underlay relay: {dpu_bmc_ip}"
+        );
+
+        if !dpus_in_nic_mode {
+            let dpu_underlay_ip = dpu
+                .machine_ip()
+                .context("DPU doesn't have machine IP address")?;
+            eyre::ensure!(
+                dpu_underlay_ip.octets()[..3] == underlay_dhcp_relay_address.octets()[..3],
+                "DPU OOB boot DHCP used the BMC relay: {dpu_underlay_ip}"
+            );
+        }
+    }
+
+    Ok(())
+}

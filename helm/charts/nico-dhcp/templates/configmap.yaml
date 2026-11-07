@@ -1,0 +1,58 @@
+{{- if .Values.config.enabled }}
+{{- /* Migration guard: the pre-refactor field name was `config.keaConfigJson`
+       (no Raw suffix). Helm silently drops unknown values, so a typoed or
+       stale override would have rendered the chart-default placeholders and
+       broken DPU pre-ingestion with no signal. Fail loudly at template time
+       so operators migrating from the old shape see the breakage immediately
+       and can pick between the structured `config.kea` block or the
+       `config.keaConfigJsonRaw` escape hatch. */ -}}
+{{- if .Values.config.keaConfigJson }}
+{{- fail "nico-dhcp: `config.keaConfigJson` has been removed. Either migrate to the structured `config.kea` block (recommended) or move the full JSON string to `config.keaConfigJsonRaw`. See helm/charts/nico-dhcp/values.yaml for the field mapping." }}
+{{- end }}
+{{- /* Type guard: `keaConfigJsonRaw` must be a string. A map/list overlay
+       (e.g. a paste-mistake mirroring the structured `kea:` block) would
+       reach sprig's `replace` and surface as `wrong type for value` deep
+       in this template. Catch it here with a value-file-relative pointer. */ -}}
+{{- if and (hasKey .Values.config "keaConfigJsonRaw") .Values.config.keaConfigJsonRaw (not (kindIs "string" .Values.config.keaConfigJsonRaw)) }}
+{{- fail (printf "nico-dhcp: `config.keaConfigJsonRaw` must be a string (got %s). Set to a complete kea_config.json blob, or leave empty/omit to use the structured `config.kea` block." (kindOf .Values.config.keaConfigJsonRaw)) }}
+{{- end }}
+{{- /* Conflict guard: the raw escape hatch skips the structured `config.kea`
+       block entirely, including the server-identifier pinning (issue #3663).
+       An explicitly set `config.kea.serverIdentifier` alongside a raw blob
+       would be silently ignored — fail loudly so the operator either drops
+       the structured override or adds the option-data to the raw JSON. */ -}}
+{{- if and (trim (default "" .Values.config.keaConfigJsonRaw)) (trim (printf "%v" (dig "kea" "serverIdentifier" "" .Values.config))) }}
+{{- fail "nico-dhcp: `config.kea.serverIdentifier` is ignored when `config.keaConfigJsonRaw` is set. Remove the structured override, or add the dhcp-server-identifier option-data to the raw kea_config.json blob (see issue #3663)." }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nico-dhcp.name" . }}-config
+  namespace: {{ include "nico-dhcp.namespace" . }}
+  labels:
+    {{- include "nico-dhcp.labels" . | nindent 4 }}
+data:
+  ## kea_config.json comes from one of two sources:
+  ##   - structured (default): config.kea fields → nico-dhcp.keaConfigJson helper
+  ##   - raw escape hatch: config.keaConfigJsonRaw (when set to a non-empty
+  ##     string — leading/trailing whitespace is treated as empty so a stray
+  ##     space in an override doesn't silently take the wrong branch).
+  ## See values.yaml::config for the rationale and the field mapping.
+  kea_config.json: |
+{{- $rawTrimmed := trim (default "" .Values.config.keaConfigJsonRaw) }}
+{{- if $rawTrimmed }}
+    {{- /* Raw escape hatch: substitute __NAMESPACE__ and __API_HOST__
+           the same way the (pre-refactor) keaConfigJson string did, so
+           anyone who carried the raw string with those placeholders across
+           the refactor keeps working under the dual-deployment scheme.
+           Both substitutions route through `nico-dhcp.apiServiceName` so
+           an empty `.Values.apiServiceName` falls back to `nico-api`
+           rather than producing `https://.<ns>...` in the rendered host. */ -}}
+    {{- $rawTrimmed
+          | replace "__NAMESPACE__" (include "nico-dhcp.namespace" .)
+          | replace "__API_HOST__" (include "nico-dhcp.apiServiceName" .)
+          | nindent 4 }}
+{{- else }}
+    {{- include "nico-dhcp.keaConfigJson" . | nindent 4 }}
+{{- end }}
+{{- end }}

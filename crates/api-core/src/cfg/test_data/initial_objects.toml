@@ -1,0 +1,46 @@
+[pools.fnn-asn]
+type = "integer"
+ranges = [{ start = "4268000000", end = "4268999999" }]
+
+[pools.lo-ip]
+type = "ipv4"
+prefix = "10.180.62.1/26"
+
+[pools.vlan-id]
+type = "integer"
+ranges = [{ start = "100", end = "501" }]
+
+[pools.vni]
+type = "integer"
+ranges = [{ start = "1024500", end = "1024550" }]
+
+[pools.vpc-vni]
+type = "integer"
+ranges = [{ start = "2024500", end = "2024550" }]
+
+[networks.admin]
+type = "admin"
+prefix = "172.20.0.0/24"
+gateway = "172.20.0.1"
+mtu = 9000
+reserve_first = 5
+infer_slaac_eui64_addresses = true
+
+[networks.DEV1-C09-IPMI-01]
+type = "underlay"
+prefix = "172.99.0.0/26"
+gateway = "172.99.0.1"
+mtu = 1500
+reserve_first = 5
+
+[networks.ZERO-DPU-HOST-01-SWP7]
+type = "hostinband"
+prefix = "10.217.18.192/30"
+gateway = "10.217.18.193"
+mtu = 1500
+reserve_first = 1
+vpc_name = "zero-dpu-vpc"
+
+[vpcs.zero-dpu-vpc]
+organization_id = "2829bbe3-c169-4cd9-8b2a-19a8b1618a93"
+network_virtualization_type = "flat"

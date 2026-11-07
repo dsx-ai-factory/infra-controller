@@ -1,0 +1,8 @@
+
+[iptables]
+# Block access to nvued API
+-A INPUT -p tcp --dport 8765 -j DROP
+
+[ebtables]
+# Suppress ARP packets before they get encapsulated.
+-A OUTPUT -o vxlan48 -p ARP -j DROP

@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "nico-rest-api.name" . }}
+  namespace: {{ include "nico-rest-api.namespace" . }}
+  labels:
+    {{- include "nico-rest-api.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "nico-rest-api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nico-rest-api.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # 1000 is the `nvs` user the image declares. The image names it rather
+      # than giving a UID, which the kubelet cannot verify, so runAsNonRoot
+      # needs the number spelled out here.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: api
+          image: "{{ include "nico-rest-api.image" . }}"
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: {{ .Values.service.port }}
+              name: http
+            - containerPort: {{ .Values.service.metricsPort }}
+              name: metrics
+          env:
+            - name: CONFIG_FILE_PATH
+              value: /app/config.yaml
+            {{- range $k, $v := .Values.extraEnv }}
+            {{- if has $k (list "CONFIG_FILE_PATH") }}
+            {{- fail (printf "extraEnv must not override chart-managed variable %s" $k) }}
+            {{- end }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+            {{- if .Values.config.keycloak.enabled }}
+            - name: keycloak-secret
+              mountPath: /var/secrets/keycloak
+              readOnly: true
+            {{- end }}
+            - name: temporal-encryption-key
+              mountPath: /var/secrets/temporal
+              readOnly: true
+            - name: temporal-tls-certs
+              mountPath: /var/secrets/temporal/certs
+              readOnly: true
+            {{- if .Values.secrets.dbCreds }}
+            - name: db-creds
+              mountPath: /var/secrets/db
+              readOnly: true
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.config.powerProvisioning.dps.enabled }}
+            - name: dps-creds
+              mountPath: /var/secrets/dps
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ .Values.service.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.service.port }}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      volumes:
+        # Scratch space for the read-only root filesystem. Go puts temp files
+        # under /tmp, including the spill from oversized multipart requests.
+        - name: tmp
+          emptyDir: {}
+        - name: config
+          configMap:
+            name: {{ include "nico-rest-api.name" . }}-config
+        {{- if .Values.config.keycloak.enabled }}
+        - name: keycloak-secret
+          secret:
+            secretName: {{ .Values.secrets.keycloakClientSecret }}
+            items:
+              - key: keycloak-client-secret
+                path: client-secret
+        {{- end }}
+        - name: temporal-encryption-key
+          secret:
+            secretName: {{ .Values.secrets.temporalEncryptionKey }}
+            items:
+              - key: temporal-encryption-key
+                path: encryption-key
+        - name: temporal-tls-certs
+          secret:
+            secretName: {{ .Values.secrets.temporalClientCerts }}
+        {{- if .Values.secrets.dbCreds }}
+        - name: db-creds
+          secret:
+            secretName: {{ .Values.secrets.dbCreds }}
+            items:
+              - key: password
+                path: password
+        {{- end }}
+        {{- if .Values.config.powerProvisioning.dps.enabled }}
+        - name: dps-creds
+          secret:
+            secretName: {{ .Values.secrets.dpsCreds }}
+            items:
+              - key: token
+                path: token
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}

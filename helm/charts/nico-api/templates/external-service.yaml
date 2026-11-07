@@ -1,0 +1,39 @@
+{{- if .Values.externalService.enabled }}
+{{- $rawPort := .Values.externalService.port }}
+{{- if kindIs "invalid" $rawPort }}{{- $rawPort = 443 }}{{- end }}
+{{- $port := toString $rawPort }}
+{{- if or (not (regexMatch "^[1-9][0-9]{0,4}$" $port)) (gt (int $port) 65535) }}
+{{- fail (printf "nico-api: externalService.port must be a port number, got %q" $port) }}
+{{- end }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-api.name" . }}-external
+  namespace: {{ include "nico-api.namespace" . }}
+  labels:
+    {{- include "nico-api.labels" . | nindent 4 }}
+  {{- with .Values.externalService.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.externalService.type | default "LoadBalancer" }}
+  {{- with .Values.externalService.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ . }}
+  {{- end }}
+  {{- with .Values.externalService.ipFamilies }}
+  ipFamilies:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if .Values.externalService.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ .Values.externalService.externalTrafficPolicy }}
+  {{- end }}
+  internalTrafficPolicy: Local
+  selector:
+    {{- include "nico-api.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: {{ $port }}
+      targetPort: {{ .Values.service.grpc.port }}
+      name: grpc
+      protocol: TCP
+{{- end }}

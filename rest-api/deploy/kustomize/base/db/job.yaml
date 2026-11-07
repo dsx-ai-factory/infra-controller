@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Database migrations Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nico-rest-db-migration
+  labels:
+    app: nico-rest-db-migration
+spec:
+  ttlSecondsAfterFinished: 300
+  # Allow retries so init (single pg_isready) can succeed once postgres is up
+  backoffLimit: 30
+  template:
+    metadata:
+      labels:
+        app: nico-rest-db-migration
+    spec:
+      imagePullSecrets:
+        - name: image-pull-secret
+      restartPolicy: OnFailure
+      # 1000 is the `nvs` user the migrations image declares. `pg_isready` in
+      # the init container is a client binary that writes nothing, so it runs
+      # under the same UID without needing anything from its own image.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      initContainers:
+        # Wait for PostgreSQL to be ready using a single pg_isready check (relying on Job retries)
+        - name: wait-for-postgres
+          image: postgres:14.4-alpine
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - pg_isready
+            - -h
+            - postgres.postgres
+            - -p
+            - "5432"
+            - -U
+            - postgres
+      containers:
+        - name: migrations
+          image: nico-rest-db
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          env:
+            - name: PGHOST
+              value: postgres.postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: nico
+            - name: PGUSER
+              value: nico
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-creds
+                  key: password
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+      volumes:
+        # Scratch space for the read-only root filesystem. Go puts temp files
+        # under /tmp.
+        - name: tmp
+          emptyDir: {}

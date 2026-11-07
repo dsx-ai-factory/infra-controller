@@ -1,0 +1,10 @@
+apiVersion: v2
+name: nico-ssh-console-rs
+description: Helm chart for the NICo SSH Console RS component
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - nico
+  - ssh-console
+  - nico

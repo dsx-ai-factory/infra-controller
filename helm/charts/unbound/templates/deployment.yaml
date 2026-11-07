@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nico-unbound
+  namespace: {{ include "unbound.namespace" . }}
+  labels:
+    {{- include "unbound.labels" . | nindent 4 }}
+  annotations:
+    {{- include "unbound.annotations" . | nindent 4 }}
+    configmap.reloader.stakater.com/reload: "unbound-local-config, unbound-envvars"
+spec:
+  selector:
+    matchLabels:
+      {{- include "unbound.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- include "unbound.annotations" . | nindent 8 }}
+        prometheus.io/port: "9167"
+        prometheus.io/scrape: "1"
+      labels:
+        {{- include "unbound.podLabels" . | nindent 8 }}
+    spec:
+      {{- with (.Values.imagePullSecrets | default .Values.global.imagePullSecrets) }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: unbound
+          image: "{{ required "unbound.image.repository is required — set it in helm-prereqs/values/nico-core.yaml (unbound.image.repository)" .Values.image.repository }}:{{ required "unbound.image.tag is required — set it in helm-prereqs/values/nico-core.yaml (unbound.image.tag)" .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: dns-udp
+              containerPort: 53
+              protocol: UDP
+            - name: dns-tcp
+              containerPort: 53
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: 53
+          readinessProbe:
+            tcpSocket:
+              port: 53
+          volumeMounts:
+            - name: local-config
+              mountPath: /etc/unbound/local.conf.d
+            - name: control-keys
+              mountPath: /etc/unbound/keys
+          envFrom:
+            - configMapRef:
+                name: unbound-envvars
+        {{- if .Values.exporter.enabled }}
+        - name: unbound-metrics
+          image: "{{ required "unbound.exporterImage.repository is required when exporter.enabled — set unbound.exporterImage.repository, or set unbound.exporter.enabled=false for a public/stock unbound image" .Values.exporterImage.repository }}:{{ required "unbound.exporterImage.tag is required when exporter.enabled — set unbound.exporterImage.tag" .Values.exporterImage.tag }}"
+          imagePullPolicy: {{ .Values.exporterImage.pullPolicy }}
+          env:
+            - name: KEYS_DIR
+              value: /etc/unbound/keys
+          volumeMounts:
+            - name: control-keys
+              mountPath: /etc/unbound/keys
+              readOnly: true
+          ports:
+            - name: metrics
+              containerPort: 9167
+              protocol: TCP
+        {{- end }}
+      volumes:
+        - name: local-config
+          configMap:
+            name: unbound-local-config
+        - name: control-keys
+          emptyDir: {}

@@ -1,0 +1,223 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  labels:
+    app.kubernetes.io/part-of: dpf-operator-controller-manager
+    dpu.nvidia.com/component: dpf-operator-controller-manager
+  name: nodesriovdevicepluginconfigs.noderesources.dpu.nvidia.com
+spec:
+  group: noderesources.dpu.nvidia.com
+  names:
+    kind: NodeSRIOVDevicePluginConfig
+    listKind: NodeSRIOVDevicePluginConfigList
+    plural: nodesriovdevicepluginconfigs
+    singular: nodesriovdevicepluginconfig
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: NodeSRIOVDevicePluginConfig is the Schema for the nodesriovdevicepluginconfigs
+          API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: NodeSRIOVDevicePluginConfigSpec defines the desired state
+              of NodeSRIOVDevicePluginConfig
+            properties:
+              devicePluginResources:
+                description: DevicePluginResources is the list of device plugin resource
+                  configurations.
+                items:
+                  description: DevicePluginResource defines a single device plugin
+                    resource configuration.
+                  properties:
+                    name:
+                      description: |-
+                        Name is the endpoint resource name for the device plugin.
+                        Should contain only alphanumeric characters, underscores and hyphens.
+                        The full extended resource name will be constructed as resource-prefix/name.
+                        Example: pods_vf, ovnk_mgmt_vf, pods_sf
+                      minLength: 1
+                      pattern: ^[a-zA-Z0-9_-]+$
+                      type: string
+                    options:
+                      description: Options contains additional options for the device
+                        plugin resource.
+                      properties:
+                        isRdma:
+                          description: IsRdma indicates whether RDMA is enabled for
+                            this resource.
+                          type: boolean
+                        needVhostNet:
+                          description: |-
+                            NeedVhostNet mounts /dev/vhost-net and /dev/net/tun with the allocated devices.
+                            Defaults to false.
+                          type: boolean
+                      type: object
+                    ranges:
+                      description: |-
+                        Ranges specifies the function ranges on PFs to be included in this resource.
+                        For type sf, each range must set both start and end.
+                      items:
+                        description: |-
+                          FunctionRange defines a range of functions (Virtual Functions or Scalable Functions)
+                          on a Physical Function.
+                        properties:
+                          end:
+                            description: |-
+                              End is the ending function index (inclusive).
+                              If not set, the range extends to the last function of this type on the PF.
+                              Required when type is sf. SF ranges are contiguous: every index from
+                              start to end (inclusive) must exist on the PF.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          pfIndex:
+                            description: PFIndex is the index of the Physical Function.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          start:
+                            description: |-
+                              Start is the starting function index (inclusive).
+                              If not set, the range starts from index 0.
+                              Required when type is sf. SF ranges are contiguous: every index from
+                              start to end (inclusive) must exist on the PF.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                        required:
+                        - pfIndex
+                        type: object
+                        x-kubernetes-validations:
+                        - message: start must be less than or equal to end
+                          rule: '!has(self.start) || !has(self.end) || self.start
+                            <= self.end'
+                      maxItems: 1024
+                      minItems: 1
+                      type: array
+                    resourcePrefix:
+                      description: |-
+                        ResourcePrefix is the resource prefix used by the device plugin to prefix the resource name.
+                        If not set, the default resource prefix will be used.
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                      type: string
+                    type:
+                      description: Type specifies the type of the device plugin resource.
+                      enum:
+                      - vf
+                      - sf
+                      type: string
+                  required:
+                  - name
+                  - ranges
+                  - type
+                  type: object
+                  x-kubernetes-validations:
+                  - message: start and end must be set when type is sf
+                    rule: self.type != 'sf' || self.ranges.all(r, has(r.start) &&
+                      has(r.end))
+                maxItems: 64
+                minItems: 1
+                type: array
+            required:
+            - devicePluginResources
+            type: object
+          status:
+            description: NodeSRIOVDevicePluginConfigStatus defines the observed state
+              of NodeSRIOVDevicePluginConfig
+            properties:
+              conditions:
+                description: Conditions exposes the current state of the NodeSRIOVDevicePluginConfig.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                description: ObservedGeneration records the Generation observed on
+                  the object the last time it was patched.
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

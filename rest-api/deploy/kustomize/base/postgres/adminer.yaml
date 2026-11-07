@@ -1,0 +1,71 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Adminer - Lightweight PostgreSQL Admin UI
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adminer
+  labels:
+    app: adminer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: adminer
+  template:
+    metadata:
+      labels:
+        app: adminer
+    spec:
+      imagePullSecrets:
+        - name: image-pull-secret
+      containers:
+        - name: adminer
+          image: adminer:4.8.1
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: ADMINER_DEFAULT_SERVER
+              value: postgres.postgres
+            - name: ADMINER_DESIGN
+              value: nette
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adminer
+  labels:
+    app: adminer
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8081
+      targetPort: 8080
+      name: http
+  selector:
+    app: adminer
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: adminer-nodeport
+  labels:
+    app: adminer
+spec:
+  type: NodePort
+  ports:
+    - port: 8081
+      targetPort: 8080
+      nodePort: 30081
+      name: http
+  selector:
+    app: adminer

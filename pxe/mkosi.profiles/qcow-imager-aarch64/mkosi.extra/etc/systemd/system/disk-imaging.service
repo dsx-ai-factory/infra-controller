@@ -1,0 +1,13 @@
+[Unit]
+Description=Disk imaging service
+After=network-online.target systemd-time-wait-sync.service time-sync.target
+Wants=network-online.target systemd-time-wait-sync.service
+
+[Service]
+Type=idle
+ExecStart=/opt/forge/disk_imaging.sh
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

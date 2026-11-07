@@ -1,0 +1,194 @@
+# =============================================================================
+# RACK VALIDATION SCENARIO DEFINITION
+# =============================================================================
+#
+# This file defines a complete rack validation scenario for RVS
+# (Rack Validation Service).
+#
+# It specifies:
+#   - Which rack model and SOT release this scenario applies to
+#   - The OS image to boot on nodes
+#   - Artifacts (drivers, scripts, tests) to pre-cache
+#   - Setup steps to prepare nodes for testing
+#   - Test definitions
+#   - Teardown/cleanup steps
+#
+# Topology Information:
+#   RVS exposes rack topology (partitions, node roles, machine IDs, etc.)
+#   to all executables via environment variables and files. The config
+#   itself does not encode topology -- scripts decide how to use it.
+#   TBD: document the exact env vars and file contracts.
+#
+# Execution Model:
+#   1. Artifacts are pre-cached before any node boots.
+#   2. Setup steps run in order. If any step fails, validation aborts.
+#   3. Test steps run in order. Each result is recorded independently.
+#   4. Teardown steps always run (regardless of test pass/fail).
+#
+# Scripts are free to use any execution backend internally (SLURM, MPI,
+# direct SSH, etc.) -- RVS does not care.
+#
+# Expression Languages Used:
+#   - JSONPath: for extracting artifact URLs from SOT JSON (`sotpath`)
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# RACK IDENTIFICATION
+# -----------------------------------------------------------------------------
+# RVS uses this section to determine which racks this scenario applies to.
+# A scenario is only executed on racks matching both model AND sot_release.
+
+[rack]
+
+# The rack model identifier (e.g., "gb200nvl", "dgx", etc.)
+# Must match the rack model registered in Carbide's inventory.
+model = "gb200nvl"
+
+# The SOT (Source of Truth) release version this scenario is designed for.
+# Artifacts and configurations are tied to specific SOT releases.
+sot_release = "1.2.5"
+
+# -----------------------------------------------------------------------------
+# OS IMAGE
+# -----------------------------------------------------------------------------
+# Defines the ephemeral OS image that RVS will distribute through
+# CreateInstance APIs on all nodes participating in rack validation.
+# This image is (chain-?)loaded via PXE boot.
+
+[os]
+
+# URI to the OS image archive. RVS will cache this and serve it to nodes.
+uri = "http://os.archlinuxarm.org/os/ArchLinuxARM-armv7-latest.tar.gz"
+
+# =============================================================================
+# ARTIFACTS
+# =============================================================================
+# Artifacts are files (drivers, scripts, binaries, etc.) that RVS will
+# pre-cache locally and make available at /rvs-cache/<output>.
+#
+# Each artifact specifies:
+#   - `name`    -- unique identifier for this artifact
+#   - `output`  -- local filename under /rvs-cache/
+#   - `uri`     -- direct URL to download from, OR
+#   - `sotpath` -- JSONPath expression to extract the URL from SOT JSON
+#
+# All artifacts are downloaded before any node boots, ensuring fast
+# local access during setup and test execution.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Generic dependency blob -- prepared for this particular rack model.
+# This is the preferred way of dealing with complex dependency trees:
+# bundle everything into a single archive.
+# -----------------------------------------------------------------------------
+
+[[artifacts]]
+name = "deps"
+uri = "http://internal.nvidia.com/rvs/gb200_1.2.5.tar.gz"
+output = "deps.tar.gz"
+
+# -----------------------------------------------------------------------------
+# Install script -- knows how to unpack and install the deps blob.
+# -----------------------------------------------------------------------------
+
+[[artifacts]]
+name = "install_deps"
+uri = "http://internal.nvidia.com/carbide/extra_scripts/gb200nvl_install.sh"
+output = "install.sh"
+
+# -----------------------------------------------------------------------------
+# RM Driver -- extracted from SOT using JSONPath.
+#
+# The URL is dynamically resolved from the SOT JSON at scenario load time.
+# JSONPath navigates the nested SOT structure to find the download location
+# for the RM Driver component matching the specified board and architecture.
+#
+# This mechanism is useful when artifacts must be pinned to the exact
+# versions shipped in a given SOT release.
+# -----------------------------------------------------------------------------
+
+[[artifacts]]
+name = "rm_driver"
+sotpath = """\
+$\
+.BoardSKUs[?@.Name == 'P4975-Bianca']\
+.Components\
+.Software[?@.Component == 'RM Driver']\
+.Locations[?@.Architecture == 'aarch64']\
+"""
+output = "rm_driver.run"
+
+# -----------------------------------------------------------------------------
+# IMEX -- another SOT-sourced artifact.
+# -----------------------------------------------------------------------------
+
+[[artifacts]]
+name = "imex"
+sotpath = """\
+$\
+.BoardSKUs[?@.Name == 'P4975-Bianca']\
+.Components\
+.Software[?@.Component == 'IMEX']\
+.Locations[?@.Architecture == 'aarch64']\
+"""
+output = "imex.run"
+
+# -----------------------------------------------------------------------------
+# Test scripts -- direct URIs.
+# The naming convention can hint at the backend used internally
+# (e.g., "nvlink_slurm_test.sh" uses SLURM, but RVS doesn't care).
+# -----------------------------------------------------------------------------
+
+[[artifacts]]
+name = "test_nvlink"
+uri = "http://internal.nvidia.com/carbide/test_script/nvlink_slurm_test.sh"
+output = "nvlink_slurm_test.sh"
+
+[[artifacts]]
+name = "test_basic"
+uri = "http://internal.nvidia.com/carbide/test_script/nv_basic.sh"
+output = "nv_basic.sh"
+
+# =============================================================================
+# SETUP
+# =============================================================================
+# Setup steps run in order BEFORE any tests.
+# If any step fails, the entire rack validation aborts (teardown still runs).
+#
+# Each step specifies a single `execute` command. RVS exposes topology
+# information via env vars and files -- scripts use that however they
+# see fit.
+# =============================================================================
+
+[[setup]]
+execute = "/rvs-cache/install.sh"
+
+# =============================================================================
+# TESTS
+# =============================================================================
+# Test steps run in order. Each is an independent test whose pass/fail
+# result is recorded in the database under `name`.
+#
+# Like setup, each step is a single `execute` command with topology info
+# available via env vars and files.
+# =============================================================================
+
+[[test]]
+name = "nv_basic"
+execute = "/rvs-cache/nv_basic.sh"
+
+[[test]]
+name = "nvlink_bandwidth"
+execute = "/rvs-cache/nvlink_slurm_test.sh"
+
+# =============================================================================
+# TEARDOWN
+# =============================================================================
+# Teardown steps run in order AFTER all tests complete.
+# They ALWAYS run, regardless of whether tests passed or failed.
+# Used for cleanup: collecting logs, resetting state, removing temp files.
+# =============================================================================
+
+[[teardown]]
+execute = "echo 'cleanup done'"

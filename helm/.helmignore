@@ -1,0 +1,12 @@
+# Patterns to ignore when building packages.
+.git
+.gitignore
+.helmignore
+*.md
+examples/
+# Standalone REST charts live under helm/rest/ but are published separately
+# (see rest-helm-workflows.yml), not bundled into the nico umbrella chart.
+rest/
+# nico-flow is likewise a standalone release (setup.sh phase 7h), not an
+# umbrella subchart - keep it out of the packaged nico chart.
+nico-flow/

@@ -1,0 +1,301 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -o pipefail
+
+PCR=16
+OUTCONSOLE=""
+ROOTFS_INFO_FILE="/run/nextroot/rootfs_info.txt"
+ROOTFS_INFO_TMP="/tmp/rootfs_info.txt"
+ROOTFS_DIGEST_FILE="/tmp/rootfs.digest"
+ROOTFS_DIGEST_FIFO="/tmp/rootfs.digest.fifo"
+ROOTFS_IMAGE_DIR="/run/scout-rootfs"
+ROOTFS_IMAGE_FILE="${ROOTFS_IMAGE_DIR}/scout.squashfs"
+SQUASHFS_LOWER="/run/scout-rootfs.lower"
+OVERLAY_ROOT="/run/scout-rootfs.overlay"
+OVERLAY_UPPER="${OVERLAY_ROOT}/upper"
+OVERLAY_WORK="${OVERLAY_ROOT}/work"
+CURL_ERR="/tmp/rootfs.curl.err"
+ZSTD_ERR="/tmp/rootfs.zstd.err"
+CPIO_ERR="/tmp/rootfs.cpio.err"
+MOUNT_ERR="/tmp/rootfs.mount.err"
+
+NEXTROOT_CLOUD_CFG_DIR="/run/nextroot/etc/cloud/cloud.cfg.d"
+NEXTROOT_CLOUD_NETWORK_CFG="${NEXTROOT_CLOUD_CFG_DIR}/99-forge-network.cfg"
+
+send_msg() {
+	for dest in ${OUTCONSOLE}
+	do
+		echo "$1" >${dest} 2>/dev/null
+	done
+}
+
+# Default image will be scout, from the nginx container
+if [ "$(grep -c 'newrootfs=' /proc/cmdline)" -eq 1 ]
+then
+    newrootfsurl=$(cat /proc/cmdline | sed -e 's/.*newrootfs=//' -e 's/ .*//')
+else
+    arch=$(uname -m)
+    newrootfsurl="http://carbide-static-pxe.forge/public/blobs/internal/${arch}/scout.squashfs"
+fi
+
+# Respect the console info from the kernel command line
+for opt in $(cat /proc/cmdline)
+do
+	if [ "$(echo ${opt} | grep -c '^console=')" -eq 1 ]
+	then
+		dest=$(echo "${opt}" | sed -e 's/console=//' -e 's/,.*//')
+		if [ "$(echo ${dest} | grep -c '^/dev/')" -eq 1 ]
+		then
+			OUTCONSOLE="${OUTCONSOLE} ${dest}"
+		else
+			OUTCONSOLE="${OUTCONSOLE} /dev/${dest}"
+		fi
+	fi
+done
+send_msg "LOADER: Starting V1.2"
+
+detect_pcr_hash() {
+    PCR_HASH_ALG=""
+    PCR_HASH_CMD=""
+    if [ -e "/sys/class/tpm/tpm0/pcr-sha256/${PCR}" ]
+    then
+      PCR_HASH_ALG="sha256"
+      PCR_HASH_CMD="sha256sum"
+    elif [ -e "/sys/class/tpm/tpm0/pcr-sha384/${PCR}" ]
+    then
+      PCR_HASH_ALG="sha384"
+      PCR_HASH_CMD="sha384sum"
+    fi
+}
+
+measure_rootfs() {
+    if [ -n "${PCR_HASH_ALG}" ]
+    then
+      send_msg "LOADER: Measuring to PCR ${PCR_HASH_ALG}/${PCR}"
+      tpm2_pcrextend "${PCR}:${PCR_HASH_ALG}=$(<"${ROOTFS_DIGEST_FILE}")"
+    else
+      send_msg "LOADER: Unable to find PCR ${PCR}, is TPM installed and configured correctly?"
+    fi
+}
+
+prepare_cpio_rootfs() {
+    local rootfsurl="$1"
+
+    mkdir -p /nextroot /run/nextroot
+    if ! mountpoint -q /run/nextroot
+    then
+        mount -o bind,suid /nextroot /run/nextroot || return 1
+    fi
+    cd /run/nextroot || return 1
+
+    if [ -n "${PCR_HASH_CMD}" ]
+    then
+        rm -f "${ROOTFS_DIGEST_FILE}" "${ROOTFS_DIGEST_FIFO}"
+        mkfifo "${ROOTFS_DIGEST_FIFO}"
+        (
+            "${PCR_HASH_CMD}" < "${ROOTFS_DIGEST_FIFO}" | awk '{print $1}' > "${ROOTFS_DIGEST_FILE}"
+        ) &
+        HASH_PID=$!
+
+        curl -sSf -o - "${rootfsurl}" 2> "${CURL_ERR}" | tee "${ROOTFS_DIGEST_FIFO}" | zstd -d 2> "${ZSTD_ERR}" | cpio -i 2> "${CPIO_ERR}"
+        PIPE_RET=$?
+        wait "${HASH_PID}"
+        HASH_RET=$?
+        rm -f "${ROOTFS_DIGEST_FIFO}"
+
+        if (( ${PIPE_RET} != 0 ))
+        then
+            return "${PIPE_RET}"
+        fi
+        return "${HASH_RET}"
+    fi
+
+    curl -sSf -o - "${rootfsurl}" 2> "${CURL_ERR}" | zstd -d 2> "${ZSTD_ERR}" | cpio -i 2> "${CPIO_ERR}"
+}
+
+cleanup_squashfs_mounts() {
+    umount /run/nextroot 2>/dev/null || true
+    umount "${SQUASHFS_LOWER}" 2>/dev/null || true
+    umount "${OVERLAY_ROOT}" 2>/dev/null || true
+    rm -rf "${SQUASHFS_LOWER}" "${OVERLAY_ROOT}"
+    rm -f "${ROOTFS_IMAGE_FILE}"
+}
+
+ensure_loop_devices() {
+    [ -e /dev/loop-control ] || mknod /dev/loop-control c 10 237 2>/dev/null || true
+    for devnum in 0 1 2 3
+    do
+        [ -e "/dev/loop${devnum}" ] || mknod "/dev/loop${devnum}" b 7 "${devnum}" 2>/dev/null || true
+    done
+}
+
+prepare_squashfs_rootfs() {
+    local rootfsurl="$1"
+
+    cleanup_squashfs_mounts
+    rm -f "${ROOTFS_DIGEST_FILE}"
+
+    # /run is limited to 20% of RAM, which can be smaller than Scout itself.
+    # A separate tmpfs retains the image across soft reboot and uses the
+    # normal 50% limit without reserving that memory up front.
+    mkdir -p "${ROOTFS_IMAGE_DIR}" || return 1
+    if ! mountpoint -q "${ROOTFS_IMAGE_DIR}"
+    then
+        mount -t tmpfs -o mode=0700,nodev,nosuid,noexec tmpfs "${ROOTFS_IMAGE_DIR}" 2> "${MOUNT_ERR}" || return 1
+    fi
+
+    curl -sSf -o "${ROOTFS_IMAGE_FILE}" "${rootfsurl}" 2> "${CURL_ERR}"
+    if (( $? != 0 ))
+    then
+        return 1
+    fi
+
+    if [ -n "${PCR_HASH_CMD}" ]
+    then
+        "${PCR_HASH_CMD}" "${ROOTFS_IMAGE_FILE}" | awk '{print $1}' > "${ROOTFS_DIGEST_FILE}"
+    fi
+
+    modprobe loop 2>/dev/null || true
+    modprobe squashfs 2>/dev/null || true
+    modprobe overlay 2>/dev/null || true
+    ensure_loop_devices
+
+    mkdir -p "${SQUASHFS_LOWER}" "${OVERLAY_ROOT}" /run/nextroot
+    mount -t squashfs -o loop,ro "${ROOTFS_IMAGE_FILE}" "${SQUASHFS_LOWER}" 2> "${MOUNT_ERR}"
+    if (( $? != 0 ))
+    then
+        return 1
+    fi
+
+    mount -t tmpfs -o mode=0755 tmpfs "${OVERLAY_ROOT}" 2> "${MOUNT_ERR}"
+    if (( $? != 0 ))
+    then
+        return 1
+    fi
+
+    mkdir -p "${OVERLAY_UPPER}" "${OVERLAY_WORK}"
+    mount -t overlay overlay \
+        -o "lowerdir=${SQUASHFS_LOWER},upperdir=${OVERLAY_UPPER},workdir=${OVERLAY_WORK}" \
+        /run/nextroot 2> "${MOUNT_ERR}"
+}
+
+prepare_rootfs() {
+    local rootfsurl="$1"
+
+    : > "${CURL_ERR}"
+    : > "${ZSTD_ERR}"
+    : > "${CPIO_ERR}"
+    : > "${MOUNT_ERR}"
+
+    case "${rootfsurl}" in
+        *.cpio|*.cpio\?*|*.cpio.zst|*.cpio.zst\?*|*.cpio.zstd|*.cpio.zstd\?*)
+            prepare_cpio_rootfs "${rootfsurl}"
+            ;;
+        *)
+            prepare_squashfs_rootfs "${rootfsurl}"
+            ;;
+    esac
+}
+
+# We will use "none" as a filename to stay in this image for debugging
+if [ "${newrootfsurl}" != "none" ]
+then
+    detect_pcr_hash
+
+    DONE=0
+    NIC_FILTERED=0
+    send_msg "LOADER: Downloading ${newrootfsurl}"
+    while (( ${DONE} != 1 ))
+    do
+      if (( ${NIC_FILTERED} != 1 )) && [ -x /opt/forge/forge-scout-network.sh ]
+      then
+        send_msg "LOADER: Selecting boot NIC from kernel mac= parameter"
+        if /opt/forge/forge-scout-network.sh
+        then
+          NIC_FILTERED=1
+        else
+          send_msg "LOADER: Scout NIC filtering incomplete; retrying"
+        fi
+      fi
+
+      # We store the HTTP HEAD info for the script which will check for updates later.
+      curl -sSf --head "${newrootfsurl}" 2> "${CURL_ERR}" | sed 's/\r//g' > "${ROOTFS_INFO_TMP}"
+      if (( $? == 0 ))
+      then
+        prepare_rootfs "${newrootfsurl}"
+        if (( $? == 0 ))
+        then
+          if ! /opt/forge/forge-scout-network.sh handoff /run/nextroot
+          then
+            send_msg "LOADER: Failed to prepare Scout networking in new root; retrying"
+            sleep 1
+            continue
+          fi
+          cp "${ROOTFS_INFO_TMP}" "${ROOTFS_INFO_FILE}"
+          measure_rootfs
+          DONE=1
+        else
+          send_msg "LOADER: Download failed:"
+          send_msg "LOADER: curl error: $(<"${CURL_ERR}")"
+          send_msg "LOADER: zstd error: $(<"${ZSTD_ERR}")"
+          send_msg "LOADER: cpio error: $(<"${CPIO_ERR}")"
+          send_msg "LOADER: mount error: $(<"${MOUNT_ERR}")"
+          sleep 1
+        fi
+      else
+          send_msg "LOADER: Failed to gather root filesystem information:"
+          send_msg "LOADER: curl error: $(<"${CURL_ERR}")"
+          sleep 1
+      fi
+    done
+
+    send_msg "LOADER: Disabling cloud-init network configuration in new root"
+    if mkdir -p "${NEXTROOT_CLOUD_CFG_DIR}" &&
+       printf '%s\n' \
+         'network:' \
+         '  config: disabled' > "${NEXTROOT_CLOUD_NETWORK_CFG}.tmp" &&
+       chmod 0644 "${NEXTROOT_CLOUD_NETWORK_CFG}.tmp" &&
+       mv -f "${NEXTROOT_CLOUD_NETWORK_CFG}.tmp" "${NEXTROOT_CLOUD_NETWORK_CFG}"
+    then
+      send_msg "LOADER: Disabled cloud-init network configuration in new root"
+    else
+      rm -f "${NEXTROOT_CLOUD_NETWORK_CFG}.tmp"
+      send_msg "LOADER: Failed to disable cloud-init network configuration; continuing"
+    fi
+
+    send_msg "LOADER: Cleaning up & switching"
+    rm -f "${ROOTFS_DIGEST_FILE}" "${ROOTFS_DIGEST_FIFO}" "${ROOTFS_INFO_TMP}"
+    # We need this so that subsequent reboots don't call soft-reboot and put us in a loop
+    echo "export SYSTEMCTL_SKIP_AUTO_SOFT_REBOOT=1" >>/run/nextroot/etc/environment
+
+    send_msg "LOADER: Closing D-Bus before soft reboot"
+    if systemctl stop dbus.service dbus.socket
+    then
+      send_msg "LOADER: D-Bus socket closed"
+    else
+      send_msg "LOADER: Failed to close D-Bus socket; continuing"
+    fi
+
+    systemctl soft-reboot
+elif [ -x /opt/forge/forge-scout-network.sh ]
+then
+    # Early policy also applies when the loader is kept as a debug image.
+    # Restore broad networking here if its selected NIC never becomes usable.
+    send_msg "LOADER: Checking boot NIC while staying in debug image"
+    /opt/forge/forge-scout-network.sh ||
+        send_msg "LOADER: Scout NIC filtering incomplete; staying in debug image"
+fi

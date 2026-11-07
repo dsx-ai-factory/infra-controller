@@ -1,0 +1,22 @@
+{
+   "id": "0b1c53a0-a27e-4714-98d7-0cd3bc579db2",
+   "name": "demo-vpc",
+   "description": "Demo tenant VPC",
+   "org": "tenant-org-name",
+   "infrastructureProviderId": "16060041-f146-43fe-8c82-be48460b5583",
+   "tenantId": "aaf3cb83-8785-4265-a3bd-61e828f87db8",
+   "siteId": "bd4692bd-da95-410e-911a-d492fe2d35f8",
+   "controllerVpcId": null,
+   "networkVirtualizationType": "FNN",
+   "status": "Pending",
+   "statusHistory": [
+      {
+      "status": "Pending",
+      "message": "received vpc creation request, pending pairing",
+      "created": "2023-07-06T16:20:43.335989Z",
+      "updated": "2023-07-06T16:20:43.335989Z"
+      }
+   ],
+   "created": "2023-07-06T16:20:43.335989Z",
+   "updated": "2023-07-06T16:20:43.335989Z"
+}

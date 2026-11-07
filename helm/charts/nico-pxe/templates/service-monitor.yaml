@@ -1,0 +1,14 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "nico-pxe.name" . }}-metrics
+  namespace: {{ include "nico-pxe.namespace" . }}
+  labels:
+    {{- include "nico-pxe.labels" . | nindent 4 }}
+    app.kubernetes.io/metrics: {{ include "nico-pxe.name" . }}
+    app: {{ include "nico-pxe.name" . }}
+    prometheus: nico-monitoring
+spec:
+  {{- include "nico-pxe.serviceMonitorSpec" (dict "name" (include "nico-pxe.name" .) "port" "http" "monitor" .Values.serviceMonitor "namespace" (include "nico-pxe.namespace" .)) | nindent 2 }}
+{{- end }}

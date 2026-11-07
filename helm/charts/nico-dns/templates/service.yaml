@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-dns.name" . }}
+  namespace: {{ include "nico-dns.namespace" . }}
+  labels:
+    {{- include "nico-dns.labels" . | nindent 4 }}
+spec:
+  ipFamilyPolicy: PreferDualStack
+  selector:
+    {{- include "nico-dns.selectorLabels" . | nindent 4 }}
+  ports:
+    {{- range .Values.service.ports }}
+    - port: {{ .port }}
+      name: {{ .name }}
+      protocol: {{ .protocol }}
+    {{- end }}

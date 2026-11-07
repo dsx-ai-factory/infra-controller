@@ -1,0 +1,67 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+syntax = "proto3";
+
+package agent_local;
+
+// Local (on-DPU) API served by forge-dpu-agent over a unix domain socket
+// (the agent's `local-api-socket` setting, which defaults to a dedicated run/
+// subdirectory of the shared credentials directory, so consumers can mount the
+// socket read-write while the credentials stay read-only). The literal default
+// lives in DEFAULT_AGENT_LOCAL_SOCKET and is deliberately not repeated here:
+// REST proto normalization rewrites vendor names inside comments, which would
+// silently corrupt an inlined filesystem path into one that does not exist.
+// This is the consolidation point for
+// agent <-> co-located-service communication: services that today mount the
+// machine cert/key (or synced files) to talk to nico-api can instead ask the
+// agent, and future local needs should add RPCs here rather than new
+// sockets, ports, or file drops.
+service AgentLocal {
+  // Returns the current node-auth bearer JWT, minted by the agent from the
+  // machine's client-certificate key (issue #355). Callers present it as
+  // `Authorization: Bearer <token>` to nico-api. Only the agent ever touches
+  // the private key. The empty request carries neither a caller identity nor
+  // a current token; access is controlled by the local socket's mount and
+  // permissions.
+  //
+  // Freshness: the returned token is valid at the moment of the call but is
+  // NOT freshly minted per request -- the agent serves a cached token and
+  // re-mints only once it nears expiry, so successive calls usually return the
+  // identical string. A cached token is returned only with more than 60
+  // seconds remaining; otherwise the agent mints a replacement with its
+  // normal 300-second lifetime. `expires_at` is therefore the only thing a
+  // caller may rely on: re-fetch before it, and do not assume a new call
+  // yields a new token or a reset lifetime. Callers that need continuous
+  // coverage should refresh with a margin rather than at the boundary.
+  //
+  // If the agent cannot mint a token, it returns UNAVAILABLE. This method
+  // applies no server-side deadline or retry policy; callers choose their own.
+  rpc GetNodeToken(GetNodeTokenRequest) returns (GetNodeTokenResponse);
+}
+
+message GetNodeTokenRequest {
+  // Intentionally empty. The connection to the protected local socket is the
+  // authorization boundary.
+}
+
+message GetNodeTokenResponse {
+  // The signed ES256 JWT.
+  string token = 1;
+  // Unix seconds when the token expires.
+  uint64 expires_at = 2;
+}

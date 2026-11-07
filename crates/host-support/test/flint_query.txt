@@ -1,0 +1,24 @@
+Image type:            FS4
+FW Version:            24.35.2000
+FW Release Date:       24.11.2022
+Part Number:           MBF2H536C-CECO_Ax_Bx
+Description:           BlueField-2 P-Series DPU 100GbE Dual-Port QSFP56; integrated BMC; PCIe Gen4 x16; Secure Boot Enabled; Crypto Enabled; 32GB on-board DDR; 1GbE OOB management; FHHL
+Product Version:       24.35.2000
+Rom Info:              type=UEFI Virtio net version=21.4.10 cpu=AMD64,AARCH64
+type=UEFI Virtio blk version=22.4.10 cpu=AMD64,AARCH64
+type=UEFI version=14.28.16 cpu=AMD64,AARCH64
+type=PXE version=3.6.805 cpu=AMD64
+Description:           UID                GuidsNumber
+Base GUID:             b83fd20300909694        16
+Base MAC:              b83fd2909694            16
+Image VSD:             N/A
+Device VSD:            N/A
+PSID:                  MT_0000000768
+Security Attributes:   secure-fw
+Default Update Method: fw_ctrl
+Life cycle:            GA SECURED
+Secure Boot Capable:   Enabled
+EFUSE Security Ver:    0
+Image Security Ver:    0
+Security Ver Program:  Manually ; Disabled
+

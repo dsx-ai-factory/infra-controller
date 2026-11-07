@@ -1,0 +1,56 @@
+suite: certificate dnsNames and uris configurability
+templates:
+  - certificate.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: generates dnsNames and uris from serviceName and namespace by default
+    asserts:
+      - isKind:
+          of: Certificate
+      - equal:
+          path: metadata.name
+          value: nico-dhcp-certificate
+      - equal:
+          path: spec.dnsNames
+          value:
+            - nico-dhcp.nico-system.svc.cluster.local
+            - nico-dhcp.nico-system
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://nico.local/nico-system/sa/nico-dhcp
+
+  - it: fully overrides the generated dnsNames and uris when set
+    set:
+      certificate:
+        dnsNames:
+          - nico-dhcp.override.example.com
+        uris:
+          - spiffe://override.local/nico-system/sa/nico-dhcp
+    asserts:
+      - equal:
+          path: spec.dnsNames
+          value:
+            - nico-dhcp.override.example.com
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://override.local/nico-system/sa/nico-dhcp
+
+  - it: nameOverride flips the certificate resource name, dnsNames, and SPIFFE URI to the override
+    set:
+      nameOverride: carbide-dhcp
+    asserts:
+      - equal:
+          path: metadata.name
+          value: carbide-dhcp-certificate
+      - equal:
+          path: spec.dnsNames
+          value:
+            - carbide-dhcp.nico-system.svc.cluster.local
+            - carbide-dhcp.nico-system
+      - equal:
+          path: spec.uris
+          value:
+            - spiffe://nico.local/nico-system/sa/carbide-dhcp

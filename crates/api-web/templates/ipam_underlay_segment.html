@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block title %}IPAM / Underlay / {{ segment_name }}{% endblock %}
+
+{% block content %}
+<h1>IPAM &rsaquo; <a href="/admin/ipam/underlay">Underlay Networks</a> &rsaquo; {{ segment_name }}</h1>
+
+<table class="detailsview">
+	<tr><td>Segment</td><td>{{ segment_name }}</td></tr>
+	<tr><td>Type</td><td>{{ segment_type }}</td></tr>
+	<tr><td>Prefixes</td><td>{% for prefix in segment_prefixes %}{{ prefix }}{% if !loop.last %}<br>{% endif %}{% endfor %}</td></tr>
+	<tr><td>Segment ID</td><td><a href="/admin/network-segment/{{ segment_id }}">{{ segment_id }}</a></td></tr>
+</table>
+
+<h2>Allocated Addresses</h2>
+<p>{{ addresses.len() }} address(es) allocated.</p>
+
+<table class="sortable overview">
+	<thead>
+		<tr>
+			<th>IP Address</th>
+			<th>MAC Address</th>
+			<th>Machine ID</th>
+			<th>Hostname</th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for addr in addresses %}
+			<tr>
+				<td><a href="/admin/search?q={{ addr.address }}">{{ addr.address }}</a></td>
+				<td>{{ addr.mac_address }}</td>
+				<td>{% if !addr.machine_id.is_empty() %}<a href="/admin/machine/{{ addr.machine_id }}">{{ addr.machine_id }}</a>{% endif %}</td>
+				<td>{{ addr.hostname }}</td>
+			</tr>
+		{% endfor %}
+	</tbody>
+</table>
+{% endblock %}

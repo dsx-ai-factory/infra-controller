@@ -1,0 +1,46 @@
+# `nico-admin-cli redfish get-chassis-all`
+
+*[Hardware commands](../../hardware.md) › [redfish](./redfish.md) › **get-chassis-all***
+
+## NAME
+
+nico-admin-cli-redfish-get-chassis-all - List Chassis
+
+## SYNOPSIS
+
+```text
+nico-admin-cli redfish get-chassis-all [--extended]
+[--sort-by] [-h|--help]
+```
+
+## DESCRIPTION
+
+List Chassis
+
+## OPTIONS
+
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
+`--sort-by <SORT_BY> [default: primary-id]`
+
+Sort output by specified field
+
+*Possible values:*
+
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
+
+`-h, --help`
+
+Print help (see a summary with -h)
+
+---
+
+**Related:** [Hardware commands](../../hardware.md) · [CLI reference index](../../README.md)

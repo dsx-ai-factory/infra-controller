@@ -1,0 +1,111 @@
+# =============================================================================
+# metallb-config.yaml — MetalLB site configuration
+#
+# Applied by setup.sh Phase 1c after MetalLB is installed.
+#
+# SITE TEMPLATE — every site-specific value below ships BLANK on purpose.
+# Fill in your VIP CIDRs and an advertisement mode (BGP or L2) before running
+# setup.sh. preflight.sh fails while the pools have no addresses or no
+# advertisement mode is configured.
+#
+# Fields you MUST set per site:
+#   IPAddressPool.spec.addresses   — your VIP CIDRs
+#   BGPPeer.spec.myASN             — your cluster-side ASN
+#   BGPPeer.spec.peerASN           — TOR router ASN per node (unique per node)
+#   BGPPeer.spec.peerAddress       — TOR switch IP reachable from that node
+#   BGPPeer.spec.nodeSelectors     — actual node hostnames in your cluster
+#
+# Advertisement mode — choose ONE:
+#   BGP (production): uncomment + fill the BGPPeer + BGPAdvertisement section
+#   L2  (dev/test):   uncomment the L2Advertisement section
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# IP Address Pools
+#
+# Define one pool per logical VIP segment. NICo Core LoadBalancer services
+# (nico-api, DHCP, DNS, PXE, SSH console) are allocated IPs from these pools.
+#
+# Typical production setup: separate internal and external pools so that
+# management traffic (nico-api) can be routed differently from data-plane VIPs.
+#
+# addresses: list of CIDRs or ranges:
+#   CIDR format:  "10.x.x.160/28"       (16 addresses: .160 – .175)
+#   Range format: "10.x.x.10-10.x.x.20" (11 addresses)
+# ---------------------------------------------------------------------------
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: vip-pool-internal
+  namespace: metallb-system
+spec:
+  addresses: []      # REQUIRED: your internal VIP CIDR(s)/range(s)
+
+---
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: vip-pool-external
+  namespace: metallb-system
+spec:
+  addresses: []      # REQUIRED: your external VIP CIDR(s)/range(s)
+
+---
+# ---------------------------------------------------------------------------
+# BGP Peers (production) — REQUIRED unless you use L2 mode below.
+#
+# One BGPPeer per (worker node, TOR router) pair. Each node peers with the TOR
+# switch it is physically connected to; the MetalLB FRR speaker announces the
+# VIP routes so traffic is routed to the right node.
+#
+#   myASN:       cluster-side ASN — same for all nodes on this site.
+#   peerASN:     router-side ASN — typically unique per TOR port / node.
+#   peerAddress: TOR switch IP reachable from this node (usually OOB/mgmt subnet).
+#   nodeSelectors: restricts this peer to a node by hostname (kubectl get nodes).
+#
+# Add or remove BGPPeer blocks to match your node count. Template per node:
+#
+# apiVersion: metallb.io/v1beta2
+# kind: BGPPeer
+# metadata:
+#   name: <node-hostname>-bgp-peer
+#   namespace: metallb-system
+# spec:
+#   myASN: <cluster-asn>
+#   peerASN: <tor-asn-for-this-node>
+#   peerAddress: <tor-switch-ip-for-this-node>
+#   nodeSelectors:
+#     - matchExpressions:
+#         - key: kubernetes.io/hostname
+#           operator: In
+#           values:
+#             - <node-hostname>
+# ---
+# ---------------------------------------------------------------------------
+# BGP Advertisement (production)
+#
+# Empty spec = advertise ALL IPAddressPools to ALL BGPPeers. Uncomment when
+# using BGP mode; rename to match your site.
+# ---------------------------------------------------------------------------
+# apiVersion: metallb.io/v1beta1
+# kind: BGPAdvertisement
+# metadata:
+#   name: site-advertisement
+#   namespace: metallb-system
+
+# ---------------------------------------------------------------------------
+# L2 Advertisement — alternative to BGP for dev/test environments.
+#
+# Use this instead of BGPPeer + BGPAdvertisement when BGP routing is not
+# available (e.g. local dev clusters, Kind, flat-network environments).
+# Uncomment and keep ONLY one mode active.
+# ---------------------------------------------------------------------------
+# apiVersion: metallb.io/v1beta1
+# kind: L2Advertisement
+# metadata:
+#   name: l2-advertisement
+#   namespace: metallb-system
+# spec:
+#   ipAddressPools:
+#     - vip-pool-internal
+#     - vip-pool-external

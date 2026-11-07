@@ -1,0 +1,145 @@
+## nico-ssh-console-rs — SSH console proxy for remote BMC/console access
+## Global settings (overridden by umbrella chart)
+global:
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []
+  certificate:
+    duration: 720h0m0s
+    renewBefore: 360h0m0s
+    privateKey:
+      algorithm: ECDSA
+      size: 384
+    issuerRef:
+      kind: ClusterIssuer
+      name: vault-nico-issuer
+      group: cert-manager.io
+  spiffe:
+    trustDomain: nico.local
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: site-controller
+
+## Override the release namespace (defaults to helm install -n <namespace>)
+namespaceOverride: ""
+
+replicas: 1
+
+## Container resource requests and limits. Empty by default.
+resources: {}
+
+## OTLP/gRPC collector endpoint. Empty leaves span export off unless set through env.
+otlpEndpoint: ""
+
+## Extra environment variables for the ssh-console container.
+env: {}
+
+annotations:
+  configmap.reloader.stakater.com/reload: '{{ include "nico-ssh-console-rs.name" . }}-config-files'
+
+## Soft open-file limit applied before startup. Clamped to the runtime hard
+## limit when it exceeds it. null falls back to 65536; non-null values must be
+## a positive integer (validated at render).
+fileDescriptorLimit: 65536
+
+imagePullSecrets: []
+
+service:
+  port: 22
+  grpcPort: 1079
+
+metrics:
+  port: 9009
+
+apiServiceName: nico-api
+
+certificate:
+  ## serviceName is used to auto-generate dnsNames and SPIFFE URIs based on the release namespace
+  serviceName: ""
+  spiffeServiceName: ""
+  identityNamespace: ""
+  ## Fully override the auto-generated dnsNames/uris. When empty, dnsNames and
+  ## uris are generated from serviceName + namespace (extraDnsNames/extraUris
+  ## are appended to the generated list).
+  dnsNames: []
+  uris: []
+  extraDnsNames: []
+  extraUris: []
+
+readinessProbe:
+  tcpSocket:
+    port: 22
+  initialDelaySeconds: 1
+  periodSeconds: 30
+  failureThreshold: 3
+  successThreshold: 1
+
+livenessProbe:
+  tcpSocket:
+    port: ssh
+  initialDelaySeconds: 20
+  periodSeconds: 30
+  # Keep liveness more forgiving than readiness so Kubernetes drains first,
+  # then restarts only after the listener stays down.
+  failureThreshold: 6
+  successThreshold: 1
+
+## OpenTelemetry Collector Contrib sidecar for shipping console logs to Loki.
+## This requires a separate image from the BMM core services.
+## Example: repository: otel/opentelemetry-collector-contrib, tag: "0.81.0"
+lokiLogCollector:
+  enabled: false
+  image:
+    ## repository: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib
+    ## tag: "0.81.0"
+    repository: ""
+    tag: ""
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 25s
+
+## Operator authentication with OpenSSH certificates.
+##
+## ssh-console admits a certificate when it is signed by a trusted CA and its
+## key_id carries `roles=<adminCertificateRole>`. Both settings are empty by
+## default, which trusts no CA and disables certificate auth.
+##
+## These are substituted into the packaged config.toml, so a deployment can set
+## just these two rather than restating the whole file. They are ignored when
+## configFiles.config supplies a complete config.
+sshConsole:
+  ## CA fingerprints in the form `ssh-keygen -lf` prints, for example
+  ## ["SHA256:0wdgK9aNegCbsccq9nwulAMo34TakGz+RP7sCS2e7Oc"].
+  opensshCertificateCaFingerprints: []
+  ## Role that must appear in the certificate key_id `roles=` field.
+  adminCertificateRole: ""
+
+# Config files - can be overridden
+configFiles:
+  config: ""        # If empty, uses the default from files/
+  otelcolConfig: "" # If empty, uses the default from files/
+
+## External LoadBalancer Service (for bare-metal / MetalLB)
+externalService:
+  enabled: false
+  type: LoadBalancer
+  # Empty values keep Kubernetes defaults. Use SingleStack with [IPv6] for an
+  # IPv6-only Service, or RequireDualStack with [IPv4, IPv6] for both families.
+  # PreferDualStack allows fallback on a single-stack cluster. An existing
+  # Service's primary family (the first entry) cannot be changed in place.
+  ipFamilyPolicy: ""
+  ipFamilies: []
+  # External SSH port. The backend target port stays 22, and clients must use
+  # the port set here.
+  port: 22
+  # Empty keeps the Kubernetes default (Cluster). Set Local to preserve client
+  # source IPs. MetalLB only lets Local Services share an IP with Services
+  # that select the same pods.
+  externalTrafficPolicy: ""
+  # Annotations are passed through unchanged. To share an IP with another
+  # Service, add your load-balancer controller's sharing annotation here.
+  annotations: {}

@@ -1,0 +1,65 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "nico-api.name" . }}-migrate
+  namespace: {{ include "nico-api.namespace" . }}
+  labels:
+    {{- include "nico-api.labels" . | nindent 4 }}
+    app: {{ include "nico-api.name" . }}-migrate
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "-5"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/hook-weight: "-5"
+spec:
+  template:
+    metadata:
+      name: {{ include "nico-api.name" . }}-migrate
+      labels:
+        {{- include "nico-api.labels" . | nindent 8 }}
+        app: {{ include "nico-api.name" . }}-migrate
+    spec:
+      restartPolicy: OnFailure
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ include "nico-api.name" . }}-migrate
+          image: "{{ include "nico-api.image" . }}"
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              {{- include "nico-api.databaseUrlScript" . | nindent 14 }}
+              if [ -x /opt/nico/nico-api ]; then BIN=/opt/nico/nico-api; else BIN=/opt/carbide/carbide-api; fi
+              exec "$BIN" migrate --datastore="${DATASTORE_URL}?sslmode={{ .Values.migrationJob.sslMode }}"
+          env:
+            - name: DATASTORE_USER
+              valueFrom:
+                secretKeyRef:
+                  key: username
+                  name: {{ .Values.envFrom.databaseCredentials.secretName }}
+            - name: DATASTORE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: {{ .Values.envFrom.databaseCredentials.secretName }}
+            - name: DATASTORE_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Values.envFrom.databaseConfig.configMapName }}
+                  key: DB_HOST
+            - name: DATASTORE_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Values.envFrom.databaseConfig.configMapName }}
+                  key: DB_PORT
+            - name: DATASTORE_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ .Values.envFrom.databaseConfig.configMapName }}
+                  key: DB_NAME

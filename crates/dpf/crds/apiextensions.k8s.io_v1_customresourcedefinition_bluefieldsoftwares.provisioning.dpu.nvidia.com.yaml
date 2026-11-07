@@ -1,0 +1,255 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+    helm.sh/resource-policy: keep
+  labels:
+    app.kubernetes.io/part-of: dpf-operator-controller-manager
+    dpu.nvidia.com/component: dpf-operator-controller-manager
+  name: bluefieldsoftwares.provisioning.dpu.nvidia.com
+spec:
+  group: provisioning.dpu.nvidia.com
+  names:
+    kind: BlueFieldSoftware
+    listKind: BlueFieldSoftwareList
+    plural: bluefieldsoftwares
+    singular: bluefieldsoftware
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: phase of the bluefieldsoftware
+      jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: BlueFieldSoftware is the Schema for the bluefieldsoftware API
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: BlueFieldSpec defines the desired state of BlueFieldSoftware.
+            properties:
+              nicFw:
+                description: |-
+                  NicFw points to the NIC firmware binary used for E/W NIC firmware updates.
+                  Use this when a specific NIC firmware binary is required and is not included in the
+                  platform PLDM firmware bundle.
+                  In production, prefer using PlatformPldmFwBundle.
+                minLength: 1
+                type: string
+              osIso:
+                description: OS ISO points to the OS ISO used by DPU OS installation
+                  flow.
+                minLength: 1
+                type: string
+              platformPldmFwBundle:
+                description: |-
+                  PlatformPldmFwBundle points to the platform PLDM firmware bundle used for E/W NIC
+                  firmware updates.
+                minLength: 1
+                type: string
+              pldmFwBundle:
+                additionalProperties:
+                  type: string
+                description: |-
+                  PldmFwBundle maps each PSID to the PLDM firmware bundle URL used for that DPU model's
+                  baseline firmware updates. Each PSID's bundle is a complete PLDM package for that device.
+                  Keys are matched case-insensitively against the BMC-reported DPUDevice status PSID.
+                minProperties: 1
+                type: object
+                x-kubernetes-validations:
+                - message: pldmFwBundle entries must have non-empty PSID keys and
+                    non-empty bundle URLs
+                  rule: self.all(k, size(k) > 0 && size(self[k]) > 0)
+            required:
+            - osIso
+            type: object
+            x-kubernetes-validations:
+            - message: BlueFieldSpec is immutable
+              rule: self == oldSelf
+            - message: nicFw and platformPldmFwBundle are mutually exclusive; set
+                only one
+              rule: '!(has(self.nicFw) && has(self.platformPldmFwBundle))'
+          status:
+            default:
+              phase: Initializing
+            description: BlueFieldSoftwareStatus defines the observed state of BlueFieldSoftware
+            properties:
+              conditions:
+                description: Conditions represent the latest available observations
+                  of BlueFieldSoftware state
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              downloadedComponents:
+                description: DownloadedComponents tracks which components have been
+                  successfully downloaded
+                properties:
+                  nicFw:
+                    description: |-
+                      NicFw is the local path of the E/W NIC firmware binary, either downloaded from
+                      spec.nicFw or unpacked from the platform PLDM firmware bundle.
+                    type: string
+                  osIso:
+                    description: OsIso is the local path of the downloaded OS ISO.
+                    type: string
+                  platformPldmFwBundle:
+                    description: PlatformPldmFwBundle is the local path of the downloaded
+                      platform PLDM firmware bundle.
+                    type: string
+                  pldmFwBundle:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      PldmFwBundle maps each PSID to the local path of its downloaded PLDM firmware bundle.
+                      Keys are matched case-insensitively against the BMC-reported DPUDevice PSID.
+                    type: object
+                type: object
+              observedGeneration:
+                description: ObservedGeneration records the Generation observed on
+                  the object the last time it was patched.
+                format: int64
+                type: integer
+              phase:
+                default: Initializing
+                description: The current state of BlueFieldSoftware.
+                enum:
+                - Initializing
+                - Downloading
+                - Extracting
+                - Ready
+                - Deleting
+                - Error
+                type: string
+              versions:
+                description: Versions tracks the versions of the components
+                properties:
+                  bluefieldSoftwareVersions:
+                    additionalProperties:
+                      description: BluefieldDeviceVersions holds firmware versions
+                        extracted from a single PSID's PLDM bundle.
+                      properties:
+                        bfNicFwVersion:
+                          description: BFNicFwVersion is the BlueField NIC firmware
+                            version shipped in the bundle.
+                          minLength: 1
+                          type: string
+                        bmcErotVersion:
+                          description: BMCErotVersion is the BMC ERoT (External Root
+                            of Trust) firmware version shipped in the bundle.
+                          minLength: 1
+                          type: string
+                        bmcVersion:
+                          description: BMCVersion is the DPU BMC firmware version
+                            shipped in the bundle.
+                          minLength: 1
+                          type: string
+                        sbiosVersion:
+                          description: SBIOSVersion is the DPU SBIOS firmware version
+                            shipped in the bundle.
+                          minLength: 1
+                          type: string
+                      type: object
+                    description: |-
+                      BluefieldSoftwareVersions maps each PSID to the firmware versions from that device's
+                      PLDM bundle. Keys are matched case-insensitively against the BMC-reported DPUDevice PSID.
+                    type: object
+                  doca:
+                    description: DOCA is the formatted, user-facing DOCA version derived
+                      from the OS ISO.
+                    type: string
+                  ewNicFwVersion:
+                    description: |-
+                      EWNicFwVersion is the E/W NIC firmware version taken from the platform PLDM bundle.
+                      It is not keyed by PSID because a BlueFieldSoftware carries a single platform bundle.
+                    type: string
+                  osISOVersion:
+                    description: OSISOVersion is the raw DOCA version for the OS ISO,
+                      taken from the ISO filename
+                    type: string
+                type: object
+            type: object
+            x-kubernetes-validations:
+            - message: versions cannot be removed once set
+              rule: '!has(oldSelf.versions) || has(self.versions)'
+        type: object
+        x-kubernetes-validations:
+        - message: name length can't be bigger than 187 chars
+          rule: self.metadata.name.size() <= 187
+    served: true
+    storage: true
+    subresources:
+      status: {}

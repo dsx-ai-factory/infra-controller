@@ -1,0 +1,12 @@
+#!/bin/bash
+
+# Need to decompress the kernel so the UKI file will be valid
+for kernel in $(ls -1 /lib/modules/*/vmlinuz)
+do
+  isgzip=$(file ${kernel} | grep -c "gzip compressed")
+  if [ "${isgzip}" == "1" ]
+  then
+    cat ${kernel} | gunzip -c >${kernel}.tmp
+    mv -f ${kernel}.tmp ${kernel}
+  fi
+done

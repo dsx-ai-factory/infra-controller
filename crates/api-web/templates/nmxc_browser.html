@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+
+{% block title %}NMX-C Browser{% endblock %}
+
+{% block content %}
+<h1>NMX-C Browser</h1>
+
+<p>
+Choose an operation and an endpoint — either a chassis serial or a rack ID.
+See the <a href="https://docs.nvidia.com/networking/display/nmxcv11/grpc+api+documentation">NMX-C gRPC API documentation</a> for details.
+</p>
+
+<form id="nmxc_console" method="GET" action="/admin/nmxc-browser" onsubmit="nmxcSyncEndpointName()">
+	<div>
+		<label for="endpoint_value_input">Endpoint:</label>
+		<div style="display: flex; gap: 0.5rem; align-items: center;">
+			<select id="endpoint_type_select" style="width: auto; flex-shrink: 0;" onchange="nmxcUpdateEndpoint(this)">
+				<option value="chassis_serial" {% if rack_id.is_empty() %}selected{% endif %}>Chassis serial</option>
+				<option value="rack_id" {% if !rack_id.is_empty() %}selected{% endif %}>Rack ID</option>
+			</select>
+			<input type=text id="endpoint_value_input"
+				name="{% if !rack_id.is_empty() %}rack_id{% else %}chassis_serial{% endif %}"
+				value="{% if !rack_id.is_empty() %}{{ rack_id }}{% else %}{{ chassis_serial }}{% endif %}"
+				placeholder="{% if !rack_id.is_empty() %}e.g. ipp6-b03-gb-nvl-124-mini2{% else %}e.g. 1234567890{% endif %}"
+				style="flex: 1;" />
+		</div>
+	</div>
+	<div>
+		<label for="operation_input">Operation:</label>
+		<select id="operation_input" name="operation">
+			<option value="" {% if operation.is_empty() %}selected{% endif %}>— choose —</option>
+			<option value="compute_node_info_list" {% if operation == "compute_node_info_list" %}selected{% endif %}>Compute node info list</option>
+			<option value="switch_node_info_list" {% if operation == "switch_node_info_list" %}selected{% endif %}>Switch node info list</option>
+			<option value="gpu_info" {% if operation == "gpu_info" %}selected{% endif %}>GPU info (by UID)</option>
+			<option value="gpu_info_list" {% if operation == "gpu_info_list" %}selected{% endif %}>GPU info list (domain)</option>
+			<option value="partition_info_list" {% if operation == "partition_info_list" %}selected{% endif %}>Partition info list</option>
+			<option value="get_domain_properties" {% if operation == "get_domain_properties" %}selected{% endif %}>Get domain properties</option>
+		</select>
+	</div>
+	<div>
+		<label for="gpu_uid_input">GPU UID (required for GPU info):</label>
+		<input type=text size="24" id="gpu_uid_input" name="gpu_uid" value="{{ gpu_uid }}" />
+	</div>
+	<input type="submit" value="Run query">
+</form>
+
+{% if !error.is_empty() %}
+<h3>Error</h3>
+<textarea disabled>{{ error }}</textarea>
+{% endif %}
+
+{% if query_was_executed %}
+
+<h3>Metadata</h3>
+<table class="detailsview">
+	<tr><th>HTTP status</th><td>{{ status_code }} {{ status_string }}</td></tr>
+	{% if !response_headers.is_empty() %}
+	<tr>
+		<th>Response Headers</th>
+		<td>
+			<details>
+				<summary>Expand Headers</summary>
+				<table class="detailsview">
+					{% for header in response_headers %}
+					<tr>
+						<td>{{ header.name }}</td>
+						<td>{{ header.value }}</td>
+					</tr>
+					{% endfor %}
+				</table>
+			</details>
+		</td>
+	</tr>
+	{% endif %}
+</table>
+
+{% if !response.is_empty() %}
+<h3>Response</h3>
+<table class="detailsview">
+<tbody>
+	<tr>
+		<td>
+			<div style="overflow: auto;">
+					<pre><code>{{ response|pretty_json }}</code></pre>
+			</div>
+		</td>
+	</tr>
+</tbody>
+</table>
+{% endif %}
+
+{% endif %}
+
+{% endblock %}
+
+{% block script %}
+function nmxcUpdateEndpoint(select) {
+	var input = document.getElementById('endpoint_value_input');
+	input.name = select.value;
+	input.value = '';
+	input.placeholder = select.value === 'rack_id'
+		? 'e.g. ipp6-b03-gb-nvl-124-mini2'
+		: 'e.g. 1234567890';
+	input.focus();
+}
+
+// Derive the submitted field name from the select's current
+// value at submit time, rather than trusting that onchange already synced it.
+function nmxcSyncEndpointName() {
+	var select = document.getElementById('endpoint_type_select');
+	var input = document.getElementById('endpoint_value_input');
+	input.name = select.value;
+}
+{% endblock %}

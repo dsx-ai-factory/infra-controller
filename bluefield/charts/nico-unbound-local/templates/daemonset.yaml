@@ -1,0 +1,208 @@
+{{/*
+  Everything under dnsDir belongs to the DPU agent: it creates <dnsDir>/run and
+  <dnsDir>/zone (0700, root) and writes the zonefile; Unbound creates its
+  control socket in run/ and reads zone/. Both are hostPath type Directory, so
+  a pod scheduled before the agent has created them waits in ContainerCreating
+  instead of creating root-owned directories the agent would then find in its
+  way. The zone mount and its init container exist only for a VPC with a
+  private zone; without one the resolver recurses only. The nic-init init
+  container numbers the slot interface with the image's busybox ip, the
+  interface setup nico-fmds performs in its own binary, so Unbound runs
+  without NET_ADMIN.
+*/}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "nico-unbound-local.labels" . | nindent 4 }}
+    {{- with .Values.serviceDaemonSet.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.serviceDaemonSet.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.serviceDaemonSet.updateStrategy }}
+  updateStrategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "nico-unbound-local.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- with .Values.serviceDaemonSet.annotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        checksum/config: {{ .Values.unboundConfig | sha256sum }}
+      labels:
+        {{- include "nico-unbound-local.selectorLabels" . | nindent 8 }}
+        {{- with .Values.serviceDaemonSet.labels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.serviceDaemonSet.nodeSelector }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            {{- toYaml . | nindent 12 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        {{- if .Values.zoneName }}
+        # Unbound exits when an auth-zone's zonefile is missing, and the agent
+        # writes it only after the pod can be scheduled; wait for it with the
+        # Unbound image's busybox shell so no second image is needed.
+        - name: wait-for-zone
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The image's default user is not root, and the agent creates the
+          # zone directory 0700 root, so only UID 0 can see the zonefile.
+          securityContext:
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          command:
+            - /busybox/sh
+            - -c
+            - |
+              echo "Waiting for {{ .Values.dnsDir }}/zone/zonefile ..."
+              while [ ! -f {{ .Values.dnsDir }}/zone/zonefile ]; do
+                sleep 5
+              done
+              echo "Zonefile found."
+          volumeMounts:
+            - name: zone
+              mountPath: {{ .Values.dnsDir }}/zone
+              readOnly: true
+        {{- end }}
+        # Multus attaches the slot interface with no address. Add the fixed
+        # resolver addresses and route replies to tenant prefixes back through
+        # HBN's end of each pair, the way nico-fmds does for its metadata
+        # address: a source rule per family into table 100 whose default route
+        # points at the gateway. Init and app containers share the network
+        # namespace, so the state outlives this container. Only a second add
+        # of an address already present is tolerated; every other failure
+        # stops the pod before Unbound advertises itself.
+        - name: nic-init
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [NET_ADMIN]
+          env:
+            - name: INTERFACE
+              value: {{ .Values.interfaceName | quote }}
+            - name: IPV4_ADDRESS
+              value: {{ .Values.resolver.ipv4.address | quote }}
+            - name: IPV4_GATEWAY
+              value: {{ .Values.resolver.ipv4.gateway | quote }}
+            - name: IPV6_ADDRESS
+              value: {{ .Values.resolver.ipv6.address | quote }}
+            - name: IPV6_GATEWAY
+              value: {{ .Values.resolver.ipv6.gateway | quote }}
+          command:
+            - /busybox/sh
+            - -ec
+            - |
+              i=0
+              until ip link show dev "$INTERFACE" >/dev/null 2>&1; do
+                i=$((i + 1))
+                [ "$i" -lt 15 ] || { echo "$INTERFACE never appeared" >&2; exit 1; }
+                sleep 2
+              done
+              add_address() {
+                out=$(ip $1 addr add "$2" dev "$INTERFACE" 2>&1) && return 0
+                case "$out" in
+                  *"File exists"*) echo "$2 already present" ;;
+                  *) echo "ip addr add $2: $out" >&2; exit 1 ;;
+                esac
+              }
+              add_address "" "$IPV4_ADDRESS"
+              add_address "-f inet6" "$IPV6_ADDRESS"
+              ip link set dev "$INTERFACE" up
+              # A duplicate keeps the tentative flag beside dadfailed, so test
+              # the failure first or it would look like a slow detection.
+              i=0
+              while :; do
+                state=$(ip -f inet6 addr show dev "$INTERFACE")
+                case "$state" in
+                  *dadfailed*) echo "$IPV6_ADDRESS is a duplicate" >&2; exit 1 ;;
+                  *tentative*) ;;
+                  *) break ;;
+                esac
+                i=$((i + 1))
+                [ "$i" -lt 10 ] || { echo "$IPV6_ADDRESS stayed tentative" >&2; exit 1; }
+                sleep 1
+              done
+              ip route replace default via "$IPV4_GATEWAY" dev "$INTERFACE" table 100 \
+                || { echo "default route via $IPV4_GATEWAY failed" >&2; exit 1; }
+              ip -f inet6 route replace default via "$IPV6_GATEWAY" dev "$INTERFACE" table 100 \
+                || { echo "default route via $IPV6_GATEWAY failed" >&2; exit 1; }
+              ip rule list | grep -q "from ${IPV4_ADDRESS%/*} lookup 100" \
+                || ip rule add from "${IPV4_ADDRESS%/*}/32" table 100
+              ip -f inet6 rule list | grep -q "from ${IPV6_ADDRESS%/*} lookup 100" \
+                || ip -f inet6 rule add from "${IPV6_ADDRESS%/*}/128" table 100
+              echo "$INTERFACE holds $IPV4_ADDRESS and $IPV6_ADDRESS; replies route via $IPV4_GATEWAY and $IPV6_GATEWAY (table 100)"
+      containers:
+        - name: unbound
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with .Values.serviceDaemonSet.resources }}
+          resources:
+            limits:
+              {{- toYaml . | nindent 14 }}
+            requests:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+          ports:
+            - name: dns-udp
+              containerPort: 53
+              protocol: UDP
+            - name: dns-tcp
+              containerPort: 53
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/unbound
+              readOnly: true
+            # Read-write: Unbound creates control.sock here and the agent
+            # connects to it to reload the zone.
+            - name: run
+              mountPath: {{ .Values.dnsDir }}/run
+            {{- if .Values.zoneName }}
+            # Read-only: the agent writes the zonefile and its rollback copy;
+            # Unbound only reads them.
+            - name: zone
+              mountPath: {{ .Values.dnsDir }}/zone
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}
+        - name: run
+          hostPath:
+            path: {{ .Values.dnsDir }}/run
+            type: Directory
+        {{- if .Values.zoneName }}
+        - name: zone
+          hostPath:
+            path: {{ .Values.dnsDir }}/zone
+            type: Directory
+        {{- end }}

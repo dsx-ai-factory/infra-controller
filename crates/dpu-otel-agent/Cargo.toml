@@ -1,0 +1,67 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[package]
+name = "carbide-dpu-otel-agent"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "otel_agent"
+
+[[bin]]
+# TODO: rename to carbide-dpu-otel-agent
+name = "forge-dpu-otel-agent"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+eyre = { workspace = true }
+humantime = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+tonic = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { features = [
+  "env-filter",
+  "local-time",
+], workspace = true }
+typed-builder = { workspace = true }
+
+# [local-dependencies]
+carbide-certs = { path = "../certs" }
+carbide-host-support = { path = "../host-support", default-features = false }
+carbide-systemd = { path = "../systemd" }
+carbide-tls = { path = "../tls" }
+carbide-rpc = { path = "../rpc" }
+
+[dev-dependencies]
+ctor = { workspace = true }
+tempfile = { workspace = true }
+prost = { workspace = true }
+reqwest = { default-features = false, features = [
+  "rustls",
+  "stream",
+], workspace = true }
+rustls-pemfile = { workspace = true }
+rustls-pki-types = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,24 @@
+name: Docker Authentication
+description: Setup authentication for Docker registries such as NGC
+
+inputs:
+  registry:
+    description: 'Registry to authenticate (e.g., nvcr.io)'
+    required: true
+    default: 'nvcr.io'
+  username:
+    description: 'Username for registry'
+    required: true
+  token:
+    description: 'Token/password for registry'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Log in to registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.token }}

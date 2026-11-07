@@ -1,0 +1,45 @@
+{{- if .Values.externalService.enabled }}
+{{- $replicas := int .Values.replicas }}
+{{- $trafficPolicy := "Local" }}
+{{- if hasKey .Values.externalService "externalTrafficPolicy" }}
+{{- $trafficPolicy = .Values.externalService.externalTrafficPolicy }}
+{{- end }}
+{{- range $i := until $replicas }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-ntp.name" $ }}-external-{{ $i }}
+  namespace: {{ include "nico-ntp.namespace" $ }}
+  labels:
+    app.kubernetes.io/part-of: {{ include "nico-ntp.name" $ }}-instance-{{ $i }}
+  annotations:
+    {{- $annotations := "" }}
+    {{- if and $.Values.externalService.perPodAnnotations (gt (len $.Values.externalService.perPodAnnotations) $i) }}
+    {{- $annotations = index $.Values.externalService.perPodAnnotations $i }}
+    {{- end }}
+    {{- with $annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  type: {{ $.Values.externalService.type | default "LoadBalancer" }}
+  {{- with $.Values.externalService.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ . }}
+  {{- end }}
+  {{- with $.Values.externalService.ipFamilies }}
+  ipFamilies:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $trafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
+  selector:
+    app.kubernetes.io/name: {{ include "nico-ntp.name" $ }}
+    statefulset.kubernetes.io/pod-name: {{ include "nico-ntp.name" $ }}-{{ $i }}
+  ports:
+    - name: ntp
+      protocol: UDP
+      port: 123
+      targetPort: 123
+{{- end }}
+{{- end }}

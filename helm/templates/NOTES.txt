@@ -1,0 +1,40 @@
+=====================================================================
+ NICo Bare Metal Manager — Umbrella Chart
+=====================================================================
+
+Namespace : {{ .Release.Namespace }}
+Release   : {{ .Release.Name }}
+
+Deployed sub-charts:
+  ✓ nico-api
+  ✓ nico-bmc-proxy
+  ✓ nico-dhcp
+  ✓ nico-dns
+  ✓ nico-hardware-health
+  ✓ nico-pxe
+  ✓ nico-ssh-console-rs
+{{- /* Core components above are mandatory (no enabled toggle, see Chart.yaml).
+       Optional services below keep their gates. */}}
+{{- if ne (toString (index .Values "nico-dsx-exchange-consumer" "enabled")) "false" }}
+  ✓ nico-dsx-exchange-consumer
+{{- end }}
+{{- if ne (toString (index .Values "nico-ntp" "enabled")) "false" }}
+  ✓ nico-ntp
+{{- end }}
+{{- if index .Values "nico-machine-a-tron" "enabled" | default false }}
+  ✓ nico-machine-a-tron (mock machines for dev/test)
+{{- end }}
+{{- if index .Values "unbound" "enabled" | default false }}
+  ✓ unbound
+{{- end }}
+
+Check pod status:
+  kubectl get pods -n {{ .Release.Namespace }}
+
+Check certificates:
+  kubectl get certificates -n {{ .Release.Namespace }}
+
+NOTE: nico-api depends on PostgreSQL + migration job.
+      Pods may restart briefly until the database is ready.
+
+=====================================================================

@@ -1,0 +1,1 @@
+UPDATE instances SET storage_status_observation = '{"config_version": "V1-T1666644937952267", "volumes": [], "observed_at": "2023-01-01T00:00:00.000000000Z"}' WHERE storage_status_observation = '{"storage_config_version": "V1-T1666644937952267", "observed_at": "2023-01-01 00:00:00.000000+00"}';

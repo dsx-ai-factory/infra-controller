@@ -1,0 +1,393 @@
+# DNS Service Endpoints
+
+## Overview
+
+NICo (ncx-infrastructure-controller) depends on a set of well-known hostnames in the `.nico` and `.forge` DNS zones. These names are resolved by DPU agents, host PXE loaders, and other in-band management components at runtime. Several of these hostnames are **compiled into binaries or embedded shell scripts** and cannot be changed without rebuilding the software.
+
+Before deploying NICo, you must configure DNS A records that resolve each
+required hostname to the appropriate service virtual IP (VIP) on your
+out-of-band (OOB) management network. Configure AAAA records for services that
+must be discovered over IPv6; in particular, DHCPv6 option 56 requires an AAAA
+record for the NTP hostname. A site-local recursive resolver (Unbound or
+equivalent) running on your site controller is the recommended approach.
+
+Stock DPU-agent images query `carbide-pxe.forge`, `carbide-ntp.forge`, and
+`socks.forge`, and connect to the API at `carbide-api.forge` by default. The
+rebranded `nico-pxe.nico`, `nico-ntp.nico`, `socks.nico`, and `nico-api.nico`
+names apply only to images built to use those names. These are
+distinct hostnames, not suffix substitutions; configure the exact names queried
+by the deployed agent, or serve both aliases during a mixed-image transition.
+
+---
+
+## Endpoint Quick Reference
+
+| Hostname | Port | Protocol | Consumers | Backing Service | Purpose |
+|---|---|---|---|---|---|
+| `carbide-api.forge` (default) or `nico-api.nico` (rebranded image) | 443 | gRPC / TLS | DPU agents, FMDS, booting hosts | `nico-api` pod | NICo gRPC API |
+| `carbide-pxe.forge` (stock) or `nico-pxe.nico` (rebranded image) | 80 | HTTP | DPU agents, iPXE clients | `nico-pxe` pod | iPXE scripts, cloud-init payloads, boot artifacts, internal APT |
+| `carbide-static-pxe.forge` (stock fallback) | 80 | HTTP | Scout loader and update checker | `nico-static-pxe` pod | Full Scout filesystem and update assets; see [Static Boot Asset Server](#nico-static-pxenico---static-boot-asset-server) |
+| `carbide-ntp.forge` (stock) or `nico-ntp.nico` (rebranded image) | 123 | UDP (NTP) | DPU agents, managed hosts (DHCP options 42 and 56) | `nico-ntp` pods or operator NTP service | NTP time synchronisation |
+| `unbound.nico` | 53 | UDP / TCP (DNS) | DPU agents, managed hosts (DHCP option 6) | `nico-unbound` pod | Site-local recursive DNS resolver |
+| `otel-receiver.forge` (default) | 443 | gRPC / TLS (OTLP) | DPU otel-collector sidecars | otel-receiver service | OpenTelemetry ingestion endpoint |
+| `socks.forge` (stock) or `socks.nico` (rebranded image) | 1888 | SOCKS5 | DPU containerd, when pulling extension service images | SOCKS5 proxy service | Outbound proxy for DPU extension service image pulls |
+
+The static-asset row describes Scout's stock fallback. Boot URL overrides
+select their own host, scheme, port, and destination.
+
+---
+
+## Endpoint Details
+
+### `carbide-api.forge` / `nico-api.nico` - NICo gRPC API
+
+**Port:** 443 (TLS)  
+**Protocol:** gRPC over TLS  
+**In-cluster address:** `nico-api.nico-system.svc.cluster.local:1079`
+
+The primary NICo management API. Clients on the OOB network connect on port 443; the pod itself listens on port 1079.
+
+**Consumers on the OOB network:**
+
+- `nico-agent` (DPU agent) - phones home for network configuration, workflow state, and provisioning instructions
+- NICo Metadata Service (`fmds`) - metadata queries and distribution
+- Booting hosts - through the API URL in the iPXE scripts and cloud-init served by the PXE service
+
+Services inside the cluster, such as `nico-pxe`, the `nico-dhcp` DHCP plugin,
+and `health`, use the in-cluster address and have their own settings.
+
+**Configurability:** No `NICO_API_URL` setting exists. Each consumer has its
+own setting, and each defaults to `https://carbide-api.forge`:
+
+- The stock DPU agent reads `api-server` from the `[forge-system]` section of
+  `/etc/forge/config.toml` (default in `crates/host-support/src/agent_config.rs`).
+  The PXE service writes that file during DPU provisioning and sets
+  `api-server` only for interfaces on the static-assignments segment, from the
+  `external_api_url` setting in the `nico-api` configuration. Other DPU agents
+  use the default, so publish `carbide-api.forge`.
+- FMDS takes the `--forge-api` flag.
+- The PXE service reads the `CARBIDE_API_URL` environment variable and puts
+  that URL in the iPXE scripts and cloud-init it serves.
+
+---
+
+### `carbide-pxe.forge` / `nico-pxe.nico` - PXE / Boot Service
+
+**Port:** 80 (HTTP)  
+**Protocol:** HTTP  
+**In-cluster address:** `nico-pxe.nico-system.svc.cluster.local`
+
+Serves dynamic per-machine iPXE boot scripts, cloud-init payloads, boot artifacts, and the internal APT package repository to DPU agents and PXE-booting clients.
+
+**Consumers:**
+
+- `nico-agent` (DPU agent) - stock images resolve `carbide-pxe.forge` at startup; images rebuilt with the rebranded name resolve `nico-pxe.nico`. The agent's DHCP server advertises the resolved addresses to hosts as the PXE / UEFI HTTP boot server
+- iPXE clients during initial machine network boot
+
+**Configurability:** The stock DPU agent resolves `carbide-pxe.forge` directly
+via DNS (`crates/agent/src/util.rs`). **This lookup is not overridable via
+config in the compiled agent.** The PXE service accepts a `CARBIDE_PXE_URL`
+environment variable to override the URL it advertises to clients; the default
+is `http://carbide-pxe.forge`. That setting does not change the agent's DNS
+lookup.
+
+> **Warning:** `carbide-pxe.forge` is hardcoded in the stock `nico-agent`
+> binary. That exact DNS record must resolve correctly on the OOB network;
+> publishing only `nico-pxe.nico` is not enough. If the lookup fails, the
+> agent stops at startup. Changing the hostname requires rebuilding the DPU
+> agent.
+
+---
+
+### `nico-static-pxe.nico` - Static Boot Asset Server
+
+**Port:** 80 (HTTP)  
+**Protocol:** HTTP  
+**In-cluster address:** `nico-static-pxe.nico-system.svc.cluster.local`
+
+Serves pre-built, version-controlled boot assets used during host bring-up.
+The service name does not determine the URL used by a booting host. Stock Scout
+scripts use `carbide-static-pxe.forge` as their fallback hostname; a deployment
+using `nico-static-pxe.nico` must supply the appropriate boot URL or resolve the
+stock hostname to the same server.
+
+**Consumers:**
+
+- Scout host PXE loader downloads `scout.squashfs`, the full Scout root
+  filesystem. The server also hosts `scout.efi` and BFB images for their boot
+  and provisioning consumers. See the [Scout boot-stage
+  procedure](../development/vm_pxe_client.md#verify-scout-boot-nic-selection).
+
+**Configurability:** The loader accepts a full root-filesystem URL through the
+`newrootfs=` kernel argument. Without it, the loader uses
+`http://carbide-static-pxe.forge/public/blobs/internal/<architecture>/scout.squashfs`,
+where `<architecture>` is the kernel's machine architecture. The
+[boot procedure](../development/vm_pxe_client.md#verify-scout-boot-nic-selection)
+describes URL formats and diagnostic use of `newrootfs=none`.
+
+The update checker separately uses `pxe_uri=` as its base URL, falling back to
+`http://carbide-static-pxe.forge` when that argument is absent or empty. Changing
+these boot arguments does not require rebuilding the images. The static asset
+URL in the iPXE response does not replace the loader's `newrootfs=` fallback URL.
+
+Scout's pre-start script also uses `pxe_uri=` to fetch `/api/v0/tls/root_ca`;
+its fallback when the argument is absent or empty is `http://carbide-pxe.forge`.
+A replacement PXE endpoint must also serve Scout's bootstrap CA bundle at
+that path. Use `newrootfs=` to select a different full-image server while
+preserving the generated `pxe_uri=`.
+
+---
+
+### `carbide-ntp.forge` / `nico-ntp.nico` - NTP Service
+
+**Port:** 123 (UDP)  
+**Protocol:** NTP  
+**In-cluster addresses:** `nico-ntp-1.nico-ntp.nico-system.svc.cluster.local`, `nico-ntp-2.nico-ntp.nico-system.svc.cluster.local`, `nico-ntp-3.nico-ntp.nico-system.svc.cluster.local`
+
+Provides NTP time synchronisation for DPU agents and managed hosts. The bundled
+service is backed by three pods for redundancy. Configure multiple DNS A
+records pointing to its IPv4 VIPs. To advertise the service through DHCPv6
+option 56, also configure one or more AAAA records pointing to reachable IPv6
+NTP endpoints.
+
+**Consumers:**
+
+- `nico-agent` (DPU agent) - stock images resolve `carbide-ntp.forge` at startup to discover NTP server addresses; images rebuilt with the rebranded name resolve `nico-ntp.nico`. IPv4 and IPv6 results are advertised to managed hosts through DHCP options 42 and 56, respectively
+
+**Configurability:** The stock DPU agent resolves `carbide-ntp.forge` directly
+via DNS (`crates/agent/src/util.rs`). **This lookup is not overridable via
+config in the compiled agent.** Using `nico-ntp.nico` requires an image rebuilt
+with that hostname.
+
+> **Warning:** `carbide-ntp.forge` is hardcoded in the stock `nico-agent`
+> binary. That exact DNS record must resolve correctly on the OOB network.
+> Changing the hostname requires rebuilding the DPU agent.
+
+**Multiple records (recommended):** Configure one A record per IPv4 NTP pod
+instance to provide redundancy. Configure one or more AAAA records when using
+the DHCPv6 option-56 fallback. Clients receive every address from the matching
+family and select among them.
+
+---
+
+### `unbound.nico` - Recursive DNS Resolver
+
+**Port:** 53 (UDP and TCP)  
+**Protocol:** DNS  
+**In-cluster service:** `nico-unbound` in the `nico-system` namespace
+
+The site-local recursive DNS resolver. DPU agents and managed hosts use this resolver for all DNS lookups, including resolution of other `.nico` names. The resolver address is distributed to clients via DHCP option 6.
+
+**Consumers:**
+
+- DPU agents - all DNS resolution during provisioning and normal operation
+- Managed host operating systems - configured as the primary name server via DHCP
+
+**Configurability:** The resolver address is not compiled into binaries; it is distributed to clients via DHCP and can be changed by updating the DHCP server configuration. The service records must be loaded into Unbound (see [DNS Configuration](#dns-configuration) below) for all other hostnames in this document to resolve correctly.
+
+---
+
+### `otel-receiver.forge` - OpenTelemetry Receiver
+
+**Port:** 443 (TLS)  
+**Protocol:** gRPC / TLS (OTLP - OpenTelemetry Protocol)
+
+Ingests telemetry (metrics, traces, and logs) exported by otel-collector sidecars running on managed BlueField DPUs.
+
+**Consumers:**
+
+- `nico-otelcol` - the otel-collector sidecar deployed on each DPU via the `bluefield/charts/nico-otelcol` Helm chart
+- Site controller otel agents (`bluefield/otel/site-controller/`)
+
+**Configurability:** The shipped configurations use `otel-receiver.forge:443`.
+In the `nico-otelcol` chart, the `otlpSiteEndpoint` value sets the endpoint.
+The standalone configurations set it in `bluefield/otel/otel_config.yaml` and
+`bluefield/otel/site-controller/otel_config.yaml`. Changing the address
+requires updating that value or file and redeploying the otel-collector.
+
+---
+
+### `socks.forge` / `socks.nico` - SOCKS5 Outbound Proxy
+
+**Port:** 1888  
+**Protocol:** SOCKS5
+
+Provides outbound connectivity for pulling the container images of extension
+services that the DPU agent launches. Before starting extension services, the
+stock agent writes a systemd drop-in for `containerd@mgmt.service` that sets
+`HTTP_PROXY=socks5://socks.forge:1888` and
+`HTTPS_PROXY=socks5://socks.forge:1888`, then restarts containerd. Images
+rebuilt with the rebranded name use `socks.nico` instead.
+
+**Consumers:**
+
+- containerd on the DPU, when pulling extension service images (`crates/agent/src/extension_services/k8s_pod_handler.rs`)
+
+**Configurability:** The proxy address and port are **hardcoded in the compiled `nico-agent` binary** (`crates/agent/src/extension_services/k8s_pod_handler.rs`). Changing this address requires rebuilding the DPU agent.
+
+> **Warning:** `socks.forge:1888` is hardcoded in the stock `nico-agent`
+> binary. Publishing only `socks.nico` is not enough for stock agents.
+
+---
+
+## Network Topology
+
+`.nico` service endpoints are hosted on the site controller (control plane). All service VIPs have their routes injected into both the underlay and the overlay.
+
+**DPU agents** and **managed hosts** reach `.nico` endpoints over the OOB/admin management network. All `.nico` names must be resolvable from this network path.
+
+**Tenant workloads** can reach the service VIPs at the IP level but are not configured to use `unbound.nico` as their DNS resolver and will not resolve `.nico` names.
+
+---
+
+## Resolution Flow for DPU Agents and Unallocated Managed Hosts
+
+This section describes how DNS queries flow from the two client types that consume the service zones: DPU agents (during DPU provisioning and steady-state operation) and managed hosts that have been ingested but not yet allocated to a tenant.
+
+### DPU Agents
+
+The DPU agent (`nico-agent`) issues DNS queries at startup and periodically thereafter - for fetching FMDS configuration, pulling boot artifacts from the PXE service, reaching NTP, exporting telemetry to the OTel receiver, and dialing the SOCKS proxy used by extension-service pods.
+
+How it finds its resolver:
+
+- The DPU's network interface receives an IP and DHCP options from `nico-dhcp` (the Kea + nico hook combination).
+- DHCP option 6 (Domain Name Server) is set to the `unbound.nico` VIP. This value comes from the Kea hook parameter `nico-nameserver`.
+- The DPU agent uses this as its sole resolver. The agent has no compiled-in resolver address; changing the resolver is a DHCP-side configuration change.
+
+What it resolves:
+
+| Query | How it's answered |
+|---|---|
+| `nico-static-pxe.nico`, `otel-receiver.forge`, and the exact API, PXE, NTP, and SOCKS hostnames used by the deployed agent | Served locally by Unbound from `local_data.conf` |
+| Names in the site domain (e.g., a `<machine-id>` record under `initial_domain_name`) | Reaches `nico-dns` via upstream delegation of the site zone to the `nico-dns` VIPs, or via an explicit forward zone in Unbound |
+| External names (package mirrors, public NTP fallbacks, etc.) | Unbound forwards or recurses to the upstream resolver configured in `forwarders.conf` |
+
+The DPU agent does not query the Kubernetes cluster DNS (CoreDNS); it has no awareness of the `*.svc.cluster.local` namespace.
+
+### Unallocated Managed Hosts
+
+A managed host that has been ingested but not yet allocated to a tenant remains on the admin network. Its DNS configuration mirrors a DPU agent's:
+
+- The host receives DHCP from `nico-dhcp` on its admin-network interface.
+- DHCP option 6 hands out the `unbound.nico` VIP.
+- The host OS's resolver (`/etc/resolv.conf`, populated by NetworkManager, systemd-networkd, or cloud-init depending on the image) uses Unbound for all queries.
+
+What it resolves:
+
+- The same service endpoints as DPU agents - for example, the PXE hostname in the URLs the PXE service advertises (`carbide-pxe.forge` unless `CARBIDE_PXE_URL` overrides it) for cloud-init userdata and the internal APT repository, the NTP hostname compiled into the deployed agent for time synchronisation, and the API URL from the same boot scripts (`carbide-api.forge` unless `CARBIDE_API_URL` overrides it) for any in-band tooling that targets the NICo API.
+- The host's own hostname and other site-zone records, through the same delegation or forward-zone path that DPU agents use.
+- External names, through Unbound's upstream forwarder.
+
+Once a tenant is assigned to the host, the host typically receives tenant-provided cloud-init userdata that may reconfigure DNS. Tenant-allocated DNS behaviour is outside the scope of this page.
+
+### Common Properties
+
+For both client types:
+
+- All resolution flows through Unbound. Neither DPU agents nor unallocated hosts contact `nico-dns` directly - they reach it (when they need to) only via the upstream delegation chain or an Unbound forward zone.
+- Reachability requires the `unbound.nico` VIP to be routable on the OOB/admin management network.
+- Site-zone names resolve only if the `initial_domain_name` zone is delegated to the `nico-dns` VIPs at the upstream authoritative DNS, or if Unbound is configured with an explicit `forward-zone:` (or `stub-zone:`) pointing at those VIPs. If neither is in place, site-zone queries fail silently from the client's perspective - DPU agents will still resolve the service names served by Unbound but cannot look up per-machine records.
+
+---
+
+## Hardcoded vs. Configurable Endpoints
+
+| Hostname | Hardcoded in | Configurable at deploy time? |
+|---|---|---|
+| `carbide-api.forge` (default) / `nico-api.nico` (rebranded image) | Default value only (`crates/host-support/src/agent_config.rs`, `crates/fmds/src/cfg.rs`, `crates/pxe/src/config.rs`) | **Partly** - no `NICO_API_URL` setting exists. The PXE service reads `CARBIDE_API_URL` and FMDS takes `--forge-api`. Stock DPU agents use the default unless the interface is on the static-assignments segment and `external_api_url` is set |
+| `carbide-pxe.forge` (stock) / `nico-pxe.nico` (rebranded image) | Compiled into `nico-agent` (`crates/agent/src/util.rs`) | **No** - requires rebuilding `nico-agent`. `CARBIDE_PXE_URL` changes only the URLs the PXE service advertises |
+| `carbide-static-pxe.forge` (stock fallback) | Embedded fallback in Scout's loader and update checker | **Yes, at boot.** `newrootfs=` selects the full-image URL; `pxe_uri=` controls update checks. See [Static Boot Asset Server](#nico-static-pxenico---static-boot-asset-server). |
+| `carbide-ntp.forge` (stock) / `nico-ntp.nico` (rebranded image) | Compiled into `nico-agent` (`crates/agent/src/util.rs`) | **No** - requires rebuilding `nico-agent` |
+| `unbound.nico` | Not compiled into binaries; distributed via DHCP option 6 | **Yes** - update DHCP server configuration |
+| `otel-receiver.forge` | Default in the `nico-otelcol` chart's `otlpSiteEndpoint` value and the standalone otel-collector configs | **Yes** - change the value or config file and redeploy |
+| `socks.forge` (stock) / `socks.nico` (rebranded image) | Compiled into `nico-agent` (`crates/agent/src/extension_services/k8s_pod_handler.rs`) | **No** - requires rebuilding `nico-agent` |
+
+---
+
+## DNS Configuration
+
+### Using Unbound (`local_data.conf`)
+
+Populate `unbound.localData` in the Helm values with each service VIP. The
+chart renders IPv4 literals as A records and IPv6 literals as AAAA records. Add
+an AAAA entry for `carbide-ntp.forge` when stock agents use the DHCPv6
+option-56 fallback, and add the corresponding `nico-ntp.nico` record only for
+rebranded images. If Stakater Reloader is installed, the Unbound pod restarts
+automatically once the generated ConfigMap changes. Otherwise, restart the
+Unbound Deployment after changing `unbound.localData`.
+
+### Using Other DNS Providers
+
+Any DNS server that can serve authoritative responses for the required `.nico`
+and `.forge` names on your OOB management network is supported. Create A
+records for each applicable hostname and an AAAA record for the exact NTP
+hostname queried by the deployed agent when DHCPv6 option 56 is required.
+
+> **Note:** `.nico` and `.forge` are private service zones in this deployment.
+> They should not be forwarded to public resolvers. Configure your DNS server
+> to answer the required names locally with no upstream forwarding.
+
+---
+
+## Deployment Checklist
+
+After configuring DNS, verify the required records from a host or DPU on the
+OOB management network. The DNS and HTTP examples below assume stock agents
+and that your deployment publishes the listed records. The loop checks
+`carbide-static-pxe.forge`, Scout's stock fallback. If Scout's effective
+full-image or update URL names a different host, check that hostname too, and
+drop the fallback once no URL uses it. Omit DNS checks for literal IP URLs; an
+unused `.nico` alias does not need to resolve.
+The loop checks A records; for IPv6 Scout endpoints, check AAAA records for
+the selected hostname instead. The [Static Boot Asset Server reference](#nico-static-pxenico---static-boot-asset-server)
+describes how `newrootfs=` and `pxe_uri=` select the URLs independently.
+
+```bash
+for name in carbide-api.forge carbide-pxe.forge carbide-static-pxe.forge \
+            unbound.nico otel-receiver.forge socks.forge; do
+    printf "%-30s -> %s\n" "$name" "$(dig +short "$name" @<UNBOUND_VIP> || echo 'FAILED')"
+done
+
+# Stock agent: both results are required for dual-stack NTP fallback.
+dig +short A carbide-ntp.forge @<UNBOUND_VIP>
+dig +short AAAA carbide-ntp.forge @<UNBOUND_VIP>
+```
+
+For an image rebuilt with the rebranded names, replace the complete
+`carbide-api.forge`, `carbide-pxe.forge`, `socks.forge`, and
+`carbide-ntp.forge` hostnames with `nico-api.nico`, `nico-pxe.nico`,
+`socks.nico`, and `nico-ntp.nico` in these checks and the reachability checks
+below. Do not replace only the TLD. If `external_api_url` is set, also check
+its hostname from the static-assignments segment.
+
+Verify reachability on expected ports. For Scout, substitute the selected
+server's scheme, hostname, and port in the Static PXE example. Repeat the
+server check for each distinct endpoint selected by the full-image and update
+URLs. That example checks the server root; a failure there does not establish
+that Scout's asset URL is unavailable. The [Scout boot procedure](../development/vm_pxe_client.md#verify-scout-boot-nic-selection)
+checks the actual download.
+
+```bash
+# NICo gRPC API (TLS handshake)
+openssl s_client -connect carbide-api.forge:443 </dev/null 2>/dev/null | grep -E "^(subject|Verify)"
+
+# PXE service
+curl -sf --max-time 5 http://carbide-pxe.forge/ -o /dev/null && echo "nico-pxe OK" || echo "nico-pxe FAILED"
+
+# Static PXE service
+curl -sf --max-time 5 http://carbide-static-pxe.forge/ -o /dev/null && echo "nico-static-pxe OK" || echo "nico-static-pxe FAILED"
+
+# NTP
+ntpdate -q carbide-ntp.forge
+
+# DNS resolver (should return a result for an external name)
+dig +short +timeout=3 example.com @unbound.nico
+
+# OTEL receiver (TLS handshake)
+openssl s_client -connect otel-receiver.forge:443 </dev/null 2>/dev/null | grep -E "^(subject|Verify)"
+
+# SOCKS proxy (TCP connect)
+nc -zv socks.forge 1888
+```
+
+Refer to [Helm prerequisites](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/PREREQUISITES.md) for additional deployment prerequisites.

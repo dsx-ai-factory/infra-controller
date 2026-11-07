@@ -1,0 +1,134 @@
+# OTEL Collector — AGENT (DaemonSet). Two jobs:
+#   logs:   scrapes every node's /var/log/pods/* — all k8s pod stdout (nico-*, nico-rest, flow,
+#           temporal, rack-manager, cert-manager, vault, ... + CP static pods) -> local Loki.
+#   traces: receives OTLP spans (NICo's opt-in span export; see README "Enabling traces") and
+#           forwards them to Tempo. Services target otel-agent.otel.svc.cluster.local:4317.
+# Cert-free, no VIP.
+#
+# NOTE: no `journald` receiver (for systemd-only node services): the contrib image ships no
+# journalctl binary, so one would crash-loop. To add one: use a journald-capable image, check
+# the node journal layout (`ls /var/log/journal /run/log/journal`), mount the right dir, and
+# set the receiver `directory`.
+#
+# IMAGE PIN (load-bearing): the `loki` exporter was deprecated upstream in collector v0.107 and
+# removed from the contrib distribution soon after — 0.106.x is the last safely-pinnable line.
+# Bumping the image requires switching the logs exporter to Loki-native OTLP (and Loki 3.x).
+mode: daemonset
+fullnameOverride: otel-agent
+image:
+  repository: "otel/opentelemetry-collector-contrib"
+  tag: "0.106.1"
+presets:
+  kubernetesAttributes:
+    enabled: true
+  logsCollection:
+    enabled: true
+# Site label value. Overridden per site by install-observability.sh
+# (OTEL_SITE_NAME env) — must stay at index 0 of extraEnvs.
+extraEnvs:
+  - name: OTEL_SITE_NAME
+    value: "nico-site"
+# Run as root so filelog can always read /var/log/pods regardless of file perms.
+# runAsNonRoot:false avoids a conflict if the chart defaults it true.
+securityContext:
+  runAsUser: 0
+  runAsNonRoot: false
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 1Gi
+# OTLP ingest for traces. The chart renders a Service for the DaemonSet so in-cluster services
+# have a stable name (otel-agent.otel.svc.cluster.local:4317) rather than node-local addressing.
+ports:
+  otlp:
+    enabled: true          # 4317/gRPC
+  otlp-http:
+    enabled: true          # 4318/HTTP
+  # Disable the chart's default jaeger/zipkin listeners (helm merge keeps them otherwise);
+  # nothing on a NICo site speaks those protocols.
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+service:
+  enabled: true
+# Bind to the primary pod IP used by the Service. Unbracketed IPv6 endpoints
+# prevent collector startup; brackets also work for IPv4.
+config:
+  extensions:
+    health_check:
+      endpoint: "[${env:MY_POD_IP}]:13133"
+  receivers:
+    # Null out the chart's default receivers not used here (a null key removes it).
+    jaeger: null
+    zipkin: null
+    prometheus: null
+    filelog:
+      # patch the logsCollection preset: collect all pods, drop our own + loki (avoid feedback loops)
+      include:
+        - /var/log/pods/*/*/*.log
+      exclude:
+        - /var/log/pods/otel_*/opentelemetry-collector/*.log
+        - /var/log/pods/loki_loki-*/*/*.log
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "[${env:MY_POD_IP}]:4317"
+        http:
+          endpoint: "[${env:MY_POD_IP}]:4318"
+  processors:
+    memory_limiter:
+      limit_percentage: 80
+      spike_limit_percentage: 25
+      check_interval: 1s
+    # Single source of the forge_site value (${env:OTEL_SITE_NAME}).
+    resource/site-label-loki:
+      attributes:
+        - {action: insert, key: forge_site, value: "${env:OTEL_SITE_NAME}"}
+    resource/site-logs-loki:
+      attributes:
+        - {action: insert, key: component, value: "site-controller-filelog"}
+        - action: insert
+          key: loki.resource.labels
+          value: forge_site, k8s.namespace.name, k8s.pod.name, k8s.container.name, k8s.node.name, component
+        - {action: insert, key: loki.format, value: raw}   # raw: don't append OTEL attrs into each line
+    attributes/site-logs-loki:
+      actions:
+        - {action: insert, key: loki.attribute.labels, value: log.file.path}
+    batch: {}
+  exporters:
+    loki:
+      endpoint: http://loki.loki.svc.cluster.local:3100/loki/api/v1/push
+      headers:
+        X-Scope-OrgID: forge
+      default_labels_enabled:
+        exporter: false
+    # Traces to Tempo. `otlp` is a core exporter — unaffected by the contrib image ceiling.
+    otlp/tempo:
+      endpoint: tempo.tempo.svc.cluster.local:4317
+      tls:
+        insecure: true     # in-cluster, no TLS on Tempo's OTLP ingest
+      retry_on_failure:
+        enabled: false     # best-effort: don't queue traces while Tempo is down
+  service:
+    telemetry:
+      metrics:
+        address: "[${env:MY_POD_IP}]:8888"
+    pipelines:
+      # Remove the chart's default metrics pipeline; only logs + traces run on the agent.
+      metrics: null
+      logs:
+        receivers: [filelog]
+        processors: [memory_limiter, resource/site-label-loki, k8sattributes, resource/site-logs-loki, attributes/site-logs-loki, batch]
+        exporters: [loki]
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, resource/site-label-loki, k8sattributes, batch]
+        exporters: [otlp/tempo]

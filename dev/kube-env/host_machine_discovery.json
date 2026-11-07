@@ -1,0 +1,234 @@
+{
+  "machine_interface_id": {
+    "value": ""
+  },
+  "info": {
+    "cpus": [
+      {
+        "core": 0,
+        "node": 2,
+        "model": "0x1",
+        "number": 0,
+        "socket": 0,
+        "vendor": "0x41",
+        "frequency": "400.00"
+      },
+      {
+        "core": 0,
+        "node": 2,
+        "model": "0x1",
+        "number": 1,
+        "socket": 0,
+        "vendor": "0x41",
+        "frequency": "400.00"
+      },
+      {
+        "core": 0,
+        "node": 2,
+        "model": "0x1",
+        "number": 2,
+        "socket": 0,
+        "vendor": "0x41",
+        "frequency": "400.00"
+      },
+      {
+        "core": 0,
+        "node": 2,
+        "model": "0x1",
+        "number": 3,
+        "socket": 0,
+        "vendor": "0x41",
+        "frequency": "400.00"
+      },
+      {
+        "core": 0,
+        "node": 2,
+        "model": "0x1",
+        "number": 4,
+        "socket": 0,
+        "vendor": "0x41",
+        "frequency": "400.00"
+      },
+      {
+        "core": 0,
+        "node": 2,
+        "model": "0x1",
+        "number": 5,
+        "socket": 0,
+        "vendor": "0x41",
+        "frequency": "400.00"
+      },
+      {
+        "core": 0,
+        "node": 2,
+        "model": "0x1",
+        "number": 6,
+        "socket": 0,
+        "vendor": "0x41",
+        "frequency": "400.00"
+      },
+      {
+        "core": 0,
+        "node": 2,
+        "model": "0x1",
+        "number": 7,
+        "socket": 0,
+        "vendor": "0x41",
+        "frequency": "400.00"
+      }
+    ],
+    "machine_type": "x86_64",
+    "nvme_devices": [],
+    "block_devices": [
+      {
+        "model": "NO_MODEL",
+        "serial": "NO_SERIAL",
+        "revision": "NO_REVISION"
+      },
+      {
+        "model": "NO_MODEL",
+        "serial": "NO_SERIAL",
+        "revision": "NO_REVISION"
+      },
+      {
+        "model": "NO_MODEL",
+        "serial": "NO_SERIAL",
+        "revision": "NO_REVISION"
+      },
+      {
+        "model": "NO_MODEL",
+        "serial": "NO_SERIAL",
+        "revision": "NO_REVISION"
+      },
+      {
+        "model": "NO_MODEL",
+        "serial": "NO_SERIAL",
+        "revision": "NO_REVISION"
+      }
+    ],
+    "dmi_data": {
+      "board_name": "",
+      "board_version": "",
+      "bios_version": "",
+      "bios_date": "01/01/1971",
+      "product_serial": "Host123",
+      "board_serial": "HostBoard123",
+      "chassis_serial": "HostChassis123",
+      "product_name": "HostProductName234",
+      "sys_vendor": "HostSysVendor234"
+    },
+    "network_interfaces": [
+      {
+        "mac_address": "02:52:e9:bc:01:91",
+        "pci_properties": {
+          "path": "/devices/pci0000:00/0000:00:00.0/0000:01:00.0/0000:02:00.0/0000:03:00.0/mlx5_core.sf.2/net/enp3s0f0s0",
+          "device": "0xa2d6",
+          "vendor": "0x15b3",
+          "numa_node": 2147483647,
+          "description": "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"
+        }
+      },
+      {
+        "mac_address": "ch:64",
+        "pci_properties": {
+          "path": "/devices/pci0000:00/0000:00:00.0/0000:01:00.0/0000:02:00.0/0000:03:00.0/net/en3f0pf0sf0",
+          "device": "0xa2d6",
+          "vendor": "0x15b3",
+          "numa_node": -1,
+          "description": "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"
+        }
+      },
+      {
+        "mac_address": "08:c0:eb:cb:0e:ac",
+        "pci_properties": {
+          "path": "/devices/pci0000:00/0000:00:00.0/0000:01:00.0/0000:02:00.0/0000:03:00.0/net/p0",
+          "device": "0xa2d6",
+          "vendor": "0x15b3",
+          "numa_node": -1,
+          "description": "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"
+        }
+      },
+      {
+        "mac_address": "00:11:22:33:44:66",
+        "pci_properties": {
+          "path": "/devices/pci0000:00/0000:00:00.0/0000:01:00.0/0000:02:00.0/0000:03:00.0/net/pf0hpf",
+          "device": "0xa2d6",
+          "vendor": "0x15b3",
+          "numa_node": -1,
+          "description": "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"
+        }
+      },
+      {
+        "mac_address": "02:13:e7:bf:35:9e",
+        "pci_properties": {
+          "path": "/devices/pci0000:00/0000:00:00.0/0000:01:00.0/0000:02:00.0/0000:03:00.1/mlx5_core.sf.3/net/enp3s0f1s0",
+          "device": "0xa2d6",
+          "vendor": "0x15b3",
+          "numa_node": 2147483647,
+          "description": "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"
+        }
+      },
+      {
+        "mac_address": "ch:64",
+        "pci_properties": {
+          "path": "/devices/pci0000:00/0000:00:00.0/0000:01:00.0/0000:02:00.0/0000:03:00.1/net/en3f1pf1sf0",
+          "device": "0xa2d6",
+          "vendor": "0x15b3",
+          "numa_node": -1,
+          "description": "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"
+        }
+      },
+      {
+        "mac_address": "08:c0:eb:cb:0e:ad",
+        "pci_properties": {
+          "path": "/devices/pci0000:00/0000:00:00.0/0000:01:00.0/0000:02:00.0/0000:03:00.1/net/p1",
+          "device": "0xa2d6",
+          "vendor": "0x15b3",
+          "numa_node": -1,
+          "description": "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"
+        }
+      },
+      {
+        "mac_address": "ch:64",
+        "pci_properties": {
+          "path": "/devices/pci0000:00/0000:00:00.0/0000:01:00.0/0000:02:00.0/0000:03:00.1/net/pf1hpf",
+          "device": "0xa2d6",
+          "vendor": "0x15b3",
+          "numa_node": -1,
+          "description": "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"
+        }
+      }
+    ],
+    "tpm_ek_certificate": "U29tZSBhcmJpdHJhcnkgYmFzZTY0",
+    "gpus": [
+      {
+        "name": "NVIDIA H100 PCIe",
+        "serial": "1654422005699",
+        "driver_version": "530.30.02",
+        "vbios_version": "96.00.30.00.01",
+        "inforom_version": "1010.0200.00.02",
+        "total_memory": "81559 MiB",
+        "frequency": "1755 MHz",
+        "pci_bus_id": "00000000:17:00.0"
+      }
+    ],
+    "memory_devices": [
+      {
+        "size_mb": 2048,
+        "mem_type": "DDR4"
+      },
+      {
+        "size_mb": 2048,
+        "mem_type": "DDR4"
+      },
+      {
+        "size_mb": 16384,
+        "mem_type": "DDR4"
+      },
+      {
+        "size_mb": 16384,
+        "mem_type": "DDR4"
+      }
+    ]
+  }
+}

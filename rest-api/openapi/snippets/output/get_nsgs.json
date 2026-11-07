@@ -1,0 +1,34 @@
+[
+  {
+    "id": "string",
+    "name": "string",
+    "description": "string",
+    "siteId": "60189e9c-7d12-438c-b9ca-6998d9c364b1",
+    "tenantId": "f97df110-f4de-492e-8849-4a6af68026b0",
+    "status": "Pending",
+    "statusHistory": [
+      {
+        "status": "Pending",
+        "message": "Request received, pending processing",
+        "created": "2019-08-24T14:15:22Z",
+        "updated": "2019-08-24T14:15:22Z"
+      }
+    ],
+    "rules": [
+      {
+        "name": "string",
+        "direction": "INGRESS",
+        "sourcePortRange": "80-81",
+        "destinationPortRange": "80-81",
+        "protocol": "TCP",
+        "action": "PERMIT",
+        "priority": 0,
+        "sourcePrefix": "10.5.44.0/24",
+        "destinationPrefix": "10.5.44.0/24"
+      }
+    ],
+    "labels": {},
+    "created": "2019-08-24T14:15:22Z",
+    "updated": "2019-08-24T14:15:22Z"
+  }
+]

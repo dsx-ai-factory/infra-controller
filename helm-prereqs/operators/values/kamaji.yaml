@@ -1,0 +1,89 @@
+# =============================================================================
+# operators/values/kamaji.yaml — Kamaji static values
+#
+# DPF prerequisite (installed by default; skip with --skip-dpf).
+# Copied from NVIDIA/doca-platform deploy/helmfiles/values at tag v26.4.0 —
+# keep in sync with the helm-prereqs/doca-platform submodule pin when bumping DPF.
+#
+# Chart: oci://ghcr.io/nvidia/charts/kamaji 1.2.0
+# =============================================================================
+
+# Kamaji configuration
+# Number of Kamaji controller replicas for High Availability. The chart key is
+# `replicaCount` (templates/controller.yaml renders `replicas: .Values.replicaCount`,
+# default 1) — a top-level `replicas:` is silently ignored, so HA needs this key.
+# The controller runs --leader-elect, so 2 replicas give active/standby failover;
+# there is no pod anti-affinity, so this never blocks scheduling on a small cluster.
+replicaCount: 2
+resources: null
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: "node-role.kubernetes.io/master"
+              operator: Exists
+        - matchExpressions:
+            - key: "node-role.kubernetes.io/control-plane"
+              operator: Exists
+tolerations:
+  - key: node-role.kubernetes.io/master
+    operator: Exists
+    effect: NoSchedule
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+kamaji-etcd:
+  persistentVolumeClaim:
+    storageClassName: local-path
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: "node-role.kubernetes.io/master"
+                operator: Exists
+          - matchExpressions:
+              - key: "node-role.kubernetes.io/control-plane"
+                operator: Exists
+  tolerations:
+    - key: node-role.kubernetes.io/master
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule
+  jobs:
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: "node-role.kubernetes.io/master"
+                  operator: Exists
+            - matchExpressions:
+                - key: "node-role.kubernetes.io/control-plane"
+                  operator: Exists
+    tolerations:
+      - key: node-role.kubernetes.io/master
+        operator: Exists
+        effect: NoSchedule
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+        effect: NoSchedule
+  datastore:
+    enabled: true
+    annotations:
+      helm.sh/resource-policy: keep
+    name: default
+image:
+  repository: ghcr.io/nvidia/kamaji
+  tag: v1.34.0-25.9.3
+  pullPolicy: Always
+# NOTE: this key is currently a no-op in kamaji-etcd 1.2.0 — its cert-preinstall
+# job (charts/kamaji-etcd/templates/etcd_job_preinstall_1.yaml) hardcodes the
+# image as `cfssl/cfssl:latest` and reads no `cfssl.image` value. Kept (matching
+# upstream) to carry the intended pin for a future chart that wires it up.
+cfssl:
+  image:
+    tag: v1.6.5

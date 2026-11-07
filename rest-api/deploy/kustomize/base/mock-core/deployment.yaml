@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# nico-rest-mock-core (mock nico gRPC server) Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nico-rest-mock-core
+  labels:
+    app: nico-rest-mock-core
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nico-rest-mock-core
+  template:
+    metadata:
+      labels:
+        app: nico-rest-mock-core
+    spec:
+      imagePullSecrets:
+        - name: image-pull-secret
+      containers:
+        - name: mock-core
+          image: nico-rest-mock-core
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 11079
+              name: grpc
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          livenessProbe:
+            tcpSocket:
+              port: 11079
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 11079
+            initialDelaySeconds: 2
+            periodSeconds: 5

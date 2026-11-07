@@ -1,0 +1,78 @@
+# =============================================================================
+# NICo site-agent standalone chart values
+#
+# Used by setup.sh for: helm upgrade --install nico-rest-site-agent
+#   -f helm-prereqs/values/nico-site-agent.yaml
+#
+# Dynamic values (image tags, site UUID) are passed via --set in setup.sh.
+#
+# Key fields to customize for non-dev environments:
+#   envConfig.DB_DATABASE / DB_ADDR               — consolidated nico-pg-cluster by default
+#   secrets.dbCreds                               — name of Secret with DB_USER and DB_PASSWORD
+#   certificate.uris                               — SPIFFE URI for this site
+#   global.certificate.issuerRef.name             — CA issuer for mTLS certs
+# =============================================================================
+
+global:
+  image:
+    pullPolicy: IfNotPresent
+  imagePullSecrets:
+    - name: image-pull-secret
+  # Cert issued by vault-nico-issuer so nico-api (same Vault PKI CA) trusts
+  # the site-agent's client cert for mTLS.  The ca.crt in the issued secret is
+  # the Vault PKI CA which the site-agent also uses as ServerCAPath to verify
+  # nico-api's server cert.
+  certificate:
+    issuerRef:
+      kind: ClusterIssuer
+      name: vault-nico-issuer
+      group: cert-manager.io
+
+replicaCount: 3
+
+bootstrap:
+  enabled: true
+  siteManager:
+    # Port 8100 is required — the default omits the port and hits HTTPS 443
+    address: "nico-rest-site-manager.nico-rest:8100"
+
+certificate:
+  # Service identifier must resolve to "elektra-site-agent" for nico-api's
+  # SiteAgent RBAC role (InternalRBACRules, compiled-in static table).
+  # Path /nico-system/sa/ is one of nico-api's spiffe_service_base_paths;
+  # stripping it from the URI yields identifier "elektra-site-agent" -> SiteAgent role.
+  uris:
+    - "spiffe://nico.local/nico-system/sa/elektra-site-agent"
+
+envConfig:
+  DEV_MODE: "true"
+  ENABLE_DEBUG: "true"
+  ENABLE_TLS: "true"
+
+  # mTLS to nico-api on port 1079 (NICO_SEC_OPT=2).
+  # InsecuregRPC=0, ServerTLS=1, MutualTLS=2.
+  # Using InsecuregRPC (0) against a TLS-only server causes a 5-second
+  # DeadlineExceeded on the initial Version health-check RPC and leaves the
+  # NicoClient nil, causing all inventory activity panics.
+  # Site-agent reads CORE_GRPC_* first, then CARBIDE_* legacy fallbacks.
+  CORE_GRPC_ADDRESS: "nico-api.nico-system.svc.cluster.local:1079"
+  CORE_GRPC_SEC_OPT: "2"
+  CARBIDE_ADDRESS: "nico-api.nico-system.svc.cluster.local:1079"
+  CARBIDE_SEC_OPT: "2"
+
+  # DB connection — nico-pg-cluster (Zalando-managed, shared with nico-rest-api).
+  # DB_USER and DB_PASSWORD are injected from the db-creds Secret (secrets.dbCreds).
+  DB_ADDR: "nico-pg-cluster.postgres.svc.cluster.local"
+  DB_DATABASE: "nico_rest"
+  DB_PORT: "5432"
+
+  TEMPORAL_HOST: "temporal-frontend.temporal"
+  TEMPORAL_PORT: "7233"
+  TEMPORAL_SERVER: "interservice.server.temporal.local"
+  TEMPORAL_PUBLISH_NAMESPACE: "site"
+  TEMPORAL_PUBLISH_QUEUE: "site"
+  TEMPORAL_INVENTORY_SCHEDULE: "@every 3m"
+  TEMPORAL_CERT_PATH: "/etc/temporal-certs"
+  TEMPORAL_CERT: "temporal-client-site-agent-certs"
+  # CLUSTER_ID, TEMPORAL_SUBSCRIBE_NAMESPACE, TEMPORAL_SUBSCRIBE_QUEUE
+  # are set dynamically via --set in setup.sh using NICO_SITE_UUID.

@@ -1,0 +1,66 @@
+name: Publish Github Pages Documentation
+
+on:
+  push:
+    branches:
+      - main
+
+  # Allow manual trigger
+  workflow_dispatch:
+
+# Sets permissions for GitHub Pages deployment
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow only one concurrent deployment
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: linux-amd64-cpu4
+    steps:
+      - name: Create redirect site
+        run: |
+          mkdir -p public
+          cat > public/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <meta charset="utf-8">
+              <title>Redirecting...</title>
+              <meta http-equiv="refresh" content="0; url=https://docs.nvidia.com/infra-controller/">
+              <link rel="canonical" href="https://docs.nvidia.com/infra-controller/">
+            </head>
+            <body>
+              <p>Documentation has moved to
+                <a href="https://docs.nvidia.com/infra-controller/">docs.nvidia.com/infra-controller</a>.
+              </p>
+              <script>window.location.replace("https://docs.nvidia.com/infra-controller/");</script>
+            </body>
+          </html>
+          EOF
+          cp public/index.html public/404.html
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: public
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: linux-amd64-cpu4
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

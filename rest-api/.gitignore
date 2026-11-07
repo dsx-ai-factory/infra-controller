@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+build/
+/nico-rest
+/db/cmd/migrations/migrations
+.test-config/
+.idea/
+ref/
+.debug/
+.tools/
+.tools-stamp

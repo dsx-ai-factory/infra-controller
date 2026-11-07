@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-dsx-exchange-consumer.name" . }}
+  namespace: {{ include "nico-dsx-exchange-consumer.namespace" . }}
+  labels:
+    {{- include "nico-dsx-exchange-consumer.labels" . | nindent 4 }}
+    app: {{ include "nico-dsx-exchange-consumer.name" . }}
+    app.kubernetes.io/metrics: {{ include "nico-dsx-exchange-consumer.name" . }}
+spec:
+  ipFamilyPolicy: PreferDualStack
+  selector:
+    {{- include "nico-dsx-exchange-consumer.selectorLabels" . | nindent 4 }}
+  ports:
+    - port: {{ .Values.service.port }}
+      name: metrics
+      protocol: TCP

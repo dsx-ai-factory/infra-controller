@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Overlay for db (migrations) and postgres deployment customization.
+# Customize images or add patches for the db Job (migrations) and postgres here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: nico-rest
+
+resources:
+  - ../../base/mock-core
+
+images:
+  - name: nico-rest-mock-core
+    newName: localhost:5000/nico-rest-mock-core
+    newTag: latest
+
+patches:
+  - target:
+      kind: Deployment
+      name: nico-rest-mock-core
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/imagePullSecrets
+        value: []

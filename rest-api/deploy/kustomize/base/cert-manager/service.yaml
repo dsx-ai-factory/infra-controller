@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# nico-rest-cert-manager Service (native Go PKI)
+apiVersion: v1
+kind: Service
+metadata:
+  name: nico-rest-cert-manager
+  labels:
+    app: nico-rest-cert-manager
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: https
+    - port: 8001
+      targetPort: 8001
+      name: http
+  selector:
+    app: nico-rest-cert-manager

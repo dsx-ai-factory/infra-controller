@@ -1,0 +1,94 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+# This should match rust-toolchain.toml
+ARG CONTAINER_BUILD_X86_64
+ARG CONTAINER_RUNTIME_X86_64
+
+FROM $CONTAINER_BUILD_X86_64 as builder
+ARG VERSION
+ENV VERSION $VERSION
+ENV CONTAINER_REPO_ROOT=/carbide
+
+RUN USER=root cargo new --bin carbide
+WORKDIR ./carbide
+COPY . ./
+
+# --mount=type=cache persists the sccache directory on the host across docker build invocations.
+# sccache keys by source hash, so stale artifacts are not a risk — a changed file always recompiles.
+# On a rebuild, only crates affected by source changes recompile; everything else is a cache hit.
+# Requires BuildKit (enabled by default in Docker 23+; set DOCKER_BUILDKIT=1 on older versions).
+RUN --mount=type=cache,id=sccache-x86_64,target=/sccache \
+  export CARGO_MAKE_SKIP_CODECOV="true" && \
+  export DATABASE_URL="postgresql://root@%2Fvar%2Frun%2Fpostgresql/root" && \
+  export SCCACHE_DIR=/sccache && \
+  export RUSTC_WRAPPER=sccache && \
+  export CARGO_PROFILE_RELEASE_DEBUG=true && \
+  /etc/init.d/postgresql start && \
+  sudo -u postgres psql -c "ALTER USER root WITH SUPERUSER;" && \
+  createdb root && \
+  # Run clippy once at the workspace root. build-release itself selects only the packages whose
+  # artifacts are copied into the runtime image, so test-only workspace members cannot enable
+  # features in production dependencies.
+  cargo make --no-workspace clippy-release && \
+  echo "$(date): Finished cargo make clippy-release\n" && \
+  cargo make carbide-lints && \
+  echo "$(date): Finished cargo make carbide-lints\n" && \
+  (taplo fmt --check || echo "Please format toml files") && \
+  echo "$(date): Finished taplo fmt \n" && \
+  cargo make --no-workspace check-format-nightly && \
+  echo "$(date): Finished cargo make check-format-nightly\n" && \
+  cargo xtask check-workspace-deps && \
+  echo "$(date): Finished cargo xtask check-workspace-deps\n" && \
+  cargo make --no-workspace build-release && \
+  echo "$(date): Finished cargo make build-release\n" && \
+  cargo make --no-workspace check-licenses && \
+  echo "$(date): Finished cargo make check-licenses\n" && \
+  cargo make --no-workspace check-bans && \
+  echo "$(date): Finished cargo make check-bans\n" && \
+  mkdir -p /carbide/target/bin && \
+  find /carbide/target/release -maxdepth 1 -type f -exec cp -t /carbide/target/bin {} + && \
+  rm -rf /carbide/target/debug && \
+  rm -rf /carbide/target/release && \
+  echo "$(date): Deleted artifacts"
+
+# After build, copy the release into the runtime container
+FROM $CONTAINER_RUNTIME_X86_64
+ARG CI_COMMIT_SHORT_SHA
+ENV CI_COMMIT_SHORT_SHA $CI_COMMIT_SHORT_SHA
+RUN mkdir -p /opt/carbide/migrations && \
+  mkdir -p /opt/carbide/pxe/templates && \
+  mkdir -p /opt/carbide/scout-firmware-scripts && \
+  mkdir -p /opt/carbide/static
+
+RUN echo "$(date): Start runtime container build"
+
+COPY --from=builder ["/carbide/target/bin/carbide-api", "/carbide/target/bin/carbide", "/carbide/target/bin/carbide-dns", "/carbide/target/bin/nico-admin-cli", "/carbide/target/bin/carbide-dsx-exchange-consumer", "/carbide/target/bin/forge-dpu-agent", "/carbide/target/bin/forge-dhcp-server", "/carbide/target/bin/forge-hw-health", "/carbide/target/bin/forge-log-parser", "/carbide/target/bin/ssh-console", "/carbide/target/bin/carbide-bmc-proxy", "/opt/carbide/"]
+COPY --from=builder /carbide/target/bin/libdhcp.so /usr/lib/x86_64-linux-gnu/kea/hooks
+RUN mkdir -p /usr/lib/kea/hooks && \
+    ln -sf /usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp.so /usr/lib/kea/hooks/libdhcp.so
+RUN ln -s /opt/carbide/nico-admin-cli /opt/carbide/carbide-admin-cli && \
+    ln -s /opt/carbide/nico-admin-cli /opt/carbide/forge-admin-cli
+
+RUN echo "$(date): Finished copies"
+
+COPY crates/api-db/migrations/ /opt/carbide/migrations/
+COPY pxe/templates/*  /opt/carbide/pxe/templates/
+COPY pxe/scout-firmware-scripts/ /opt/carbide/scout-firmware-scripts/
+COPY crates/api/casbin-policy.csv /opt/carbide/
+
+ENV CASBIN_POLICY_FILE=/opt/carbide/casbin-policy.csv

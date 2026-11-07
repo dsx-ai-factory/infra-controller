@@ -1,0 +1,236 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "DPUService Helm Chart Values",
+  "description": "Schema for validating values.yaml for DPUService Helm charts. Note: All Kubernetes resources must include {{ .Release.Name }} in their metadata.name to enable deployment of multiple instances of the service.",
+  "type": "object",
+  "required": ["serviceDaemonSet", "lldpSidecar"],
+  "properties": {
+    "xplaneMaintenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Internal mount access for Xplane sockets and the provisioned netdev mapping, derived from [ewethers_config] partial-multiplane in the NICo site config."
+        }
+      }
+    },
+    "serviceDaemonSet": {
+      "type": "object",
+      "description": "Configuration for the service DaemonSet",
+      "required": ["labels", "annotations", "updateStrategy", "resources"],
+      "properties": {
+        "nodeSelector": {
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "Node selector for the DaemonSet using nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution",
+              "required": ["nodeSelectorTerms"],
+              "properties": {
+                "nodeSelectorTerms": {
+                  "type": "array",
+                  "description": "Required node selector terms, one of which must match for pod scheduling",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "required": ["matchExpressions"],
+                    "properties": {
+                      "matchExpressions": {
+                        "type": "array",
+                        "description": "Node selector requirements by node's labels",
+                        "minItems": 1,
+                        "items": {
+                          "type": "object",
+                          "required": ["key", "operator", "values"],
+                          "properties": {
+                            "key": {
+                              "type": "string",
+                              "description": "The label key that the selector applies to"
+                            },
+                            "operator": {
+                              "type": "string",
+                              "description": "Represents a key's relationship to a set of values",
+                              "enum": ["In", "NotIn", "Exists", "DoesNotExist", "Gt", "Lt"]
+                            },
+                            "values": {
+                              "type": "array",
+                              "description": "An array of string values. If operator is In or NotIn, values array must be non-empty",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "matchFields": {
+                        "type": "array",
+                        "description": "Node selector requirements by node's fields",
+                        "items": {
+                          "type": "object",
+                          "required": ["key", "operator", "values"],
+                          "properties": {
+                            "key": {
+                              "type": "string",
+                              "description": "The label key that the selector applies to"
+                            },
+                            "operator": {
+                              "type": "string",
+                              "description": "Represents a key's relationship to a set of values",
+                              "enum": ["In", "NotIn", "Exists", "DoesNotExist", "Gt", "Lt"]
+                            },
+                            "values": {
+                              "type": "array",
+                              "description": "An array of string values. If operator is In or NotIn, values array must be non-empty",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "type": "null",
+              "description": "Node selector can be null/empty"
+            },
+            {
+              "type": "object",
+              "description": "Node selector can be an empty object",
+              "maxProperties": 0
+            }
+          ]
+        },
+        "labels": {
+          "type": "object",
+          "description": "serviceDaemonSet pod labels",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "annotations": {
+          "type": "object",
+          "description": "serviceDaemonSet pod annotations",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "updateStrategy": {
+          "type": "object",
+          "description": "serviceDaemonSet upgrade strategy configuration",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["RollingUpdate", "OnDelete"]
+            },
+            "rollingUpdate": {
+              "type": "object",
+              "properties": {
+                "maxUnavailable": {
+                  "oneOf": [
+                    { "type": "integer", "minimum": 1 },
+                    { "type": "string" }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "description": "serviceDaemonset pod Resource requests/limits (e.g., CPU, memory)",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "fmds": {
+      "type": "object",
+      "properties": {
+        "networkingAddresses": {
+          "type": ["array", "null"],
+          "description": "Complete FMDS address list for the agent's fmds-armos-networking.config.addresses. Null or omission preserves the IPv4-only default; an empty list is written explicitly. In DPF, only fd00:76b9::254/127 enables the IPv6 HBN peer and requires matching nico-fmds interfaceCidrV6 and IPv6 listener settings. Other entries do not change HBN peers or configure addresses in the external FMDS pod. The ConfigMap checksum rolls the agent pod after changes.",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "lldpSidecar": {
+      "type": "object",
+      "description": "Configuration for the LLDP snapshot sidecar",
+      "required": ["resources"],
+      "properties": {
+        "resources": {
+          "type": "object",
+          "description": "CPU and memory requests and limits for the LLDP snapshot sidecar",
+          "required": ["requests", "limits"],
+          "properties": {
+            "requests": {
+              "type": "object",
+              "required": ["cpu", "memory"],
+              "properties": {
+                "cpu": { "type": "string", "minLength": 1 },
+                "memory": { "type": "string", "minLength": 1 }
+              }
+            },
+            "limits": {
+              "type": "object",
+              "required": ["cpu", "memory"],
+              "properties": {
+                "cpu": { "type": "string", "minLength": 1 },
+                "memory": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "exposedPorts": {
+      "type": "object",
+      "description": "Configuration for exposing ports (optional). If provided, both 'ports' and 'labels' must be specified.",
+      "required": ["ports", "labels"],
+      "properties": {
+        "ports": {
+          "type": "object",
+          "description": "Map of port names to boolean values to enable/disable exposure",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "labels": {
+          "type": "object",
+          "description": "Custom labels for the Service resources to be discovered by the DPUService controller",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "supplementalNetworkConfig": {
+      "type": "object",
+      "description": "Reference to an externally managed ConfigMap (not part of this chart) holding an RFC 7386 JSON Merge Patch that the dpu-agent merges into the `set` section of its generated NVUE config before every apply. Applies uniformly to every DPU in this release's DaemonSet. An empty or omitted name disables the mount and the merge.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the externally managed ConfigMap in the release namespace (RFC 1123 DNS subdomain). Empty disables the feature.",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+        },
+        "key": {
+          "type": "string",
+          "description": "Key within that ConfigMap holding the merge-patch document (default: supplemental.json)",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^[-._a-zA-Z0-9]+$"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

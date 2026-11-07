@@ -1,0 +1,2120 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package handler
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"maps"
+	"math"
+	"net"
+	"net/http"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	mapset "github.com/deckarep/golang-set/v2"
+	validation "github.com/go-ozzo/ozzo-validation/v4"
+	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/otel/attribute"
+	tclient "go.temporal.io/sdk/client"
+
+	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	cem "github.com/NVIDIA/infra-controller/rest-api/common/pkg/expectedmachine"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
+)
+
+// ValidateProviderOrTenantSiteAccess validates if the provider or tenant has access to the site
+func ValidateProviderOrTenantSiteAccess(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session, site *cdbm.Site, infrastructureProvider *cdbm.InfrastructureProvider, tenant *cdbm.Tenant) (bool, *cutil.APIError) {
+	providerHasAccess := infrastructureProvider != nil && site.InfrastructureProviderID == infrastructureProvider.ID
+	tenantHasAccess := false
+
+	if tenant != nil {
+		// Effective TargetedInstanceCreation for this Site governs tenant access.
+		// A TenantSite association alone must not bypass an explicit false override.
+		var err error
+		tenantHasAccess, err = common.TenantHasTargetedInstanceCreation(ctx, nil, dbSession, tenant, &common.TenantPrivilegeScope{SiteID: &site.ID})
+		if err != nil {
+			logger.Error().Err(err).Msg("error resolving TargetedInstanceCreation for Tenant/Site")
+			return false, cutil.NewAPIError(http.StatusInternalServerError, "Failed to resolve Tenant capability for Site due to DB error", nil)
+		}
+	}
+
+	return providerHasAccess || tenantHasAccess, nil
+}
+
+// ~~~~~ Create Handler ~~~~~ //
+
+// CreateExpectedMachineHandler is the API Handler for creating new ExpectedMachine
+type CreateExpectedMachineHandler struct {
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
+}
+
+// NewCreateExpectedMachineHandler initializes and returns a new handler for creating ExpectedMachine
+func NewCreateExpectedMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) CreateExpectedMachineHandler {
+	return CreateExpectedMachineHandler{
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
+	}
+}
+
+// Handle godoc
+// @Summary Create an ExpectedMachine
+// @Description Create an ExpectedMachine
+// @Tags ExpectedMachine
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param message body model.APIExpectedMachineCreateRequest true "ExpectedMachine creation request"
+// @Success 201 {object} model.APIExpectedMachine
+// @Router /v2/org/{org}/nico/expected-machine [post]
+func (cemh CreateExpectedMachineHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "Create", c)
+	if handlerSpan != nil {
+		defer handlerSpan.End()
+	}
+	// Is DB user missing?
+	if dbUser == nil {
+		logger.Error().Msg("invalid User object found in request context")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	// Validate request
+	// Bind request data to API model
+	apiRequest := model.APIExpectedMachineCreateRequest{}
+	err := c.Bind(&apiRequest)
+	if err != nil {
+		logger.Warn().Err(err).Msg("error binding request data into API model")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
+	}
+
+	// Validate request attributes
+	verr := apiRequest.Validate()
+	if verr != nil {
+		logger.Warn().Err(verr).Msg("error validating Expected Machine creation request data")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Expected Machine creation data", verr)
+	}
+
+	// Retrieve the Site from the DB
+	site, err := common.GetSiteFromIDString(ctx, nil, apiRequest.SiteID, cemh.dbSession)
+	if err != nil {
+		if errors.Is(err, common.ErrInvalidID) {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site ID specified in request data is not valid", nil)
+		}
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request data does not exist", nil)
+		}
+		logger.Error().Err(err).Msg("error retrieving Site from DB")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site specified in request data due to DB error", nil)
+	}
+
+	// Scope tenant privilege to the Site targeted by this request.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, cemh.dbSession, org, dbUser, false, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
+	// Validate ProviderTenantSite relationship and site state
+	hasAccess, apiError := ValidateProviderOrTenantSiteAccess(ctx, logger, cemh.dbSession, site, infrastructureProvider, tenant)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
+	if !hasAccess {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have access to Site", nil)
+	}
+
+	emDAO := cdbm.NewExpectedMachineDAO(cemh.dbSession)
+
+	expectedMachine, err := cdb.WithTxResult(ctx, cemh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedMachine, error) {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return nil, apiErr
+		}
+		apiErr := checkPendingExpectedMachineOverlap(ctx, logger, cemh.dbSession, tx, site.ID, nil, []string{apiRequest.BmcMacAddress}, []string{apiRequest.ChassisSerialNumber})
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		// Site authorization comes first so denied callers cannot probe SKU IDs.
+		// Keep the SKU locked until the attachment write commits.
+		if apiRequest.SkuID != nil {
+			skuDAO := cdbm.NewSkuDAO(cemh.dbSession)
+			skus, err := skuDAO.GetForAttachment(ctx, tx, site.ID, []string{*apiRequest.SkuID})
+			if err != nil {
+				logger.Error().Err(err).Msg("error validating SKU ID in request data")
+				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to validate SKU ID in request data due to DB error", nil)
+			}
+			if len(skus) == 0 {
+				logger.Warn().Msg("SKU ID specified in request does not exist")
+				return nil, cutil.NewAPIError(http.StatusUnprocessableEntity, "SKU ID specified in request does not exist", nil)
+			}
+		}
+
+		// Check if Site is in Registered state
+		if site.Status != cdbm.SiteStatusRegistered {
+			logger.Warn().Msg("Site is not in Registered state")
+			return nil, cutil.NewAPIError(http.StatusBadRequest, "Site is not in Registered state, cannot perform operation", nil)
+		}
+
+		// Check for duplicate MAC address. The DB enforces UNIQUE (bmc_mac_address, site_id),
+		// but we pre-check here so we can return the conflicting record's ID in the response.
+		ems, count, err := emDAO.GetAll(ctx, tx, cdbm.ExpectedMachineFilterInput{
+			BmcMacAddresses: []string{apiRequest.BmcMacAddress},
+			SiteIDs:         []uuid.UUID{site.ID},
+		}, paginator.PageInput{
+			Limit: cutil.GetPtr(1),
+		}, nil)
+
+		if err != nil {
+			logger.Error().Err(err).Msg("error checking for duplicate MAC address on Site")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to validate MAC address uniqueness on Site due to DB error", nil)
+		}
+
+		if count > 0 {
+			logger.Warn().Str("MacAddress", apiRequest.BmcMacAddress).Msg("Expected Machine with specified MAC address already exists on Site")
+
+			return nil, cutil.NewAPIError(http.StatusConflict, "Expected Machine with specified MAC address already exists on Site", validation.Errors{
+				"id": errors.New(ems[0].ID.String()),
+			})
+		}
+		// Note: DefaultBmcUsername and BmcPassword are not stored in DB, only passed to workflow
+		em, err := emDAO.Create(
+			ctx,
+			tx,
+			cdbm.ExpectedMachineCreateInput{
+				ExpectedMachineID:        uuid.New(),
+				SiteID:                   site.ID,
+				BmcMacAddress:            apiRequest.BmcMacAddress,
+				BmcIpAddress:             apiRequest.BmcIpAddress,
+				ChassisSerialNumber:      apiRequest.ChassisSerialNumber,
+				SkuID:                    apiRequest.SkuID,
+				FallbackDpuSerialNumbers: apiRequest.FallbackDPUSerialNumbers,
+				Interfaces:               apiRequest.InterfacesToDBModel(),
+				RackID:                   apiRequest.RackID,
+				Name:                     apiRequest.Name,
+				Manufacturer:             apiRequest.Manufacturer,
+				Model:                    apiRequest.Model,
+				Description:              apiRequest.Description,
+				ServerName:               apiRequest.ServerName,
+				SlotID:                   apiRequest.SlotID,
+				TrayIdx:                  apiRequest.TrayIdx,
+				HostID:                   apiRequest.HostID,
+				IsDpfEnabled:             apiRequest.IsDpfEnabled,
+				Labels:                   apiRequest.Labels,
+				HostLifecycleProfile:     apiRequest.HostLifecycleProfile.ToDBModel(),
+				CreatedBy:                dbUser.ID,
+			},
+		)
+		if err != nil {
+			logger.Error().Err(err).Msg("error creating ExpectedMachine record in DB")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Expected Machine due to DB error", nil)
+		}
+
+		createExpectedMachineRequest := em.ToProto(cdbm.ExpectedMachineCredentials{
+			Username: apiRequest.DefaultBmcUsername,
+			Password: apiRequest.DefaultBmcPassword,
+		})
+
+		logger.Info().Msg("triggering Expected Machine create workflow on Site")
+
+		workflowOptions := tclient.StartWorkflowOptions{
+			ID:                       "expected-machine-create-" + em.ID.String(),
+			WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
+			TaskQueue:                queue.SiteTaskQueue,
+		}
+
+		stc, err := cemh.scp.GetClientByID(site.ID)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+		}
+
+		if apiErr := common.ExecuteSyncWorkflow(ctx, logger, stc, "CreateExpectedMachine", workflowOptions, createExpectedMachineRequest); apiErr != nil {
+			return nil, apiErr
+		}
+		return em, nil
+	})
+	if err != nil {
+		return common.HandleTxError(c, logger, err, "Failed to create Expected Machine due to DB transaction error")
+	}
+
+	apiExpectedMachine := model.NewAPIExpectedMachine(expectedMachine)
+
+	logger.Info().Msg("finishing API handler")
+	return c.JSON(http.StatusCreated, apiExpectedMachine)
+}
+
+// ~~~~~ GetAll Handler ~~~~~ //
+
+// GetAllExpectedMachineHandler is the API Handler for getting all ExpectedMachines
+type GetAllExpectedMachineHandler struct {
+	dbSession *cdb.Session
+	cfg       *config.Config
+}
+
+// NewGetAllExpectedMachineHandler initializes and returns a new handler for getting all ExpectedMachines
+func NewGetAllExpectedMachineHandler(dbSession *cdb.Session, cfg *config.Config) GetAllExpectedMachineHandler {
+	return GetAllExpectedMachineHandler{
+		dbSession: dbSession,
+		cfg:       cfg,
+	}
+}
+
+// Handle godoc
+// @Summary Get all ExpectedMachines
+// @Description Get all ExpectedMachines. Tenant results are restricted to Sites with effective TargetedInstanceCreation; no single-Site privilege scope is required.
+// @Tags ExpectedMachine
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param siteId query string false "ID of Site (optional, filters results to specific site)"
+// @Param pageNumber query integer false "Page number of results returned"
+// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'SKU'"
+// @Param pageSize query integer false "Number of results per page"
+// @Param orderBy query string false "Order by field"
+// @Success 200 {object} []model.APIExpectedMachine
+// @Router /v2/org/{org}/nico/expected-machine [get]
+func (gaemh GetAllExpectedMachineHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "GetAll", c)
+	if handlerSpan != nil {
+		defer handlerSpan.End()
+	}
+	// Is DB user missing?
+	if dbUser == nil {
+		logger.Error().Msg("invalid User object found in request context")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	// ensure our user is a provider or tenant for the org. We do not request the
+	// privileged-tenant pre-gate (requirePrivilegedScope=nil): tenant-only
+	// callers are scoped below to Sites with effective TargetedInstanceCreation,
+	// and receive 403 when none are resolved.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, gaemh.dbSession, org, dbUser, true, nil)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
+	// Initialize SiteIDs to a non-nil empty slice so an unscoped caller (e.g. a
+	// non-privileged Tenant) matches no Sites instead of every Site.
+	siteIDs := mapset.NewSet[uuid.UUID]()
+
+	if infrastructureProvider != nil {
+		// Get all Sites for the org's Infrastructure Provider
+		siteDAO := cdbm.NewSiteDAO(gaemh.dbSession)
+		sites, _, err := siteDAO.GetAll(ctx, nil,
+			cdbm.SiteFilterInput{InfrastructureProviderIDs: []uuid.UUID{infrastructureProvider.ID}},
+			paginator.PageInput{Limit: cutil.GetPtr(math.MaxInt)},
+			nil,
+		)
+		if err != nil {
+			logger.Error().Err(err).Msg("error retrieving Sites from DB")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Sites for org due to DB error", nil)
+		}
+
+		for _, site := range sites {
+			siteIDs.Add(site.ID)
+		}
+	}
+
+	if tenant != nil {
+		// Scope tenant listing to Sites where the Tenant has effective
+		// TargetedInstanceCreation, honoring per-site TenantSite.config overrides.
+		privilegedSiteIDs, err := common.GetPrivilegedAccessSiteIDsForTenant(ctx, nil, gaemh.dbSession, tenant)
+		if err != nil {
+			logger.Error().Err(err).Msg("error resolving privileged Site access for Tenant")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve Tenant capability due to DB error", nil)
+		}
+		for _, siteID := range privilegedSiteIDs {
+			siteIDs.Add(siteID)
+		}
+	}
+
+	if infrastructureProvider == nil && tenant != nil && siteIDs.Cardinality() == 0 {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have Targeted Instance Creation capability enabled for any Site", nil)
+	}
+
+	siteIDStr := c.QueryParam("siteId")
+	if siteIDStr != "" {
+		site, err := common.GetSiteFromIDString(ctx, nil, siteIDStr, gaemh.dbSession)
+		if err != nil {
+			if errors.Is(err, cdb.ErrDoesNotExist) {
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request data does not exist", nil)
+			}
+			logger.Error().Err(err).Msg("error retrieving Site from DB")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site specified in request data due to DB error", nil)
+		}
+
+		// Validate Site association with org
+		isAssociated := false
+		if infrastructureProvider != nil {
+			// Check if Site belongs to org's Infrastructure Provider
+			if site.InfrastructureProviderID == infrastructureProvider.ID {
+				isAssociated = true
+			}
+		}
+
+		if !isAssociated && tenant != nil {
+			// filterInput.SiteIDs already holds the Tenant's effective privileged Sites.
+			isAssociated = siteIDs.Contains(site.ID)
+		}
+
+		if isAssociated {
+			siteIDs.Clear()
+			siteIDs.Add(site.ID)
+		} else {
+			logger.Error().Msg("Site is not associated with org")
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Current org is not associated with the Site specified in query", nil)
+		}
+	}
+
+	// Get and validate includeRelation params
+	qParams := c.QueryParams()
+	qIncludeRelations, errStr := common.GetAndValidateQueryRelations(qParams, cdbm.ExpectedMachineRelatedEntities)
+	if errStr != "" {
+		logger.Warn().Msg(errStr)
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, errStr, nil)
+	}
+
+	// Validate pagination request
+	pageRequest := pagination.PageRequest{}
+	err := c.Bind(&pageRequest)
+	if err != nil {
+		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request pagination data", nil)
+	}
+
+	// Validate pagination attributes
+	err = pageRequest.Validate(cdbm.ExpectedMachineOrderByFields)
+	if err != nil {
+		logger.Warn().Err(err).Msg("error validating pagination request data")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate pagination request data", err)
+	}
+
+	// Get Expected Machines from DB
+	emDAO := cdbm.NewExpectedMachineDAO(gaemh.dbSession)
+	expectedMachines, total, err := emDAO.GetAll(
+		ctx,
+		nil,
+		cdbm.ExpectedMachineFilterInput{
+			SiteIDs: siteIDs.ToSlice(),
+		},
+		paginator.PageInput{
+			Offset:  pageRequest.Offset,
+			Limit:   pageRequest.Limit,
+			OrderBy: pageRequest.OrderBy,
+		}, qIncludeRelations,
+	)
+	if err != nil {
+		logger.Error().Err(err).Msg("error retrieving Expected Machines from db")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Machines due to DB error", nil)
+	}
+
+	// Create response
+	apiExpectedMachines := []*model.APIExpectedMachine{}
+	for _, em := range expectedMachines {
+		apiExpectedMachine := model.NewAPIExpectedMachine(&em)
+		apiExpectedMachines = append(apiExpectedMachines, apiExpectedMachine)
+	}
+
+	// Create pagination response header
+	pageResponse := pagination.NewPageResponse(*pageRequest.PageNumber, *pageRequest.PageSize, total, pageRequest.OrderByStr)
+	pageHeader, err := json.Marshal(pageResponse)
+	if err != nil {
+		logger.Error().Err(err).Msg("error marshaling pagination response")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to generate pagination response header", nil)
+	}
+
+	c.Response().Header().Set(pagination.ResponseHeaderName, string(pageHeader))
+
+	logger.Info().Msg("finishing API handler")
+
+	return c.JSON(http.StatusOK, apiExpectedMachines)
+}
+
+// ~~~~~ Get Handler ~~~~~ //
+
+// GetExpectedMachineHandler is the API Handler for retrieving ExpectedMachine
+type GetExpectedMachineHandler struct {
+	dbSession *cdb.Session
+	cfg       *config.Config
+}
+
+// NewGetExpectedMachineHandler initializes and returns a new handler to retrieve ExpectedMachine
+func NewGetExpectedMachineHandler(dbSession *cdb.Session, cfg *config.Config) GetExpectedMachineHandler {
+	return GetExpectedMachineHandler{
+		dbSession: dbSession,
+		cfg:       cfg,
+	}
+}
+
+// Handle godoc
+// @Summary Retrieve the ExpectedMachine
+// @Description Retrieve the ExpectedMachine by ID
+// @Tags ExpectedMachine
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param id path string true "ID of Expected Machine"
+// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'SKU'"
+// @Success 200 {object} model.APIExpectedMachine
+// @Router /v2/org/{org}/nico/expected-machine/{id} [get]
+func (gemh GetExpectedMachineHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "Get", c)
+	if handlerSpan != nil {
+		defer handlerSpan.End()
+	}
+	// Is DB user missing?
+	if dbUser == nil {
+		logger.Error().Msg("invalid User object found in request context")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	// Get Expected Machine ID from URL param
+	expectedMachineIDStr := c.Param("id")
+	expectedMachineID, err := uuid.Parse(expectedMachineIDStr)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Expected Machine ID in URL", nil)
+	}
+
+	logger = logger.With().Str("ExpectedMachineID", expectedMachineID.String()).Logger()
+
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_machine_id", expectedMachineID.String()))
+
+	// Get and validate includeRelation params
+	qParams := c.QueryParams()
+	qIncludeRelations, errStr := common.GetAndValidateQueryRelations(qParams, cdbm.ExpectedMachineRelatedEntities)
+	if errStr != "" {
+		logger.Warn().Msg(errStr)
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, errStr, nil)
+	}
+
+	// Get ExpectedMachine from DB by ID
+	emDAO := cdbm.NewExpectedMachineDAO(gemh.dbSession)
+	expectedMachine, err := emDAO.Get(ctx, nil, expectedMachineID, qIncludeRelations, false)
+	if err != nil {
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Machine with ID: %s", expectedMachineID.String()), nil)
+		}
+		logger.Error().Err(err).Msg("error retrieving Expected Machine from DB")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Machine due to DB error", nil)
+	}
+
+	// Site is needed for the access check; reuse if loaded via includeRelation, else fetch.
+	site := expectedMachine.Site
+	if site == nil {
+		siteDAO := cdbm.NewSiteDAO(gemh.dbSession)
+		site, err = siteDAO.GetByID(ctx, nil, expectedMachine.SiteID, nil, false, false)
+		if err != nil {
+			logger.Error().Err(err).Msg("error retrieving Site from DB")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for Expected Machine due to DB error", nil)
+		}
+	}
+
+	// Scope tenant privilege to the Expected Machine's Site.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, gemh.dbSession, org, dbUser, true, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
+	// Validate ProviderTenantSite relationship and site state
+	hasAccess, apiError := ValidateProviderOrTenantSiteAccess(ctx, logger, gemh.dbSession, site, infrastructureProvider, tenant)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
+	if !hasAccess {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Current org is not associated with the Site of the Expected Machine", nil)
+	}
+
+	// Create response
+	apiExpectedMachine := model.NewAPIExpectedMachine(expectedMachine)
+
+	logger.Info().Msg("finishing API handler")
+	return c.JSON(http.StatusOK, apiExpectedMachine)
+}
+
+// ~~~~~ Update Handler ~~~~~ //
+
+// UpdateExpectedMachineHandler is the API Handler for updating a ExpectedMachine
+type UpdateExpectedMachineHandler struct {
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
+}
+
+// bmcMacUnchanged accepts an omitted MAC or another spelling of the stored MAC.
+func bmcMacUnchanged(stored string, submitted *string) bool {
+	if submitted == nil {
+		return true
+	}
+
+	storedMAC, storedErr := net.ParseMAC(stored)
+	submittedMAC, submittedErr := net.ParseMAC(*submitted)
+	return storedErr == nil && submittedErr == nil && slices.Equal(storedMAC, submittedMAC)
+}
+
+// bmcMacImmutableValidationError keeps BMC MAC PATCH validation responses aligned.
+func bmcMacImmutableValidationError() validation.Errors {
+	return validation.Errors{
+		"bmcMacAddress": errors.New("BMC MAC address cannot be changed after creation"),
+	}
+}
+
+// NewUpdateExpectedMachineHandler initializes and returns a new handler for updating ExpectedMachine
+func NewUpdateExpectedMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) UpdateExpectedMachineHandler {
+	return UpdateExpectedMachineHandler{
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
+	}
+}
+
+// Handle godoc
+// @Summary Update an existing ExpectedMachine
+// @Description Update an existing ExpectedMachine by ID
+// @Tags ExpectedMachine
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param id path string true "ID of Expected Machine"
+// @Param message body model.APIExpectedMachineUpdateRequest true "ExpectedMachine update request"
+// @Success 200 {object} model.APIExpectedMachine
+// @Router /v2/org/{org}/nico/expected-machine/{id} [patch]
+func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "Update", c)
+	if handlerSpan != nil {
+		defer handlerSpan.End()
+	}
+
+	// Is DB user missing?
+	if dbUser == nil {
+		logger.Error().Msg("invalid User object found in request context")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	// Get Expected Machine ID from URL param
+	expectedMachineID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Expected Machine ID in URL", nil)
+	}
+	logger = logger.With().Str("ExpectedMachineID", expectedMachineID.String()).Logger()
+
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_machine_id", expectedMachineID.String()))
+
+	// Validate request
+	// Bind request data to API model
+	apiRequest := model.APIExpectedMachineUpdateRequest{}
+	err = c.Bind(&apiRequest)
+	if err != nil {
+		logger.Warn().Err(err).Msg("error binding request data into API model")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
+	}
+	// Validate request attributes
+	verr := apiRequest.Validate()
+	if verr != nil {
+		logger.Warn().Err(verr).Msg("error validating ExpectedMachine update request data")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate ExpectedMachine update request data", verr)
+	}
+
+	// If ID is provided in body, it must match the path ID
+	if apiRequest.ID != nil && *apiRequest.ID != expectedMachineID.String() {
+		logger.Warn().
+			Str("URLID", expectedMachineID.String()).
+			Str("RequestDataID", *apiRequest.ID).
+			Msg("Mismatched Expected Machine ID between path and body")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "If provided, Expected Machine ID specified in request data must match URL request value", nil)
+	}
+
+	// Get ExpectedMachine from DB by ID
+	emDAO := cdbm.NewExpectedMachineDAO(uemh.dbSession)
+	expectedMachine, err := emDAO.Get(ctx, nil, expectedMachineID, []string{cdbm.SiteRelationName}, false)
+	if err != nil {
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Machine with ID: %s", expectedMachineID.String()), nil)
+		}
+		logger.Error().Err(err).Msg("error retrieving Expected Machine from DB")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Machine due to DB error", nil)
+	}
+
+	// Validate that Site relation exists for the Expected Machine
+	site := expectedMachine.Site
+	if site == nil {
+		logger.Error().Msg("no Site relation found for Expected Machine")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for Expected Machine", nil)
+	}
+
+	// Scope tenant privilege to the Expected Machine's Site.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, uemh.dbSession, org, dbUser, false, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
+	// Validate ProviderTenantSite relationship and site state
+	hasAccess, apiError := ValidateProviderOrTenantSiteAccess(ctx, logger, uemh.dbSession, site, infrastructureProvider, tenant)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
+	if !hasAccess {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Current org is not associated with the Site of the Expected Machine", nil)
+	}
+
+	bmcIPAddress := apiRequest.BmcIpAddress
+	clearBmcIPAddress := bmcIPAddress != nil && *bmcIPAddress == ""
+	if clearBmcIPAddress {
+		bmcIPAddress = nil
+	}
+
+	updatedExpectedMachine, err := cdb.WithTxResult(ctx, uemh.dbSession, func(tx *cdb.Tx) (*cdbm.ExpectedMachine, error) {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return nil, apiErr
+		}
+		var serials []string
+		if apiRequest.ChassisSerialNumber != nil {
+			serials = []string{*apiRequest.ChassisSerialNumber}
+		}
+		apiErr := checkPendingExpectedMachineOverlap(ctx, logger, uemh.dbSession, tx, site.ID, []uuid.UUID{expectedMachineID}, nil, serials)
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		// Site authorization comes first so denied callers cannot probe SKU IDs.
+		// Keep the SKU locked until the attachment write commits.
+		if apiRequest.SkuID != nil {
+			skuDAO := cdbm.NewSkuDAO(uemh.dbSession)
+			skus, err := skuDAO.GetForAttachment(ctx, tx, site.ID, []string{*apiRequest.SkuID})
+			if err != nil {
+				logger.Error().Err(err).Msg("error validating SKU ID in request data")
+				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to validate SKU ID in request data due to DB error", nil)
+			}
+			if len(skus) == 0 {
+				logger.Warn().Msg("SKU ID specified in request does not exist")
+				return nil, cutil.NewAPIError(http.StatusUnprocessableEntity, "SKU ID specified in request does not exist", nil)
+			}
+		}
+
+		if !bmcMacUnchanged(expectedMachine.BmcMacAddress, apiRequest.BmcMacAddress) {
+			validationErrors := bmcMacImmutableValidationError()
+			return nil, cutil.NewAPIError(http.StatusBadRequest, "Failed to validate Expected Machine update data", validationErrors)
+		}
+		var interfaces []cdbm.ExpectedMachineInterface
+		if apiRequest.Interfaces != nil {
+			// Merge from locked state so a concurrent reservation edit cannot be lost.
+			stored, err := emDAO.Get(ctx, tx, expectedMachineID, nil, true)
+			if err != nil {
+				if errors.Is(err, cdb.ErrDoesNotExist) {
+					return nil, cutil.NewAPIError(http.StatusConflict, "Expected Machine was removed before the update completed", nil)
+				}
+				logger.Error().Err(err).Msg("failed to lock ExpectedMachine for interface update")
+				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Machine due to DB error", nil)
+			}
+			replaceLoopbacks := apiRequest.ReplaceDpuLoopbacks != nil && *apiRequest.ReplaceDpuLoopbacks
+			interfaces = apiRequest.Interfaces.ToDBModelPreservingLoopbacks(stored.Interfaces, replaceLoopbacks)
+		}
+		// Note: DefaultBmcUsername and BmcPassword are not stored in DB, only passed to workflow
+		em, err := emDAO.Update(
+			ctx,
+			tx,
+			cdbm.ExpectedMachineUpdateInput{
+				ExpectedMachineID:        expectedMachine.ID,
+				BmcIpAddress:             bmcIPAddress,
+				ChassisSerialNumber:      apiRequest.ChassisSerialNumber,
+				SkuID:                    apiRequest.SkuID,
+				FallbackDpuSerialNumbers: apiRequest.FallbackDPUSerialNumbers,
+				Interfaces:               interfaces,
+				RackID:                   apiRequest.RackID,
+				Name:                     apiRequest.Name,
+				Manufacturer:             apiRequest.Manufacturer,
+				Model:                    apiRequest.Model,
+				Description:              apiRequest.Description,
+				ServerName:               apiRequest.ServerName,
+				SlotID:                   apiRequest.SlotID,
+				TrayIdx:                  apiRequest.TrayIdx,
+				HostID:                   apiRequest.HostID,
+				Labels:                   apiRequest.Labels,
+				IsDpfEnabled:             apiRequest.IsDpfEnabled,
+				HostLifecycleProfile:     apiRequest.HostLifecycleProfile.ToDBModelPtr(),
+			},
+		)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to update ExpectedMachine record in DB")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Machine due to DB error", nil)
+		}
+
+		if clearBmcIPAddress {
+			em, err = emDAO.Clear(ctx, tx, cdbm.ExpectedMachineClearInput{
+				ExpectedMachineID: expectedMachine.ID,
+				BmcIpAddress:      true,
+			})
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to clear ExpectedMachine BMC IP address in DB")
+				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Machine due to DB error", nil)
+			}
+		}
+
+		patchExpectedMachineRequest := apiRequest.ToProto(em)
+		var secretFields []string
+		if apiRequest.DefaultBmcUsername != nil || apiRequest.DefaultBmcPassword != nil {
+			secretFields = []string{"expectedMachine"}
+		}
+
+		stc, err := uemh.scp.GetClientByID(site.ID)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+		}
+
+		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_PatchExpectedMachine_FullMethodName, patchExpectedMachineRequest, nil, site.ID.String(), secretFields...)
+		if apiErr != nil {
+			logAPIError(logger, apiErr, "failed to patch expected machine")
+			return nil, apiErr
+		}
+		return em, nil
+	})
+	if err != nil {
+		return common.HandleTxError(c, logger, err, "Failed to update Expected Machine due to DB transaction error")
+	}
+
+	apiExpectedMachine := model.NewAPIExpectedMachine(updatedExpectedMachine)
+
+	logger.Info().Msg("finishing API handler")
+
+	return c.JSON(http.StatusOK, apiExpectedMachine)
+}
+
+// ~~~~~ Delete Handler ~~~~~ //
+
+// DeleteExpectedMachineHandler is the API Handler for deleting a ExpectedMachine
+type DeleteExpectedMachineHandler struct {
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
+}
+
+// NewDeleteExpectedMachineHandler initializes and returns a new handler for deleting ExpectedMachine
+func NewDeleteExpectedMachineHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteExpectedMachineHandler {
+	return DeleteExpectedMachineHandler{
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
+	}
+}
+
+// Handle godoc
+// @Summary Delete an existing ExpectedMachine
+// @Description Delete an existing ExpectedMachine by ID
+// @Tags ExpectedMachine
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param id path string true "ID of Expected Machine"
+// @Success 204
+// @Router /v2/org/{org}/nico/expected-machine/{id} [delete]
+func (demh DeleteExpectedMachineHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "Delete", c)
+	if handlerSpan != nil {
+		defer handlerSpan.End()
+	}
+	// Is DB user missing?
+	if dbUser == nil {
+		logger.Error().Msg("invalid User object found in request context")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	// Get Expected Machine ID from URL param
+	expectedMachineID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Expected Machine ID in URL", nil)
+	}
+	logger = logger.With().Str("ExpectedMachineID", expectedMachineID.String()).Logger()
+
+	cotel.SetAttribute(handlerSpan, attribute.String("expected_machine_id", expectedMachineID.String()))
+
+	// Get ExpectedMachine from DB by ID
+	emDAO := cdbm.NewExpectedMachineDAO(demh.dbSession)
+	expectedMachine, err := emDAO.Get(ctx, nil, expectedMachineID, []string{cdbm.SiteRelationName}, false)
+	if err != nil {
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Machine with ID: %s", expectedMachineID.String()), nil)
+		}
+		logger.Error().Err(err).Msg("error retrieving Expected Machine from DB")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Machine due to DB error", nil)
+	}
+
+	// Validate that Site relation exists for the Expected Machine
+	site := expectedMachine.Site
+	if site == nil {
+		logger.Error().Msg("no Site relation found for Expected Machine")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site details for Expected Machine", nil)
+	}
+
+	// Scope tenant privilege to the Expected Machine's Site.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, demh.dbSession, org, dbUser, false, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
+	// Validate ProviderTenantSite relationship and site state
+	hasAccess, apiError := ValidateProviderOrTenantSiteAccess(ctx, logger, demh.dbSession, site, infrastructureProvider, tenant)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
+	if !hasAccess {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Current org is not associated with the Site of the Expected Machine", nil)
+	}
+
+	err = cdb.WithTx(ctx, demh.dbSession, func(tx *cdb.Tx) error {
+		if apiErr := acquireExpectedInventorySharedMutationLock(ctx, logger, tx, site.ID); apiErr != nil {
+			return apiErr
+		}
+		apiErr := checkPendingExpectedMachineOverlap(ctx, logger, demh.dbSession, tx, site.ID, []uuid.UUID{expectedMachine.ID}, nil, nil)
+		if apiErr != nil {
+			return apiErr
+		}
+		if err := emDAO.Delete(ctx, tx, expectedMachine.ID); err != nil {
+			logger.Error().Err(err).Msg("unable to delete ExpectedMachine record from DB")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Expected Machine due to DB error", nil)
+		}
+
+		deleteExpectedMachineRequest := &corev1.ExpectedMachineRequest{
+			Id: &corev1.UUID{Value: expectedMachine.ID.String()},
+		}
+
+		logger.Info().Msg("triggering ExpectedMachine delete workflow")
+
+		workflowOptions := tclient.StartWorkflowOptions{
+			ID:                       "expected-machine-delete-" + expectedMachine.ID.String(),
+			WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
+			TaskQueue:                queue.SiteTaskQueue,
+		}
+
+		stc, err := demh.scp.GetClientByID(site.ID)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+		}
+
+		if apiErr := common.ExecuteSyncWorkflow(ctx, logger, stc, "DeleteExpectedMachine", workflowOptions, deleteExpectedMachineRequest); apiErr != nil {
+			return apiErr
+		}
+		return nil
+	})
+	if err != nil {
+		return common.HandleTxError(c, logger, err, "Failed to delete Expected Machine due to DB transaction error")
+	}
+
+	logger.Info().Msg("finishing API handler")
+
+	return c.NoContent(http.StatusNoContent)
+}
+
+// ~~~~~ CreateExpectedMachines Handler ~~~~~ //
+
+// CreateExpectedMachinesHandler is the API Handler for creating multiple ExpectedMachines
+type CreateExpectedMachinesHandler struct {
+	dbSession       *cdb.Session
+	scp             *sc.ClientPool
+	cfg             *config.Config
+	workflowTimeout time.Duration
+}
+
+// NewCreateExpectedMachinesHandler initializes and returns a new handler for creating multiple ExpectedMachines
+func NewCreateExpectedMachinesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) CreateExpectedMachinesHandler {
+	return CreateExpectedMachinesHandler{
+		dbSession:       dbSession,
+		scp:             scp,
+		cfg:             cfg,
+		workflowTimeout: cutil.WorkflowContextTimeout,
+	}
+}
+
+// Handle godoc
+// @Summary Create multiple ExpectedMachines
+// @Description Create multiple ExpectedMachines in a single request. All machines must belong to the same site.
+// @Tags ExpectedMachine
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param message body []model.APIExpectedMachineCreateRequest true "ExpectedMachine batch creation request"
+// @Success 201 {object} model.APIExpectedMachineBatchResponse
+// @Router /v2/org/{org}/nico/expected-machine/batch [post]
+func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "CreateMultiple", c)
+	if handlerSpan != nil {
+		defer handlerSpan.End()
+	}
+
+	// Is DB user missing?
+	if dbUser == nil {
+		logger.Error().Msg("invalid User object found in request context")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	// Validate request
+	// Bind request data to API model (array payload)
+	apiRequests := []model.APIExpectedMachineCreateRequest{}
+	err := c.Bind(&apiRequests)
+	if err != nil {
+		logger.Warn().Err(err).Msg("error binding request data into API model")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
+	}
+
+	if len(apiRequests) == 0 {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Request data must contain at least 1 Expected Machine entry", nil)
+	}
+
+	if len(apiRequests) > model.ExpectedMachineMaxBatchItems {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("At most %d Expected Machine entries can be created in a batch request", model.ExpectedMachineMaxBatchItems), nil)
+	}
+
+	// Validate each item, also collect requested sku IDs
+	// - SiteID is required, a valid UUID and unique across all items
+	// - BMC address is required and must be unique
+	// - Serial Number is required and must be unique
+	// Note: this is early partial validation before we try to call the DB.
+	validationErrors := validation.Errors{} //
+	var foundSiteID *uuid.UUID
+	bmcMacMap := make(map[string]int)
+	serialMap := make(map[string]int)
+	requestedSkuIDs := make(map[string]bool)
+	for i, req := range apiRequests {
+		strIndex := strconv.Itoa(i) // index/key as string for validation errors map
+		itemErrors := validation.Errors{}
+
+		verr := req.Validate()
+		if verr != nil {
+			var ok bool
+			itemErrors, ok = verr.(validation.Errors)
+			if !ok {
+				common.AddToValidationErrors(itemErrors, "validation", verr)
+			}
+		}
+
+		// SiteID is mandatory for batch create and must be the same for all items
+		if req.SiteID == "" {
+			common.AddToValidationErrors(itemErrors, "siteID", fmt.Errorf("Site ID is required"))
+		}
+		siteID, _ := uuid.Parse(req.SiteID) // already validated
+		if foundSiteID == nil {
+			foundSiteID = &siteID
+		} else {
+			if siteID != *foundSiteID {
+				common.AddToValidationErrors(itemErrors, "siteID", fmt.Errorf(
+					"Expected Machine does not belong to the same Site (%s) as other Expected Machines in request", req.SiteID))
+			}
+		}
+
+		lowerMac := strings.ToLower(req.BmcMacAddress)
+		if prev, ok := bmcMacMap[lowerMac]; ok {
+			common.AddToValidationErrors(itemErrors, "bmcMacAddress", fmt.Errorf(
+				"duplicate BMC MAC address '%s' found at indices %d and %d", req.BmcMacAddress, prev, i))
+		}
+		bmcMacMap[lowerMac] = i
+
+		lowerSerial := strings.ToLower(req.ChassisSerialNumber)
+		if prev, ok := serialMap[lowerSerial]; ok {
+			common.AddToValidationErrors(itemErrors, "chassisSerialNumber", fmt.Errorf(
+				"duplicate chassis serial number '%s' found at indices %d and %d", req.ChassisSerialNumber, prev, i))
+		}
+		serialMap[lowerSerial] = i
+
+		if req.SkuID != nil {
+			requestedSkuIDs[*req.SkuID] = true
+		}
+
+		if len(itemErrors) > 0 {
+			validationErrors[strIndex] = itemErrors
+		}
+	}
+	if len(validationErrors) > 0 {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Expected Machine create data", validationErrors)
+	}
+	siteID := *foundSiteID
+
+	// Retrieve the Site from the DB
+	site, err := common.GetSiteFromIDString(ctx, nil, siteID.String(), cemh.dbSession)
+	if err != nil {
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site specified in request data does not exist", nil)
+		}
+		logger.Error().Err(err).Msg("error retrieving Site from DB")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site specified in request data due to DB error", nil)
+	}
+
+	// Scope tenant privilege to the common Site targeted by this batch.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, cemh.dbSession, org, dbUser, false, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
+	// Validate access to Site
+	hasAccess, apiError := ValidateProviderOrTenantSiteAccess(ctx, logger, cemh.dbSession, site, infrastructureProvider, tenant)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+	if !hasAccess {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Current org is not associated with the Site", nil)
+	}
+
+	emDAO := cdbm.NewExpectedMachineDAO(cemh.dbSession)
+
+	// Generate the durable identities once. Credentials are excluded from private
+	// recovery rows and matched by UUID when added to the Temporal payload.
+	credsByID := make(map[uuid.UUID]cdbm.ExpectedMachineCredentials, len(apiRequests))
+	createInputs := make([]cdbm.ExpectedMachineCreateInput, 0, len(apiRequests))
+	for _, machineReq := range apiRequests {
+		id := uuid.New()
+		credsByID[id] = cdbm.ExpectedMachineCredentials{
+			Username: machineReq.DefaultBmcUsername,
+			Password: machineReq.DefaultBmcPassword,
+		}
+		createInputs = append(createInputs, cdbm.ExpectedMachineCreateInput{
+			ExpectedMachineID:        id,
+			SiteID:                   site.ID,
+			BmcMacAddress:            machineReq.BmcMacAddress,
+			BmcIpAddress:             machineReq.BmcIpAddress,
+			ChassisSerialNumber:      machineReq.ChassisSerialNumber,
+			SkuID:                    machineReq.SkuID,
+			FallbackDpuSerialNumbers: machineReq.FallbackDPUSerialNumbers,
+			Interfaces:               machineReq.InterfacesToDBModel(),
+			RackID:                   machineReq.RackID,
+			Name:                     machineReq.Name,
+			Manufacturer:             machineReq.Manufacturer,
+			Model:                    machineReq.Model,
+			Description:              machineReq.Description,
+			ServerName:               machineReq.ServerName,
+			SlotID:                   machineReq.SlotID,
+			TrayIdx:                  machineReq.TrayIdx,
+			HostID:                   machineReq.HostID,
+			Labels:                   machineReq.Labels,
+			IsDpfEnabled:             machineReq.IsDpfEnabled,
+			HostLifecycleProfile:     machineReq.HostLifecycleProfile.ToDBModel(),
+			CreatedBy:                dbUser.ID,
+		})
+	}
+
+	recoveryEnabled := cemh.cfg != nil && cemh.cfg.GetExpectedMachineBatchRecoveryEnabled()
+	var rpcCtx context.Context
+	var cancelRPC context.CancelFunc
+	admissionCtx := ctx
+	if recoveryEnabled {
+		rpcCtx, cancelRPC = context.WithTimeout(ctx, cemh.workflowTimeout)
+		admissionCtx = rpcCtx
+	}
+	defer func() {
+		if cancelRPC != nil {
+			cancelRPC()
+		}
+	}()
+	var stc tclient.Client
+	if recoveryEnabled {
+		stc, err = cemh.scp.GetClientByID(site.ID)
+		if err != nil {
+			logger.Error().Err(err).Str("SiteID", site.ID.String()).Str("FailureCategory", "client_unavailable").Msg("failed to retrieve Temporal client for Expected Machine batch")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+		}
+	}
+	batch := cdbm.PendingExpectedMachineBatch{
+		WorkflowID: fmt.Sprintf("create-expected-machines-%s-%s", site.ID, uuid.New()),
+		SiteID:     site.ID, Inputs: createInputs,
+	}
+	pendingDAO := cdbm.NewPendingExpectedMachineBatchDAO(cemh.dbSession)
+	dispatch := func() (bool, error) {
+		if stc == nil {
+			var clientErr error
+			stc, clientErr = cemh.scp.GetClientByID(site.ID)
+			if clientErr != nil {
+				logger.Error().Err(clientErr).Str("SiteID", site.ID.String()).Str("WorkflowID", batch.WorkflowID).Str("FailureCategory", "client_unavailable").Msg("failed to retrieve Temporal client for Expected Machine batch")
+				return false, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+			}
+		}
+		// The flag selects new admission only. Once a reservation is committed,
+		// this request finishes it even if later requests use the disabled mode.
+		workflowMachines := make([]*corev1.ExpectedMachine, 0, len(createInputs))
+		for _, input := range createInputs {
+			machine := input.ToExpectedMachine()
+			workflowMachines = append(workflowMachines, machine.ToProto(credsByID[machine.ID]))
+		}
+		workflowRequest := &corev1.BatchExpectedMachineOperationRequest{
+			ExpectedMachines: &corev1.ExpectedMachineList{ExpectedMachines: workflowMachines}, AcceptPartialResults: false,
+		}
+		workflowOptions := tclient.StartWorkflowOptions{ID: batch.WorkflowID, WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout, TaskQueue: queue.SiteTaskQueue}
+		if !recoveryEnabled {
+			rpcCtx, cancelRPC = context.WithTimeout(ctx, cemh.workflowTimeout)
+		}
+		if recoveryEnabled && rpcCtx.Err() != nil {
+			// No start was attempted, so this request can release its reservation.
+			// Bound local cleanup separately from the canceled request.
+			releaseCtx, cancelRelease := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancelRelease()
+			releaseErr := cdb.WithTx(releaseCtx, cemh.dbSession, func(tx *cdb.Tx) error {
+				err := tx.TryAcquireAdvisoryLock(releaseCtx, cdbm.ExpectedInventoryMutationLockID(site.ID), nil)
+				if err != nil {
+					return err
+				}
+				return pendingDAO.Delete(releaseCtx, tx, site.ID, batch.WorkflowID)
+			})
+			if releaseErr != nil {
+				logger.Error().Err(releaseErr).Str("WorkflowID", batch.WorkflowID).Msg("failed to release undispatched Expected Machine batch")
+			}
+			return false, cutil.NewAPIError(http.StatusInternalServerError, "Failed to schedule batch Expected Machine creation workflow on Site", nil)
+		}
+		workflowRun, werr := stc.ExecuteWorkflow(rpcCtx, workflowOptions, "CreateExpectedMachines", workflowRequest)
+		if werr != nil {
+			logger.Error().Str("WorkflowID", batch.WorkflowID).Int("MachineCount", len(batch.Inputs)).Str("FailureCategory", cem.ExpectedMachineBatchFailureCategory(werr)).Msg("could not observe batch Expected Machine workflow dispatch")
+			return false, cutil.NewAPIError(http.StatusInternalServerError, "Failed to schedule batch Expected Machine creation workflow on Site", nil)
+		}
+		var workflowResult corev1.BatchExpectedMachineOperationResponse
+		if !recoveryEnabled {
+			// Disabled admission retains the synchronous transaction and result
+			// checks used before durable batch recovery was enabled.
+			werr = workflowRun.Get(rpcCtx, &workflowResult)
+			if werr != nil {
+				logger.Error().Str("WorkflowID", batch.WorkflowID).Str("FailureCategory", cem.ExpectedMachineBatchFailureCategory(werr)).Msg("could not observe legacy Expected Machine batch result")
+				return false, cutil.NewAPIError(http.StatusInternalServerError, "Failed to execute batch Expected Machine creation workflow on Site", nil)
+			}
+			if len(workflowResult.GetResults()) != len(createInputs) {
+				return false, cutil.NewAPIError(http.StatusInternalServerError, "Failed to verify batch Expected Machine creation workflow results", nil)
+			}
+			return true, nil
+		}
+		// A timeout cannot undo an in-flight Core commit. Recovery observes this
+		// exact run and never terminates or redispatches the recorded workflow.
+		runID := workflowRun.GetRunID()
+		if runID == "" {
+			logger.Error().Str("WorkflowID", batch.WorkflowID).Str("FailureCategory", "run_identity_missing").Msg("could not identify batch Expected Machine execution; reservation retained")
+			return false, cutil.NewAPIError(http.StatusInternalServerError, "Failed to verify batch Expected Machine creation workflow results", nil)
+		}
+		if bindErr := pendingDAO.BindRunID(rpcCtx, site.ID, batch.WorkflowID, runID); bindErr != nil {
+			logger.Error().Err(bindErr).Str("WorkflowID", batch.WorkflowID).Msg("failed to record original Expected Machine batch execution")
+			return false, cutil.NewAPIError(http.StatusInternalServerError, "Failed to record batch Expected Machine execution", nil)
+		}
+		werr = workflowRun.GetWithOptions(rpcCtx, &workflowResult, tclient.WorkflowRunGetOptions{DisableFollowingRuns: true})
+		confirmed := werr == nil && batch.Succeeded(&workflowResult)
+		rejected := false
+		failureCategory := cem.ExpectedMachineBatchFailureCategory(werr)
+		if cem.IsExpectedMachineBatchRejectionCandidate(werr) {
+			var historyErr error
+			rejected, historyErr = cem.VerifyExpectedMachineBatchRejection(rpcCtx, stc, batch.WorkflowID, runID, werr)
+			if !rejected {
+				failureCategory = "rejection_unverified"
+				if historyErr != nil {
+					failureCategory = cem.ExpectedMachineBatchFailureCategory(historyErr)
+				}
+			}
+		}
+		if werr != nil && !rejected && !cem.IsExpectedMachineBatchRejectionCandidate(werr) && rpcCtx.Err() == nil {
+			var historyErr error
+			rejected, historyErr = cem.VerifyExpectedMachineBatchNotDispatched(rpcCtx, stc, batch.WorkflowID, runID)
+			if rejected {
+				failureCategory = "workflow_not_dispatched"
+			} else if historyErr != nil {
+				failureCategory = cem.ExpectedMachineBatchFailureCategory(historyErr)
+			}
+		}
+		if !confirmed && !rejected {
+			logger.Error().Str("WorkflowID", batch.WorkflowID).Str("RunID", runID).Int("ExpectedCount", len(batch.Inputs)).Int("ResultCount", len(workflowResult.GetResults())).Str("FailureCategory", failureCategory).Msg("could not confirm batch Expected Machine creation; reservation retained")
+			return false, cutil.NewAPIError(http.StatusInternalServerError, "Failed to verify batch Expected Machine creation workflow results", nil)
+		}
+		if rejected {
+			logger.Warn().Str("WorkflowID", batch.WorkflowID).Str("RunID", runID).Int("MachineCount", len(batch.Inputs)).Str("FailureCategory", failureCategory).Msg("Expected Machine batch creation was conclusively rejected or never dispatched")
+		}
+		return confirmed, nil
+	}
+	var createdExpectedMachines []cdbm.ExpectedMachine
+	// Read Committed gives the duplicate lookup a fresh snapshot after a lock retry.
+	err = cdb.WithTxOpts(admissionCtx, cemh.dbSession, &sql.TxOptions{Isolation: sql.LevelReadCommitted}, func(tx *cdb.Tx) error {
+		// Both modes check reservations under the same lock. Recovery releases it
+		// before dispatch; disabled admission retains the legacy transaction.
+		apiErr := acquireExpectedInventoryExclusiveMutationLock(admissionCtx, logger, tx, site.ID)
+		if apiErr != nil {
+			return apiErr
+		}
+		if recoveryEnabled {
+			_, err := cdbm.NewSiteDAO(cemh.dbSession).GetByID(admissionCtx, tx, site.ID, nil, false, true)
+			if errors.Is(err, cdb.ErrDoesNotExist) {
+				return cutil.NewAPIError(http.StatusBadRequest, "Site specified in request data does not exist", nil)
+			}
+			if err != nil {
+				logger.Error().Err(err).Msg("failed to lock Site for Expected Machine batch admission")
+				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Site specified in request data due to DB error", nil)
+			}
+		}
+		macs := make([]string, 0, len(createInputs))
+		serials := make([]string, 0, len(createInputs))
+		for _, input := range createInputs {
+			macs = append(macs, input.BmcMacAddress)
+			serials = append(serials, input.ChassisSerialNumber)
+		}
+		apiErr = checkPendingExpectedMachineOverlap(admissionCtx, logger, cemh.dbSession, tx, site.ID, nil, macs, serials)
+		if apiErr != nil {
+			return apiErr
+		}
+		existingMachinesOnSite, _, err := emDAO.GetAll(admissionCtx, tx, cdbm.ExpectedMachineFilterInput{
+			SiteIDs: []uuid.UUID{siteID},
+		}, paginator.PageInput{
+			Limit: cutil.GetPtr(paginator.TotalLimit), // we want ALL records on site
+		}, []string{})
+		if err != nil {
+			logger.Error().Err(err).Msg("error retrieving Expected Machines from DB")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Expected Machines due to DB error", nil)
+		}
+		existingMacAddressMap := make(map[string]bool)
+		existingSerialMap := make(map[string]bool)
+		for _, machine := range existingMachinesOnSite {
+			existingMacAddressMap[machine.BmcMacAddress] = true
+			existingSerialMap[machine.ChassisSerialNumber] = true
+		}
+
+		// Keep requested SKUs locked through the writes so deletion/recreation
+		// cannot change their Site after validation.
+		skuDAO := cdbm.NewSkuDAO(cemh.dbSession)
+		existingSkus, err := skuDAO.GetForAttachment(admissionCtx, tx, siteID, slices.Collect(maps.Keys(requestedSkuIDs)))
+		if err != nil {
+			logger.Error().Err(err).Msg("error retrieving SKUs from DB")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve SKUs due to DB error", nil)
+		}
+		existingSkuIDsMap := make(map[string]bool)
+		for _, sku := range existingSkus {
+			existingSkuIDsMap[sku.ID] = true
+		}
+
+		// Report duplicate and SKU errors together for each request item.
+		validationErrors := validation.Errors{}
+		for i, req := range apiRequests {
+			itemErrors := validation.Errors{}
+			strIndex := strconv.Itoa(i) // index/key as string for validation errors map
+
+			// Check MAC unicity
+			if existingMacAddressMap[req.BmcMacAddress] {
+				common.AddToValidationErrors(itemErrors, "bmcMacAddress", fmt.Errorf(
+					"Expected Machine with BMC MAC Address: %s already exist", req.BmcMacAddress))
+			}
+			// Check Serial unicity
+			if existingSerialMap[req.ChassisSerialNumber] {
+				common.AddToValidationErrors(itemErrors, "chassisSerialNumber", fmt.Errorf(
+					"Expected Machine with Chassis Serial Number: %s already exists", req.ChassisSerialNumber))
+			}
+			// Check SKU existence
+			if req.SkuID != nil && !existingSkuIDsMap[*req.SkuID] {
+				common.AddToValidationErrors(itemErrors, "skuID", fmt.Errorf(
+					"the SkuID specified for Expected Machine does not exist in DB: %s", *req.SkuID))
+			}
+
+			// Collect errors
+			if len(itemErrors) > 0 {
+				validationErrors[strIndex] = itemErrors
+			}
+		}
+		if len(validationErrors) > 0 {
+			return cutil.NewAPIError(http.StatusBadRequest, "Failed to validate Expected Machine update data", validationErrors)
+		}
+		if recoveryEnabled {
+			return pendingDAO.Create(admissionCtx, tx, batch)
+		}
+		var createErr error
+		createdExpectedMachines, createErr = emDAO.CreateMultiple(admissionCtx, tx, createInputs)
+		if createErr != nil {
+			logger.Error().Err(createErr).Msg("failed to create legacy Expected Machine batch in DB")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Expected Machine due to DB error", nil)
+		}
+		_, createErr = dispatch()
+		if cancelRPC != nil {
+			cancelRPC()
+		}
+		return createErr
+	})
+	if err != nil {
+		return common.HandleTxError(c, logger, err, "Failed to create Expected Machines due to DB transaction error")
+	}
+
+	if recoveryEnabled {
+		confirmed, dispatchErr := dispatch()
+		if dispatchErr != nil {
+			return common.HandleTxError(c, logger, dispatchErr, "Failed to observe Expected Machine batch creation")
+		}
+		// Finalization shares the caller's remaining workflow budget. A conflict
+		// here follows a possible Core commit, so retain the reservation and return
+		// 500 instead of the admission-only 409 that permits a fresh dispatch.
+		createdExpectedMachines, err = cdb.WithTxResult(rpcCtx, cemh.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedMachine, error) {
+			err := tx.TryAcquireAdvisoryLock(rpcCtx, cdbm.ExpectedInventoryMutationLockID(site.ID), nil)
+			if err != nil {
+				return nil, err
+			}
+			if !confirmed {
+				return nil, pendingDAO.Delete(rpcCtx, tx, site.ID, batch.WorkflowID)
+			}
+			machines, err := pendingDAO.Complete(rpcCtx, tx, site.ID, batch.WorkflowID)
+			if err != nil {
+				return nil, err
+			}
+			// Inventory can complete this identity while the caller waits.
+			if machines == nil {
+				for _, input := range batch.Inputs {
+					machine, err := emDAO.Get(rpcCtx, tx, input.ExpectedMachineID, nil, false)
+					if err != nil {
+						return nil, err
+					}
+					machines = append(machines, *machine)
+				}
+			}
+			return machines, nil
+		})
+		if err != nil {
+			logger.Error().Err(err).Str("WorkflowID", batch.WorkflowID).Msg("failed to finalize Expected Machine batch")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to finalize Expected Machines due to DB transaction error", nil)
+		}
+		if !confirmed {
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to execute batch Expected Machine creation workflow on Site", nil)
+		}
+	}
+
+	logger.Info().
+		Int("SuccessCount", len(createdExpectedMachines)).
+		Msg("finishing CreateExpectedMachines API handler")
+
+	apiExpectedMachines := make([]*model.APIExpectedMachine, 0, len(createdExpectedMachines))
+	for i := range createdExpectedMachines {
+		apiExpectedMachines = append(apiExpectedMachines, model.NewAPIExpectedMachine(&createdExpectedMachines[i]))
+	}
+	return c.JSON(http.StatusCreated, apiExpectedMachines)
+}
+
+// ~~~~~ Batch Update Handler ~~~~~ //
+
+// UpdateExpectedMachinesHandler is the API Handler for batch updating ExpectedMachines
+type UpdateExpectedMachinesHandler struct {
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
+	cfg       *config.Config
+}
+
+// NewUpdateExpectedMachinesHandler initializes and returns a new handler for batch updating ExpectedMachines
+func NewUpdateExpectedMachinesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) UpdateExpectedMachinesHandler {
+	return UpdateExpectedMachinesHandler{
+		dbSession: dbSession,
+		scp:       scp,
+		cfg:       cfg,
+	}
+}
+
+type expectedMachineUpdateFieldSet struct {
+	bmcMacAddress            bool
+	defaultBmcUsername       bool
+	defaultBmcPassword       bool
+	chassisSerialNumber      bool
+	fallbackDPUSerialNumbers bool
+	interfaces               bool
+	skuID                    bool
+	rackID                   bool
+	name                     bool
+	manufacturer             bool
+	model                    bool
+	description              bool
+	serverName               bool
+	slotID                   bool
+	trayIdx                  bool
+	hostID                   bool
+	isDpfEnabled             bool
+	labels                   bool
+	hostLifecycleProfile     bool
+}
+
+// expectedMachineUpdateFields records field presence across the complete update
+// request without comparing values. Keep it in sync with
+// `model.APIExpectedMachineUpdateRequest`: `ID` selects the row, and
+// `bmcIpAddress` and the `replaceDpuLoopbacks` intent are per-machine exceptions.
+func expectedMachineUpdateFields(req model.APIExpectedMachineUpdateRequest) expectedMachineUpdateFieldSet {
+	return expectedMachineUpdateFieldSet{
+		bmcMacAddress:            req.BmcMacAddress != nil,
+		defaultBmcUsername:       req.DefaultBmcUsername != nil,
+		defaultBmcPassword:       req.DefaultBmcPassword != nil,
+		chassisSerialNumber:      req.ChassisSerialNumber != nil,
+		fallbackDPUSerialNumbers: req.FallbackDPUSerialNumbers != nil,
+		interfaces:               req.Interfaces != nil,
+		skuID:                    req.SkuID != nil,
+		rackID:                   req.RackID != nil,
+		name:                     req.Name != nil,
+		manufacturer:             req.Manufacturer != nil,
+		model:                    req.Model != nil,
+		description:              req.Description != nil,
+		serverName:               req.ServerName != nil,
+		slotID:                   req.SlotID != nil,
+		trayIdx:                  req.TrayIdx != nil,
+		hostID:                   req.HostID != nil,
+		isDpfEnabled:             req.IsDpfEnabled != nil,
+		labels:                   req.Labels != nil,
+		hostLifecycleProfile:     req.HostLifecycleProfile.ToDBModelPtr() != nil,
+	}
+}
+
+// Handle godoc
+// @Summary Batch update ExpectedMachines
+// @Description Update multiple ExpectedMachines in a single request. All machines must belong to the same site.
+// @Tags ExpectedMachine
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param message body []model.APIExpectedMachineUpdateRequest true "ExpectedMachine UpdateExpectedMachines request"
+// @Success 200 {object} model.APIExpectedMachineBatchResponse
+// @Router /v2/org/{org}/nico/expected-machine/batch [patch]
+func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachine", "UpdateMultiple", c)
+	if handlerSpan != nil {
+		defer handlerSpan.End()
+	}
+
+	// Is DB user missing?
+	if dbUser == nil {
+		logger.Error().Msg("invalid User object found in request context")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	// Validate request
+	// Bind request data to API model (array payload)
+	apiRequests := []model.APIExpectedMachineUpdateRequest{}
+	err := c.Bind(&apiRequests)
+	if err != nil {
+		logger.Warn().Err(err).Msg("error binding request data into API model")
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
+	}
+
+	if len(apiRequests) == 0 {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Request data must contain at least 1 Expected Machine entry", nil)
+	}
+
+	if len(apiRequests) > model.ExpectedMachineMaxBatchItems {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("At most %d Expected Machine entries can be created in a batch request", model.ExpectedMachineMaxBatchItems), nil)
+	}
+
+	// Validate each item, also collect requested sku IDs
+	// - ID is required and must be unique
+	// - Serial Number is optional but must be unique
+	// Note: this is early partial validation before we try to call the DB.
+	validationErrors := validation.Errors{} //
+	idMap := make(map[uuid.UUID]int)        // Map Expected Machine ID to its index in the request array
+	serialMap := make(map[string]int)
+	requestedSkuIDs := make(map[string]bool)
+	// The public batch contract requires one update field set. Enforce it before
+	// `UpdateMultiple` can apply its shared column list to rows that omitted a field.
+	batchFields := expectedMachineUpdateFields(apiRequests[0])
+	for i, req := range apiRequests {
+		strIndex := strconv.Itoa(i) // index/key as string for validation errors map
+		itemErrors := validation.Errors{}
+
+		verr := req.Validate()
+		if verr != nil {
+			var ok bool
+			itemErrors, ok = verr.(validation.Errors)
+			if !ok {
+				common.AddToValidationErrors(itemErrors, "validation", verr)
+			}
+		}
+
+		// validation must accept nil ID for single update use case so we need to check for nil ID here
+		if req.ID == nil {
+			common.AddToValidationErrors(itemErrors, "id", fmt.Errorf("Missing required Expected Machine ID"))
+		} else {
+			// extract already validated UUID
+			mid, _ := uuid.Parse(*req.ID)
+
+			if prev, ok := idMap[mid]; ok {
+				common.AddToValidationErrors(itemErrors, "id", fmt.Errorf(
+					"duplicate Expected Machine ID '%s' found at indices %d and %d", *req.ID, prev, i))
+			}
+			idMap[mid] = i
+		}
+
+		if req.ChassisSerialNumber != nil {
+			lowerSerial := strings.ToLower(*req.ChassisSerialNumber)
+			if prev, ok := serialMap[lowerSerial]; ok {
+				common.AddToValidationErrors(itemErrors, "chassisSerialNumber", fmt.Errorf(
+					"duplicate chassis serial number '%s' found at indices %d and %d", *req.ChassisSerialNumber, prev, i))
+			}
+			serialMap[lowerSerial] = i
+		}
+
+		if req.SkuID != nil {
+			requestedSkuIDs[*req.SkuID] = true
+		}
+
+		if expectedMachineUpdateFields(req) != batchFields {
+			common.AddToValidationErrors(itemErrors, "fields", errors.New("must provide the same set of fields as batch item 0, except bmcIpAddress and replaceDpuLoopbacks"))
+		}
+
+		if len(itemErrors) > 0 {
+			validationErrors[strIndex] = itemErrors
+		}
+	}
+	if len(validationErrors) > 0 {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Expected Machine update data", validationErrors)
+	}
+
+	logger.Info().Int("MachineCount", len(apiRequests)).Msg("processing UpdateExpectedMachines request")
+
+	// Retrieve the requested Expected Machines so we can resolve the SiteID
+	// and validate they all belong to the same Site. This is a pure
+	// validation read, so it stays outside the write transaction. Serial and
+	// SKU checks run inside that transaction under the Expected Inventory lock.
+	emDAO := cdbm.NewExpectedMachineDAO(uemh.dbSession)
+	requestedExpectedMachine, _, err := emDAO.GetAll(ctx, nil, cdbm.ExpectedMachineFilterInput{
+		ExpectedMachineIDs: slices.Collect(maps.Keys(idMap)),
+	}, paginator.PageInput{
+		Limit: cutil.GetPtr(paginator.TotalLimit),
+	}, []string{cdbm.SiteRelationName})
+	if err != nil {
+		logger.Error().Err(err).Msg("error retrieving Expected Machines from DB")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Machines due to DB error", nil)
+	}
+	if len(requestedExpectedMachine) == 0 {
+		logger.Warn().Msg("No Expected Machines found for provided IDs")
+		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "No Expected Machines found for provided IDs", nil)
+	}
+	requestedEmMap := make(map[uuid.UUID]cdbm.ExpectedMachine)
+	for i := range requestedExpectedMachine {
+		em := &requestedExpectedMachine[i]
+		requestedEmMap[em.ID] = *em
+	}
+
+	// Iterate on retrieved records to check siteID and IDs
+	var foundSiteID *uuid.UUID
+	validationErrors = validation.Errors{}
+	for i, req := range apiRequests {
+		strIndex := strconv.Itoa(i) // index/key as string for validation errors map
+		itemErrors := validation.Errors{}
+
+		// Check ID
+		mid, _ := uuid.Parse(*req.ID) // we know the ID in request is valid from previous validation
+		em, ok := requestedEmMap[mid]
+		if !ok {
+			common.AddToValidationErrors(itemErrors, "id", fmt.Errorf(
+				"Expected Machine with ID %s not found in DB", *req.ID))
+			validationErrors[strIndex] = itemErrors
+			continue
+		}
+
+		// Check SiteID consistency
+		if foundSiteID == nil {
+			foundSiteID = &em.SiteID
+		} else {
+			if em.SiteID != *foundSiteID {
+				common.AddToValidationErrors(itemErrors, "siteID", fmt.Errorf(
+					"Expected Machine with ID %s does not belong to the same Site (%s) as other Expected Machines in request", *req.ID, *foundSiteID))
+			}
+		}
+
+		if len(itemErrors) > 0 {
+			validationErrors[strIndex] = itemErrors
+		}
+	}
+	if len(validationErrors) > 0 {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Expected Machine update data", validationErrors)
+	}
+
+	// Get our unique Site ID and Site record
+	siteID := requestedExpectedMachine[0].SiteID
+	site := requestedExpectedMachine[0].Site // we get the site record from the relation loaded with our Expected Machine
+	if site == nil {
+		logger.Warn().Msg("No Site relation found for Expected Machines")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "No Site found for Expected Machines", nil)
+	}
+
+	// Scope tenant privilege to the common Site targeted by this batch.
+	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, uemh.dbSession, org, dbUser, false, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+
+	// Validate ProviderTenantSite relationship and state
+	hasAccess, apiError := ValidateProviderOrTenantSiteAccess(ctx, logger, uemh.dbSession, site, infrastructureProvider, tenant)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
+	}
+	if !hasAccess {
+		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Current org is not associated with the Site", nil)
+	}
+
+	// Validate the stored identity only after the caller's Site access is known.
+	// Otherwise the error would reveal whether a submitted MAC matched a machine
+	// the caller cannot access.
+	validationErrors = validation.Errors{}
+	for i, req := range apiRequests {
+		mid, _ := uuid.Parse(*req.ID)
+		em := requestedEmMap[mid]
+		if !bmcMacUnchanged(em.BmcMacAddress, req.BmcMacAddress) {
+			validationErrors[strconv.Itoa(i)] = bmcMacImmutableValidationError()
+		}
+	}
+	if len(validationErrors) > 0 {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Expected Machine update data", validationErrors)
+	}
+
+	// The DAO returns rows in its own order. Match each row to the request
+	// by ID so its credentials and field mask stay together.
+	requestsByID := make(map[uuid.UUID]model.APIExpectedMachineUpdateRequest, len(apiRequests))
+	updateInputs := make([]cdbm.ExpectedMachineUpdateInput, 0, len(apiRequests))
+	bmcIPClearIDs := make(map[uuid.UUID]struct{})
+	for _, machineReq := range apiRequests {
+		// APIExpectedMachineUpdateRequest must allow nil ID for single update use case. If present here, it has already been validated.
+		if machineReq.ID == nil {
+			logger.Error().Msg("Expected Machine ID cannot be nil")
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Expected Machine ID cannot be nil", nil)
+		}
+
+		emID, _ := uuid.Parse(*machineReq.ID)
+		requestsByID[emID] = machineReq
+		bmcIPAddress := machineReq.BmcIpAddress
+		if bmcIPAddress != nil && *bmcIPAddress == "" {
+			bmcIPClearIDs[emID] = struct{}{}
+			bmcIPAddress = nil
+		}
+		updateInputs = append(updateInputs, cdbm.ExpectedMachineUpdateInput{
+			ExpectedMachineID:        emID,
+			BmcIpAddress:             bmcIPAddress,
+			ChassisSerialNumber:      machineReq.ChassisSerialNumber,
+			SkuID:                    machineReq.SkuID,
+			FallbackDpuSerialNumbers: machineReq.FallbackDPUSerialNumbers,
+			Interfaces:               machineReq.InterfacesToDBModel(),
+			RackID:                   machineReq.RackID,
+			Name:                     machineReq.Name,
+			Manufacturer:             machineReq.Manufacturer,
+			Model:                    machineReq.Model,
+			Description:              machineReq.Description,
+			ServerName:               machineReq.ServerName,
+			SlotID:                   machineReq.SlotID,
+			TrayIdx:                  machineReq.TrayIdx,
+			HostID:                   machineReq.HostID,
+			Labels:                   machineReq.Labels,
+			IsDpfEnabled:             machineReq.IsDpfEnabled,
+			HostLifecycleProfile:     machineReq.HostLifecycleProfile.ToDBModelPtr(),
+		})
+	}
+	// Existing inventory may contain duplicate serials. Check explicit serial
+	// updates while keeping other fields editable on those records.
+	setsSerials := len(serialMap) > 0
+
+	// Read Committed gives the serial lookup a fresh snapshot after a lock retry.
+	updatedExpectedMachines, err := cdb.WithTxResultOpts(ctx, uemh.dbSession, &sql.TxOptions{Isolation: sql.LevelReadCommitted}, func(tx *cdb.Tx) ([]cdbm.ExpectedMachine, error) {
+		// Serial validation needs the exclusive lock before reading inventory.
+		// Updates omitting serials keep the shared mode used by ordinary mutations.
+		apiErr := acquireExpectedInventoryMutationLock(ctx, logger, tx, site.ID, !setsSerials)
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		ids := make([]uuid.UUID, 0, len(updateInputs))
+		var serials []string
+		for _, input := range updateInputs {
+			ids = append(ids, input.ExpectedMachineID)
+			if input.ChassisSerialNumber != nil {
+				serials = append(serials, *input.ChassisSerialNumber)
+			}
+		}
+		apiErr = checkPendingExpectedMachineOverlap(ctx, logger, uemh.dbSession, tx, site.ID, ids, nil, serials)
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		expectedMachineSerialNumberChecker := common.NewUniqueChecker[uuid.UUID]()
+		if setsSerials {
+			expectedMachinesOnSite, _, err := emDAO.GetAll(ctx, tx, cdbm.ExpectedMachineFilterInput{
+				SiteIDs: []uuid.UUID{siteID},
+			}, paginator.PageInput{
+				Limit: cutil.GetPtr(paginator.TotalLimit), // we want ALL records on site
+			}, []string{})
+			if err != nil {
+				logger.Error().Err(err).Msg("error retrieving Expected Machines from DB")
+				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Expected Machines due to DB error", nil)
+			}
+
+			// Load stored serials before applying this batch.
+			for i := range expectedMachinesOnSite { // iterate on ALL Expected Machine on Site
+				em := &expectedMachinesOnSite[i]
+				if em.ChassisSerialNumber != "" {
+					expectedMachineSerialNumberChecker.Update(em.ID, em.ChassisSerialNumber)
+				}
+			}
+
+			// Apply Serial changes to the checker
+			for _, req := range apiRequests {
+				mid, _ := uuid.Parse(*req.ID)
+				if req.ChassisSerialNumber != nil {
+					expectedMachineSerialNumberChecker.Update(mid, *req.ChassisSerialNumber)
+				}
+			}
+		}
+
+		// Keep requested SKUs locked through the writes so deletion/recreation
+		// cannot change their Site after validation.
+		skuDAO := cdbm.NewSkuDAO(uemh.dbSession)
+		skus, err := skuDAO.GetForAttachment(ctx, tx, siteID, slices.Collect(maps.Keys(requestedSkuIDs)))
+		if err != nil {
+			logger.Error().Err(err).Msg("error retrieving SKUs from DB")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve SKUs due to DB error", nil)
+		}
+		uniqueSkuIDsOnSite := make(map[string]bool)
+		for _, sku := range skus {
+			uniqueSkuIDsOnSite[sku.ID] = true
+		}
+		// Report serial and SKU errors together for each request item.
+		validationErrors := validation.Errors{}
+		for i, req := range apiRequests {
+			itemErrors := validation.Errors{}
+			strIndex := strconv.Itoa(i) // index/key as string for validation errors map
+			mid, _ := uuid.Parse(*req.ID)
+
+			// Check Serial unicity
+			if req.ChassisSerialNumber != nil && expectedMachineSerialNumberChecker.DoesIDHaveConflict(mid) {
+				common.AddToValidationErrors(itemErrors, "chassisSerialNumber", fmt.Errorf(
+					"Expected Machine with Chassis Serial Number: %s already exists", *req.ChassisSerialNumber))
+			}
+			// Check SKU existence
+			if req.SkuID != nil && !uniqueSkuIDsOnSite[*req.SkuID] {
+				common.AddToValidationErrors(itemErrors, "skuID", fmt.Errorf(
+					"the SkuID specified for Expected Machine does not exist in DB: %s", *req.SkuID))
+			}
+
+			// Collect errors
+			if len(itemErrors) > 0 {
+				validationErrors[strIndex] = itemErrors
+			}
+		}
+		if len(validationErrors) > 0 {
+			return nil, cutil.NewAPIError(http.StatusBadRequest, "Failed to validate Expected Machine update data", validationErrors)
+		}
+		// Lock the full target set before clearing any one row. Clear touches
+		// only a subset, while UpdateMultiple writes every target; without this
+		// canonical lock pass, overlapping batches can each hold a different
+		// cleared row and deadlock during the batch update.
+		derr := emDAO.LockForUpdate(ctx, tx, slices.Collect(maps.Keys(idMap)))
+		if derr != nil {
+			if errors.Is(derr, cdb.ErrDoesNotExist) {
+				return nil, cutil.NewAPIError(http.StatusConflict, "One or more Expected Machines were removed before the batch update completed", nil)
+			}
+			logger.Error().Err(derr).Msg("error locking ExpectedMachine records for batch update")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Machine due to DB error", nil)
+		}
+		if batchFields.interfaces {
+			stored, _, derr := emDAO.GetAll(ctx, tx, cdbm.ExpectedMachineFilterInput{
+				ExpectedMachineIDs: slices.Collect(maps.Keys(idMap)),
+			}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+			if derr != nil {
+				logger.Error().Err(derr).Msg("error reading locked ExpectedMachine interfaces for batch update")
+				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Machine due to DB error", nil)
+			}
+			for _, machine := range stored {
+				request := requestsByID[machine.ID]
+				replaceLoopbacks := request.ReplaceDpuLoopbacks != nil && *request.ReplaceDpuLoopbacks
+				updateInputs[idMap[machine.ID]].Interfaces = request.Interfaces.ToDBModelPreservingLoopbacks(machine.Interfaces, replaceLoopbacks)
+			}
+		}
+
+		// Clear first so UpdateMultiple's final SELECT sees nil. Its scoped
+		// BMC IP update cannot restore cleared rows. Every target row is already
+		// locked above, so the subset clear cannot introduce a second order.
+		for _, input := range updateInputs {
+			expectedMachineID := input.ExpectedMachineID
+			if _, ok := bmcIPClearIDs[expectedMachineID]; !ok {
+				continue
+			}
+			_, derr := emDAO.Clear(ctx, tx, cdbm.ExpectedMachineClearInput{
+				ExpectedMachineID: expectedMachineID,
+				BmcIpAddress:      true,
+			})
+			if derr != nil {
+				logger.Error().Err(derr).Str("ExpectedMachineID", expectedMachineID.String()).Msg("error clearing ExpectedMachine BMC IP address in DB")
+				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Machine due to DB error", nil)
+			}
+		}
+
+		updatedMachines, derr := emDAO.UpdateMultiple(ctx, tx, updateInputs)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("error updating ExpectedMachine records in DB")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Machine due to DB error", nil)
+		}
+
+		patches := make([]*corev1.PatchExpectedMachineRequest, 0, len(updatedMachines))
+		for i := range updatedMachines {
+			em := &updatedMachines[i]
+			request, ok := requestsByID[em.ID]
+			if !ok {
+				logger.Error().Str("ExpectedMachineID", em.ID.String()).Msg("UpdateMultiple returned a machine with an unrecognized ID")
+				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to correlate updated Expected Machine to request", nil)
+			}
+			patches = append(patches, request.ToProto(em))
+		}
+		patchRequest := &corev1.PatchExpectedMachinesRequest{Patches: patches}
+		var secretFields []string
+		if slices.ContainsFunc(apiRequests, func(request model.APIExpectedMachineUpdateRequest) bool {
+			return request.DefaultBmcUsername != nil || request.DefaultBmcPassword != nil
+		}) {
+			secretFields = []string{"patches"}
+		}
+
+		// Get the Temporal client for the site we are working with
+		stc, cerr := uemh.scp.GetClientByID(site.ID)
+		if cerr != nil {
+			logger.Error().Err(cerr).Msg("failed to retrieve Temporal client for Site")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+		}
+
+		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_PatchExpectedMachines_FullMethodName, patchRequest, nil, site.ID.String(), secretFields...)
+		if apiErr != nil {
+			logAPIError(logger, apiErr, "failed to patch expected machines")
+			return nil, apiErr
+		}
+
+		return updatedMachines, nil
+	})
+	if err != nil {
+		return common.HandleTxError(c, logger, err, "Failed to update Expected Machines due to DB transaction error")
+	}
+
+	logger.Info().
+		Int("SuccessCount", len(updatedExpectedMachines)).
+		Msg("finishing UpdateExpectedMachines API handler")
+
+	apiExpectedMachines := make([]*model.APIExpectedMachine, 0, len(updatedExpectedMachines))
+	for i := range updatedExpectedMachines {
+		apiExpectedMachines = append(apiExpectedMachines, model.NewAPIExpectedMachine(&updatedExpectedMachines[i]))
+	}
+	return c.JSON(http.StatusOK, apiExpectedMachines)
+}
+
+// ReplaceAllExpectedMachinesHandler replaces the complete ExpectedMachine set
+// for one Site.
+type ReplaceAllExpectedMachinesHandler struct{ expectedInventoryBatchBase }
+
+// NewReplaceAllExpectedMachinesHandler creates a full-Site ExpectedMachine replacement handler.
+func NewReplaceAllExpectedMachinesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) ReplaceAllExpectedMachinesHandler {
+	return ReplaceAllExpectedMachinesHandler{newExpectedInventoryBatchBase(dbSession, scp, cfg)}
+}
+
+// Handle godoc
+// @Summary Replace all ExpectedMachines for a Site
+// @Description Replace the full set of ExpectedMachines for a Site; an empty list clears the set
+// @Tags ExpectedMachine
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param message body model.APIReplaceAllExpectedMachinesRequest true "ExpectedMachine replace-all request"
+// @Success 200 {object} []model.APIExpectedMachine
+// @Router /v2/org/{org}/nico/expected-machine/all [put]
+func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
+	org, dbUser, ctx, logger, span := common.SetupHandler("ExpectedMachine", "ReplaceAll", c)
+	if span != nil {
+		defer span.End()
+	}
+	if dbUser == nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
+	}
+
+	request := model.APIReplaceAllExpectedMachinesRequest{}
+	err := c.Bind(&request)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
+	}
+	err = request.Validate()
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate ReplaceAllExpectedMachines request data", err)
+	}
+	logger = logger.With().Str("SiteID", request.SiteID).Int("MachineCount", len(request.ExpectedMachines)).Logger()
+	cotel.SetAttribute(span, attribute.String("site_id", request.SiteID))
+
+	site, apiErr := h.resolveSite(ctx, logger, org, dbUser, request.SiteID, true)
+	if apiErr != nil {
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
+	}
+
+	requestedSKUs := make(map[string]bool)
+	for _, machine := range request.ExpectedMachines {
+		if machine.SkuID != nil {
+			requestedSKUs[*machine.SkuID] = true
+		}
+	}
+
+	inputs := make([]cdbm.ExpectedMachineCreateInput, 0, len(request.ExpectedMachines))
+	credentials := make(map[uuid.UUID]cdbm.ExpectedMachineCredentials, len(request.ExpectedMachines))
+	requestsByID := make(map[uuid.UUID]*model.APIExpectedMachineCreateRequest, len(request.ExpectedMachines))
+	for _, machine := range request.ExpectedMachines {
+		id := uuid.New()
+		requestsByID[id] = machine
+		credentials[id] = cdbm.ExpectedMachineCredentials{Username: machine.DefaultBmcUsername, Password: machine.DefaultBmcPassword}
+		inputs = append(inputs, cdbm.ExpectedMachineCreateInput{
+			ExpectedMachineID: id, SiteID: site.ID, BmcMacAddress: machine.BmcMacAddress,
+			BmcIpAddress: machine.BmcIpAddress, ChassisSerialNumber: machine.ChassisSerialNumber,
+			SkuID: machine.SkuID, FallbackDpuSerialNumbers: machine.FallbackDPUSerialNumbers,
+			Interfaces: machine.InterfacesToDBModel(),
+			RackID:     machine.RackID, Name: machine.Name, Manufacturer: machine.Manufacturer,
+			Model: machine.Model, Description: machine.Description, ServerName: machine.ServerName, SlotID: machine.SlotID,
+			TrayIdx: machine.TrayIdx, HostID: machine.HostID, IsDpfEnabled: machine.IsDpfEnabled,
+			Labels: machine.Labels, HostLifecycleProfile: machine.HostLifecycleProfile.ToDBModel(), CreatedBy: dbUser.ID,
+		})
+	}
+
+	dao := cdbm.NewExpectedMachineDAO(h.dbSession)
+	replaced, err := cdb.WithTxResult(ctx, h.dbSession, func(tx *cdb.Tx) ([]cdbm.ExpectedMachine, error) {
+		apiErr := acquireExpectedInventoryExclusiveMutationLock(ctx, logger, tx, site.ID)
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		apiErr = checkPendingExpectedMachineOverlap(ctx, logger, h.dbSession, tx, site.ID, nil, nil, nil)
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		// Keep requested SKUs locked through replacement so deletion/recreation
+		// cannot change their Site after validation.
+		if len(requestedSKUs) > 0 {
+			skuIDs := make([]string, 0, len(requestedSKUs))
+			for skuID := range requestedSKUs {
+				skuIDs = append(skuIDs, skuID)
+			}
+			skus, derr := cdbm.NewSkuDAO(h.dbSession).GetForAttachment(ctx, tx, site.ID, skuIDs)
+			if derr != nil {
+				logger.Error().Err(derr).Msg("error retrieving SKUs for ExpectedMachine replacement")
+				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve SKUs due to DB error", nil)
+			}
+			existing := make(map[string]bool, len(skus))
+			for _, sku := range skus {
+				existing[sku.ID] = true
+			}
+			for skuID := range requestedSKUs {
+				if !existing[skuID] {
+					return nil, cutil.NewAPIError(http.StatusBadRequest, "SkuID specified for an Expected Machine does not exist on the Site", nil)
+				}
+			}
+		}
+		stc, err := h.scp.GetClientByID(site.ID)
+		if err != nil {
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+		}
+		stored, _, derr := dao.GetAll(ctx, tx, cdbm.ExpectedMachineFilterInput{
+			SiteIDs: []uuid.UUID{site.ID},
+		}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("error reading ExpectedMachine interfaces for replacement")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to replace Expected Machines due to DB error", nil)
+		}
+		interfacesByMAC := make(map[string][]cdbm.ExpectedMachineInterface, len(stored))
+		for _, machine := range stored {
+			interfacesByMAC[cdbm.NormalizeMacAddress(machine.BmcMacAddress)] = machine.Interfaces
+		}
+		for i := range inputs {
+			request := requestsByID[inputs[i].ExpectedMachineID]
+			interfaces := request.Interfaces
+			if interfaces == nil {
+				// Replace-all still replaces physical declarations when the list is omitted.
+				interfaces = model.APIExpectedMachineInterfaces{}
+			}
+			replaceLoopbacks := request.ReplaceDpuLoopbacks != nil && *request.ReplaceDpuLoopbacks
+			inputs[i].Interfaces = interfaces.ToDBModelPreservingLoopbacks(interfacesByMAC[cdbm.NormalizeMacAddress(inputs[i].BmcMacAddress)], replaceLoopbacks)
+		}
+		machines, derr := dao.ReplaceAll(ctx, tx, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{site.ID}}, inputs)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("error replacing ExpectedMachine records in DB")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to replace Expected Machines due to DB error", nil)
+		}
+		protos := make([]*corev1.ExpectedMachine, 0, len(machines))
+		for i := range machines {
+			machine := machines[i].ToProto(credentials[machines[i].ID])
+			request := requestsByID[machines[i].ID]
+			// Cached loopbacks are response state, not new replacement intent for Core.
+			machine.HostNics = nil
+			for _, expectedInterface := range request.Interfaces {
+				machine.HostNics = append(machine.HostNics, expectedInterface.ToDBModel().ToProto())
+			}
+			// Replace-all replaces physical interfaces, including nested Host BMCs.
+			machine.ReplaceHostNics = true
+			machine.ReplaceDpuLoopbacks = request.ReplaceDpuLoopbacks != nil && *request.ReplaceDpuLoopbacks
+			protos = append(protos, machine)
+		}
+		coreRequest := &corev1.ExpectedMachineList{ExpectedMachines: protos}
+		var secretFields []string
+		if slices.ContainsFunc(request.ExpectedMachines, func(machine *model.APIExpectedMachineCreateRequest) bool {
+			return machine.DefaultBmcUsername != nil || machine.DefaultBmcPassword != nil
+		}) {
+			secretFields = []string{"expectedMachines"}
+		}
+		apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_ReplaceAllExpectedMachines_FullMethodName, coreRequest, nil, site.ID.String(), secretFields...)
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		return machines, nil
+	})
+	if err != nil {
+		return common.HandleTxError(c, logger, err, "Failed to replace Expected Machines due to DB transaction error")
+	}
+
+	response := make([]*model.APIExpectedMachine, 0, len(replaced))
+	for i := range replaced {
+		response = append(response, model.NewAPIExpectedMachine(&replaced[i]))
+	}
+	return c.JSON(http.StatusOK, response)
+}
+
+// DeleteAllExpectedMachinesHandler deletes the complete ExpectedMachine set for one Site.
+type DeleteAllExpectedMachinesHandler struct{ expectedInventoryBatchBase }
+
+// NewDeleteAllExpectedMachinesHandler creates a full-Site ExpectedMachine deletion handler.
+func NewDeleteAllExpectedMachinesHandler(dbSession *cdb.Session, scp *sc.ClientPool, cfg *config.Config) DeleteAllExpectedMachinesHandler {
+	return DeleteAllExpectedMachinesHandler{newExpectedInventoryBatchBase(dbSession, scp, cfg)}
+}
+
+// Handle godoc
+// @Summary Delete all ExpectedMachines for a Site
+// @Tags ExpectedMachine
+// @Security ApiKeyAuth
+// @Param org path string true "Name of NGC organization"
+// @Param siteId query string true "ID of Site whose ExpectedMachines should be deleted"
+// @Success 204
+// @Router /v2/org/{org}/nico/expected-machine/all [delete]
+func (h DeleteAllExpectedMachinesHandler) Handle(c echo.Context) error {
+	return h.deleteAll(c, "ExpectedMachine", corev1.Forge_DeleteAllExpectedMachines_FullMethodName, func(ctx context.Context, tx *cdb.Tx, siteID uuid.UUID) error {
+		logger := log.With().Str("Model", "ExpectedMachine").Str("Handler", "DeleteAll").Str("SiteID", siteID.String()).Logger()
+		apiErr := checkPendingExpectedMachineOverlap(ctx, logger, h.dbSession, tx, siteID, nil, nil, nil)
+		if apiErr != nil {
+			return apiErr
+		}
+		return cdbm.NewExpectedMachineDAO(h.dbSession).DeleteAll(ctx, tx, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}})
+	})
+}
+
+func checkPendingExpectedMachineOverlap(ctx context.Context, logger zerolog.Logger, session *cdb.Session, tx *cdb.Tx, siteID uuid.UUID, ids []uuid.UUID, macs, serials []string) *cutil.APIError {
+	batches, err := cdbm.NewPendingExpectedMachineBatchDAO(session).GetAll(ctx, tx, siteID)
+	if err != nil {
+		logger.Error().Err(err).Str("SiteID", siteID.String()).Msg("failed to retrieve pending Expected Machine batches")
+		return cutil.NewAPIError(http.StatusInternalServerError, "Failed to check pending Expected Machine creation", nil).WithCause(err)
+	}
+	for _, batch := range batches {
+		if batch.Overlaps(ids, macs, serials) {
+			return cutil.NewAPIError(http.StatusConflict, "Expected Machine creation is awaiting confirmation; retry after reconciliation", nil)
+		}
+	}
+	return nil
+}

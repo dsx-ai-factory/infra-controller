@@ -1,0 +1,157 @@
+- header:
+    model: VX
+    nvue-api-version: nvue_v1
+    rev-id: 1.0
+    version: Cumulus Linux 5.6.0
+- set:
+    evpn:
+      enable: on
+    interface:
+      lo:
+        ip:
+          address:
+            127.0.0.1/32: {}
+        type: loopback
+      pf0dpu1_if:
+        ip:
+          address:
+            169.254.169.253/30: {}
+      p0_if:
+        type: swp
+      p1_if:
+        type: swp
+      pf0hpf_if:
+        type: swp
+        bridge:
+          domain:
+            br_default:
+              access: 10
+      vlan10:
+        type: svi
+        vlan: 10
+        ip:
+          address:
+            192.168.0.0/16: {}
+    nve:
+      vxlan:
+        arp-nd-suppress: on
+        enable: on
+        source:
+          address: 127.0.0.1
+    router:
+      bgp:
+        autonomous-system: 65535
+        enable: on
+        router-id: 127.0.0.1
+      policy:
+        prefix-list:
+          FORGE_FROM_UNDERLAY:
+            rule:
+              '10':
+                action: permit
+                match:
+                  0.0.0.0/0: {}
+              '1000':
+                action: deny
+                match:
+                  any: {}
+          dpu_from_instance:
+            rule:
+              '1000':
+                action: permit
+                match:
+                  5.255.255.0/24:
+                    min-prefix-len: 32
+              '65535':
+                action: deny
+                match:
+                  any: {}
+        route-map:
+          FORGE_TO_UNDERLAY:
+            rule:
+              '10':
+                action:
+                  deny: {}
+                match:
+                  interface: vlan10
+              '1000':
+                action:
+                  permit: {}
+          dpu_to_instance:
+            rule:
+              '10':
+                action:
+                  deny: {}
+    system:
+      api:
+        listening-address:
+          0.0.0.0: {}
+      reflexive-acl:
+        enable: on
+    vrf:
+      default:
+        router:
+          nexthop-tracking:
+            ipv4:
+              resolved-via-default: on
+          static:
+            192.168.0.12/32:
+              address-family: ipv4-unicast
+              via:
+                vlan10:
+                  type: interface
+          bgp:
+            address-family:
+              ipv4-unicast:
+                network:
+                  127.0.0.1/32: {}
+                  192.168.0.12/32: {}
+                enable: on
+                multipaths:
+                  ebgp: 128
+                redistribute:
+                  connected:
+                    enable: on
+              l2vpn-evpn:
+                enable: on
+            enable: on
+            neighbor:
+              p0_if:
+                peer-group: underlay
+                type: unnumbered
+              p1_if:
+                peer-group: underlay
+                type: unnumbered
+            path-selection:
+              multipath:
+                aspath-ignore: on
+            peer-group:
+              routeserver:
+                address-family:
+                  ipv4-unicast:
+                    enable: off
+                  l2vpn-evpn:
+                    aspath:
+                      allow-my-asn:
+                        enable: on
+                    enable: on
+                multihop-ttl: 255
+                remote-as: external
+                update-source: lo
+              underlay:
+                remote-as: external
+                address-family:
+                  ipv4-unicast:
+                    policy:
+                      inbound:
+                        prefix-list: FORGE_FROM_UNDERLAY
+                      outbound:
+                        route-map: FORGE_TO_UNDERLAY
+                    aspath:
+                      allow-my-asn:
+                        enable: on
+                  l2vpn-evpn:
+                    aspath:
+                      allow-my-asn:
+                        enable: on
+                    enable: on

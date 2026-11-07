@@ -1,0 +1,688 @@
+diff --git a/src/config/defaults/efi.h b/src/config/defaults/efi.h
+index baacae4f9..bf724bfa9 100644
+--- a/src/config/defaults/efi.h
++++ b/src/config/defaults/efi.h
+@@ -23,6 +23,7 @@ FILE_SECBOOT ( PERMITTED );
+ #define ENTROPY_EFITICK
+ #define ENTROPY_EFIRNG
+ #define TIME_EFI
++#define TPM_EFI
+ #define REBOOT_EFI
+ #define ACPI_EFI
+ #define MPAPI_EFI
+diff --git a/src/image/efi_image.c b/src/image/efi_image.c
+index 0b4e257b5..7d0be2034 100644
+--- a/src/image/efi_image.c
++++ b/src/image/efi_image.c
+@@ -42,6 +42,7 @@ FILE_SECBOOT ( PERMITTED );
+ #include <ipxe/features.h>
+ #include <ipxe/uri.h>
+ #include <ipxe/console.h>
++#include <ipxe/tpm.h>
+ 
+ FEATURE ( FEATURE_IMAGE, "EFI", DHCP_EB_FEATURE_EFI, 1 );
+ 
+@@ -342,6 +343,36 @@ static int efi_image_exec ( struct image *image ) {
+ 		goto err_shim_install;
+ 	}
+ 
++	/* Measure the kernel image and command line.  Absence of a TPM is
++	 * not treated as an error by the TPM API.
++	 */
++	if ( ( rc = tpm_init ( ) ) != 0 ) {
++		DBGC ( image, "EFIIMAGE %s could not initialise TPM: %s\n",
++		       image->name, strerror ( rc ) );
++	}
++	DBGC ( image, "EFIIMAGE %s measuring kernel at %p len %#zx to "
++	       "PCR %d\n", image->name, image->data, image->len,
++	       TPM_PCR_KERNEL );
++	rc = tpm_measure ( ( uint8_t * ) image->data,
++			   ( uint32_t ) image->len, TPM_PCR_KERNEL,
++			   ( uint8_t * ) image->name );
++	if ( rc == 0 ) {
++		DBGC ( image, "EFIIMAGE %s measuring command line to "
++		       "PCR %d\n", image->name, TPM_PCR_ARGS );
++		rc = tpm_measure ( ( uint8_t * ) cmdline,
++				   ( uint32_t ) ( ( wcslen ( cmdline ) +
++						    1 /* NUL */ ) *
++						  sizeof ( wchar_t ) ),
++				   TPM_PCR_ARGS,
++				   ( uint8_t * ) "cmdline" );
++		rc = tpm_separator ( TPM_PCR_KERNEL );
++		rc = tpm_separator ( TPM_PCR_ARGS );
++	} else {
++		DBGC ( image, "EFIIMAGE %s could not measure kernel\n",
++		       image->name );
++	}
++	tpm_exit ( );
++
+ 	/* Attempt loading image
+ 	 *
+ 	 * LoadImage() does not (allegedly) modify the image content,
+diff --git a/src/include/ipxe/efi/IndustryStandard/UefiTcgPlatform.h b/src/include/ipxe/efi/IndustryStandard/UefiTcgPlatform.h
+index 07fbc42ab..3bb5c4a7f 100644
+--- a/src/include/ipxe/efi/IndustryStandard/UefiTcgPlatform.h
++++ b/src/include/ipxe/efi/IndustryStandard/UefiTcgPlatform.h
+@@ -31,6 +31,7 @@ FILE_SECBOOT ( PERMITTED );
+ #define EV_PLATFORM_CONFIG_FLAGS    ((TCG_EVENTTYPE) 0x0000000A)
+ #define EV_TABLE_OF_DEVICES         ((TCG_EVENTTYPE) 0x0000000B)
+ #define EV_COMPACT_HASH             ((TCG_EVENTTYPE) 0x0000000C)
++#define EV_IPL                      ((TCG_EVENTTYPE) 0x0000000D)
+ #define EV_NONHOST_CODE             ((TCG_EVENTTYPE) 0x0000000F)
+ #define EV_NONHOST_CONFIG           ((TCG_EVENTTYPE) 0x00000010)
+ #define EV_NONHOST_INFO             ((TCG_EVENTTYPE) 0x00000011)
+diff --git a/src/include/ipxe/errfile.h b/src/include/ipxe/errfile.h
+index 19570d09e..edd5f1bf3 100644
+--- a/src/include/ipxe/errfile.h
++++ b/src/include/ipxe/errfile.h
+@@ -452,6 +452,7 @@ FILE_SECBOOT ( PERMITTED );
+ #define ERRFILE_crypto_null	      ( ERRFILE_OTHER | 0x006a0000 )
+ #define ERRFILE_ffdhe		      ( ERRFILE_OTHER | 0x006b0000 )
+ #define ERRFILE_cbc		      ( ERRFILE_OTHER | 0x006c0000 )
++#define ERRFILE_efi_tpm	      ( ERRFILE_OTHER | 0x006d0000 )
+ 
+ /** @} */
+ 
+diff --git a/src/config/config_tpm.c b/src/config/config_tpm.c
+new file mode 100644
+index 000000000..f50ff33f7
+--- /dev/null
++++ b/src/config/config_tpm.c
+@@ -0,0 +1,31 @@
++/*
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
++ * 02110-1301, USA.
++ *
++ * You can also choose to distribute this program under the terms of
++ * the Unmodified Binary Distribution Licence (as given in the file
++ * COPYING.UBDL), provided that you have satisfied its requirements.
++ */
++
++FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
++FILE_SECBOOT ( PERMITTED );
++
++#include <config/tpm.h>
++
++PROVIDE_REQUIRING_SYMBOL();
++
++#ifdef TPM_EFI
++REQUIRE_OBJECT ( efi_tpm );
++#endif
+diff --git a/src/config/tpm.h b/src/config/tpm.h
+new file mode 100644
+index 000000000..7806e287d
+--- /dev/null
++++ b/src/config/tpm.h
+@@ -0,0 +1,26 @@
++#ifndef CONFIG_TPM_H
++#define CONFIG_TPM_H
++
++/** @file
++ *
++ * TPM configuration
++ *
++ */
++
++FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
++FILE_SECBOOT ( PERMITTED );
++
++#include <config/defaults.h>
++
++/*
++ * TPM external interfaces
++ *
++ */
++//#undef	TPM_EFI		/* Provide EFI TPM 1.2 and 2.0 interface */
++
++#include <config/named.h>
++#include NAMED_CONFIG(tpm.h)
++#include <config/local/tpm.h>
++#include LOCAL_NAMED_CONFIG(tpm.h)
++
++#endif /* CONFIG_TPM_H */
+diff --git a/src/include/ipxe/efi/efi_tpm.h b/src/include/ipxe/efi/efi_tpm.h
+new file mode 100644
+index 000000000..9234da179
+--- /dev/null
++++ b/src/include/ipxe/efi/efi_tpm.h
+@@ -0,0 +1,19 @@
++#ifndef _IPXE_EFI_TPM_H
++#define _IPXE_EFI_TPM_H
++
++/** @file
++ *
++ * iPXE TPM API for EFI
++ *
++ */
++
++FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
++FILE_SECBOOT ( PERMITTED );
++
++#ifdef TPM_EFI
++#define TPM_PREFIX_efi
++#else
++#define TPM_PREFIX_efi __efi_
++#endif
++
++#endif /* _IPXE_EFI_TPM_H */
+diff --git a/src/include/ipxe/null_tpm.h b/src/include/ipxe/null_tpm.h
+new file mode 100644
+index 000000000..0c10fab21
+--- /dev/null
++++ b/src/include/ipxe/null_tpm.h
+@@ -0,0 +1,19 @@
++#ifndef _IPXE_NULL_TPM_H
++#define _IPXE_NULL_TPM_H
++
++/** @file
++ *
++ * iPXE do-nothing TPM API
++ *
++ */
++
++FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
++FILE_SECBOOT ( PERMITTED );
++
++#ifdef TPM_NULL
++#define TPM_PREFIX_null
++#else
++#define TPM_PREFIX_null __null_
++#endif
++
++#endif /* _IPXE_NULL_TPM_H */
+diff --git a/src/include/ipxe/tpm.h b/src/include/ipxe/tpm.h
+new file mode 100644
+index 000000000..dedb29aee
+--- /dev/null
++++ b/src/include/ipxe/tpm.h
+@@ -0,0 +1,61 @@
++#ifndef _IPXE_TPM_H
++#define _IPXE_TPM_H
++
++/** @file
++ *
++ * iPXE TPM API
++ *
++ */
++
++FILE_LICENCE ( GPL2_OR_LATER_OR_UBDL );
++FILE_SECBOOT ( PERMITTED );
++
++#include <stdint.h>
++#include <ipxe/api.h>
++#include <config/tpm.h>
++
++#define TPM_PCR_IPXE	8U
++#define TPM_PCR_KERNEL	8U
++#define TPM_PCR_INITRD	9U
++#define TPM_PCR_ARGS	10U
++#define TPM_PCR_CONFIG	11U
++
++/**
++ * Calculate static inline TPM API function name
++ *
++ * @v _prefix		Subsystem prefix
++ * @v _api_func		API function
++ * @ret _subsys_func	Subsystem API function
++ */
++#define TPM_INLINE( _subsys, _api_func ) \
++	SINGLE_API_INLINE ( TPM_PREFIX_ ## _subsys, _api_func )
++
++/**
++ * Provide a TPM API implementation
++ *
++ * @v _prefix		Subsystem prefix
++ * @v _api_func		API function
++ * @v _func		Implementing function
++ */
++#define PROVIDE_TPM( _subsys, _api_func, _func ) \
++	PROVIDE_SINGLE_API ( TPM_PREFIX_ ## _subsys, _api_func, _func )
++
++/**
++ * Provide a static inline TPM API implementation
++ *
++ * @v _prefix		Subsystem prefix
++ * @v _api_func		API function
++ */
++#define PROVIDE_TPM_INLINE( _subsys, _api_func ) \
++	PROVIDE_SINGLE_API_INLINE ( TPM_PREFIX_ ## _subsys, _api_func )
++
++/* Include all architecture-independent TPM API headers */
++#include <ipxe/null_tpm.h>
++#include <ipxe/efi/efi_tpm.h>
++
++int tpm_init ( void );
++void tpm_exit ( void );
++int tpm_measure ( uint8_t *buf, uint32_t len, uint32_t pcr, uint8_t *desc );
++int tpm_separator ( uint32_t pcr );
++
++#endif /* _IPXE_TPM_H */
+diff --git a/src/interface/efi/efi_tpm.c b/src/interface/efi/efi_tpm.c
+new file mode 100644
+index 000000000..a383860e6
+--- /dev/null
++++ b/src/interface/efi/efi_tpm.c
+@@ -0,0 +1,411 @@
++/*
++ * Copyright (C) 2024 Vishnu Rangayyan <vrangayyan@nvidia.com>.
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License as
++ * published by the Free Software Foundation; either version 2 of the
++ * License, or any later version.
++ *
++ * This program is distributed in the hope that it will be useful, but
++ * WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
++ * 02110-1301, USA.
++ */
++
++FILE_LICENCE ( GPL2_OR_LATER );
++FILE_SECBOOT ( PERMITTED );
++
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include <errno.h>
++#include <ipxe/efi/efi.h>
++#include <ipxe/efi/Protocol/TcgService.h>
++#include <ipxe/efi/Protocol/Tcg2Protocol.h>
++#include <ipxe/tpm.h>
++
++/** TCG protocol version */
++enum efitpm_tcg_version {
++	EFITPM_TCG_V1 = 1,
++	EFITPM_TCG_V2,
++};
++
++/** Optional EFI TCG v1 protocol */
++static EFI_TCG_PROTOCOL *efitpm_tcg;
++EFI_REQUEST_PROTOCOL ( EFI_TCG_PROTOCOL, &efitpm_tcg );
++
++/** Optional EFI TCG v2 protocol */
++static EFI_TCG2_PROTOCOL *efitpm_tcg2;
++EFI_REQUEST_PROTOCOL ( EFI_TCG2_PROTOCOL, &efitpm_tcg2 );
++
++/** Current TCG protocol version */
++static enum efitpm_tcg_version efitpm_tcg_ver;
++
++/** TPM is available */
++static BOOLEAN efitpm_available;
++
++/** TPM capability structure */
++static void *efitpm_caps;
++
++/**
++ * Convert a pointer to an EFI physical address
++ *
++ * @v ptr		Pointer
++ * @ret phys		EFI physical address
++ */
++static EFI_PHYSICAL_ADDRESS efitpm_phys ( const void *ptr ) {
++	return ( ( EFI_PHYSICAL_ADDRESS ) ( ( unsigned long ) ptr ) );
++}
++
++/**
++ * Query TPM via TCG v1 interface
++ *
++ * @ret efirc		EFI status code
++ */
++static EFI_STATUS efitpm_query_v1 ( void ) {
++	TCG_EFI_BOOT_SERVICE_CAPABILITY *caps;
++	uint32_t flags;
++	EFI_PHYSICAL_ADDRESS log_start;
++	EFI_PHYSICAL_ADDRESS log_last;
++	EFI_STATUS efirc;
++
++	if ( ! efitpm_tcg )
++		return EFI_NOT_FOUND;
++
++	caps = zalloc ( sizeof ( *caps ) );
++	if ( ! caps )
++		return EFI_OUT_OF_RESOURCES;
++	caps->Size = sizeof ( *caps );
++
++	efirc = efitpm_tcg->StatusCheck ( efitpm_tcg, caps, &flags,
++					  &log_start, &log_last );
++	if ( efirc != EFI_SUCCESS ) {
++		DBGC ( efitpm_tcg, "EFITPM TCG1 status check failed: "
++		       "%#lx\n", ( ( unsigned long ) efirc ) );
++		goto err_status_check;
++	}
++
++	if ( ( ! caps->TPMPresentFlag ) || caps->TPMDeactivatedFlag ) {
++		DBGC ( efitpm_tcg, "EFITPM TCG1 TPM not present or "
++		       "disabled\n" );
++		efirc = EFI_NOT_FOUND;
++		goto err_tpm_unavailable;
++	}
++
++	efitpm_caps = caps;
++	return EFI_SUCCESS;
++
++ err_tpm_unavailable:
++ err_status_check:
++	free ( caps );
++	return efirc;
++}
++
++/**
++ * Query TPM via TCG v2 interface
++ *
++ * @ret efirc		EFI status code
++ */
++static EFI_STATUS efitpm_query_v2 ( void ) {
++	EFI_TCG2_BOOT_SERVICE_CAPABILITY *caps;
++	EFI_STATUS efirc;
++
++	if ( ! efitpm_tcg2 )
++		return EFI_NOT_FOUND;
++
++	caps = zalloc ( sizeof ( *caps ) );
++	if ( ! caps )
++		return EFI_OUT_OF_RESOURCES;
++	caps->Size = sizeof ( *caps );
++
++	efirc = efitpm_tcg2->GetCapability ( efitpm_tcg2, caps );
++	if ( efirc != EFI_SUCCESS ) {
++		DBGC ( efitpm_tcg2, "EFITPM TCG2 capability check failed: "
++		       "%#lx\n",
++		       ( ( unsigned long ) efirc ) );
++		free ( caps );
++		return efirc;
++	}
++
++	if ( ! caps->TPMPresentFlag ) {
++		DBGC ( efitpm_tcg2, "EFITPM TCG2 TPM not present\n" );
++		efirc = EFI_NOT_FOUND;
++		goto err_tpm_unavailable;
++	}
++
++	efitpm_caps = caps;
++	return EFI_SUCCESS;
++
++ err_tpm_unavailable:
++	free ( caps );
++	return efirc;
++}
++
++/**
++ * Log TCG v1 event
++ *
++ * @v buf		Data buffer
++ * @v len		Length of data buffer
++ * @v pcr		PCR index
++ * @v desc		Event description
++ * @ret efirc		EFI status code
++ */
++static EFI_STATUS efitpm_log_event_v1 ( uint8_t *buf, uint32_t len,
++					uint32_t pcr, uint8_t *desc ) {
++	TCG_PCR_EVENT *event;
++	uint32_t event_num;
++	EFI_PHYSICAL_ADDRESS last;
++	size_t desc_len;
++	EFI_STATUS efirc;
++
++	desc_len = ( strlen ( ( char * ) desc ) + 1 );
++	event = zalloc ( sizeof ( *event ) + desc_len );
++	if ( ! event )
++		return EFI_OUT_OF_RESOURCES;
++
++	event->PCRIndex = pcr;
++	event->EventType = EV_IPL;
++	event->EventSize = desc_len;
++	memcpy ( &event->Event[0], desc, desc_len );
++
++	efirc = efitpm_tcg->HashLogExtendEvent ( efitpm_tcg,
++						 efitpm_phys ( buf ), len,
++						 TPM_ALG_SHA, event,
++						 &event_num, &last );
++	if ( efirc != EFI_SUCCESS ) {
++		DBGC ( efitpm_tcg, "EFITPM TCG1 could not extend PCR %d: "
++		       "%#lx\n", pcr, ( ( unsigned long ) efirc ) );
++	}
++
++	free ( event );
++	return efirc;
++}
++
++/**
++ * Log TCG v2 event
++ *
++ * @v buf		Data buffer
++ * @v len		Length of data buffer
++ * @v pcr		PCR index
++ * @v desc		Event description
++ * @ret efirc		EFI status code
++ */
++static EFI_STATUS efitpm_log_event_v2 ( uint8_t *buf, uint32_t len,
++					uint32_t pcr, uint8_t *desc ) {
++	EFI_TCG2_EVENT *event;
++	size_t desc_len;
++	EFI_STATUS efirc;
++
++	desc_len = ( strlen ( ( char * ) desc ) + 1 );
++	event = zalloc ( sizeof ( *event ) + desc_len );
++	if ( ! event )
++		return EFI_OUT_OF_RESOURCES;
++
++	event->Header.HeaderSize = sizeof ( event->Header );
++	event->Header.HeaderVersion = EFI_TCG2_EVENT_HEADER_VERSION;
++	event->Header.PCRIndex = pcr;
++	event->Header.EventType = EV_IPL;
++	event->Size = ( sizeof ( *event ) - sizeof ( event->Event ) +
++			desc_len );
++	memcpy ( &event->Event[0], desc, desc_len );
++
++	efirc = efitpm_tcg2->HashLogExtendEvent ( efitpm_tcg2, 0,
++						  efitpm_phys ( buf ), len,
++						  event );
++	if ( efirc != EFI_SUCCESS ) {
++		DBGC ( efitpm_tcg2, "EFITPM TCG2 could not extend PCR %d: "
++		       "%#lx\n", pcr, ( ( unsigned long ) efirc ) );
++	}
++
++	free ( event );
++	return efirc;
++}
++
++/**
++ * Log TCG v1 separator
++ *
++ * @v pcr		PCR index
++ * @ret efirc		EFI status code
++ */
++static EFI_STATUS efitpm_log_separator_v1 ( uint32_t pcr ) {
++	TCG_PCR_EVENT *event;
++	uint32_t zeroes = 0;
++	uint32_t event_num;
++	EFI_PHYSICAL_ADDRESS last;
++	EFI_STATUS efirc;
++
++	event = zalloc ( sizeof ( *event ) + sizeof ( zeroes ) );
++	if ( ! event )
++		return EFI_OUT_OF_RESOURCES;
++
++	event->PCRIndex = pcr;
++	event->EventType = EV_SEPARATOR;
++	event->EventSize = sizeof ( zeroes );
++	memcpy ( &event->Event[0], &zeroes, sizeof ( zeroes ) );
++
++	efirc = efitpm_tcg->HashLogExtendEvent ( efitpm_tcg,
++						 efitpm_phys ( &zeroes ),
++						 sizeof ( zeroes ),
++						 TPM_ALG_SHA, event,
++						 &event_num, &last );
++	if ( efirc != EFI_SUCCESS ) {
++		DBGC ( efitpm_tcg, "EFITPM TCG1 could not log separator "
++		       "for PCR %d: %#lx\n", pcr,
++		       ( ( unsigned long ) efirc ) );
++	}
++
++	free ( event );
++	return efirc;
++}
++
++/**
++ * Log TCG v2 separator
++ *
++ * @v pcr		PCR index
++ * @ret efirc		EFI status code
++ */
++static EFI_STATUS efitpm_log_separator_v2 ( uint32_t pcr ) {
++	EFI_TCG2_EVENT *event;
++	uint32_t zeroes = 0;
++	EFI_STATUS efirc;
++
++	event = zalloc ( sizeof ( *event ) + sizeof ( zeroes ) );
++	if ( ! event )
++		return EFI_OUT_OF_RESOURCES;
++
++	event->Header.HeaderSize = sizeof ( event->Header );
++	event->Header.HeaderVersion = EFI_TCG2_EVENT_HEADER_VERSION;
++	event->Header.PCRIndex = pcr;
++	event->Header.EventType = EV_SEPARATOR;
++	event->Size = ( sizeof ( *event ) - sizeof ( event->Event ) +
++			sizeof ( zeroes ) );
++	memcpy ( &event->Event[0], &zeroes, sizeof ( zeroes ) );
++
++	efirc = efitpm_tcg2->HashLogExtendEvent ( efitpm_tcg2, 0,
++						  efitpm_phys ( &zeroes ),
++						  sizeof ( zeroes ),
++						  event );
++	if ( efirc != EFI_SUCCESS ) {
++		DBGC ( efitpm_tcg2, "EFITPM TCG2 could not log separator "
++		       "for PCR %d: %#lx\n", pcr,
++		       ( ( unsigned long ) efirc ) );
++	}
++
++	free ( event );
++	return efirc;
++}
++
++/**
++ * Measure a buffer into a TPM PCR
++ *
++ * @v buf		Data buffer
++ * @v len		Length of data buffer
++ * @v pcr		PCR index
++ * @v desc		Event description
++ * @ret rc		Return status code
++ */
++int efitpm_measure ( uint8_t *buf, uint32_t len, uint32_t pcr,
++		     uint8_t *desc ) {
++	EFI_STATUS efirc = EFI_INVALID_PARAMETER;
++
++	if ( ! efitpm_available )
++		return 0;
++
++	if ( efitpm_tcg_ver == EFITPM_TCG_V2 ) {
++		efirc = efitpm_log_event_v2 ( buf, len, pcr, desc );
++	} else if ( efitpm_tcg_ver == EFITPM_TCG_V1 ) {
++		efirc = efitpm_log_event_v1 ( buf, len, pcr, desc );
++	}
++
++	if ( efirc != EFI_SUCCESS ) {
++		DBGC ( &efitpm_available, "EFITPM could not measure PCR %d: "
++		       "%#lx\n", pcr, ( ( unsigned long ) efirc ) );
++	}
++
++	return ( efirc == EFI_SUCCESS ) ? 0 : -EEFI ( efirc );
++}
++
++/**
++ * Log a TPM separator event
++ *
++ * @v pcr		PCR index
++ * @ret rc		Return status code
++ */
++int efitpm_separator ( uint32_t pcr ) {
++	EFI_STATUS efirc = EFI_INVALID_PARAMETER;
++
++	if ( ! efitpm_available )
++		return 0;
++
++	if ( efitpm_tcg_ver == EFITPM_TCG_V2 ) {
++		efirc = efitpm_log_separator_v2 ( pcr );
++	} else if ( efitpm_tcg_ver == EFITPM_TCG_V1 ) {
++		efirc = efitpm_log_separator_v1 ( pcr );
++	}
++
++	if ( efirc != EFI_SUCCESS ) {
++		DBGC ( &efitpm_available, "EFITPM could not log separator "
++		       "for PCR %d: %#lx\n", pcr,
++		       ( ( unsigned long ) efirc ) );
++	}
++
++	return ( efirc == EFI_SUCCESS ) ? 0 : -EEFI ( efirc );
++}
++
++/**
++ * Initialise EFI TPM interface
++ *
++ * @ret rc		Return status code
++ */
++int efitpm_init ( void ) {
++	EFI_STATUS efirc;
++
++	free ( efitpm_caps );
++	efitpm_caps = NULL;
++	efitpm_available = FALSE;
++
++	if ( efitpm_tcg2 ) {
++		efitpm_tcg_ver = EFITPM_TCG_V2;
++		efirc = efitpm_query_v2 ( );
++		if ( efirc == EFI_SUCCESS ) {
++			efitpm_available = TRUE;
++			return 0;
++		}
++		DBGC ( efitpm_tcg2, "EFITPM TCG2 unavailable: %#lx\n",
++		       ( ( unsigned long ) efirc ) );
++	}
++
++	if ( efitpm_tcg ) {
++		efitpm_tcg_ver = EFITPM_TCG_V1;
++		efirc = efitpm_query_v1 ( );
++		if ( efirc == EFI_SUCCESS ) {
++			efitpm_available = TRUE;
++			return 0;
++		}
++		DBGC ( efitpm_tcg, "EFITPM TCG1 unavailable: %#lx\n",
++		       ( ( unsigned long ) efirc ) );
++	}
++
++	/* Absence of a TCG protocol is not an error. */
++	return 0;
++}
++
++/**
++ * Shut down EFI TPM interface
++ */
++void efitpm_exit ( void ) {
++
++	free ( efitpm_caps );
++	efitpm_caps = NULL;
++	efitpm_available = FALSE;
++}
++
++PROVIDE_TPM ( efi, tpm_init, efitpm_init );
++PROVIDE_TPM ( efi, tpm_exit, efitpm_exit );
++PROVIDE_TPM ( efi, tpm_measure, efitpm_measure );
++PROVIDE_TPM ( efi, tpm_separator, efitpm_separator );

@@ -1,0 +1,271 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use std::fmt::Debug;
+use std::net::IpAddr;
+
+use carbide_secrets::credentials::Credentials;
+use mac_address::MacAddress;
+use model::component_manager::{ComputeTrayComponent, FirmwareState, PowerAction};
+
+use crate::component_common::{ComponentPowerStateResult, PowerStateSource};
+use crate::error::ComponentManagerError;
+use crate::firmware_inventory::{ComponentFirmwareInventoryResult, FirmwareInventorySource};
+use crate::firmware_jobs::{ComponentFirmwareJobsResult, FirmwareJobSource};
+use crate::types::FirmwareUpdateOptions;
+
+/// Physical network identifiers for a compute tray, used to register with and
+/// operate against the backend service (CTM).
+#[derive(Debug, Clone)]
+pub struct ComputeTrayEndpoint {
+    pub vendor: ComputeTrayVendor,
+    pub bmc_ip: IpAddr,
+    pub bmc_mac: MacAddress,
+    pub bmc_credentials: Credentials,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComputeTrayVendor {
+    Unknown,
+    Dell,
+    Hpe,
+    Lenovo,
+    Supermicro,
+    Nvidia,
+}
+
+impl From<bmc_vendor::BMCVendor> for ComputeTrayVendor {
+    fn from(vendor: bmc_vendor::BMCVendor) -> Self {
+        match vendor {
+            bmc_vendor::BMCVendor::Dell => Self::Dell,
+            bmc_vendor::BMCVendor::Hpe => Self::Hpe,
+            bmc_vendor::BMCVendor::Lenovo => Self::Lenovo,
+            bmc_vendor::BMCVendor::Supermicro => Self::Supermicro,
+            bmc_vendor::BMCVendor::Nvidia => Self::Nvidia,
+            bmc_vendor::BMCVendor::LenovoAMI
+            | bmc_vendor::BMCVendor::GigaComputing
+            | bmc_vendor::BMCVendor::Liteon
+            | bmc_vendor::BMCVendor::Delta
+            | bmc_vendor::BMCVendor::Sushy
+            | bmc_vendor::BMCVendor::Unknown => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComputeTrayModel {
+    Unknown,
+    Viking,
+    GB200,
+    GB300,
+}
+
+#[derive(Debug, Clone)]
+pub struct ComputeTrayResult {
+    pub bmc_ip: IpAddr,
+    pub bmc_mac: MacAddress,
+    pub success: bool,
+    pub error: Option<String>,
+
+    /// Opaque backend job ID returned for an asynchronous operation.
+    ///
+    /// `None` means the backend returned no durable job handle. Presence does
+    /// not imply success; a failed result may retain the ID for reconciliation.
+    pub backend_job_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ComputeTrayFirmwareUpdateStatus {
+    pub bmc_ip: IpAddr,
+    pub bmc_mac: MacAddress,
+    pub state: FirmwareState,
+    pub target_version: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    Core,
+    #[default]
+    Rms,
+    Mock,
+}
+
+impl std::fmt::Display for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rms => f.write_str("rms"),
+            Self::Core => f.write_str("core"),
+            Self::Mock => f.write_str("mock"),
+        }
+    }
+}
+
+/// Backend trait for compute tray management operations.
+///
+/// Implementations receive physical endpoint information (BMC IP/MAC + vendor).
+/// Mutation and firmware-update results echo both `bmc_ip` and `bmc_mac`; power
+/// and firmware observations identify the requested BMC MAC in `mac_address`.
+/// The BMC IP can change before ingestion as leases churn.
+#[async_trait::async_trait]
+pub trait ComputeTrayManager: Send + Sync + Debug + 'static {
+    fn name(&self) -> &str;
+
+    /// Identifies the source when `get_power_state` supports fresh, passive reads.
+    /// `None` means callers must reject passive reads before fetching credentials
+    /// or invoking the getter; its default implementation is unsupported.
+    fn power_state_source(&self) -> Option<PowerStateSource> {
+        None
+    }
+
+    /// Identifies passive job reads. `None` means callers report
+    /// [`ComponentManagerError::Unsupported`]; `get_firmware_status` serves executors
+    /// and does not provide this passive contract.
+    fn firmware_job_source(&self) -> Option<FirmwareJobSource> {
+        None
+    }
+
+    /// Observes known jobs in the supplied MAC order, including repeated MACs,
+    /// without registering devices, submitting work, advancing staged updates,
+    /// or writing tracking. Missing tracking, missing jobs, and read failures
+    /// remain distinct; one job's failure must preserve its peers and staged work.
+    /// Accepts BMC MACs only; job tracking needs no hardware credentials or inventory.
+    /// Unsupported backends return [`ComponentManagerError::Unsupported`] without I/O.
+    /// Implementations document admission/deadline bounds and return
+    /// [`ComponentManagerError::InvalidArgument`] for excess input.
+    async fn get_firmware_jobs(
+        &self,
+        _macs: &[MacAddress],
+    ) -> Result<Vec<ComponentFirmwareJobsResult>, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "passive firmware jobs are not supported by the {} backend",
+            self.name()
+        )))
+    }
+
+    /// Identifies a backend that can read firmware inventory without registering
+    /// devices or advancing updates. `None` means callers must skip credential
+    /// lookup and report [`ComponentManagerError::Unsupported`]; existing update/status
+    /// methods are not substitutes.
+    fn firmware_inventory_source(&self) -> Option<FirmwareInventorySource> {
+        None
+    }
+
+    /// Reads each endpoint's firmware inventory in caller order, preserving repeated
+    /// endpoints and inventory members. Member errors must not discard healthy peers.
+    /// Versions describe backend observations, not proof of an active image.
+    /// Whole-call failures use [`ComponentManagerError`], including `Unsupported`
+    /// without I/O for backends lacking this capability and `InvalidArgument` for
+    /// oversized input. Collection/member failures stay nested in their endpoint result.
+    async fn get_firmware_inventory(
+        &self,
+        _endpoints: &[ComputeTrayEndpoint],
+    ) -> Result<Vec<ComponentFirmwareInventoryResult>, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "firmware inventory is not supported by the {} backend",
+            self.name()
+        )))
+    }
+
+    fn backend(&self) -> Backend;
+
+    async fn power_control(
+        &self,
+        endpoints: &[ComputeTrayEndpoint],
+        action: PowerAction,
+    ) -> Result<Vec<ComputeTrayResult>, ComponentManagerError>;
+
+    /// Reads power observations in endpoint order, identified by each tray's
+    /// requested BMC MAC. Per-tray absence and errors are represented in each
+    /// result; an error preparing the request can fail the whole call. Reads do not
+    /// register devices or change their power state.
+    ///
+    /// Backends without power observation support return
+    /// [`ComponentManagerError::Unsupported`].
+    async fn get_power_state(
+        &self,
+        _endpoints: &[ComputeTrayEndpoint],
+    ) -> Result<Vec<ComponentPowerStateResult>, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "power observations are not supported by the {} backend",
+            self.name()
+        )))
+    }
+
+    /// Update firmware on compute trays.
+    ///
+    /// Endpoints that resolve to an ingested machine row are handled through
+    /// that row; rack-scale trays with no row yet (pre-ingestion) are resolved
+    /// from the expected inventory by BMC MAC where the backend supports it.
+    async fn update_firmware(
+        &self,
+        endpoints: &[ComputeTrayEndpoint],
+        target_version: &str,
+        components: &[ComputeTrayComponent],
+        options: &FirmwareUpdateOptions,
+    ) -> Result<Vec<ComputeTrayResult>, ComponentManagerError>;
+
+    async fn get_firmware_status(
+        &self,
+        endpoints: &[ComputeTrayEndpoint],
+    ) -> Result<Vec<ComputeTrayFirmwareUpdateStatus>, ComponentManagerError>;
+
+    /// Return the status of one exact backend firmware job.
+    ///
+    /// This avoids selecting a job from device-scoped tracking when the caller
+    /// already owns an exact job ID. Backends without this capability return
+    /// [`ComponentManagerError::Unsupported`].
+    async fn get_firmware_job_status(
+        &self,
+        _bmc_ip: IpAddr,
+        _bmc_mac: MacAddress,
+        _job_id: &str,
+    ) -> Result<ComputeTrayFirmwareUpdateStatus, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "exact firmware job status is not supported by the {} backend",
+            self.name()
+        )))
+    }
+
+    async fn list_firmware_bundles(&self) -> Result<Vec<String>, ComponentManagerError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use bmc_vendor::BMCVendor;
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn power_observations_are_unsupported_by_default() {
+        let error = crate::mock::MockComputeTrayManager
+            .get_power_state(&[])
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ComponentManagerError::Unsupported(_)));
+    }
+
+    #[test]
+    fn bmc_vendor_maps_to_compute_tray_vendor() {
+        value_scenarios!(run = ComputeTrayVendor::from;
+            "supported compute tray vendors" {
+                BMCVendor::Dell => ComputeTrayVendor::Dell,
+                BMCVendor::Hpe => ComputeTrayVendor::Hpe,
+                BMCVendor::Lenovo => ComputeTrayVendor::Lenovo,
+                BMCVendor::Supermicro => ComputeTrayVendor::Supermicro,
+                BMCVendor::Nvidia => ComputeTrayVendor::Nvidia,
+            }
+
+            "unsupported compute tray vendors" {
+                BMCVendor::LenovoAMI => ComputeTrayVendor::Unknown,
+                BMCVendor::GigaComputing => ComputeTrayVendor::Unknown,
+                BMCVendor::Liteon => ComputeTrayVendor::Unknown,
+                BMCVendor::Delta => ComputeTrayVendor::Unknown,
+                BMCVendor::Sushy => ComputeTrayVendor::Unknown,
+                BMCVendor::Unknown => ComputeTrayVendor::Unknown,
+            }
+        );
+    }
+}

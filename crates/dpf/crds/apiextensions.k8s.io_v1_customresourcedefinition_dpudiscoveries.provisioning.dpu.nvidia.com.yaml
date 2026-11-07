@@ -1,0 +1,125 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+    helm.sh/resource-policy: keep
+  labels:
+    app.kubernetes.io/part-of: dpf-operator-controller-manager
+    dpu.nvidia.com/component: dpf-operator-controller-manager
+  name: dpudiscoveries.provisioning.dpu.nvidia.com
+spec:
+  group: provisioning.dpu.nvidia.com
+  names:
+    kind: DPUDiscovery
+    listKind: DPUDiscoveryList
+    plural: dpudiscoveries
+    singular: dpudiscovery
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.lastScanTime
+      name: Last Scan
+      type: date
+    - jsonPath: .status.foundDPUs
+      name: Found DPUs
+      type: integer
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: DPUDiscoverySpec defines the desired state of DPUDiscovery
+            properties:
+              ipRangeSpec:
+                description: IPRange defines the range of IP addresses to scan
+                properties:
+                  ipRange:
+                    description: IPRange represents a range of IP addresses to scan
+                    properties:
+                      endIP:
+                        pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
+                        type: string
+                        x-kubernetes-validations:
+                        - message: EndIP cannot be empty
+                          rule: size(self) > 0
+                      port:
+                        default: 443
+                        description: Port defines the port to on which BMC is listening
+                        format: int32
+                        maximum: 65535
+                        minimum: 1
+                        type: integer
+                      startIP:
+                        pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
+                        type: string
+                        x-kubernetes-validations:
+                        - message: StartIP cannot be empty
+                          rule: size(self) > 0
+                    required:
+                    - endIP
+                    - startIP
+                    type: object
+                required:
+                - ipRange
+                type: object
+                x-kubernetes-validations:
+                - message: Both startIP and endIP must be provided
+                  rule: size(self.ipRange.startIP) > 0 && size(self.ipRange.endIP)
+                    > 0
+                - message: IP addresses cannot be 0.0.0.0
+                  rule: self.ipRange.startIP != '0.0.0.0' && self.ipRange.endIP !=
+                    '0.0.0.0'
+                - message: Only IPv4 addresses are supported (IPv6 not allowed)
+                  rule: '!self.ipRange.startIP.contains('':'') && !self.ipRange.endIP.contains('':'')'
+              scanInterval:
+                default: 1h
+                description: ScanInterval defines how often to perform the scan
+                type: string
+              workers:
+                description: Workers defines the number of workers to use for the
+                  scan (default 1 worker for each 255 IPs in the range)
+                type: integer
+            required:
+            - ipRangeSpec
+            type: object
+          status:
+            description: DPUDiscoveryStatus defines the observed state of DPUDiscovery
+            properties:
+              foundDPUs:
+                description: FoundDPUs is the list of discovered DPU BMC IPs
+                type: integer
+              lastScanTime:
+                description: LastScanTime is the timestamp of the last successful
+                  scan
+                format: date-time
+                type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the generation of the spec that was last applied by a successful scan.
+                  When spec (e.g. IP range) changes, reconciliation runs a scan immediately instead of waiting for the next interval.
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,27 @@
+---
+tags: ["EOL", "nvlink", "provisioning", "rest-api"]
+---
+
+## NVIDIA Infra Controller v0.2 <Badge intent="error">EOL</Badge>
+
+NVIDIA Infra Controller v0.2 made the project available as open-source software and expanded its APIs, orchestration, and hardware lifecycle support.
+
+### APIs and orchestration
+
+- The REST API supports external identity providers for JWT authentication and batch instance creation through `/nico/instance/batch`.
+- Instances can be rebooted by `instance_id` as well as `machine_id`.
+- State handling is split between a `PeriodicEnqueuer`, which schedules work for managed resources, and a `StateProcessor`, which dequeues and runs state handlers.
+- State handlers are rescheduled immediately after a `Transition` outcome or a detected DPU version change, reducing waits for transitions such as `WaitingForNetworkConfig` by up to 30 seconds.
+
+### Provisioning and hardware management
+
+- Pre-ingestion sets the system time zone to UTC when the clock is out of sync so NTP timestamps are interpreted correctly.
+- The Scout agent can securely erase NVMe devices asynchronously.
+- NVLink interfaces enter Pending while updates are sent, and NVLink Logical Partition inventory metadata updates are more reliable.
+- `DpuExtensionService` supports `name` for `orderBy`, and `ExpectedMachine` objects support bulk creation and updates.
+
+### Platform update and bug fix
+
+The Go toolchain was updated to v1.25.4 and `nv-redfish` to v0.1.3. The `nv-redfish` update fixes a critical BMC cache bug that caused repeated cache misses and prevented health-monitor rediscovery.
+
+<Button large intent="primary" rightIcon="arrow-right" href="/infra-controller/documentation/getting-started/quick-start-guide">Deploy NVIDIA Infra Controller</Button>

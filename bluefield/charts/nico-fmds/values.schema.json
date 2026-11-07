@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "DPUService Helm Chart Values",
+  "description": "Schema for validating values.yaml for DPUService Helm charts. Note: All Kubernetes resources must include {{ .Release.Name }} in their metadata.name to enable deployment of multiple instances of the service.",
+  "type": "object",
+  "required": ["serviceDaemonSet"],
+  "properties": {
+    "serviceDaemonSet": {
+      "type": "object",
+      "description": "Configuration for the service DaemonSet",
+      "required": ["labels", "annotations", "updateStrategy", "resources"],
+      "properties": {
+        "nodeSelector": {
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "Node selector for the DaemonSet using nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution",
+              "required": ["nodeSelectorTerms"],
+              "properties": {
+                "nodeSelectorTerms": {
+                  "type": "array",
+                  "description": "Required node selector terms, one of which must match for pod scheduling",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "required": ["matchExpressions"],
+                    "properties": {
+                      "matchExpressions": {
+                        "type": "array",
+                        "description": "Node selector requirements by node's labels",
+                        "minItems": 1,
+                        "items": {
+                          "type": "object",
+                          "required": ["key", "operator", "values"],
+                          "properties": {
+                            "key": {
+                              "type": "string",
+                              "description": "The label key that the selector applies to"
+                            },
+                            "operator": {
+                              "type": "string",
+                              "description": "Represents a key's relationship to a set of values",
+                              "enum": ["In", "NotIn", "Exists", "DoesNotExist", "Gt", "Lt"]
+                            },
+                            "values": {
+                              "type": "array",
+                              "description": "An array of string values. If operator is In or NotIn, values array must be non-empty",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "matchFields": {
+                        "type": "array",
+                        "description": "Node selector requirements by node's fields",
+                        "items": {
+                          "type": "object",
+                          "required": ["key", "operator", "values"],
+                          "properties": {
+                            "key": {
+                              "type": "string",
+                              "description": "The label key that the selector applies to"
+                            },
+                            "operator": {
+                              "type": "string",
+                              "description": "Represents a key's relationship to a set of values",
+                              "enum": ["In", "NotIn", "Exists", "DoesNotExist", "Gt", "Lt"]
+                            },
+                            "values": {
+                              "type": "array",
+                              "description": "An array of string values. If operator is In or NotIn, values array must be non-empty",
+                              "items": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "type": "null",
+              "description": "Node selector can be null/empty"
+            },
+            {
+              "type": "object",
+              "description": "Node selector can be an empty object",
+              "maxProperties": 0
+            }
+          ]
+        },
+        "labels": {
+          "type": "object",
+          "description": "serviceDaemonSet pod labels",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "annotations": {
+          "type": "object",
+          "description": "serviceDaemonSet pod annotations",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "updateStrategy": {
+          "type": "object",
+          "description": "serviceDaemonSet upgrade strategy configuration",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["RollingUpdate", "OnDelete"]
+            },
+            "rollingUpdate": {
+              "type": "object",
+              "properties": {
+                "maxUnavailable": {
+                  "oneOf": [
+                    { "type": "integer", "minimum": 1 },
+                    { "type": "string" }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "resources": {
+          "type": "object",
+          "description": "serviceDaemonset pod Resource requests/limits (e.g., CPU, memory)",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "exposedPorts": {
+      "type": "object",
+      "description": "Configuration for exposing ports (optional). If provided, both 'ports' and 'labels' must be specified.",
+      "required": ["ports", "labels"],
+      "properties": {
+        "ports": {
+          "type": "object",
+          "description": "Map of port names to boolean values to enable/disable exposure",
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "labels": {
+          "type": "object",
+          "description": "Custom labels for the Service resources to be discovered by the DPUService controller",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "restAddress": {
+      "description": "Optional primary tenant metadata listener address override",
+      "type": ["string", "null"],
+      "default": null
+    },
+    "compatibilityRestAddress": {
+      "description": "Optional additional tenant metadata listener address for compatibility",
+      "type": ["string", "null"],
+      "default": null
+    },
+    "interfaceCidrV6": {
+      "description": "Optional IPv6 metadata address alongside IPv4. Include this endpoint in nico-dpu-agent fmds.networkingAddresses. Requires an IPv6 restAddress or compatibilityRestAddress: use [::]:80 for both families, or a listener bound to fd00:76b9::254 for IPv6 only. FMDS validates the exact listener address at startup. A non-null value overrides FMDS_INTERFACE_CIDR_V6; null leaves its environment-variable fallback in effect.",
+      "type": ["string", "null"],
+      "enum": [null, "fd00:76b9::254/127"],
+      "default": null
+    }
+  },
+  "additionalProperties": true
+}

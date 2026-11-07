@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unbound-envvars
+  namespace: {{ include "unbound.namespace" . }}
+  labels:
+    {{- include "unbound.labels" . | nindent 4 }}
+  annotations:
+    {{- include "unbound.annotations" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.env }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unbound-local-config
+  namespace: {{ include "unbound.namespace" . }}
+  labels:
+    {{- include "unbound.labels" . | nindent 4 }}
+  annotations:
+    {{- include "unbound.annotations" . | nindent 4 }}
+data:
+  access_control.conf: |
+{{ index .Values.localConfig "access_control.conf" | indent 4 }}
+  extended_statistics.conf: |
+{{ index .Values.localConfig "extended_statistics.conf" | indent 4 }}
+  verbosity.conf: |
+{{ index .Values.localConfig "verbosity.conf" | indent 4 }}
+  nico_local_unknowndomain.conf: |
+{{ index .Values.localConfig "nico_local_unknowndomain.conf" | indent 4 }}
+  forwarders.conf: |
+{{ index .Values.localConfig "forwarders.conf" | indent 4 }}
+  {{- if .Values.localData }}
+  local_data.conf: |
+    server:
+    {{- range .Values.localData }}
+    {{- $name := .name }}
+    {{- $ttl := .ttl | default 300 }}
+    {{- range .addresses }}
+    {{- if contains ":" (toString .) }}
+        local-data: "{{ $name }} {{ $ttl }} IN AAAA {{ . }}"
+    {{- else }}
+        local-data: "{{ $name }} {{ $ttl }} IN A {{ . }}"
+    {{- end }}
+    {{- end }}
+    {{- end }}
+  {{- end }}

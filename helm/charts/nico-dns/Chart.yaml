@@ -1,0 +1,10 @@
+apiVersion: v2
+name: nico-dns
+description: Helm chart for the NICo DNS component
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - nico
+  - dns
+  - nico

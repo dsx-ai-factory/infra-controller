@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }}{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>{{ title }} ({{ page.total_items() }})</h1>
+
+<table class="sortable overview">
+	<thead>
+	<tr>
+		<th>#</th>
+		<th>ID</th>
+		<th>State</th>
+		<th>Health Alerts</th>
+		<th>Health Reports #</th>
+		<th>Associated DPU/Host</th>
+		<th>Labels</th>
+		<th>Instance Type</th>
+		<th>IP Address</th>
+		<th>MAC Address</th>
+		<th>Sys Vendor</th>
+		<th>Product Serial</th>
+		{% if let Some(machine) = machines.first() %}
+			{% if machine.is_host %}
+				<th>GPU #</th>
+				<th>IB IFs #</th>
+				<th>NVLink GPUs #</th>
+			{% endif %}
+		{% endif %}
+	</tr>
+	</thead>
+	<tbody>
+	{% for m in machines %}
+		<tr>
+			<td>{{ page.current_page() * page.limit() + loop.index }}</td>
+			<td>{{ m.id|machine_id_link|safe }}</td>
+			<td>{{ m.state_display|safe }}</td>
+			<td>
+				<a href="/admin/machine/{{ m.id }}/health">
+					{{ m.health_probe_alerts|health_alerts_fmt(false, false)|safe }}
+				</a>
+			</td>
+			<td><a href="/admin/machine/{{ m.id }}/health">{{ m.override_mode_counts }}</a></td>
+			<td>{% if m.is_host %}
+				{% for dpu_id in m.associated_dpu_ids %}
+				{{ dpu_id|machine_id_link|safe }}
+				{% endfor %}
+				{% else %}
+				{{ m.associated_host_id|machine_id_link|safe }}
+				{% endif %}
+			</td>
+			<td>{{ m.metadata.labels|label_list_fmt(true)|safe }}</td>
+			<td>
+				{% if !m.instance_type_id.is_empty() %}
+				<a href="/admin/instance-type/{{ m.instance_type_id }}">
+					{% if !m.instance_type.is_empty() %}
+					{{ m.instance_type }}
+					{% else %}
+					{{ m.instance_type_id }}
+					{% endif %}
+				</a>
+				{% endif %}
+			</td>
+			<td>{{ m.ip_address }}</td>
+			<td>{{ m.mac_address }}</td>
+			<td>{{ m.sys_vendor}}</td>
+			<td>{{ m.product_serial }}</td>
+			{% if m.is_host %}
+				<td>{{ m.num_gpus }}</td>
+				<td>{{ m.num_ib_ifs }}</td>
+				<td>{{ m.num_nvlink_gpus }}</td>
+			{% endif %}
+		</tr>
+	{% endfor %}
+	</tbody>
+</table>
+
+{% include "pages_footer.html" %}
+
+{% endblock %}

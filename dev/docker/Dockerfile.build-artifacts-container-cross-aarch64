@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Note that the output container image needs to be able to produce artifacts
+# that are compatible with the DPU BFB, so for example the libc6 version can't
+# be greater than what we see in the BFB.
+FROM rust:1.97.1-bookworm
+
+RUN dpkg --add-architecture arm64 && \
+    apt-get update && \
+    apt-get upgrade -y && \
+    apt-get -o Dpkg::Options::="--force-overwrite" install --assume-yes unzip libudev-dev:arm64 libssl-dev:arm64 libtss2-dev:arm64 g++-aarch64-linux-gnu libc6-dev-arm64-cross libclang-dev cmake mold
+
+# protoc must match the image userspace (FROM rust:… resolves to host arch by default),
+# not the Rust target (aarch64); see prost-build protoc invocation.
+RUN ARCH="$(dpkg --print-architecture)" && \
+    case "$ARCH" in \
+      amd64) PROTOC_ZIP=protoc-3.15.8-linux-x86_64.zip ;; \
+      arm64) PROTOC_ZIP=protoc-3.15.8-linux-aarch_64.zip ;; \
+      *) echo "unsupported Debian arch for protoc download: $ARCH" >&2; exit 1 ;; \
+    esac && \
+    curl -fLO "https://github.com/protocolbuffers/protobuf/releases/download/v3.15.8/${PROTOC_ZIP}" && \
+    mkdir /protobuf && \
+    unzip "${PROTOC_ZIP}" -d /protobuf && \
+    rm "${PROTOC_ZIP}" && \
+    chmod -R 755 /protobuf
+ENV PATH="/protobuf/bin:${PATH}"
+
+RUN rustup target add aarch64-unknown-linux-gnu
+
+# Keep the cross-GCC driver so it supplies the ARM64 sysroot, but make mold an
+# invariant of that driver rather than relying on a mounted checkout's Cargo
+# configuration.
+#
+# collect2 searches PATH only for the target-prefixed linker name, and looks for
+# the unprefixed ld.mold solely within the cross toolchain's own directories, so
+# the /usr/bin/ld.mold Debian installs never resolves for this driver.
+RUN ln -s /usr/bin/mold /usr/bin/aarch64-linux-gnu-ld.mold && \
+    printf '#!/bin/sh\nexec aarch64-linux-gnu-gcc -fuse-ld=mold "$@"\n' \
+      >/usr/local/bin/aarch64-linux-gnu-gcc-mold && \
+    chmod 0755 /usr/local/bin/aarch64-linux-gnu-gcc-mold && \
+    printf 'int main(void) { return 0; }\n' | \
+      aarch64-linux-gnu-gcc-mold -x c - -o /tmp/mold-smoke && \
+    readelf -p .comment /tmp/mold-smoke | grep -q mold && \
+    rm /tmp/mold-smoke
+
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc-mold CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ PKG_CONFIG_PATH=/lib/aarch64-linux-gnu/pkgconfig PKG_CONFIG_SYSROOT_DIR=/lib/aarch64-linux-gnu
+WORKDIR ./carbide

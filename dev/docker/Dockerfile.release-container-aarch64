@@ -1,0 +1,108 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+# This should match rust-toolchain.toml
+ARG CONTAINER_BUILD_AARCH64
+ARG CONTAINER_RUNTIME_AARCH64
+
+# Empty unless CI passes its restored sccache directory as the `sccache-seed`
+# build context.
+FROM scratch AS sccache-seed
+
+FROM $CONTAINER_BUILD_AARCH64 as builder
+ARG CI_COMMIT_SHORT_SHA
+ENV CI_COMMIT_SHORT_SHA $CI_COMMIT_SHORT_SHA
+ARG CI_COMMIT_TIMESTAMP
+ENV CI_COMMIT_TIMESTAMP $CI_COMMIT_TIMESTAMP
+
+ARG VERSION
+ENV VERSION $VERSION
+ARG CARBIDE_BUILD_HELM_VERSION
+ENV CARBIDE_BUILD_HELM_VERSION $CARBIDE_BUILD_HELM_VERSION
+ENV CONTAINER_REPO_ROOT=/carbide
+
+RUN USER=root cargo new --bin carbide
+WORKDIR ./carbide
+COPY . ./
+
+# --mount=type=cache persists the sccache directory across docker build invocations.
+# Uses id=sccache-aarch64 (separate from x86_64 cache) since compiled artifacts are arch-specific.
+# Requires BuildKit (default in Docker 23+).
+#
+# The cache mount alone is only useful on a machine that keeps its BuildKit
+# state. CI runners get a fresh builder per job, so CI restores the previous
+# sccache directory from the Actions cache and passes it in as `sccache-seed`,
+# which sccache_setup copies into the mount. On main, CI then builds the
+# `sccache-export` target below to save the updated directory.
+RUN --mount=type=cache,id=sccache-aarch64,target=/sccache \
+    --mount=type=bind,from=sccache-seed,target=/sccache-seed \
+  export CARGO_MAKE_SKIP_CODECOV="true" && \
+  export DATABASE_URL="postgresql://root@%2Fvar%2Frun%2Fpostgresql/root" && \
+  export SCCACHE_DIR=/sccache && \
+  export SCCACHE_SEED_DIR=/sccache-seed && \
+  export RUSTC_WRAPPER=sccache && \
+  export CARGO_PROFILE_RELEASE_DEBUG=true && \
+  . /carbide/dev/docker/sccache-cache.sh && \
+  sccache_setup && \
+  /etc/init.d/postgresql start && \
+  sudo -u postgres psql -c "ALTER USER root WITH SUPERUSER;" && \
+  createdb root && \
+  cargo make build-release-container-services && \
+  echo "$(date): Finished cargo make build-release-container-services\n" && \
+  sccache_report && \
+  mkdir -p /carbide/target/bin && \
+  find /carbide/target/release -maxdepth 1 -type f -exec cp -t /carbide/target/bin {} + && \
+  rm -rf /carbide/target/debug && \
+  rm -rf /carbide/target/release && \
+  echo "$(date): Deleted artifacts"
+
+# CI builds this target after the image, on main only, to copy the updated
+# sccache directory out of the cache mount, which outlives the image build in
+# the same BuildKit builder. These stages stay ahead of the runtime stage,
+# which must remain last so it stays the default target.
+FROM $CONTAINER_BUILD_AARCH64 AS sccache-collect
+RUN --mount=type=cache,id=sccache-aarch64,target=/sccache \
+  mkdir -p /sccache-out && cp -a /sccache/. /sccache-out/
+
+FROM scratch AS sccache-export
+COPY --from=sccache-collect /sccache-out/ /
+
+# After build, copy the release into the runtime container
+FROM $CONTAINER_RUNTIME_AARCH64
+RUN mkdir -p /opt/carbide/migrations && \
+  mkdir -p /opt/carbide/pxe/templates && \
+  mkdir -p /opt/carbide/scout-firmware-scripts && \
+  mkdir -p /opt/carbide/static
+
+RUN echo "$(date): Start runtime container build"
+
+COPY --from=builder ["/carbide/target/bin/carbide-api", "/carbide/target/bin/carbide", "/carbide/target/bin/carbide-dns", "/carbide/target/bin/nico-admin-cli", "/carbide/target/bin/carbide-dsx-exchange-consumer", "/carbide/target/bin/forge-dpu-agent", "/carbide/target/bin/forge-dhcp-server", "/carbide/target/bin/forge-hw-health", "/carbide/target/bin/forge-log-parser", "/carbide/target/bin/ssh-console", "/carbide/target/bin/carbide-bmc-proxy", "/opt/carbide/"]
+# Note: aarch64 uses different library path than x86_64
+COPY --from=builder /carbide/target/bin/libdhcp.so /usr/lib/aarch64-linux-gnu/kea/hooks
+RUN mkdir -p /usr/lib/kea/hooks && \
+    ln -sf /usr/lib/aarch64-linux-gnu/kea/hooks/libdhcp.so /usr/lib/kea/hooks/libdhcp.so
+RUN ln -s /opt/carbide/nico-admin-cli /opt/carbide/carbide-admin-cli && \
+    ln -s /opt/carbide/nico-admin-cli /opt/carbide/forge-admin-cli
+
+RUN echo "$(date): Finished copies"
+
+COPY crates/api-db/migrations/ /opt/carbide/migrations/
+COPY pxe/templates/*  /opt/carbide/pxe/templates/
+COPY pxe/scout-firmware-scripts/ /opt/carbide/scout-firmware-scripts/
+COPY crates/api/casbin-policy.csv /opt/carbide/
+
+ENV CASBIN_POLICY_FILE=/opt/carbide/casbin-policy.csv

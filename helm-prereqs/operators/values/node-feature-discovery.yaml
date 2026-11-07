@@ -1,0 +1,65 @@
+# =============================================================================
+# operators/values/node-feature-discovery.yaml — Node Feature Discovery static values
+#
+# DPF prerequisite (installed by default; skip with --skip-dpf).
+# Copied from NVIDIA/doca-platform deploy/helmfiles/values at tag v26.4.0 —
+# keep in sync with the helm-prereqs/doca-platform submodule pin when bumping DPF.
+#
+# Chart: nfd/node-feature-discovery 0.18.3
+# =============================================================================
+
+# Node Feature Discovery configuration
+master:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: "node-role.kubernetes.io/master"
+                operator: Exists
+          - matchExpressions:
+              - key: "node-role.kubernetes.io/control-plane"
+                operator: Exists
+  tolerations:
+  # Note: beginning with v0.18.3 the master toleration was dropped from the chart's default values.yaml.
+  - key: "node-role.kubernetes.io/master"
+    operator: "Equal"
+    value: ""
+    effect: "NoSchedule"
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Equal"
+    value: ""
+    effect: "NoSchedule"
+worker:
+  enable: true
+  hostNetwork: true
+  tolerations:
+    - key: node.kubernetes.io/not-ready
+      operator: Exists
+  config:
+    sources:
+      pci:
+        deviceClassWhitelist:
+          - "0200"
+        deviceLabelFields:
+          - "class"
+          - "vendor"
+          - "device"
+gc:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: "node-role.kubernetes.io/master"
+                operator: Exists
+          - matchExpressions:
+              - key: "node-role.kubernetes.io/control-plane"
+                operator: Exists
+  tolerations:
+    - key: node-role.kubernetes.io/master
+      operator: Exists
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      operator: Exists
+      effect: NoSchedule

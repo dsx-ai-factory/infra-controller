@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+
+{% block title %}InfiniBand Fabrics{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>InfiniBand Fabrics</h1>
+
+<table class="sortable overview">
+	<thead>
+		<th>Id</th>
+	</thead>
+	<tbody>
+		{% for f in fabrics %}
+		<tr>
+			<td>{{ f }}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+
+{% endblock %}

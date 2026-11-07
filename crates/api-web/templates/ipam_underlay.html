@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}IPAM / Underlay Networks{% endblock %}
+
+{% block content %}
+<h1>IPAM &rsaquo; Underlay Networks</h1>
+<p>{{ segment_count }} segment(s). Each prefix is shown in a separate row.</p>
+
+<table class="sortable overview">
+	<thead>
+		<tr>
+			<th>Name</th>
+			<th>Type</th>
+			<th>Prefix</th>
+			<th>Gateway</th>
+			<th>MTU</th>
+			<th>State</th>
+			<th>Allocated IPs</th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for seg in segments %}
+			<tr>
+				<td><a href="/admin/ipam/underlay/segment/{{ seg.id }}">{{ seg.name }}</a></td>
+				<td>{{ seg.segment_type }}</td>
+				<td>{% if !seg.prefix.is_empty() %}<a href="/admin/ipam/underlay/segment/{{ seg.id }}">{{ seg.prefix }}</a>{% endif %}</td>
+				<td>{{ seg.gateway }}</td>
+				<td>{{ seg.mtu }}</td>
+				<td>{{ seg.state }}</td>
+				<td>{{ seg.ip_count }}</td>
+			</tr>
+		{% endfor %}
+	</tbody>
+</table>
+{% endblock %}

@@ -1,0 +1,62 @@
+## What address to listen on.
+listen_address = "*:22"
+metrics_address = "*:9009"
+api_listen_address = "*:1079"
+api_allowed_client_spiffe_id = "spiffe://nico.local/nico-system/sa/nico-api"
+
+## Address for the API. Both `nico_url` (renamed binary) and `carbide_url` (carbide
+## binary) are set so the chart works with either image; binary reads its expected key.
+nico_url = "https://nico-api.nico-system.svc.cluster.local:1079"
+carbide_url = "https://nico-api.nico-system.svc.cluster.local:1079"
+
+## Path to root CA cert. Both names set for dual-image support.
+nico_root_ca_path = "/var/run/secrets/spiffe.io/ca.crt"
+forge_root_ca_path = "/var/run/secrets/spiffe.io/ca.crt"
+
+## Client cert path to communicate with nico-api
+client_cert_path = "/var/run/secrets/spiffe.io/tls.crt"
+
+## Client key path to communicate with nico-api
+client_key_path = "/var/run/secrets/spiffe.io/tls.key"
+
+## Path to the SSH host key.
+host_key = "/etc/ssh/ssh_host_ed25519_key"
+
+## Allow SSH'ing to DPU consoles
+dpus = true
+
+## Disable client SSH auth enforcement. This must NEVER be set in production: It forces all incoming
+## client connections to succeed.
+insecure = false
+
+## Signing CA fingerprints for openssh certificates. Add your CA fingerprints here.
+openssh_certificate_ca_fingerprints = []
+
+## Roles which determine admin access (logins with an openssh certificate, signed by the above
+## fingerprints, containing this role in its Key ID, are considered admins and can log into machines
+## directly.)
+admin_certificate_role = ""
+
+## If true, use insecure ciphers when connecting to IPMI, like SHA1. Useful for ipmi_sim.
+insecure_ipmi_ciphers = false
+
+## Path to the ipmitool executable.
+ipmitool_path = "ipmitool"
+
+## Force-deactivate a conflicting IPMI SOL session before reconnecting. The BMC cannot determine
+## whether the existing session is stale or belongs to an active operator, so enabling this may
+## disconnect someone using the console. Enable only when ssh-console has exclusive SOL ownership.
+force_deactivate_conflicting_ipmi_sol_sessions = false
+
+## Optional: For development mode, gives keys that are authorized to connect to ssh-console. Meant
+## for integration tests. For interactive use, consider using openssh certificates instead.
+# authorized_keys_path = <path>
+
+## How often to poll the nico API server for what machines are available
+api_poll_interval = "180s"
+
+## Whether to output the console data for each machine to a log file
+console_logging_enabled = true
+
+## Where to write console logs for each machine, if enabled
+console_logs_path = "/var/log/consoles"

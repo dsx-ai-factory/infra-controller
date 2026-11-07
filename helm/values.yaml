@@ -1,0 +1,190 @@
+## =============================================================================
+## NICo Bare Metal Manager — Umbrella Helm Chart
+## =============================================================================
+## This chart deploys all services for the NICo (NVIDIA Bare Metal Manager)
+## platform. See README.md for full documentation and PREREQUISITES.md for
+## required infrastructure setup.
+##
+## IMPORTANT: You MUST set global.image.repository and global.image.tag before
+## installing. They default to empty strings and the chart will not render
+## valid manifests without them.
+##
+## Top-level `global:` values are automatically passed to ALL sub-charts.
+## Per-subchart overrides go under <chart-name>: key.
+##
+## Core components (nico-api, nico-bmc-proxy, nico-dhcp, nico-dns,
+## nico-hardware-health, nico-pxe, nico-ssh-console-rs) are mandatory and
+## always installed - there is no <chart-name>.enabled toggle for them, and
+## helm/Chart.yaml declares them as unconditional dependencies. A leftover
+## <chart-name>.enabled key for a core component is ignored, so values files
+## written for earlier releases keep working. Optional services
+## (nico-dsx-exchange-consumer, nico-ntp, unbound, nico-machine-a-tron,
+## nico-postgres-exporter) can
+## still be disabled via <chart-name>.enabled: false.
+## =============================================================================
+
+## ---------------------------------------------------------------------------
+## Global settings (shared by all sub-charts)
+## ---------------------------------------------------------------------------
+global:
+  ## Container image for NICo core services (REQUIRED -- must be set by user)
+  ## Services that share this image: nico-api, nico-dhcp, nico-dns,
+  ## nico-dsx-exchange-consumer, nico-hardware-health, nico-pxe,
+  ## nico-ssh-console-rs.
+  ## NOTE: unbound uses its own image settings.
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  ## Image pull secrets shared by all sub-charts that use global.imagePullSecrets
+  imagePullSecrets: []
+
+  ## cert-manager Certificate configuration (shared defaults for all services)
+  certificate:
+    ## Use CertificateRequests for Scout and DPU certificates.
+    ## Requires nico-api.machineCertificates to reference the existing site CA.
+    ## Service Certificate resources use their existing settings.
+    useCertManager: false
+    ## Independently enable UFM issuance after approval policy allows its DNS SANs.
+    useCertManagerUfm: false
+    duration: 720h0m0s
+    renewBefore: 360h0m0s
+    privateKey:
+      algorithm: ECDSA
+      size: 384
+    issuerRef:
+      kind: ClusterIssuer
+      name: vault-nico-issuer
+      group: cert-manager.io
+
+  ## SPIFFE trust domain for mTLS between services
+  spiffe:
+    trustDomain: nico.local
+
+  ## Common labels applied to all resources
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: site-controller
+
+## ---------------------------------------------------------------------------
+## Grafana dashboards (optional)
+## ---------------------------------------------------------------------------
+## Packages the NICo dashboards in a ConfigMap for discovery by a Grafana
+## dashboard sidecar, such as the one included with kube-prometheus-stack.
+## Grafana itself is not installed by this chart.
+grafanaDashboards:
+  enabled: false
+  ## Namespace where the dashboard ConfigMap is installed. An empty value uses
+  ## the Helm release namespace. A non-default namespace must already exist.
+  namespace: ""
+  ## Folder metadata understood by common Grafana dashboard sidecars. Set
+  ## folderAnnotation or folder to an empty string to omit the annotation.
+  folder: NICo
+  folderAnnotation: grafana_folder
+  ## The defaults match kube-prometheus-stack's dashboard sidecar selector.
+  ## Add or replace labels here if the local sidecar uses another selector.
+  labels:
+    grafana_dashboard: "1"
+  annotations: {}
+
+## ---------------------------------------------------------------------------
+## nico-api — Core API server (gRPC + REST)
+## Manages machines, provisioning, networking, firmware updates, and web UI.
+## Requires PostgreSQL and Vault. Mandatory - see helm/Chart.yaml.
+## ---------------------------------------------------------------------------
+nico-api: {}
+
+## ---------------------------------------------------------------------------
+## nico-bmc-proxy — BMC proxy used by DPS-based power provisioning
+## Provides an authenticated HTTP proxy to each BMC known by nico. Mandatory
+## - see helm/Chart.yaml.
+## ---------------------------------------------------------------------------
+nico-bmc-proxy: {}
+
+## ---------------------------------------------------------------------------
+## nico-dhcp — DHCP server (Kea-based)
+## Provides DHCP for PXE boot and bare metal network assignment. Mandatory -
+## see helm/Chart.yaml.
+## ---------------------------------------------------------------------------
+nico-dhcp: {}
+
+## ---------------------------------------------------------------------------
+## nico-dns — Authoritative DNS server
+## Serves DNS records for managed machines and VPCs. Mandatory - see
+## helm/Chart.yaml.
+## ---------------------------------------------------------------------------
+nico-dns: {}
+
+## ---------------------------------------------------------------------------
+## nico-dsx-exchange-consumer — DSX Exchange message consumer
+## Consumes DSX exchange messages for machine telemetry and state updates.
+## ---------------------------------------------------------------------------
+nico-dsx-exchange-consumer:
+  enabled: true
+
+## ---------------------------------------------------------------------------
+## nico-hardware-health — Hardware health collector
+## Collects and reports hardware health metrics from managed machines.
+## Mandatory - see helm/Chart.yaml.
+## ---------------------------------------------------------------------------
+nico-hardware-health: {}
+
+## ---------------------------------------------------------------------------
+## nico-ntp — chrony NTP servers
+## 3-replica StatefulSet that DPUs and bare-metal hosts sync against
+## (advertised via nico-dhcp.config.kea.hookParameters.ntpServer). DPU
+## pre-ingestion requires synced clocks, so this is enabled by default.
+## Disable only when the provisioning network already has a reachable
+## upstream NTP source.
+## ---------------------------------------------------------------------------
+nico-ntp:
+  enabled: true
+
+## ---------------------------------------------------------------------------
+## nico-pxe — PXE boot server
+## HTTP-based PXE server for OS provisioning workflows. Mandatory - see
+## helm/Chart.yaml.
+## ---------------------------------------------------------------------------
+nico-pxe:
+  ## Optional CA bundle served to bootstrapping clients. Set at most one object
+  ## name; leaving both empty preserves the PXE workload CA fallback.
+  bootstrapRootCa:
+    configMapName: ""
+    secretName: ""
+    key: ca.crt
+
+## ---------------------------------------------------------------------------
+## nico-ssh-console-rs — SSH console proxy
+## Provides remote SSH access to managed machine BMCs and consoles.
+## NOTE: This chart reads .Values.imagePullSecrets (not global). Mandatory -
+## see helm/Chart.yaml.
+## ---------------------------------------------------------------------------
+nico-ssh-console-rs: {}
+
+## ---------------------------------------------------------------------------
+## unbound — Recursive DNS resolver (disabled by default)
+## Provides layered DNS: forwards internal queries (*.nico.local) to
+## nico-dns and external queries to upstream resolvers.
+## Enable if your environment does not already provide a recursive resolver
+## with the required forwarding rules for NICo internal domains.
+## NOTE: Uses its own image / exporterImage (not global.image).
+##       Reads .Values.imagePullSecrets (not global) for pull secrets.
+## ---------------------------------------------------------------------------
+unbound:
+  enabled: false
+
+## ---------------------------------------------------------------------------
+## nico-machine-a-tron - Mock machine simulator (development/testing only)
+## Simulates bare-metal machines, DPUs, switches and power shelves for
+## testing NICo without physical hardware. NOT for production use.
+## Deploy standalone for dev environments:
+##   helm install mat ./helm/charts/nico-machine-a-tron -n nico-system ...
+## ---------------------------------------------------------------------------
+nico-machine-a-tron:
+  enabled: false
+
+## Optional PostgreSQL debugging exporter and dashboard. Configure image and
+## database settings under this key; see charts/nico-postgres-exporter/README.md.
+nico-postgres-exporter:
+  enabled: false

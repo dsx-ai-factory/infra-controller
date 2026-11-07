@@ -1,0 +1,74 @@
+[
+    {
+      "id": "06c3d1a5-ed84-489a-96cc-4d644dc57ebb",
+      "name": "test-megan",
+      "description": null,
+      "siteId": "157627d6-d742-440b-ac04-77a618d94459",
+      "infrastructureProviderId": "16060041-f146-43fe-8c82-be48460b5583",
+      "tenantId": null,
+      "routingType": "Public",
+      "prefix": "100.100.0.0",
+      "prefixLength": 19,
+      "protocolVersion": "IPv4",
+      "status": "Ready",
+      "statusHistory": [
+        {
+          "status": "Ready",
+          "message": "IP Block is ready for use",
+          "created": "2023-10-18T19:44:38.921567Z",
+          "updated": "2023-10-18T19:44:38.921567Z"
+        }
+      ],
+      "deprecations": [],
+      "created": "2023-10-18T19:44:38.921567Z",
+      "updated": "2023-10-18T19:44:38.921567Z"
+    },
+    {
+      "id": "b88be53c-ba35-4b55-844b-fa581921f6f3",
+      "name": "site-fabric-ipv4-192-168-20-0-24",
+      "description": "Automatically created from Site fabric prefix",
+      "siteId": "157627d6-d742-440b-ac04-77a618d94459",
+      "infrastructureProviderId": "16060041-f146-43fe-8c82-be48460b5583",
+      "tenantId": null,
+      "routingType": "DatacenterOnly",
+      "prefix": "192.168.20.0",
+      "prefixLength": 24,
+      "protocolVersion": "IPv4",
+      "status": "Ready",
+      "statusHistory": [
+        {
+          "status": "Ready",
+          "message": "IP Block is ready for use",
+          "created": "2023-10-16T17:20:21.214662Z",
+          "updated": "2023-10-16T17:20:21.214662Z"
+        }
+      ],
+      "deprecations": [],
+      "created": "2023-10-16T17:20:21.214662Z",
+      "updated": "2023-10-16T17:20:21.214662Z"
+    },
+    {
+      "id": "a65e537e-ba93-4d69-ac5c-b7d177344890",
+      "name": "demo-ipv4-network-gold",
+      "description": "Demo IPv4 - Gold",
+      "siteId": "157627d6-d742-440b-ac04-77a618d94459",
+      "infrastructureProviderId": "16060041-f146-43fe-8c82-be48460b5583",
+      "tenantId": null,
+      "routingType": "Public",
+      "prefix": "192.168.4.128",
+      "prefixLength": 26,
+      "protocolVersion": "IPv4",
+      "status": "Ready",
+      "statusHistory": [
+        {
+          "status": "Ready",
+          "message": "IP Block is ready for use",
+          "created": "2023-04-25T13:49:15.699358Z",
+          "updated": "2023-04-25T13:49:15.699358Z"
+        }
+      ],
+      "deprecations": [],
+      "created": "2023-04-25T13:49:15.699358Z",
+      "updated": "2023-04-25T13:49:15.699358Z"
+    }
+  ]

@@ -1,0 +1,74 @@
+{
+	"Dhcp4": {
+		// Add names of your network interfaces to listen on.
+		"interfaces-config": {
+			"interfaces": [ "##CHANGEME##" ],
+
+			// Relay only
+			"dhcp-socket-type": "udp"
+		},
+
+		"lease-database": {
+			"type": "memfile",
+			"lfc-interval": 3600
+		},
+
+		"multi-threading": {
+			"enable-multi-threading": false,
+			"thread-pool-size": 4,
+			"packet-queue-size": 16
+		},
+
+		"renew-timer": 900,
+		"rebind-timer": 1800,
+		"valid-lifetime": 3600,
+		"decline-probation-period": 900,
+
+		// Another thing possible here are hooks. Kea supports a powerful mechanism
+		// that allows loading external libraries that can extract information and
+		// even influence how the server processes packets.
+		"hooks-libraries": [
+			{
+				// Carbide provides host provisioning workflow
+				"library": "/home/andrew/NVIDIA/carbide/target/debug/libdhcp.so",
+				"parameters": {
+					"carbide-api-url": "https://[::1]:1079",
+					"carbide-metrics-endpoint": "[::]:1089",
+					"carbide-nameservers": "##CHANGEME##",
+					"carbide-mqtt-server": "##CHANGEME##",
+					"carbide-provisioning-server-ipv4": "##CHANGEME##"
+				}
+			}
+		],
+		"subnet4": [
+			{
+				"subnet": "0.0.0.0/0",
+				"pools": [{
+					"pool": "0.0.0.0-255.255.255.255"
+				}]
+			}
+		],
+
+		"loggers": [
+			{
+				"name": "kea-dhcp4",
+				"output_options": [{"output": "stdout"}],
+				"severity": "DEBUG",
+				"debuglevel": 10
+			},
+			{
+				"name": "kea-dhcp4.carbide-rust",
+				"output_options": [{"output": "stdout"}],
+				"severity": "INFO",
+				"debuglevel": 10
+			},
+			{
+				"name": "kea-dhcp4.carbide-callouts",
+				"output_options": [{"output": "stdout"}],
+				"severity": "INFO",
+				"debuglevel": 10
+			}
+		]
+
+	}
+}

@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+ARG CONTAINER_BUILD
+
+# Empty unless CI passes its restored sccache directory as the `sccache-seed`
+# build context.
+FROM scratch AS sccache-seed
+
+FROM $CONTAINER_BUILD as builder
+ARG VERSION
+ENV VERSION $VERSION
+ENV CONTAINER_REPO_ROOT=/carbide
+#RUN USER=root cargo new --bin carbide
+RUN mkdir /carbide
+WORKDIR ./carbide
+COPY . ./
+
+# --mount=type=cache persists the sccache directory across builds. Requires BuildKit (default in Docker 23+).
+# On CI the BuildKit state is discarded per job, so CI restores the previous
+# sccache directory from the Actions cache and passes it in as `sccache-seed`,
+# which sccache_setup copies into the mount. On main, CI then builds the
+# `sccache-export` target below to save the updated directory.
+RUN --mount=type=cache,id=sccache-x86_64,target=/sccache \
+    --mount=type=bind,from=sccache-seed,target=/sccache-seed \
+  cd /carbide && \
+  export SCCACHE_DIR=/sccache && \
+  export SCCACHE_SEED_DIR=/sccache-seed && \
+  export RUSTC_WRAPPER=sccache && \
+  export CARGO_PROFILE_RELEASE_DEBUG=true && \
+  . /carbide/dev/docker/sccache-cache.sh && \
+  sccache_setup && \
+  cargo build --release -p nico-admin-cli && \
+  sccache_report
+
+# CI builds this target after the image, on main only, to copy the updated
+# sccache directory out of the cache mount, which outlives the image build in
+# the same BuildKit builder. These stages stay ahead of the runtime stage,
+# which must remain last so it stays the default target.
+FROM $CONTAINER_BUILD AS sccache-collect
+RUN --mount=type=cache,id=sccache-x86_64,target=/sccache \
+  mkdir -p /sccache-out && cp -a /sccache/. /sccache-out/
+
+FROM scratch AS sccache-export
+COPY --from=sccache-collect /sccache-out/ /
+
+FROM debian:12-slim
+ARG CI_COMMIT_SHORT_SHA
+ENV CI_COMMIT_SHORT_SHA $CI_COMMIT_SHORT_SHA
+
+RUN apt update && \
+    apt install -y \
+    jq \
+    libtss2-dev
+
+WORKDIR /app
+COPY --from=builder /carbide/target/release/nico-admin-cli ./
+RUN ln -s /app/nico-admin-cli /app/carbide-admin-cli
+# Cert paths read by nico-admin-cli via nico_api_cli.json.
+# Internal deployments: mount provisioned client certs into /root/.config/carbide/certs/.
+RUN mkdir -p /root/.config/carbide/certs && \
+mkdir -p /opt/forge
+COPY ./dev/certs/forge_root.pem /opt/forge
+RUN echo '{"root_ca_path": "/opt/forge/forge_root.pem","client_key_path": "/root/.config/carbide/certs/client","client_cert_path": "/root/.config/carbide/certs/client.crt"}' > /root/.config/nico_api_cli.json
+ENV PATH="$PATH:/app"
+
+ENTRYPOINT ["/app/nico-admin-cli"]

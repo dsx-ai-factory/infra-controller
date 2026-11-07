@@ -1,0 +1,20 @@
+suite: API service host (apiServiceName) default nico, override carbide
+templates:
+  - configmap.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: defaults the console API URL host to nico-api
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'https://nico-api\.nico-system\.svc\.cluster\.local'
+  - it: apiServiceName overrides the console API URL host to carbide-api
+    documentIndex: 0
+    set:
+      apiServiceName: carbide-api
+    asserts:
+      - matchRegex:
+          path: data["config.toml"]
+          pattern: 'https://carbide-api\.nico-system\.svc\.cluster\.local'

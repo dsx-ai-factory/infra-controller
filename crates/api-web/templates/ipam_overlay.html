@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}IPAM / Overlay Networks{% endblock %}
+
+{% block content %}
+<h1>IPAM &rsaquo; Overlay Networks</h1>
+<p>{{ vpcs.len() }} VPCs.</p>
+
+<table class="sortable overview">
+	<thead>
+		<tr>
+			<th>VPC Name</th>
+			<th>VNI</th>
+			<th>Tenant</th>
+			<th>Prefixes</th>
+			<th>Prefix States</th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for vpc in vpcs %}
+			<tr>
+				<td><a href="/admin/vpc/{{ vpc.id }}">{{ vpc.name }}</a></td>
+				<td>{{ vpc.vni }}</td>
+				<td>{{ vpc.tenant }}</td>
+				<td>
+					{% for p in vpc.prefixes %}
+						<a href="/admin/ipam/overlay/prefix/{{ p.id }}">{{ p.prefix }}</a>
+						{% if !p.name.is_empty() %}({{ p.name }}){% endif %}
+						{% if !loop.last %}<br>{% endif %}
+					{% endfor %}
+					{% if vpc.prefixes.is_empty() %}
+						<span class="muted">None</span>
+					{% endif %}
+				</td>
+				<td>
+					{% for p in vpc.prefixes %}
+						{{ p.lifecycle_state }}
+						{% if !loop.last %}<br>{% endif %}
+					{% endfor %}
+					{% if vpc.prefixes.is_empty() %}
+						<span class="muted">None</span>
+					{% endif %}
+				</td>
+			</tr>
+		{% endfor %}
+	</tbody>
+</table>
+{% endblock %}

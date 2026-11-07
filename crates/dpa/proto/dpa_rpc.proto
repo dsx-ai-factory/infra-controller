@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package dpa_rpc;
+
+// This file contains the format of the messages exchanged between
+// Carbide and the SVPC agent running on the DPA. This exchange
+// happens via an MQTT broker.
+
+// Currently, we have only one message - the SetVNI message that is
+// sent as a command, and is received as an acknowledgement.
+
+// This should be sent to topic dpa/command/<macaddrwithout:chars>/SetVni
+// Example for topic: dpa/command/001122334455/SetVni
+
+message SetVNI {
+  DpaMetadata metadata = 1;
+  PFVNI pf_info = 2;
+}
+
+message DpaMetadata {
+  string dpa_id = 1; // The MAC address of the NIC
+  string host_id = 2;
+  string revision = 3; // Revision string or NIL in case of heartbeat
+  string transaction = 4;
+}
+
+// Currently, SVPC supports only pfs and not vfs
+message PFVNI {
+  int32 pf_id = 1; // Set to 0
+  string mac = 2;
+  int32 vni = 3; // Actual vni if in tenancy; 0 otherwise
+  string subnet_ip = 4;
+  int32 subnet_mask = 5;
+  string dhcp_ip = 6;
+  string host_ip = 7;
+}

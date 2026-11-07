@@ -1,0 +1,28 @@
+{{- $root := . }}
+{{- $namespace := include "nico-machine-a-tron.namespace" . }}
+{{- $baseName := include "nico-machine-a-tron.name" . }}
+
+{{- range $podName, $podConfig := .Values.pods }}
+{{/*
+Skip unconfigured pods
+*/}}
+{{- if not (and $podConfig (or (gt (len ($podConfig.machines | default dict)) 0) (gt (len ($podConfig.racks | default dict)) 0))) }}
+{{- continue }}
+{{- end }}
+
+{{- $name := printf "%s-%s" $baseName $podName }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ $name }}-certificate
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "nico-machine-a-tron.labels" $root | nindent 4 }}
+    nvidia-infra-controller/pod-name: {{ $podName | quote }}
+spec:
+  {{- $bmcMockDns := printf "%s-bmc-mock.%s.svc.cluster.local" $name $namespace }}
+  {{- $extraDns := prepend ($root.Values.certificate.extraDnsNames | default list) $bmcMockDns }}
+  {{- $certWithExtra := merge (dict "extraDnsNames" $extraDns) $root.Values.certificate }}
+  {{- include "nico-machine-a-tron.certificateSpec" (dict "name" (printf "%s-certificate" $name) "secretName" (printf "%s-tls" $name) "svcName" $name "namespace" $namespace "cert" $certWithExtra "global" $root.Values.global) | nindent 2 }}
+{{- end }}

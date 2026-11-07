@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+
+{% block title %}Network Security Group {{ id }}{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Network Security Group {{ id }}</h1>
+
+<form id="nsgupdate_action" method="POST" action="/admin/network-security-group/{{ id }}">
+	<table class="detailsview">
+		<tr>
+			<th>Network Security Group</th>
+			<td>
+				{{ id }}
+			</td>
+		</tr>
+		<tr><th></th><td>{{ version|config_version|safe }}<input type="hidden" name="version" value="{{ version|safe }}"></td></tr>
+		<tr><th>Tenant Organization ID</th><td>{{ tenant_organization_id }}<input type="hidden" name="tenant_organization_id" value="{{ tenant_organization_id }}"></td></tr>	
+		<tr><th>Created</th><td>{{ created }}</td></tr>	
+		<tr><th>Created By</th><td> {{ created_by }} </td></tr>
+		<tr><th>Updated By</th><td> {{ updated_by }} </td></tr>
+		<tr><th>Name</th><td><input name="name" type="text" value="{{ name }}"></td></tr>
+		<tr><th>Description</th><td><textarea name="description">{{ description }}</textarea></td></tr>
+		<tr><th>Labels</th><td><textarea name="labels">{{ labels }}</textarea></td></tr>
+		<tr><th>Stateful Egress</th><td><input type="checkbox" name="stateful_egress" value="true" {% if stateful_egress %} checked {% endif %} /></td></tr>
+		<tr><th>Rules</th><td><textarea name="rules">{{ rules }}</textarea></td></tr>
+		<tr><th>&nbsp;</th><td><input type="submit" value="Save"></td></tr>
+	</table>
+</form>
+
+<h3>Attachments</h3>
+<table class="detailsview">
+	<tr><th>ID</th><th>Type</th></tr>
+	{% for vpc_id in attachments.vpc_ids %}
+	<tr><td>{{ vpc_id }}</td><td>VPC</td></tr>
+	{% endfor %}
+	{% for instance_id in attachments.instance_ids %}
+	<tr><td>{{ instance_id }}</td><td>INSTANCE</td></tr>
+	{% endfor %}
+</table>
+
+<h3>Propagations</h3>
+<table class="detailsview">
+	<tr><th>ID</th><th>Type</th><th>Status</th><th>Related Unpropagated Instances</th></tr>
+	{% for prop in propagation %}
+	<tr>
+		<td>{{ prop.object_id }}</td>
+		<td>{{ prop.object_type }}</td>
+		<td>{{ prop.object_status }}</td>
+		<td>
+			<ul>
+				{% for instance_id in prop.unpropagated_instance_ids %}
+				<li> {{ instance_id }}
+				{% endfor %}
+			</ul>
+		</td>
+	</tr>
+	{% endfor %}
+</table>
+
+{% endblock %}

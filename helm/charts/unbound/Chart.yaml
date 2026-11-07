@@ -1,0 +1,6 @@
+apiVersion: v2
+name: unbound
+description: Unbound recursive DNS resolver for NICo/NICo
+type: application
+version: 0.1.0
+appVersion: "3b089e6"

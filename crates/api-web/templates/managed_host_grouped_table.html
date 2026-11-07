@@ -1,0 +1,29 @@
+<table class="sortable overview">
+	<thead>
+		<tr>
+			<th>Filter</th>
+			{% for header in grouped_hosts.as_ref().unwrap().headers %}
+			<th>{{ header }}</th>
+			{% endfor %}
+			<th>Hosts in group</th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for group in grouped_hosts.as_ref().unwrap().groups %}
+		<tr>
+			<td>
+				<a style="display: block" href="/admin/managed-host?{{ group.query }}"> + </a>
+			</td>
+			{% for value in group.group_fields %}
+				<td>{{ value }}</td>
+			{% endfor %}
+			<td>{{ group.num_in_group }}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+	<tfoot>
+		<th></th>
+		{% for header in grouped_hosts.as_ref().unwrap().headers %}<th></th>{% endfor %}
+		<th>{{ grouped_hosts.as_ref().unwrap().total }}</th>
+	</tfoot>
+</table>

@@ -1,0 +1,2491 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"github.com/NVIDIA/infra-controller/rest-api/openapi"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	cli "github.com/urfave/cli/v2"
+)
+
+func captureStdout(t *testing.T, run func()) string {
+	t.Helper()
+
+	previousStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = writer
+	t.Cleanup(func() {
+		os.Stdout = previousStdout
+		_ = writer.Close()
+		_ = reader.Close()
+	})
+
+	run()
+	require.NoError(t, writer.Close())
+	os.Stdout = previousStdout
+
+	output, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	return string(output)
+}
+
+func TestToKebab(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		// Space-separated (tag names)
+		{"Site", "site"},
+		{"IP Block", "ip-block"},
+		{"SSH Key Group", "ssh-key-group"},
+		{"DPU Extension Service", "dpu-extension-service"},
+		{"Infrastructure Provider", "infrastructure-provider"},
+		{"NVLink Logical Partition", "nvlink-logical-partition"},
+
+		// CamelCase (parameter and field names)
+		{"siteId", "site-id"},
+		{"pageNumber", "page-number"},
+		{"pageSize", "page-size"},
+		{"infrastructureProviderId", "infrastructure-provider-id"},
+		{"networkSecurityGroupId", "network-security-group-id"},
+		{"serialConsoleHostname", "serial-console-hostname"},
+
+		// Acronym handling
+		{"NVLinkLogicalPartition", "nvlink-logical-partition"},
+		{"isNVLinkPartitionEnabled", "is-nvlink-partition-enabled"},
+		{"dpuExtensionServiceId", "dpu-extension-service-id"},
+
+		// Already lowercase
+		{"site", "site"},
+		{"org", "org"},
+
+		// Single word uppercase
+		{"ID", "id"},
+		{"VPC", "vpc"},
+		{"SKU", "sku"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := toKebab(tt.input)
+			if got != tt.want {
+				t.Errorf("toKebab(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCollectOperations(t *testing.T) {
+	spec := &Spec{Paths: map[string]PathItem{
+		"/preferred": {
+			Put: &Operation{OperationID: "replace-all-resource"},
+		},
+		"/legacy": {
+			Put: &Operation{OperationID: "replace-all-resource-legacy", Deprecated: true},
+		},
+	}}
+
+	operations := collectOperations(spec)
+
+	require.Len(t, operations, 1)
+	assert.Equal(t, "replace-all-resource", operations[0].op.OperationID)
+	assert.Equal(t, "/preferred", operations[0].path)
+}
+
+func TestClientFromContextExplicitTokenCommandOverridesCachedConfigToken(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	cfg := &ConfigFile{
+		API: ConfigAPI{
+			Base: "http://localhost:8388",
+			Org:  "test-org",
+		},
+		Auth: ConfigAuth{
+			Token: "cached-token",
+		},
+	}
+	require.NoError(t, SaveConfigToPath(cfg, configPath))
+	SetConfigPath(configPath)
+	defer SetConfigPath("")
+
+	flags := flag.NewFlagSet("test", flag.ContinueOnError)
+	flags.String("token", "", "")
+	flags.String("token-command", "", "")
+	flags.String("base-url", "", "")
+	flags.String("org", "", "")
+	flags.Bool("debug", false, "")
+	require.NoError(t, flags.Set("token-command", "printf explicit-token"))
+
+	ctx := cli.NewContext(cli.NewApp(), flags, nil)
+	client, err := clientFromContext(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "explicit-token", client.Token)
+}
+
+func TestClientFromContextReturnsMalformedConfigError(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("auth:\n  token:missing-space\n  token_command: echo token\n"), 0600))
+	SetConfigPath(configPath)
+	defer SetConfigPath("")
+
+	flags := flag.NewFlagSet("test", flag.ContinueOnError)
+	flags.String("token", "", "")
+	flags.String("token-command", "", "")
+	flags.String("base-url", "", "")
+	flags.String("org", "", "")
+	flags.Bool("debug", false, "")
+
+	ctx := cli.NewContext(cli.NewApp(), flags, nil)
+	_, err := clientFromContext(ctx)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "loading config: parsing config "+configPath)
+}
+
+func TestOperationAction(t *testing.T) {
+	tests := []struct {
+		opID string
+		want string
+	}{
+		{"get-all-site", "list"},
+		{"get-all-instance", "list"},
+		{"get-all-allocation-constraint", "list"},
+		{"get-current-infrastructure-provider", "current"},
+		{"get-current-tenant", "current"},
+		{"get-current-service-account", "current"},
+		{"create-site", "create"},
+		{"create-allocation-constraint", "create"},
+		{"update-site", "update"},
+		{"delete-site", "delete"},
+		{"get-site", "get"},
+		{"get-allocation", "get"},
+		{"get-site-status-history", "status-history"},
+		{"get-instance-status-history", "status-history"},
+		{"get-machine-status-history", "status-history"},
+		// get-current-<resource> singletons resolve to `current`; their
+		// -stats endpoints resolve to `stats` (distinct actions, no collision).
+		// service-account has no -stats endpoint in the spec today, but the
+		// suffix mapping is resource-independent, so it is asserted here too.
+		{"get-current-infrastructure-provider-stats", "stats"},
+		{"get-current-tenant-stats", "stats"},
+		{"get-current-service-account-stats", "stats"},
+		{"batch-create-instance", "batch-create"},
+		{"batch-create-expected-machines", "batch-create"},
+		{"batch-update-expected-machines", "batch-update"},
+		{"get-metadata", "get"},
+		{"get-user", "get"},
+		{"update-identity-config", "update"},
+		{"get-identity-config", "get"},
+		{"delete-identity-config", "delete"},
+		{"update-token-delegation", "update"},
+		{"get-token-delegation", "get"},
+		{"delete-token-delegation", "delete"},
+		{"get-jwks", "get"},
+		{"get-spiffe-jwks", "get"},
+		{"get-openid-configuration", "get"},
+		{"start-machine-validation", "start"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.opID, func(t *testing.T) {
+			got := operationAction(tt.opID)
+			if got != tt.want {
+				t.Errorf("operationAction(%q) = %q, want %q", tt.opID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractResourceSuffix(t *testing.T) {
+	tests := []struct {
+		opID string
+		want string
+	}{
+		{"get-all-site", "site"},
+		{"create-site", "site"},
+		{"get-site", "site"},
+		{"delete-site", "site"},
+		{"update-site", "site"},
+		{"get-all-allocation-constraint", "allocation-constraint"},
+		{"get-current-infrastructure-provider", "infrastructure-provider"},
+		{"batch-create-expected-machines", "expected-machines"},
+		{"batch-update-expected-machines", "expected-machines"},
+		{"get-site-status-history", "site-status-history"},
+		{"get-instance-status-history", "instance-status-history"},
+		{"update-identity-config", "identity-config"},
+		{"get-identity-config", "identity-config"},
+		{"delete-identity-config", "identity-config"},
+		{"update-token-delegation", "token-delegation"},
+		{"get-token-delegation", "token-delegation"},
+		{"delete-token-delegation", "token-delegation"},
+		{"get-jwks", "jwks"},
+		{"get-spiffe-jwks", "spiffe-jwks"},
+		{"get-openid-configuration", "openid-configuration"},
+		{"start-machine-validation", "machine-validation"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.opID, func(t *testing.T) {
+			got := extractResourceSuffix(tt.opID)
+			if got != tt.want {
+				t.Errorf("extractResourceSuffix(%q) = %q, want %q", tt.opID, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSubResourceName(t *testing.T) {
+	tests := []struct {
+		suffix  string
+		primary string
+		want    string
+	}{
+		// Exact match → primary
+		{"site", "site", ""},
+		{"allocation", "allocation", ""},
+		{"instance", "instance", ""},
+
+		// Plural match → primary
+		{"expected-machines", "expected-machine", ""},
+
+		// Primary as prefix → sub-resource
+		{"allocation-constraint", "allocation", "constraint"},
+		{"dpu-extension-service-version", "dpu-extension-service", "version"},
+		{"instance-type-machine-association", "instance-type", "machine-association"},
+
+		// Action modifiers → primary (not sub-resource)
+		{"site-status-history", "site", ""},
+		{"instance-status-history", "instance", ""},
+		{"infrastructure-provider-stats", "infrastructure-provider", ""},
+
+		// Primary as suffix → sub-resource
+		{"derived-ipblock", "ipblock", "derived"},
+
+		// No overlap → sub-resource (full suffix)
+		{"interface", "instance", "interface"},
+		{"infiniband-interface", "instance", "infiniband-interface"},
+		{"nvlink-interface", "nvlink-logical-partition", "nvlink-interface"},
+	}
+
+	for _, tt := range tests {
+		name := tt.suffix + "_primary_" + tt.primary
+		t.Run(name, func(t *testing.T) {
+			got := subResourceName(tt.suffix, tt.primary)
+			if got != tt.want {
+				t.Errorf("subResourceName(%q, %q) = %q, want %q", tt.suffix, tt.primary, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDetectPrimaryResource(t *testing.T) {
+	tests := []struct {
+		name  string
+		opIDs []string
+		want  string
+	}{
+		{
+			name: "site is primary",
+			opIDs: []string{
+				"get-all-site", "create-site", "get-site", "update-site", "delete-site",
+				"get-site-status-history",
+			},
+			want: "site",
+		},
+		{
+			name: "allocation wins over allocation-constraint by shorter length on tie",
+			opIDs: []string{
+				"get-all-allocation", "create-allocation", "get-allocation", "update-allocation", "delete-allocation",
+				"get-all-allocation-constraint", "create-allocation-constraint", "get-allocation-constraint", "update-allocation-constraint", "delete-allocation-constraint",
+			},
+			want: "allocation",
+		},
+		{
+			name: "instance wins with more operations",
+			opIDs: []string{
+				"get-all-instance", "create-instance", "get-instance", "update-instance", "delete-instance",
+				"batch-create-instance", "get-instance-status-history",
+				"get-all-interface",
+				"get-all-infiniband-interface",
+			},
+			want: "instance",
+		},
+		{
+			name: "expected-machine with plural batch ops",
+			opIDs: []string{
+				"create-expected-machine", "get-all-expected-machine", "get-expected-machine",
+				"update-expected-machine", "delete-expected-machine",
+				"batch-create-expected-machines", "batch-update-expected-machines",
+			},
+			want: "expected-machine",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := make([]resolvedOp, len(tt.opIDs))
+			for i, opID := range tt.opIDs {
+				ops[i] = resolvedOp{
+					op: &Operation{OperationID: opID},
+				}
+			}
+			got := detectPrimaryResource(ops)
+			if got != tt.want {
+				t.Errorf("detectPrimaryResource() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCoerceValue(t *testing.T) {
+	tests := []struct {
+		value      string
+		schemaType SchemaType
+		want       interface{}
+		wantErr    bool
+	}{
+		// Integers
+		{"42", "integer", 42, false},
+		{"0", "integer", 0, false},
+		{"-1", "integer", -1, false},
+		{"abc", "integer", nil, true},
+
+		// Booleans
+		{"true", "boolean", true, false},
+		{"false", "boolean", false, false},
+		{"1", "boolean", true, false},
+		{"0", "boolean", false, false},
+		{"yes", "boolean", nil, true},
+
+		// Numbers (float)
+		{"3.14", "number", 3.14, false},
+		{"0", "number", float64(0), false},
+		{"abc", "number", nil, true},
+
+		// Strings (passthrough)
+		{"hello", "string", "hello", false},
+		{"", "string", "", false},
+		{"123", "string", "123", false},
+	}
+
+	for _, tt := range tests {
+		name := string(tt.schemaType) + "_" + tt.value
+		t.Run(name, func(t *testing.T) {
+			got, err := coerceValue(tt.value, tt.schemaType)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("coerceValue(%q, %q) error = %v, wantErr %v", tt.value, tt.schemaType, err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Errorf("coerceValue(%q, %q) = %v (%T), want %v (%T)", tt.value, tt.schemaType, got, got, tt.want, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsListAction(t *testing.T) {
+	tests := []struct {
+		action string
+		want   bool
+	}{
+		{"list", true},
+		{"list-interfaces", true},
+		{"list-infiniband-interfaces", true},
+		{"get", false},
+		{"create", false},
+		{"delete", false},
+		{"listing", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.action, func(t *testing.T) {
+			got := isListAction(tt.action)
+			if got != tt.want {
+				t.Errorf("isListAction(%q) = %v, want %v", tt.action, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildCommands_NoDuplicateFlags walks every command produced from the
+// embedded OpenAPI spec and asserts that no single command declares the same
+// flag name twice. Duplicate names cause urfave/cli to panic at
+// flag.(*FlagSet).Var ("flag redefined") when the command's flag set is built,
+// which is exactly how the dpu-extension-service create bug surfaced.
+func TestBuildCommands_NoDuplicateFlags(t *testing.T) {
+	spec, err := ParseSpec(openapi.Spec)
+	require.NoError(t, err, "ParseSpec failed")
+
+	cmds := BuildCommands(spec)
+	require.NotEmpty(t, cmds, "BuildCommands returned no commands")
+
+	var visit func(path string, children []*cli.Command)
+	visit = func(path string, children []*cli.Command) {
+		for _, c := range children {
+			full := path + " " + c.Name
+			seen := make(map[string]bool)
+			for _, f := range c.Flags {
+				name := f.Names()[0]
+				assert.Falsef(t, seen[name],
+					"command %q declares duplicate flag %q (would panic at runtime)", full, name)
+				seen[name] = true
+			}
+			if len(c.Subcommands) > 0 {
+				visit(full, c.Subcommands)
+			}
+		}
+	}
+	visit("nicocli", cmds)
+}
+
+func TestGeneratedCommandInfos(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{
+			name: "concise aliases",
+			run: func(t *testing.T) {
+				spec, err := ParseSpec(openapi.Spec)
+				require.NoError(t, err)
+
+				operations := make(map[string]string)
+				for _, info := range GeneratedCommandInfos(spec) {
+					operations[info.Name] = info.OperationID
+				}
+
+				assert.Equal(t, "machine-power-control-machine", operations["machine power"])
+				assert.Equal(t, "get-all-dpu-machines", operations["dpu-machine list"])
+				assert.Equal(t, "get-dpu-machine", operations["dpu-machine get"])
+				assert.Equal(t,
+					"machine-power-control-machine",
+					operations["machine power-control-machine machine-power-control-machine"],
+				)
+
+				for operationID, path := range commandPathAliases {
+					assert.Equalf(t,
+						operationID,
+						operations[strings.Join(path, " ")],
+						"concise command path for %q does not identify the same operation",
+						operationID,
+					)
+				}
+				for operationID, path := range commandPathReplacements {
+					assert.Equalf(t,
+						operationID,
+						operations[strings.Join(path, " ")],
+						"replacement command path for %q does not identify the same operation",
+						operationID,
+					)
+				}
+				for operationID, paths := range additionalCommandPathAliases {
+					for _, path := range paths {
+						assert.Equalf(t,
+							operationID,
+							operations[strings.Join(path, " ")],
+							"additional command path for %q does not identify the same operation",
+							operationID,
+						)
+					}
+				}
+			},
+		},
+		{
+			name: "expected inventory batch paths",
+			run: func(t *testing.T) {
+				spec, err := ParseSpec(openapi.Spec)
+				require.NoError(t, err)
+
+				operations := make(map[string]GeneratedCommandInfo)
+				for _, info := range GeneratedCommandInfos(spec) {
+					operations[info.OperationID] = info
+				}
+
+				tests := []struct {
+					operationID string
+					method      string
+					path        string
+				}{
+					{
+						operationID: "replace-all-expected-rack",
+						method:      http.MethodPut,
+						path:        "/v2/org/{org}/nico/expected-rack/all",
+					},
+					{
+						operationID: "replace-all-expected-rack-group",
+						method:      http.MethodPut,
+						path:        "/v2/org/{org}/nico/expected-rack-group/all",
+					},
+					{operationID: "replace-all-expected-machine", method: http.MethodPut, path: "/v2/org/{org}/nico/expected-machine/all"},
+					{operationID: "delete-all-expected-machine", method: http.MethodDelete, path: "/v2/org/{org}/nico/expected-machine/all"},
+					{operationID: "replace-all-expected-switch", method: http.MethodPut, path: "/v2/org/{org}/nico/expected-switch/all"},
+					{operationID: "delete-all-expected-switch", method: http.MethodDelete, path: "/v2/org/{org}/nico/expected-switch/all"},
+					{operationID: "replace-all-expected-power-shelf", method: http.MethodPut, path: "/v2/org/{org}/nico/expected-power-shelf/all"},
+					{operationID: "delete-all-expected-power-shelf", method: http.MethodDelete, path: "/v2/org/{org}/nico/expected-power-shelf/all"},
+				}
+				for _, tt := range tests {
+					t.Run(tt.operationID, func(t *testing.T) {
+						operation, ok := operations[tt.operationID]
+						require.True(t, ok, "missing %s", tt.operationID)
+						assert.Equal(t, tt.method, operation.Method)
+						assert.Equal(t, tt.path, operation.Path)
+					})
+				}
+
+				_, hasRackLegacy := operations["replace-all-expected-rack-legacy"]
+				assert.False(t, hasRackLegacy)
+				_, hasRackGroupLegacy := operations["replace-all-expected-rack-group-legacy"]
+				assert.False(t, hasRackGroupLegacy)
+			},
+		},
+		{
+			name: "repeatable query parameters",
+			run: func(t *testing.T) {
+				spec, err := ParseSpec(openapi.Spec)
+				require.NoError(t, err)
+
+				operations := make(map[string]GeneratedCommandInfo)
+				for _, info := range GeneratedCommandInfos(spec) {
+					operations[info.OperationID] = info
+				}
+
+				tests := []struct {
+					name        string
+					operationID string
+					parameter   string
+					repeatable  bool
+				}{
+					// A scalar description is the source of truth for legacy repeatable filters.
+					{name: "documented scalar", operationID: "get-all-vpc-peering", parameter: "status", repeatable: true},
+					// Array schemas carry repeatability structurally instead of through prose.
+					{name: "OpenAPI array", operationID: "get-all-ipxe-template", parameter: "siteId", repeatable: true},
+					// Relation handlers consume every repeated includeRelation value across endpoint families.
+					{name: "relation", operationID: "get-vpc-prefix", parameter: "includeRelation", repeatable: true},
+					// Operation-scoped metadata covers legacy scalar schemas whose handlers consume every value.
+					{name: "allocation tenant IDs", operationID: "get-all-allocation", parameter: "tenantId", repeatable: true},
+					{name: "operating system types", operationID: "get-all-operating-system", parameter: "type", repeatable: true},
+					{name: "machine hardware SKU device types", operationID: "get-all-machine", parameter: "hwSkuDeviceType", repeatable: true},
+					{name: "rack names", operationID: "get-all-rack", parameter: "name", repeatable: true},
+					{name: "rack manufacturers", operationID: "get-all-rack", parameter: "manufacturer", repeatable: true},
+					{name: "rack validation names", operationID: "validate-racks", parameter: "name", repeatable: true},
+					{name: "rack validation manufacturers", operationID: "validate-racks", parameter: "manufacturer", repeatable: true},
+					{name: "tray validation names", operationID: "validate-trays", parameter: "name", repeatable: true},
+					{name: "tray validation manufacturers", operationID: "validate-trays", parameter: "manufacturer", repeatable: true},
+					// Generic parameter names remain scalar outside reviewed operation/parameter pairs.
+					{name: "generic type remains scalar", operationID: "validate-trays", parameter: "type", repeatable: false},
+					// Pagination remains scalar even next to repeatable filters.
+					{name: "scalar pagination", operationID: "get-all-vpc-peering", parameter: "pageSize", repeatable: false},
+				}
+
+				for _, test := range tests {
+					t.Run(test.name, func(t *testing.T) {
+						operation, ok := operations[test.operationID]
+						require.True(t, ok, "missing operation %s", test.operationID)
+						for _, parameter := range operation.QueryParameters {
+							if parameter.Name == test.parameter {
+								assert.Equal(t, test.repeatable, parameter.Repeatable)
+								return
+							}
+						}
+						t.Fatalf("missing parameter %s on operation %s", test.parameter, test.operationID)
+					})
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, test.run)
+	}
+}
+
+// TestRunGeneratedCommand groups request behavior for alternate interfaces
+// that execute the generated command tree with an existing client.
+func TestRunGeneratedCommand(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		// The alternate command entry point must preserve every exact flag value.
+		{
+			name: "repeated strings preserve exact values",
+			run: func(t *testing.T) {
+				spec, err := ParseSpec(openapi.Spec)
+				require.NoError(t, err)
+
+				var observed url.Values
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					observed = request.URL.Query()
+					w.WriteHeader(http.StatusNoContent)
+				}))
+				t.Cleanup(server.Close)
+				client := NewClient(server.URL, "test-org", "test-token", nil, false)
+
+				// Repeated flags remain separate while each occurrence preserves its
+				// comma and surrounding spaces through the alternate execution path.
+				err = RunGeneratedCommand(
+					spec,
+					client,
+					"vpc-peering list",
+					[]string{"--status", " Ready,Error ", "--status", "Pending", "--status=-Leading"},
+				)
+				require.NoError(t, err)
+				assert.Equal(t, []string{" Ready,Error ", "Pending", "-Leading"}, observed["status"])
+			},
+		},
+		// Alternate interfaces must reject a following flag consumed as a missing value.
+		{
+			name: "missing repeated value rejected before request",
+			run: func(t *testing.T) {
+				spec, err := ParseSpec(openapi.Spec)
+				require.NoError(t, err)
+
+				var requestCount atomic.Int32
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					requestCount.Add(1)
+					w.WriteHeader(http.StatusNoContent)
+				}))
+				t.Cleanup(server.Close)
+				client := NewClient(server.URL, "test-org", "test-token", nil, false)
+
+				err = RunGeneratedCommand(
+					spec,
+					client,
+					"vpc-peering list",
+					[]string{"--status", "--output=json"},
+				)
+				require.ErrorContains(t, err, "flag needs an argument")
+				assert.Zero(t, requestCount.Load())
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
+	}
+}
+
+func TestValidateMissingFlagValues(t *testing.T) {
+	commands := []*cli.Command{
+		{
+			Name:    "resource",
+			Aliases: []string{"r"},
+			Subcommands: []*cli.Command{
+				{
+					Name:    "list",
+					Aliases: []string{"ls"},
+					Flags: []cli.Flag{
+						&cli.StringSliceFlag{Name: "status"},
+						&cli.StringFlag{Name: "output"},
+						&cli.BoolFlag{Name: "verbose"},
+					},
+				},
+			},
+		},
+	}
+	tests := []struct {
+		name      string
+		args      []string
+		wantError string
+	}{
+		// A recognized flag cannot satisfy the preceding value-taking flag.
+		{
+			name:      "missing value before recognized flag",
+			args:      []string{"resource", "list", "--status", "--output=json"},
+			wantError: "flag needs an argument: -status",
+		},
+		// Equals syntax makes a leading-dash value unambiguous.
+		{
+			name: "explicit leading-dash value",
+			args: []string{"resource", "list", "--status=-Ready", "--output=json"},
+		},
+		// A non-flag token is consumed as the preceding flag's value.
+		{
+			name: "separate consumed value token",
+			args: []string{"resource", "list", "--status", "Ready", "--output=json"},
+		},
+		// Command aliases follow the same leaf flag contract.
+		{
+			name:      "command aliases",
+			args:      []string{"r", "ls", "--status", "--output=json"},
+			wantError: "flag needs an argument: -status",
+		},
+		// Once a value has been consumed, the separator ends option parsing.
+		{
+			name: "separator after consumed value",
+			args: []string{"resource", "list", "--status", "Ready", "--", "--output=json"},
+		},
+		// A separator encountered while no value is pending ends flag parsing.
+		{
+			name: "separator ends flag parsing",
+			args: []string{"resource", "list", "--", "--status", "--output=json"},
+		},
+		// The parser consumes a separator token when a preceding flag still needs a value.
+		{
+			name: "separator consumed as value",
+			args: []string{"resource", "list", "--status", "--", "--output=json"},
+		},
+		// A positional token ends stdlib flag parsing; misplaced flags are handled separately.
+		{
+			name: "positional ends flag parsing",
+			args: []string{"resource", "list", "machine-1", "--status", "--output=json"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateMissingFlagValues(test.args, commands)
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func testNewApp_VpcRoutingProfileCommands(t *testing.T) {
+	tests := []struct {
+		action string
+		flags  []string
+	}{
+		{action: "get"},
+		{action: "update", flags: []string{"--routing-profile", "--vni"}},
+		{action: "release-inactive-vni", flags: []string{"--if-version-match", "--expected-inactive-vni"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.action, func(t *testing.T) {
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+			vpc := app.Command("vpc")
+			require.NotNil(t, vpc)
+			routingProfile := vpc.Command("routing-profile")
+			require.NotNil(t, routingProfile)
+			command := routingProfile.Command(tt.action)
+			require.NotNil(t, command)
+			require.NotNil(t, command.Action)
+
+			var output bytes.Buffer
+			app.Writer = &output
+			app.ErrWriter = &output
+			err = app.Run([]string{"nicocli", "vpc", "routing-profile", tt.action, "--help"})
+			require.NoError(t, err)
+			assert.Contains(t, output.String(), "nicocli vpc routing-profile "+tt.action)
+			for _, name := range tt.flags {
+				assert.Contains(t, output.String(), name)
+			}
+			if tt.action == "update" {
+				assert.NotContains(t, output.String(), "--if-version-match")
+			}
+		})
+	}
+}
+
+func testNewApp_VpcPrefixCreateSelectors(t *testing.T) {
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err)
+	vpcPrefix := app.Command("vpc-prefix")
+	require.NotNil(t, vpcPrefix)
+	create := vpcPrefix.Command("create")
+	require.NotNil(t, create)
+	require.NotNil(t, create.Action)
+
+	flags := make(map[string]cli.Flag)
+	for _, flag := range create.Flags {
+		flags[flag.Names()[0]] = flag
+	}
+	require.Contains(t, flags, "prefix")
+	require.Contains(t, flags, "prefix-length")
+	assert.Contains(t, flags["prefix"].(*cli.StringFlag).Usage, "exactly one of --prefix or --prefix-length is required")
+	assert.Contains(t, flags["prefix-length"].(*cli.StringFlag).Usage, "exactly one of --prefix or --prefix-length is required")
+
+	var output bytes.Buffer
+	app.Writer = &output
+	app.ErrWriter = &output
+	require.NoError(t, app.Run([]string{"nicocli", "vpc-prefix", "create", "--help"}))
+	assert.Contains(t, output.String(), "--prefix value")
+	assert.Contains(t, output.String(), "--prefix-length value")
+	assert.Contains(t, output.String(), "exactly one of --prefix or --prefix-length is required")
+}
+
+func testNewApp_VpcPrefixCreateSelectorValidation(t *testing.T) {
+	requestCount := 0
+	requestBody := ""
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requestCount++
+		body, err := io.ReadAll(request.Body)
+		require.NoError(t, err)
+		requestBody = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, err = w.Write([]byte(`{}`))
+		require.NoError(t, err)
+	}))
+	t.Cleanup(server.Close)
+
+	const (
+		vpcID     = "5e28ad7c-5fb7-46d6-a28a-fc0ba6fdc4a3"
+		ipBlockID = "8c1d1a06-90a2-4863-8ee1-6029265b9f0a"
+	)
+	tests := []struct {
+		name      string
+		args      []string
+		wantBody  string
+		wantError string
+	}{
+		{
+			name: "automatic allocation flags",
+			args: []string{"--name", "automatic", "--vpc-id", vpcID, "--ip-block-id", ipBlockID, "--prefix-length", "24"},
+			wantBody: fmt.Sprintf(
+				`{"name":"automatic","vpcId":%q,"ipBlockId":%q,"prefixLength":24}`,
+				vpcID,
+				ipBlockID,
+			),
+		},
+		{
+			name: "explicit allocation flags",
+			args: []string{"--name", "explicit", "--vpc-id", vpcID, "--ip-block-id", ipBlockID, "--prefix", "10.20.30.0/24"},
+			wantBody: fmt.Sprintf(
+				`{"name":"explicit","vpcId":%q,"ipBlockId":%q,"prefix":"10.20.30.0/24"}`,
+				vpcID,
+				ipBlockID,
+			),
+		},
+		{
+			name:      "neither selector flags",
+			args:      []string{"--name", "missing", "--vpc-id", vpcID, "--ip-block-id", ipBlockID},
+			wantError: "exactly one of --prefix or --prefix-length must be specified",
+		},
+		{
+			name:      "both selector flags",
+			args:      []string{"--name", "both", "--vpc-id", vpcID, "--ip-block-id", ipBlockID, "--prefix", "10.20.30.0/24", "--prefix-length", "24"},
+			wantError: "exactly one of --prefix or --prefix-length must be specified",
+		},
+		{
+			name: "null selector in inline JSON is omitted",
+			args: []string{"--data", fmt.Sprintf(
+				`{"name":"automatic","vpcId":%q,"ipBlockId":%q,"prefix":null,"prefixLength":24}`,
+				vpcID,
+				ipBlockID,
+			)},
+			wantBody: fmt.Sprintf(
+				`{"name":"automatic","vpcId":%q,"ipBlockId":%q,"prefix":null,"prefixLength":24}`,
+				vpcID,
+				ipBlockID,
+			),
+		},
+		{
+			name: "both selectors in inline JSON",
+			args: []string{"--data", fmt.Sprintf(
+				`{"name":"both","vpcId":%q,"ipBlockId":%q,"prefix":"10.20.30.0/24","prefixLength":24}`,
+				vpcID,
+				ipBlockID,
+			)},
+			wantError: "exactly one of --prefix or --prefix-length must be specified",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			beforeRequests := requestCount
+			requestBody = ""
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+			var output bytes.Buffer
+			app.Writer = &output
+			app.ErrWriter = &output
+
+			args := []string{
+				"nicocli",
+				"--base-url", server.URL,
+				"--org", "test-org",
+				"--api-name", "nico",
+				"--token", "test-token",
+				"vpc-prefix", "create",
+			}
+			err = app.Run(append(args, test.args...))
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				assert.Equal(t, beforeRequests, requestCount)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, beforeRequests+1, requestCount)
+			assert.JSONEq(t, test.wantBody, requestBody)
+		})
+	}
+}
+
+// TestBuildActionCommandWithOptions groups flag, metadata, and execution
+// scenarios owned by the generated action-command builder.
+func TestBuildActionCommandWithOptions(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		// A schema-less repeatable parameter must use matching metadata, flag, and HTTP behavior.
+		{
+			name: "repeatable parameter without schema",
+			run: func(t *testing.T) {
+				parameter := Parameter{
+					Name:        "filter",
+					In:          "query",
+					Description: "Can be specified multiple times.",
+				}
+				operation := resolvedOp{
+					tag:    "Test",
+					action: "list",
+					method: http.MethodGet,
+					path:   "/items",
+					op: &Operation{
+						OperationID: "get-all-items",
+						Parameters:  []Parameter{parameter},
+					},
+				}
+
+				var info GeneratedCommandInfo
+				var observed url.Values
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+					observed = request.URL.Query()
+					w.WriteHeader(http.StatusNoContent)
+				}))
+				t.Cleanup(server.Close)
+				client := NewClient(server.URL, "test-org", "test-token", nil, false)
+
+				// Build once so the generated flag and metadata describe the same contract.
+				command := buildActionCommandWithOptions(&Spec{}, operation, "", commandBuildOptions{
+					clientFactory: func(*cli.Context) (*Client, error) {
+						return client, nil
+					},
+					record: func(generated GeneratedCommandInfo) {
+						info = generated
+					},
+				})
+				var filterFlag cli.Flag
+				for _, candidate := range command.Flags {
+					if candidate.Names()[0] == "filter" {
+						filterFlag = candidate
+						break
+					}
+				}
+				require.IsType(t, &cli.StringSliceFlag{}, filterFlag)
+				require.Len(t, info.QueryParameters, 1)
+				assert.True(t, info.QueryParameters[0].Repeatable)
+
+				// Execute both occurrences through readFlagValues and request encoding.
+				app := &cli.App{
+					Name:                      "test",
+					Commands:                  []*cli.Command{command},
+					DisableSliceFlagSeparator: true,
+				}
+				err := app.Run([]string{"test", "list", "--filter", " first,value ", "--filter", "second"})
+				require.NoError(t, err)
+				assert.Equal(t, []string{" first,value ", "second"}, observed["filter"])
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
+	}
+}
+
+// TestBuildActionCommand_BodyPropertyFlags verifies body-property flag naming
+// for reserved names and scalar-compatible, single-item arrays.
+func TestBuildActionCommand_BodyPropertyFlags(t *testing.T) {
+	one := 1
+	two := 2
+	spec := &Spec{
+		Paths: map[string]PathItem{
+			"/v2/org/{org}/nico/widget": {
+				Post: &Operation{
+					OperationID: "create-widget",
+					Tags:        []string{"Widget"},
+					Parameters: []Parameter{
+						{
+							Name:        "legacyFilter",
+							In:          "query",
+							Deprecated:  true,
+							Description: "Legacy filter",
+							Schema: &Schema{
+								Type: "string",
+							},
+						},
+					},
+					RequestBody: &RequestBody{
+						Content: map[string]MediaType{
+							"application/json": {
+								Schema: &Schema{
+									Type: "object",
+									Properties: map[string]*Schema{
+										"name":     {Type: "string"},
+										"data":     {Type: "string"},
+										"dataFile": {Type: "string"},
+										"output":   {Type: "string"},
+										"all":      {Type: "boolean"},
+										"legacyBodyParam": {
+											Type:       "boolean",
+											Deprecated: true,
+										},
+										"rackIds": {
+											Type: "array",
+											Items: &Schema{
+												Type: "string",
+											},
+											MaxItems: &one,
+										},
+										"tagIds": {
+											Type: "array",
+											Items: &Schema{
+												Type: "string",
+											},
+											MaxItems: &two,
+										},
+									},
+									Required: []string{"name"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	ro := resolvedOp{
+		tag:    "Widget",
+		action: "create",
+		method: "POST",
+		path:   "/v2/org/{org}/nico/widget",
+		op:     spec.Paths["/v2/org/{org}/nico/widget"].Post,
+	}
+
+	cmd := buildActionCommand(spec, ro, "")
+
+	counts := make(map[string]int)
+	for _, f := range cmd.Flags {
+		counts[f.Names()[0]]++
+	}
+
+	// Wrapper flags stay unprefixed with exactly one registration each.
+	assert.Equal(t, 1, counts["data"], "--data (JSON wrapper)")
+	assert.Equal(t, 1, counts["data-file"], "--data-file (JSON wrapper)")
+	assert.Equal(t, 1, counts["output"], "--output (format flag)")
+
+	// --all is list-only; on a create action neither the wrapper nor the
+	// colliding body property should be registered as plain --all.
+	assert.Equal(t, 0, counts["all"], "--all should not be present for create")
+
+	// Colliding body properties get a body- prefix.
+	assert.Equal(t, 1, counts["body-data"], "--body-data (prefixed body property)")
+	assert.Equal(t, 1, counts["body-data-file"], "--body-data-file (prefixed body property)")
+	assert.Equal(t, 1, counts["body-output"], "--body-output (prefixed body property)")
+	assert.Equal(t, 1, counts["body-all"], "--body-all (prefixed body property)")
+
+	// Non-colliding body property stays unprefixed.
+	assert.Equal(t, 1, counts["name"], "--name (non-reserved body property)")
+
+	// A primitive array constrained to one item is presented as a scalar flag.
+	// Arrays that permit multiple items still require JSON input.
+	assert.Equal(t, 1, counts["rack-ids"], "--rack-ids (single-item array property)")
+	assert.Equal(t, 0, counts["tag-ids"], "multi-item arrays do not get scalar flags")
+
+	app := &cli.App{
+		Name: "nicocli",
+		Commands: []*cli.Command{
+			{
+				Name: "widget",
+				Subcommands: []*cli.Command{
+					cmd,
+				},
+			},
+		},
+	}
+	var output bytes.Buffer
+	app.Writer = &output
+	err := app.Run([]string{
+		"nicocli",
+		"widget",
+		"create",
+		"-h",
+	})
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		"--legacy-body-param value legacyBodyParam (deprecated)",
+		normalizedOptionHelpLine(output.String(), "--legacy-body-param value"),
+	)
+	assert.Equal(
+		t,
+		"--legacy-filter value legacyFilter (deprecated): Legacy filter",
+		normalizedOptionHelpLine(output.String(), "--legacy-filter value"),
+	)
+	assert.Equal(
+		t,
+		"--rack-ids value rackIds",
+		normalizedOptionHelpLine(output.String(), "--rack-ids value"),
+	)
+	assert.NotContains(t, output.String(), "[ --rack-ids value ]")
+}
+
+func TestBuildRequestBody(t *testing.T) {
+	var body []byte
+	app := &cli.App{
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name: "data",
+			},
+			&cli.StringFlag{
+				Name: "data-file",
+			},
+			&cli.StringFlag{
+				Name: "resource-ids",
+			},
+		},
+		Action: func(c *cli.Context) error {
+			var err error
+			body, err = buildRequestBody(c, []bodyField{
+				{
+					jsonName: "resourceIds",
+					flagName: "resource-ids",
+					schema: &Schema{
+						Type: "array",
+					},
+					wrapInList: true,
+					itemType:   "string",
+				},
+			})
+			return err
+		},
+	}
+
+	err := app.Run([]string{
+		"test",
+		"--resource-ids",
+		"resource-1",
+	})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"resourceIds":["resource-1"]}`, string(body))
+}
+
+func TestBuildRequestBody_VpcPrefixSelectors(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "automatic allocation",
+			args: []string{"test", "--prefix-length", "24"},
+			want: `{"prefixLength":24}`,
+		},
+		{
+			name: "explicit CIDR allocation",
+			args: []string{"test", "--prefix", "10.20.30.0/24"},
+			want: `{"prefix":"10.20.30.0/24"}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var body []byte
+			app := &cli.App{
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "data"},
+					&cli.StringFlag{Name: "data-file"},
+					&cli.StringFlag{Name: "prefix"},
+					&cli.StringFlag{Name: "prefix-length"},
+				},
+				Action: func(c *cli.Context) error {
+					var err error
+					body, err = buildRequestBody(c, []bodyField{
+						{jsonName: "prefix", flagName: "prefix", schema: &Schema{Type: "string"}},
+						{jsonName: "prefixLength", flagName: "prefix-length", schema: &Schema{Type: "integer"}},
+					})
+					return err
+				},
+			}
+
+			require.NoError(t, app.Run(test.args))
+			assert.JSONEq(t, test.want, string(body))
+		})
+	}
+}
+
+// testNewApp_DpuExtensionServiceCreate_DoesNotPanic loads the real embedded
+// OpenAPI spec and runs `nicocli dpu-extension-service create --help`. Prior
+// to the reserved-flag fix this invocation panics with
+// "create flag redefined: data" during urfave/cli flag-set construction.
+func testNewApp_DpuExtensionServiceCreate_DoesNotPanic(t *testing.T) {
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err, "NewApp failed")
+
+	require.NotPanics(t, func() {
+		require.NoError(t, app.Run([]string{"nicocli", "dpu-extension-service", "create", "--help"}))
+	})
+}
+
+// TestBuildActionCommand_UsageTextUsesBinaryName guards against regressing the
+// dynamic usage string back to the literal "cli" prefix. Per-command --help
+// output renders UsageText, so a wrong prefix shows up as
+// "USAGE: cli site list" even though the binary is nicocli.
+func TestBuildActionCommand_UsageTextUsesBinaryName(t *testing.T) {
+	spec := &Spec{
+		Paths: map[string]PathItem{
+			"/v2/org/{org}/nico/site/{siteId}": {
+				Get: &Operation{
+					OperationID: "get-site",
+					Tags:        []string{"Site"},
+					Parameters: []Parameter{
+						{Name: "siteId", In: "path"},
+					},
+				},
+			},
+		},
+	}
+
+	ro := resolvedOp{
+		tag:    "Site",
+		action: "get",
+		method: "GET",
+		path:   "/v2/org/{org}/nico/site/{siteId}",
+		op:     spec.Paths["/v2/org/{org}/nico/site/{siteId}"].Get,
+	}
+
+	cmd := buildActionCommand(spec, ro, "")
+	assert.Equal(t, "nicocli site get [command options] <siteId>", cmd.UsageText)
+	assert.False(t, strings.HasPrefix(cmd.UsageText, "cli "),
+		"UsageText must not start with the literal word 'cli '; got %q", cmd.UsageText)
+}
+
+func testNewApp_RackGetUsageShowsOptionsBeforeID(t *testing.T) {
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err)
+
+	var output bytes.Buffer
+	app.Writer = &output
+	require.NoError(t, app.Run([]string{"nicocli", "rack", "get", "--help"}))
+
+	assert.Contains(t, output.String(), "USAGE:\n   nicocli rack get [command options] <id>")
+	assert.NotContains(t, output.String(), "nicocli rack get <id>")
+}
+
+// TestBuildCommands_AllUsageTextStartsWithBinaryName walks every dynamically
+// built command from the embedded spec and asserts that the per-command
+// UsageText begins with the actual binary name. This is the broadest form of
+// the regression -- every leaf command renders UsageText in --help.
+func TestBuildCommands_AllUsageTextStartsWithBinaryName(t *testing.T) {
+	spec, err := ParseSpec(openapi.Spec)
+	require.NoError(t, err, "ParseSpec failed")
+
+	cmds := BuildCommands(spec)
+	require.NotEmpty(t, cmds, "BuildCommands returned no commands")
+
+	var visit func(path string, children []*cli.Command)
+	visit = func(path string, children []*cli.Command) {
+		for _, c := range children {
+			full := path + " " + c.Name
+			if c.UsageText != "" {
+				assert.Truef(t, strings.HasPrefix(c.UsageText, "nicocli "),
+					"command %q UsageText %q must start with %q",
+					full, c.UsageText, "nicocli ")
+			}
+			if len(c.Subcommands) > 0 {
+				visit(full, c.Subcommands)
+			}
+		}
+	}
+	visit("nicocli", cmds)
+}
+
+func TestDetectMisorderedFlags(t *testing.T) {
+	usage := "nicocli machine update [command options] <machineId>"
+	tests := []struct {
+		name         string
+		args         []string
+		argParams    []string
+		wantErr      bool
+		wantContains []string
+	}{
+		{
+			name:      "happy path - exactly the positional, no extras",
+			args:      []string{"fm100htq"},
+			argParams: []string{"machineId"},
+			wantErr:   false,
+		},
+		{
+			name:      "happy path - no positionals required and none given",
+			args:      nil,
+			argParams: nil,
+			wantErr:   false,
+		},
+		{
+			name:         "flag after positional - NVBug repro",
+			args:         []string{"fm100htq", "--data", "{}"},
+			argParams:    []string{"machineId"},
+			wantErr:      true,
+			wantContains: []string{"--data", "placed after a positional", "Move all flags before positionals", "[command options] <machineId>"},
+		},
+		{
+			name:         "flag=value form after positional",
+			args:         []string{"fm100htq", "--data={}"},
+			argParams:    []string{"machineId"},
+			wantErr:      true,
+			wantContains: []string{"--data", "placed after a positional"},
+		},
+		{
+			name:         "short flag after positional",
+			args:         []string{"fm100htq", "-o", "yaml"},
+			argParams:    []string{"machineId"},
+			wantErr:      true,
+			wantContains: []string{"-o"},
+		},
+		{
+			name:         "multiple flags after positional",
+			args:         []string{"fm100htq", "--data", "{}", "--output", "yaml"},
+			argParams:    []string{"machineId"},
+			wantErr:      true,
+			wantContains: []string{"--data", "--output"},
+		},
+		{
+			name:         "per-field flag after positional",
+			args:         []string{"fm100htq", "--instance-type-id", "uuid-here"},
+			argParams:    []string{"machineId"},
+			wantErr:      true,
+			wantContains: []string{"--instance-type-id"},
+		},
+		{
+			name:         "extra positional without leading dash",
+			args:         []string{"fm100htq", "bonusId"},
+			argParams:    []string{"machineId"},
+			wantErr:      true,
+			wantContains: []string{"unexpected positional argument", "bonusId"},
+		},
+		{
+			name:         "extra positional plus misplaced flag",
+			args:         []string{"fm100htq", "bonusId", "--data", "{}"},
+			argParams:    []string{"machineId"},
+			wantErr:      true,
+			wantContains: []string{"--data", "bonusId", "unexpected positional"},
+		},
+		{
+			name:         "lone dash is not treated as a flag",
+			args:         []string{"fm100htq", "-"},
+			argParams:    []string{"machineId"},
+			wantErr:      true,
+			wantContains: []string{"unexpected positional", "-"},
+		},
+		{
+			name:      "multi-positional command with flags in correct order",
+			args:      []string{"instanceTypeId-1", "machineAssociationId-1"},
+			argParams: []string{"instanceTypeId", "machineAssociationId"},
+			wantErr:   false,
+		},
+		{
+			name:         "multi-positional command with flag inside a required positional slot",
+			args:         []string{"instanceTypeId-1", "--data={}"},
+			argParams:    []string{"instanceTypeId", "machineAssociationId"},
+			wantErr:      true,
+			wantContains: []string{"--data", "placed after a positional"},
+		},
+		{
+			name:         "multi-positional command with trailing flag",
+			args:         []string{"instanceTypeId-1", "machineAssociationId-1", "--data", "{}"},
+			argParams:    []string{"instanceTypeId", "machineAssociationId"},
+			wantErr:      true,
+			wantContains: []string{"--data"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := detectMisorderedFlagsInArgs(tt.args, tt.argParams, usage)
+			if tt.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if err != nil {
+				for _, want := range tt.wantContains {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error missing %q:\n%s", want, err.Error())
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestIsActionModifier(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"status-history", true},
+		{"stats", true},
+		{"constraint", false},
+		{"version", false},
+		{"virtualization", false},
+		{"machine-association", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := isActionModifier(tt.input)
+			if got != tt.want {
+				t.Errorf("isActionModifier(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestBuildTagSubcommands_AliasCollisionExpandsAllNames documents the fix
+// for the alias-collision determinism bug. When two operations under the
+// same tag collapse to the same short action name (e.g.
+// `get-current-infrastructure-provider` and
+// `get-current-infrastructure-provider-stats` both -> `get`), the generated
+// command tree must expose BOTH operations under their full OperationID and
+// must NOT expose either under the colliding short name. Without this, the
+// short alias non-deterministically points at one of the two operations
+// depending on map iteration order, so the same binary exposes a different
+// command surface depending on whether the config file was loaded.
+//
+// NOTE: this exercises the collision resolver with synthetic ops (action
+// "get" injected on both). In the embedded spec these two operations now map
+// to distinct `current` / `stats` actions, so this exact collision no longer
+// arises there; the live singleton-surface guard is
+// TestNewApp_CurrentSingletonCommandSurface.
+func TestBuildTagSubcommands_AliasCollisionExpandsAllNames(t *testing.T) {
+	infraProviderGet := &Operation{
+		OperationID: "get-current-infrastructure-provider",
+		Tags:        []string{"Infrastructure Provider"},
+		Summary:     "Retrieve Infrastructure Provider for current Org",
+	}
+	infraProviderStats := &Operation{
+		OperationID: "get-current-infrastructure-provider-stats",
+		Tags:        []string{"Infrastructure Provider"},
+		Summary:     "Retrieve Stats for current Infrastructure Provider",
+	}
+	ops := []resolvedOp{
+		{tag: "Infrastructure Provider", action: "get", method: "GET", path: "/p1", op: infraProviderGet},
+		{tag: "Infrastructure Provider", action: "get", method: "GET", path: "/p2", op: infraProviderStats},
+	}
+
+	cmds := buildTagSubcommands(&Spec{}, ops)
+
+	names := make(map[string]int)
+	for _, c := range cmds {
+		names[c.Name]++
+	}
+	assert.Equal(t, 0, names["get"],
+		"colliding short alias must be dropped entirely, not assigned to one operation non-deterministically")
+	assert.Equal(t, 1, names["get-current-infrastructure-provider"])
+	assert.Equal(t, 1, names["get-current-infrastructure-provider-stats"])
+}
+
+// TestBuildTagSubcommands_NonCollidingActionKeepsShortAlias is the negative
+// counterpart to the collision test above: when there is exactly one
+// operation per short action, the short alias is preserved. Uses a plain
+// get-<resource> op (a genuine `get` action) so the fixture is self-consistent
+// -- get-current-* singletons now map to `current`, not `get`.
+func TestBuildTagSubcommands_NonCollidingActionKeepsShortAlias(t *testing.T) {
+	op := &Operation{
+		OperationID: "get-site",
+		Tags:        []string{"Site"},
+	}
+	ops := []resolvedOp{
+		{tag: "Site", action: "get", method: "GET", path: "/p1", op: op},
+	}
+
+	cmds := buildTagSubcommands(&Spec{}, ops)
+
+	require.Len(t, cmds, 1)
+	assert.Equal(t, "get", cmds[0].Name,
+		"a single-op tag must keep its short alias; collision-expansion must not over-fire")
+}
+
+// TestBuildTagSubcommands_AliasCollisionIsOrderIndependent simulates the two
+// states the bug filer observed (config-loaded vs config-not-loaded) by
+// running the resolver against both possible orderings of the colliding
+// operations. The resulting command tree must be identical, so the binary's
+// command surface no longer depends on Go map iteration order.
+//
+// NOTE: synthetic action "get" is injected on both ops to force the collision;
+// in the embedded spec these resolve to distinct `current` / `stats` actions.
+func TestBuildTagSubcommands_AliasCollisionIsOrderIndependent(t *testing.T) {
+	infraProviderGet := &Operation{
+		OperationID: "get-current-infrastructure-provider",
+		Tags:        []string{"Infrastructure Provider"},
+	}
+	infraProviderStats := &Operation{
+		OperationID: "get-current-infrastructure-provider-stats",
+		Tags:        []string{"Infrastructure Provider"},
+	}
+
+	collectNames := func(ops []resolvedOp) []string {
+		cmds := buildTagSubcommands(&Spec{}, ops)
+		names := make([]string, 0, len(cmds))
+		for _, c := range cmds {
+			names = append(names, c.Name)
+		}
+		// Sort because primaryOps slice order is map-iteration-derived; we
+		// only care that the *set* of names is identical across orderings.
+		sortedNames := append([]string(nil), names...)
+		sortStrings(sortedNames)
+		return sortedNames
+	}
+
+	forward := collectNames([]resolvedOp{
+		{tag: "Infrastructure Provider", action: "get", method: "GET", path: "/p1", op: infraProviderGet},
+		{tag: "Infrastructure Provider", action: "get", method: "GET", path: "/p2", op: infraProviderStats},
+	})
+	reverse := collectNames([]resolvedOp{
+		{tag: "Infrastructure Provider", action: "get", method: "GET", path: "/p2", op: infraProviderStats},
+		{tag: "Infrastructure Provider", action: "get", method: "GET", path: "/p1", op: infraProviderGet},
+	})
+	assert.Equal(t, forward, reverse,
+		"command surface must not depend on the order primaryOps is built in")
+}
+
+// testNewApp_CurrentSingletonCommandSurface walks the embedded production spec
+// and asserts that the get-current-<resource> singletons expose the `current`
+// action (and `stats` for their -stats endpoints) instead of the bare `get`
+// action or the full operationId. Because `current` and `stats` are distinct
+// actions there is no get-action collision, so the command surface is
+// deterministic and never depends on Go map iteration order. This is the
+// regression guard for NVBug 6100988 (`tenant current` must be runnable from
+// the command line, matching what the interactive TUI prints) and replaces the
+// old guard that asserted the colliding pair expanded to full operationIds.
+func testNewApp_CurrentSingletonCommandSurface(t *testing.T) {
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err, "NewApp failed")
+
+	// tag -> actions that must be present, with no bare `get` and no
+	// full-operationId leftovers.
+	want := map[string][]string{
+		"infrastructure-provider": {"current", "stats"},
+		"tenant":                  {"current", "stats"},
+	}
+
+	for tag, actions := range want {
+		t.Run(tag, func(t *testing.T) {
+			var found *cli.Command
+			for _, c := range app.Commands {
+				if c.Name == tag {
+					found = c
+					break
+				}
+			}
+			require.NotNilf(t, found, "tag %q should be present in the generated command tree", tag)
+
+			subNames := make(map[string]bool)
+			for _, sc := range found.Subcommands {
+				subNames[sc.Name] = true
+			}
+			for _, a := range actions {
+				assert.Truef(t, subNames[a], "tag %q must expose the %q command", tag, a)
+			}
+			assert.Falsef(t, subNames["get"],
+				"tag %q must NOT expose a bare `get`; the singleton getter is `current`", tag)
+			assert.Falsef(t, subNames["get-current-"+tag],
+				"tag %q must NOT expose the full-operationId command; it collapses to `current`", tag)
+		})
+	}
+}
+
+func testNewApp_UEFICredentialCreateCommand(t *testing.T) {
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err, "NewApp failed")
+
+	var credential *cli.Command
+	for _, command := range app.Commands {
+		if command.Name == "uefi-credential" {
+			credential = command
+			break
+		}
+	}
+	require.NotNil(t, credential, "UEFI credential must be exposed by the embedded OpenAPI spec")
+
+	var create *cli.Command
+	for _, command := range credential.Subcommands {
+		if command.Name == "create" {
+			create = command
+			break
+		}
+	}
+	require.NotNil(t, create, "UEFI credential must expose a create command")
+}
+
+// TestBuildCommands_RunnablePaths asserts that reviewed generated command paths
+// reach executable leaves in the non-interactive CLI.
+func TestBuildCommands_RunnablePaths(t *testing.T) {
+	spec, err := ParseSpec(openapi.Spec)
+	require.NoError(t, err)
+	cmds := BuildCommands(spec)
+
+	tests := []struct {
+		name string
+		path []string
+	}{
+		{name: "tenant current", path: []string{"tenant", "current"}},
+		{name: "infrastructure provider current", path: []string{"infrastructure-provider", "current"}},
+		{name: "service account current", path: []string{"service-account", "current"}},
+		{name: "machine multiplane get", path: []string{"machine", "spectrumx-multiplane", "get"}},
+		{name: "machine multiplane update", path: []string{"machine", "spectrumx-multiplane", "update"}},
+		{name: "machine health report delete", path: []string{"machine", "health-report", "delete"}},
+		{name: "machine health report list", path: []string{"machine", "health-report", "list"}},
+		{name: "machine health report update", path: []string{"machine", "health-report", "update"}},
+		{name: "machine BMC reset", path: []string{"machine", "bmc", "reset"}},
+		{name: "machine DPU reprovision", path: []string{"machine", "dpu", "reprovision"}},
+		{name: "machine validation results", path: []string{"machine", "validation", "results", "list"}},
+		{name: "machine validation runs", path: []string{"machine", "validation", "runs", "list"}},
+		{name: "machine validation start", path: []string{"machine", "validation", "start"}},
+		{name: "rack health report delete", path: []string{"rack", "health-report", "delete"}},
+		{name: "rack health report list", path: []string{"rack", "health-report", "list"}},
+		{name: "rack health report update", path: []string{"rack", "health-report", "update"}},
+		{name: "tray health report delete", path: []string{"tray", "health-report", "delete"}},
+		{name: "tray health report list", path: []string{"tray", "health-report", "list"}},
+		{name: "tray health report update", path: []string{"tray", "health-report", "update"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			children := cmds
+			var command *cli.Command
+			for _, component := range test.path {
+				command = nil
+				for _, candidate := range children {
+					if candidate.HasName(component) {
+						command = candidate
+						break
+					}
+				}
+				require.NotNilf(t, command, "command path %q is missing component %q", strings.Join(test.path, " "), component)
+				children = command.Subcommands
+			}
+			require.NotNilf(t, command.Action, "command path %q must be executable", strings.Join(test.path, " "))
+		})
+	}
+}
+
+func TestCollectOperations_MachineScopedOperationsUseMachineTag(t *testing.T) {
+	spec, err := ParseSpec(openapi.Spec)
+	require.NoError(t, err)
+
+	for _, operation := range collectOperations(spec) {
+		if !strings.Contains(operation.path, "/machine/{machineId}/") {
+			continue
+		}
+		assert.Equalf(t,
+			"Machine",
+			operation.tag,
+			"machine-scoped operation %q must remain under the Machine API",
+			operation.op.OperationID,
+		)
+	}
+}
+
+func TestBuildCommands_SiteExplorerActionIsRunnable(t *testing.T) {
+	spec, err := ParseSpec(openapi.Spec)
+	require.NoError(t, err)
+
+	var siteExplorer *cli.Command
+	for _, command := range BuildCommands(spec) {
+		if command.HasName("site-explorer") {
+			siteExplorer = command
+			break
+		}
+	}
+	require.NotNil(t, siteExplorer)
+
+	var sawCreate, sawEndpointAction, sawList bool
+	for _, command := range siteExplorer.Subcommands {
+		if command.HasName("create") {
+			sawCreate = true
+		}
+		if command.HasName("endpoint") && len(command.Subcommands) > 0 {
+			for _, subcommand := range command.Subcommands {
+				if subcommand.HasName("action") && subcommand.Action != nil {
+					sawEndpointAction = true
+				}
+			}
+		}
+		if command.HasName("list") {
+			sawList = true
+		}
+	}
+	if !sawCreate {
+		t.Fatal("site-explorer create must be generated from the OpenAPI operation")
+	}
+	require.True(t, sawEndpointAction,
+		"site-explorer endpoint action must be generated from the OpenAPI operation")
+	if !sawList {
+		t.Fatal("site-explorer list must be generated from the OpenAPI operation")
+	}
+}
+
+// TestBuildCommands_AllocationConstraintIsUpdateOnly is the CLI-side guard for
+// NVBug 6232163: the server only registers PATCH for the AllocationConstraint
+// sub-resource, and the stale create/get/list/delete endpoints were removed
+// from the OpenAPI spec. Because the CLI is generated from the embedded spec,
+// the `allocation constraint` sub-resource must therefore expose only `update`.
+// This test fails if the removed endpoints are ever reintroduced into the spec.
+func TestBuildCommands_AllocationConstraintIsUpdateOnly(t *testing.T) {
+	spec, err := ParseSpec(openapi.Spec)
+	require.NoError(t, err)
+	cmds := BuildCommands(spec)
+
+	var allocation *cli.Command
+	for _, c := range cmds {
+		if c.Name == "allocation" {
+			allocation = c
+			break
+		}
+	}
+	require.NotNil(t, allocation, "allocation command must exist")
+
+	var constraint *cli.Command
+	for _, sc := range allocation.Subcommands {
+		if sc.Name == "constraint" {
+			constraint = sc
+			break
+		}
+	}
+	require.NotNil(t, constraint, "allocation `constraint` sub-resource must exist")
+
+	actions := make([]string, 0, len(constraint.Subcommands))
+	for _, sc := range constraint.Subcommands {
+		actions = append(actions, sc.Name)
+	}
+	assert.Equal(t, []string{"update"}, actions,
+		"allocation constraint must expose only `update`; create/get/list/delete were "+
+			"removed from the OpenAPI spec because the server never registered those routes (NVBug 6232163)")
+}
+
+func testNewApp_ListAllEmptyCollectionOutputsArray(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		assert.Equal(t, "100", request.URL.Query().Get("pageSize"))
+		assert.Equal(t, "1", request.URL.Query().Get("pageNumber"))
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`[]`))
+		require.NoError(t, err)
+	}))
+	t.Cleanup(server.Close)
+
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err)
+
+	previousStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = writer
+	t.Cleanup(func() {
+		os.Stdout = previousStdout
+	})
+
+	err = app.Run([]string{
+		"nicocli",
+		"--base-url", server.URL,
+		"--org", "test-org",
+		"--api-name", "nico",
+		"--token", "test-token",
+		"machine", "list", "--all",
+	})
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	os.Stdout = previousStdout
+	output, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	assert.JSONEq(t, `[]`, string(output))
+}
+
+// testNewAppPreservesRepeatedQueryFlags captures generated CLI requests to
+// prove each repeatable contract reaches HTTP as a separate query value.
+func testNewAppPreservesRepeatedQueryFlags(t *testing.T) {
+	const (
+		firstID  = "00000000-0000-4000-8000-000000000001"
+		secondID = "00000000-0000-4000-8000-000000000002"
+	)
+	tests := []struct {
+		name      string
+		command   []string
+		wantPath  string
+		wantQuery url.Values
+		wantError string
+	}{
+		// Status is a scalar schema whose description promises repeatable filtering.
+		{
+			name:      "documented statuses",
+			command:   []string{"vpc-peering", "list", "--status", "Ready", "--status", "Error", "--output", "json"},
+			wantPath:  "/v2/org/test-org/nico/vpc-peering",
+			wantQuery: url.Values{"status": {"Ready", "Error"}},
+		},
+		// A following flag cannot be consumed as the missing repeated value.
+		{
+			name:      "missing repeated string value",
+			command:   []string{"vpc-peering", "list", "--status", "--output=json"},
+			wantError: "flag needs an argument",
+		},
+		// One occurrence remains one exact value even when it contains spaces and a comma.
+		{
+			name:      "repeatable string contents",
+			command:   []string{"vpc-peering", "list", "--status", " Ready,Error ", "--output", "json"},
+			wantPath:  "/v2/org/test-org/nico/vpc-peering",
+			wantQuery: url.Values{"status": {" Ready,Error "}},
+		},
+		// UUID filters use the same documented scalar-repeat contract as status.
+		{
+			name:      "documented IDs",
+			command:   []string{"vpc-peering", "list", "--vpc-id", firstID, "--vpc-id", secondID, "--output", "json"},
+			wantPath:  "/v2/org/test-org/nico/vpc-peering",
+			wantQuery: url.Values{"vpcId": {firstID, secondID}},
+		},
+		{
+			name:      "repeated integers including zero",
+			command:   []string{"allocation", "list", "--constraint-value", "0", "--constraint-value", "42"},
+			wantPath:  "/v2/org/test-org/nico/allocation",
+			wantQuery: url.Values{"constraintValue": {"0", "42"}},
+		},
+		{
+			name:      "invalid repeated integer",
+			command:   []string{"allocation", "list", "--constraint-value", "1", "--constraint-value", "not-an-integer"},
+			wantError: "not-an-integer",
+		},
+		// A comma inside one integer occurrence is not an alternate list syntax.
+		{
+			name:      "invalid comma-separated repeated integers",
+			command:   []string{"allocation", "list", "--constraint-value", "1,2"},
+			wantError: "1,2",
+		},
+		// Repeated inactive-device indices preserve their caller-supplied order.
+		{
+			name:      "inactive devices in order",
+			command:   []string{"machine", "capabilities", "list", "--site-id", firstID, "--inactive-devices", "1", "--inactive-devices", "3"},
+			wantPath:  "/v2/org/test-org/nico/machine-capability",
+			wantQuery: url.Values{"siteId": {firstID}, "inactiveDevices": {"1", "3"}},
+		},
+		// Relation expansion is repeatable in the shared handler contract.
+		{
+			name:      "relations",
+			command:   []string{"vpc-prefix", "get", "--include-relation", "Vpc", "--include-relation", "Site", "--output", "json", firstID},
+			wantPath:  "/v2/org/test-org/nico/vpc-prefix/" + firstID,
+			wantQuery: url.Values{"includeRelation": {"Vpc", "Site"}},
+		},
+		// An OpenAPI array must serialize using the repeated-key convention consumed by Echo.
+		{
+			name:      "OpenAPI array",
+			command:   []string{"ipxe-template", "list", "--site-id", firstID, "--site-id", secondID},
+			wantPath:  "/v2/org/test-org/nico/ipxe-template",
+			wantQuery: url.Values{"siteId": {firstID, secondID}},
+		},
+		// Reviewed operation metadata preserves repeated filters omitted from legacy OpenAPI prose.
+		{
+			name:      "allocation tenant IDs",
+			command:   []string{"allocation", "list", "--tenant-id", firstID, "--tenant-id", secondID},
+			wantPath:  "/v2/org/test-org/nico/allocation",
+			wantQuery: url.Values{"tenantId": {firstID, secondID}},
+		},
+		{
+			name:      "operating system types",
+			command:   []string{"operating-system", "list", "--type", "Image", "--type", "iPXE"},
+			wantPath:  "/v2/org/test-org/nico/operating-system",
+			wantQuery: url.Values{"type": {"Image", "iPXE"}},
+		},
+		{
+			name:      "machine hardware SKU device types",
+			command:   []string{"machine", "list", "--hw-sku-device-type", "gpu", "--hw-sku-device-type", "storage"},
+			wantPath:  "/v2/org/test-org/nico/machine",
+			wantQuery: url.Values{"hwSkuDeviceType": {"gpu", "storage"}},
+		},
+		// The equals form must preserve a value that begins with a dash.
+		{
+			name:      "explicit leading-dash value",
+			command:   []string{"machine", "list", "--hw-sku-device-type=-gpu"},
+			wantPath:  "/v2/org/test-org/nico/machine",
+			wantQuery: url.Values{"hwSkuDeviceType": {"-gpu"}},
+		},
+		{
+			name:      "rack names and manufacturers",
+			command:   []string{"rack", "list", "--site-id", firstID, "--name", "rack-a", "--name", "rack-b", "--manufacturer", "vendor-a", "--manufacturer", "vendor-b"},
+			wantPath:  "/v2/org/test-org/nico/rack",
+			wantQuery: url.Values{"siteId": {firstID}, "name": {"rack-a", "rack-b"}, "manufacturer": {"vendor-a", "vendor-b"}},
+		},
+		{
+			name:      "rack validation names and manufacturers",
+			command:   []string{"rack", "validate-all", "--site-id", firstID, "--name", "rack-a", "--name", "rack-b", "--manufacturer", "vendor-a", "--manufacturer", "vendor-b"},
+			wantPath:  "/v2/org/test-org/nico/rack/validation",
+			wantQuery: url.Values{"siteId": {firstID}, "name": {"rack-a", "rack-b"}, "manufacturer": {"vendor-a", "vendor-b"}},
+		},
+		{
+			name:      "tray validation names and manufacturers",
+			command:   []string{"tray", "validate-all", "--site-id", firstID, "--name", "tray-a", "--name", "tray-b", "--manufacturer", "vendor-a", "--manufacturer", "vendor-b"},
+			wantPath:  "/v2/org/test-org/nico/tray/validation",
+			wantQuery: url.Values{"siteId": {firstID}, "name": {"tray-a", "tray-b"}, "manufacturer": {"vendor-a", "vendor-b"}},
+		},
+		// Scalar values and omitted OpenAPI defaults retain their existing request shape.
+		{
+			name:      "scalar regression",
+			command:   []string{"vpc-peering", "list", "--site-id", firstID, "--page-size", "25", "--output", "json"},
+			wantPath:  "/v2/org/test-org/nico/vpc-peering",
+			wantQuery: url.Values{"siteId": {firstID}, "pageSize": {"25"}},
+		},
+		{
+			name:      "scalar false",
+			command:   []string{"vpc-peering", "list", "--is-multi-tenant=false", "--output", "json"},
+			wantPath:  "/v2/org/test-org/nico/vpc-peering",
+			wantQuery: url.Values{"isMultiTenant": {"false"}},
+		},
+		{
+			name:      "scalar zero",
+			command:   []string{"tray", "validate-all", "--site-id", firstID, "--rack-id", secondID, "--slot-id", "0"},
+			wantPath:  "/v2/org/test-org/nico/tray/validation",
+			wantQuery: url.Values{"siteId": {firstID}, "rackId": {secondID}, "slotId": {"0"}},
+		},
+		{
+			name:      "omitted query parameters",
+			command:   []string{"vpc-peering", "list", "--output", "json"},
+			wantPath:  "/v2/org/test-org/nico/vpc-peering",
+			wantQuery: url.Values{},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var requestCount atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				assert.Equal(t, http.MethodGet, request.Method)
+				assert.Equal(t, test.wantPath, request.URL.Path)
+				assert.Equal(t, test.wantQuery, request.URL.Query())
+				requestCount.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			t.Cleanup(server.Close)
+
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+			args := []string{"nicocli", "--base-url", server.URL, "--org", "test-org", "--token", "test-token"}
+			args = append(args, test.command...)
+
+			err = app.Run(args)
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				assert.Zero(t, requestCount.Load())
+				return
+			}
+			require.NoError(t, err)
+			assert.EqualValues(t, 1, requestCount.Load())
+		})
+	}
+}
+
+// testNewAppListAllPreservesRepeatedFilters captures every paginated request
+// so a filter cannot narrow silently after the first page.
+func testNewAppListAllPreservesRepeatedFilters(t *testing.T) {
+	var queries []url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		query := request.URL.Query()
+		queries = append(queries, query)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Pagination", fmt.Sprintf(
+			`{"pageNumber":%s,"pageSize":100,"total":101}`,
+			query.Get("pageNumber"),
+		))
+		if query.Get("pageNumber") == "1" {
+			items := "[" + strings.TrimSuffix(strings.Repeat(`{"id":"item"},`, 100), ",") + "]"
+			_, err := io.WriteString(w, items)
+			require.NoError(t, err)
+			return
+		}
+		_, err := io.WriteString(w, `[{"id":"last-item"}]`)
+		require.NoError(t, err)
+	}))
+	t.Cleanup(server.Close)
+
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err)
+	previousStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = writer
+	t.Cleanup(func() {
+		os.Stdout = previousStdout
+	})
+
+	// Exercise the public --all path so both generated flag reading and page mutation are covered.
+	err = app.Run([]string{
+		"nicocli",
+		"--base-url", server.URL,
+		"--org", "test-org",
+		"--token", "test-token",
+		"vpc-peering", "list", "--all",
+		"--status", "Ready",
+		"--status", "Error",
+	})
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	os.Stdout = previousStdout
+	_, err = io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+
+	// Every page must retain both filters while only pagination values change.
+	require.Len(t, queries, 2)
+	assert.Equal(t, []string{"Ready", "Error"}, queries[0]["status"])
+	assert.Equal(t, []string{"Ready", "Error"}, queries[1]["status"])
+	assert.Equal(t, "100", queries[0].Get("pageSize"))
+	assert.Equal(t, "100", queries[1].Get("pageSize"))
+	assert.Equal(t, "1", queries[0].Get("pageNumber"))
+	assert.Equal(t, "2", queries[1].Get("pageNumber"))
+}
+
+func testNewApp_VpcPeeringList(t *testing.T) {
+	const response = `[
+		{
+			"id": "peering-id",
+			"vpc1Id": "vpc1-id",
+			"vpc1": {"name": "Application VPC"},
+			"vpc2Id": "vpc2-id",
+			"vpc2": {"name": "Storage VPC"}
+		},
+		{
+			"id": "orphan-peering-id",
+			"vpc1Id": "vpc3-id",
+			"vpc1": {"name": "Edge VPC"},
+			"vpc2Id": "vpc4-id"
+		}
+	]`
+	pagedPeering := func(id string) map[string]interface{} {
+		return map[string]interface{}{
+			"id":     id,
+			"vpc1Id": "vpc1-id",
+			"vpc1":   map[string]string{"name": "Application VPC"},
+			"vpc2Id": "vpc2-id",
+			"vpc2":   map[string]string{"name": "Storage VPC"},
+		}
+	}
+	firstPage := make([]map[string]interface{}, 100)
+	for i := range firstPage {
+		firstPage[i] = pagedPeering(fmt.Sprintf("peering-%d", i))
+	}
+	firstPageBody, err := json.Marshal(firstPage)
+	require.NoError(t, err)
+	secondPageBody, err := json.Marshal([]map[string]interface{}{pagedPeering("last-peering")})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name          string
+		flags         []string
+		pages         []string
+		wantRelations []string
+		wantTable     string
+		wantJSON      bool
+		wantYAML      bool
+	}{
+		{
+			name:          "defaults to table and requests both VPC relations",
+			pages:         []string{response},
+			wantRelations: []string{"Vpc1", "Vpc2"},
+			wantTable: "" +
+				"ID                 VPC1 Name        VPC1 ID  VPC2 Name    VPC2 ID\n" +
+				"peering-id         Application VPC  vpc1-id  Storage VPC  vpc2-id\n" +
+				"orphan-peering-id  Edge VPC         vpc3-id               vpc4-id\n",
+		},
+		{
+			name:     "JSON remains available without relation expansion",
+			flags:    []string{"--output", "json"},
+			pages:    []string{response},
+			wantJSON: true,
+		},
+		{
+			name:     "YAML remains available without relation expansion",
+			flags:    []string{"--output", "yaml"},
+			pages:    []string{response},
+			wantYAML: true,
+		},
+		{
+			name:          "all keeps relations across pages",
+			flags:         []string{"--all", "--include-relation", "Site"},
+			pages:         []string{string(firstPageBody), string(secondPageBody)},
+			wantRelations: []string{"Site", "Vpc1", "Vpc2"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var requests []url.Values
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				requests = append(requests, request.URL.Query())
+				page := test.pages[min(len(requests), len(test.pages))-1]
+				w.Header().Set("Content-Type", "application/json")
+				_, writeErr := w.Write([]byte(page))
+				assert.NoError(t, writeErr)
+			}))
+			t.Cleanup(server.Close)
+
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+
+			args := []string{
+				"nicocli",
+				"--base-url", server.URL,
+				"--org", "test-org",
+				"--api-name", "nico",
+				"--token", "test-token",
+				"vpc-peering", "list",
+			}
+			args = append(args, test.flags...)
+			var runErr error
+			output := captureStdout(t, func() {
+				runErr = app.Run(args)
+			})
+			require.NoError(t, runErr)
+			require.Len(t, requests, len(test.pages))
+			for index, query := range requests {
+				assert.Equal(t, test.wantRelations, query["includeRelation"])
+				if len(test.pages) > 1 {
+					assert.Equal(t, fmt.Sprint(index+1), query.Get("pageNumber"))
+					assert.Equal(t, "100", query.Get("pageSize"))
+				}
+			}
+			if test.wantTable != "" {
+				assert.Equal(t, test.wantTable, output)
+			}
+			if test.wantJSON {
+				assert.JSONEq(t, response, output)
+			}
+			if test.wantYAML {
+				assert.Contains(t, output, "id: peering-id")
+				assert.Contains(t, output, "name: Application VPC")
+				assert.Contains(t, output, "name: Storage VPC")
+			}
+		})
+	}
+}
+
+func TestAddDefaultTableRelations(t *testing.T) {
+	tests := []struct {
+		name        string
+		operationID string
+		queryParams url.Values
+		want        []string
+	}{
+		{
+			name:        "adds mapped relations without duplicates",
+			operationID: vpcPeeringListOperationID,
+			queryParams: url.Values{"includeRelation": {"Site", "Vpc1"}},
+			want:        []string{"Site", "Vpc1", "Vpc2"},
+		},
+		{
+			name:        "leaves operations without relation defaults unchanged",
+			operationID: "get-all-site",
+			queryParams: url.Values{"includeRelation": {"Tenant"}},
+			want:        []string{"Tenant"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			addDefaultTableRelations(test.queryParams, test.operationID)
+			assert.Equal(t, test.want, test.queryParams["includeRelation"])
+		})
+	}
+}
+
+func testNewApp_MachineValidationCommandSurface(t *testing.T) {
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err)
+
+	var machine, machineValidation *cli.Command
+	for _, command := range app.Commands {
+		assert.NotEqual(t, "machine-validation", command.Name, "Machine validation must not be a top-level resource")
+		if command.Name == "machine" {
+			machine = command
+		}
+	}
+	require.NotNil(t, machine, "Machine must be exposed by the embedded OpenAPI spec")
+	for _, command := range machine.Subcommands {
+		assert.NotContains(t,
+			[]string{"reprovision-machine-dpu", "reset-machine-bmc", "validation-results", "validation-runs"},
+			command.Name,
+			"Machine must not expose a synthetic command path alongside its reviewed resource path",
+		)
+		if command.Name == "validation" {
+			machineValidation = command
+			break
+		}
+	}
+	require.NotNil(t, machineValidation, "Machine must expose validation operations")
+
+	var start *cli.Command
+	for _, command := range machineValidation.Subcommands {
+		if command.Name == "start" {
+			start = command
+			break
+		}
+	}
+	require.NotNil(t, start, "Machine validation must expose a start command")
+	assert.Equal(t, "nicocli machine validation start [command options] <machineId>", start.UsageText)
+
+	for _, resourceName := range []string{"results", "runs"} {
+		var resource *cli.Command
+		for _, command := range machineValidation.Subcommands {
+			if command.Name == resourceName {
+				resource = command
+				break
+			}
+		}
+		require.NotNil(t, resource, "Machine validation must expose a %s sub-resource", resourceName)
+
+		var list *cli.Command
+		for _, command := range resource.Subcommands {
+			if command.Name == "list" {
+				list = command
+				break
+			}
+		}
+		require.NotNil(t, list, "Machine validation %s must expose a list command", resourceName)
+	}
+}
+
+func testNewApp_MachineValidationStartExecutesRESTRequest(t *testing.T) {
+	var method, path, authorization, body string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		method = request.Method
+		path = request.URL.Path
+		authorization = request.Header.Get("Authorization")
+		requestBody, err := io.ReadAll(request.Body)
+		require.NoError(t, err)
+		body = string(requestBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, err = w.Write([]byte(`{"validationID":"validation-1","machineID":"machine-1","startTime":"2026-08-05T16:00:00Z","endTime":null,"name":"Test_machine-1","context":"OnDemand","status":{"state":"Started","total":0,"completed":0},"durationToCompleteSecs":0}`))
+		require.NoError(t, err)
+	}))
+	t.Cleanup(server.Close)
+
+	app, err := NewApp(openapi.Spec)
+	require.NoError(t, err)
+
+	err = app.Run([]string{
+		"nicocli",
+		"--base-url", server.URL,
+		"--org", "test-org",
+		"--api-name", "nico",
+		"--token", "test-token",
+		"machine", "validation", "start",
+		"--data", `{"allowedTests":["gpu_bandwidth"],"runUnverifiedTests":true}`,
+		"machine-1",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, http.MethodPost, method)
+	assert.Equal(t, "/v2/org/test-org/nico/machine/machine-1/validation/run", path)
+	assert.Equal(t, "Bearer test-token", authorization)
+	assert.JSONEq(t, `{"allowedTests":["gpu_bandwidth"],"runUnverifiedTests":true}`, body)
+}
+
+func normalizedOptionHelpLine(output, option string) string {
+	for _, line := range strings.Split(output, "\n") {
+		normalized := strings.Join(strings.Fields(line), " ")
+		if strings.HasPrefix(normalized, option) {
+			return normalized
+		}
+	}
+	return ""
+}
+
+func testNewApp_MachineValidationReadCommandsExecuteRESTRequests(t *testing.T) {
+	tests := []struct {
+		name         string
+		resource     string
+		expectedPath string
+	}{
+		{
+			name:         "runs",
+			resource:     "runs",
+			expectedPath: "/v2/org/test-org/nico/machine/machine-1/validation/run",
+		},
+		{
+			name:         "results",
+			resource:     "results",
+			expectedPath: "/v2/org/test-org/nico/machine/machine-1/validation/result",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var method, path, authorization string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				method = request.Method
+				path = request.URL.Path
+				authorization = request.Header.Get("Authorization")
+				w.Header().Set("Content-Type", "application/json")
+				_, err := w.Write([]byte(`[]`))
+				require.NoError(t, err)
+			}))
+			t.Cleanup(server.Close)
+
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+
+			err = app.Run([]string{
+				"nicocli",
+				"--base-url", server.URL,
+				"--org", "test-org",
+				"--api-name", "nico",
+				"--token", "test-token",
+				"machine", "validation", tt.resource, "list",
+				"machine-1",
+			})
+			require.NoError(t, err)
+			assert.Equal(t, http.MethodGet, method)
+			assert.Equal(t, tt.expectedPath, path)
+			assert.Equal(t, "Bearer test-token", authorization)
+		})
+	}
+}
+
+func TestNewApp(t *testing.T) {
+	clearAllNicoEnv(t)
+	previousConfigPath := configOverridePath
+	SetConfigPath(filepath.Join(t.TempDir(), "config.yaml"))
+	t.Cleanup(func() { SetConfigPath(previousConfigPath) })
+
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "VPC routing profile commands", run: testNewApp_VpcRoutingProfileCommands},
+		{name: "VPC prefix create selectors", run: testNewApp_VpcPrefixCreateSelectors},
+		{name: "VPC prefix selector validation", run: testNewApp_VpcPrefixCreateSelectorValidation},
+		{name: "DPU extension service create", run: testNewApp_DpuExtensionServiceCreate_DoesNotPanic},
+		{name: "rack get usage", run: testNewApp_RackGetUsageShowsOptionsBeforeID},
+		{name: "singleton command surface", run: testNewApp_CurrentSingletonCommandSurface},
+		{name: "UEFI credential create command", run: testNewApp_UEFICredentialCreateCommand},
+		{name: "empty list-all output", run: testNewApp_ListAllEmptyCollectionOutputsArray},
+		{name: "VPC peering list output", run: testNewApp_VpcPeeringList},
+		{name: "machine validation command surface", run: testNewApp_MachineValidationCommandSurface},
+		{name: "machine validation start request", run: testNewApp_MachineValidationStartExecutesRESTRequest},
+		{name: "machine validation read requests", run: testNewApp_MachineValidationReadCommandsExecuteRESTRequests},
+		{name: "rejects invalid output format", run: testNewApp_OutputFlagRejectsUnknownValueAtRuntime},
+		{name: "site bootstrap command", run: testNewAppIncludesSiteBootstrapCommand},
+		{name: "preserves repeated query flags", run: testNewAppPreservesRepeatedQueryFlags},
+		{name: "preserves repeated filters across pages", run: testNewAppListAllPreservesRepeatedFilters},
+		{name: "power commands", run: testNewAppPowerCommands},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
+	}
+}
+
+func testNewAppPowerCommands(t *testing.T) {
+	const siteID = "550e8400-e29b-41d4-a716-446655440000"
+	const trayID = "aa:bb:cc:dd:ee:ff"
+	tests := []struct {
+		name      string
+		command   []string
+		args      []string
+		method    string
+		wantQuery string
+		wantBody  string
+	}{
+		{
+			// The OpenAPI getter must produce an executable command with a
+			// site selector in the query, without a mutation request body.
+			name:      "read power state",
+			command:   []string{"tray", "power-state", "get"},
+			args:      []string{"--site-id", siteID, trayID},
+			method:    http.MethodGet,
+			wantQuery: "siteId=" + siteID,
+		},
+		{
+			// Adding a getter at the same REST path must preserve the
+			// existing power command's PATCH method and body flags.
+			name:     "change power",
+			command:  []string{"tray", "power"},
+			args:     []string{"--site-id", siteID, "--state", "On", trayID},
+			method:   http.MethodPatch,
+			wantBody: `{"siteId":"550e8400-e29b-41d4-a716-446655440000","state":"On"}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var requestCount atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				assert.Equal(t, test.method, request.Method)
+				assert.Equal(t, "/v2/org/test-org/nico/tray/"+trayID+"/power", request.URL.Path)
+				assert.Equal(t, test.wantQuery, request.URL.RawQuery)
+				body, err := io.ReadAll(request.Body)
+				assert.NoError(t, err)
+				if test.wantBody == "" {
+					assert.Empty(t, body)
+				} else {
+					assert.JSONEq(t, test.wantBody, string(body))
+				}
+				requestCount.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, err = w.Write([]byte(`{}`))
+				assert.NoError(t, err)
+			}))
+			t.Cleanup(server.Close)
+
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+			children := app.Commands
+			var command *cli.Command
+			for _, name := range test.command {
+				command = nil
+				for _, candidate := range children {
+					if candidate.HasName(name) {
+						command = candidate
+						break
+					}
+				}
+				require.NotNilf(t, command, "missing command %q", name)
+				children = command.Subcommands
+			}
+			require.NotNil(t, command.Action, "the command must execute, not only appear in help")
+
+			args := []string{
+				"nicocli", "--base-url", server.URL, "--org", "test-org", "--token", "test-token",
+			}
+			args = append(args, test.command...)
+			args = append(args, test.args...)
+			err = app.Run(args)
+
+			require.NoError(t, err)
+			assert.EqualValues(t, 1, requestCount.Load(), "each command must send exactly one request")
+		})
+	}
+}
+
+// sortStrings is a tiny stable sort used by the order-independence test so it
+// stays self-contained and does not pull in sort.Strings (which is already
+// used elsewhere; this just keeps the test readable).
+func sortStrings(s []string) {
+	for i := 1; i < len(s); i++ {
+		for j := i; j > 0 && s[j-1] > s[j]; j-- {
+			s[j-1], s[j] = s[j], s[j-1]
+		}
+	}
+}

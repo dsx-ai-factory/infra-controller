@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Temporal client TLS certs for site-agent
+# Placeholder values
+apiVersion: v1
+kind: Secret
+metadata:
+  name: temporal-client-site-agent-certs
+  labels:
+    app: nico-rest-site-agent
+type: Opaque
+stringData:
+  otp: ""
+  cacertificate: ""
+  certificate: ""
+  key: ""

@@ -1,0 +1,36 @@
+ubuntu_PASSWORD='{{.UbuntuPasswordHash}}'
+ENABLE_SFC_HBN=yes
+NUM_SFs_ECPF0=18
+NUM_SFs_ECPF1=2
+WITH_NIC_FW_UPDATE="yes"
+
+bfb_post_install()
+{
+	log ============ bfb_post_install ===============
+}
+
+bfb_modify_os() {
+    log "bfb_modify_os: creating /home/ubuntu/.ssh/authorized_keys"
+
+    install -d -m 700 /mnt/home/ubuntu/.ssh
+
+    cat > /mnt/home/ubuntu/.ssh/authorized_keys <<'AUTH_KEYS_EOF'
+__DPU_PROVISION_SSH_PUBKEY__
+AUTH_KEYS_EOF
+
+    chmod 600 /mnt/home/ubuntu/.ssh/authorized_keys
+
+    chroot /mnt chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+
+    log "bfb_modify_os: creating /root/.ssh/authorized_keys"
+
+    install -d -m 700 /mnt/root/.ssh
+
+    cat > /mnt/root/.ssh/authorized_keys <<'AUTH_KEYS_EOF'
+__DPU_PROVISION_SSH_PUBKEY__
+AUTH_KEYS_EOF
+
+    chmod 600 /mnt/root/.ssh/authorized_keys
+
+    sync
+}

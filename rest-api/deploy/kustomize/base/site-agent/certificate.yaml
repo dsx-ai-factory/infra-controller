@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# SPIFFE certificate for site-agent gRPC client connections to NICo/NICo API
+# Issued by nico-rest-ca-issuer (native Go PKI CA)
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: core-grpc-client-site-agent-certs
+spec:
+  secretName: core-grpc-client-site-agent-certs
+
+  duration: 720h # 30d
+  renewBefore: 360h # 15d
+  subject:
+    organizations:
+      - Nvidia
+  isCA: false
+  privateKey:
+    algorithm: ECDSA
+    size: 384
+  usages:
+    - client auth
+  dnsNames:
+    - nico-rest-site-agent
+    - nico-rest-site-agent.nico-rest
+    - nico-rest-site-agent.nico-rest.svc.cluster.local
+  uris:
+    - spiffe://nico.local/nico-rest/sa/nico-rest-site-agent
+  issuerRef:
+    name: nico-rest-ca-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io

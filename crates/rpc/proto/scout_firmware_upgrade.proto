@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package scout_firmware_upgrade;
+
+import "codegen/v1/derive.proto";
+import "codegen/v1/extern_path.proto";
+
+message ScoutFirmwareUpgradeTask {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
+  string upgrade_task_id = 1;
+  string component_type = 2;
+  string target_version = 3;
+  FileArtifact script = 4;
+  uint32 execution_timeout_seconds = 5;
+  uint32 artifact_download_timeout_seconds = 6;
+  repeated FileArtifact file_artifacts = 7;
+}
+
+message FileArtifact {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
+  string url = 1;
+  string sha256 = 2;
+}

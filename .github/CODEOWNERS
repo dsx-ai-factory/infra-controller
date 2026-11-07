@@ -1,0 +1,30 @@
+# GitHub CODEOWNERS file
+# See https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Note: GitHub does not support GitLab's [section] syntax.
+# Rules are evaluated from top to bottom, with later rules taking precedence.
+
+# Default owners for everything in the repo
+* @dsx-ai-factory/carbide-sw-approvers
+
+# CODEOWNERS file itself - requires admin approval
+/.github/CODEOWNERS @dsx-ai-factory/carbide-sw-admins
+
+# CI/CD related files
+/.github/ @dsx-ai-factory/dsx-sw-cicd
+
+# Helm charts
+/helm/ @dsx-ai-factory/dsx-sw-helm
+/helm-prereqs/ @dsx-ai-factory/dsx-sw-helm
+
+# Documentation
+/docs/ @dsx-ai-factory/carbide-sw-docs
+/fern/ @dsx-ai-factory/carbide-sw-docs
+
+# QA tests
+/tests/ @dsx-ai-factory/nico-qa-approvers
+
+# The metrics catalogue is generated (`test_integration` regenerates it from the
+# `/metrics` scrape; `cargo xtask check-metric-docs --fix` adds the rest), not
+# authored prose -- exclude it so metric-only changes don't wait on docs review.
+/docs/observability/core_metrics.md

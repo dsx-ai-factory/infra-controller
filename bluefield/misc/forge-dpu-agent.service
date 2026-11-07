@@ -1,0 +1,49 @@
+[Unit]
+Description=Forge DPU agent service
+Documentation=https://docs.nvidia.com/infra-controller/documentation/home
+#
+# containerd@mgmt.service is what starts HBN
+After=networking.service network-online.target time-sync.target containerd@mgmt.service
+
+[Service]
+Type=notify
+Environment="RUST_BACKTRACE=full"
+Environment="RUST_LIB_BACKTRACE=0"
+#
+# Use this line for more agent logging
+#Environment="RUST_LOG=debug,agent=trace"
+Environment="RUST_LOG=info"
+#
+# Enable core dumps (SIGABRT) limited to 100MiB. Currently an agent core dump is ~30MiB.
+LimitCORE=104857600
+#
+# systemd to restart us if we hang for >10 minutes.
+# Should be greater than api.rs ServiceConfig::dpu_up_threshold (currently 5 mins)
+WatchdogSec=600
+#
+# Delete everything except the most recent file from core dump directory, to prevent it growing.
+# The `-` means keep going if the script fails or is missing.
+ExecStartPre=-/usr/bin/clean_core_files.sh
+#
+# Restore from backup in case upgrade failed and `forge-dpu-agent` is missing.
+# The `-` means keep going if this fails
+ExecStartPre=-bash -c '[[ -e "/usr/bin/forge-dpu-agent.BAK" && ! -e "/usr/bin/forge-dpu-agent" ]] && cp /usr/bin/forge-dpu-agent.BAK /usr/bin/forge-dpu-agent && chmod u+x /usr/bin/forge-dpu-agent && chown root:root /usr/bin/forge-dpu-agent'
+#
+ExecStart=/usr/bin/forge-dpu-agent run --enable-metadata-service
+#
+# Capabilities for setting socket options and executing commands in a specific VRF
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_NET_RAW
+#
+# We always want to restart the dpu agent in case of crashes
+# However we don't want to immediatly restart it to avoid flooding the API server
+# with bad requests which could limit the availablity of other clients.
+# Note that we initially experimented with the `StartLimitIntervalSec`
+# and `StartLimitBurst` parameters for this. However we learned that those policies
+# prevented the service from **ever** restarting once the give threshold was
+# exceeded. This required manual actions to enable the agent. The current policy
+# will continuously restart the agent.
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

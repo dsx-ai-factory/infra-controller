@@ -1,0 +1,8 @@
+[Match]
+Name=enx* enp* enP*
+
+[Network]
+DHCP=yes
+
+[DHCP]
+ClientIdentifier=mac

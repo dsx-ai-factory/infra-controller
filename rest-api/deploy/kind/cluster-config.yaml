@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Kind cluster configuration for local NICo REST development
+# Creates a single-node cluster with port mappings for local access
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: nico-rest-local
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # API service
+      - containerPort: 30388
+        hostPort: 8388
+        protocol: TCP
+      # Keycloak
+      - containerPort: 30082
+        hostPort: 8082
+        protocol: TCP
+      # Temporal UI
+      - containerPort: 30233
+        hostPort: 8233
+        protocol: TCP
+      # Adminer (PostgreSQL Admin)
+      - containerPort: 30081
+        hostPort: 8081
+        protocol: TCP
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"

@@ -1,0 +1,158 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[package]
+name = "carbide-agent"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+name = "agent"
+
+[[bin]]
+# TODO: rename to carbide-dpu-agent
+name = "forge-dpu-agent"
+path = "src/main.rs"
+
+[[bin]]
+name = "xplane-maintenance-mock"
+path = "src/bin/xplane-maintenance-mock.rs"
+required-features = ["xplane-maintenance-mock"]
+
+[features]
+xplane-maintenance-mock = []
+
+[dependencies]
+
+# [local-dependencies]
+# DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
+config-version = { path = "../config-version" }
+carbide-certs = { path = "../certs" }
+carbide-dpu-agent-utils = { path = "../dpu-agent-utils" }
+carbide-dpu-fmds-shared = { path = "../dpu-fmds-shared" }
+carbide-dpu-remediation = { path = "../dpu-remediation" }
+carbide-host-support = { path = "../host-support" }
+carbide-instrument = { path = "../instrument" }
+carbide-http-connector = { path = "../http-connector" }
+carbide-metrics-utils = { path = "../metrics-utils" }
+carbide-network = { path = "../network" }
+carbide-systemd = { path = "../systemd" }
+carbide-tls = { path = "../tls" }
+carbide-uuid = { path = "../uuid" }
+carbide-version = { path = "../version" }
+carbide-health-report = { path = "../health-report" }
+carbide-rpc = { path = "../rpc" }
+carbide-rpc-utils = { path = "../rpc-utils" }
+carbide-utils = { path = "../utils" }
+metrics-endpoint = { path = "../metrics-endpoint" }
+nvue-client = { path = "../nvue-client" }
+# DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
+
+#these are alphabetized
+arc-swap = { workspace = true }
+async-trait = { workspace = true }
+axum = { workspace = true, features = ["macros"] }
+axum-server = { features = ["tls-rustls"], workspace = true }
+backon = { workspace = true }
+blake3 = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+colored = { workspace = true }
+containerd-client = { workspace = true }
+data-encoding = { workspace = true }
+diff = { workspace = true }
+eyre = { workspace = true }
+futures = { workspace = true }
+futures-util = { workspace = true }
+governor = { workspace = true }
+gtmpl = { workspace = true }
+gtmpl_derive = { workspace = true }
+gtmpl_value = { workspace = true }
+hex = { workspace = true }
+hickory-resolver = { workspace = true }
+http-body = { workspace = true }
+http-body-util = { workspace = true }
+humantime = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true, features = ["client-legacy"] }
+ipnetwork = { workspace = true }
+lazy_static = { workspace = true }
+libc = { workspace = true }
+mac_address = { workspace = true }
+mockall = { workspace = true }
+netlink-packet-route = { workspace = true }
+nix = { features = ["fs", "user"], workspace = true }
+nonzero_ext = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry-prometheus = { workspace = true }
+opentelemetry-semantic-conventions = { workspace = true, features = [
+  "semconv_experimental",
+] }
+opentelemetry_sdk = { workspace = true, features = [
+  "spec_unstable_metrics_views",
+] }
+prometheus = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+resolv-conf = { workspace = true }
+rtnetlink = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+serde = { features = ["derive"], workspace = true }
+json-patch = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+similar = { workspace = true }
+surge-ping = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+reqwest = { default-features = false, features = [
+  "rustls",
+  "stream",
+], workspace = true }
+tower = { workspace = true }
+tower-http = { features = ["trace"], workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+uuid = { features = ["v4", "serde"], workspace = true }
+uzers = { workspace = true }
+version-compare = { workspace = true }
+#these are alphabetized
+
+[build-dependencies]
+carbide-version = { path = "../version" }
+tonic-prost-build = { workspace = true }
+
+[dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-test-support = { path = "../test-support" }
+rcgen = { workspace = true }
+prost = { workspace = true }
+rustls-pki-types = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

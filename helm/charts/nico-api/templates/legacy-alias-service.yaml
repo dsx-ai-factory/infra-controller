@@ -1,0 +1,61 @@
+{{/*
+Legacy name aliases — opt-in ExternalName Services that make the legacy
+"carbide-api.forge-system.svc.cluster.local" hostname (and any other
+configured alias) resolve to this chart's nico-api Service.
+
+Why: pre-rename binaries (admin CLI, dpu-agent, log-parser, health, pxe,
+bmc-proxy, ssh-console, dsx-exchange-consumer, rvs, dhcp-server) hardcode
+the legacy URL as their default. Rebuilding those binaries to use the
+modern nico-api.<ns>.svc.cluster.local name is forward-only and does not
+help mixed fleets, so the chart provides the alias instead — both names
+work simultaneously, pointing at the same pods.
+
+Notes:
+- Cross-namespace lookups: the alias is an ExternalName Service in
+  `<alias.namespace>` that CNAMEs to nico-api.<this-ns>.svc.cluster.local.
+- The alias namespace is created with `helm.sh/resource-policy: keep` so
+  uninstalling nico-api does not delete the namespace if other resources
+  live there.
+- Clients running in-cluster against the legacy hostname will still hit
+  the resolver's ndots-based search expansion. To avoid an initial
+  NXDOMAIN round trip, set `dnsConfig.options: [{name: ndots, value: "2"}]`
+  on the consuming pod, or update the consuming binary to use a
+  trailing-dot FQDN.
+*/}}
+{{- if and .Values.legacyAlias .Values.legacyAlias.enabled }}
+{{- range $alias := .Values.legacyAlias.aliases }}
+{{- if $alias.createNamespace }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $alias.namespace }}
+  annotations:
+    "helm.sh/resource-policy": keep
+    # Argo CD ignores helm.sh/resource-policy; this is its equivalent fuse.
+    argocd.argoproj.io/sync-options: Prune=false
+    nico.nvidia.com/purpose: "legacy-compat namespace for nico-api aliases"
+  labels:
+    {{- include "nico-api.labels" $ | nindent 4 }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $alias.name }}
+  namespace: {{ $alias.namespace }}
+  labels:
+    {{- include "nico-api.labels" $ | nindent 4 }}
+    nico.nvidia.com/legacy-alias-of: {{ include "nico-api.name" $ }}
+spec:
+  type: ExternalName
+  externalName: {{ include "nico-api.name" $ }}.{{ include "nico-api.namespace" $ }}.svc.cluster.local
+  ports:
+    - name: grpc
+      port: 1079
+      protocol: TCP
+    - name: metrics
+      port: 1080
+      protocol: TCP
+{{- end }}
+{{- end }}

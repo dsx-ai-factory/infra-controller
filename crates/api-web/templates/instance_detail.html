@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+
+{% block title %}Instance Detail{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Instance {{ id }}</h1>
+
+<table class="detailsview">
+	<tr><th>Machine ID</th><td>{{ machine_id|machine_id_link|safe}}</td></tr>
+	<tr><th>Tenant Org</th><td><a href="/admin/tenant/{{ tenant_org }}">{{ tenant_org }}</a></td></tr>
+	<tr><th>Tenant State</th><td>{{ tenant_state }}</td></tr>
+	<tr><th>Tenant State Details</th><td>{{ tenant_state_details }}</td></tr>
+	<tr><th>Config Version</th><td>{{ config_version|config_version|safe }}</td></tr>
+	<tr><th>Configs Synced</th><td>{{ configs_synced }}</td></tr>
+	<tr><th>Network Config Synced</th><td>{{ network_config_synced }}</td></tr>
+	<tr><th>Network Config Version</th><td>{{ network_config_version|config_version|safe }}</td></tr>
+	<tr><th>InfiniBand Config Synced</th><td>{{ ib_config_synced }}</td></tr>
+	<tr><th>InfiniBand Config Version</th><td>{{ ib_config_version|config_version|safe }}</td></tr>
+	<tr><th>NvLink Config Synced</th><td>{{ nvlink_config_synced }}</td></tr>
+	<tr><th>NvLink Config Version</th><td>{{ nvlink_config_version|config_version|safe }}</td></tr>
+
+</table>
+
+<h2>Metadata</h2>
+<table class="detailsview">
+	<tr><th>Name</th><td>{{ metadata.name }}</td></tr>
+	<tr><th>Description</th><td>{{ metadata.description }}</td></tr>
+	<tr><th>Labels</th><td>{{ metadata.labels|label_list_fmt(false)|safe }}</td></tr>
+</table>
+
+<h2>Operating System</h2>
+<table class="detailsview">
+	{% if !os.os_id.is_empty() %}
+	<tr><th>OS Definition</th><td><a href="/admin/operating-system/{{ os.os_id }}">{{ os.os_id }}</a></td></tr>
+	{% endif %}
+	{% if !os.ipxe_script.is_empty() %}
+	<tr><th>iPXE Script</th><td><textarea disabled>{{ os.ipxe_script }}</textarea></td></tr>
+	{% endif %}
+	{% if !os.userdata.is_empty() %}
+	<tr><th>Userdata</th><td><textarea disabled>{{ os.userdata }}</textarea></td></tr>
+	{% endif %}
+	<tr><th>Run Provisioning Instructions On Every Boot</th><td>{{ os.run_provisioning_instructions_on_every_boot }}</td></tr>
+	<tr><th>Phone Home Enabled</th><td>{{ os.phone_home_enabled }}</td></tr>
+</table>
+
+<h2>Interfaces</h2>
+{% for interface in interfaces %}
+<table class="detailsview">
+	<tr><th>Function type</th><td>{{ interface.function_type }}</td></tr>
+	<tr><th>VF ID</th><td>{{ interface.vf_id }}</td></tr>
+	<tr><th>Segment ID</th><td>{% if !interface.segment_id.is_empty() %}<a href="/admin/network-segment/{{ interface.segment_id }}">{{ interface.segment_id }}</a>{% endif %}</td></tr>
+	<tr><th>MAC Address</th><td>{{ interface.mac_address }}</td></tr>
+	<tr><th>IP Addresses</th><td>{{ interface.addresses }}</td></tr>
+	<tr><th>IP Prefixes</th><td>{{ interface.prefixes }}</td></tr>
+	<tr><th>Gateways</th><td>{{ interface.gateways }}</td></tr>
+	<tr><th>VPC Id</th><td><a href="/admin/vpc/{{ interface.vpc_id }}">{{ interface.vpc_id }}</a></td></tr>
+	<tr><th>VPC Name</th><td>{{ interface.vpc_name }}</td></tr>
+</table>
+{% endfor %}
+
+<h2>InfiniBand Interfaces</h2>
+{% for interface in ib_interfaces %}
+<table class="detailsview">
+	<tr><th>Device</th><td>{{ interface.device }}</td></tr>
+	<tr><th>Vendor</th><td>{{ interface.vendor }}</td></tr>
+	<tr><th>Device Instance</th><td>{{ interface.device_instance }}</td></tr>
+	<tr><th>Function type</th><td>{{ interface.function_type }}</td></tr>
+	<tr><th>VF ID</th><td>{{ interface.vf_id }}</td></tr>
+	<tr><th>IB Partition ID</th><td><a href="/admin/ib-partition/{{ interface.ib_partition_id }}">{{ interface.ib_partition_id }}</a></td></tr>
+	<tr><th>PF GUID</th><td>{{ interface.pf_guid }}</td></tr>
+	<tr><th>GUID</th><td>{{ interface.guid }}</td></tr>
+	<tr><th>LID</th><td>{{ interface.lid }}</td></tr>
+</table>
+{% endfor %}
+
+<h2>Keysets</h2>
+{% for keyset in keysets %}
+<table class="detailsview">
+	<tr><th>ID</th><td><a href="/admin/tenant_keyset/{{ tenant_org }}/{{ keyset }}">{{ keyset }}</a></td></tr>
+</table>
+{% endfor %}
+
+<h2>NVLink GPUs</h2>
+{% for gpu in nvlink_gpus %}
+<table class="detailsview">
+	<tr><th>Device Instance</th><td>{{ gpu.device_instance }}</td></tr>
+	<tr><th>Device UID</th><td>{{ gpu.device_guid}}</td></tr>
+	<tr><th>Logical Partition </th><td>{{ gpu.logical_partition_id}}</td></tr>
+</table>
+{% endfor %}
+
+
+{% endblock %}

@@ -1,0 +1,152 @@
+suite: node-exporter sidecar
+templates:
+  - daemonset.yaml
+tests:
+  - it: should add the node-exporter sidecar with the configured image
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[2].name
+          value: node-exporter
+      - equal:
+          path: spec.template.spec.containers[2].image
+          value: quay.io/prometheus/node-exporter:v1.9.1
+
+  - it: should bind node-exporter to loopback on the configured port
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[2].args
+          content: --web.listen-address=127.0.0.1:9200
+      - contains:
+          path: spec.template.spec.containers[2].args
+          content: --path.procfs=/host/proc
+      - contains:
+          path: spec.template.spec.containers[2].args
+          content: --path.sysfs=/host/sys
+      - contains:
+          path: spec.template.spec.containers[2].args
+          content: --path.rootfs=/host/root
+
+  - it: should honor a custom node-exporter port and image
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+      nodeExporter:
+        image:
+          repository: mirror.example.com/node-exporter
+          tag: v1.2.3
+          pullPolicy: Always
+        port: 19200
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[2].image
+          value: mirror.example.com/node-exporter:v1.2.3
+      - equal:
+          path: spec.template.spec.containers[2].imagePullPolicy
+          value: Always
+      - contains:
+          path: spec.template.spec.containers[2].args
+          content: --web.listen-address=127.0.0.1:19200
+
+  - it: should run node-exporter unprivileged as non-root
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[2].securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[2].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[2].securityContext.allowPrivilegeEscalation
+          value: false
+
+  - it: should read-only mount host /proc, /sys and / for node-exporter
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[2].volumeMounts
+          content:
+            name: host-proc
+            mountPath: /host/proc
+            readOnly: true
+      - contains:
+          path: spec.template.spec.containers[2].volumeMounts
+          content:
+            name: host-sys
+            mountPath: /host/sys
+            readOnly: true
+      - contains:
+          path: spec.template.spec.containers[2].volumeMounts
+          content:
+            name: host-root
+            mountPath: /host/root
+            mountPropagation: HostToContainer
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: host-proc
+            hostPath:
+              path: /proc
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: host-sys
+            hostPath:
+              path: /sys
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: host-root
+            hostPath:
+              path: /
+
+  - it: should omit node-exporter resources by default
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - isNull:
+          path: spec.template.spec.containers[2].resources
+
+  - it: should render node-exporter resources when set
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+      nodeExporter:
+        resources:
+          limits:
+            memory: 64Mi
+          requests:
+            cpu: 50m
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[2].resources.limits.memory
+          value: 64Mi
+      - equal:
+          path: spec.template.spec.containers[2].resources.requests.cpu
+          value: 50m

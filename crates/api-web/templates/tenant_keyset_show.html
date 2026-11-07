@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}Keysets{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Keysets</h1>
+
+<table class="sortable overview">
+	<thead>
+	<tr>
+		<th>Organization ID</th>
+		<th>Keyset ID</th>
+		<th>Keys #</th>
+		<th>Version</th>
+	</tr>
+	</thead>
+	<tbody>
+	{% for ks in keysets %}
+		<tr>
+			<td><a href="/admin/tenant/{{ ks.organization_id }}">{{ ks.organization_id }}</a></td>
+			<td><a href="/admin/tenant_keyset/{{ ks.organization_id }}/{{ ks.keyset_id }}">{{ ks.keyset_id }}</a></td>
+			<td>{{ ks.num_keys }}</td>
+			<td>{{ ks.version|config_version|safe }}</td>
+		</tr>
+	{% endfor %}
+	</tbody>
+</table>
+
+{% endblock %}
+

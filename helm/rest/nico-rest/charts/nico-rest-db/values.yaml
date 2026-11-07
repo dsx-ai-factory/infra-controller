@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+nameOverride: ""
+namespaceOverride: ""
+
+podAnnotations: {}
+
+image:
+  name: nico-rest-db
+
+waitForPostgres:
+  # Set `repository` + `tag` to override (they win when both are set); otherwise the
+  # combined `image` below is used.
+  # repository: postgres
+  # tag: 14.4-alpine
+  image: postgres:14.4-alpine
+
+db:
+  host: nico-pg-cluster.postgres.svc.cluster.local
+  port: "5432"
+  name: nico_rest
+  user: nico-rest.nico
+
+secrets:
+  dbCreds: db-creds
+
+resources:
+  requests:
+    memory: "64Mi"
+    cpu: "50m"
+  limits:
+    memory: "128Mi"
+    cpu: "100m"
+
+ttlSecondsAfterFinished: 300
+backoffLimit: 30

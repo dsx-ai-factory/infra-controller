@@ -1,0 +1,22 @@
+{{- if and .Values.enabled .Values.grafanaDashboards.enabled }}
+{{- $annotations := deepCopy (.Values.grafanaDashboards.annotations | default dict) }}
+{{- if and .Values.grafanaDashboards.folderAnnotation .Values.grafanaDashboards.folder }}
+{{- $_ := set $annotations .Values.grafanaDashboards.folderAnnotation .Values.grafanaDashboards.folder }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "nico-postgres-exporter.fullname" . }}-dashboards
+  namespace: {{ .Values.grafanaDashboards.namespace | default .Release.Namespace | quote }}
+  labels:
+    {{- include "nico-postgres-exporter.labels" . | nindent 4 }}
+    {{- with .Values.grafanaDashboards.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  {{- (.Files.Glob "dashboards/*.json").AsConfig | nindent 2 }}
+{{- end }}

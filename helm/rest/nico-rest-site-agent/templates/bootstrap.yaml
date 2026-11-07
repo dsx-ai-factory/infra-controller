@@ -1,0 +1,156 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if .Values.bootstrap.enabled }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "nico-rest-site-agent.name" . }}-bootstrap
+  namespace: {{ include "nico-rest-site-agent.namespace" . }}
+  labels:
+    {{- include "nico-rest-site-agent.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "nico-rest-site-agent.name" . }}-bootstrap
+  namespace: {{ include "nico-rest-site-agent.namespace" . }}
+  labels:
+    {{- include "nico-rest-site-agent.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "delete"]
+  - apiGroups: ["forge.nvidia.io"]
+    resources: ["sites"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "nico-rest-site-agent.name" . }}-bootstrap
+  namespace: {{ include "nico-rest-site-agent.namespace" . }}
+  labels:
+    {{- include "nico-rest-site-agent.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "nico-rest-site-agent.name" . }}-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "nico-rest-site-agent.name" . }}-bootstrap
+    namespace: {{ include "nico-rest-site-agent.namespace" . }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "nico-rest-site-agent.name" . }}-bootstrap
+  namespace: {{ include "nico-rest-site-agent.namespace" . }}
+  labels:
+    {{- include "nico-rest-site-agent.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ include "nico-rest-site-agent.name" . }}-bootstrap
+      containers:
+        - name: bootstrap
+          image: {{ if and .Values.bootstrap.repository .Values.bootstrap.tag }}{{ .Values.bootstrap.repository }}:{{ .Values.bootstrap.tag }}{{ else }}{{ .Values.bootstrap.image }}{{ end }}
+          env:
+            - name: SITE_UUID
+              value: {{ .Values.envConfig.CLUSTER_ID | quote }}
+            - name: NAMESPACE
+              value: {{ include "nico-rest-site-agent.namespace" . }}
+            - name: SITE_MANAGER_URL
+              value: "https://{{ .Values.bootstrap.siteManager.address }}"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+
+              echo "=== nico-rest-site-agent bootstrap ==="
+
+              if [ -z "$SITE_UUID" ]; then
+                echo "ERROR: SITE_UUID (envConfig.CLUSTER_ID) is not set"
+                exit 1
+              fi
+
+              # Idempotency: skip if already bootstrapped
+              if kubectl get secret {{ .Values.secrets.siteRegistration }} -n "$NAMESPACE" > /dev/null 2>&1; then
+                echo "{{ .Values.secrets.siteRegistration }} secret already exists — skipping bootstrap"
+                exit 0
+              fi
+
+              echo "Fetching CA certificate from {{ .Values.bootstrap.siteManager.tlsSecret }}..."
+              CACERT=$(kubectl get secret {{ .Values.bootstrap.siteManager.tlsSecret }} \
+                -n "$NAMESPACE" -o jsonpath='{.data.ca\.crt}' | base64 -d)
+              if [ -z "$CACERT" ]; then
+                echo "ERROR: missing ca.crt in secret {{ .Values.bootstrap.siteManager.tlsSecret }}"
+                exit 1
+              fi
+              echo "$CACERT" > /tmp/site-manager-ca.crt
+
+              echo "Creating site via site-manager (uuid=$SITE_UUID)..."
+              HTTP_CODE=$(curl -s --connect-timeout 10 --max-time 30 --cacert /tmp/site-manager-ca.crt -X POST "$SITE_MANAGER_URL/v1/site" \
+                -H "Content-Type: application/json" \
+                -d "{\"siteuuid\":\"$SITE_UUID\"}" \
+                -o /dev/null -w "%{http_code}")
+              if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+                echo "Site created (HTTP $HTTP_CODE)"
+              elif [ "$HTTP_CODE" = "400" ] || [ "$HTTP_CODE" = "409" ]; then
+                echo "Site already exists (HTTP $HTTP_CODE) — continuing to fetch OTP"
+              else
+                echo "ERROR: unexpected HTTP status $HTTP_CODE from site-manager"
+                exit 1
+              fi
+
+              echo "Waiting for Site CR OTP (up to 3 min)..."
+              SITE_NAME="site-$SITE_UUID"
+              OTP=""
+              for i in $(seq 1 36); do
+                OTP=$(kubectl get site "$SITE_NAME" -n "$NAMESPACE" \
+                  -o jsonpath='{.status.otp.passcode}' 2>/dev/null || true)
+                if [ -n "$OTP" ]; then
+                  echo "OTP acquired"
+                  break
+                fi
+                echo "Waiting for OTP ($i/36)..."
+                sleep 5
+              done
+
+              if [ -z "$OTP" ]; then
+                echo "ERROR: Timed out waiting for OTP from Site CR"
+                exit 1
+              fi
+
+              echo "Creating {{ .Values.secrets.siteRegistration }} secret..."
+              kubectl delete secret {{ .Values.secrets.siteRegistration }} -n "$NAMESPACE" --ignore-not-found
+              kubectl create secret generic {{ .Values.secrets.siteRegistration }} \
+                -n "$NAMESPACE" \
+                --from-literal=site-uuid="$SITE_UUID" \
+                --from-literal=otp="$OTP" \
+                --from-literal=creds-url="https://{{ .Values.bootstrap.siteManager.address }}/v1/sitecreds" \
+                --from-literal=cacert="$CACERT"
+
+              echo "=== Bootstrap complete ==="
+{{- end }}

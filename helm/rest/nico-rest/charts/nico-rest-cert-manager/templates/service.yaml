@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: nico-rest-cert-manager
+  namespace: {{ include "nico-rest-cert-manager.namespace" . }}
+  labels:
+    {{- include "nico-rest-cert-manager.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ .Values.service.httpsPort }}
+      targetPort: {{ .Values.config.tlsPort }}
+      name: https
+    - port: {{ .Values.service.httpPort }}
+      targetPort: {{ .Values.config.insecurePort }}
+      name: http
+  selector:
+    {{- include "nico-rest-cert-manager.selectorLabels" . | nindent 4 }}

@@ -1,0 +1,49 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+use clap::Parser;
+use rpc::forge::DeleteNetworkSecurityGroupRequest;
+
+#[derive(Parser, Debug, Clone)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Delete a network security group:
+    $ nico-admin-cli network-security-group delete --id 12345678-1234-5678-90ab-cdef01234567 \
+    --tenant-organization-id fds34511233a
+
+")]
+pub(crate) struct Args {
+    #[clap(short = 'i', long, help = "Network security group ID to delete")]
+    pub(super) id: String,
+
+    #[clap(
+        short = 't',
+        long,
+        help = "Tenant organization ID of the network security group"
+    )]
+    tenant_organization_id: String,
+}
+
+impl From<Args> for DeleteNetworkSecurityGroupRequest {
+    fn from(args: Args) -> Self {
+        DeleteNetworkSecurityGroupRequest {
+            id: args.id,
+            tenant_organization_id: args.tenant_organization_id,
+        }
+    }
+}

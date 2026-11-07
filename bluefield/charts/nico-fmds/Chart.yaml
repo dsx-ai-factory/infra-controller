@@ -1,0 +1,8 @@
+apiVersion: v2
+name: nico-fmds
+description: NICo NICo Metadata Service (FMDS) for serving instance metadata to tenants on DPUs
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+annotations:
+  dpu.nvidia.com/doca-version: ">= 2.9"

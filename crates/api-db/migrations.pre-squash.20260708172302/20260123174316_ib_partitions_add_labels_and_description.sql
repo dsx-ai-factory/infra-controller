@@ -1,0 +1,5 @@
+ALTER TABLE IF EXISTS ib_partitions 
+    ADD COLUMN labels JSONB NOT NULL DEFAULT ('{}'),
+    ADD COLUMN description VARCHAR(1024) NOT NULL DEFAULT ('');
+
+ALTER TABLE ib_partitions ALTER COLUMN name TYPE VARCHAR(256);

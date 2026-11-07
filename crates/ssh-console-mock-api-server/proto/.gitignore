@@ -1,0 +1,2 @@
+# These are copied from the rpc crate as part of build.rs
+*.proto

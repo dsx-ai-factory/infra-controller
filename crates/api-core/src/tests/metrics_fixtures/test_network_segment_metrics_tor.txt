@@ -1,0 +1,163 @@
+# HELP carbide_available_ips_count Number of available IPs per network segment
+# TYPE carbide_available_ips_count gauge
+carbide_available_ips_count{fresh="true",name="TEST_SEGMENT",prefix="192.0.2.0/24",type="tor"} 253
+# HELP carbide_machines_count Number of carbide_machines in the system
+# TYPE carbide_machines_count gauge
+carbide_machines_count{fresh="true"} 1
+# HELP carbide_machines_enqueuer_iteration_latency_milliseconds The overall time it took to enqueue state handling tasks for all carbide_machines in the system
+# TYPE carbide_machines_enqueuer_iteration_latency_milliseconds histogram
+carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="0"} 0
+carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="5"} 1
+carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="10"} 2
+carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="25"} 2
+carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="50"} 2
+carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="75"} 2
+carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="100"} 2
+carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="250"} 2
+carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="500"} 2
+carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="750"} 2
+carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="1000"} 2
+carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="2500"} 2
+carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="5000"} 2
+carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="7500"} 2
+carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="10000"} 2
+carbide_machines_enqueuer_iteration_latency_milliseconds_bucket{le="+Inf"} 2
+carbide_machines_enqueuer_iteration_latency_milliseconds_sum 9.791577
+carbide_machines_enqueuer_iteration_latency_milliseconds_count 2
+# HELP carbide_machines_handler_latency_in_state_milliseconds The amount of time it took to invoke the state handler for objects of type carbide_machines in a certain state
+# TYPE carbide_machines_handler_latency_in_state_milliseconds histogram
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="deleting",substate="drainallocatedips",le="0"} 0
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="deleting",substate="drainallocatedips",le="5"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="deleting",substate="drainallocatedips",le="10"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="deleting",substate="drainallocatedips",le="25"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="deleting",substate="drainallocatedips",le="50"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="deleting",substate="drainallocatedips",le="75"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="deleting",substate="drainallocatedips",le="100"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="deleting",substate="drainallocatedips",le="250"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="deleting",substate="drainallocatedips",le="500"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="deleting",substate="drainallocatedips",le="750"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="deleting",substate="drainallocatedips",le="1000"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="deleting",substate="drainallocatedips",le="2500"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="deleting",substate="drainallocatedips",le="5000"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="deleting",substate="drainallocatedips",le="7500"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="deleting",substate="drainallocatedips",le="10000"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="deleting",substate="drainallocatedips",le="+Inf"} 1
+carbide_machines_handler_latency_in_state_milliseconds_sum{state="deleting",substate="drainallocatedips"} 1.657742
+carbide_machines_handler_latency_in_state_milliseconds_count{state="deleting",substate="drainallocatedips"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="0"} 0
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="5"} 0
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="10"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="25"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="50"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="75"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="100"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="250"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="500"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="750"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="1000"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="2500"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="5000"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="7500"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="10000"} 1
+carbide_machines_handler_latency_in_state_milliseconds_bucket{state="ready",substate="",le="+Inf"} 1
+carbide_machines_handler_latency_in_state_milliseconds_sum{state="ready",substate=""} 8.861486
+carbide_machines_handler_latency_in_state_milliseconds_count{state="ready",substate=""} 1
+# HELP carbide_machines_iteration_latency_milliseconds Elapsed time of each completed state processor iteration for objects of type carbide_machines
+# TYPE carbide_machines_iteration_latency_milliseconds histogram
+carbide_machines_iteration_latency_milliseconds_bucket{le="0"} 0
+carbide_machines_iteration_latency_milliseconds_bucket{le="5"} 1
+carbide_machines_iteration_latency_milliseconds_bucket{le="10"} 1
+carbide_machines_iteration_latency_milliseconds_bucket{le="25"} 2
+carbide_machines_iteration_latency_milliseconds_bucket{le="50"} 2
+carbide_machines_iteration_latency_milliseconds_bucket{le="75"} 2
+carbide_machines_iteration_latency_milliseconds_bucket{le="100"} 2
+carbide_machines_iteration_latency_milliseconds_bucket{le="250"} 2
+carbide_machines_iteration_latency_milliseconds_bucket{le="500"} 2
+carbide_machines_iteration_latency_milliseconds_bucket{le="750"} 2
+carbide_machines_iteration_latency_milliseconds_bucket{le="1000"} 2
+carbide_machines_iteration_latency_milliseconds_bucket{le="2500"} 2
+carbide_machines_iteration_latency_milliseconds_bucket{le="5000"} 2
+carbide_machines_iteration_latency_milliseconds_bucket{le="7500"} 2
+carbide_machines_iteration_latency_milliseconds_bucket{le="10000"} 2
+carbide_machines_iteration_latency_milliseconds_bucket{le="+Inf"} 2
+carbide_machines_iteration_latency_milliseconds_sum 19.73192
+carbide_machines_iteration_latency_milliseconds_count 2
+# HELP carbide_machines_object_tasks_completed_total Number of object handling tasks completed for objects of type carbide_machines
+# TYPE carbide_machines_object_tasks_completed_total counter
+carbide_machines_object_tasks_completed_total 2
+# HELP carbide_machines_object_tasks_dispatched_total Number of object handling tasks dequeued and dispatched for processing for objects of type carbide_machines
+# TYPE carbide_machines_object_tasks_dispatched_total counter
+carbide_machines_object_tasks_dispatched_total 2
+# HELP carbide_machines_object_tasks_enqueued_total Number of object handling tasks freshly enqueued for objects of type carbide_machines
+# TYPE carbide_machines_object_tasks_enqueued_total counter
+carbide_machines_object_tasks_enqueued_total 1
+# HELP carbide_machines_object_tasks_requeued_total Number of object handling tasks requeued for objects of type carbide_machines
+# TYPE carbide_machines_object_tasks_requeued_total counter
+carbide_machines_object_tasks_requeued_total 1
+# HELP carbide_machines_object_tasks_running Number of object handling tasks currently running of type carbide_machines
+# TYPE carbide_machines_object_tasks_running gauge
+carbide_machines_object_tasks_running 0
+# HELP carbide_machines_per_state Number of carbide_machines in the system with a given state
+# TYPE carbide_machines_per_state gauge
+carbide_machines_per_state{fresh="true",state="deleting",substate="drainallocatedips"} 1
+# HELP carbide_machines_per_state_above_sla Number of carbide_machines currently in a state longer than the SLA allows
+# TYPE carbide_machines_per_state_above_sla gauge
+carbide_machines_per_state_above_sla{fresh="true",state="deleting",substate="drainallocatedips"} 0
+# HELP carbide_machines_state_entered_total Number of times objects of type carbide_machines have entered a certain state
+# TYPE carbide_machines_state_entered_total counter
+carbide_machines_state_entered_total{state="deleting",substate="drainallocatedips"} 1
+# HELP carbide_machines_state_exited_total Number of times objects of type carbide_machines have exited a certain state
+# TYPE carbide_machines_state_exited_total counter
+carbide_machines_state_exited_total{state="ready",substate=""} 1
+# HELP carbide_machines_time_in_state_seconds The amount of time objects of type carbide_machines have spent in a certain state
+# TYPE carbide_machines_time_in_state_seconds histogram
+carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="0"} 0
+carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="5"} 1
+carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="10"} 1
+carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="25"} 1
+carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="50"} 1
+carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="75"} 1
+carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="100"} 1
+carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="250"} 1
+carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="500"} 1
+carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="750"} 1
+carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="1000"} 1
+carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="2500"} 1
+carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="5000"} 1
+carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="7500"} 1
+carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="10000"} 1
+carbide_machines_time_in_state_seconds_bucket{next_state="deleting",next_substate="drainallocatedips",state="ready",substate="",le="+Inf"} 1
+carbide_machines_time_in_state_seconds_sum{next_state="deleting",next_substate="drainallocatedips",state="ready",substate=""} 0.092357396
+carbide_machines_time_in_state_seconds_count{next_state="deleting",next_substate="drainallocatedips",state="ready",substate=""} 1
+# HELP carbide_machines_total Number of carbide_machines in the system
+# TYPE carbide_machines_total gauge
+carbide_machines_total{fresh="true"} 1
+# HELP carbide_machines_with_state_handling_errors_per_state Number of carbide_machines whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error
+# TYPE carbide_machines_with_state_handling_errors_per_state gauge
+carbide_machines_with_state_handling_errors_per_state{error="any",fresh="true",state="deleting",substate="drainallocatedips"} 0
+# HELP carbide_nvlink_partition_monitor_nmxc_changes_applied_total Number of changes requested to NMX-C
+# TYPE carbide_nvlink_partition_monitor_nmxc_changes_applied_total counter
+carbide_nvlink_partition_monitor_nmxc_changes_applied_total{operation="create",status="completed"} 0
+carbide_nvlink_partition_monitor_nmxc_changes_applied_total{operation="create",status="failed"} 0
+carbide_nvlink_partition_monitor_nmxc_changes_applied_total{operation="create",status="timedout"} 0
+carbide_nvlink_partition_monitor_nmxc_changes_applied_total{operation="remove",status="completed"} 0
+carbide_nvlink_partition_monitor_nmxc_changes_applied_total{operation="remove",status="failed"} 0
+carbide_nvlink_partition_monitor_nmxc_changes_applied_total{operation="remove",status="timedout"} 0
+carbide_nvlink_partition_monitor_nmxc_changes_applied_total{operation="remove_default_partition",status="completed"} 0
+carbide_nvlink_partition_monitor_nmxc_changes_applied_total{operation="remove_default_partition",status="failed"} 0
+carbide_nvlink_partition_monitor_nmxc_changes_applied_total{operation="remove_default_partition",status="timedout"} 0
+carbide_nvlink_partition_monitor_nmxc_changes_applied_total{operation="update",status="completed"} 0
+carbide_nvlink_partition_monitor_nmxc_changes_applied_total{operation="update",status="failed"} 0
+carbide_nvlink_partition_monitor_nmxc_changes_applied_total{operation="update",status="timedout"} 0
+# HELP carbide_reserved_ips_count Number of reserved IPs per network segment
+# TYPE carbide_reserved_ips_count gauge
+carbide_reserved_ips_count{fresh="true",name="TEST_SEGMENT",prefix="192.0.2.0/24",type="tor"} 1
+# HELP carbide_site_explorer_create_machines Whether site-explorer machine creation is enabled (1) or disabled (0)
+# TYPE carbide_site_explorer_create_machines gauge
+carbide_site_explorer_create_machines 1
+# HELP carbide_site_explorer_enabled Whether site-explorer is enabled (1) or paused (0)
+# TYPE carbide_site_explorer_enabled gauge
+carbide_site_explorer_enabled 1
+# HELP carbide_total_ips_count Number of IPs per network segment
+# TYPE carbide_total_ips_count gauge
+carbide_total_ips_count{fresh="true",name="TEST_SEGMENT",prefix="192.0.2.0/24",type="tor"} 256

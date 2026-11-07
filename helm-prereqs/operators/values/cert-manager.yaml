@@ -1,0 +1,23 @@
+## cert-manager v1.17.1
+## https://artifacthub.io/packages/helm/cert-manager/cert-manager
+##
+## Feature parity with nico-external (cert-manager-app/kustomization.yaml):
+##   - AdditionalCertificateOutputFormats: enables combined PEM output used by NICo
+##   - csiDriver: installed to match production setup
+##   - NOTE: we do NOT set --controllers=*,-certificaterequests-approver because we
+##     do not run cert-manager-approver-policy; the built-in approver is required.
+crds:
+  enabled: true
+global:
+  leaderElection:
+    namespace: cert-manager
+featureGates: "AdditionalCertificateOutputFormats=true"
+webhook:
+  extraArgs:
+    - "--feature-gates=AdditionalCertificateOutputFormats=true"
+# csiDriver is a separate chart in cert-manager >= v1.12 (cert-manager/cert-manager-csi-driver)
+# Not needed for dev — NICo mounts certs from K8s Secrets, not CSI volumes.
+prometheus:
+  enabled: false
+  servicemonitor:
+    enabled: false

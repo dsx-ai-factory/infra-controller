@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+
+{% block title %}Machine Validation Runs{% endblock %}
+
+{% block content %}
+<h1>Machine Validation Runs ({{ page.total_items() }})</h1>
+<table class="sortable overview">
+	<thead>
+		<tr>
+			<th>Validation ID</th>
+			<th>Machine ID</th>
+			<th>Context</th>
+			<th>Status</th>
+			<th>Start Time</th>
+			<th>End Time</th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for run in validation_runs %}
+		<tr>
+			<td><a href="/admin/machinevalidation/runs/{{ run.validation_id }}">{{ run.validation_id }}</a></td>
+			<td><a href="/admin/machine/{{ run.machine_id }}">{{ run.machine_id }}</a></td>
+			<td>{{ run.context }}</td>
+			                <td>{% if run.status == "Completed(Success)" %}<span class="bubble success">{% else %}<span class="bubble error">{% endif %}{{ run.status }}</span></td>
+			<td>{{ run.start_time }}</td>
+			<td>{{ run.end_time }}</td>
+			
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+
+{% include "pages_footer.html" %}
+
+{% endblock %}

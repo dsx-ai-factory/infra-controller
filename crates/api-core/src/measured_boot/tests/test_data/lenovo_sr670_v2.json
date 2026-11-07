@@ -1,0 +1,885 @@
+{
+    "cpus": [
+        {
+            "core": 0,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 0,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.191"
+        },
+        {
+            "core": 0,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 1,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.669"
+        },
+        {
+            "core": 9,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 2,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.974"
+        },
+        {
+            "core": 9,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 3,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.639"
+        },
+        {
+            "core": 1,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 4,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.460"
+        },
+        {
+            "core": 1,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 5,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.058"
+        },
+        {
+            "core": 10,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 6,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.714"
+        },
+        {
+            "core": 10,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 7,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.679"
+        },
+        {
+            "core": 2,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 8,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.663"
+        },
+        {
+            "core": 2,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 9,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.000"
+        },
+        {
+            "core": 11,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 10,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.420"
+        },
+        {
+            "core": 11,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 11,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.979"
+        },
+        {
+            "core": 3,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 12,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.722"
+        },
+        {
+            "core": 3,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 13,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.078"
+        },
+        {
+            "core": 12,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 14,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.713"
+        },
+        {
+            "core": 12,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 15,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.725"
+        },
+        {
+            "core": 4,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 16,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.697"
+        },
+        {
+            "core": 4,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 17,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.114"
+        },
+        {
+            "core": 13,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 18,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "1384.487"
+        },
+        {
+            "core": 13,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 19,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.700"
+        },
+        {
+            "core": 5,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 20,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "900.559"
+        },
+        {
+            "core": 5,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 21,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.727"
+        },
+        {
+            "core": 14,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 22,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.714"
+        },
+        {
+            "core": 14,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 23,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.733"
+        },
+        {
+            "core": 6,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold6354 CPU @ 3.00GHz",
+            "number": 24,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.856"
+        },
+        {
+            "core": 6,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 25,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.725"
+        },
+        {
+            "core": 15,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 26,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.142"
+        },
+        {
+            "core": 15,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 27,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.699"
+        },
+        {
+            "core": 7,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 28,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.113"
+        },
+        {
+            "core": 7,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 29,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.098"
+        },
+        {
+            "core": 16,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 30,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.314"
+        },
+        {
+            "core": 16,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 31,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.066"
+        },
+        {
+            "core": 8,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 32,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.745"
+        },
+        {
+            "core": 8,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 33,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.716"
+        },
+        {
+            "core": 17,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 34,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.707"
+        },
+        {
+            "core": 17,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 35,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.712"
+        },
+        {
+            "core": 0,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 36,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.741"
+        },
+        {
+            "core": 0,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 37,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.721"
+        },
+        {
+            "core": 9,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 38,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.100"
+        },
+        {
+            "core": 9,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 39,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.666"
+        },
+        {
+            "core": 1,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 40,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.747"
+        },
+        {
+            "core": 1,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 41,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.739"
+        },
+        {
+            "core": 10,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 42,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.728"
+        },
+        {
+            "core": 10,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 43,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.963"
+        },
+        {
+            "core": 2,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 44,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.738"
+        },
+        {
+            "core": 2,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 45,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.023"
+        },
+        {
+            "core": 11,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 46,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.738"
+        },
+        {
+            "core": 11,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 47,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.081"
+        },
+        {
+            "core": 3,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 48,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.120"
+        },
+        {
+            "core": 3,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 49,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.470"
+        },
+        {
+            "core": 12,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 50,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.112"
+        },
+        {
+            "core": 12,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 51,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.119"
+        },
+        {
+            "core": 4,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 52,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.652"
+        },
+        {
+            "core": 4,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 53,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.103"
+        },
+        {
+            "core": 13,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 54,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "3000.000"
+        },
+        {
+            "core": 13,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 55,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.703"
+        },
+        {
+            "core": 5,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 56,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.595"
+        },
+        {
+            "core": 5,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 57,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.707"
+        },
+        {
+            "core": 14,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 58,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.742"
+        },
+        {
+            "core": 14,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 59,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.748"
+        },
+        {
+            "core": 6,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 60,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.642"
+        },
+        {
+            "core": 6,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 61,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.721"
+        },
+        {
+            "core": 15,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 62,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.493"
+        },
+        {
+            "core": 15,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 63,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.221"
+        },
+        {
+            "core": 7,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 64,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.324"
+        },
+        {
+            "core": 7,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 65,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.109"
+        },
+        {
+            "core": 16,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 66,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.469"
+        },
+        {
+            "core": 16,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 67,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.724"
+        },
+        {
+            "core": 8,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 68,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.463"
+        },
+        {
+            "core": 8,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 69,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "801.092"
+        },
+        {
+            "core": 17,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 70,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.541"
+        },
+        {
+            "core": 17,
+            "node": 0,
+            "model": "Intel(R) Xeon(R) Gold 6354 CPU @ 3.00GHz",
+            "number": 71,
+            "socket": 0,
+            "vendor": "GenuineIntel",
+            "frequency": "800.649"
+        }
+    ],
+    "machine_type": "x86_64",
+    "nvme_devices": [
+        {
+            "model": "NO_MODEL",
+            "firmware_rev": "NO_FIRMWARE_REV"
+        }
+    ],
+    "dmi_data": {
+        "board_name": "",
+        "board_version": "",
+        "bios_version": "AFE124G-2.10",
+        "bios_date": "01/01/1971",
+        "product_serial": "Host123",
+        "board_serial": "HostBoard123",
+        "chassis_serial": "HostChassis123",
+        "product_name": "ThinkSystem SR670 V2",
+        "sys_vendor": "Lenovo"
+    },
+    "block_devices": [
+        {
+            "model": "DELLBOSS_VD",
+            "serial": "e932d5c34b090010",
+            "revision": "MV.R00-0"
+        },
+        {
+            "model": "DELLBOSS_VD",
+            "serial": "e932d5c34b090010",
+            "revision": "MV.R00-0"
+        },
+        {
+            "model": "DELLBOSS_VD",
+            "serial": "e932d5c34b090010",
+            "revision": "MV.R00-0"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A0D2TCD8",
+            "revision": "2.1.3"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A0D2TCD8",
+            "revision": "2.1.3"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A0D2TCD8",
+            "revision": "2.1.3"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A098TCD8",
+            "revision": "2.1.3"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A098TCD8",
+            "revision": "2.1.3"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A098TCD8",
+            "revision": "2.1.3"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A0B8TCD8",
+            "revision": "2.1.3"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A0B8TCD8",
+            "revision": "2.1.3"
+        },
+        {
+            "model": "Dell Ent NVMe CM6 RI 1.92TB",
+            "serial": "61M0A0B8TCD8",
+            "revision": "2.1.3"
+        }
+    ],
+    "network_interfaces": [
+        {
+            "mac_address": "70:b5:e8:f0:50:28",
+            "pci_properties": {
+                "path": "/devices/pci0000:00/0000:00:1c.5/0000:04:00.0/net/eno8303",
+                "device": "0x165f",
+                "vendor": "0x14e4",
+                "numa_node": 0,
+                "description": "NetXtreme BCM5720 2-port Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)"
+            }
+        },
+        {
+            "mac_address": "70:b5:e8:f0:50:29",
+            "pci_properties": {
+                "path": "/devices/pci0000:00/0000:00:1c.5/0000:04:00.1/net/eno8403",
+                "device": "0x165f",
+                "vendor": "0x14e4",
+                "numa_node": 0,
+                "description": "NetXtreme BCM5720 2-port Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)"
+            }
+        },
+        {
+            "mac_address": "e4:3d:1a:15:3e:d0",
+            "pci_properties": {
+                "path": "/devices/pci0000:30/0000:30:04.0/0000:31:00.0/net/eno12399np0",
+                "device": "0x16d7",
+                "vendor": "0x14e4",
+                "numa_node": 0,
+                "description": "BCM57414 NetXtreme-E 10Gb/25Gb RDMA Ethernet Controller"
+            }
+        },
+        {
+            "mac_address": "e4:3d:1a:15:3e:d1",
+            "pci_properties": {
+                "path": "/devices/pci0000:30/0000:30:04.0/0000:31:00.1/net/eno12409np1",
+                "device": "0x16d7",
+                "vendor": "0x14e4",
+                "numa_node": 0,
+                "description": "BCM57414 NetXtreme-E 10Gb/25Gb RDMA Ethernet Controller"
+            }
+        },
+        {
+            "mac_address": "08:c0:eb:cb:0e:96",
+            "pci_properties": {
+                "path": "/devices/pci0000:b0/0000:b0:04.0/0000:b1:00.0/net/enp177s0f0np0",
+                "device": "0xa2d6",
+                "vendor": "0x15b3",
+                "numa_node": 1,
+                "description": "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"
+            }
+        },
+        {
+            "mac_address": "08:c0:eb:cb:0e:97",
+            "pci_properties": {
+                "path": "/devices/pci0000:b0/0000:b0:04.0/0000:b1:00.1/net/enp177s0f1np1",
+                "device": "0xa2d6",
+                "vendor": "0x15b3",
+                "numa_node": 1,
+                "description": "MT42822 BlueField-2 integrated ConnectX-6 Dx network controller"
+            }
+        }
+    ],
+    "infiniband_interfaces": [
+        {
+            "pci_properties": {
+                "vendor": "0x15b3",
+                "device": "0x1021",
+                "path": "/devices/pci0000:b0/0000:c0:02.0/0000:c1:00.1/infiniband/ibp178s0f1",
+                "numaNode": 1,
+                "description": "MT2910 Family [ConnectX-7]",
+                "slot": "0000:c1:00.1"
+            },
+            "guid": "946dae03002ac100"
+        },
+        {
+            "pci_properties": {
+                "vendor": "0x15b3",
+                "device": "0x1021",
+                "path": "/devices/pci0000:b0/0000:c0:02.0/0000:c1:00.0/infiniband/ibp178s0f0",
+                "numaNode": 1,
+                "description": "MT2910 Family [ConnectX-7]",
+                "slot": "0000:c1:00.0"
+            },
+            "guid": "946dae03002ac101"
+        },
+        {
+            "pci_properties": {
+                "vendor": "0x15b3",
+                "device": "0x1021",
+                "path": "/devices/pci0000:b0/0000:b0:02.0/0000:b1:00.1/infiniband/ibp177s0f1",
+                "numaNode": 1,
+                "description": "MT2910 Family [ConnectX-7]",
+                "slot": "0000:b1:00.1"
+            },
+            "guid": "946dae03002ac102"
+        },
+        {
+            "pci_properties": {
+                "vendor": "0x15b3",
+                "device": "0x1021",
+                "path": "/devices/pci0000:b0/0000:b0:02.0/0000:b1:00.0/infiniband/ibp177s0f0",
+                "numaNode": 1,
+                "description": "MT2910 Family [ConnectX-7]",
+                "slot": "0000:b1:00.0"
+            },
+            "guid": "946dae03002ac103"
+        },
+        {
+            "pci_properties": {
+                "vendor": "0x15b3",
+                "device": "0x1017",
+                "path": "/devices/pci0000:97/0000:97:02.0/0000:98:00.0/infiniband/ibp152s0f0",
+                "numaNode": 1,
+                "description": "MT27800 Family [ConnectX-5]",
+                "slot": "0000:98:00.0"
+            },
+            "guid": "946dae03002ac752"
+        },
+        {
+            "pci_properties": {
+                "vendor": "0x15b3",
+                "device": "0x1017",
+                "path": "/devices/pci0000:97/0000:97:02.0/0000:98:00.1/infiniband/ibp152s0f1",
+                "numaNode": 1,
+                "description": "MT27800 Family [ConnectX-5]",
+                "slot": "0000:98:00.1"
+            },
+            "guid": "946dae03002ac753"
+        }
+    ],
+    "tpm_ek_certificate": "U29tZSBhcmJpdHJhcnkgYmFzZTY0",
+    "gpus": [
+        {
+            "name": "NVIDIA H100 PCIe",
+            "serial": "1654422005699",
+            "driver_version": "530.30.02",
+            "vbios_version": "96.00.30.00.01",
+            "inforom_version": "1010.0200.00.02",
+            "total_memory": "81559 MiB",
+            "frequency": "1755 MHz",
+            "pci_bus_id": "00000000:17:00.0"
+        }
+    ],
+    "memory_devices": [
+        {
+            "size_mb": 1024,
+            "mem_type": "DDR4"
+        },
+        {
+            "size_mb": 1024,
+            "mem_type": "DDR4"
+        }
+    ]
+}

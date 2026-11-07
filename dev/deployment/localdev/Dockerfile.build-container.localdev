@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+FROM urm.nvidia.com/swngc-ngcc-docker-local/forge/carbide/x86-64/build-container:latest
+
+RUN mkdir /target
+RUN mkdir -p /cache/cargo
+ENV SCCACHE_CACHE_SIZE 10g
+ENV SCCACHE_DIR /cache/sccache
+ENV CARGO_HOME /cache/cargo
+ENV CARGO_TARGET_HOME /target
+ENV RUSTC_WRAPPER /usr/local/cargo/bin/sccache
+WORKDIR ./carbide
+ENTRYPOINT ["cargo", "build", "-p"]

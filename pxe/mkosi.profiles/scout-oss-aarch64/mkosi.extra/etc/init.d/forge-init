@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+
+# nvssh does not allow the root to be world writable
+chmod o-w /

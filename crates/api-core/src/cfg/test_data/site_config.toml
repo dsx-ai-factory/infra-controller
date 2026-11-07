@@ -1,0 +1,66 @@
+asn = 777
+dhcp_servers = ["99.101.102.103"]
+max_database_connections = 1333
+max_find_by_ids = 50
+dpu_network_monitor_pinger_type = "OobNetBind"
+bmc_session_lockout_threshold = 5
+vpc_peering_policy = "exclusive"
+
+
+[tls]
+identity_pemfile_path = "/patched/path/to/cert"
+identity_keyfile_path = "/patched/path/to/key"
+root_cafile_path = "/patched/path/to/ca"
+
+[auth]
+permissive_mode = true
+casbin_policy_file = "/patched/path/to/policy"
+
+[pools.fnn-asn]
+type = "integer"
+ranges = [{ start = "4268000000", end = "4268999999" }]
+
+[pools.lo-ip]
+type = "ipv4"
+prefix = "10.180.63.0/26"
+
+[ib_config]
+enabled = true
+fabric_monitor_run_interval = "102s"
+
+[site_explorer]
+enabled = false
+concurrent_explorations = 10
+explorations_per_run = 12
+create_machines = false
+
+# Unit is mandatory
+[machine_state_controller]
+dpu_wait_time = "7m"
+power_down_wait = "17s"
+failure_retry_time = "70m"
+dpu_up_threshold = "77m"
+boot_interface_observation_interval = "2h"
+[machine_state_controller.controller]
+iteration_time = "3m"
+max_object_handling_time = "11s"
+max_concurrency = 22
+
+[network_segment_state_controller]
+network_segment_drain_time = "45s"
+[network_segment_state_controller.controller]
+iteration_time = "18m"
+max_object_handling_time = "188s"
+max_concurrency = 1888
+
+[vpc_prefix_state_controller]
+vpc_prefix_drain_time = "46s"
+[vpc_prefix_state_controller.controller]
+iteration_time = "19m"
+max_object_handling_time = "199s"
+max_concurrency = 1999
+
+[ib_partition_state_controller.controller]
+iteration_time = "17m"
+max_object_handling_time = "177s"
+max_concurrency = 1777

@@ -1,0 +1,320 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+    helm.sh/resource-policy: keep
+  labels:
+    app.kubernetes.io/part-of: dpf-operator-controller-manager
+    dpu.nvidia.com/component: dpf-operator-controller-manager
+  name: dpuserviceconfigurations.svc.dpu.nvidia.com
+spec:
+  group: svc.dpu.nvidia.com
+  names:
+    kind: DPUServiceConfiguration
+    listKind: DPUServiceConfigurationList
+    plural: dpuserviceconfigurations
+    singular: dpuserviceconfiguration
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          DPUServiceConfiguration is the Schema for the dpuserviceconfigurations API. This object is intended to be used in
+          conjunction with a DPUDeployment object. This object is the template from which the DPUService will be created. It
+          contains all configuration options from the user to be provided to the service itself via the helm chart values.
+          This object doesn't allow configuration of nodeSelector and resources in purpose as these are delegated to the
+          DPUDeployment and DPUServiceTemplate accordingly.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: DPUServiceConfigurationSpec defines the desired state of
+              DPUServiceConfiguration
+            properties:
+              deploymentServiceName:
+                description: |-
+                  DeploymentServiceName is the name of the DPU service this configuration refers to. It must match
+                  .spec.deploymentServiceName of a DPUServiceTemplate object and one of the keys in .spec.services of a
+                  DPUDeployment object.
+                maxLength: 28
+                minLength: 1
+                type: string
+              interfaces:
+                description: Interfaces specifies the DPUServiceInterface to be generated
+                  for the generated DPUService.
+                items:
+                  description: ServiceInterfaceTemplate contains the information related
+                    to an interface of the DPUService
+                  properties:
+                    name:
+                      description: Name is the name of the interface
+                      maxLength: 15
+                      minLength: 1
+                      type: string
+                    network:
+                      description: |-
+                        Network is the Network Attachment Definition in the form of "namespace/name"
+                        or just "name" if the namespace is the same as the namespace the pod is running.
+                      type: string
+                    virtualNetwork:
+                      description: VirtualNetwork is the VirtualNetwork name in the
+                        same namespace
+                      type: string
+                  required:
+                  - name
+                  - network
+                  type: object
+                maxItems: 50
+                minItems: 1
+                type: array
+              serviceConfiguration:
+                description: ServiceConfiguration contains fields that are configured
+                  on the generated DPUService.
+                properties:
+                  configPorts:
+                    description: |-
+                      ConfigPorts defines the desired state of port configurations for a DPUService.
+                      This struct determines how ports are exposed from the DPU to the host cluster.
+                      A DPUService can only have a single ServiceType across all ports.
+                    properties:
+                      ports:
+                        description: |-
+                          Ports defines the list of port configurations that will be exposed by the DPUService.
+                          Each port must specify a name, port number, and protocol.
+
+                          Constraints:
+                          - If ServiceType is "NodePort", ports may optionally specify a NodePort.
+                          - If ServiceType is "None" or "ClusterIP", ports **cannot** specify a NodePort.
+                        items:
+                          description: |-
+                            ConfigPort defines the configuration of a single port within a DPUService.
+                            Each port must have a unique name within the service.
+                          properties:
+                            name:
+                              description: |-
+                                Name is a unique identifier for the port within the DPUService.
+                                This name is used for reference inside the service.
+                              minLength: 1
+                              pattern: ^[a-z0-9-]+$
+                              type: string
+                            nodePort:
+                              description: |-
+                                NodePort is the external port assigned on each node in the cluster.
+                                If not set, Kubernetes will automatically allocate a NodePort.
+
+                                Constraints:
+                                - Can only be set when ServiceType is "NodePort".
+                                - Must be within the clusters valid NodePort range (Kubernetes default is 30000-32767).
+                              type: integer
+                            port:
+                              description: |-
+                                Port is the port number that will be exposed by the service.
+                                Must be within the valid range of TCP/UDP ports (1-65535).
+                              type: integer
+                            protocol:
+                              description: |-
+                                Protocol specifies the transport protocol used by the port.
+                                Supported values: TCP, UDP
+                              enum:
+                              - TCP
+                              - UDP
+                              type: string
+                          required:
+                          - name
+                          - port
+                          - protocol
+                          type: object
+                        type: array
+                      serviceType:
+                        default: NodePort
+                        description: |-
+                          ServiceType specifies the type of Kubernetes Service to create.
+                          All ports within this ConfigPorts will have the same ServiceType.
+                          The value is immutable and cannot be changed after creation.
+                          Supported values:
+                          - "NodePort": Exposes ports externally on a node.
+                          - "ClusterIP": Exposes ports internally within the cluster.
+                          - "None": Internal-only service with no cluster IP.
+                          Default: "NodePort"
+                        enum:
+                        - NodePort
+                        - ClusterIP
+                        - None
+                        type: string
+                        x-kubernetes-validations:
+                        - message: Value is immutable
+                          rule: self == oldSelf
+                    required:
+                    - ports
+                    - serviceType
+                    type: object
+                    x-kubernetes-validations:
+                    - message: nodePort can only be set when serviceType is NodePort
+                      rule: '!(self.serviceType != ''NodePort'' && self.ports.exists(p,
+                        has(p.nodePort)))'
+                  deployInCluster:
+                    description: DeployInCluster indicates if the DPUService Helm
+                      Chart will be deployed on the Host cluster. Default to false.
+                    type: boolean
+                  helmChart:
+                    description: |-
+                      HelmChart reflects the Helm related configuration. The user is supposed to configure values specific to that
+                      DPUServiceConfiguration used in a DPUDeployment and should not specify values that could be shared across multiple
+                      DPUDeployments using different DPUServiceConfigurations. These values are merged with values specified in the
+                      DPUServiceTemplate. In case of conflict, the DPUServiceConfiguration values take precedence.
+                    properties:
+                      values:
+                        description: Values specifies Helm values to be passed to
+                          Helm template, defined as a map. This takes precedence over
+                          Values.
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                    type: object
+                  serviceDaemonSet:
+                    description: ServiceDaemonSet contains settings related to the
+                      underlying DaemonSet that is part of the Helm chart
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: Annotations specifies annotations which are added
+                          to the ServiceDaemonSet.
+                        maxProperties: 50
+                        type: object
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: Labels specifies labels which are added to the
+                          ServiceDaemonSet.
+                        maxProperties: 50
+                        type: object
+                      resources:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: Resources specifies resources which are added
+                          to the ServiceDaemonSet.
+                        type: object
+                      updateStrategy:
+                        description: UpdateStrategy specifies the DeaemonSet update
+                          strategy for the ServiceDaemonset.
+                        properties:
+                          rollingUpdate:
+                            description: Rolling update config params. Present only
+                              if type = "RollingUpdate".
+                            properties:
+                              maxSurge:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: |-
+                                  The maximum number of nodes with an existing available DaemonSet pod that
+                                  can have an updated DaemonSet pod during during an update.
+                                  Value can be an absolute number (ex: 5) or a percentage of desired pods (ex: 10%).
+                                  This can not be 0 if MaxUnavailable is 0.
+                                  Absolute number is calculated from percentage by rounding up to a minimum of 1.
+                                  Default value is 0.
+                                  Example: when this is set to 30%, at most 30% of the total number of nodes
+                                  that should be running the daemon pod (i.e. status.desiredNumberScheduled)
+                                  can have their a new pod created before the old pod is marked as deleted.
+                                  The update starts by launching new pods on 30% of nodes. Once an updated
+                                  pod is available (Ready for at least minReadySeconds) the old DaemonSet pod
+                                  on that node is marked deleted. If the old pod becomes unavailable for any
+                                  reason (Ready transitions to false, is evicted, or is drained) an updated
+                                  pod is immediately created on that node without considering surge limits.
+                                  Allowing surge implies the possibility that the resources consumed by the
+                                  daemonset on any given node can double if the readiness check fails, and
+                                  so resource intensive daemonsets should take into account that they may
+                                  cause evictions during disruption.
+                                x-kubernetes-int-or-string: true
+                              maxUnavailable:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: |-
+                                  The maximum number of DaemonSet pods that can be unavailable during the
+                                  update. Value can be an absolute number (ex: 5) or a percentage of total
+                                  number of DaemonSet pods at the start of the update (ex: 10%). Absolute
+                                  number is calculated from percentage by rounding up.
+                                  This cannot be 0 if MaxSurge is 0
+                                  Default value is 1.
+                                  Example: when this is set to 30%, at most 30% of the total number of nodes
+                                  that should be running the daemon pod (i.e. status.desiredNumberScheduled)
+                                  can have their pods stopped for an update at any given time. The update
+                                  starts by stopping at most 30% of those DaemonSet pods and then brings
+                                  up new DaemonSet pods in their place. Once the new pods are available,
+                                  it then proceeds onto other DaemonSet pods, thus ensuring that at least
+                                  70% of original number of DaemonSet pods are available at all times during
+                                  the update.
+                                x-kubernetes-int-or-string: true
+                            type: object
+                          type:
+                            description: Type of daemon set update. Can be "RollingUpdate"
+                              or "OnDelete". Default is RollingUpdate.
+                            type: string
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: labels should not contain dpu.nvidia.com/ and should
+                        not end with dpu.nvidia.com
+                      rule: '!(has(self.labels) && (self.labels.exists(key, (key.contains(''dpu.nvidia.com/'')
+                        || key.endsWith(''dpu.nvidia.com'')) && !key.matches(''svc.dpu.nvidia.com/custom-flows'')))) '
+                    - message: annotations should not contain dpu.nvidia.com/ and
+                        should not end with dpu.nvidia.com
+                      rule: '!(has(self.annotations) && (self.annotations.exists(key,
+                        key.contains(''dpu.nvidia.com/'') || key.endsWith(''dpu.nvidia.com'')))) '
+                type: object
+                x-kubernetes-validations:
+                - message: configPorts cannot be set when deployInCluster is true
+                  rule: '!(has(self.deployInCluster) && self.deployInCluster && has(self.configPorts))'
+              upgradePolicy:
+                default: {}
+                description: UpgradePolicy contains the configuration for the upgrade
+                  process
+                properties:
+                  applyNodeEffect:
+                    default: true
+                    description: |-
+                      ApplyNodeEffect specifies if the node effect should be applied during the
+                      upgrade. It signals the reconciler that this object upgrade is disruptive.
+                      Hence a new revision of the object should be created and node effect should
+                      be applied.
+                    type: boolean
+                type: object
+            required:
+            - deploymentServiceName
+            - upgradePolicy
+            type: object
+            x-kubernetes-validations:
+            - message: interfaces are not supported when deploying in cluster
+              rule: '!has(self.interfaces) || (has(self.interfaces) && (!has(self.serviceConfiguration)
+                || self.serviceConfiguration.deployInCluster == false || !has(self.serviceConfiguration.deployInCluster)))'
+          status:
+            description: DPUServiceConfigurationStatus defines the observed state
+              of DPUServiceConfiguration
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

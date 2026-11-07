@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block title %}IP Address Search{% endblock %}
+
+{% block content %}
+<h1>IP Address Search</h1>
+
+{% if found.is_empty() %}
+	{% if !ip.is_empty() %}
+		<div class="card">
+			<p class="text-warning font-bold" style="font-size: 1.25rem; margin-bottom: 1rem;">No results found</p>
+			<p>The IP address <strong>{{ ip }}</strong> did not match any records.</p>
+		</div>
+	{% endif %}
+{% else %}
+
+<div class="card">
+	<p class="text-success font-bold" style="font-size: 1.25rem; margin-bottom: 1rem;">{{ ip }} appears in {{ found.len() }} place{% if found.len() != 1 %}s{% endif %}</p>
+	
+	<table class="sortable overview">
+		<thead>
+			<tr>
+				<th>Type</th>
+				<th>Details</th>
+			</tr>
+		</thead>
+		<tbody>
+			{% for m in found %}
+			<tr>
+				<td>
+					{% if !m.url.is_empty() %}
+						<span class="bubble">
+							<a href="{{ m.url }}">{{ m.name }}</a>
+						</span>
+					{% else %}
+						<span class="bubble">{{ m.name }}</span>
+					{% endif %}
+				</td>
+				<td>{{ m.message }}</td>
+			</tr>
+			{% endfor %}
+		</tbody>
+	</table>
+</div>
+
+{% endif %}
+
+{% endblock %}
+

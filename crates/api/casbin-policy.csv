@@ -1,0 +1,38 @@
+# This file is a Casbin policy. In Casbin, the semantics of the policy are
+# dictated by the model, and in particular the model and policy need to agree on
+# the count and order of the arguments to the `g` and `p` rules.
+#
+# This policy's model is compiled in to the carbide-api binary, and can be found
+# in the source code in the `src/auth/casbin_engine.rs` file. Currently, we're
+# using the `Rbac` model there.
+#
+# On `g` rules: These associate a principal (second column) with a role name
+# (third column). This causes the named role to also be looked up as if it were
+# a principal.
+#
+# On `p` rules: These allow a principal or role (second column) to perform the
+# named action (third column). Glob matching is available on the action field.
+#
+# The names of the principals can be found in `src/auth.rs` in the
+# `Principal::as_identifier()` method.
+
+
+# Map the carbide-dhcp SPIFFE ID to the carbide-dhcp role.
+# FIXME: verify that this is how these SPIFFE service identifiers look in reality.
+g, spiffe-service-id/carbide-dhcp, carbide-dhcp
+g, spiffe-service-id/carbide-dns, carbide-dns
+g, spiffe-machine-id, machine
+
+# Allow the carbide-dhcp role to call its methods.
+p, carbide-dhcp, forge/DiscoverDhcp
+
+# Same idea for carbide-dns.
+p, carbide-dns, forge/LookupRecord
+
+# Allow any certificate we trust to hit any Forge method.
+# FIXME: This should be removed once we have more fine-grained rule coverage.
+p, trusted-certificate, forge/*
+
+# Anonymous access to endpoints that don't modify state or expose any customer
+# or site data should be fine.
+p, anonymous, forge/Version

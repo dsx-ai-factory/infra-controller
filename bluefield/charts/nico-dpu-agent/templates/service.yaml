@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-dpu-agent.fullname" . }}
+  labels:
+    {{- include "nico-dpu-agent.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  internalTrafficPolicy: Local
+  selector:
+    {{- include "nico-dpu-agent.selectorLabels" . | nindent 4 }}
+    {{- with .Values.serviceDaemonSet.labels }}
+      {{- toYaml . | nindent 4 }}
+    {{- end }}
+  ports:
+    - name: metrics
+      protocol: TCP
+      port: {{ include "nico-dpu-agent.metricsPort" . | int }}
+      targetPort: {{ include "nico-dpu-agent.metricsPort" . | int }}

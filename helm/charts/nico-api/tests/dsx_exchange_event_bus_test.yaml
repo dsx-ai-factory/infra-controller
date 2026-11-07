@@ -1,0 +1,28 @@
+suite: DSX Exchange Event Bus deployment configuration
+templates:
+  - deployment.yaml
+tests:
+  - it: does not inject the event bus configuration by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_API_DSX_EXCHANGE_EVENT_BUS
+
+  - it: injects the event bus configuration without replacing extra environment variables
+    set:
+      dsxExchangeEventBusConfig: '{enabled=true,mqtt_endpoint="dsx-exchange",mqtt_broker_port=1883}'
+      extraEnv:
+        - name: DISABLE_TLS_ENFORCEMENT
+          value: "1"
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CARBIDE_API_DSX_EXCHANGE_EVENT_BUS
+            value: '{enabled=true,mqtt_endpoint="dsx-exchange",mqtt_broker_port=1883}'
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DISABLE_TLS_ENFORCEMENT
+            value: "1"

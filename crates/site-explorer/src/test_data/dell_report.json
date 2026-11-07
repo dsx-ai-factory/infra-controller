@@ -1,0 +1,96 @@
+{
+    "EndpointType": "Bmc",
+    "LastExplorationError": null,
+    "MachineId": null,
+    "Vendor": "Dell",
+    "Managers": [
+        {
+            "Id": "iDRAC.Embedded.1",
+            "EthernetInterfaces": [
+                {
+                    "Id": "NIC.1",
+                    "Description": "Management Network Interface",
+                    "InterfaceEnabled": true,
+                    "MacAddress": "c8:4b:d6:7a:a7:64"
+                }
+            ]
+        }
+    ],
+    "Systems": [
+        {
+            "Id": "System.Embedded.1",
+            "Manufacturer": "Dell Inc.",
+            "Model": "PowerEdge R750",
+            "SerialNumber": "MXFC40025U02UX",
+            "EthernetInterfaces": [
+                {
+                    "Id": "NIC.Embedded.2-1-1",
+                    "Description": "Embedded NIC 1 Port 2 Partition 1",
+                    "InterfaceEnabled": true,
+                    "MacAddress": "c8:4b:d6:7b:a6:9d"
+                },
+                {
+                    "Id": "NIC.Embedded.1-1-1",
+                    "Description": "Embedded NIC 1 Port 1 Partition 1",
+                    "InterfaceEnabled": true,
+                    "MacAddress": "c8:4b:d6:7b:a6:9c"
+                },
+                {
+                    "Id": "NIC.Slot.5-1",
+                    "Description": "NIC in Slot 5 Port 1",
+                    "InterfaceEnabled": false,
+                    "MacAddress": "b8:3f:d2:90:95:f4"
+                }
+            ],
+            "PcieDevices": [
+                {
+                    "Id": "",
+                    "Description": "",
+                    "FirmwareVersion": "1.2.3.4",
+                    "Manufacturer": "Acme",
+                    "Name": "Integrated Matrox G200EW3 Graphics",
+                    "PartNumber": "12345",
+                    "SerialNumber": "abcde123",
+                    "Status": {
+                        "State": "Enabled",
+                        "Health": "OK",
+                        "HealthRollup": "OK"
+                    }
+                }
+            ]
+        }
+    ],
+    "Chassis": [
+        {
+            "Id": "System.Embedded.1",
+            "NetworkAdapters": [
+                {
+                    "Id": "NIC.Embedded.1",
+                    "Manufacturer": "Broadcom Inc. and subsidiaries",
+                    "Model": null,
+                    "PartNumber": null,
+                    "SerialNumber": ""
+                },
+                {
+                    "Id": "NIC.Slot.5",
+                    "Manufacturer": "Mellanox Technologies",
+                    "Model": "BlueField-2 SmartNIC Main Card",
+                    "PartNumber": "MBF2H5",
+                    "SerialNumber": "MT2242XZ00PE"
+                },
+                {
+                    "Id": "InfiniBand.Slot.7",
+                    "Manufacturer": "Mellanox Technologies",
+                    "Model": null,
+                    "PartNumber": null,
+                    "SerialNumber": ""
+                }
+            ],
+            "Manufacturer": "Dell Inc.",
+            "Model": "PowerEdge R750",
+            "PartNumber": "01J4WFA05",
+            "SerialNumber": "MXFC40025U02UX"
+        }
+    ],
+    "service": []
+}

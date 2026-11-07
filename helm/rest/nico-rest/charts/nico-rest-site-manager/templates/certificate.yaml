@@ -1,0 +1,47 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if .Values.certificate.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.certificate.secretName }}
+  namespace: {{ include "nico-rest-site-manager.namespace" . }}
+  labels:
+    {{- include "nico-rest-site-manager.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.certificate.secretName }}
+  duration: {{ .Values.certificate.duration }}
+  renewBefore: {{ .Values.certificate.renewBefore }}
+  {{- if .Values.certificate.subject.organizations }}
+  subject:
+    organizations:
+      {{- toYaml .Values.certificate.subject.organizations | nindent 6 }}
+  {{- end }}
+  commonName: {{ .Values.certificate.commonName }}
+  isCA: false
+  privateKey:
+    algorithm: {{ .Values.certificate.privateKey.algorithm }}
+    encoding: {{ .Values.certificate.privateKey.encoding }}
+    size: {{ .Values.certificate.privateKey.size }}
+  usages:
+    - server auth
+    - client auth
+  dnsNames:
+    {{- if .Values.certificate.dnsNames }}
+    {{- toYaml .Values.certificate.dnsNames | nindent 4 }}
+    {{- else }}
+    - {{ include "nico-rest-site-manager.name" . }}
+    - {{ include "nico-rest-site-manager.name" . }}.{{ include "nico-rest-site-manager.namespace" . }}
+    - {{ include "nico-rest-site-manager.name" . }}.{{ include "nico-rest-site-manager.namespace" . }}.svc.cluster.local
+    - localhost
+    {{- end }}
+  {{- if .Values.certificate.uris }}
+  uris:
+    {{- toYaml .Values.certificate.uris | nindent 4 }}
+  {{- end }}
+  issuerRef:
+    name: {{ .Values.global.certificate.issuerRef.name }}
+    kind: {{ .Values.global.certificate.issuerRef.kind }}
+    group: {{ .Values.global.certificate.issuerRef.group }}
+{{- end }}

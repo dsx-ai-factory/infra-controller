@@ -1,0 +1,11 @@
+<form id="bmcreset_action" method="POST" action="/admin/explored-endpoint/{{ bmc_ip }}/bmc-reset">
+	<span class="action-spinner"></span><div>
+		<input title="Use IPMI instead of Redfish to reset the target BMC. ipmitool bmc reset requests may be silently ignored if the BMC is in lockdown mode." type="checkbox" id="use_ipmi" name="use_ipmi"
+			value="true">
+		<label for="use_ipmi">Use IPMI</label>
+	</div>
+	{% if let Some(bmc_action_redirect_to) = bmc_action_redirect_to %}
+	<input type="hidden" name="redirect_to" value="{{ bmc_action_redirect_to }}">
+	{% endif %}
+	<input type="submit" value="Reset BMC">
+</form>

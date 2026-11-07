@@ -1,0 +1,75 @@
+{{- if .Values.externalService.enabled }}
+{{- $replicas := int .Values.replicas }}
+{{- range $i := until $replicas }}
+{{- $perPod := $.Values.externalService.perPodAnnotations }}
+{{- $podAnnotations := dict }}
+{{- if and $perPod (gt (len $perPod) $i) }}
+{{- $podAnnotations = index $perPod $i }}
+{{- end }}
+{{- $annotations := include "nico.sharedIpAnnotations" (dict "service" $.Values.externalService "group" (printf "%s-instance-%d" (include "nico-dns.name" $) $i) "annotations" $podAnnotations) | fromYaml }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-dns.name" $ }}-external-udp-{{ $i }}
+  namespace: {{ include "nico-dns.namespace" $ }}
+  labels:
+    app.kubernetes.io/part-of: {{ include "nico-dns.name" $ }}-instance-{{ $i }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $.Values.externalService.type | default "LoadBalancer" }}
+  {{- with $.Values.externalService.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ . }}
+  {{- end }}
+  {{- with $.Values.externalService.ipFamilies }}
+  ipFamilies:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $.Values.externalService.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
+  selector:
+    app.kubernetes.io/name: {{ include "nico-dns.name" $ }}
+    statefulset.kubernetes.io/pod-name: {{ include "nico-dns.name" $ }}-{{ $i }}
+  ports:
+    - port: 53
+      targetPort: 53
+      name: udp
+      protocol: UDP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "nico-dns.name" $ }}-external-tcp-{{ $i }}
+  namespace: {{ include "nico-dns.namespace" $ }}
+  labels:
+    app.kubernetes.io/part-of: {{ include "nico-dns.name" $ }}-instance-{{ $i }}
+  {{- with $annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $.Values.externalService.type | default "LoadBalancer" }}
+  {{- with $.Values.externalService.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ . }}
+  {{- end }}
+  {{- with $.Values.externalService.ipFamilies }}
+  ipFamilies:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $.Values.externalService.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ . }}
+  {{- end }}
+  selector:
+    app.kubernetes.io/name: {{ include "nico-dns.name" $ }}
+    statefulset.kubernetes.io/pod-name: {{ include "nico-dns.name" $ }}-{{ $i }}
+  ports:
+    - port: 53
+      targetPort: 53
+      name: tcp
+      protocol: TCP
+{{- end }}
+{{- end }}

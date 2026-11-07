@@ -1,0 +1,119 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Function to mount the root device to a temporary mount point
+mount_tmp() {
+  if [ -e "$root_device" ]; then
+    TMP_MNT=/tmp/.bfmnt
+    mkdir -p "$TMP_MNT" 2>/dev/null
+    mount "$root_device" "$TMP_MNT"
+  fi
+}
+
+mount_etc() {
+  if [ -e "$root_device" ]; then
+    mkdir -p "/etc" 2>/dev/null
+    mount "$root_device" "/etc"
+  fi
+}
+
+# Function to enable networking
+enable_networking() {
+  for i in $(cat /proc/cmdline); do
+    if [ "$(echo "$i" | cut -c1-6)" = "bfnet=" ]; then
+      bfnet=$(echo "$i" | cut -d'=' -f2 | cut -d':' -f1)
+    fi
+  done
+
+  state=$(ip link show "$bfnet" | grep 'state' | awk '{print $9}')
+  if [ "$state" = "DOWN" ]; then
+    ip link set "$bfnet" up
+  else
+    ip addr show "$bfnet" | tee /dev/hvc0
+  fi
+
+  if [ -x /sbin/dhclient ]; then
+    /sbin/dhclient -lf "$TMP_MNT"/dhclient.leases -v "$bfnet"
+  fi
+
+  gateway=$(cat "$TMP_MNT"/dhclient.leases | grep routers | awk '{print $3}' | cut -d';' -f1)
+  dns=$(cat "$TMP_MNT"/dhclient.leases | grep domain-name-servers | awk '{print $3}' | cut -d';' -f1)
+
+  if [ -n "$gateway" ]; then
+    echo "Setting default route statically"  | tee /dev/hvc0
+    ip route add default via "$gateway" dev "$bfnet"
+  fi
+
+  if [ -n "$dns" ]; then
+    echo "Setting DNS statically"  | tee /dev/hvc0
+    echo "nameserver $dns" > /etc/resolv.conf
+  fi
+}
+
+umount_tmp() {
+  if [ -n "$TMP_MNT" ]; then
+    umount $TMP_MNT 2>/dev/null
+    rmdir $TMP_MNT 2>/dev/null
+  fi
+}
+
+# Function to run the kickstart script
+run_kickstart() {
+  for i in $(cat /proc/cmdline); do
+    if [ "$(echo "$i" | cut -c1-5)" = "bfks=" ]; then
+      bfks=$(echo "$i" | cut -d'=' -f2)
+    fi
+  done
+
+  if [ -n "$bfks" ]; then
+    cd /tmp
+    wget "$bfks"
+    bfks=$(basename "$bfks")
+    if [ -f "$bfks" ]; then
+      chmod +x "$bfks"
+      ./"$bfks"
+    else
+      echo "ERROR: Failed to download $bfks"
+    fi
+  fi
+}
+
+TMP_MNT=
+bfnet=
+
+# Function to display usage information
+usage() {
+  echo "syntax: bfpxe [-d <rootfs-device>]"
+}
+
+# Parse the arguments
+while getopts ":d:" opt; do
+  case $opt in
+    d)
+      root_device=$OPTARG
+      ;;
+    \?)
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+mount_tmp
+mount_etc
+enable_networking
+umount_tmp
+run_kickstart

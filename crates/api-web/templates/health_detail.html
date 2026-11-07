@@ -1,0 +1,30 @@
+<h3>Health</h3>
+
+<table class="detailsview">
+	<tr>
+		<th>Health Reports</th>
+		<td><a href="{{ health_reports_url }}">{{ health_reports_link_text }}</a></td>
+	</tr>
+	<tr><th>Report Source</th><td>{{ health.source }}</td></tr>
+	<tr><th>Report Observed At</th><td>{{ health.observed_at|option_fmt }}</td></tr>
+	<tr>
+		<th>Health Probe Alerts</th>
+		<td>
+			<a href="{{ health_reports_url }}">
+				{{ health.alerts|health_alerts_fmt(true, true)|safe }}
+			</a>
+		</td>
+	</tr>
+	<tr>
+		<th>Health Alert Classifications</th>
+		<td>{{ health.alerts|health_alert_classifications_fmt|safe }}</td>
+	</tr>
+	<tr>
+		<th>Health Reports</th>
+		<td>
+			<a href="{{ health_reports_url }}">
+				{{ health_sources|join("\n")|linebreaksbr|safe }}
+			</a>
+		</td>
+	</tr>
+</table>

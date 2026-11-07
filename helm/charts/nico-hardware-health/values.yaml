@@ -1,0 +1,124 @@
+## nico-hardware-health — Collects and reports hardware health metrics
+## Global settings (overridden by umbrella chart)
+global:
+  image:
+    repository: ""
+    tag: ""
+    pullPolicy: IfNotPresent
+  imagePullSecrets: []
+  certificate:
+    duration: 720h0m0s
+    renewBefore: 360h0m0s
+    privateKey:
+      algorithm: ECDSA
+      size: 384
+    issuerRef:
+      kind: ClusterIssuer
+      name: vault-nico-issuer
+      group: cert-manager.io
+  spiffe:
+    trustDomain: nico.local
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: site-controller
+
+## Override the release namespace (defaults to helm install -n <namespace>)
+namespaceOverride: ""
+
+replicas: 1
+
+## Must exceed hardware-health's `shutdown_timeout` (default 20s) so the pod
+## exits on its own; 30s leaves 10s of headroom. Rendering fails when it does not
+## exceed CARBIDE_HEALTH__SHUTDOWN_TIMEOUT (whole seconds only) or the 20s default.
+terminationGracePeriodSeconds: 30
+
+## Container resource requests and limits. Empty by default.
+resources: {}
+
+## Soft open-file limit applied before startup. Clamped to the runtime hard
+## limit when it exceeds it. null falls back to 65536; non-null values must be
+## a positive integer (validated at render).
+fileDescriptorLimit: 65536
+
+## Additional containers appended in list order after the nico-hardware-health
+## container, for example a telemetry collector sidecar. Omitted or empty lists
+## add no extra containers.
+## Quote tags (for example, tag: "1.10") to preserve their exact text.
+## YAML parses unquoted 1.10 as 1.1; unquoted 0 is treated as empty and falls
+## back to image. Use "0" to select the literal tag 0.
+## Set both non-empty `repository` + `tag` to build `image: <repository>:<tag>`;
+## they take precedence over `image`. If either is omitted or empty, supply `image`
+## (a tag or digest reference). No repository or tag defaults come from global.image.
+## Rendering fails if neither form supplies an image; the error identifies the list entry.
+## The chart consumes repository and tag; all other Kubernetes container fields
+## pass through unchanged, and mounts are not injected.
+## The chart sets no pod-level securityContext, so each extra container runs
+## with only the securityContext it declares itself and is not covered by any
+## chart hardening. Set securityContext on every extra container.
+extraContainers: []
+# extraContainers:
+#   - name: collector
+#     repository: <your-registry>/collector
+#     tag: "<tag>"
+#     # Alternatively: image: <your-registry>/collector:<tag>
+#     args: ["--config=/etc/collector/config.yaml"]
+#     volumeMounts:
+#       - name: collector-config
+#         mountPath: /etc/collector
+#         readOnly: true
+
+## Additional volumes appended verbatim to the pod spec after the spiffe volume.
+extraVolumes: []
+# extraVolumes:
+#   - name: collector-config
+#     configMap:
+#       name: collector-config
+
+service:
+  port: 9009
+
+certificate:
+  ## serviceName is used to auto-generate dnsNames and SPIFFE URIs based on the release namespace
+  serviceName: ""
+  spiffeServiceName: ""
+  identityNamespace: ""
+  ## Fully override the auto-generated dnsNames/uris. When empty, dnsNames and
+  ## uris are generated from serviceName + namespace (extraDnsNames/extraUris
+  ## are appended to the generated list).
+  dnsNames: []
+  uris: []
+  extraDnsNames: []
+  extraUris: []
+
+env:
+  RUST_BACKTRACE: "full"
+  RUST_LIB_BACKTRACE: "0"
+  NICO_HEALTH__COLLECTORS__LOGS__ENABLED: "true"
+  ## Keep direct Prometheus collection independent of optional OTLP analyzer targets.
+  CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED: "true"
+
+livenessProbe:
+  httpGet:
+    path: /livez
+    port: 9009
+    scheme: HTTP
+  initialDelaySeconds: 20
+  periodSeconds: 300
+  failureThreshold: 3
+  successThreshold: 1
+
+## Scrapes /metrics: service operational metrics (discovery, collectors, components,
+## including the optional BMC latency histogram).
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 25s
+
+## Scrapes /telemetry: hardware sensor samples exported by the Prometheus sink
+## (temperature, power, fans, and other Redfish-derived gauge readings per endpoint).
+## Requires CARBIDE_HEALTH__SINKS__PROMETHEUS__ENABLED=true. High cardinality;
+## enable only when Prometheus retention and scrape budget allow it.
+telemetryServiceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 25s

@@ -1,0 +1,34 @@
+{
+   "id": "0b1c53a0-a27e-4714-98d7-0cd3bc579db2",
+   "name": "demo-vpc",
+   "description": "Demo tenant VPC",
+   "org": "tenant-org-name",
+   "infrastructureProviderId": "16060041-f146-43fe-8c82-be48460b5583",
+   "tenantId": "aaf3cb83-8785-4265-a3bd-61e828f87db8",
+   "siteId": "bd4692bd-da95-410e-911a-d492fe2d35f8",
+   "controllerVpcId": "b1e32ce0-49d4-48c7-bdc9-ecc1623c02f4",
+   "networkVirtualizationType": "FNN",
+   "status": "Ready",
+   "statusHistory": [
+      {
+         "status": "Ready",
+         "message": "VPC successfully provisioned on Site",
+         "created": "2023-07-06T16:20:44.490895Z",
+         "updated": "2023-07-06T16:20:44.490895Z"
+      },
+      {
+         "status": "Provisioning",
+         "message": "initiated VPC provisioning via Site Agent",
+         "created": "2023-07-06T16:20:43.63647Z",
+         "updated": "2023-07-06T16:20:43.63647Z"
+      },
+      {
+         "status": "Pending",
+         "message": "received vpc creation request, pending pairing",
+         "created": "2023-07-06T16:20:43.335989Z",
+         "updated": "2023-07-06T16:20:43.335989Z"
+      }
+   ],
+   "created": "2023-07-06T16:20:43.335989Z",
+   "updated": "2023-07-06T16:20:44.497876Z"
+}

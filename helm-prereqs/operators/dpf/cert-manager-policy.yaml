@@ -1,0 +1,70 @@
+# =============================================================================
+# operators/dpf/cert-manager-policy.yaml — DPF CertificateRequestPolicy + RBAC
+#
+# Only required on clusters that run cert-manager approver-policy (CRD
+# policy.cert-manager.io/CertificateRequestPolicy). On such clusters no CSR is
+# approved unless a policy whitelists it, and every DPF CSR hangs Pending
+# without this. setup.sh applies this file only when the CRD exists — the
+# stock helm-prereqs cert-manager does NOT install approver-policy (its
+# built-in approver auto-approves; see operators/values/cert-manager.yaml).
+#
+# Wildcards are intentional per docs/manuals/dpf.md §1.4; tighten in
+# production with guidance from the DPF team.
+# =============================================================================
+---
+apiVersion: policy.cert-manager.io/v1alpha1
+kind: CertificateRequestPolicy
+metadata:
+  name: dpf-approval-policy
+spec:
+  selector:
+    namespace:
+      matchNames: [dpf-operator-system]
+    issuerRef:
+      name: '*'
+      kind: '*'
+      group: '*'
+  allowed:
+    commonName:
+      value: '*'
+    dnsNames:
+      values: ['*']
+    ipAddresses:
+      values: ['*']
+    uris:
+      values: ['*']
+    emailAddresses:
+      values: ['*']
+    isCA: true
+    usages:
+      - server auth
+      - client auth
+      - digital signature
+      - key encipherment
+      # isCA: true certs get cert-manager's auto-added CA usages; whitelist them
+      # too or approver-policy denies the CA CSR (usages must be a subset).
+      - cert sign
+      - crl sign
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cert-manager-policy:dpf-approval-policy
+rules:
+  - apiGroups: [policy.cert-manager.io]
+    resources: [certificaterequestpolicies]
+    verbs: [use]
+    resourceNames: [dpf-approval-policy]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cert-manager-policy:dpf-approval-policy
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cert-manager-policy:dpf-approval-policy
+subjects:
+  - kind: ServiceAccount
+    name: cert-manager
+    namespace: cert-manager

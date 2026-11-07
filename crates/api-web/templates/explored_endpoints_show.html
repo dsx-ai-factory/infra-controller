@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+
+{% block title %}{{ filter_name }} Explored Endpoints{% endblock %}
+
+{% block content %}
+{% if active_vendor_filter == "all" && !is_errors_only %}
+<div id="json"><a href="/admin/explored-endpoint.json">JSON</a></div>
+{% endif %}
+
+<h1>{{ filter_name }} Explored Endpoints{% if is_errors_only %} - Errors{% endif %} ({{ page.total_items() }})</h1>
+
+{% include "missing_credentials_warning.html" %}
+{% include "site_explorer_run_status.html" %}
+
+<details {% if active_vendor_filter != "all" || is_errors_only %}open{% endif %}>
+	<summary>Show filters</summary>
+	<form class="filter-container" action="" method="get">
+		<div class="filter-item">
+				<label for="vendor-filter">Vendor</label>
+				<select id="vendor-filter" name="vendor-filter">
+						<option value="all">All</option>
+						{% for v in vendors %}
+						<option value="{{ v|lower }}" {% if active_vendor_filter == v.to_lowercase() %}selected{% endif %}>{{ v|capitalize }}</option>
+						{% endfor %}
+						<option value="none"{% if active_vendor_filter == "none" %}selected{% endif %}>None</option>
+				</select>
+		</div>
+		<div class="filter-item">
+			<label for="errors-only">Errors Only</label>
+			<select id="errors-only" name="errors-only">
+				<option value=false {% if !is_errors_only %}selected{% endif %}>False</option>
+				<option value=true {% if is_errors_only %}selected{% endif %}>True</option>
+			</select>
+		</div>
+		<div class="filter-item">
+				<input type="submit" value="Update">
+		</div>
+	</form>
+</details>
+
+<table class="sortable overview">
+	<thead>
+		<tr>
+			<th>Address</th>
+			<th>Endpoint Type</th>
+			<th>BMC MAC</th>
+			<th>Vendor</th>
+			<th title="The MachineId that is calculated based on exploration data">Derived Machine ID</th>
+			<th>Serial Numbers</th>
+			<th>Power State</th>
+			<th>Preingestion State</th>
+			<th data-sortable-type="numeric">Exploration Latency</th>
+			<th>Last Exploration Error</th>
+			<th>Exploration Pause</th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for ep in endpoints %}
+		<tr>
+			<td><a href="/admin/explored-endpoint/{{ ep.address }}">{{ ep.address }}</a></td>
+			<td>{{ ep.endpoint_type }}</td>
+			<td>{{ ep.bmc_mac_addrs|join("\n")|escape|linebreaksbr|safe }}</td>
+			<td>{{ ep.vendor }}</td>
+			<td>{{ ep.machine_id|machine_id_link|safe }}</td>
+			<td>{{ ep.serial_numbers|join("\n")|escape|linebreaksbr|safe }}</td>
+			<td>{{ ep.power_states|join("\n")|escape|linebreaksbr|safe }}</td>
+			<td>{{ ep.preingestion_state }}</td>
+			{% match ep.last_exploration_latency %}
+			{% when Some with (latency) %}
+			<td data-value="{{ latency }}">{{ latency }}s</td>
+			{% else %}
+			<td data-value="0"></td>
+			{% endmatch %}
+			<td>
+				{% if ep.has_exploration_error %}
+				<div style="max-width: 400px; max-height: 100px; overflow: auto; border: 1px solid var(--border-color); border-radius: 4px; padding: 0.5rem;">
+					<pre style="margin: 0; white-space: pre-wrap; font-size: 0.8rem;"><code>{{ ep.last_exploration_error|pretty_json }}</code></pre>
+				</div>
+				<form id="clearlasterror_action" method="POST" action="/admin/explored-endpoint/{{ ep.address }}/clear-last-error">
+					<button type="submit">Clear</button>
+				</form>
+				{% endif %}
+			</td>
+			<td>{% if ep.exploration_paused_for_dpf %}DPU provisioning; resumes automatically when all Site Explorer suppressions are cleared{% endif %}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+	<tfoot>
+		<tr>
+			<th>{{ endpoints.len() }} item{% if endpoints.len() != 1 %}s{% endif %}</th>
+			<th></th>
+			<th></th>
+			<th></th>
+			<th></th>
+			<th></th>
+			<th></th>
+			<th></th>
+			<th></th>
+			<th></th>
+			<th></th>
+		</tr>
+	</tfoot>
+</table>
+
+{% include "pages_footer.html" %}
+
+{% endblock %}

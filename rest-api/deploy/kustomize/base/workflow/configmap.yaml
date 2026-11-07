@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# nico-rest-workflow configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nico-rest-workflow-config
+  labels:
+    app: nico-rest-workflow
+data:
+  config.yaml: |
+    env:
+      dev: true
+
+    log:
+      level: debug
+
+    db:
+      host: postgres.postgres
+      port: 5432
+      name: nico
+      user: nico
+      password: nico
+
+    temporal:
+      host: temporal-frontend.temporal
+      port: 7233
+      serverName: server.temporal.local
+      namespace: cloud
+      queue: cloud
+      tls:
+        enabled: true
+        certPath: /var/secrets/temporal/certs/tls.crt
+        keyPath: /var/secrets/temporal/certs/tls.key
+        caPath: /var/secrets/temporal/certs/ca.crt
+        disableHostVerification: false
+      encryptionKeyPath: /var/secrets/temporal/encryption-key
+
+    siteManager:
+      svcEndpoint: "https://nico-rest-site-manager:8100/v1/site"
+
+    ngc:
+      api:
+        baseUrl: ""
+
+    notifications:
+      slack:
+        webhookURL: ""
+
+    metrics:
+      enabled: true
+      port: 9360
+
+    tracing:
+      enabled: false
+      serviceName: nico-rest-workflow

@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: temporal-client-cloud-cert
+  namespace: {{ include "nico-rest-common.namespace" . }}
+  labels:
+    {{- include "nico-rest-common.labels" . | nindent 4 }}
+spec:
+  secretName: temporal-client-cloud-certs
+  duration: {{ .Values.certificate.temporalClientCloud.duration }}
+  renewBefore: {{ .Values.certificate.temporalClientCloud.renewBefore }}
+  subject:
+    organizations:
+      - NVIDIA
+  commonName: temporal-client
+  isCA: false
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  usages:
+    - client auth
+  dnsNames:
+    {{- toYaml .Values.certificate.temporalClientCloud.dnsNames | nindent 4 }}
+  {{- if .Values.certificate.temporalClientCloud.uris }}
+  uris:
+    {{- toYaml .Values.certificate.temporalClientCloud.uris | nindent 4 }}
+  {{- end }}
+  issuerRef:
+    {{- toYaml .Values.global.certificate.issuerRef | nindent 4 }}

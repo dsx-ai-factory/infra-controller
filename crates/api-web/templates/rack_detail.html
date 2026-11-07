@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block title %}Rack {{ id }}{% endblock %}
+
+{% block content %}
+<div id="json">
+	<a id="json-link" href="">JSON</a>
+</div>
+<h1>Rack {{ id }}</h1>
+
+<h2>Info</h2>
+<table class="detailsview">
+	<tr>
+		<th>ID</th>
+		<td>{{ id }}</td>
+	</tr>
+	<tr>
+		<th>Version</th>
+		<td>{{ version }}</td>
+	</tr>
+</table>
+
+{{ lifecycle_detail|safe }}
+
+<h2>Metadata</h2>
+{{ metadata_detail|safe }}
+
+{{ health_detail|safe }}
+
+<h2>Managed Rack Components</h2>
+
+<h3>Compute Trays (Host machines)</h3>
+<table class="detailsview">
+	<thead>
+		<tr>
+			<th>ID</th>
+		</tr>
+	</thead>
+	<tbody>
+	{% for machine_id in associated_machines %}
+		<tr>
+			<td>{{ machine_id|machine_id_link|safe }}</td>
+		</tr>
+	{% endfor %}
+	</tbody>
+</table>
+
+<h3>Switches</h3>
+<table class="detailsview">
+	<thead>
+		<tr>
+			<th>ID</th>
+			<th>Primary</th>
+		</tr>
+	</thead>
+	<tbody>
+	{% for switch in associated_switches %}
+		<tr>
+			<td>{{ switch.id|switch_id_link|safe }}</td>
+			<td>{% if switch.is_primary %}Primary{% endif %}</td>
+		</tr>
+	{% endfor %}
+	</tbody>
+</table>
+
+<h3>Power Shelves</h3>
+<table class="detailsview">
+	<thead>
+		<tr>
+			<th>ID</th>
+		</tr>
+	</thead>
+	<tbody>
+	{% for ps_id in associated_power_shelves %}
+		<tr>
+			<td>{{ ps_id|power_shelf_id_link|safe }}</td>
+		</tr>
+	{% endfor %}
+	</tbody>
+</table>
+
+<h2>History</h2>
+<a href="/admin/rack/{{ id }}/state-history">Open State History on separate page</a>
+{{ history|safe }}
+
+{% endblock %}

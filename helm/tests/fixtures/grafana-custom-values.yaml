@@ -1,0 +1,10 @@
+grafanaDashboards:
+  enabled: true
+  namespace: monitoring
+  folder: Infrastructure/NICo
+  folderAnnotation: sidecar.example.com/folder
+  labels:
+    grafana_dashboard: null
+    sidecar.example.com/dashboard: "true"
+  annotations:
+    example.com/owner: sre

@@ -1,0 +1,10 @@
+{% set display_state = state|state_with_substate_label %}
+{% if display_state.to_lowercase().contains("failed") || display_state.to_lowercase().contains("error") %}
+	<span class="bubble error">{{ display_state }}{% if time_in_state_above_sla %} ⏱️{% endif %}</span>
+{% else if time_in_state_above_sla %}
+	<span class="bubble warning">{{ display_state }} ⏱️</span>
+{% else if display_state == "Ready" || display_state == "Assigned/Ready" %}
+	<span class="bubble success">{{ display_state }}</span>
+{% else %}
+	<span class="bubble">{{ display_state }}</span>
+{% endif %}

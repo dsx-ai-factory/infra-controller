@@ -1,0 +1,682 @@
+name: Build Artifacts (Boot & Ephemeral Images)
+
+on:
+  workflow_call:
+    inputs:
+      target_login:
+        description: 'Allow authenticating to the build-container host when it differs from the extras host (publish runs only)'
+        required: false
+        default: false
+        type: boolean
+      arch:
+        description: 'Target architecture: x86_64 or aarch64'
+        required: true
+        type: string
+      cargo_make_task:
+        description: 'Cargo make task to execute'
+        required: true
+        type: string
+      build_type:
+        description: 'Build type: boot, ephemeral, or package (compile-and-package only, uploads just target/debs)'
+        required: true
+        type: string
+      prereq_artifact:
+        description: 'Artifact holding the prerequisite files for an ephemeral build. Defaults to the full boot-artifacts archive; point it at a package-artifacts archive to fetch only the forge-scout .deb the mkosi build actually consumes.'
+        required: false
+        default: ''
+        type: string
+      build_container:
+        description: 'Build container image to use (for container mode only)'
+        required: false
+        type: string
+        default: ''
+      runner:
+        description: 'Runner label to use'
+        required: true
+        type: string
+      version:
+        description: 'Build version string (used for debian packages)'
+        required: true
+        type: string
+      use_container:
+        description: 'Run in container (true) or directly on runner (false for mkosi)'
+        required: false
+        default: true
+        type: boolean
+      sa_enablement:
+        description: 'Enable SA enablement'
+        required: false
+        default: false
+        type: boolean
+      inject_extras:
+        description: 'Whether or not to inject the extras during image build'
+        required: false
+        default: false
+        type: boolean
+      extras_container:
+        description: 'Location of additional artifacts to place into the built images'
+        required: false
+        # An empty string, not boolean false: this is a string input, so a
+        # boolean default reaches callers as the literal text "false" and any
+        # job omitting the input then tries to docker login to a registry
+        # named "false". An empty value engages the `nvcr.io` fallback
+        # instead.
+        default: ''
+        type: string
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: recursive
+          fetch-depth: 0  # Full git history needed for git describe
+
+      # Resolve or download validation Python before the long build, so an
+      # unsupported runner fails immediately. Shell-mode mkosi uses packages
+      # installed for the distro interpreter, so keep this runtime off PATH.
+      - name: Prepare Python for output validation
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          update-environment: false
+
+      - name: Initialize submodules at pinned commits
+        run: |
+          set -e
+
+          # Try standard git submodule update first (respects pinned commits)
+          echo "Attempting git submodule update..."
+          git submodule update --init --recursive 2>&1 || echo "⚠️  git submodule command failed"
+
+          # Check if submodules were actually cloned (command can succeed but not clone anything)
+          if [ -f "pxe/ipxe/upstream/src/Makefile" ] && [ -d "pxe/mkosi/.git" ]; then
+            echo "✅ Submodules initialized via git submodule"
+          else
+            echo "⚠️  Submodules not present after git submodule, using manual fallback..."
+
+            # Get the pinned commits from the Git tree (matches GitLab's GIT_SUBMODULE_STRATEGY: recursive)
+            IPXE_COMMIT=$(git ls-tree HEAD pxe/ipxe/upstream | awk '{print $3}')
+            MKOSI_COMMIT=$(git ls-tree HEAD pxe/mkosi | awk '{print $3}')
+
+            # Fallback: If Git tree doesn't have submodule commits (sanitized repo),
+            # read from .gitmodules which has FIXME hardcoded commits
+            if [ -z "$IPXE_COMMIT" ]; then
+              echo "⚠️  Git tree missing submodule metadata, reading from .gitmodules..."
+              IPXE_COMMIT=$(git config -f .gitmodules --get submodule.pxe/ipxe/upstream.commit)
+              MKOSI_COMMIT=$(git config -f .gitmodules --get submodule.mkosi.commit)
+            fi
+
+            echo "📌 iPXE pinned to: ${IPXE_COMMIT}"
+            echo "📌 mkosi pinned to: ${MKOSI_COMMIT}"
+
+            # Clone iPXE at the specific pinned commit
+            if [ ! -f "pxe/ipxe/upstream/src/Makefile" ]; then
+              echo "📦 Cloning iPXE at pinned commit..."
+              rm -rf pxe/ipxe/upstream
+              git clone https://github.com/ipxe/ipxe.git pxe/ipxe/upstream
+              cd pxe/ipxe/upstream
+              git checkout ${IPXE_COMMIT}
+              cd ../../..
+            fi
+
+            # Clone mkosi at the specific pinned commit
+            if [ ! -d "pxe/mkosi/.git" ]; then
+              echo "📦 Cloning mkosi at pinned commit..."
+              rm -rf pxe/mkosi
+              git clone https://github.com/systemd/mkosi.git pxe/mkosi
+              cd pxe/mkosi
+              git checkout ${MKOSI_COMMIT}
+              cd ../..
+            fi
+          fi
+
+          # Verify submodules are present
+          [ -f "pxe/ipxe/upstream/src/Makefile" ] || { echo "❌ iPXE missing"; exit 1; }
+          [ -d "pxe/mkosi" ] || { echo "❌ mkosi missing"; exit 1; }
+
+          # Show what we got (for debugging)
+          echo "✅ iPXE commit: $(cd pxe/ipxe/upstream && git rev-parse --short HEAD)"
+          echo "✅ mkosi commit: $(cd pxe/mkosi && git rev-parse --short HEAD)"
+          echo "✅ Submodules ready"
+
+      # For ephemeral builds, download the prerequisite artifacts first
+      - name: Download prerequisite boot artifacts
+        if: inputs.build_type == 'ephemeral'
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.prereq_artifact != '' && inputs.prereq_artifact || format('boot-artifacts-{0}-{1}', inputs.arch, github.run_id) }}
+          path: .
+        continue-on-error: false
+
+      # Setup mkosi environment for ephemeral builds (runs on shell)
+      - name: Setup mkosi environment
+        if: inputs.build_type == 'ephemeral'
+        uses: ./.github/actions/setup-mkosi-environment
+        with:
+          rust-version: '1.96.0'
+          arch: ${{ inputs.arch }}
+
+      # Persist mkosi's downloaded distro packages between runs. Restore-keys let
+      # a run start from the most recent cache for this arch even when the
+      # profile set has changed, which is the common case.
+      #
+      # restore/save rather than actions/cache so the save can be limited to main;
+      # see "Save mkosi package cache" below for why.
+      - name: Restore mkosi package cache
+        id: mkosi-cache
+        if: inputs.build_type == 'ephemeral'
+        uses: actions/cache/restore@v4
+        with:
+          path: pxe/.mkosi-package-cache
+          key: mkosi-pkgs-${{ inputs.arch }}-${{ hashFiles('pxe/mkosi.conf', 'pxe/mkosi.profiles/**/mkosi.conf') }}
+          restore-keys: |
+            mkosi-pkgs-${{ inputs.arch }}-
+
+      # Setup Docker for container-based builds
+      - name: Derive registry hosts
+        id: registry-hosts
+        env:
+          EXTRAS: ${{ inputs.extras_container }}
+          BUILD: ${{ inputs.build_container }}
+        run: |
+          echo "extras_host=${EXTRAS%%/*}" >> "$GITHUB_OUTPUT"
+          echo "build_host=${BUILD%%/*}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Docker authentication (source)
+        if: inputs.use_container == true || inputs.inject_extras == true
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ steps.registry-hosts.outputs.extras_host || 'nvcr.io' }}
+          username: ${{ secrets.NICO_SOURCE_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_SOURCE_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      # the build container ref points at the target registry after a rebuild;
+      # log in there too when it is a different host.
+      - name: Setup Docker authentication (target)
+        if: inputs.target_login == true && inputs.use_container == true && inputs.build_container != '' && steps.registry-hosts.outputs.build_host != steps.registry-hosts.outputs.extras_host
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ steps.registry-hosts.outputs.build_host }}
+          username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      - name: Pull carbide-extras container
+        if: inputs.inject_extras == true && inputs.extras_container != ''
+        env:
+          EXTRAS_CONTAINER: ${{ inputs.extras_container }}
+        run: |
+          echo "Pulling carbide-extras container ${EXTRAS_CONTAINER}"
+          docker pull "${EXTRAS_CONTAINER}"
+
+      - name: Pull build container
+        if: inputs.use_container == true && inputs.build_container != ''
+        env:
+          BUILD_CONTAINER: ${{ inputs.build_container }}
+        run: |
+          echo "Pulling build container: ${BUILD_CONTAINER}"
+          docker pull "${BUILD_CONTAINER}"
+
+      - name: Log out of source registry
+        env:
+          EXTRAS: ${{ inputs.extras_container }}
+          BUILD: ${{ inputs.build_container }}
+        run: |
+          # Later build tasks pull public images from the same host (e.g.
+          # nvcr.io/nvidia/doca in the bfb flow); a scoped credential denies
+          # those pulls while anonymous access succeeds. All authenticated
+          # pulls are done at this point.
+          if [ -n "${BUILD}" ]; then docker logout "${BUILD%%/*}" 2>/dev/null || true; fi
+          if [ -n "${EXTRAS}" ]; then docker logout "${EXTRAS%%/*}" 2>/dev/null || true; fi
+
+      - name: Set up environment variables
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "CARGO_HOME=${{ github.workspace }}/cargo" >> $GITHUB_ENV
+          echo "CARGO_INCREMENTAL=0" >> $GITHUB_ENV
+          echo "CACHE_DIRECTORY=${{ github.workspace }}/cache" >> $GITHUB_ENV
+          echo "APT_CACHE_DIR=${{ github.workspace }}/apt" >> $GITHUB_ENV
+          echo "LOGNAME=root" >> $GITHUB_ENV
+          echo "KEA_BIN_PATH=/usr/bin" >> $GITHUB_ENV
+          echo "KEA_INCLUDE_PATH=/usr/include/kea" >> $GITHUB_ENV
+          echo "REPO_ROOT=${{ github.workspace }}" >> $GITHUB_ENV
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "FORGE_CA=prod" >> $GITHUB_ENV
+
+          # Add cargo and sbin to PATH (needed for mkosi)
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          echo "/sbin" >> $GITHUB_PATH
+          echo "/usr/sbin" >> $GITHUB_PATH
+
+      - name: Create cache directories
+        env:
+          ARCH: ${{ inputs.arch }}
+        run: |
+          mkdir -p ${{ github.workspace }}/cargo
+          mkdir -p ${{ github.workspace }}/cache
+          mkdir -p ${{ github.workspace }}/apt
+          mkdir -p "pxe/static/blobs/internal/${ARCH}"
+
+      - name: Display build information
+        env:
+          BUILD_TYPE: ${{ inputs.build_type }}
+          ARCH: ${{ inputs.arch }}
+          CARGO_MAKE_TASK: ${{ inputs.cargo_make_task }}
+          VERSION: ${{ inputs.version }}
+          RUNNER: ${{ inputs.runner }}
+          BUILD_CONTAINER: ${{ inputs.build_container }}
+        run: |
+          echo "============================================"
+          echo "Building: ${BUILD_TYPE} artifacts"
+          echo "============================================"
+          echo "Architecture: ${ARCH}"
+          echo "Task: ${CARGO_MAKE_TASK}"
+          echo "Version: ${VERSION}"
+          echo "Runner: ${RUNNER}"
+          echo "Use container: ${{ inputs.use_container }}"
+          if [ -n "${BUILD_CONTAINER}" ]; then
+            echo "Container: ${BUILD_CONTAINER}"
+          fi
+          echo "Working directory: $(pwd)"
+          echo "============================================"
+
+      # TODO(ajf): This is NVIDIA specific stuff and really needs to be genericized
+      - name: Inject carbide_extras content into build
+        if: inputs.inject_extras == true && inputs.extras_container != ''
+        env:
+          CARBIDE_EXTRAS_CONTAINER: ${{ inputs.extras_container }}
+          ARCH: ${{ inputs.arch }}
+        run: |
+          set -euo pipefail
+          PROFILE_DIR="pxe/mkosi.profiles/scout-oss-${ARCH}"
+
+          container_id=$(docker create "${CARBIDE_EXTRAS_CONTAINER}" /bin/true)
+
+          echo "Extracting Sources from container..."
+          mkdir -p pxe/.scout-extras
+          docker cp "${container_id}:/extras/." pxe/.scout-extras
+
+          echo "Removing temporary container..."
+          docker rm "${container_id}"
+
+          echo "Copying files into mkosi.profiles"
+          mkdir -p "${PROFILE_DIR}/mkosi.extra/build-output/extras"
+          cp -av pxe/.scout-extras/. "${PROFILE_DIR}/mkosi.extra/build-output/extras"
+
+          echo "Locating Lenovo mnv_cli in extras content"
+          MNV_CLI_SOURCE=""
+          for candidate in \
+            "pxe/.scout-extras/opt/forge/bin/mnv_cli" \
+            "pxe/.scout-extras/opt/forge/mnv_cli"; do
+            if [ -f "${candidate}" ]; then
+              MNV_CLI_SOURCE="${candidate}"
+              break
+            fi
+          done
+
+          if [ -z "${MNV_CLI_SOURCE}" ]; then
+            echo "ERROR: Could not locate mnv_cli in extracted extras content"
+            echo "Checked:"
+            echo "  - pxe/.scout-extras/opt/forge/bin/mnv_cli"
+            echo "  - pxe/.scout-extras/opt/forge/mnv_cli"
+            exit 1
+          fi
+
+          echo "Staging Lenovo mnv_cli directly into scout rootfs overlay from ${MNV_CLI_SOURCE}"
+          mkdir -p "${PROFILE_DIR}/mkosi.extra/opt/forge/bin"
+          cp -av "${MNV_CLI_SOURCE}" "${PROFILE_DIR}/mkosi.extra/opt/forge/bin/mnv_cli"
+
+          echo "Copying libnss debs"
+          mkdir -p "pxe/debs"
+          cp -v pxe/.scout-extras/debs/{arm64,amd64}/*.deb pxe/debs
+
+          echo "Copying nvinit configs"
+          mkdir -p "pxe/nvinit_setup"
+          cp -av pxe/.scout-extras/nvinit_setup/. pxe/nvinit_setup
+
+          echo "Appending postinstall extras script"
+          if [ -f "pxe/.scout-extras/postinst-extras.sh" ]; then
+            cat pxe/.scout-extras/postinst-extras.sh >> "${PROFILE_DIR}/mkosi.postinst.chroot"
+            echo "✅ Postinst script appended successfully"
+          else
+            echo "⚠  Warning: postinst-extras.sh not found in extras"
+          fi
+
+          echo
+          echo "============================="
+          echo "Extracted extras content:"
+          ls -lah pxe/.scout-extras || echo "No extras directory"
+          echo "Carbide extras setup complete"
+
+      - name: Verify required extras binaries are present
+        if: inputs.inject_extras == true && inputs.extras_container != ''
+        env:
+          ARCH: ${{ inputs.arch }}
+        run: |
+          set -euo pipefail
+          PROFILE_DIR="pxe/mkosi.profiles/scout-oss-${ARCH}"
+
+          REQUIRED_BINARIES=(
+            "${PROFILE_DIR}/mkosi.extra/opt/forge/bin/mnv_cli"
+          )
+
+          MISSING=0
+          for bin in "${REQUIRED_BINARIES[@]}"; do
+            if [ ! -f "${bin}" ]; then
+              echo "ERROR: Required binary missing after extras staging: ${bin}"
+              echo "This binary is needed for Lenovo M.2 NVMe 2-Bay RAID Kit cleanup."
+              echo "Ensure the extras container includes all required Lenovo tools."
+              MISSING=1
+            else
+              echo "OK: ${bin}"
+            fi
+          done
+
+          if [ "${MISSING}" -eq 1 ]; then
+            exit 1
+          fi
+
+      # The container's sccache store is cache/sccache in the workspace, so a
+      # cold one recompiles the whole Rust tree on the bfb critical path. One
+      # restore here and one save on main replace a cache request per
+      # compilation, which held the repository at the cache API rate limit.
+      # Cargo.lock and rust-toolchain.toml key the entry, so a toolchain bump
+      # saves a fresh one instead of keeping an entry that can no longer hit.
+      # The prefix lets a lockfile bump start from the previous entry.
+      - name: Restore sccache
+        id: sccache
+        if: inputs.use_container == true
+        uses: actions/cache/restore@v4
+        with:
+          path: cache/sccache
+          key: sccache-${{ inputs.cargo_make_task }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: sccache-${{ inputs.cargo_make_task }}-
+
+      # Run build in container mode (for boot artifacts)
+      - name: Run cargo make task (container mode)
+        if: inputs.use_container == true
+        env:
+          VERSION: ${{ inputs.version }}
+          BUILD_CONTAINER: ${{ inputs.build_container }}
+          CARGO_MAKE_TASK: ${{ inputs.cargo_make_task }}
+        run: |
+          # Set up environment variables for container (matches GitLab CI global variables)
+          ENV_ARGS=(
+            -e CARGO_HOME=/workspace/cargo
+            -e CARGO_INCREMENTAL=0
+            -e RUSTC_WRAPPER=sccache
+            -e SCCACHE_DIR=/workspace/cache/sccache
+            -e CACHE_DIRECTORY=/workspace/cache
+            -e APT_CACHE_DIR=/workspace/apt
+            -e LOGNAME=root
+            -e KEA_BIN_PATH=/usr/bin
+            -e KEA_INCLUDE_PATH=/usr/include/kea
+            -e REPO_ROOT=/workspace
+            -e VERSION
+            -e CARGO_MAKE_TASK
+            -e FORGE_CA=prod
+            -e HOST_OWNER="$(id -u):$(id -g)"
+          )
+
+          echo "============================================"
+          echo "Running in container: ${BUILD_CONTAINER}"
+          echo "VERSION=${VERSION}"
+          echo "FORGE_CA=prod"
+          echo "============================================"
+
+          EXTRA_DOCKER_ARGS=""
+          if [[ "${CARGO_MAKE_TASK}" == "build-boot-artifacts-bfb-ci" ]]; then
+            # bfb build runs `docker pull/save` (see pxe/Makefile.toml tasks.bfb-hbn-pull/export).
+            # Allow docker CLI inside the build container to talk to the host Docker daemon.
+            EXTRA_DOCKER_ARGS="${EXTRA_DOCKER_ARGS} -v /var/run/docker.sock:/var/run/docker.sock"
+
+            # Also pass Docker auth config so pulls from NVCR work.
+            # Copy to temp dir (not :ro) because docker buildx needs to write to DOCKER_CONFIG/buildx
+            if [[ -d "${HOME}/.docker" ]]; then
+              DOCKER_CONFIG_TMP="/tmp/docker-config-$$"
+              mkdir -p "${DOCKER_CONFIG_TMP}"
+              cp -r "${HOME}/.docker/"* "${DOCKER_CONFIG_TMP}/" 2>/dev/null || true
+              EXTRA_DOCKER_ARGS="${EXTRA_DOCKER_ARGS} -v ${DOCKER_CONFIG_TMP}:/docker-config -e DOCKER_CONFIG=/docker-config"
+            else
+              echo "⚠️  ${HOME}/.docker not found; NVCR pulls inside the build container may fail"
+            fi
+          fi
+
+          # Only set SA_ENABLEMENT when explicitly enabled (not setting it allows cargo-make
+          # to use env_not_set conditions correctly)
+          SA_ENABLEMENT_ARG=""
+          if [[ "${{ inputs.sa_enablement }}" == "true" ]]; then
+            SA_ENABLEMENT_ARG="--env SA_ENABLEMENT=1"
+          fi
+
+          # Run cargo make in container. It runs as root, so sccache leaves its
+          # store owned by root and the save step below could not read it back.
+          # The trap hands it to the runner user on the way out, failed or not.
+          docker run --rm \
+            -v "${{ github.workspace }}:/workspace" \
+            ${EXTRA_DOCKER_ARGS} \
+            -w /workspace \
+            "${ENV_ARGS[@]}" \
+            "${BUILD_CONTAINER}" \
+            bash -c "trap 'chown -R \${HOST_OWNER} /workspace/cache/sccache 2>/dev/null || true' EXIT; . /workspace/dev/docker/sccache-cache.sh && sccache_setup && git config --global --add safe.directory /workspace && git config --global --add safe.directory /workspace/pxe/ipxe/upstream && echo 'VERSION in container: '\${VERSION} && cargo make --cwd pxe ${SA_ENABLEMENT_ARG} \"\${CARGO_MAKE_TASK}\" && sccache_report"
+
+      # Only main saves, like the other sccache entries: other refs can read
+      # main's entry but not each other's. A run whose Cargo.lock matches the
+      # restored entry skips the upload. Runs only after a successful build so
+      # an empty or partial directory is never saved under the key.
+      - name: Save sccache
+        if: inputs.use_container == true && github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: cache/sccache
+          key: ${{ steps.sccache.outputs.cache-primary-key }}
+
+      # Run build directly on runner (for ephemeral images with mkosi)
+      - name: Run cargo make task (shell mode)
+        if: inputs.use_container == false
+        env:
+          VERSION: ${{ inputs.version }}
+          CARGO_MAKE_TASK: ${{ inputs.cargo_make_task }}
+        run: |
+          set -euo pipefail
+
+          # Configure git to trust the workspace
+          git config --global --add safe.directory "${{ github.workspace }}" || true
+
+          # Source cargo environment
+          source $HOME/.cargo/env
+
+          # Only set SA_ENABLEMENT when explicitly enabled
+          SA_ENABLEMENT_ARG=""
+          if [[ "${{ inputs.sa_enablement }}" == "true" ]]; then
+            SA_ENABLEMENT_ARG="--env SA_ENABLEMENT=1"
+          fi
+
+          echo "============================================"
+          echo "Running on shell runner (mkosi mode)"
+          echo "VERSION=${VERSION}"
+          echo "SA_ENABLEMENT=${{ inputs.sa_enablement }}"
+          echo "============================================"
+
+          # Run the cargo make task with full output
+          cargo make --cwd pxe ${SA_ENABLEMENT_ARG} "${CARGO_MAKE_TASK}" 2>&1 | tee build.log
+
+          echo "Build completed!"
+
+      # Only main saves this cache. Pull requests restore main's copy through the
+      # restore-keys prefix above but cannot add one of their own: entries are
+      # ref-scoped, so concurrent pull requests starting cold each used to store
+      # a byte-identical duplicate, crowding out main's sccache.
+      #
+      # Saved on failure too: the packages mkosi downloaded are valid whether or
+      # not the image build that followed succeeded.
+      - name: Save mkosi package cache
+        if: ${{ !cancelled() && inputs.build_type == 'ephemeral' && github.ref == 'refs/heads/main' && steps.mkosi-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: pxe/.mkosi-package-cache
+          key: ${{ steps.mkosi-cache.outputs.cache-primary-key }}
+
+      # Activate the runtime prepared above only after both build paths finish.
+      # This exports the matching Python library directory beside its PATH.
+      - name: Activate Python for output validation
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Validate output contract
+        env:
+          ARCH: ${{ inputs.arch }}
+          BUILD_TYPE: ${{ inputs.build_type }}
+          CARGO_MAKE_TASK: ${{ inputs.cargo_make_task }}
+          REPOSITORY_ROOT: ${{ github.workspace }}
+        run: |
+          python3 .github/ci/validate_boot_outputs.py \
+            --cargo-make-task "${CARGO_MAKE_TASK}" \
+            --build-type "${BUILD_TYPE}" \
+            --arch "${ARCH}" \
+            --root "${REPOSITORY_ROOT}"
+
+      - name: Verify Scout networking in built loader and full image
+        if: inputs.build_type == 'ephemeral'
+        env:
+          ARCH: ${{ inputs.arch }}
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          bash .github/ci/verify_scout_network.sh "pxe/static/blobs/internal/${ARCH}"
+
+      - name: Verify firmware supervisor in built Scout image
+        if: inputs.build_type == 'ephemeral'
+        env:
+          ARCH: ${{ inputs.arch }}
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+
+          SCOUT_IMAGE="pxe/static/blobs/internal/${ARCH}/scout.squashfs"
+          SUPERVISOR="opt/forge/mlx-firmware-supervisor"
+          VALIDATION_ROOT="$(mktemp -d)"
+          trap 'rm -rf -- "${VALIDATION_ROOT}"' EXIT
+
+          unsquashfs -no-progress -d "${VALIDATION_ROOT}/root" "${SCOUT_IMAGE}" "${SUPERVISOR}"
+          if [[ ! -f "${VALIDATION_ROOT}/root/${SUPERVISOR}" ||
+                -L "${VALIDATION_ROOT}/root/${SUPERVISOR}" ||
+                ! -x "${VALIDATION_ROOT}/root/${SUPERVISOR}" ]]; then
+            echo "ERROR: /${SUPERVISOR} must be an executable regular file in ${SCOUT_IMAGE}"
+            exit 1
+          fi
+          echo "OK: /${SUPERVISOR} is executable in ${SCOUT_IMAGE}"
+
+      - name: Verify mnv_cli exists in built scout image
+        if: inputs.build_type == 'ephemeral' && inputs.inject_extras == true
+        env:
+          ARCH: ${{ inputs.arch }}
+        run: |
+          set -euo pipefail
+
+          SCOUT_IMAGE="pxe/static/blobs/internal/${ARCH}/scout.squashfs"
+          if [ ! -f "${SCOUT_IMAGE}" ]; then
+            echo "ERROR: Missing scout image artifact: ${SCOUT_IMAGE}"
+            exit 1
+          fi
+
+          if unsquashfs -l "${SCOUT_IMAGE}" 2>/dev/null | grep -Eq '^squashfs-root/opt/forge/bin/mnv_cli$'; then
+            echo "OK: /opt/forge/bin/mnv_cli is present in ${SCOUT_IMAGE}"
+          else
+            echo "ERROR: /opt/forge/bin/mnv_cli missing from ${SCOUT_IMAGE}"
+            echo "Lenovo RAID Kit cleanup will fail without this binary."
+            exit 1
+          fi
+
+      # Upload production artifacts only after the validator and every other
+      # applicable check pass. Boot failures remain in the Actions step logs;
+      # ephemeral failures also upload `build.log` through the separate
+      # best-effort step below.
+      #
+      # Upload the files used by later jobs. The package-scout task writes
+      # forge-scout to `target/debs/`; the ephemeral job downloads that deb
+      # (x86_64 still downloads the full boot bundle), and
+      # `copy-forge-scout-*` in `pxe/Makefile.toml` copies the deb
+      # into mkosi staging. `Dockerfile.release-artifacts-*` consumes
+      # `pxe/static/blobs/internal/`. Excluding the rest of the cargo target tree
+      # and `mkosi.profiles` staging inputs removes ~14 GB of upload/download
+      # from the critical path. Keep the unstripped aarch64 Scout and firmware
+      # supervisor binaries so crashes from the shipped image can still be
+      # symbolicated.
+      #
+      # `compression-level: 0` avoids re-deflating squashfs, BFB, and EFI files
+      # that are already compressed. `if-no-files-found` checks the path list as
+      # a whole; the validator above is what requires each contract entry.
+      - name: Upload artifacts
+        if: ${{ success() && inputs.build_type != 'package' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.build_type }}-artifacts-${{ inputs.arch }}-${{ github.run_id }}
+          path: |
+            pxe/static/blobs/
+            target/debs/
+            target/aarch64-unknown-linux-gnu/release/forge-scout
+            target/aarch64-unknown-linux-gnu/release/mlx-firmware-supervisor
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      # The package build's deliverable is the `.deb` set alone, not the
+      # unstripped binary (its symbolication copy ships in the boot artifact).
+      # Staged under a directory that reproduces the repo-relative layout,
+      # same pattern as the bluefield binaries in ci.yaml: upload-artifact
+      # roots the archive at the least common ancestor of what it matched, so
+      # uploading `target/debs/` directly would drop the `target/` prefix the
+      # pxe copy-forge-scout tasks expect after download.
+      - name: Stage package artifacts for upload
+        if: ${{ success() && inputs.build_type == 'package' }}
+        run: |
+          mkdir -p package-artifacts-dir/target
+          cp -r target/debs package-artifacts-dir/target/debs
+
+      # `.deb` payloads are already compressed, so `compression-level: 0`.
+      # The name matches the release-artifacts download pattern
+      # (`*-<arch>-<run_id>`), which is harmless: the carrier images COPY only
+      # `pxe/static/blobs/`.
+      - name: Upload package artifacts
+        if: ${{ success() && inputs.build_type == 'package' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.build_type }}-artifacts-${{ inputs.arch }}-${{ github.run_id }}
+          path: package-artifacts-dir/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload build log on failure
+        if: failure() && inputs.build_type == 'ephemeral'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.build_type }}-build-log-${{ inputs.arch }}-${{ github.run_id }}
+          path: build.log
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Display build summary
+        env:
+          BUILD_TYPE: ${{ inputs.build_type }}
+          ARCH: ${{ inputs.arch }}
+          CARGO_MAKE_TASK: ${{ inputs.cargo_make_task }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "============================================"
+          echo "✅ ${BUILD_TYPE} Build Completed"
+          echo "============================================"
+          echo "Architecture: ${ARCH}"
+          echo "Task: ${CARGO_MAKE_TASK}"
+          echo "Version: ${VERSION}"
+          echo "Container mode: ${{ inputs.use_container }}"
+          echo ""
+          echo "Generated Artifacts:"
+          find "pxe/static/blobs/internal/${ARCH}" -type f 2>/dev/null || echo "No blobs found"
+          echo "============================================"

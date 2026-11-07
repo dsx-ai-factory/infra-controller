@@ -1,0 +1,40 @@
+# Example configuration for carbide-dsx-exchange-consumer service
+
+# ==============================================================================
+# MQTT Configuration - DSX Exchange Event Bus
+# ==============================================================================
+
+[mqtt]
+endpoint = "mqtt.forge"
+port = 1884
+client_id = "carbide-dsx-exchange-consumer"
+topic_prefix = "BMS/v1"
+# Maximum number of messages to buffer before dropping (default: 1024)
+queue_capacity = 1024
+
+# ==============================================================================
+# Cache Configuration - TTL settings (uses moka for automatic eviction)
+# ==============================================================================
+
+[cache]
+# Time-to-live for metadata cache entries (default: 1 hour)
+metadata_ttl = "1h"
+# Time-to-live for value state cache entries used for deduplication (default: 1 hour)
+value_state_ttl = "1h"
+
+# ==============================================================================
+# Carbide API Configuration - for submitting rack health reports
+# ==============================================================================
+
+[carbide_api]
+root_ca = "/var/run/secrets/spiffe.io/ca.crt"
+client_cert = "/var/run/secrets/spiffe.io/tls.crt"
+client_key = "/var/run/secrets/spiffe.io/tls.key"
+api_url = "https://nico-api.nico-system.svc.cluster.local:1079"
+
+# ==============================================================================
+# Metrics
+# ==============================================================================
+
+[metrics]
+endpoint = "0.0.0.0:9009"

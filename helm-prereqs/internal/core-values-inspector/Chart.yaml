@@ -1,0 +1,5 @@
+apiVersion: v2
+name: core-values-inspector
+description: Internal helper for parsing NICo Core values in setup.sh
+type: application
+version: 0.1.0

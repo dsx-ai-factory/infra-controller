@@ -1,0 +1,345 @@
+# iPXE Script Templates
+# These templates are loaded at compile time into DefaultIpxeScriptRenderer
+
+templates:
+  - id: ddbf83c0-a753-5fde-96c1-6b74e9c9db10
+    name: raw-ipxe
+    description: Allows for raw iPXE scripting but provides base_url, console and arch variables
+    visibility: public
+    required_params:
+      - ipxe
+    reserved_params:
+      - base_url
+      - console
+    template: |
+      #!ipxe
+
+      # 1. Discover running architecture:
+      iseq ${buildarch} x86_64 && set arch x86_64 && goto arch_done ||
+      iseq ${buildarch} arm64 && set arch aarch64 && goto arch_done ||
+      set arch unknown
+      :arch_done
+      echo
+      echo Identified architecture: ${buildarch} -> ${arch}
+      # Safety check:
+      iseq ${arch} unknown && echo "Unsupported architecture." && sleep 5 && exit 1 ||
+
+      # 2. Get NICo Core generated reserved values (base URL for local artifacts and console specific to hardware):
+      set base_url {{base_url}}
+      set console {{console}}
+
+      # 3. Insert raw iPXE:
+      {{ipxe}}
+
+  - id: ea756ddd-add3-5e42-a202-44bfc2d5aac2
+    name: qcow-image
+    description: Generic multi-platform template iPXE script for qcow images
+    visibility: public
+    required_params:
+      - image_url
+    reserved_params:
+      - base_url
+      - console
+    template: |
+      #!ipxe
+
+      # 1. Discover running architecture:
+      iseq ${buildarch} x86_64 && set arch x86_64 && goto arch_done ||
+      iseq ${buildarch} arm64 && set arch aarch64 && goto arch_done ||
+      set arch unknown
+      :arch_done
+      echo
+      echo Identified architecture: ${buildarch} -> ${arch}
+      # Safety check:
+      iseq ${arch} unknown && echo "Unsupported architecture." && sleep 5 && exit 1 ||
+
+      # 2. Get NICo Core generated reserved values (base URL for local artifacts and console specific to hardware):
+      set base_url {{base_url}}
+      set console {{console}}
+
+      # 3. Boot qcow-imager with parameters:
+      chain ${base_url}/internal/${arch}/qcow-imager.efi loglevel=7 console=tty0 pci=realloc=off console=${console} image_url={{image_url}} {{extra}}
+      boot
+
+  - id: 5c7cfa88-6003-5ac0-b4c0-201eb5b28153
+    name: kernel-only
+    description: Boot kernel/EFI without initrd (ESXi, etc.)
+    visibility: public
+    required_params:
+      - kernel_params
+    required_artifacts:
+      - kernel
+    reserved_params:
+      - base_url
+      - console
+    template: |
+      #!ipxe
+      set base_url {{base_url}}
+      set console {{console}}
+
+      kernel {{kernel}} {{kernel_params}} {{extra}}
+      boot
+
+  - id: c4b1d4f6-69ba-5f55-90cd-ab2acd002475
+    name: kernel-initrd
+    description: Generic kernel + initrd boot (Ubuntu autoinstall, NKE, BCM scout, etc.)
+    visibility: public
+    required_params:
+      - kernel_params
+    required_artifacts:
+      - kernel
+      - initrd
+    reserved_params:
+      - base_url
+      - console
+    template: |
+      #!ipxe
+      set base_url {{base_url}}
+      set console {{console}}
+
+      kernel {{kernel}} {{kernel_params}} {{extra}}
+      initrd {{initrd}}
+      boot
+
+  - id: a7850943-e3cd-5e9a-93ca-9e12f52939cc
+    name: ubuntu-autoinstall
+    description: Template for Ubuntu autoinstall
+    visibility: public
+    required_artifacts:
+      - install_iso
+      - kernel
+      - initrd
+    reserved_params:
+      - base_url
+      - console
+    template: |
+      #!ipxe
+      # Ubuntu autoinstall template
+      kernel {{kernel}} BOOTIF=01-${netX/mac:hexhyp} ip=dhcp fb=false url={{install_iso}} autoinstall ds=nocloud-net;s=${tenant-cloudinit-url} console=tty0 console={{console}},115200 initrd=initrd.magic
+      initrd {{initrd}}
+      boot
+
+  - id: ecaf197e-d60e-50f8-a598-c844afccc24d
+    name: dgx-os
+    description: Template for DGX OS autoinstall
+    visibility: public
+    required_params:
+      - force_platform
+    required_artifacts:
+      - install_iso
+      - kernel
+      - initrd
+      - ai_cfg
+    reserved_params:
+      - base_url
+      - console
+    template: |
+      #!ipxe
+      kernel {{kernel}} fsck.mode=skip autoinstall ip=dhcp BOOTIF=01-${netX/mac:hexhyp} url={{install_iso}} nvme-core.multipath=n nouveau.modeset=0 console=tty0 console={{console}},115200 nooemconfig force-platform={{force_platform}} force-ai={{ai_cfg}} ds=nocloud-net;s=${tenant-cloudinit-url}
+      initrd {{initrd}}
+      boot
+
+  # The kickstart URL comes from the ${dpu-cloudinit-url} iPXE variable that the
+  # boot script sets, not from a stored `cloudinit_url` parameter as it once
+  # did. The cloud-init routes are split by consumer (dpu/, tenant/, scout/), so
+  # a URL captured into an OS definition when the endpoint had no prefix now
+  # points at a route that does not exist, and nothing would report the 404 --
+  # the DPU would simply never get a kickstart. Reading it from the boot script
+  # means the value cannot go stale, needs no migration if the prefixes move
+  # again, and matches character-for-character what
+  # PxeInstructions::get_pxe_instruction_for_arch emits for the same machine.
+  # A `cloudinit_url` left over on an existing definition is now unconsumed and
+  # is swept into {{extra}}; it is inert, and can be removed at leisure.
+  - id: fd4f4413-18c4-5159-8cc0-7a64be5f98b9
+    name: discovery-scout-aarch64-dpu
+    description: Discovery Scout for ARM DPU with initrd
+    reserved_params:
+      - base_url
+      - console
+    required_params:
+      - cli_cmd
+      - bfnet
+      - machine_id
+      - server_uri
+    template: |
+      #!ipxe
+      set base_url {{base_url}}
+
+      kernel ${base_url}/internal/aarch64/carbide.efi initrd=initrd.img console=tty0 console=ttyS0,115200 console=ttyAMA0 console=hvc0 ip=dhcp cli_cmd={{cli_cmd}} bfnet={{bfnet}} bfks=${dpu-cloudinit-url}/user-data machine_id={{machine_id}} server_uri={{server_uri}} {{extra}} ||
+      imgfetch --name initrd.img ${base_url}/internal/aarch64/carbide.root ||
+      boot ||
+
+  - id: d88257b0-f40a-5714-a1ed-1cb8f6237b9b
+    name: discovery-scout-aarch64
+    description: Discovery Scout for ARM Host
+    reserved_params:
+      - base_url
+      - console
+    required_params:
+      - mac
+      - cli_cmd
+      - machine_id
+      - server_uri
+    template: |
+      #!ipxe
+      kernel {{base_url}}/internal/aarch64/scout.efi mac={{mac}} console=tty0 console=ttyS0,115200 pci=realloc=off iommu=off cli_cmd={{cli_cmd}} machine_id={{machine_id}} server_uri={{server_uri}} ds=nocloud;s=${scout-cloudinit-url} {{extra}} ||
+      boot ||
+
+  - id: bbfbd1d9-9a19-5ce0-ba56-65d75eb225a1
+    name: discovery-scout-x86_64
+    description: Discovery Scout for x86_64
+    reserved_params:
+      - base_url
+    required_params:
+      - mac
+      - serial_console
+      - cli_cmd
+      - machine_id
+      - server_uri
+    template: |
+      #!ipxe
+      kernel {{base_url}}/internal/x86_64/scout.efi mac={{mac}} console=tty0 console={{serial_console}} pci=realloc=off iommu=off cli_cmd={{cli_cmd}} machine_id={{machine_id}} server_uri={{server_uri}} ds=nocloud;s=${scout-cloudinit-url} {{extra}} ||
+      boot ||
+
+  - id: cfff2862-bb55-55c6-bf66-237b5bcf09b3
+    name: error-instructions
+    description: Error instructions template
+    required_params:
+      - machine_id
+      - interface_id
+      - current_state
+    template: |
+      #!ipxe
+      echo Machine ID: {{machine_id}}
+      echo Interface ID: {{interface_id}}
+      echo Current state: {{current_state}}
+      echo Could not continue boot due to invalid state ||
+      sleep 5 ||
+      exit ||
+
+  - id: f5dd027a-d3d9-5128-9709-96d2af192aef
+    name: exit-instructions
+    description: Exit instructions template
+    required_params:
+      - machine_id
+      - interface_id
+      - current_state
+    template: |
+      #!ipxe
+      echo Machine ID: {{machine_id}}
+      echo Interface ID: {{interface_id}}
+      echo Current state: {{current_state}}
+      echo This state assumes an OS is provisioned and will exit into the OS in 5 seconds. To re-run iPXE instructions and OS installation, trigger a reboot request with flag rebootWithCustomIpxe/boot_with_custom_ipxe set. ||
+      sleep 5 ||
+      exit ||
+
+  - id: dd8c8306-9047-5fc0-9c78-3f520bdf7247
+    name: unknown-host
+    description: Unknown host template
+    required_params:
+      - architecture
+    template: |
+      #!ipxe
+      echo this is an unknown {{architecture}} host, not PXE booting ||
+      sleep 5 ||
+      exit ||
+
+  - id: 9bfffafc-4ffa-53b8-b9c4-81d1b01e7257
+    name: whoami
+    description: Who am I iPXE script to print machine information
+    template: |
+      #!ipxe
+      set esc:hex 1b
+      set bold ${esc:string}[1m
+      set boldoff ${esc:string}[22m
+
+      set nvgreen ${esc:string}[32m
+      set white ${esc:string}[37m
+
+      echo ${nvgreen}${bold}Machine Information:
+      echo ${nvgreen}${bold}MAC...........${boldoff}${white} ${netX/mac}
+      echo ${nvgreen}${bold}IP............${boldoff}${white} ${netX/ip}
+      echo ${nvgreen}${bold}Gateway.......${boldoff}${white} ${netX/gateway}
+      echo ${nvgreen}${bold}DNS...........${boldoff}${white} ${netX/dns}
+      echo ${nvgreen}${bold}IPv6..........${boldoff}${white} ${netX/ip6}
+      echo ${nvgreen}${bold}IPv6 Gateway..${boldoff}${white} ${netX/gateway6}
+      echo ${nvgreen}${bold}IPv6 DNS......${boldoff}${white} ${netX/dns6}
+      echo ${nvgreen}${bold}Hostname......${boldoff}${white} ${hostname}
+      echo ${nvgreen}${bold}Domain........${boldoff}${white} ${domain}
+      echo ${nvgreen}${bold}Next Server...${boldoff}${white} ${next-server}
+      echo ${nvgreen}${bold}Architecture..${boldoff}${white} ${buildarch}
+      echo ${nvgreen}${bold}Platform......${boldoff}${white} ${platform}
+      echo ${nvgreen}${bold}Manufacturer..${boldoff}${white} ${manufacturer}
+      echo ${nvgreen}${bold}Product.......${boldoff}${white} ${product}
+      echo ${nvgreen}${bold}Serial........${boldoff}${white} ${serial}
+      echo
+      echo Press any key to continue...
+      prompt
+      exit
+
+  - id: 9f1b388e-cf6d-52a2-a20a-19eeeaca2f47
+    name: openshift-coreos
+    description: OpenShift/Assisted Installer - CoreOS live boot with initrd before kernel
+    visibility: public
+    required_artifacts:
+      - initrd
+      - kernel
+    required_params:
+      - kernel_params
+    reserved_params:
+      - base_url
+      - console
+    template: |
+      #!ipxe
+      initrd --name initrd {{initrd}}
+      kernel {{kernel}} initrd=initrd {{kernel_params}} {{extra}}
+      boot
+
+  - id: 7be5f99b-9719-53cb-9733-7d674c02e887
+    name: chain-efi
+    description: Chain to arbitrary EFI binary (firmware update, custom loader, etc.)
+    visibility: public
+    required_params:
+      - efi_url
+    reserved_params:
+      - base_url
+      - console
+    template: |
+      #!ipxe
+      set base_url {{base_url}}
+      set console {{console}}
+
+      chain {{efi_url}} {{extra}}
+      boot
+
+  - id: d38ae593-8f92-5869-9605-e6d8b2359e7d
+    name: loader-rootfs
+    description: Chain loader.efi with newrootfs (custom root filesystem)
+    visibility: public
+    required_params:
+      - loader_url
+      - newrootfs_url
+    reserved_params:
+      - base_url
+      - console
+    template: |
+      #!ipxe
+      set base_url {{base_url}}
+      set console {{console}}
+
+      chain {{loader_url}} newrootfs={{newrootfs_url}} {{extra}}
+      boot
+
+  - id: 2d2e5533-b2dc-5d7a-9754-bb85ff7dc33b
+    name: ipxe-shell
+    description: Drop into iPXE shell for debugging
+    template: |
+      #!ipxe
+      shell
+
+  - id: c816a939-0993-5ebf-82dd-5227ad215703
+    name: carbide-menu-static-ipxe
+    description: NICo Menu
+    visibility: public
+    # Populated from pxe/ipxe/local/embed.ipxe by DefaultIpxeScriptRenderer::new.
+    template: ""

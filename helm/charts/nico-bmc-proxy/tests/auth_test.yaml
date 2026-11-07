@@ -1,0 +1,44 @@
+suite: proxy authorization config (default nico, override carbide/forge)
+templates:
+  - configmap.yaml
+release:
+  namespace: nico-system
+tests:
+  - it: defaults trust domain, base paths, and the API principal to nico
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: 'spiffe_trust_domain = "nico\.local"'
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: '"/nico-system/sa/"'
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: 'allowed_principals = \["spiffe-service-id/nico-api"'
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: '"spiffe-service-id/nico-api" = \[\s+"GET /redfish/v1/Registries/%23\*",\s+"/\*\*",\s+\]'
+
+  - it: flips trust domain, base-path namespace, and the API principal to forge/carbide
+    documentIndex: 0
+    set:
+      global:
+        spiffe:
+          trustDomain: forge.local
+      auth:
+        namespace: forge-system
+        apiPrincipal: carbide-api
+    asserts:
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: 'spiffe_trust_domain = "forge\.local"'
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: '"/forge-system/sa/"'
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: 'allowed_principals = \["spiffe-service-id/carbide-api"'
+      - matchRegex:
+          path: data["nico-bmc-proxy.toml"]
+          pattern: '"spiffe-service-id/carbide-api" = \[\s+"GET /redfish/v1/Registries/%23\*",\s+"/\*\*",\s+\]'

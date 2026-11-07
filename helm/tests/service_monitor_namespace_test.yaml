@@ -1,0 +1,74 @@
+suite: ServiceMonitor namespace selectors
+templates:
+  - charts/nico-dhcp/templates/service-monitor.yaml
+  - charts/nico-hardware-health/templates/service-monitor.yaml
+  - charts/nico-hardware-health/templates/telemetry-service-monitor.yaml
+  - charts/nico-pxe/templates/service-monitor.yaml
+  - charts/nico-ssh-console-rs/templates/service-monitor.yaml
+release:
+  namespace: custom-nico
+tests:
+  - it: nico-dhcp selects Services in the release namespace
+    template: charts/nico-dhcp/templates/service-monitor.yaml
+    set:
+      nico-dhcp.serviceMonitor.enabled: true
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: custom-nico
+      - equal:
+          path: spec.namespaceSelector.matchNames
+          value:
+            - custom-nico
+
+  - it: nico-hardware-health selects Services in the release namespace
+    template: charts/nico-hardware-health/templates/service-monitor.yaml
+    set:
+      nico-hardware-health.serviceMonitor.enabled: true
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: custom-nico
+      - equal:
+          path: spec.namespaceSelector.matchNames
+          value:
+            - custom-nico
+
+  - it: nico-hardware-health telemetry selects Services in the release namespace
+    template: charts/nico-hardware-health/templates/telemetry-service-monitor.yaml
+    set:
+      nico-hardware-health.telemetryServiceMonitor.enabled: true
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: custom-nico
+      - equal:
+          path: spec.namespaceSelector.matchNames
+          value:
+            - custom-nico
+
+  - it: nico-pxe selects Services in the release namespace
+    template: charts/nico-pxe/templates/service-monitor.yaml
+    set:
+      nico-pxe.serviceMonitor.enabled: true
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: custom-nico
+      - equal:
+          path: spec.namespaceSelector.matchNames
+          value:
+            - custom-nico
+
+  - it: nico-ssh-console-rs selects Services in the release namespace
+    template: charts/nico-ssh-console-rs/templates/service-monitor.yaml
+    set:
+      nico-ssh-console-rs.serviceMonitor.enabled: true
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: custom-nico
+      - equal:
+          path: spec.namespaceSelector.matchNames
+          value:
+            - custom-nico

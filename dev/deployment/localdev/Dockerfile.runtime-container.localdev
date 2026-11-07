@@ -1,0 +1,49 @@
+# syntax = docker/dockerfile:1.4
+
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+FROM debian:bookworm-slim as carbide
+
+RUN mkdir -p /opt/carbide/migrations && \
+  mkdir -p /opt/carbide/pxe/templates && \
+  mkdir -p /opt/carbide/static \
+  mkdir -p /forge-boot-artifacts/blobs/internal/aarch64
+
+
+# This is required for kea pid file
+RUN mkdir -p /var/run/kea
+
+RUN --mount=type=cache,target=/var/cache/apt apt-get update && apt-get install -y --no-install-recommends \
+  postgresql-client-15 \
+  ca-certificates \
+  curl \
+  iproute2 \
+  iputils-ping \
+  kea-dev \
+  kea-dhcp4-server \
+  kea-dhcp6-server \
+  libssl-dev \
+  libudev1 \
+  ca-certificates \
+  curl \
+  ipmitool \
+  iproute2 \
+  iputils-ping \
+  libudev1 \
+  tpm2-tools \
+  nginx \
+  libtss2-dev

@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block title %}iPXE Template {{ tmpl.name }}{% endblock %}
+
+{% block content %}
+<h1>iPXE Template: {{ tmpl.name }}</h1>
+
+<table class="detailsview">
+	<tr><th>Name</th><td>{{ tmpl.name }}</td></tr>
+	<tr><th>Description</th><td>{{ tmpl.description }}</td></tr>
+	<tr><th>Visibility</th><td>{{ tmpl.visibility|ipxe_template_visibility_fmt }}</td></tr>
+</table>
+
+{% if !tmpl.required_params.is_empty() %}
+<h2>Required Parameters</h2>
+<table class="sortable overview">
+	<thead>
+		<th>Name</th>
+	</thead>
+	<tbody>
+		{% for param in tmpl.required_params %}
+		<tr>
+			<td>{{ param }}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+{% endif %}
+
+{% if !tmpl.reserved_params.is_empty() %}
+<h2>Reserved Parameters</h2>
+<table class="sortable overview">
+	<thead>
+		<th>Name</th>
+	</thead>
+	<tbody>
+		{% for param in tmpl.reserved_params %}
+		<tr>
+			<td>{{ param }}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+{% endif %}
+
+{% if !tmpl.required_artifacts.is_empty() %}
+<h2>Required Artifacts</h2>
+<table class="sortable overview">
+	<thead>
+		<th>Name</th>
+	</thead>
+	<tbody>
+		{% for artifact in tmpl.required_artifacts %}
+		<tr>
+			<td>{{ artifact }}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+{% endif %}
+
+<h2>Template</h2>
+<textarea disabled rows="30" cols="100" style="width:100%;font-family:monospace;">{{ tmpl.template }}</textarea>
+
+{% endblock %}

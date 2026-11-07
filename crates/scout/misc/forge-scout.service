@@ -1,0 +1,23 @@
+
+[Unit]
+Description=Scout Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=MLX_FIRMWARE_SUPERVISOR_LAUNCH=systemd-scope
+EnvironmentFile=-/opt/forge/forge-scout.env
+ExecStartPre=/opt/forge/forge-scout-pre.sh 
+User=root
+Group=root
+RestartSec=5
+WorkingDirectory=/opt/forge/
+ExecStart=/opt/forge/forge-scout --api=${server_uri} --machine-interface-id=${machine_id}
+OOMScoreAdjust=-1000
+Restart=on-failure
+RestartPreventExitStatus=255
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

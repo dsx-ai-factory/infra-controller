@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}VPCs{% endblock %}
+
+{% block content %}
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>VPCs</h1>
+
+<table class="sortable overview">
+	<thead>
+		<th>Id</th>
+		<th>Name</th>
+		<th>Labels</th>
+		<th>Tenant</th>
+		<th>Keyset ID</th>
+		<th>Network Virtualization</th>
+		<th>Routing Profile Type</th>
+		<th>VNI</th>
+	</thead>
+	<tbody>
+		{% for vpc in vpcs %}
+		<tr>
+			<td><a href="/admin/vpc/{{ vpc.id }}">{{ vpc.id }}</a></td>
+			<td>{{ vpc.metadata.name }}</td>
+			<td>{{ vpc.metadata.labels|label_list_fmt(true)|safe }}</td>
+			<td><a href="/admin/tenant/{{ vpc.tenant_organization_id }}">{{ vpc.tenant_organization_id }}</a></td>
+			<td>{{ vpc.tenant_keyset_id }}</td>
+			<td>{{ vpc.network_virtualization_type }}</td>
+			<td>{{ vpc.routing_profile_type }}</td>
+			<td>{{ vpc.vni }}</td>
+		</tr>
+		{% endfor %}
+	</tbody>
+</table>
+
+{% endblock %}

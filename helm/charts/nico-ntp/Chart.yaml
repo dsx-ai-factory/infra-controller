@@ -1,0 +1,10 @@
+apiVersion: v2
+name: nico-ntp
+description: Helm chart for the NICo NTP component (chrony StatefulSet)
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - nico
+  - ntp
+  - chrony

@@ -1,0 +1,228 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+name: Carbide Artifacts Promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to promote (e.g., 1.5.0-85ed215)'
+        required: true
+        type: string
+
+jobs:
+  # ============================================================================
+  # PREPARE - Validate source images exist
+  # ============================================================================
+  prepare:
+    # Production promotion never runs outside the canonical repo.
+    if: github.repository == 'dsx-ai-factory/infra-controller'
+    runs-on: linux-amd64-cpu4
+    outputs:
+      version: ${{ inputs.version }}
+      helm_version: ${{ steps.version.outputs.helm_version }}
+      image_registry: ${{ steps.registry.outputs.registry }}
+      registry_host: ${{ steps.registry.outputs.registry_host }}
+      prod_image_registry: ${{ steps.registry.outputs.prod_registry }}
+      prod_registry_path: ${{ steps.registry.outputs.prod_registry_path }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Calculate Helm chart version
+        id: version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          HELM_VERSION_BASE="${VERSION#v}"
+          HELM_VERSION="$(echo "${HELM_VERSION_BASE}" | sed 's/\(.*\)-/\1./')"
+
+          echo "helm_version=${HELM_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Promoting chart version ${HELM_VERSION} from release ${VERSION}"
+
+      - name: Resolve container registries
+        id: registry
+        # promotion only runs in the canonical repo; endpoints are constants so
+        # repository variables can never redirect staging/production credentials
+        run: |
+          set -euo pipefail
+          REGISTRY="nvcr.io/0837451325059433/carbide-dev"
+          PROD_REGISTRY="nvcr.io/0837451325059433/carbide"
+          {
+            echo "registry=${REGISTRY}"
+            echo "registry_host=${REGISTRY%%/*}"
+            echo "prod_registry=${PROD_REGISTRY}"
+            echo "prod_registry_path=${PROD_REGISTRY#*/}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Container registry: ${REGISTRY} (prod: ${PROD_REGISTRY})"
+
+      - name: Login to NVCR
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ steps.registry.outputs.registry_host }}
+          username: ${{ secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NVCR_TOKEN }}
+
+      - name: Validate source images exist
+        env:
+          REGISTRY: ${{ steps.registry.outputs.registry }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          echo "## Promotion Validation" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          IMAGES=(
+            "${REGISTRY}/nvmetal-carbide:${VERSION}"
+            "${REGISTRY}/carbide-release-artifacts-aarch64:${VERSION}"
+            "${REGISTRY}/carbide-release-artifacts-x86_64:${VERSION}"
+          )
+
+          FAILED=0
+          for IMAGE in "${IMAGES[@]}"; do
+            if docker manifest inspect "${IMAGE}" > /dev/null 2>&1; then
+              echo "✅ Found: ${IMAGE}"
+              echo "| \`${IMAGE}\` | ✅ Found |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "❌ NOT FOUND: ${IMAGE}"
+              echo "| \`${IMAGE}\` | ❌ Not Found |" >> $GITHUB_STEP_SUMMARY
+              FAILED=1
+            fi
+          done
+
+          if [ $FAILED -eq 1 ]; then
+            echo ""
+            echo "::error::One or more source images not found. Please verify the version string."
+            exit 1
+          fi
+
+          echo ""
+          echo "All source images validated successfully!"
+
+  # ============================================================================
+  # APPROVAL GATE - Promote images from carbide-dev to carbide
+  # ============================================================================
+  approve-promotion:
+    needs: prepare
+    runs-on: linux-amd64-cpu4
+    environment:
+      name: promote-release-candidate
+    steps:
+      - name: Promotion approved
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          echo "✅ Promotion approved"
+          echo "Promoting images from carbide-dev to carbide"
+          echo "Version: ${VERSION}"
+          echo ""
+          echo "Images to be promoted:"
+          echo "  - nvmetal-carbide"
+          echo "  - carbide-release-artifacts-aarch64"
+          echo "  - carbide-release-artifacts-x86_64"
+          echo "Helm charts to be promoted:"
+          echo "  - carbide-prereqs"
+
+
+  # ============================================================================
+  # ReTag - Application Image (nvmetal-carbide)
+  # ============================================================================
+  promote-carbide-core:
+    needs:
+      - prepare
+      - approve-promotion
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+    with:
+      source: ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide
+      source_tag: ${{ needs.prepare.outputs.version }}
+      destination: ${{ needs.prepare.outputs.prod_image_registry }}/nvmetal-carbide
+      destination_tag: ${{ needs.prepare.outputs.version }}
+    secrets:
+      SOURCE_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      SOURCE_PASSWORD: ${{ secrets.NVCR_TOKEN }}
+      DEST_USERNAME: ${{ secrets.NVCR_PROD_USERNAME }}
+      DEST_PASSWORD: ${{ secrets.NVCR_PROD_TOKEN }}
+
+  # ============================================================================
+  # ReTag - Artifacts Image (aarch64)
+  # ============================================================================
+  promote-artifacts-aarch64:
+    needs:
+      - prepare
+      - approve-promotion
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+    with:
+      source: ${{ needs.prepare.outputs.image_registry }}/carbide-release-artifacts-aarch64
+      source_tag: ${{ needs.prepare.outputs.version }}
+      destination: ${{ needs.prepare.outputs.prod_image_registry }}/carbide-release-artifacts-aarch64
+      destination_tag: ${{ needs.prepare.outputs.version }}
+    secrets:
+      SOURCE_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      SOURCE_PASSWORD: ${{ secrets.NVCR_TOKEN }}
+      DEST_USERNAME: ${{ secrets.NVCR_PROD_USERNAME }}
+      DEST_PASSWORD: ${{ secrets.NVCR_PROD_TOKEN }}
+
+  # ============================================================================
+  # ReTag - Artifacts Image (x86_64)
+  # ============================================================================
+  promote-artifacts-x86_64:
+    needs:
+      - prepare
+      - approve-promotion
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+    with:
+      source: ${{ needs.prepare.outputs.image_registry }}/carbide-release-artifacts-x86_64
+      source_tag: ${{ needs.prepare.outputs.version }}
+      destination: ${{ needs.prepare.outputs.prod_image_registry }}/carbide-release-artifacts-x86_64
+      destination_tag: ${{ needs.prepare.outputs.version }}
+    secrets:
+      SOURCE_USERNAME: ${{ secrets.NVCR_USERNAME }}
+      SOURCE_PASSWORD: ${{ secrets.NVCR_TOKEN }}
+      DEST_USERNAME: ${{ secrets.NVCR_PROD_USERNAME }}
+      DEST_PASSWORD: ${{ secrets.NVCR_PROD_TOKEN }}
+
+  # ============================================================================
+  # Publish - Helm prereqs chart (carbide-prereqs)
+  # ============================================================================
+  promote-helm-prereqs-chart:
+    needs:
+      - prepare
+      - approve-promotion
+    runs-on: linux-amd64-cpu4
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Package and push Helm prereqs chart to production NGC
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        with:
+          chart-path: helm-prereqs
+          chart-version: ${{ needs.prepare.outputs.helm_version }}
+          app-version: ${{ needs.prepare.outputs.version }}
+          lint: 'false'
+          ngc-key: ${{ secrets.NVCR_PROD_TOKEN }}
+          ngc-path: ${{ needs.prepare.outputs.prod_registry_path }}
+          ngc-duplicate: verify
+          retries: 3

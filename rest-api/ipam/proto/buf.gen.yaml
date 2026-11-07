@@ -1,0 +1,14 @@
+version: v1
+managed:
+  enabled: true
+  go_package_prefix:
+    default: github.com/NVIDIA/infra-controller/rest-api/ipam
+plugins:
+  # generate go structs for protocol buffer defination
+  - plugin: buf.build/connectrpc/go:v1.11.0
+    out: ../
+    opt: paths=source_relative
+  # generate go structs for protocol buffer defination
+  - plugin: buf.build/protocolbuffers/go:v1.31.0
+    out: ../
+    opt: paths=source_relative

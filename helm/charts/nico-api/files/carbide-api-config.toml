@@ -1,0 +1,344 @@
+# This is the global configuration file for nico-api that is shared
+# between all environments.
+# Each environment can overwrite certain parameters of this file via a
+# nico-api-site-config.toml file. Those are placed in the `envs/` folder
+# for the respective environment
+
+listen = "[::]:1079"
+# Required: the chart's readinessProbe and livenessProbe target this port.
+# Removing metrics_endpoint leaves the pod permanently un-Ready.
+metrics_endpoint = "[::]:1080"
+alt_metric_prefix = "nico_"
+database_url = "postgres://replaced-by-env-var"
+ssh_console_url = "https://{{ .Values.sshConsole.serviceName }}.{{ include "nico-api.namespace" . }}.svc.cluster.local:{{ .Values.sshConsole.port }}"
+asn = 4294967000
+initial_dpu_agent_upgrade_policy = "up_only"
+max_concurrent_machine_updates = 10
+dhcp_servers = []                                                                                                     # Added in per-site-configuration
+route_servers = []                                                                                                    # Required for FNN. Not yet used
+attestation_enabled = true
+
+# The original behavior of the BYOIP feature allowed
+# any announcement, so this isn't changing anything.
+# We're going to start restricting but we need to
+# identify all the current tenant announcements first.
+# This "allow-all" will be removed after all
+# site-specific announcements have been identified
+# and each site with announcements has been given
+# its more specific config for anycast_site_prefixes.
+anycast_site_prefixes = ["0.0.0.0/0"]
+
+[certificates]
+use_cert_manager = {{ .Values.global.certificate.useCertManager }}
+use_cert_manager_ufm = {{ .Values.global.certificate.useCertManagerUfm }}
+{{- if or .Values.global.certificate.useCertManager .Values.global.certificate.useCertManagerUfm }}
+
+[certificates.cert_manager]
+namespace = {{ include "nico-api.namespace" . | quote }}
+issuer_name = {{ .Values.machineCertificates.issuerRef.name | quote }}
+issuer_kind = {{ .Values.machineCertificates.issuerRef.kind | quote }}
+request_timeout_secs = {{ .Values.machineCertificates.requestTimeoutSecs }}
+{{- end }}
+
+[dpu_config]
+# DPU NIC firmware settings.
+dpu_nic_firmware_initial_update_enabled = false
+dpu_nic_firmware_reprovision_update_enabled = true
+dpu_nic_firmware_update_versions = ["24.47.3576", "32.47.3576"]
+# Number of VFs configured per DPU PF during BlueField provisioning.
+num_of_vfs = 16
+
+[host_health]
+hardware_health_reports = "MonitorOnly"
+
+[site_explorer]
+enabled = true
+create_machines = true
+
+{{- if .Values.bmcProxy.enabled }}
+
+[bmc_proxy]
+# Ordinary BMC Redfish traffic -- including established-endpoint
+# credentialed exploration -- goes through nico-bmc-proxy; credential
+# setup, session minting, password rotation, exploration's anonymous
+# vendor probes, and component-manager compute-tray power control stay
+# direct.
+enabled = true
+address = "{{ .Values.bmcProxy.address | default (printf "nico-bmc-proxy.%s.svc.cluster.local:1079" (include "nico-api.namespace" .)) }}"
+# Client identity presented to the proxy's mTLS listener; the defaults are the
+# SPIFFE workload paths this pod already mounts.
+client_cert = "/var/run/secrets/spiffe.io/tls.crt"
+client_key = "/var/run/secrets/spiffe.io/tls.key"
+root_ca = "/var/run/secrets/spiffe.io/ca.crt"
+{{- end }}
+
+[node_auth]
+# Node (Scout / DPU-agent) authentication to the API.
+# See docs/design/machine-identity/node-auth-jwt.md.
+# Bearer JWTs: off by default. When enabled, the API accepts short-lived
+# `Authorization: Bearer` tokens that nodes self-sign with their existing
+# mTLS client-certificate key (the cert rides in the token's x5c header and
+# is verified against the same root CA as the TLS listener).
+enabled = false
+# Machine mTLS client-certificate authentication: on by default. Disable only
+# after the fleet presents bearer tokens (requires enabled = true; the API
+# refuses to start with both mechanisms off). Service/admin-CLI certs are
+# unaffected.
+mtls_enabled = true
+# `aud` claim is always "nico-api".
+# Maximum accepted token lifetime in seconds (nodes mint 300 s tokens).
+#max_token_ttl_sec = 900
+# Whether DPF-deployed fmds is rendered in token mode. Unset follows `enabled`,
+# which is what you want unless you are staging a change: set it to false while
+# `enabled` is still true to move fmds back to client certificates first, then
+# turn `enabled` off once that roll has landed. true with enabled = false is
+# rejected at startup. See docs/design/machine-identity/node-auth-jwt.md.
+#fmds_use_node_tokens = false
+
+[firmware_global]
+autoupdate = true
+
+[machine_identity]
+enabled = true
+current_encryption_key_id = "kv1" # must match a key under machine_identity.encryption_keys in credentials
+algorithm = "ES256"               # must match tenant identity signing alg (ES256 only)
+
+[tls]
+identity_pemfile_path = "/var/run/secrets/spiffe.io/tls.crt"
+identity_keyfile_path = "/var/run/secrets/spiffe.io/tls.key"
+root_cafile_path = "/var/run/secrets/spiffe.io/ca.crt"
+admin_root_cafile_path = "{{ .Values.auth.adminRootCafilePath | default "/etc/forge/carbide-api/site/admin_root_cert_pem" }}"
+
+[auth]
+permissive_mode = {{ .Values.auth.permissiveMode | default false }}
+casbin_policy_file = "/etc/forge/carbide-api/casbin-policy.csv"
+
+[auth.trust]
+spiffe_trust_domain = "{{ .Values.global.spiffe.trustDomain }}"
+spiffe_service_base_paths = [
+  "/{{ .Values.auth.namespace | default (include "nico-api.namespace" .) }}/sa/",
+  "/default/sa/",
+  "/elektra-site-agent/sa/",
+]
+spiffe_machine_base_path = "/{{ .Values.auth.namespace | default (include "nico-api.namespace" .) }}/machine/"
+additional_issuer_cns = [{{ range $i, $cn := .Values.auth.additionalIssuerCns }}{{ if $i }}, {{ end }}{{ $cn | quote }}{{ end }}]
+
+{{- if not (has .Values.credentials.ufmSource (list "local_first" "backend" "local")) }}
+{{- fail "nico-api.credentials.ufmSource must be one of local_first, backend, or local" }}
+{{- end }}
+{{- if not (has .Values.credentials.bmcSiteWideRootSource (list "local_first" "backend" "local")) }}
+{{- fail "nico-api.credentials.bmcSiteWideRootSource must be one of local_first, backend, or local" }}
+{{- end }}
+[credentials]
+ufm_source = {{ .Values.credentials.ufmSource | quote }}
+bmc_site_wide_root_source = {{ .Values.credentials.bmcSiteWideRootSource | quote }}
+
+{{- if .Values.credentials.file.existingSecret.name }}
+[credentials.file]
+path = {{ printf "%s/credentials.yaml" (required "nico-api.credentials.file.mountPath is required when credentials.file.existingSecret.name is set" .Values.credentials.file.mountPath) | quote }}
+poll_interval = {{ required "nico-api.credentials.file.pollInterval is required when credentials.file.existingSecret.name is set" .Values.credentials.file.pollInterval | quote }}
+{{- end }}
+
+[machine_state_controller]
+failure_retry_time = "90m"
+
+{{- $maxConcurrency := .Values.machineStateController.maxConcurrency }}
+{{- if or (ne (printf "%v" $maxConcurrency) (printf "%d" ($maxConcurrency | int))) (lt ($maxConcurrency | int) 1) }}
+{{- fail "nico-api.machineStateController.maxConcurrency must be a positive integer" }}
+{{- end }}
+[machine_state_controller.controller]
+max_concurrency = {{ .Values.machineStateController.maxConcurrency | int }}
+
+{{- if not (kindIs "bool" .Values.apiAdmissionControl.enabled) }}
+{{- fail "nico-api.apiAdmissionControl.enabled must be true or false" }}
+{{- end }}
+[api_admission_control]
+enabled = {{ .Values.apiAdmissionControl.enabled }}
+
+[vpc_prefix_state_controller]
+vpc_prefix_drain_time = "5m"
+
+[network_security_group]
+# Controls whether NSGs may enable stateful egress and whether
+# stateful/reflexive ACL support is inserted into HBN configuration.
+# When false, Core rejects stateful NSG creation and updates from
+# stateless to stateful. Existing stateful NSGs remain editable but
+# are applied statelessly.
+# Leave disabled until every DPU in the site runs HBN 2.3 or later.
+stateful_acls_enabled = false
+
+# Maximum number of security groups rules
+# after they are expanded:
+# src port range * dst port range * src prefix list * dst prefix list
+# NOTE: There is also a hard-limit in the
+# DPU agent of 10k (as of the time of this
+# comment) to protect it misconfig in
+# site-controller.
+max_network_security_group_size = 200
+
+# Enable Machine Validation feature and enable all tests
+[machine_validation_config]
+enabled = true
+test_selection_mode = "EnableAll"
+
+# OEM manager attribute profiles applied during machine_setup.
+# These are vendor-specific BMC/manager settings applied before BMC lockdown.
+#
+# Fix for nvbugs-5834644: Dell R760 PSU Hot Spare causes unnecessary fan spin-up.
+# Disabling PSRapidOn prevents the BMC from activating standby PSUs as hot spares,
+# eliminating the associated fan ramp-up. Applied for all profile types.
+[oem_manager_profiles.Dell.PowerEdge_R760.performance]
+"ServerPwr.1.PSRapidOn" = "Disabled"
+
+[oem_manager_profiles.Dell.PowerEdge_R760.powerefficiency]
+"ServerPwr.1.PSRapidOn" = "Disabled"
+
+# Qualified platform baselines, keyed by the rack_profile_id on an expected
+# rack. Counts describe expected inventory for missing-component health alerts.
+# Only the switch count gates Created (present) and Discovering (ready).
+#
+# Site-config merges per key, allowing vendor/count overrides and custom profiles.
+[rack_profiles.NVL72]
+product_family = "gb200"
+rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { vendor = "NVIDIA", count = 16 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 8 }
+
+[rack_profiles.NVL72_GB300]
+product_family = "gb300"
+rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { vendor = "Lenovo", count = 16 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 6 }
+
+# Defaults for topology/vendor-derived profile IDs; site-config overrides per key.
+[rack_profiles.VR_NVL72R1_C2G4_NVIDIA]
+product_family = "vrnvl72"
+rack_hardware_topology = "vr_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { vendor = "NVIDIA", count = 16 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 4 }
+
+[rack_profiles.VR_NVL72R1_C2G4_NVIDIA_NO_POWERSHELF]
+product_family = "vrnvl72"
+rack_hardware_topology = "vr_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { vendor = "NVIDIA", count = 16 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 0 }
+
+[rack_profiles.GB300_NVL72R1_C2G4_NVIDIA]
+product_family = "gb300"
+rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB300", vendor = "NVIDIA", count = 16 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 6 }
+
+[rack_profiles.GB300_NVL72R1_C2G4_NVIDIA_NO_POWERSHELF]
+product_family = "gb300"
+rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB300", vendor = "NVIDIA", count = 16 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 0 }
+
+[rack_profiles.GB300_NVL72R1_C2G4_LENOVO]
+product_family = "gb300"
+rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB300", vendor = "Lenovo", count = 16 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 6 }
+
+[rack_profiles.GB300_NVL72R1_C2G4_LENOVO_NO_POWERSHELF]
+product_family = "gb300"
+rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB300", vendor = "Lenovo", count = 16 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 0 }
+
+[rack_profiles.GB300_NVL72R1_C2G4_SMC]
+product_family = "gb300"
+rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB300", vendor = "Supermicro", count = 16 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "Delta", count = 6 }
+
+[rack_profiles.GB300_NVL72R1_C2G4_SMC_NO_POWERSHELF]
+product_family = "gb300"
+rack_hardware_topology = "gb300_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB300", vendor = "Supermicro", count = 16 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "Delta", count = 0 }
+
+[rack_profiles.GB200_NVL72R1_C2G4_NVIDIA]
+product_family = "gb200"
+rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB200", vendor = "NVIDIA", count = 16 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 8 }
+
+[rack_profiles.GB200_NVL72R1_C2G4_NVIDIA_NO_POWERSHELF]
+product_family = "gb200"
+rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB200", vendor = "NVIDIA", count = 16 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 0 }
+
+[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN]
+product_family = "gb200"
+rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB200", vendor = "WIWYNN", count = 16 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 8 }
+
+[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN_NO_POWERSHELF]
+product_family = "gb200"
+rack_hardware_topology = "gb200_nvl72r1_c2g4_topology"
+rack_capabilities.compute = { name = "GB200", vendor = "WIWYNN", count = 16 }
+rack_capabilities.switch = { vendor = "NVIDIA", count = 9 }
+rack_capabilities.power_shelf = { vendor = "LiteOn", count = 0 }
+
+[tracing]
+enabled = {{ .Values.tracing.enabled }}
+
+[observability.per_object_state_metrics]
+enabled = {{ .Values.service.perObjectStateMetrics.enabled }}
+listen_address = "[::]:{{ .Values.service.perObjectStateMetrics.port }}"
+object_types = {{ default list .Values.service.perObjectStateMetrics.objectTypes | toJson }}
+{{- if .Values.componentManager.enabled }}
+
+# Presence of this section enables the component manager; site-config can
+# override fields but cannot un-define the section once rendered. Independent
+# of rms.enabled — pair with RMS when backends are "rms".
+[component_manager]
+compute_tray_backend = {{ .Values.componentManager.computeTrayBackend | quote }}
+nv_switch_backend = {{ .Values.componentManager.nvSwitchBackend | quote }}
+power_shelf_backend = {{ .Values.componentManager.powerShelfBackend | quote }}
+
+nv_switch_use_state_controller = {{ .Values.componentManager.nvSwitchUseStateController }}
+power_shelf_use_state_controller = {{ .Values.componentManager.powerShelfUseStateController }}
+compute_tray_use_state_controller = {{ .Values.componentManager.computeTrayUseStateController }}
+{{- end }}
+{{- if .Values.rms.enabled }}
+
+# RMS (Rack Management Service) connectivity, used by the component manager
+# and rack controller for rack-level firmware upgrades and power sequencing.
+[rms]
+api_url = {{ .Values.rms.apiUrl | quote }}
+enforce_tls = {{ .Values.rms.enforceTls }}
+{{- with .Values.rms.rootCaPath }}
+root_ca_path = {{ . | quote }}
+{{- end }}
+{{- with .Values.rms.clientCert }}
+client_cert = {{ . | quote }}
+{{- end }}
+{{- with .Values.rms.clientKey }}
+client_key = {{ . | quote }}
+{{- end }}
+{{- end }}
+{{- $nvlinkEnabled := index (.Values.nvlink | default dict) "enabled" }}
+{{- if kindIs "bool" $nvlinkEnabled }}
+
+# NVLink partitioning; a site configuration value takes precedence.
+[nvlink_config]
+enabled = {{ $nvlinkEnabled }}
+{{- end }}

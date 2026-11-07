@@ -1,0 +1,44 @@
+apiVersion: v2
+name: nico
+description: Umbrella chart for the NICo Bare Metal Manager platform
+type: application
+version: 0.1.1
+appVersion: "v2025.12.30-rc1"
+keywords:
+  - nico
+  - nico
+  - bare-metal
+  - umbrella
+
+dependencies:
+  # Core components - mandatory, no condition. See helm/values.yaml.
+  - name: nico-api
+    version: "0.1.1"
+  - name: nico-bmc-proxy
+    version: "0.1.0"
+  - name: nico-dhcp
+    version: "0.1.0"
+  - name: nico-dns
+    version: "0.1.0"
+  - name: nico-hardware-health
+    version: "0.1.0"
+  - name: nico-pxe
+    version: "0.1.0"
+  - name: nico-ssh-console-rs
+    version: "0.1.0"
+  # Optional services - configurable via <chart-name>.enabled.
+  - name: nico-dsx-exchange-consumer
+    version: "0.1.0"
+    condition: nico-dsx-exchange-consumer.enabled
+  - name: nico-ntp
+    version: "0.1.0"
+    condition: nico-ntp.enabled
+  - name: unbound
+    version: "0.1.0"
+    condition: unbound.enabled
+  - name: nico-machine-a-tron
+    version: "0.1.0"
+    condition: nico-machine-a-tron.enabled
+  - name: nico-postgres-exporter
+    version: "0.1.0"
+    condition: nico-postgres-exporter.enabled

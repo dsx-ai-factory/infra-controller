@@ -1,0 +1,217 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+package inventorysync
+
+import (
+	"context"
+	"encoding/json"
+	"slices"
+
+	"github.com/rs/zerolog/log"
+
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+)
+
+// nvosPortsDescriptionKey holds Core's observed NVOS ports as inventory metadata.
+const nvosPortsDescriptionKey = "nvos_ports"
+
+// nvosIPDescriptionKey holds the last known primary NVOS address.
+const nvosIPDescriptionKey = "nvos_ip"
+
+// ---------------------------------------------------------------------------
+// syncNVSwitchesNICo: sync NVSwitch components via Core (NICo)
+// ---------------------------------------------------------------------------
+//
+// Uses Core's NICo API. Core's NSM backend auto-registers switches, so no
+// registration step is needed.
+//
+// Primary NICo API calls:
+//   - GetSwitches: list every active Core switch and its BMC MAC
+//   - GetComponentInventory: get firmware, serial, power state from site explorer
+//
+// Flow:
+//  1. DB: get all NVSwitch components with BMCs
+//  2. NICo GetSwitches: map BMC MAC → Core SwitchId
+//  3. Transactionally converge external_id from this snapshot
+//  4. NICo GetComponentInventory: extract firmware_version, serial_number, power_state
+//  5. Direct-write inventory fields to DB
+//  6. Return current-snapshot drifts in both directions
+func syncNVSwitchesNICo(
+	ctx context.Context,
+	pool *cdb.Session,
+	nicoClient nicoapi.Client,
+) (received int, drifts []model.ComponentDrift, rpcOK bool) {
+	log.Debug().Msg("Syncing NV switches via NICo...")
+
+	expectedSwitches, err := model.GetComponentsByType(ctx, pool.DB, devicetypes.ComponentTypeNVSwitch)
+	if err != nil {
+		log.Error().Msgf("Unable to retrieve NVSwitch components from db: %v", err)
+		return 0, nil, false
+	}
+
+	// Actual snapshot: map BMC MAC → Core SwitchId.
+	observed, err := nicoClient.GetSwitches(ctx)
+	if err != nil {
+		log.Error().Msgf("Unable to retrieve active switches from NICo: %v", err)
+		return 0, nil, false
+	}
+	linkedActual := make([]actualControllerDevice, 0, len(observed))
+	for _, sw := range observed {
+		linkedActual = append(linkedActual, actualControllerDevice{
+			controllerMAC: sw.BmcMac,
+			externalID:    sw.ID,
+		})
+	}
+	received, componentsBySwitchID, drifts, reconcileOK := reconcileActualControllerDevices(
+		ctx, pool, "NVSwitch", expectedSwitches, linkedActual,
+	)
+	if !reconcileOK {
+		return received, nil, false
+	}
+
+	switchIDs := make([]*corev1.SwitchId, 0, len(componentsBySwitchID))
+	for switchID := range componentsBySwitchID {
+		switchIDs = append(switchIDs, &corev1.SwitchId{Id: switchID})
+	}
+
+	// Fetch inventory from Core for all matched switches. Inventory only feeds
+	// the firmware_version / power_state direct-writes now — drift is keyed on
+	// BMC MAC via the linked RPC above — so a failure here is best-effort and
+	// just leaves those fields stale this cycle; it does not make the drift
+	// table partial.
+	if len(switchIDs) > 0 {
+		invResp, err := nicoClient.GetComponentInventory(ctx, &corev1.GetComponentInventoryRequest{
+			Target: &corev1.GetComponentInventoryRequest_SwitchIds{
+				SwitchIds: &corev1.SwitchIdList{Ids: switchIDs},
+			},
+		})
+		if err != nil {
+			log.Error().Msgf("Unable to retrieve switch inventory from NICo: %v", err)
+		} else {
+			applyInventoryToComponents(ctx, pool, invResp, componentsBySwitchID)
+		}
+	}
+
+	syncSwitchStatuses(ctx, pool, nicoClient, componentsBySwitchID)
+
+	syncSwitchNvosPorts(ctx, pool, nicoClient, componentsBySwitchID)
+
+	log.Info().Msgf("NVSwitch NICo sync: %d drift(s) out of %d expected", len(drifts), len(expectedSwitches))
+	return received, drifts, true
+}
+
+// syncSwitchStatuses fetches controller_state for the matched switches and
+// persists the derived ComponentOperationStatus per DB row.
+func syncSwitchStatuses(
+	ctx context.Context,
+	pool *cdb.Session,
+	nicoClient nicoapi.Client,
+	componentsBySwitchID map[string]*model.Component,
+) {
+	ids := mapKeys(componentsBySwitchID)
+	if len(ids) == 0 {
+		return
+	}
+	runtimeByID, err := nicoClient.FindSwitchRuntimeStatuses(ctx, ids)
+	if err != nil {
+		log.Error().Msgf("Unable to retrieve switch runtime status from NICo: %v", err)
+		return
+	}
+	statesByID := make(map[string]string, len(runtimeByID))
+	healthByID := make(map[string]*types.HealthReport, len(runtimeByID))
+	for id, runtime := range runtimeByID {
+		if runtime.ControllerState != "" {
+			statesByID[id] = runtime.ControllerState
+		}
+		healthByID[id] = runtime.Health
+	}
+	persistComponentOperationStatuses(ctx, pool, types.ComponentTypeNVSwitch, statesByID, componentsBySwitchID)
+	persistComponentHealthSnapshots(ctx, pool, healthByID, componentsBySwitchID)
+}
+
+// syncSwitchNvosPorts mirrors every reported port, including unresolved ports.
+// Missing status and legacy NVOS info, or a failed fetch, leaves metadata untouched;
+// an empty port list replaces stale ports. The last known primary IP is retained
+// when no primary address is available. Only the NVOS keys change, preserving
+// concurrent updates to other description entries and component fields.
+func syncSwitchNvosPorts(
+	ctx context.Context,
+	pool *cdb.Session,
+	nicoClient nicoapi.Client,
+	componentsBySwitchID map[string]*model.Component,
+) {
+	ids := mapKeys(componentsBySwitchID)
+	if len(ids) == 0 {
+		return
+	}
+	portsByID, err := nicoClient.FindSwitchNvosPorts(ctx, ids)
+	if err != nil {
+		log.Error().Msgf("Unable to retrieve switch NVOS ports from NICo: %v", err)
+		return
+	}
+	for switchID, ports := range portsByID {
+		comp, ok := componentsBySwitchID[switchID]
+		if !ok {
+			continue
+		}
+		if ports == nil {
+			ports = []nicoapi.SwitchNvosPort{}
+		}
+		patch := map[string]any{
+			nvosPortsDescriptionKey: ports,
+		}
+		ip := primarySwitchNvosIP(ports)
+		if ip != "" {
+			patch[nvosIPDescriptionKey] = ip
+		}
+		data, err := json.Marshal(patch)
+		if err != nil {
+			log.Error().Msgf("NVSwitch %s: unable to encode NVOS ports: %v", comp.ID, err)
+			continue
+		}
+		// Merge against the stored JSONB, not the earlier reconciliation snapshot.
+		const mergedDescription = "(CASE WHEN jsonb_typeof(description) = 'object' THEN description ELSE '{}'::jsonb END) || ?::jsonb"
+		result, err := pool.DB.NewUpdate().
+			Model((*model.Component)(nil)).
+			Set("description = "+mergedDescription, string(data)).
+			Where("id = ?", comp.ID).
+			Where("description IS DISTINCT FROM ("+mergedDescription+")", string(data)).
+			Exec(ctx)
+		if err != nil {
+			log.Error().Msgf("NVSwitch %s: unable to persist NVOS ports: %v", comp.ID, err)
+			continue
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			log.Error().Msgf("NVSwitch %s: unable to count updated NVOS port rows: %v", comp.ID, err)
+			continue
+		}
+		if rowsAffected > 0 {
+			log.Info().Msgf("NVSwitch %s: synced %d NVOS ports", comp.ID, len(ports))
+		}
+	}
+}
+
+// primarySwitchNvosIP mirrors Core's legacy_switch_nvos_info selection: use the
+// first primary port, preferring its first IPv4 address over its first address.
+func primarySwitchNvosIP(ports []nicoapi.SwitchNvosPort) string {
+	primary := slices.IndexFunc(ports, func(port nicoapi.SwitchNvosPort) bool {
+		return port.IsPrimary
+	})
+	if primary < 0 || len(ports[primary].Addresses) == 0 {
+		return ""
+	}
+	addresses := ports[primary].Addresses
+	for _, address := range addresses {
+		if address.AddressFamily == corev1.AddressFamily_ADDRESS_FAMILY_V4.String() {
+			return address.Address
+		}
+	}
+	return addresses[0].Address
+}

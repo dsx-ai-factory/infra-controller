@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# nico-rest-site-agent StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nico-rest-site-agent
+  labels:
+    app: nico-rest-site-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nico-rest-site-agent
+  template:
+    metadata:
+      labels:
+        app: nico-rest-site-agent
+    spec:
+      imagePullSecrets:
+        - name: image-pull-secret
+      serviceAccountName: nico-rest-site-agent
+      containers:
+        - name: site-agent
+          image: nico-rest-site-agent
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 2112
+              name: metrics
+          envFrom:
+            - configMapRef:
+                name: nico-rest-site-agent-config
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: site-registration
+              mountPath: /etc/sitereg
+              readOnly: true
+            - name: nico-certs
+              mountPath: /etc/core-grpc
+              readOnly: true
+            - name: temporal-certs
+              mountPath: /etc/temporal-certs
+              readOnly: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+      volumes:
+        - name: site-registration
+          secret:
+            secretName: site-registration
+        - name: nico-certs
+          secret:
+            secretName: core-grpc-client-site-agent-certs
+            optional: true
+        - name: temporal-certs
+          secret:
+            secretName: temporal-client-site-agent-certs
+            optional: true
+            items:
+              - key: otp
+                path: otp
+              - key: cacertificate
+                path: ca/ca.crt
+              - key: certificate
+                path: client/tls.crt
+              - key: key
+                path: client/tls.key
