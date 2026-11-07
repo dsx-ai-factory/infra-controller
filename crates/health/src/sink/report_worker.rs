@@ -20,18 +20,41 @@
 use std::hash::Hash;
 use std::sync::Arc;
 
-use super::dedup_queue::DedupQueue;
+use tokio_util::sync::CancellationToken;
 
-/// Submits each entry taken from `queue` with `submit`, one at a time, for as
-/// long as the task runs.
-pub(super) async fn run_report_worker<K, V, F, Fut>(queue: Arc<DedupQueue<K, V>>, mut submit: F)
-where
+use super::dedup_queue::DedupQueue;
+use super::shutdown::DeliveryCounts;
+
+/// Submits each entry taken from `queue` with `submit`, one at a time.
+///
+/// `submit` returns whether the entry was delivered; `counts` records each
+/// entry as one record. Once `flush_token` is cancelled, the worker finishes
+/// its current submission, submits every entry still queued, and returns.
+pub(super) async fn run_report_worker<K, V, F, Fut>(
+    queue: Arc<DedupQueue<K, V>>,
+    counts: DeliveryCounts,
+    flush_token: CancellationToken,
+    mut submit: F,
+) where
     K: Eq + Hash + Clone,
     F: FnMut(K, V) -> Fut,
-    Fut: Future<Output = ()>,
+    Fut: Future<Output = bool>,
 {
-    loop {
-        let (key, value) = queue.next().await;
-        submit(key, value).await;
+    while let Some((key, value)) = flush_token.run_until_cancelled(queue.next()).await {
+        submit_counted(&counts, &mut submit, key, value).await;
     }
+
+    while let Some((key, value)) = queue.pop() {
+        submit_counted(&counts, &mut submit, key, value).await;
+    }
+}
+
+async fn submit_counted<K, V, F, Fut>(counts: &DeliveryCounts, submit: &mut F, key: K, value: V)
+where
+    F: FnMut(K, V) -> Fut,
+    Fut: Future<Output = bool>,
+{
+    counts.start(1);
+    let delivered = usize::from(submit(key, value).await);
+    counts.finish(1, delivered, 1 - delivered);
 }

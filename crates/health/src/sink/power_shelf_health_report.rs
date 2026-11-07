@@ -22,6 +22,7 @@ use carbide_uuid::power_shelf::PowerShelfId;
 
 use super::dedup_queue::DedupQueue;
 use super::report_worker::run_report_worker;
+use super::shutdown::{DeliveryCounts, SinkWorkers};
 use super::{
     CollectorEvent, DataSink, EventContext, HealthReport, HealthReportSubmitted,
     HealthReportTarget, ReportSource,
@@ -36,13 +37,22 @@ struct PowerShelfHealthReportKey {
     source: ReportSource,
 }
 
+const SINK_TYPE: &str = "power_shelf_health_report_sink";
+
 pub struct PowerShelfHealthReportSink {
     queue: Arc<DedupQueue<PowerShelfHealthReportKey, Arc<HealthReport>>>,
     skip_empty_reports: bool,
 }
 
 impl PowerShelfHealthReportSink {
-    pub fn new(config: &PowerShelfHealthReportSinkConfig) -> Result<Self, HealthError> {
+    /// Creates the sink and its submission workers, registering them with
+    /// `sink_workers` for the shutdown flush.
+    ///
+    /// Returns an error when called without an active Tokio runtime.
+    pub(crate) fn new(
+        config: &PowerShelfHealthReportSinkConfig,
+        sink_workers: &mut SinkWorkers,
+    ) -> Result<Self, HealthError> {
         let handle = tokio::runtime::Handle::try_current().map_err(|error| {
             HealthError::GenericError(format!(
                 "power shelf health report sink requires active Tokio runtime: {error}"
@@ -59,12 +69,21 @@ impl PowerShelfHealthReportSink {
         let queue: Arc<DedupQueue<PowerShelfHealthReportKey, Arc<HealthReport>>> =
             Arc::new(DedupQueue::new());
 
-        for worker_id in 0..config.workers {
-            let client = Arc::clone(&client);
-            handle.spawn(run_report_worker(Arc::clone(&queue), move |key, report| {
-                submit_report(Arc::clone(&client), worker_id, key, report)
-            }));
-        }
+        let counts = DeliveryCounts::default();
+        let handles = (0..config.workers)
+            .map(|worker_id| {
+                let client = Arc::clone(&client);
+                handle.spawn(run_report_worker(
+                    Arc::clone(&queue),
+                    counts.clone(),
+                    sink_workers.flush_token(),
+                    move |key, report| submit_report(Arc::clone(&client), worker_id, key, report),
+                ))
+            })
+            .collect();
+
+        let queued = Arc::clone(&queue);
+        sink_workers.register(SINK_TYPE, None, move || queued.len(), counts, handles);
 
         Ok(Self {
             queue,
@@ -78,12 +97,13 @@ async fn submit_report(
     worker_id: usize,
     key: PowerShelfHealthReportKey,
     report: Arc<HealthReport>,
-) {
+) -> bool {
     match report.as_ref().try_into() {
         Ok(converted) => {
             let result = client
                 .submit_power_shelf_health_report(&key.id, converted)
                 .await;
+            let delivered = result.is_ok();
             emit(HealthReportSubmitted {
                 target: HealthReportTarget::PowerShelf,
                 outcome: Outcome::from(&result),
@@ -91,6 +111,7 @@ async fn submit_report(
                 worker_id,
                 error: result.err().map(|e| e.to_string()).unwrap_or_default(),
             });
+            delivered
         }
         Err(error) => {
             tracing::warn!(
@@ -99,13 +120,14 @@ async fn submit_report(
                 power_shelf_id = %key.id,
                 "Failed to convert power shelf health report"
             );
+            false
         }
     }
 }
 
 impl DataSink for PowerShelfHealthReportSink {
     fn sink_type(&self) -> &'static str {
-        "power_shelf_health_report_sink"
+        SINK_TYPE
     }
 
     fn try_handle_event(

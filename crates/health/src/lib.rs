@@ -16,6 +16,7 @@
  */
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use nv_redfish::bmc_http::reqwest::{
@@ -65,7 +66,7 @@ use crate::sharding::ShardManager;
 use crate::sink::event_mapper::{OpenBmcEventMapper, RedfishEventMapper};
 use crate::sink::{
     CompositeDataSink, DataSink, HealthReportSink, LogFileSink, NvLinkDomainHealthReportSink,
-    OtlpSink, PowerShelfHealthReportSink, PrometheusSink, RackHealthReportSink,
+    OtlpSink, PowerShelfHealthReportSink, PrometheusSink, RackHealthReportSink, SinkWorkers,
     SwitchHealthReportSink, TracingSink,
 };
 
@@ -260,9 +261,12 @@ async fn build_endpoint_wiring(
     })
 }
 
+/// Builds the configured sinks, registering their background workers with
+/// `sink_workers` for the shutdown flush.
 fn build_data_sink(
     config: &Config,
     metrics_manager: Arc<MetricsManager>,
+    sink_workers: &mut SinkWorkers,
 ) -> Result<Option<Arc<dyn DataSink>>, HealthError> {
     let mut sinks: Vec<Arc<dyn DataSink>> = Vec::new();
     let mut processors: Vec<Arc<dyn EventProcessor>> = Vec::new();
@@ -314,23 +318,32 @@ fn build_data_sink(
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.health_report {
-        sinks.push(Arc::new(HealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(HealthReportSink::new(sink_cfg, sink_workers)?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.rack_health_report {
-        sinks.push(Arc::new(RackHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(RackHealthReportSink::new(sink_cfg, sink_workers)?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.switch_health_report {
-        sinks.push(Arc::new(SwitchHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(SwitchHealthReportSink::new(
+            sink_cfg,
+            sink_workers,
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.nvlink_domain_health_report {
-        sinks.push(Arc::new(NvLinkDomainHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(NvLinkDomainHealthReportSink::new(
+            sink_cfg,
+            sink_workers,
+        )?));
     }
 
     if let Configurable::Enabled(ref sink_cfg) = config.sinks.power_shelf_health_report {
-        sinks.push(Arc::new(PowerShelfHealthReportSink::new(sink_cfg)?));
+        sinks.push(Arc::new(PowerShelfHealthReportSink::new(
+            sink_cfg,
+            sink_workers,
+        )?));
     }
 
     if let Configurable::Enabled(ref otlp_cfg) = config.sinks.otlp {
@@ -407,6 +420,23 @@ impl discovery::DiscoveryIteration for ServiceDiscoveryIteration {
     }
 }
 
+/// Drains collectors and then flushes sink workers, both before one deadline
+/// `shutdown_timeout` from now.
+async fn shut_down<I: discovery::DiscoveryIteration>(
+    discovery: impl Future<Output = Result<I, JoinError>>,
+    sink_workers: SinkWorkers,
+    shutdown_timeout: Duration,
+) {
+    let deadline = Instant::now() + shutdown_timeout;
+    tracing::info!("Shutdown signal received; draining collectors");
+
+    drain_discovery(discovery, deadline).await;
+
+    // Collectors abandoned at the deadline keep their sink references, so sink
+    // workers are told to flush instead of relying on drop.
+    sink_workers.flush(deadline).await;
+}
+
 /// Waits for the cancelled discovery loop to return, then drains its
 /// collectors; both phases are abandoned at `deadline`.
 async fn drain_discovery<I: discovery::DiscoveryIteration>(
@@ -440,8 +470,8 @@ async fn drain_discovery<I: discovery::DiscoveryIteration>(
 /// tasks start, so invalid certificate configuration fails startup.
 ///
 /// `cancel_token` carries the shutdown signal: once cancelled, the service stops
-/// discovery and drains its collectors before one deadline, `shutdown_timeout`
-/// after the signal.
+/// discovery, drains its collectors, and then flushes queued sink records, all
+/// before one deadline, `shutdown_timeout` after the signal.
 ///
 /// # Errors
 ///
@@ -523,7 +553,8 @@ pub async fn run_service(
         source: endpoint_source,
     } = build_endpoint_wiring(&config, bmc_latency_metrics).await?;
 
-    let data_sink = build_data_sink(&config, metrics_manager.clone())?;
+    let mut sink_workers = SinkWorkers::default();
+    let data_sink = build_data_sink(&config, metrics_manager.clone(), &mut sink_workers)?;
 
     let config_arc = Arc::new(config);
 
@@ -581,11 +612,8 @@ pub async fn run_service(
         biased;
 
         () = cancel_token.cancelled() => {
-            let deadline = Instant::now() + config_arc.shutdown_timeout;
-            tracing::info!("Shutdown signal received; draining collectors");
-
             // The loop observes the same cancellation and returns its iteration.
-            drain_discovery(join_discovery, deadline).await;
+            shut_down(join_discovery, sink_workers, config_arc.shutdown_timeout).await;
         }
         res = join_listener => {
             match res {
@@ -602,6 +630,16 @@ pub async fn run_service(
         }
         res = &mut join_discovery => {
             match res {
+                // The loop can return between the signal and this select
+                // observing it; that is still a graceful shutdown.
+                Ok(iteration) if cancel_token.is_cancelled() => {
+                    shut_down(
+                        std::future::ready(Ok(iteration)),
+                        sink_workers,
+                        config_arc.shutdown_timeout,
+                    )
+                    .await;
+                }
                 Ok(_) => {
                     tracing::error!("Discovery loop ended unexpectedly");
                 }
@@ -807,8 +845,6 @@ mac = "aa:bb:cc:dd:ee:03"
 
     #[tokio::test(start_paused = true)]
     async fn collector_drain_stops_waiting_at_the_shutdown_deadline() {
-        use std::time::Duration;
-
         use carbide_instrument::testing::capture_logs_async;
 
         struct HangingDrain;
