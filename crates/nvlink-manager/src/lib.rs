@@ -3696,6 +3696,11 @@ impl NvlPartitionMonitor {
     /// Deletes the logical partitions marked as deleted once per iteration,
     /// after every group has removed its physical partitions. A logical
     /// partition spans domains, so this is not group work.
+    ///
+    /// A marked logical partition that an `nvlink_partitions` row still
+    /// references (for example one NMX-C forgot, so no group removes it) is
+    /// skipped and logged rather than deleted: the foreign key would fail the
+    /// whole transaction and keep every other eligible partition from purging.
     async fn delete_marked_logical_partitions(
         &self,
         db_nvl_logical_partitions: &[LogicalPartition],
@@ -3709,7 +3714,22 @@ impl NvlPartitionMonitor {
         }
 
         let mut txn = self.db_pool.txn_begin().await?;
+        // Reload inside the transaction: the groups above removed rows after
+        // the iteration's snapshot was taken.
+        let referenced_logical_partition_ids: HashSet<NvLinkLogicalPartitionId> =
+            db::nvl_partition::find_by(&mut txn, ObjectColumnFilter::<IdColumn>::All)
+                .await?
+                .into_iter()
+                .filter_map(|p| p.logical_partition_id)
+                .collect();
         for lp in marked {
+            if referenced_logical_partition_ids.contains(&lp.id) {
+                tracing::warn!(
+                    nvlink_logical_partition_id = %lp.id,
+                    "Logical partition marked as deleted still has physical partition rows; skipping deletion"
+                );
+                continue;
+            }
             tracing::info!(
                 nvlink_logical_partition_id = %lp.id,
                 "Deleting logical partition"
