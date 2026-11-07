@@ -632,7 +632,10 @@ impl SiteExplorer {
         let endpoint_explorer = endpoint_exploration_service.endpoint_explorer();
 
         SiteExplorer {
-            host_reconciler: HostReconciler::new(database_connection.clone()),
+            host_reconciler: HostReconciler::new(
+                database_connection.clone(),
+                explorer_config.clone(),
+            ),
             machine_location_reconciler: MachineLocationReconciler::new(
                 database_connection.clone(),
                 rack_profiles.clone(),
@@ -1261,8 +1264,26 @@ impl SiteExplorer {
             });
         }
 
-        let (mut identified_hosts, boot_interfaces) =
-            MachineCreator::identify_managed_hosts(configured_candidates, metrics);
+        // Registration may precede or follow Redfish ingestion; read its persisted inventory for this decision.
+        let dpu_ids = configured_candidates
+            .iter()
+            .flat_map(|candidate| {
+                candidate
+                    .dpus
+                    .iter()
+                    .filter_map(|dpu| dpu.report.machine_id)
+            })
+            .collect::<Vec<_>>();
+        let mut inventory_txn = self.txn_begin().await?;
+        let registered_topologies =
+            db::machine_topology::find_latest_by_machine_ids(&mut inventory_txn, &dpu_ids).await?;
+        inventory_txn.commit().await?;
+        let (mut identified_hosts, boot_interfaces) = MachineCreator::identify_managed_hosts(
+            configured_candidates,
+            &registered_topologies,
+            self.config.dpu_host_pf_pci_controller_id,
+            metrics,
+        );
 
         let mut txn = self.txn_begin().await?;
         Self::persist_identified_managed_hosts(&mut txn, &identified_hosts).await?;

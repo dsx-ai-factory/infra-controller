@@ -50,6 +50,8 @@ pub struct MachineStateHandlerSiteConfig {
     /// host ingestion skips enabling Astra on declared CX9 NICs.
     pub astra_enabled: bool,
     pub dpf_enabled: bool,
+    /// Resolved API controller selection for BF4's host-visible PF 0.
+    pub dpu_host_pf_pci_controller_id: u8,
     /// Site-wide enable for releasing DPF maintenance holds so changed DPUDeployment-owned
     /// DPUService revisions roll out. Direct, detached DPUService objects do not use this setting.
     /// When `false`, a host parked in the NodeEffect phase keeps its hold and pending marker.
@@ -99,6 +101,7 @@ impl MachineStateHandlerSiteConfig {
             ewethers_enabled: true,
             astra_enabled: false,
             dpf_enabled: false,
+            dpu_host_pf_pci_controller_id: 1,
             dpu_service_sync_enabled: true,
             spdm_enabled: false,
             bmc_rotation_enabled: false,

@@ -70,7 +70,8 @@ impl TestSiteExplorer {
     }
 
     pub async fn run_single_iteration(&self) -> SiteExplorerResult<SiteIdentifiedHosts> {
-        self.site_explorer.run_single_iteration().await
+        // Box exploration so nested test builders do not retain the full iteration future on their stacks.
+        Box::pin(self.site_explorer.run_single_iteration()).await
     }
 }
 

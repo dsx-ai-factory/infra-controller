@@ -107,6 +107,11 @@ use crate::tests::common::api_fixtures::{
 use crate::tests::common::attestation::spdm_attestation_run_to_failed_then_to_success;
 use crate::tests::instance_ipxe_behaviors::create_instance;
 
+mod bf4_boot_readiness;
+mod bf4_controller_two;
+mod bf4_network_ack_fence;
+mod bf4_suppressed_convergence;
+
 async fn discover_dpu_bmc_ip_for_machine_creator_state_test(
     env: &TestEnv,
     bmc_mac_address: MacAddress,
@@ -2133,6 +2138,158 @@ async fn test_dpu_init_waits_on_dpu_health_alert(pool: sqlx::PgPool) {
         "with the alert cleared the host should leave DPUInit, got {:?}",
         host_machine.current_state()
     );
+}
+
+/// Keeps healthy BF4 DPUs out of HostInit and boot-order programming until registered inventory and exact boot metadata commit.
+#[crate::sqlx_test]
+async fn test_bf4_boot_readiness_blocks_host_init_and_set_boot_order(pool: sqlx::PgPool) {
+    // Create a host in DPUInit/WaitingForNetworkConfig with healthy DPU networking.
+    let env = create_test_env(pool).await;
+    let host_config = env.managed_host_config();
+    let mh = create_dpu_machine_in_waiting_for_network_install(&env, &host_config).await;
+    let dpu_id = mh.dpu_ids[0];
+    let _ = mh.dpu().forge_agent_control().await;
+    network_configured_with_health(&env, &dpu_id, None).await;
+
+    // Model an upgraded BF4 topology without the newly introduced inventory, retaining the real fixture interfaces.
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    let primary_mac = host
+        .status
+        .interfaces
+        .iter()
+        .find(|interface| interface.primary_interface)
+        .expect("host primary")
+        .mac_address;
+    let mut topology = db::machine_topology::find_latest_by_machine_ids(&mut txn, &[dpu_id])
+        .await
+        .expect("DPU topology")
+        .remove(&dpu_id)
+        .expect("registered DPU");
+    let hardware = &mut topology.topology.discovery_data.info;
+    let dpu = hardware.dpu_info.as_mut().expect("DPU inventory");
+    dpu.part_number = "900-9D4B4-CWAA-TSA".to_string(); // Select BF4 policy without changing fixture identity.
+    dpu.host_pfs.clear(); // Legacy persisted topology predates the field.
+    let registered = dpu.clone();
+    db::machine_topology::set_topology_update_needed(&mut txn, &dpu_id.into(), true)
+        .await
+        .expect("refresh fixture platform");
+    db::machine_topology::create_or_update(&mut txn, &dpu_id.into(), hardware)
+        .await
+        .expect("store BF4 classification");
+    let host_report = EndpointExplorationReport {
+        systems: vec![model::site_explorer::ComputerSystem {
+            ethernet_interfaces: vec![model::site_explorer::EthernetInterface {
+                mac_address: Some(primary_mac),
+                id: Some("Registered.HostPF0".to_string()),
+                uefi_device_path: Some("PciRoot(0x0)/Pci(0x2,0x0)".parse().expect("PCI path")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let host_bmc_ip = host.status.bmc_info.ip.expect("host BMC IP");
+    // Replace the cached report directly because this test controls controller iterations, not Site Explorer.
+    db::explored_endpoints::insert(host_bmc_ip, &host_report, false, &mut txn)
+        .await
+        .expect("ensure host endpoint exists");
+    sqlx::query("UPDATE explored_endpoints SET exploration_report = $2 WHERE address = $1")
+        .bind(host_bmc_ip)
+        .bind(sqlx::types::Json(&host_report))
+        .execute(txn.as_mut())
+        .await
+        .expect("publish host boot evidence");
+    txn.commit().await.expect("commit incomplete registration");
+
+    // Reload the persisted outcome to prove the BF4 branch ran after DPU networking became healthy.
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let waiting = mh.host().db_machine(&mut txn).await;
+    assert!(
+        matches!(waiting.current_state(), ManagedHostState::DPUInit { dpu_states }
+        if dpu_states.states.get(&dpu_id) == Some(&DpuInitState::WaitingForNetworkConfig))
+    );
+    assert!(matches!(&waiting.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::Wait { reason, .. })
+        if reason.contains("Waiting for BF4 boot interface") && reason.contains("inventory")));
+    txn.rollback().await.expect("close readiness read");
+
+    // An upgraded host already in SetBootOrder must also wait before issuing a Redfish boot write.
+    let boot_order = ManagedHostState::HostInit {
+        machine_state: MachineState::SetBootOrder {
+            set_boot_order_info: Some(SetBootOrderInfo {
+                set_boot_order_jid: None,
+                set_boot_order_state: SetBootOrderState::SetBootOrder,
+                retry_count: 0,
+            }),
+        },
+    };
+    set_host_controller_state_stuck_in(&env, mh.host().id, &boot_order, 1).await;
+    let checkpoint = env.redfish_sim.timepoint();
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let boot_waiting = mh.host().db_machine(&mut txn).await;
+    assert_eq!(boot_waiting.current_state(), &boot_order);
+    assert!(matches!(&boot_waiting.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::Wait { reason, .. })
+        if reason.contains("Waiting for BF4 boot interface")));
+    assert!(
+        env.redfish_sim
+            .actions_since(&checkpoint)
+            .all_hosts()
+            .is_empty()
+    );
+    txn.rollback().await.expect("close boot-order read");
+
+    // Return to the permitted repair state, then emulate the trusted repository merge after phone-home.
+    let mut txn = env.db_txn().await;
+    db::machine::update_state(
+        &mut txn,
+        &mh.host().id,
+        &ManagedHostState::DPUInit {
+            dpu_states: model::machine::DpuInitStates {
+                states: HashMap::from([(dpu_id, DpuInitState::WaitingForNetworkConfig)]),
+            },
+        },
+    )
+    .await
+    .expect("return to pre-HostInit");
+    let mut registered = registered;
+    registered.host_pfs = vec![model::hardware_info::DpuHostPf {
+        pci_controller_id: 1,
+        pf_id: 0,
+        mac_address: primary_mac,
+        physical_port_name: "c1pf0".to_string(),
+        netdev_name: None,
+        pci_address: None,
+    }];
+    db::machine_topology::record_dpu_host_pfs(&mut txn, &dpu_id, &registered)
+        .await
+        .expect("merge registered inventory");
+    txn.commit().await.expect("commit mapping");
+    let mut repair = env.db_txn().await;
+    db::host_boot_interface::reconcile_pre_host_init(&mut repair, &mh.host().id, 1, false, None)
+        .await
+        .expect("reconcile exact associations and target");
+    repair.commit().await.expect("publish boot readiness");
+
+    // Refresh the agent's network observation after repair and prove the controller records its HostInit transition.
+    network_configured_with_health(&env, &dpu_id, None).await;
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.db_txn().await;
+    let initialized = mh.host().db_machine(&mut txn).await;
+    assert!(matches!(
+        initialized.current_state(),
+        ManagedHostState::HostInit {
+            machine_state: MachineState::EnableIpmiOverLan,
+        }
+    ));
+    assert!(matches!(
+        initialized.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::Transition { .. })
+    ));
+    txn.rollback().await.expect("close transition read");
 }
 
 /// `Created` is the state every machine row begins in, and a machine rests

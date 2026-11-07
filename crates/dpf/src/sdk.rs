@@ -1915,6 +1915,31 @@ fn resolve_initialization_inventory<'a>(
     config: &'a InitDpfResourcesConfig,
     namespace: Option<&str>,
 ) -> Result<ResolvedInitialization<'a>, DpfError> {
+    if matches!(
+        config.deployment_type,
+        DpuDeploymentType::Bf4Generic | DpuDeploymentType::Bf4Astra
+    ) {
+        // Unscoped resources are shared with BF3 and cannot carry a BF4-only controller override.
+        if config.dpu_host_pf_pci_controller_id != 1 && !config.deployment_scoped_service_interfaces
+        {
+            return Err(DpfError::ConfigError(
+                "BF4 controller overrides require deployment_scoped_service_interfaces=true"
+                    .to_string(),
+            ));
+        }
+        // Patch topology must identify the same host PF that carbide-api selects for boot.
+        if config.intercept_bridging.as_ref().is_some_and(|topology| {
+            topology.interfaces().iter().any(|entry| {
+                entry.identity.controller_id != config.dpu_host_pf_pci_controller_id
+                    || entry.identity.pf_id != 0
+            })
+        }) {
+            return Err(DpfError::ConfigError(
+                "BF4 intercept topology must select dpu_host_pf_pci_controller_id and PF 0"
+                    .to_string(),
+            ));
+        }
+    }
     if config.num_of_vfs > MAX_BLUEFIELD_VFS_PER_PF {
         return Err(DpfError::ConfigError(format!(
             "DPF num_of_vfs must be <= {MAX_BLUEFIELD_VFS_PER_PF}"
@@ -2188,6 +2213,7 @@ fn build_service_interface_with_scope(
     namespace: &str,
     suffix: &str,
     dpu_cluster_node_labels: Option<&BTreeMap<String, String>>,
+    controller: u8,
 ) -> DPUServiceInterface {
     let (interface_type, physical, pf, vf, patch) = match &iface.iface_type {
         DpuServiceInterfaceTemplateType::Physical => (
@@ -2209,7 +2235,7 @@ fn build_service_interface_with_scope(
                 // deployment-scoping migration and would otherwise reconcile existing resources.
                 nic_selector: dpu_cluster_node_labels.is_some().then_some(
                     DpuServiceInterfaceTemplateSpecTemplateSpecPfNicSelector {
-                        controller_number: Some(1),
+                        controller_number: Some(controller.into()),
                         pci: None,
                         r#type: DpuServiceInterfaceTemplateSpecTemplateSpecPfNicSelectorType::Dpu,
                     },
@@ -2234,7 +2260,7 @@ fn build_service_interface_with_scope(
                 // Keep the VF selector symmetric with its parent PF and absent in legacy mode.
                 nic_selector: dpu_cluster_node_labels.is_some().then_some(
                     DpuServiceInterfaceTemplateSpecTemplateSpecVfNicSelector {
-                        controller_number: Some(1),
+                        controller_number: Some(controller.into()),
                         pci: None,
                         r#type: DpuServiceInterfaceTemplateSpecTemplateSpecVfNicSelectorType::Dpu,
                     },
@@ -2308,7 +2334,7 @@ pub fn build_service_interface(
     iface: &DpuServiceInterfaceTemplateDefinition,
     namespace: &str,
 ) -> DPUServiceInterface {
-    build_service_interface_with_scope(iface, namespace, "", None)
+    build_service_interface_with_scope(iface, namespace, "", None, 1)
 }
 
 /// Builds and applies DPUServiceInterfaces. Deployment-scoped names are
@@ -2321,10 +2347,16 @@ async fn apply_service_interface_templates_with_scope<
     interfaces: &[DpuServiceInterfaceTemplateDefinition],
     suffix: &str,
     dpu_cluster_node_labels: Option<&BTreeMap<String, String>>,
+    controller: u8,
 ) -> Result<(), crate::error::DpfError> {
     for iface in interfaces {
-        let cr =
-            build_service_interface_with_scope(iface, namespace, suffix, dpu_cluster_node_labels);
+        let cr = build_service_interface_with_scope(
+            iface,
+            namespace,
+            suffix,
+            dpu_cluster_node_labels,
+            controller,
+        );
         crate::repository::DpuServiceInterfaceRepository::apply(repo, &cr).await?;
     }
     Ok(())
@@ -2587,6 +2619,7 @@ async fn create_flavor_services_and_deployment<
         interfaces,
         interface_suffix,
         dpu_cluster_node_labels.as_ref(),
+        config.host_pf_pci_controller_id(),
     )
     .await
     .map_err(|error| {
@@ -5260,6 +5293,7 @@ mod tests {
                     TEST_NAMESPACE,
                     "bf3",
                     Some(&dpu_cluster_node_labels),
+                    1,
                 )),
                 Some(1),
             );
@@ -5320,6 +5354,30 @@ mod tests {
             16,
         )
         .expect("configured inventory fixture must be valid")
+    }
+
+    /// Uses BF4's supported default PF 0 for initialization while retaining BF3's arbitrary configured PF coverage.
+    fn configured_topology_for_profile(deployment_type: DpuDeploymentType) -> DpfInterceptBridging {
+        let topology = configured_topology();
+        if matches!(
+            deployment_type,
+            DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200
+        ) {
+            return topology;
+        }
+        // Preserve bridge names and VF population while selecting the supported BF4 boot PF.
+        let interfaces = topology
+            .interfaces()
+            .iter()
+            .cloned()
+            .map(|mut entry| {
+                entry.identity.controller_id = 1;
+                entry.identity.pf_id = 0;
+                entry
+            })
+            .collect();
+        DpfInterceptBridging::new(interfaces, topology.num_of_vfs())
+            .expect("valid BF4 host-PF topology")
     }
 
     /// Provides BF3 initialization inputs for flavor persistence and conflict tests.
@@ -5612,7 +5670,7 @@ mod tests {
         ): (DpuDeploymentType, u32, u32, u32, u32, u32, bool)| {
             // Use production inventory; only the limits and topology mode vary by case.
             let slots = crate::ServiceVpcSlots::new(slot_count).expect("bounded test slot count");
-            let topology = intercept.then(configured_topology);
+            let topology = intercept.then(|| configured_topology_for_profile(deployment_type));
             let interfaces = build_deployment_dpu_interfaces(
                 deployment_type,
                 crate::DEFAULT_DPU_NUM_OF_VFS,
@@ -5965,7 +6023,7 @@ mod tests {
                     .deployment_scoped_service_interfaces(true)
                     .deployment_type(deployment_type)
                     .num_of_vfs(8)
-                    .intercept_bridging(configured_topology())
+                    .intercept_bridging(configured_topology_for_profile(deployment_type))
                     .build()
                     .expect_err(
                         "a topology validated for 16 VFs must reject initialization for 8 VFs",
@@ -6003,8 +6061,8 @@ mod tests {
                 let result = DpfInterceptBridging::new(
                     vec![DpfInterceptBridge::new(
                         DpfInterfaceIdentity {
-                            controller_id: 2,
-                            pf_id: 3,
+                            controller_id: 1,
+                            pf_id: 0,
                             vf_id: None,
                         },
                         bridge,
@@ -6039,56 +6097,56 @@ mod tests {
             "Astra aggregate xplane bridge" {
                 // The shared xplane bridge cannot also become an intermediate intercept bridge.
                 ("br-xplane", "p-host") => Some(
-                    "OVS name br-xplane for intermediate bridge on DPF intercept-bridging interface c2pf3 conflicts with BF4 Astra aggregate xplane bridge".to_string()
+                    "OVS name br-xplane for intermediate bridge on DPF intercept-bridging interface c1pf0 conflicts with BF4 Astra aggregate xplane bridge".to_string()
                 ),
             }
 
             "Astra rail bridge as a patch port" {
                 // OVS bridge names keep their physical case, which intercept patch names reject.
                 ("br-host", "brcx-A56") => Some(
-                    "DPF intercept bridging patch port name \"brcx-A56\" for interface c2pf3 must be non-empty, start with a lowercase ASCII letter, and contain only lowercase ASCII letters, digits, hyphens, or underscores".to_string()
+                    "DPF intercept bridging patch port name \"brcx-A56\" for interface c1pf0 must be non-empty, start with a lowercase ASCII letter, and contain only lowercase ASCII letters, digits, hyphens, or underscores".to_string()
                 ),
             }
 
             "Weave DHCP bridge as a patch port" {
                 // Weave DHCP names are already rejected by the lowercase intercept-name contract.
                 ("br-host", "br-dhcp-A56") => Some(
-                    "DPF intercept bridging patch port name \"br-dhcp-A56\" for interface c2pf3 must be non-empty, start with a lowercase ASCII letter, and contain only lowercase ASCII letters, digits, hyphens, or underscores".to_string()
+                    "DPF intercept bridging patch port name \"br-dhcp-A56\" for interface c1pf0 must be non-empty, start with a lowercase ASCII letter, and contain only lowercase ASCII letters, digits, hyphens, or underscores".to_string()
                 ),
             }
 
             "Weave drop bridge as a patch port" {
                 // Weave drop names are already rejected by the lowercase intercept-name contract.
                 ("br-host", "br-drop-A56") => Some(
-                    "DPF intercept bridging patch port name \"br-drop-A56\" for interface c2pf3 must be non-empty, start with a lowercase ASCII letter, and contain only lowercase ASCII letters, digits, hyphens, or underscores".to_string()
+                    "DPF intercept bridging patch port name \"br-drop-A56\" for interface c1pf0 must be non-empty, start with a lowercase ASCII letter, and contain only lowercase ASCII letters, digits, hyphens, or underscores".to_string()
                 ),
             }
 
             "DPF-generated rail peer port" {
                 // The uppercase generated peer port fails syntax validation before ownership checks.
                 ("br-host", "p_brcxA56_to_brsfc_0123abcd") => Some(
-                    "DPF intercept bridging patch port name \"p_brcxA56_to_brsfc_0123abcd\" for interface c2pf3 must be non-empty, start with a lowercase ASCII letter, and contain only lowercase ASCII letters, digits, hyphens, or underscores".to_string()
+                    "DPF intercept bridging patch port name \"p_brcxA56_to_brsfc_0123abcd\" for interface c1pf0 must be non-empty, start with a lowercase ASCII letter, and contain only lowercase ASCII letters, digits, hyphens, or underscores".to_string()
                 ),
             }
 
             "DPF-generated rail local port" {
                 // This uppercase peer name is rejected before a local patch name is generated.
                 ("br-host", "brcxA56_0123abcd") => Some(
-                    "DPF intercept bridging patch port name \"brcxA56_0123abcd\" for interface c2pf3 must be non-empty, start with a lowercase ASCII letter, and contain only lowercase ASCII letters, digits, hyphens, or underscores".to_string()
+                    "DPF intercept bridging patch port name \"brcxA56_0123abcd\" for interface c1pf0 must be non-empty, start with a lowercase ASCII letter, and contain only lowercase ASCII letters, digits, hyphens, or underscores".to_string()
                 ),
             }
 
             "DPF-generated aggregate peer port" {
                 // The aggregate-side autogenerated orientation is independent of rail group names.
                 ("br-host", "p_brxplane_to_brsfc_0123abcd") => Some(
-                    "OVS name p_brxplane_to_brsfc_0123abcd for peer patch port on DPF intercept-bridging interface c2pf3 conflicts with DPF-generated BF4 Astra aggregate patch port".to_string()
+                    "OVS name p_brxplane_to_brsfc_0123abcd for peer patch port on DPF intercept-bridging interface c1pf0 conflicts with DPF-generated BF4 Astra aggregate patch port".to_string()
                 ),
             }
 
             "DPF-generated aggregate local port" {
                 // The topology's local-name derivation must also reserve the br-sfc-side orientation.
                 ("br-host", "brxplane_0123abcd") => Some(
-                    "OVS name p_brsfc_to_brxplane_0123abcd for DPF-generated local patch port on DPF intercept-bridging interface c2pf3 conflicts with DPF-generated BF4 Astra aggregate patch port".to_string()
+                    "OVS name p_brsfc_to_brxplane_0123abcd for DPF-generated local patch port on DPF intercept-bridging interface c1pf0 conflicts with DPF-generated BF4 Astra aggregate patch port".to_string()
                 ),
             }
         );
@@ -6100,7 +6158,7 @@ mod tests {
     fn initialization_rejects_mismatched_topology_interface_projection() {
         value_scenarios!(
             run = |(deployment_type, expected_count)| {
-                let topology = configured_topology();
+                let topology = configured_topology_for_profile(deployment_type);
                 // Build the complete projection so every untouched field remains canonical.
                 let mut interfaces = build_deployment_dpu_interfaces(
                     deployment_type,
@@ -10096,6 +10154,70 @@ mod tests {
         neither.spec.dpus.bfb = None;
         neither.spec.dpus.blue_field_software = None;
         assert!(dpu_mismatch(TEST_NAMESPACE, &dpu, &neither).is_none());
+    }
+
+    /// Emits the site-selected controller only for BF4 scoped PF/VF resources so mixed sites preserve BF3 selectors.
+    #[test]
+    fn host_pf_controllers_follow_platform_and_scope() {
+        // Render ordinary PF and VF definitions through the same normalized configuration used by SDK initialization.
+        scenarios!(
+            run = |(deployment_type, scoped, controller)| {
+                let config = InitDpfResourcesConfigBuilder::default()
+                    .deployment_type(deployment_type).deployment_scoped_service_interfaces(scoped)
+                    .dpu_host_pf_pci_controller_id(controller).build().map_err(drop)?;
+                let labels = BTreeMap::from([("deployment".to_string(), "test".to_string())]);
+                let interfaces = build_dpu_interfaces_vec();
+                let observed = ["pf0hpf", "pf0vf0"].into_iter().map(|name| {
+                    let definition = interfaces.iter().find(|interface| interface.name == name).expect("ordinary PF/VF");
+                    let rendered = build_service_interface_with_scope(definition, TEST_NAMESPACE, "test",
+                        scoped.then_some(&labels), config.host_pf_pci_controller_id());
+                    let spec = rendered.spec.template.spec.template.spec;
+                    spec.pf.and_then(|pf| pf.nic_selector).and_then(|selector| selector.controller_number)
+                        .or_else(|| spec.vf.and_then(|vf| vf.nic_selector).and_then(|selector| selector.controller_number))
+                }).collect::<Vec<_>>();
+                Ok::<_, ()>(observed)
+            };
+            "compatible selectors" {
+                // A site-wide BF4 override must not change shared BF3 resources.
+                (DpuDeploymentType::Bf3, false, 2) => Yields(vec![None, None]),
+                // BF3 remains on controller 1 when resources are scoped.
+                (DpuDeploymentType::Bf3, true, 2) => Yields(vec![Some(1), Some(1)]),
+                // BF4 default unscoped specs retain their absent selectors.
+                (DpuDeploymentType::Bf4Generic, false, 1) => Yields(vec![None, None]),
+                // Both ordinary BF4 PFs and VFs receive the resolved override.
+                (DpuDeploymentType::Bf4Generic, true, 2) => Yields(vec![Some(2), Some(2)]),
+            }
+            "unsupported shared override" {
+                // Unscoped BF4 resources cannot override the controller shared with BF3.
+                (DpuDeploymentType::Bf4Generic, false, 2) => Fails,
+            }
+        );
+    }
+
+    /// Rejects explicit BF4 Patch topology that disagrees with boot policy before resources can be activated.
+    #[test]
+    fn bf4_intercept_topology_matches_boot_controller_and_pf() {
+        // Keep the selected controller fixed while varying the factual topology identity.
+        scenarios!(
+            run = |(controller, pf)| {
+                let topology = DpfInterceptBridging::new(vec![DpfInterceptBridge::new(
+                    DpfInterfaceIdentity { controller_id: controller, pf_id: pf, vf_id: None },
+                    "br-host", "p-host")], 16).map_err(drop)?;
+                InitDpfResourcesConfigBuilder::default().deployment_type(DpuDeploymentType::Bf4Generic)
+                    .deployment_scoped_service_interfaces(true).dpu_host_pf_pci_controller_id(2)
+                    .num_of_vfs(16).intercept_bridging(topology).build().map(|_| ()).map_err(drop)
+            };
+            "matching topology" {
+                // An explicit matching Patch topology remains supported.
+                (2, 0) => Yields(()),
+            }
+            "conflicting topology" {
+                // Another controller cannot silently replace the boot controller.
+                (1, 0) => Fails,
+                // PF 0 is fixed even when another PF exists on the selected controller.
+                (2, 1) => Fails,
+            }
+        );
     }
 }
 

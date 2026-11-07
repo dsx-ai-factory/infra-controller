@@ -268,6 +268,7 @@ pub(crate) async fn discover_machine(
         let admin_segment_locks = admin_segment_locks_for_discovery(
             api,
             &hardware_info,
+            &stable_machine_id,
             caller_machine_id,
             site_explorer_creates_machines,
         )
@@ -451,13 +452,118 @@ pub(crate) async fn discover_machine(
             MachineId::from(synced_host_machine_id)
         };
 
-        db::machine_topology::create_or_update_with_bom_validation(
+        let mut persisted_topology = db::machine_topology::create_or_update_with_bom_validation(
             &mut txn,
             &stable_machine_id,
             &hardware_info,
             api.runtime_config.bom_validation.enabled,
         )
         .await?;
+
+        if discovery_reporter == rpc::MachineDiscoveryReporter::DpuAgent
+            && let MachineIdSubtype::Dpu(dpu_machine_id) = stable_machine_id.machine_id_subtype()
+            && [
+                hardware_info.dpu_info.as_ref(),
+                persisted_topology
+                    .topology
+                    .discovery_data
+                    .info
+                    .dpu_info
+                    .as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|dpu| {
+                dpu.required_host_pf(api.runtime_config.dpu_host_pf_pci_controller_id)
+                    .is_some()
+            })
+        {
+            // Enforce registered host-PF identity only for BF4 to preserve older DPU-agent compatibility.
+            let incoming = hardware_info.dpu_info.as_ref().ok_or_else(|| {
+                CarbideError::InvalidArgument("DPU-agent discovery requires DpuData".to_string())
+            })?;
+            let mapping =
+                db::machine_topology::record_dpu_host_pfs(&mut txn, &dpu_machine_id, incoming).await;
+            match mapping {
+                Ok(initialized) => {
+                    // An accepted report clears a prior drift alert without replacing immutable inventory.
+                    if !incoming.host_pfs.is_empty() {
+                        db::health_report::remove_health_report(
+                            &mut txn,
+                            "machines",
+                            &dpu_machine_id,
+                            health_report::HealthReportApplyMode::Merge,
+                            "dpu-host-pf",
+                        )
+                        .await?;
+                    }
+                    if initialized {
+                        persisted_topology = db::machine_topology::find_latest_by_machine_ids(
+                            &mut txn,
+                            &[stable_machine_id],
+                        )
+                        .await?
+                        .remove(&stable_machine_id)
+                        .ok_or_else(|| CarbideError::NotFoundError {
+                            kind: "DPU topology",
+                            id: stable_machine_id.to_string(),
+                        })?;
+                    }
+                }
+                Err(error) => {
+                    let drift = matches!(
+                        &error,
+                        db::DatabaseError::DpuHostPf {
+                            source: model::hardware_info::DpuHostPfError::IdentityDrift
+                                | model::hardware_info::DpuHostPfError::BootMacDrift { .. },
+                            ..
+                        }
+                    );
+                    // Reject the discovery transaction before recording hardware drift independently.
+                    txn.rollback().await?;
+                    if drift {
+                        let mut report = health_report::HealthReport::empty("dpu-host-pf".to_string());
+                        report.alerts.push(health_report::HealthProbeAlert {
+                            id: "DpuHostPfIdentityDrift".parse().map_err(|error| {
+                                CarbideError::internal(format!(
+                                    "invalid host-PF health probe ID: {error}"
+                                ))
+                            })?,
+                            target: Some(dpu_machine_id.to_string()),
+                            in_alert_since: None,
+                            message: error.to_string(),
+                            tenant_message: None,
+                            classifications: vec![
+                                health_report::HealthAlertClassification::prevent_allocations(),
+                                health_report::HealthAlertClassification::prevent_host_state_changes(),
+                            ],
+                        });
+                        let mut drift_txn = api.txn_begin().await?;
+                        db::health_report::insert_health_report(
+                            &mut drift_txn,
+                            "machines",
+                            &dpu_machine_id,
+                            health_report::HealthReportApplyMode::Merge,
+                            &report,
+                        )
+                        .await?;
+                        drift_txn.commit().await?;
+                        tracing::error!(%dpu_machine_id, %error, "Registered DPU host-PF inventory drift rejected");
+                    }
+                    return Err(error.into());
+                }
+            }
+        }
+        let registered_dpu_info = persisted_topology
+            .topology
+            .discovery_data
+            .info
+            .dpu_info
+            .as_ref();
+        let is_bf4 = registered_dpu_info.is_some_and(|dpu| {
+            dpu.required_host_pf(api.runtime_config.dpu_host_pf_pci_controller_id)
+                .is_some()
+        });
 
         // The host whose admin addresses get normalized after this transaction
         // commits, whenever DPU discovery creates or reattaches a DPU-backed host
@@ -467,88 +573,145 @@ pub(crate) async fn discover_machine(
             // Create Host proactively.
             // In case host interface is created, this method will return existing one, instead
             // creating new everytime.
-            let machine_interface =
-                db::machine_interface::create_host_machine_dpu_interface_proactively(
-                    &mut txn,
-                    Some(&hardware_info),
-                    &machine_id,
-                    api.runtime_config
-                        .fnn
-                        .as_ref()
-                        .and_then(|fnn| fnn.admin_vpc.as_ref())
-                        .is_some_and(|admin| admin.enabled),
-                    api.runtime_config.retained_boot_interface_window,
+            let machine_interface = if is_bf4 {
+                // Require a retry for newly classified BF4 discovery to avoid upgrading segment locks after interface row locks.
+                if !matches!(admin_segment_locks, AdminSegmentLocks::Exclusive) {
+                    return Err(CarbideError::FailedPrecondition(
+                        "DPU classification changed during discovery; retry".to_string(),
+                    )
+                    .into());
+                }
+                if let Some(host) =
+                    db::machine::find_host_by_dpu_machine_id(&mut txn, &dpu_machine_id).await?
+                {
+                    // Existing BF4 networking is repaired only by the allocation-guarded transaction after commit.
+                    host.status
+                        .interfaces
+                        .iter()
+                        .find(|interface| interface.attached_dpu_machine_id == Some(dpu_machine_id))
+                        .cloned()
+                } else {
+                    match registered_dpu_info
+                        .map(|dpu| {
+                            dpu.selected_host_pf(api.runtime_config.dpu_host_pf_pci_controller_id)
+                        })
+                        .transpose()
+                        .map(|target| target.flatten())
+                    {
+                        Ok(Some(target)) => Some(
+                            db::machine_interface::create_host_machine_dpu_interface_proactively(
+                                &mut txn,
+                                target.mac_address,
+                                &machine_id,
+                                db::machine_interface::DpuHostInterfaceOwnership::UnpairedDpu,
+                                api.runtime_config
+                                    .fnn
+                                    .as_ref()
+                                    .and_then(|fnn| fnn.admin_vpc.as_ref())
+                                    .is_some_and(|admin| admin.enabled),
+                                api.runtime_config.retained_boot_interface_window,
+                            )
+                            .await?,
+                        ),
+                        unresolved => {
+                            tracing::warn!(%dpu_machine_id, pci_controller_id = api.runtime_config.dpu_host_pf_pci_controller_id,
+                                pf_id = 0, reason = ?unresolved, "DPU registration has no usable configured host PF");
+                            None
+                        }
+                    }
+                }
+            } else {
+                Some(
+                    db::machine_interface::create_host_machine_dpu_interface_proactively(
+                        &mut txn,
+                        hardware_info
+                            .factory_mac_address()
+                            .map_err(CarbideError::from)?,
+                        &machine_id,
+                        db::machine_interface::DpuHostInterfaceOwnership::Legacy,
+                        api.runtime_config
+                            .fnn
+                            .as_ref()
+                            .and_then(|fnn| fnn.admin_vpc.as_ref())
+                            .is_some_and(|admin| admin.enabled),
+                        api.runtime_config.retained_boot_interface_window,
+                    )
+                    .await?,
                 )
-                .await?;
+            };
 
             // Interface rows precede the conditional machine/configuration write.
             if let Some(prepared) = &dpu_loopback {
                 prepared.attach(&mut txn, true).await.map_err(CarbideError::from)?;
             }
 
-            let host_machine_id = if let Some(host_machine_id) = machine_interface.machine_id {
-                host_machine_id
-            } else {
-                // Create host machine with temporary ID if no machine is attached.
-                let predicted_machine_id =
-                    host_id_from_dpu_hardware_info(&hardware_info).map_err(|e| {
-                        CarbideError::InvalidArgument(format!("hardware info missing: {e}"))
-                    })?;
+            if let Some(machine_interface) = machine_interface {
+                let host_machine_id = if let Some(host_machine_id) = machine_interface.machine_id {
+                    host_machine_id
+                } else {
+                    // Create host machine with temporary ID if no machine is attached.
+                    let predicted_machine_id =
+                        host_id_from_dpu_hardware_info(&hardware_info).map_err(|e| {
+                            CarbideError::InvalidArgument(format!("hardware info missing: {e}"))
+                        })?;
 
-                let host_has_primary = db::machine_interface::find_by_machine_ids(
-                    &mut txn,
-                    std::slice::from_ref(&predicted_machine_id),
-                )
-                .await?
-                .get(&predicted_machine_id)
-                .is_some_and(|interfaces| {
-                    interfaces
-                        .iter()
-                        .any(|interface| interface.primary_interface)
-                });
-                if host_has_primary && machine_interface.primary_interface {
-                    db::machine_interface::set_primary_interface(
-                        &machine_interface.id,
-                        false,
+                    let host_has_primary = db::machine_interface::find_by_machine_ids(
                         &mut txn,
+                        std::slice::from_ref(&predicted_machine_id),
+                    )
+                    .await?
+                    .get(&predicted_machine_id)
+                    .is_some_and(|interfaces| {
+                        interfaces
+                            .iter()
+                            .any(|interface| interface.primary_interface)
+                    });
+                    if host_has_primary && machine_interface.primary_interface {
+                        db::machine_interface::set_primary_interface(
+                            &machine_interface.id,
+                            false,
+                            &mut txn,
+                        )
+                        .await?;
+                    }
+
+                    let mi_id = machine_interface.id;
+                    let proactive_machine = db::machine::get_or_create(
+                        &mut txn,
+                        Some(&api.common_pools),
+                        &predicted_machine_id,
+                        &machine_interface,
                     )
                     .await?;
-                }
 
-                let mi_id = machine_interface.id;
-                let proactive_machine = db::machine::get_or_create(
-                    &mut txn,
-                    Some(&api.common_pools),
-                    &predicted_machine_id,
-                    &machine_interface,
-                )
-                .await?;
-
-                // Update host and DPUs state correctly.
-                let host_machine_id =
-                    carbide_uuid::machine::HostMachineId::try_from(proactive_machine.id)
-                        .map_err(|error| CarbideError::internal(error.to_string()))?;
-                db::machine::update_state(
-                    &mut txn,
-                    &host_machine_id,
-                    &ManagedHostState::DPUInit {
-                        dpu_states: DpuInitStates {
-                            states: HashMap::from([(dpu_machine_id, DpuInitState::Init)]),
+                    // Update host and DPUs state correctly.
+                    let host_machine_id =
+                        carbide_uuid::machine::HostMachineId::try_from(proactive_machine.id)
+                            .map_err(|error| CarbideError::internal(error.to_string()))?;
+                    db::machine::update_state(
+                        &mut txn,
+                        &host_machine_id,
+                        &ManagedHostState::DPUInit {
+                            dpu_states: DpuInitStates {
+                                states: HashMap::from([(dpu_machine_id, DpuInitState::Init)]),
+                            },
                         },
-                    },
-                )
-                .await?;
+                    )
+                    .await?;
 
-                tracing::info!(
-                    machine_interface_id = ?mi_id,
-                    machine_id = %proactive_machine.id,
-                    "Created host machine proactively",
-                );
+                    tracing::info!(
+                        machine_interface_id = ?mi_id,
+                        machine_id = %proactive_machine.id,
+                        "Created host machine proactively",
+                    );
 
-                proactive_machine.id
-            };
+                    proactive_machine.id
+                };
 
-            Some(host_machine_id)
+                Some(host_machine_id)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -618,14 +781,43 @@ pub(crate) async fn discover_machine(
         // committed, so its segment locks never follow a row lock held here. A
         // host's first discovery runs it under the stable id, which a DPU
         // discovery overlapping the rename could not see. Failures are counted and
-        // never reject the committed discovery; a transient one flags the host's
-        // BMC endpoint so the next Site Explorer iteration retries.
+        // never reject the committed discovery; a transient legacy failure flags
+        // the host's BMC endpoint so the next Site Explorer iteration retries.
+        // Registered BF4 repair retries when Site Explorer scans initializing hosts.
         let reconciled_host_machine_id = match (dpu_host_machine_id, &predicted_host_id) {
             (Some(host_machine_id), _) => Some(host_machine_id),
             (None, Some(_)) => Some(machine_id),
             (None, None) => None,
         };
-        if let Some(host_machine_id) = reconciled_host_machine_id
+        if is_bf4 && let Some(host_machine_id) = reconciled_host_machine_id {
+            let result = async {
+                let host_machine_id = HostMachineId::try_from(host_machine_id)
+                    .map_err(|error| CarbideError::internal(error.to_string()))?;
+                let mut repair = api.txn_begin().await?;
+                db::host_boot_interface::reconcile_pre_host_init(
+                    &mut repair,
+                    &host_machine_id,
+                    api.runtime_config.dpu_host_pf_pci_controller_id,
+                    api.runtime_config
+                        .fnn
+                        .as_ref()
+                        .and_then(|fnn| fnn.admin_vpc.as_ref())
+                        .is_some_and(|admin| admin.enabled),
+                    api.runtime_config.retained_boot_interface_window,
+                )
+                .await?;
+                repair.commit().await?;
+                Ok::<(), CarbideError>(())
+            }
+            .await;
+            if let Err(error) = result {
+                carbide_instrument::emit(HostAdminAddressReconcileFailed {
+                    dpu_machine_id: dpu_host_machine_id.map(|_| stable_machine_id),
+                    host_machine_id,
+                    error: error.to_string(),
+                });
+            }
+        } else if let Some(host_machine_id) = reconciled_host_machine_id
             && let Err(error) = db::machine_interface::reconcile_admin_addresses_after_commit(
                 api.pg_pool(),
                 &host_machine_id,
@@ -836,31 +1028,56 @@ fn discovery_source_owner_error() -> CarbideError {
 /// The admin segment advisory locks a discovery transaction takes before its
 /// first row lock, decided from unlocked reads before it opens. Its row locks
 /// then follow the order the host rename and the admin address repair use,
-/// interface rows before machines rows. A stale decision can only make the
+/// interface rows before machines rows. A stale decision can make the
 /// transaction request a segment lock after a row lock, which Postgres
-/// reports as a deadlock the caller retries.
+/// reports as a deadlock the caller retries. Newly classified BF4 discovery
+/// instead requires caller retry before host association if it did not take exclusive locks.
 enum AdminSegmentLocks {
     /// No interface row this transaction writes needs a segment lock: a repeat
-    /// host discovery, or a DPU whose host link is attached to a machine.
+    /// host discovery, or a legacy DPU whose host link is attached to a machine.
     None,
-    /// The allocators' mode: a host's first discovery, or a DPU whose host
+    /// The allocators' mode: a host's first discovery, or a legacy DPU whose host
     /// link is missing or unattached where Site Explorer creates machines.
     Allocation,
-    /// A DPU whose host link is missing or unattached where Site Explorer does
-    /// not create machines, or a host caller interface whose machine id fails
-    /// authorization inside the transaction.
+    /// BF4 discovery, a legacy DPU whose host link is missing or unattached where
+    /// Site Explorer does not create machines, or a host caller interface whose
+    /// machine id fails authorization inside the transaction.
     Exclusive,
 }
 
-/// Picks the locks for a discovery of `hardware_info` from the caller
-/// interface's current machine id and, for a DPU, its host link row.
+/// Picks the discovery locks from the caller interface, host link, and incoming or
+/// persisted BF4 classification so callers can exclude allocation during host-PF ownership checks.
 async fn admin_segment_locks_for_discovery(
     api: &Api,
     hardware_info: &HardwareInfo,
+    stable_machine_id: &MachineId,
     caller_machine_id: Option<MachineId>,
     site_explorer_creates_machines: bool,
 ) -> Result<AdminSegmentLocks, CarbideError> {
     if hardware_info.is_dpu() {
+        // Consult retained classification when the incoming report does not already require BF4 locking,
+        // because accepted reports may omit their part number or host-PF inventory.
+        if hardware_info.dpu_info.as_ref().is_some_and(|dpu| {
+            dpu.required_host_pf(api.runtime_config.dpu_host_pf_pci_controller_id)
+                .is_some()
+        }) || {
+            let mut connection = api
+                .pg_pool()
+                .acquire()
+                .await
+                .map_err(db::DatabaseError::acquire)?;
+            db::machine_topology::find_latest_by_machine_ids(&mut connection, &[*stable_machine_id])
+                .await?
+                .remove(stable_machine_id)
+                .and_then(|topology| topology.topology.discovery_data.info.dpu_info)
+                .is_some_and(|dpu| {
+                    dpu.required_host_pf(api.runtime_config.dpu_host_pf_pci_controller_id)
+                        .is_some()
+                })
+        } {
+            // BF4 may create an exact-MAC link unrelated to the provisional factory-MAC row.
+            return Ok(AdminSegmentLocks::Exclusive);
+        }
         // The transaction reports a missing factory MAC itself.
         let Ok(host_mac) = hardware_info.factory_mac_address() else {
             return Ok(AdminSegmentLocks::None);
@@ -891,10 +1108,12 @@ async fn admin_segment_locks_for_discovery(
 }
 
 /// A discovery committed but the host's admin addresses could not be
-/// reconciled afterwards. The host's BMC endpoint is flagged for exploration,
-/// so the next Site Explorer iteration revisits the host and retries the
-/// repair, whether or not it creates machines. Until then a dormant link may
-/// keep a DHCP address and the host's network config version is not bumped.
+/// reconciled afterwards. After a transient legacy failure, the host's BMC
+/// endpoint is flagged for exploration, so the next Site Explorer iteration
+/// revisits the host and retries the repair, whether or not it creates machines.
+/// Registered BF4 repair retries when Site Explorer scans initializing hosts.
+/// Until then a dormant link may keep a DHCP address and the host's network
+/// config version is not bumped.
 #[derive(carbide_instrument::Event)]
 #[event(
     event_name = "host_admin_address_reconcile_failed",

@@ -63,6 +63,7 @@ use carbide_rack_controller::io::RackStateControllerIO;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
 use carbide_resource_pool::PoolDefinitionSource;
 use carbide_secrets::credentials::{CredentialManager, CredentialReader};
+use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_site_explorer::{AuthenticatedBmcClient, EndpointExplorationService, SiteExplorer};
 use carbide_spdm_controller::context::SpdmStateHandlerServices;
 use carbide_spdm_controller::handler::SpdmAttestationStateHandler;
@@ -1057,7 +1058,8 @@ fn build_dpf_init_config(
         .extra_bfcfg_parameters(carbide_config.dpf.resolved_bfcfg_parameters_for(deployment))
         .enable_delay_host_init(deployment.enable_delay_host_init)
         .partial_multiplane_disabled(!carbide_config.is_partial_multiplane_enabled())
-        .deployment_type(deployment_type);
+        .deployment_type(deployment_type)
+        .dpu_host_pf_pci_controller_id(carbide_config.dpu_host_pf_pci_controller_id);
     if let Some(bluefield_software) = bluefield_software {
         builder = builder.bluefield_software(bluefield_software);
     }
@@ -1724,6 +1726,32 @@ fn service_vpc_registration_config(
             .deployments
             .service_vpc_address_families(),
     })
+}
+
+/// Resolves root API settings into SiteExplorerConfig so BF4 reconciliation receives the configured controller.
+fn site_explorer_config(carbide_config: &CarbideConfig) -> SiteExplorerConfig {
+    let mut config = carbide_config.site_explorer.clone();
+    // `retained_boot_interface_window` is a single top-level knob
+    // (retention spans DHCP, deletion, and ingestion -- it isn't a
+    // site-explorer feature). Site-explorer's copy is `#[serde(skip)]`,
+    // so it can't be set under `[site_explorer]`; this hand-off is the
+    // only way the value gets in, sparing a constructor parameter
+    // through `SiteExplorer::new` and every test fixture.
+    config.retained_boot_interface_window = carbide_config.retained_boot_interface_window;
+    config.dpu_host_pf_pci_controller_id = carbide_config.dpu_host_pf_pci_controller_id;
+    config.admin_fnn_enabled = carbide_config
+        .fnn
+        .as_ref()
+        .and_then(|fnn| fnn.admin_vpc.as_ref())
+        .is_some_and(|admin| admin.enabled);
+    if let Some(window) = config.retained_boot_interface_window {
+        tracing::info!(
+            window_seconds = window.num_seconds(),
+            "retained_boot_interface_window configured; retained boot interface \
+             records expire instead of waiting forever"
+        );
+    }
+    config
 }
 
 /// Initialize and spawn all controllers and background tasks.
@@ -2516,32 +2544,9 @@ async fn initialize_and_start_controllers<'a>(
         }
     }
 
-    let site_explorer_config = {
-        let mut config = carbide_config.site_explorer.clone();
-        // `retained_boot_interface_window` is a single top-level knob
-        // (retention spans DHCP, deletion, and ingestion -- it isn't a
-        // site-explorer feature). Site-explorer's copy is `#[serde(skip)]`,
-        // so it can't be set under `[site_explorer]`; this hand-off is the
-        // only way the value gets in, sparing a constructor parameter
-        // through `SiteExplorer::new` and every test fixture.
-        config.retained_boot_interface_window = carbide_config.retained_boot_interface_window;
-        config.admin_fnn_enabled = carbide_config
-            .fnn
-            .as_ref()
-            .and_then(|fnn| fnn.admin_vpc.as_ref())
-            .is_some_and(|admin| admin.enabled);
-        if let Some(window) = config.retained_boot_interface_window {
-            tracing::info!(
-                window_seconds = window.num_seconds(),
-                "retained_boot_interface_window configured; retained boot interface \
-                 records expire instead of waiting forever"
-            );
-        }
-        config
-    };
     SiteExplorer::new(
         db_pool.clone(),
-        site_explorer_config,
+        site_explorer_config(carbide_config),
         meter.clone(),
         endpoint_exploration_service.clone(),
         api_service.bmc_client.clone(),
@@ -2663,6 +2668,22 @@ mod tests {
         InitialObjectsConfig, VmaasConfig, default_hbn_bridge,
     };
     use crate::cfg::load::parse_carbide_config;
+
+    /// Verifies production SiteExplorerConfig resolution replaces a different nested controller with
+    /// the root value so BF4 reconciliation receives the API's configured host-PF controller.
+    #[test]
+    fn site_explorer_config_uses_root_host_pf_controller() {
+        // Keep Site Explorer's default controller while selecting controller 2 through the root config.
+        let mut config = crate::test_support::default_config::get();
+        config.site_explorer.dpu_host_pf_pci_controller_id = 1;
+        config.dpu_host_pf_pci_controller_id = 2;
+
+        // Resolve the configuration through the same function used by production startup.
+        let explorer_config = site_explorer_config(&config);
+
+        // Root controller selection must replace the independent Site Explorer default.
+        assert_eq!(explorer_config.dpu_host_pf_pci_controller_id, 2);
+    }
 
     /// Verifies disabled DPF bypasses malformed platform values, absent packaged chart metadata, and
     /// resource construction because these inputs are irrelevant until DPF management is enabled.
@@ -3051,6 +3072,8 @@ mod tests {
 
     /// Verifies Astra startup wires one sparse topology into mandatory services and SDK validation,
     /// because SDK-only tests bypass API-core forwarding.
+    /// Controller-2 topology must validate when the root setting selects controller 2, preventing
+    /// startup from validating it against the SDK's default controller 1.
     #[test]
     fn astra_init_config_wires_topology_into_services_and_sdk_validation() {
         // Select one sparse VF, enable required interface scoping, and set non-default capacity
@@ -3060,6 +3083,25 @@ mod tests {
         config.dpu_config.num_of_vfs = 16;
         config.dpu_config.additional_managed_sf = 17;
         config.dpu_config.max_active_service_vpc_interfaces_per_dpu = 23;
+
+        // Match every typed identity to the root controller so missing SDK forwarding rejects startup.
+        config.dpu_host_pf_pci_controller_id = 2;
+        for interface in config
+            .vmaas_config
+            .as_mut()
+            .and_then(|config| config.bridging.as_mut())
+            .expect("the fixture includes intercept bridging")
+            .host_representor_intercept_bridging
+            .values_mut()
+        {
+            interface
+                .dpf_interface
+                .as_mut()
+                .expect("each fixture interface includes a typed identity")
+                .controller_id = 2;
+        }
+
+        // Normalize the same controller-2 PF and sparse VF that startup supplies to the SDK.
         let topology = normalize_dpf_intercept_bridging(
             config.vmaas_config.as_ref(),
             config.dpu_config.num_of_vfs,
@@ -3143,7 +3185,7 @@ mod tests {
         let conflicting_topology = carbide_dpf::DpfInterceptBridging::new(
             vec![carbide_dpf::DpfInterceptBridge::new(
                 carbide_dpf::DpfInterfaceIdentity {
-                    controller_id: 1,
+                    controller_id: 2, // Keep controller selection valid while isolating the bridge conflict.
                     pf_id: 0,
                     vf_id: None,
                 },

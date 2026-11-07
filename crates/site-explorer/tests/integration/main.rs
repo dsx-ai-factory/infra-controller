@@ -25,6 +25,7 @@ mod machine_fixtures;
 mod machine_location_reconciler;
 mod power_shelf;
 mod reconcile;
+mod registered_host_interfaces;
 mod site_explorer;
 mod switch;
 mod zero_dpu;

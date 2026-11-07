@@ -591,6 +591,152 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_multi_dpu_machin
     Ok(())
 }
 
+/// Releases secondary DHCP allocations before BF4 registration while preserving the provisional primary,
+/// so missing host-PF inventory cannot consume spare admin addresses or make settled hosts retake segment locks.
+#[sqlx_test]
+async fn test_bf4_ingestion_cleans_dormant_admin_links_before_registration(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Prepare two DPU Redfish reports without agent registration, with ordinary admin networking for link allocation.
+    let env = Env::new(pool).await;
+    let creator = machine_creator(&env, machine_creator_config());
+    let host = ManagedHostConfig::default().with_dpu_count(2);
+    let mut fixture = explored_host_fixture(&env, &host).await;
+    for dpu in &mut fixture.host.dpus {
+        let product = Arc::make_mut(&mut dpu.report)
+            .chassis
+            .iter_mut()
+            .find(|chassis| chassis.id == "Card1")
+            .expect("DPU product chassis");
+        product.part_number = Some("900-9D4B4-CWAA-TSA".to_string()); // Require agent inventory before automatic BF4 selection.
+    }
+    // Persist the host report so missing DPU inventory, rather than missing Redfish evidence, blocks selection.
+    let mut txn = env.pool.begin().await?;
+    db::explored_endpoints::insert(
+        fixture.host.host_bmc_ip,
+        &fixture.host_report,
+        false,
+        txn.as_mut(),
+    )
+    .await?;
+    txn.commit().await?;
+
+    // Create both provisional links and exercise the real after-commit normalization before any registration.
+    assert!(
+        creator
+            .create_managed_host(
+                &fixture.host,
+                &mut fixture.host_report,
+                Some(&expected_machine(&host)),
+                &env.pool,
+            )
+            .await?
+    );
+    let host_machine_id = HostMachineId::try_from(
+        host_links(&env.pool, &host).await?[0]
+            .machine_id
+            .expect("provisional link belongs to the new host"),
+    )?;
+    let persisted = env
+        .test_harness
+        .find_machine(host_machine_id.into())
+        .await
+        .remove(0)
+        .status
+        .expect("persisted host status");
+
+    // Reloaded links must retain their DPU associations and provisional primary while the secondary loses DHCP and DNS metadata.
+    assert_eq!(persisted.associated_dpu_machine_ids.len(), 2);
+    let links = persisted
+        .interfaces
+        .iter()
+        .filter(|interface| interface.attached_dpu_machine_id.is_some())
+        .collect::<Vec<_>>();
+    let (primary, dormant): (Vec<_>, Vec<_>) = links
+        .into_iter()
+        .partition(|interface| interface.primary_interface);
+    let ([primary], [dormant]) = (primary.as_slice(), dormant.as_slice()) else {
+        panic!("two DPU links must retain one provisional primary and one dormant link")
+    };
+    assert_eq!(
+        primary.mac_address,
+        host.dpus[0].host_mac_address.to_string()
+    );
+    assert_eq!(
+        primary.attached_dpu_machine_id,
+        Some(fixture.dpu_machine_ids[&0])
+    );
+    assert_eq!(primary.address.len(), 1);
+    assert_eq!(
+        dormant.mac_address,
+        host.dpus[1].host_mac_address.to_string()
+    );
+    assert_eq!(
+        dormant.attached_dpu_machine_id,
+        Some(fixture.dpu_machine_ids[&1])
+    );
+    assert!(dormant.address.is_empty());
+    assert_eq!(dormant.domain_id, None);
+    assert_eq!(
+        dormant.hostname,
+        format!(
+            "noip-{}",
+            host.dpus[1].host_mac_address.to_string().replace(':', "-")
+        )
+    );
+
+    // Address cleanup must not turn provisional boot intent into a resolved registered BF4 selection.
+    assert!(matches!(
+        db::host_boot_interface::not_ready_reason(&env.pool, &host_machine_id, 1).await?,
+        Some(
+            db::host_boot_interface::HostBootInterfaceNotReady::Selection(
+                model::site_explorer::HostPrimaryInterfaceError::DpuInventory {
+                    source: model::hardware_info::DpuHostPfError::MissingInventory,
+                    ..
+                }
+            )
+        )
+    ));
+    let desired = env
+        .api()
+        .get_machine_boot_interfaces(Request::new(rpc::forge::GetMachineBootInterfacesRequest {
+            machine_id: Some(host_machine_id.into()),
+        }))
+        .await?
+        .into_inner()
+        .reconciliation
+        .expect("provisional desired target");
+    assert_eq!(
+        desired
+            .desired_boot_interface
+            .expect("provisional MAC")
+            .mac_address,
+        host.dpus[0].host_mac_address.to_string()
+    );
+    assert_eq!(
+        desired.selection_source,
+        rpc::forge::BootInterfaceSelectionSource::LegacyUnknown as i32
+    );
+
+    // A settled unresolved host must finish without waiting behind another admin-segment holder.
+    let mut gate = env.pool.begin().await?;
+    db::machine_interface::lock_all_admin_segments(gate.as_mut()).await?;
+    let created = tokio::time::timeout(
+        Duration::from_secs(30),
+        creator.create_managed_host(
+            &fixture.host,
+            &mut fixture.host_report,
+            Some(&expected_machine(&host)),
+            &env.pool,
+        ),
+    )
+    .await
+    .expect("settled BF4 links must not retake admin segment locks")?;
+    assert!(!created);
+    gate.rollback().await?;
+    Ok(())
+}
+
 /// Creating a multi-DPU host takes the admin segment locks in the allocators'
 /// mode, before it writes a row: another shared holder lets the creation
 /// through, an exclusive holder makes it wait. The admin address reconcile

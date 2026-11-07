@@ -242,9 +242,10 @@ impl MachineCreator {
     /// A host is revisited when its BMC and every DPU BMC belong to a machine
     /// and one of them was explored in this run: the hosts `create_machines`
     /// repairs when it is on. Each reconcile holds the admin-lock admission
-    /// permit, like `create_machines` does. A failed transient reconcile
+    /// permit, like `create_machines` does. A failed transient legacy reconcile
     /// flags the host's BMC endpoint for exploration, so the next run
-    /// revisits the host here.
+    /// revisits the host here. Registered BF4 repair also retries when Site
+    /// Explorer scans initializing hosts.
     pub(crate) async fn reconcile_explored_host_admin_addresses(
         &self,
         explored_managed_hosts: &[IdentifiedManagedHost],
@@ -265,6 +266,7 @@ impl MachineCreator {
                     reconcile_host_admin_addresses_after_commit(
                         &self.database_connection,
                         &host_machine_id,
+                        &self.config,
                     )
                     .await;
                 }
@@ -420,7 +422,7 @@ impl MachineCreator {
             // Normalize host admin address ownership now that every DPU-backed
             // host interface is attached and the primary flags are committed.
             let repair_start = Instant::now();
-            reconcile_host_admin_addresses_after_commit(pool, &host_machine_id).await;
+            reconcile_host_admin_addresses_after_commit(pool, &host_machine_id, &self.config).await;
             record_creation_stage(
                 ManagedHostCreationStage::AfterCommitRepair,
                 repair_start.elapsed(),
@@ -497,7 +499,7 @@ impl MachineCreator {
                 prepared.check_identity(&mut txn).await?;
             }
 
-            Self::reconcile_existing_dpu_host(
+            self.reconcile_existing_dpu_host(
                 &mut txn,
                 &host_machine_id,
                 &managed_host.explored_host.dpus,
@@ -635,9 +637,10 @@ impl MachineCreator {
         Ok(ManagedHostCreation::Created { host_machine_id })
     }
 
-    /// Reconciles DPU OOB ownership and the existing host's desired boot target.
+    /// Reconciles DPU OOB ownership and a legacy host's desired boot target.
     /// The caller validates DPU attachment and owns the transaction.
     async fn reconcile_existing_dpu_host(
+        &self,
         txn: &mut PgConnection,
         host_machine_id: &HostMachineId,
         dpus: &[ExploredDpu],
@@ -646,10 +649,34 @@ impl MachineCreator {
             Self::ensure_dpu_oob_interface_ownership(txn, dpu).await?;
         }
 
+        // Keep registered BF4 classification when a Redfish refresh omits the part number.
+        let dpu_ids = dpus
+            .iter()
+            .filter_map(|dpu| dpu.report.machine_id)
+            .collect::<Vec<_>>();
+        let registered = db::machine_topology::find_latest_by_machine_ids(txn, &dpu_ids).await?;
+
         // The primary on an existing host may predate source
         // tracking. Do not infer its historical selector from today's
         // exploration or ExpectedMachine data.
-        reconcile_desired_boot_interface(txn, host_machine_id, None, None).await?;
+        let bf4 = dpus.iter().any(|dpu| {
+            dpu.boot_interface_dpu(
+                dpu.report
+                    .machine_id
+                    .as_ref()
+                    .and_then(|id| registered.get(id))
+                    .and_then(|topology| topology.topology.discovery_data.info.dpu_info.as_ref()),
+            )
+            .is_ok_and(|candidate| {
+                candidate
+                    .hardware
+                    .required_host_pf(self.config.dpu_host_pf_pci_controller_id)
+                    .is_some()
+            })
+        });
+        if !bf4 {
+            reconcile_desired_boot_interface(txn, host_machine_id, None, None).await?;
+        }
 
         Ok(())
     }
@@ -1154,8 +1181,11 @@ impl MachineCreator {
         let host_machine_interface =
             db::machine_interface::create_host_machine_dpu_interface_proactively(
                 txn,
-                Some(&dpu_hw_info),
+                dpu_hw_info
+                    .factory_mac_address()
+                    .map_err(db::DatabaseError::from)?,
                 explored_dpu.report.machine_id.as_ref().unwrap(),
+                db::machine_interface::DpuHostInterfaceOwnership::Legacy,
                 self.config.admin_fnn_enabled,
                 self.config.retained_boot_interface_window,
             )
@@ -1575,7 +1605,33 @@ fn record_creation_stage(stage: ManagedHostCreationStage, latency: Duration) {
 async fn reconcile_host_admin_addresses_after_commit(
     pool: &PgPool,
     host_machine_id: &HostMachineId,
+    config: &Config,
 ) {
+    let registered_reconcile = async {
+        let mut txn = Transaction::begin(pool).await?;
+        let bf4 = db::host_boot_interface::reconcile_pre_host_init(
+            txn.as_pgconn(),
+            host_machine_id,
+            config.dpu_host_pf_pci_controller_id,
+            config.admin_fnn_enabled,
+            config.retained_boot_interface_window,
+        )
+        .await?;
+        txn.commit().await?;
+        Ok::<bool, db::DatabaseError>(bf4)
+    }
+    .await;
+    match registered_reconcile {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            emit(SiteExplorerHostAdminAddressReconcileFailed {
+                host_machine_id: *host_machine_id,
+                error: error.to_string(),
+            });
+            return;
+        }
+    }
     if let Err(error) =
         db::machine_interface::reconcile_admin_addresses_after_commit(pool, host_machine_id).await
     {
@@ -1587,9 +1643,10 @@ async fn reconcile_host_admin_addresses_after_commit(
 }
 
 /// A managed host committed, or an exploration revisited it, but its admin
-/// addresses could not be reconciled. After a transient failure the host's
-/// BMC endpoint is flagged for exploration, so the next Site Explorer
-/// iteration revisits the host and retries the repair. Until then a dormant
+/// addresses could not be reconciled. After a transient legacy failure the
+/// host's BMC endpoint is flagged for exploration, so the next Site Explorer
+/// iteration revisits the host and retries the repair. Registered BF4 repair
+/// also retries when Site Explorer scans initializing hosts. Until then a dormant
 /// link may keep a DHCP address and the host's network config version is
 /// not bumped.
 #[derive(carbide_instrument::Event)]
@@ -1602,11 +1659,11 @@ async fn reconcile_host_admin_addresses_after_commit(
     message = "Host admin address reconciliation failed for a managed host",
     describe = "Number of host admin address reconciliations that failed after Site Explorer committed or revisited a managed host"
 )]
-struct SiteExplorerHostAdminAddressReconcileFailed {
+pub(crate) struct SiteExplorerHostAdminAddressReconcileFailed {
     #[context]
-    host_machine_id: HostMachineId,
+    pub(crate) host_machine_id: HostMachineId,
     #[context]
-    error: String,
+    pub(crate) error: String,
 }
 
 /// `host_mac_addresses_for_predicted_machine` finds the Host interfaces used to

@@ -172,6 +172,7 @@ fn bluefield3(dpu: &DpuMachineInfo) -> DiscoveryInfo {
             firmware_version: nic_firmware,
             firmware_date: "11.11.2025".into(),
             switches: vec![],
+            host_pfs: vec![],
         }),
         ..Default::default()
     }
@@ -201,6 +202,14 @@ fn bluefield4(dpu: &DpuMachineInfo) -> DiscoveryInfo {
             part_number: part_number.into(),
             part_description: format!("NVIDIA BlueField-4 {part_number}"),
             factory_mac_address: dpu.host_mac_address.to_string(),
+            // The simulator's host PF uses the same reported MAC as its host Redfish inventory.
+            host_pfs: vec![rpc::machine_discovery::DpuHostPf {
+                pci_controller_id: 1,
+                pf_id: 0,
+                mac_address: dpu.host_mac_address.to_string(),
+                physical_port_name: "c1pf0".to_string(),
+                ..Default::default()
+            }],
             ..Default::default()
         }),
         ..Default::default()

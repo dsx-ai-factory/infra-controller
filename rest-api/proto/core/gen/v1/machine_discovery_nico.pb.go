@@ -1195,6 +1195,98 @@ func (x *LldpMedInventory) GetModel() string {
 	return ""
 }
 
+// Records every host physical function observed by the DPU agent.
+// The API selects the boot target from this inventory.
+type DpuHostPf struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// PCI controller parsed from physical_port_name (zero is valid).
+	PciControllerId uint32 `protobuf:"varint,1,opt,name=pci_controller_id,json=pciControllerId,proto3" json:"pci_controller_id,omitempty"`
+	// Physical function parsed from physical_port_name (zero is valid).
+	PfId uint32 `protobuf:"varint,2,opt,name=pf_id,json=pfId,proto3" json:"pf_id,omitempty"`
+	// Host-visible MAC read from this netdev's sysfs address.
+	MacAddress string `protobuf:"bytes,3,opt,name=mac_address,json=macAddress,proto3" json:"mac_address,omitempty"`
+	// Complete Linux phys_port_name in c<decimal>pf<decimal> format.
+	PhysicalPortName string `protobuf:"bytes,4,opt,name=physical_port_name,json=physicalPortName,proto3" json:"physical_port_name,omitempty"`
+	// Linux interface name, when available, for diagnostics.
+	NetdevName *string `protobuf:"bytes,5,opt,name=netdev_name,json=netdevName,proto3,oneof" json:"netdev_name,omitempty"`
+	// PCI BDF, when available, for diagnostics.
+	PciAddress    *string `protobuf:"bytes,6,opt,name=pci_address,json=pciAddress,proto3,oneof" json:"pci_address,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DpuHostPf) Reset() {
+	*x = DpuHostPf{}
+	mi := &file_machine_discovery_nico_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DpuHostPf) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DpuHostPf) ProtoMessage() {}
+
+func (x *DpuHostPf) ProtoReflect() protoreflect.Message {
+	mi := &file_machine_discovery_nico_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DpuHostPf.ProtoReflect.Descriptor instead.
+func (*DpuHostPf) Descriptor() ([]byte, []int) {
+	return file_machine_discovery_nico_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *DpuHostPf) GetPciControllerId() uint32 {
+	if x != nil {
+		return x.PciControllerId
+	}
+	return 0
+}
+
+func (x *DpuHostPf) GetPfId() uint32 {
+	if x != nil {
+		return x.PfId
+	}
+	return 0
+}
+
+func (x *DpuHostPf) GetMacAddress() string {
+	if x != nil {
+		return x.MacAddress
+	}
+	return ""
+}
+
+func (x *DpuHostPf) GetPhysicalPortName() string {
+	if x != nil {
+		return x.PhysicalPortName
+	}
+	return ""
+}
+
+func (x *DpuHostPf) GetNetdevName() string {
+	if x != nil && x.NetdevName != nil {
+		return *x.NetdevName
+	}
+	return ""
+}
+
+func (x *DpuHostPf) GetPciAddress() string {
+	if x != nil && x.PciAddress != nil {
+		return *x.PciAddress
+	}
+	return ""
+}
+
 type DpuData struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	PartNumber        string                 `protobuf:"bytes,1,opt,name=part_number,json=partNumber,proto3" json:"part_number,omitempty"`
@@ -1204,13 +1296,32 @@ type DpuData struct {
 	FirmwareVersion   string                 `protobuf:"bytes,5,opt,name=firmware_version,json=firmwareVersion,proto3" json:"firmware_version,omitempty"`
 	FirmwareDate      string                 `protobuf:"bytes,6,opt,name=firmware_date,json=firmwareDate,proto3" json:"firmware_date,omitempty"`
 	Switches          []*LldpSwitchData      `protobuf:"bytes,7,rep,name=switches,proto3" json:"switches,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Complete BF4 host-PF inventory from DpuAgent discovery (not a partial update).
+	// BF2/BF3 registration ignores this field after wire conversion and retains
+	// existing boot selection. Malformed MAC text fails with INVALID_ARGUMENT
+	// before generation-specific registration checks.
+	// BF4 DpuAgent reports require nonempty inventory. Omission and an empty list
+	// both fail with FAILED_PRECONDITION, including after initial registration.
+	// Each (pci_controller_id, pf_id) must be unique, match physical_port_name,
+	// and carry a nonzero unicast MAC. Zero identifies controller/PF 0, not a fallback.
+	// Invalid physical-port identities, duplicate keys, and zero or multicast MACs
+	// fail with FAILED_PRECONDITION for BF4 DpuAgent reports.
+	// Only BF4 DpuAgent discovery initializes and enforces registered inventory.
+	// Later reports must retain the registered controller/PF keys and MACs.
+	// Changed identity fails with FAILED_PRECONDITION. Diagnostic fields can differ
+	// without replacing stored values. Generic discovery preserves registration.
+	// Legacy BF4 data can omit this field until the first supporting agent report.
+	// Automatic BF4 boot selection waits for the configured controller's PF 0.
+	// Older APIs ignore this field, so a BF4 agent whose first report reaches one
+	// must register again after supporting APIs serve all traffic.
+	HostPfs       []*DpuHostPf `protobuf:"bytes,8,rep,name=host_pfs,json=hostPfs,proto3" json:"host_pfs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DpuData) Reset() {
 	*x = DpuData{}
-	mi := &file_machine_discovery_nico_proto_msgTypes[13]
+	mi := &file_machine_discovery_nico_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1222,7 +1333,7 @@ func (x *DpuData) String() string {
 func (*DpuData) ProtoMessage() {}
 
 func (x *DpuData) ProtoReflect() protoreflect.Message {
-	mi := &file_machine_discovery_nico_proto_msgTypes[13]
+	mi := &file_machine_discovery_nico_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1235,7 +1346,7 @@ func (x *DpuData) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DpuData.ProtoReflect.Descriptor instead.
 func (*DpuData) Descriptor() ([]byte, []int) {
-	return file_machine_discovery_nico_proto_rawDescGZIP(), []int{13}
+	return file_machine_discovery_nico_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *DpuData) GetPartNumber() string {
@@ -1287,6 +1398,13 @@ func (x *DpuData) GetSwitches() []*LldpSwitchData {
 	return nil
 }
 
+func (x *DpuData) GetHostPfs() []*DpuHostPf {
+	if x != nil {
+		return x.HostPfs
+	}
+	return nil
+}
+
 type GpuPlatformInfo struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ChassisSerial string                 `protobuf:"bytes,1,opt,name=chassis_serial,json=chassisSerial,proto3" json:"chassis_serial,omitempty"`
@@ -1301,7 +1419,7 @@ type GpuPlatformInfo struct {
 
 func (x *GpuPlatformInfo) Reset() {
 	*x = GpuPlatformInfo{}
-	mi := &file_machine_discovery_nico_proto_msgTypes[14]
+	mi := &file_machine_discovery_nico_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1313,7 +1431,7 @@ func (x *GpuPlatformInfo) String() string {
 func (*GpuPlatformInfo) ProtoMessage() {}
 
 func (x *GpuPlatformInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_machine_discovery_nico_proto_msgTypes[14]
+	mi := &file_machine_discovery_nico_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1326,7 +1444,7 @@ func (x *GpuPlatformInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GpuPlatformInfo.ProtoReflect.Descriptor instead.
 func (*GpuPlatformInfo) Descriptor() ([]byte, []int) {
-	return file_machine_discovery_nico_proto_rawDescGZIP(), []int{14}
+	return file_machine_discovery_nico_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *GpuPlatformInfo) GetChassisSerial() string {
@@ -1388,7 +1506,7 @@ type Gpu struct {
 
 func (x *Gpu) Reset() {
 	*x = Gpu{}
-	mi := &file_machine_discovery_nico_proto_msgTypes[15]
+	mi := &file_machine_discovery_nico_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1400,7 +1518,7 @@ func (x *Gpu) String() string {
 func (*Gpu) ProtoMessage() {}
 
 func (x *Gpu) ProtoReflect() protoreflect.Message {
-	mi := &file_machine_discovery_nico_proto_msgTypes[15]
+	mi := &file_machine_discovery_nico_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1413,7 +1531,7 @@ func (x *Gpu) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Gpu.ProtoReflect.Descriptor instead.
 func (*Gpu) Descriptor() ([]byte, []int) {
-	return file_machine_discovery_nico_proto_rawDescGZIP(), []int{15}
+	return file_machine_discovery_nico_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Gpu) GetName() string {
@@ -1494,7 +1612,7 @@ type MemoryDevice struct {
 
 func (x *MemoryDevice) Reset() {
 	*x = MemoryDevice{}
-	mi := &file_machine_discovery_nico_proto_msgTypes[16]
+	mi := &file_machine_discovery_nico_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1506,7 +1624,7 @@ func (x *MemoryDevice) String() string {
 func (*MemoryDevice) ProtoMessage() {}
 
 func (x *MemoryDevice) ProtoReflect() protoreflect.Message {
-	mi := &file_machine_discovery_nico_proto_msgTypes[16]
+	mi := &file_machine_discovery_nico_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1519,7 +1637,7 @@ func (x *MemoryDevice) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MemoryDevice.ProtoReflect.Descriptor instead.
 func (*MemoryDevice) Descriptor() ([]byte, []int) {
-	return file_machine_discovery_nico_proto_rawDescGZIP(), []int{16}
+	return file_machine_discovery_nico_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *MemoryDevice) GetSizeMb() uint32 {
@@ -1555,7 +1673,7 @@ type MemoryDeviceGroup struct {
 
 func (x *MemoryDeviceGroup) Reset() {
 	*x = MemoryDeviceGroup{}
-	mi := &file_machine_discovery_nico_proto_msgTypes[17]
+	mi := &file_machine_discovery_nico_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1567,7 +1685,7 @@ func (x *MemoryDeviceGroup) String() string {
 func (*MemoryDeviceGroup) ProtoMessage() {}
 
 func (x *MemoryDeviceGroup) ProtoReflect() protoreflect.Message {
-	mi := &file_machine_discovery_nico_proto_msgTypes[17]
+	mi := &file_machine_discovery_nico_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1580,7 +1698,7 @@ func (x *MemoryDeviceGroup) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MemoryDeviceGroup.ProtoReflect.Descriptor instead.
 func (*MemoryDeviceGroup) Descriptor() ([]byte, []int) {
-	return file_machine_discovery_nico_proto_rawDescGZIP(), []int{17}
+	return file_machine_discovery_nico_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *MemoryDeviceGroup) GetSizeMb() uint32 {
@@ -1719,7 +1837,19 @@ const file_machine_discovery_nico_proto_rawDesc = "" +
 	"\x05model\x18\x03 \x01(\tH\x02R\x05model\x88\x01\x01B\t\n" +
 	"\a_serialB\x0f\n" +
 	"\r_manufacturerB\b\n" +
-	"\x06_model\"\xbd\x02\n" +
+	"\x06_model\"\x87\x02\n" +
+	"\tDpuHostPf\x12*\n" +
+	"\x11pci_controller_id\x18\x01 \x01(\rR\x0fpciControllerId\x12\x13\n" +
+	"\x05pf_id\x18\x02 \x01(\rR\x04pfId\x12\x1f\n" +
+	"\vmac_address\x18\x03 \x01(\tR\n" +
+	"macAddress\x12,\n" +
+	"\x12physical_port_name\x18\x04 \x01(\tR\x10physicalPortName\x12$\n" +
+	"\vnetdev_name\x18\x05 \x01(\tH\x00R\n" +
+	"netdevName\x88\x01\x01\x12$\n" +
+	"\vpci_address\x18\x06 \x01(\tH\x01R\n" +
+	"pciAddress\x88\x01\x01B\x0e\n" +
+	"\f_netdev_nameB\x0e\n" +
+	"\f_pci_address\"\xf6\x02\n" +
 	"\aDpuData\x12\x1f\n" +
 	"\vpart_number\x18\x01 \x01(\tR\n" +
 	"partNumber\x12)\n" +
@@ -1728,7 +1858,8 @@ const file_machine_discovery_nico_proto_rawDesc = "" +
 	"\x13factory_mac_address\x18\x04 \x01(\tR\x11factoryMacAddress\x12)\n" +
 	"\x10firmware_version\x18\x05 \x01(\tR\x0ffirmwareVersion\x12#\n" +
 	"\rfirmware_date\x18\x06 \x01(\tR\ffirmwareDate\x12=\n" +
-	"\bswitches\x18\a \x03(\v2!.machine_discovery.LldpSwitchDataR\bswitches\"\xcf\x01\n" +
+	"\bswitches\x18\a \x03(\v2!.machine_discovery.LldpSwitchDataR\bswitches\x127\n" +
+	"\bhost_pfs\x18\b \x03(\v2\x1c.machine_discovery.DpuHostPfR\ahostPfs\"\xcf\x01\n" +
 	"\x0fGpuPlatformInfo\x12%\n" +
 	"\x0echassis_serial\x18\x01 \x01(\tR\rchassisSerial\x12\x1f\n" +
 	"\vslot_number\x18\x02 \x01(\rR\n" +
@@ -1782,7 +1913,7 @@ func file_machine_discovery_nico_proto_rawDescGZIP() []byte {
 }
 
 var file_machine_discovery_nico_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_machine_discovery_nico_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_machine_discovery_nico_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_machine_discovery_nico_proto_goTypes = []any{
 	(CpuArchitecture)(0),        // 0: machine_discovery.CpuArchitecture
 	(*DiscoveryInfo)(nil),       // 1: machine_discovery.DiscoveryInfo
@@ -1798,11 +1929,12 @@ var file_machine_discovery_nico_proto_goTypes = []any{
 	(*PciDeviceProperties)(nil), // 11: machine_discovery.PciDeviceProperties
 	(*LldpSwitchData)(nil),      // 12: machine_discovery.LldpSwitchData
 	(*LldpMedInventory)(nil),    // 13: machine_discovery.LldpMedInventory
-	(*DpuData)(nil),             // 14: machine_discovery.DpuData
-	(*GpuPlatformInfo)(nil),     // 15: machine_discovery.GpuPlatformInfo
-	(*Gpu)(nil),                 // 16: machine_discovery.Gpu
-	(*MemoryDevice)(nil),        // 17: machine_discovery.MemoryDevice
-	(*MemoryDeviceGroup)(nil),   // 18: machine_discovery.MemoryDeviceGroup
+	(*DpuHostPf)(nil),           // 14: machine_discovery.DpuHostPf
+	(*DpuData)(nil),             // 15: machine_discovery.DpuData
+	(*GpuPlatformInfo)(nil),     // 16: machine_discovery.GpuPlatformInfo
+	(*Gpu)(nil),                 // 17: machine_discovery.Gpu
+	(*MemoryDevice)(nil),        // 18: machine_discovery.MemoryDevice
+	(*MemoryDeviceGroup)(nil),   // 19: machine_discovery.MemoryDeviceGroup
 }
 var file_machine_discovery_nico_proto_depIdxs = []int32{
 	4,  // 0: machine_discovery.DiscoveryInfo.network_interfaces:type_name -> machine_discovery.NetworkInterface
@@ -1810,24 +1942,25 @@ var file_machine_discovery_nico_proto_depIdxs = []int32{
 	9,  // 2: machine_discovery.DiscoveryInfo.nvme_devices:type_name -> machine_discovery.NvmeDevice
 	10, // 3: machine_discovery.DiscoveryInfo.dmi_data:type_name -> machine_discovery.DmiData
 	5,  // 4: machine_discovery.DiscoveryInfo.infiniband_interfaces:type_name -> machine_discovery.InfinibandInterface
-	14, // 5: machine_discovery.DiscoveryInfo.dpu_info:type_name -> machine_discovery.DpuData
-	16, // 6: machine_discovery.DiscoveryInfo.gpus:type_name -> machine_discovery.Gpu
-	17, // 7: machine_discovery.DiscoveryInfo.memory_devices:type_name -> machine_discovery.MemoryDevice
+	15, // 5: machine_discovery.DiscoveryInfo.dpu_info:type_name -> machine_discovery.DpuData
+	17, // 6: machine_discovery.DiscoveryInfo.gpus:type_name -> machine_discovery.Gpu
+	18, // 7: machine_discovery.DiscoveryInfo.memory_devices:type_name -> machine_discovery.MemoryDevice
 	3,  // 8: machine_discovery.DiscoveryInfo.tpm_description:type_name -> machine_discovery.TpmDescription
 	0,  // 9: machine_discovery.DiscoveryInfo.machine_arch:type_name -> machine_discovery.CpuArchitecture
 	2,  // 10: machine_discovery.DiscoveryInfo.attest_key_info:type_name -> machine_discovery.AttestKeyInfo
 	7,  // 11: machine_discovery.DiscoveryInfo.cpu_info:type_name -> machine_discovery.CpuInfo
-	18, // 12: machine_discovery.DiscoveryInfo.memory_device_groups:type_name -> machine_discovery.MemoryDeviceGroup
+	19, // 12: machine_discovery.DiscoveryInfo.memory_device_groups:type_name -> machine_discovery.MemoryDeviceGroup
 	11, // 13: machine_discovery.NetworkInterface.pci_properties:type_name -> machine_discovery.PciDeviceProperties
 	11, // 14: machine_discovery.InfinibandInterface.pci_properties:type_name -> machine_discovery.PciDeviceProperties
 	13, // 15: machine_discovery.LldpSwitchData.med_inventory:type_name -> machine_discovery.LldpMedInventory
 	12, // 16: machine_discovery.DpuData.switches:type_name -> machine_discovery.LldpSwitchData
-	15, // 17: machine_discovery.Gpu.platform_info:type_name -> machine_discovery.GpuPlatformInfo
-	18, // [18:18] is the sub-list for method output_type
-	18, // [18:18] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	14, // 17: machine_discovery.DpuData.host_pfs:type_name -> machine_discovery.DpuHostPf
+	16, // 18: machine_discovery.Gpu.platform_info:type_name -> machine_discovery.GpuPlatformInfo
+	19, // [19:19] is the sub-list for method output_type
+	19, // [19:19] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_machine_discovery_nico_proto_init() }
@@ -1840,15 +1973,16 @@ func file_machine_discovery_nico_proto_init() {
 	file_machine_discovery_nico_proto_msgTypes[10].OneofWrappers = []any{}
 	file_machine_discovery_nico_proto_msgTypes[11].OneofWrappers = []any{}
 	file_machine_discovery_nico_proto_msgTypes[12].OneofWrappers = []any{}
-	file_machine_discovery_nico_proto_msgTypes[16].OneofWrappers = []any{}
+	file_machine_discovery_nico_proto_msgTypes[13].OneofWrappers = []any{}
 	file_machine_discovery_nico_proto_msgTypes[17].OneofWrappers = []any{}
+	file_machine_discovery_nico_proto_msgTypes[18].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_machine_discovery_nico_proto_rawDesc), len(file_machine_discovery_nico_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   18,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

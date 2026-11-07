@@ -21,7 +21,9 @@ use std::net::IpAddr;
 use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
 use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::domain::DomainId;
-use carbide_uuid::machine::{AsMachineId, MachineId, MachineIdSubtypeTrait, MachineInterfaceId};
+use carbide_uuid::machine::{
+    AsMachineId, DpuMachineId, HostMachineId, MachineId, MachineIdSubtypeTrait, MachineInterfaceId,
+};
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::switch::SwitchId;
@@ -33,8 +35,8 @@ use mac_address::MacAddress;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::allocation_type::AllocationType;
 use model::expected_machine::{ExpectedInterface, ExpectedInterfaceIpAllocation};
-use model::hardware_info::HardwareInfo;
 use model::machine::MachineInterfaceSnapshot;
+use model::machine_boot_interface::BootInterfaceSelectionSource;
 use model::machine_interface::InterfaceType;
 use model::machine_interface_address::{InterfaceAssociationType, MachineInterfaceAssociation};
 use model::network_prefix::NetworkPrefix;
@@ -3161,14 +3163,26 @@ pub async fn move_predicted_machine_interface_to_machine(
     Ok(())
 }
 
-/// Finds or creates the host admin interface from the DPU's topology MAC.
+/// Selects whether proactive DPU discovery may adopt an already associated host interface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DpuHostInterfaceOwnership {
+    /// Retain legacy factory-MAC adoption, including existing host ownership.
+    Legacy,
+    /// Require a Data interface with no machine, switch, power shelf, or other DPU attachment.
+    UnpairedDpu,
+}
+
+/// Finds or creates the host admin interface from the caller-selected host-visible MAC.
 ///
 /// IPv6-only segments are eligible only when admin FNN is enabled. Segments with an IPv4
 /// prefix must have an IPv4 gateway. Existing candidate ownership and static addresses are
 /// preserved; an addressless static interface may move to a single eligible segment.
-/// Duplicate MAC rows and ownership on another managed segment are errors.
+/// Duplicate MAC rows and ownership on another managed segment are errors. `UnpairedDpu`
+/// locks and rereads the selected row before rejecting entity ownership, a non-Data interface,
+/// or another DPU attachment; `Legacy` retains existing factory-MAC adoption semantics.
 ///
 /// The caller must keep the transaction open through host association and address repair.
+/// `UnpairedDpu` callers must acquire admin-segment locks first. Any error requires rollback.
 /// This operation associates the interface with the DPU and may update its segment and DNS
 /// domain. Allocation takes segment locks before interface/address row locks.
 ///
@@ -3176,11 +3190,88 @@ pub async fn move_predicted_machine_interface_to_machine(
 /// DHCP relays would let unrelated DHCPv6 link-address metadata override that selection.
 pub async fn create_host_machine_dpu_interface_proactively(
     txn: &mut PgConnection,
-    hardware_info: Option<&HardwareInfo>,
+    host_mac: MacAddress,
     dpu_id: &MachineId,
+    ownership: DpuHostInterfaceOwnership,
     admin_fnn_enabled: bool,
     retained_window: Option<chrono::Duration>,
 ) -> Result<MachineInterfaceSnapshot, DatabaseError> {
+    let admin_networks = load_eligible_host_admin_networks(txn, admin_fnn_enabled).await?;
+
+    let mut interfaces = find_by_mac_address(&mut *txn, host_mac).await?;
+    let mut machine_interface = match interfaces.len() {
+        0 => {
+            // Every eligible candidate must allow dynamic allocation. Selecting an available
+            // Dynamic pool must not bypass another candidate's reservation requirement.
+            for segment in &admin_networks {
+                validate_dynamic_allocation(segment, host_mac)?;
+            }
+            create(
+                txn,
+                &admin_networks,
+                &host_mac,
+                true,
+                AddressSelectionStrategy::Automatic,
+                retained_window,
+            )
+            .await?
+        }
+        1 => interfaces.remove(0),
+        count => {
+            tracing::warn!(
+                mac_address = %host_mac,
+                matching_interface_count = count,
+                expected_interface_count = 1,
+                "Unexpected number of host admin interfaces for host-visible MAC",
+            );
+            return Err(DatabaseError::NetworkSegmentDuplicateMacAddress(host_mac));
+        }
+    };
+    if ownership == DpuHostInterfaceOwnership::UnpairedDpu {
+        // Static inventory writers need no Admin lock, so validate the actual selected row under its own lock.
+        lock_for_address_assignment(txn, machine_interface.id).await?;
+        machine_interface = find_one(&mut *txn, machine_interface.id).await?;
+        validate_registered_host_pf_ownership(&machine_interface, dpu_id, None)?;
+    }
+    reconcile_interface_segment_candidates(txn, &mut machine_interface, &admin_networks).await?;
+    associate_interface_with_dpu_machine(&machine_interface.id, dpu_id, txn).await?;
+
+    Ok(machine_interface)
+}
+
+/// Rejects conflicting entity, DPU, or interface-type assignments so registered host PFs cannot adopt unrelated inventory.
+///
+/// Callers must lock and reread the selected interface before relying on this check through attachment.
+/// A paired DPU may retain its current host; an unpaired DPU must pass no host.
+fn validate_registered_host_pf_ownership(
+    interface: &MachineInterfaceSnapshot,
+    dpu_id: &MachineId,
+    host_id: Option<MachineId>,
+) -> DatabaseResult<()> {
+    // Only an already paired DPU may retain its current host during registered host-PF repair.
+    if interface
+        .machine_id
+        .is_some_and(|machine_id| Some(machine_id) != host_id)
+        || interface.switch_id.is_some()
+        || interface.power_shelf_id.is_some()
+        || interface.interface_type != InterfaceType::Data
+        || interface
+            .attached_dpu_machine_id
+            .is_some_and(|attached| attached.as_machine_id() != dpu_id)
+    {
+        return Err(DatabaseError::FailedPrecondition(format!(
+            "host-PF MAC {} has conflicting ownership",
+            interface.mac_address,
+        )));
+    }
+    Ok(())
+}
+
+/// Loads usable admin segments so discovery and registered host-PF repair apply the same address-family policy.
+async fn load_eligible_host_admin_networks(
+    txn: &mut PgConnection,
+    admin_fnn_enabled: bool,
+) -> DatabaseResult<Vec<NetworkSegment>> {
     let mut admin_networks = crate::network_segment::admin(txn).await?;
     // IPv6 FNN admin prefixes omit a gateway because the DPU provides the SVI and router
     // advertisements. That does not remove the gateway requirement from an IPv4 sibling.
@@ -3200,50 +3291,259 @@ pub async fn create_host_machine_dpu_interface_proactively(
         return Err(DatabaseError::AdminNetworkNotConfigured);
     }
 
-    // Host mac is stored at DPU topology data.
-    let host_mac = hardware_info
-        .map(|x| x.factory_mac_address())
-        .ok_or_else(|| DatabaseError::NotFoundError {
-            kind: "Hardware Info",
-            id: dpu_id.to_string(),
-        })??;
+    Ok(admin_networks)
+}
 
-    let mut interfaces = find_by_mac_address(&mut *txn, host_mac).await?;
-    let machine_interface = match interfaces.len() {
-        0 => {
-            // Every eligible candidate must allow dynamic allocation. Selecting an available
-            // Dynamic pool must not bypass another candidate's reservation requirement.
-            for segment in &admin_networks {
-                validate_dynamic_allocation(segment, host_mac)?;
-            }
-            create(
-                txn,
-                &admin_networks,
-                &host_mac,
-                true,
-                AddressSelectionStrategy::Automatic,
-                retained_window,
-            )
+/// Locks existing host interfaces and their addresses before the allocation eligibility check.
+///
+/// Callers must acquire admin-segment locks first. NOWAIT on interface rows avoids
+/// holding those locks behind an allocation that already locked the host machine.
+pub(crate) async fn lock_host_boot_interface_rows(
+    txn: &mut PgConnection,
+    host_machine_id: &HostMachineId,
+) -> DatabaseResult<()> {
+    let query =
+        "SELECT id FROM machine_interfaces WHERE machine_id = $1 ORDER BY id FOR UPDATE NOWAIT";
+    let ids: Vec<MachineInterfaceId> = sqlx::query_scalar(query)
+        .bind(host_machine_id)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    lock_admin_interface_addresses(txn, &ids).await
+}
+
+/// Replaces provisional DPU links and promotes the shared selection (or retains its pending primary prediction) without deleting static data or boot IDs.
+///
+/// Callers must hold admin-segment locks, host interface/address locks, and host/DPU machine locks.
+/// Callers must reject persisted instance allocations and non-initializing hosts in that transaction
+/// before invoking this operation. Any error requires rolling back the transaction.
+pub async fn reconcile_registered_host_interfaces(
+    txn: &mut PgConnection,
+    host_machine_id: &HostMachineId,
+    targets: &[(DpuMachineId, MacAddress)],
+    selected: &model::machine_boot_interface::MachineBootInterface,
+    selection_source: BootInterfaceSelectionSource,
+    admin_fnn_enabled: bool,
+    retained_window: Option<chrono::Duration>,
+) -> DatabaseResult<bool> {
+    // Validate every assignment before writes so one MAC cannot be reattached between paired DPUs.
+    let mut target_macs = HashSet::new();
+    for (_, mac_address) in targets {
+        if !target_macs.insert(*mac_address) {
+            return Err(DatabaseError::FailedPrecondition(format!(
+                "multiple paired DPUs claim host-PF MAC {mac_address}"
+            )));
+        }
+    }
+
+    let host_id: MachineId = (*host_machine_id).into();
+    let mut by_host = find_by_machine_ids(txn, &[*host_machine_id]).await?;
+    let interfaces = by_host.remove(host_machine_id).unwrap_or_default();
+
+    // Reject ownership conflicts before creating rows or changing any existing association.
+    for (dpu_id, mac_address) in targets {
+        let conflict = "SELECT EXISTS(SELECT 1 FROM machine_interfaces
+            WHERE attached_dpu_machine_id = $1 AND machine_id IS NOT NULL
+              AND machine_id <> attached_dpu_machine_id AND machine_id <> $2
+              AND interface_type <> 'Bmc')";
+        let other_host: bool = sqlx::query_scalar(conflict)
+            .bind(dpu_id)
+            .bind(host_id)
+            .fetch_one(&mut *txn)
+            .await
+            .map_err(|error| DatabaseError::query(conflict, error))?;
+        if other_host {
+            return Err(DatabaseError::FailedPrecondition(format!(
+                "DPU {dpu_id} is linked to another host"
+            )));
+        }
+        // Lock anonymous target rows too, then re-read ownership so another adopter cannot race this validation.
+        let query = "SELECT id FROM machine_interfaces WHERE mac_address = $1::macaddr ORDER BY id FOR UPDATE NOWAIT";
+        let target_ids: Vec<MachineInterfaceId> = sqlx::query_scalar(query)
+            .bind(mac_address)
+            .fetch_all(&mut *txn)
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?;
+        lock_admin_interface_addresses(txn, &target_ids).await?;
+        let matching = find_by_mac_address(&mut *txn, *mac_address).await?;
+        if matching.len() > 1 {
+            return Err(DatabaseError::NetworkSegmentDuplicateMacAddress(
+                *mac_address,
+            ));
+        }
+        if let Some(interface) = matching.first() {
+            validate_registered_host_pf_ownership(
+                interface,
+                dpu_id.as_machine_id(),
+                Some(host_id),
+            )?;
+        }
+    }
+
+    let segments = load_eligible_host_admin_networks(txn, admin_fnn_enabled).await?;
+    let mut changed = false;
+    let mut stale_ids = Vec::new();
+    let mut replacement_primary = None;
+    for (dpu_id, mac_address) in targets {
+        let stale = interfaces
+            .iter()
+            .filter(|interface| {
+                interface.attached_dpu_machine_id == Some(*dpu_id)
+                    && interface.mac_address != *mac_address
+            })
+            .collect::<Vec<_>>();
+        let mut exact = match find_by_mac_address(&mut *txn, *mac_address)
             .await?
+            .into_iter()
+            .next()
+        {
+            Some(mut interface) => {
+                // A static row may appear after prevalidation; NOWAIT preserves the host/interface lock order on contention.
+                let query = "SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE NOWAIT";
+                sqlx::query(query)
+                    .bind(interface.id)
+                    .fetch_one(&mut *txn)
+                    .await
+                    .map_err(|error| DatabaseError::query(query, error))?;
+                interface = find_one(&mut *txn, interface.id).await?;
+                validate_registered_host_pf_ownership(
+                    &interface,
+                    dpu_id.as_machine_id(),
+                    Some(host_id),
+                )?;
+                reconcile_interface_segment_candidates(txn, &mut interface, &segments).await?;
+                interface
+            }
+            None => {
+                // An addressless row lets reconciliation move the old DPU DHCP allocation without spare capacity.
+                let segment = stale
+                    .iter()
+                    .find_map(|interface| {
+                        segments
+                            .iter()
+                            .find(|segment| segment.id == interface.segment_id)
+                    })
+                    .or_else(|| segments.first())
+                    .ok_or(DatabaseError::AdminNetworkNotConfigured)?;
+                changed = true;
+                create_without_addresses(
+                    txn,
+                    segment,
+                    mac_address,
+                    false,
+                    InterfaceType::Data,
+                    retained_window,
+                )
+                .await?
+            }
+        };
+        if exact.machine_id.is_none() {
+            if exact.primary_interface {
+                set_primary_interface(&exact.id, false, txn).await?;
+            }
+            associate_interface_with_machine(
+                &exact.id,
+                MachineInterfaceAssociation::Machine(host_id),
+                txn,
+            )
+            .await?;
+            exact.machine_id = Some(host_id);
+            changed = true;
         }
-        1 => {
-            let mut interface = interfaces.remove(0);
-            reconcile_interface_segment_candidates(txn, &mut interface, &admin_networks).await?;
-            interface
+        if exact.attached_dpu_machine_id != Some(*dpu_id) {
+            associate_interface_with_dpu_machine(&exact.id, &(*dpu_id).into(), txn).await?;
+            changed = true;
         }
-        count => {
-            tracing::warn!(
-                mac_address = %host_mac,
-                matching_interface_count = count,
-                expected_interface_count = 1,
-                "Unexpected number of host admin interfaces for DPU topology MAC",
-            );
-            return Err(DatabaseError::NetworkSegmentDuplicateMacAddress(host_mac));
+        // Keep the same primary DPU when its provisional PF is replaced before the declared NIC leases.
+        if stale.iter().any(|interface| interface.primary_interface) {
+            replacement_primary = Some(exact.id);
         }
-    };
-    associate_interface_with_dpu_machine(&machine_interface.id, dpu_id, txn).await?;
+        stale_ids.extend(stale.into_iter().map(|interface| interface.id));
+    }
 
-    Ok(machine_interface)
+    let matching = find_by_mac_address(&mut *txn, selected.mac_address).await?;
+    let pending_primary = if selection_source == BootInterfaceSelectionSource::ExpectedMachine
+        && matching.is_empty()
+    {
+        crate::predicted_machine_interface::find_by_mac_address(&mut *txn, selected.mac_address)
+            .await?
+            .is_some_and(|prediction| {
+                crate::predicted_machine_interface::matches_primary_host_boot_interface(
+                    &prediction,
+                    host_machine_id,
+                    selected,
+                )
+            })
+    } else {
+        false
+    };
+    // Preserve the primary DPU until DHCP promotes the declared HostInband NIC using its actual relay segment.
+    if pending_primary {
+        if let Some(primary_id) = replacement_primary {
+            // Promote the registered PF so reconciliation transfers DHCP before the provisional row loses its DPU association.
+            demote_primary_interfaces_for_machine(&host_id, txn).await?;
+            set_primary_interface(&primary_id, true, txn).await?;
+            changed = true;
+        }
+    } else {
+        if matching.len() != 1 {
+            return Err(DatabaseError::FailedPrecondition(format!(
+                "selected boot MAC {} has no unique owned interface",
+                selected.mac_address
+            )));
+        }
+        let primary = &matching[0];
+        if primary.machine_id != Some(host_id) {
+            return Err(DatabaseError::FailedPrecondition(format!(
+                "selected boot MAC {} is not associated with host {host_machine_id}",
+                selected.mac_address
+            )));
+        }
+        let primary_changed = !primary.primary_interface
+            || interfaces
+                .iter()
+                .any(|interface| interface.primary_interface && interface.id != primary.id);
+        if primary_changed {
+            // Demote first to preserve the database's single-primary constraint during the replacement.
+            demote_primary_interfaces_for_machine(&host_id, txn).await?;
+            set_primary_interface(&primary.id, true, txn).await?;
+            changed = true;
+        }
+        if primary.boot_interface_id.as_deref() != Some(selected.interface_id.as_str()) {
+            set_boot_interface_id(selected.mac_address, &selected.interface_id, txn).await?;
+        }
+    }
+
+    // Keep stale rows DPU-backed until DHCP ownership is reconciled to the selected active link or the interim primary for a pending declared NIC.
+    let addresses_changed = reconcile_admin_addresses_for_host(txn, &host_id).await?;
+    if !stale_ids.is_empty() {
+        let query =
+            "UPDATE machine_interfaces SET attached_dpu_machine_id = NULL WHERE id = ANY($1)";
+        sqlx::query(query)
+            .bind(&stale_ids)
+            .execute(&mut *txn)
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?;
+        changed = true;
+    }
+    // A locked DPU may have only one remaining host link after reconciliation.
+    let query = "SELECT attached_dpu_machine_id FROM machine_interfaces
+        WHERE machine_id = $1 AND attached_dpu_machine_id IS NOT NULL AND interface_type <> 'Bmc'
+        GROUP BY attached_dpu_machine_id HAVING count(*) > 1";
+    let duplicate: Vec<DpuMachineId> = sqlx::query_scalar(query)
+        .bind(host_id)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if !duplicate.is_empty() {
+        return Err(DatabaseError::FailedPrecondition(format!(
+            "host {host_machine_id} has duplicate DPU host links: {duplicate:?}"
+        )));
+    }
+    if changed || addresses_changed {
+        bump_network_config_version(txn, &host_id).await?;
+    }
+    Ok(changed || addresses_changed)
 }
 
 /// Reconciles host-owned admin interfaces so DPU-backed links only own DHCP addresses when active.
@@ -3299,25 +3599,34 @@ enum AdminReconcile {
     Done { active_config_changed: bool },
 }
 
-async fn reconcile_admin_addresses(
+/// Describes whether an unlocked host snapshot needs admin-address repair so callers can avoid unnecessary segment locks.
+pub(crate) enum AdminAddressRepair {
+    /// The host owns no admin interface.
+    NoAdminInterfaces,
+    /// The current admin addresses and naming need no repair.
+    NotNeeded,
+    /// The locked pass must re-read the host before repairing its admin addresses or naming.
+    Needed,
+}
+
+/// Checks current admin addresses and naming without locking so unresolved BF4 selection can skip an already settled host.
+pub(crate) async fn admin_address_repair_status(
     txn: &mut PgConnection,
     host_machine_id: &MachineId,
-) -> DatabaseResult<AdminReconcile> {
+) -> DatabaseResult<AdminAddressRepair> {
     // Most calls find nothing to repair; deciding that from an unlocked
     // snapshot keeps them off the admin segment locks. The locked pass
     // re-reads and recomputes from the locked rows, so a stale answer here
     // costs the lock or defers the repair to the next call.
     let interfaces = find_host_admin_interfaces(txn, host_machine_id).await?;
     if interfaces.is_empty() {
-        return Ok(AdminReconcile::NoAdminInterfaces);
+        return Ok(AdminAddressRepair::NoAdminInterfaces);
     }
     if !has_dpu_backed_host_link(&interfaces) {
-        return Ok(AdminReconcile::Done {
-            active_config_changed: false,
-        });
+        return Ok(AdminAddressRepair::NotNeeded);
     }
     let segments = load_admin_segments(txn).await?;
-    if !admin_addresses_need_repair(
+    if admin_addresses_need_repair(
         txn,
         host_machine_id,
         &segments_by_id(&segments),
@@ -3325,12 +3634,24 @@ async fn reconcile_admin_addresses(
     )
     .await?
     {
-        return Ok(AdminReconcile::Done {
-            active_config_changed: false,
-        });
+        Ok(AdminAddressRepair::Needed)
+    } else {
+        Ok(AdminAddressRepair::NotNeeded)
     }
+}
 
-    repair_admin_addresses_for_host(txn, host_machine_id).await
+/// Repairs admin addresses only when the unlocked check finds work, keeping settled hosts off segment locks.
+async fn reconcile_admin_addresses(
+    txn: &mut PgConnection,
+    host_machine_id: &MachineId,
+) -> DatabaseResult<AdminReconcile> {
+    match admin_address_repair_status(txn, host_machine_id).await? {
+        AdminAddressRepair::NoAdminInterfaces => Ok(AdminReconcile::NoAdminInterfaces),
+        AdminAddressRepair::NotNeeded => Ok(AdminReconcile::Done {
+            active_config_changed: false,
+        }),
+        AdminAddressRepair::Needed => repair_admin_addresses_for_host(txn, host_machine_id).await,
+    }
 }
 
 /// Reconciles a host's admin addresses in a transaction of its own on `pool`
@@ -3418,7 +3739,10 @@ async fn reconcile_admin_addresses_in_own_transaction(
 
 /// Runs the reconcile and, when the active admin config changed, bumps the
 /// host's network config version so DPU agents fetch the new config.
-async fn reconcile_admin_addresses_and_network_config(
+///
+/// Callers must acquire admin-segment locks before interface, address, or machine row locks,
+/// or invoke this operation before taking those row locks, to preserve allocator lock order.
+pub(crate) async fn reconcile_admin_addresses_and_network_config(
     txn: &mut PgConnection,
     host_machine_id: &MachineId,
 ) -> DatabaseResult<bool> {

@@ -23,7 +23,7 @@ use carbide_utils::arch::CpuArchitecture;
 use carbide_utils::try_convert_vec;
 use mac_address::MacAddress;
 use model::hardware_info::{
-    BlockDevice, CpuInfo, DmiData, DpuData, Gpu, GpuPlatformInfo, HardwareInfo,
+    BlockDevice, CpuInfo, DmiData, DpuData, DpuHostPf, Gpu, GpuPlatformInfo, HardwareInfo,
     InfinibandInterface, LldpSwitchData, MachineInventory, MachineInventorySoftwareComponent,
     MachineNvLinkInfo, MemoryDevice, NetworkInterface, NvLinkGpu, NvmeDevice, PciDeviceProperties,
     TpmDescription, TpmEkCertificate, condense_groups, condense_memory_devices,
@@ -225,6 +225,41 @@ impl TryFrom<LldpSwitchData> for rpc::machine_discovery::LldpSwitchData {
     }
 }
 
+impl TryFrom<rpc::machine_discovery::DpuHostPf> for DpuHostPf {
+    type Error = RpcDataConversionError;
+
+    /// Converts reported host-PF facts to typed MACs so malformed wire data cannot enter hardware inventory.
+    fn try_from(data: rpc::machine_discovery::DpuHostPf) -> Result<Self, Self::Error> {
+        // Reject malformed MACs before discovery data reaches HardwareInfo.
+        let mac_address = data
+            .mac_address
+            .parse()
+            .map_err(|_| RpcDataConversionError::InvalidMacAddress(data.mac_address.clone()))?;
+        Ok(Self {
+            pci_controller_id: data.pci_controller_id,
+            pf_id: data.pf_id,
+            mac_address,
+            physical_port_name: data.physical_port_name,
+            netdev_name: data.netdev_name,
+            pci_address: data.pci_address,
+        })
+    }
+}
+
+impl From<DpuHostPf> for rpc::machine_discovery::DpuHostPf {
+    /// Preserves host-PF identity and diagnostics on the wire so the agent can report every observed controller.
+    fn from(data: DpuHostPf) -> Self {
+        Self {
+            pci_controller_id: data.pci_controller_id,
+            pf_id: data.pf_id,
+            mac_address: data.mac_address.to_string(),
+            physical_port_name: data.physical_port_name,
+            netdev_name: data.netdev_name,
+            pci_address: data.pci_address,
+        }
+    }
+}
+
 impl TryFrom<rpc::machine_discovery::DpuData> for DpuData {
     type Error = RpcDataConversionError;
 
@@ -237,6 +272,7 @@ impl TryFrom<rpc::machine_discovery::DpuData> for DpuData {
             firmware_version: data.firmware_version,
             firmware_date: data.firmware_date,
             switches: try_convert_vec(data.switches)?,
+            host_pfs: try_convert_vec(data.host_pfs)?,
         })
     }
 }
@@ -253,6 +289,7 @@ impl TryFrom<DpuData> for rpc::machine_discovery::DpuData {
             firmware_version: data.firmware_version,
             firmware_date: data.firmware_date,
             switches: try_convert_vec(data.switches)?,
+            host_pfs: data.host_pfs.into_iter().map(Into::into).collect(),
         })
     }
 }
@@ -1389,6 +1426,7 @@ mod tests {
                 firmware_version: "32.43.1014".to_string(),
                 firmware_date: "2026-07-23".to_string(),
                 switches: vec![rpc_lldp("nested", &["192.0.2.30", "2001:db8::30"])],
+                host_pfs: vec![],
             }),
             gpus: vec![
                 rpc::machine_discovery::Gpu {
@@ -1507,6 +1545,7 @@ mod tests {
                         "2001:db8::30".parse().expect("valid IPv6 address"),
                     ],
                 )],
+                host_pfs: vec![],
             }),
             gpus: vec![
                 Gpu {
@@ -2616,5 +2655,84 @@ mod tests {
             ..Default::default()
         };
         assert!(HardwareInfo::try_from(info).is_err());
+    }
+
+    /// Preserves every host-PF field across RPC conversion so controller selection uses registered facts.
+    #[test]
+    fn dpu_host_pf_round_trip() {
+        // Include diagnostic fields as well as the controller/PF identity and boot MAC.
+        let reported = rpc::machine_discovery::DpuHostPf {
+            pci_controller_id: 2,
+            pf_id: 0,
+            mac_address: "96:ab:d0:3e:5f:a6".to_string(),
+            physical_port_name: "c2pf0".to_string(),
+            netdev_name: Some("host-pf".to_string()),
+            pci_address: Some("0000:03:00.0".to_string()),
+        };
+
+        // Exercise DpuData conversion so collection-level field loss is observable.
+        let inventory = rpc::machine_discovery::DpuData {
+            host_pfs: vec![reported],
+            ..Default::default()
+        };
+        let stored = DpuData::try_from(inventory.clone()).expect("valid host-PF inventory");
+        let restored = rpc::machine_discovery::DpuData::try_from(stored)
+            .expect("host-PF inventory converts back to RPC");
+
+        // Preserve every field through both conversion directions.
+        assert_eq!(restored, inventory);
+    }
+
+    /// Rejects malformed host-PF MACs so invalid discovery cannot become a boot target.
+    #[test]
+    fn dpu_host_pf_rejects_invalid_mac() {
+        // The MAC drives failure; the other fields identify an ordinary host PF.
+        let reported = rpc::machine_discovery::DpuHostPf {
+            mac_address: "not-a-mac".to_string(), // Invalid hardware input must return an error.
+            physical_port_name: "c1pf0".to_string(),
+            pci_controller_id: 1,
+            ..Default::default()
+        };
+
+        // Convert the wire value without relying on registration validation.
+        let converted = DpuHostPf::try_from(reported);
+
+        // Keep malformed MACs distinguishable from missing inventory.
+        assert!(matches!(
+            converted,
+            Err(RpcDataConversionError::InvalidMacAddress(_))
+        ));
+    }
+
+    /// Reads old DPU JSON without host-PF inventory so existing topology rows remain usable.
+    #[test]
+    fn dpu_data_without_host_pfs_remains_readable() {
+        // Older topology rows omit the new field entirely.
+        let legacy = r#"{"factory_mac_address":"10:20:30:40:50:61"}"#;
+
+        // Deserialize the persisted representation rather than a Rust default.
+        let restored: DpuData = serde_json::from_str(legacy).expect("legacy DPU JSON");
+
+        // Missing inventory stays absent instead of becoming a factory-MAC mapping.
+        assert!(restored.host_pfs.is_empty());
+    }
+
+    /// Reads cached RPC JSON that predates host-PF inventory so the agent can regenerate its missing facts.
+    #[test]
+    fn legacy_rpc_dpu_json_omits_host_pfs() {
+        // Remove the field entirely to reproduce a cache written by the previous agent.
+        let mut cached = serde_json::to_value(rpc::machine_discovery::DpuData::default())
+            .expect("serialize legacy DPU fields");
+        cached
+            .as_object_mut()
+            .expect("DpuData object")
+            .remove("host_pfs");
+
+        // Decode the old wire JSON before any cache enrichment can run.
+        let restored: rpc::machine_discovery::DpuData =
+            serde_json::from_value(cached).expect("old cache remains readable");
+
+        // Absence must stay empty rather than blocking deserialization or inventing a mapping.
+        assert!(restored.host_pfs.is_empty());
     }
 }

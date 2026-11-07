@@ -47,6 +47,9 @@ pub struct SiteExplorerConfig {
     /// honor the same knob as DHCP.
     #[serde(skip)]
     pub retained_boot_interface_window: Option<chrono::Duration>,
+    /// Resolved root-level API controller selection; cannot be set under site_explorer.
+    #[serde(skip, default = "default_dpu_host_pf_pci_controller_id")]
+    pub dpu_host_pf_pci_controller_id: u8,
     /// Whether proactive host discovery can use IPv6-only admin segments. Setup copies
     /// `[fnn.admin_vpc].enabled`; this is not an independent `[site_explorer]` setting.
     #[serde(skip)]
@@ -242,6 +245,11 @@ pub struct SiteExplorerConfig {
     pub explore_drive_firmware: bool,
 }
 
+/// Preserves controller 1 for standalone Site Explorer fixtures until API setup supplies its resolved policy.
+fn default_dpu_host_pf_pci_controller_id() -> u8 {
+    1
+}
+
 impl From<&SiteExplorerConfig> for crate::inventory_creator::Config {
     fn from(config: &SiteExplorerConfig) -> Self {
         Self {
@@ -255,6 +263,7 @@ impl From<&SiteExplorerConfig> for crate::inventory_creator::Config {
             switches_created_per_run: config.switches_created_per_run,
             admin_fnn_enabled: config.admin_fnn_enabled,
             retained_boot_interface_window: config.retained_boot_interface_window,
+            dpu_host_pf_pci_controller_id: config.dpu_host_pf_pci_controller_id,
         }
     }
 }
@@ -264,6 +273,7 @@ impl Default for SiteExplorerConfig {
         SiteExplorerConfig {
             enabled: Self::default_enabled(),
             retained_boot_interface_window: None,
+            dpu_host_pf_pci_controller_id: 1,
             admin_fnn_enabled: false,
             run_interval: Self::default_run_interval(),
             concurrent_explorations: Self::default_concurrent_explorations(),
@@ -301,6 +311,7 @@ impl PartialEq for SiteExplorerConfig {
         let Self {
             enabled,
             retained_boot_interface_window,
+            dpu_host_pf_pci_controller_id,
             admin_fnn_enabled,
             run_interval,
             concurrent_explorations,
@@ -329,6 +340,7 @@ impl PartialEq for SiteExplorerConfig {
 
         enabled.load(AtomicOrdering::Relaxed) == other.enabled.load(AtomicOrdering::Relaxed)
             && *retained_boot_interface_window == other.retained_boot_interface_window
+            && *dpu_host_pf_pci_controller_id == other.dpu_host_pf_pci_controller_id
             && *admin_fnn_enabled == other.admin_fnn_enabled
             && *run_interval == other.run_interval
             && *concurrent_explorations == other.concurrent_explorations
