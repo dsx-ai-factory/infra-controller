@@ -31,8 +31,8 @@ use super::metrics::SiteExplorationMetrics;
 /// site-wide `dpu_policy`. Site Explorer's precondition check and the admin
 /// UI's "default credentials not set" warning both use this selection.
 ///
-/// A site that ignores DPUs never configures one, so it does not need the DPU
-/// UEFI site default. Every other site policy, including an unset one,
+/// Sites without managed DPUs (`ignore`) do not need the DPU UEFI site
+/// default. Every other site policy, including an unset one,
 /// requires all of [`REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS`].
 pub fn required_site_default_credential_keys(
     site_dpu_policy: Option<HostDpuPolicy>,
