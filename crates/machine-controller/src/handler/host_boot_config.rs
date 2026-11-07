@@ -268,10 +268,7 @@ pub(super) async fn run_host_boot_config_stage(
             )
             .await?
             {
-                BiosConfigOutcome::Done => Ok(HostBootConfigOutcome::Continue(
-                    HostBootConfigStage::PollingBiosSetup { retry_count },
-                )),
-                BiosConfigOutcome::WaitingForBiosJob(bios_config_info) => {
+                BiosConfigOutcome::Applied(bios_config_info) => {
                     Ok(HostBootConfigOutcome::Continue(
                         HostBootConfigStage::WaitingForBiosJob { bios_config_info },
                     ))

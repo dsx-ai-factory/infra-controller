@@ -6900,6 +6900,7 @@ async fn test_legacy_http_boot_wait_migrates_to_shared_bios_repair(pool: sqlx::P
     let checkpoint = env.redfish_sim.timepoint();
     env.run_machine_state_controller_iteration().await;
     env.run_machine_state_controller_iteration().await;
+    env.run_machine_state_controller_iteration().await;
     let actions = env.redfish_sim.actions_since(&checkpoint).all_hosts();
     assert_eq!(
         actions
