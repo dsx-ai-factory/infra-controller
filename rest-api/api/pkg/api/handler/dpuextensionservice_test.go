@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1293,20 +1295,6 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 	// OTEL Spanner configuration
 	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
-	// Mock Temporal client
-	mockTC := &tmocks.Client{}
-	mockWorkflowRun := &tmocks.WorkflowRun{}
-	mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(nil)
-	mockWorkflowRun.On("GetID").Return("test-workflow-id")
-	mockTC.On("ExecuteWorkflow", mock.Anything, mock.Anything, "DeleteDpuExtensionService", mock.Anything).Return(mockWorkflowRun, nil)
-
-	// Mock Site Client Pool
-	mockSCP := &sc.ClientPool{
-		IDClientMap: map[string]temporalClient.Client{
-			st1.ID.String(): mockTC,
-		},
-	}
-
 	tests := []struct {
 		name                  string
 		reqOrgName            string
@@ -1314,6 +1302,13 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 		user                  *cdbm.User
 		expectedErr           bool
 		expectedStatus        int
+		serviceType           string
+		siteDelete            bool
+		deleteErr             error
+		lookupErr             error
+		services              []*corev1.DpuExtensionService
+		lookupCalls           int
+		retry                 bool
 	}{
 		{
 			name:                  "error when user not found in request context",
@@ -1355,6 +1350,18 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 			expectedErr:           true,
 			expectedStatus:        http.StatusBadRequest,
 		},
+
+		{name: "whole KubernetesPod delete confirms absence and retires logical row", siteDelete: true, serviceType: model.DpuExtensionServiceTypeKubernetesPod, deleteErr: status.Error(codes.NotFound, "absent"), lookupCalls: 1, expectedStatus: http.StatusNoContent},
+		{name: "whole delete confirms absent Core and commits Deleting", siteDelete: true, deleteErr: status.Error(codes.NotFound, "absent"), lookupCalls: 1, expectedStatus: http.StatusAccepted},
+		{name: "NotFound while Core service exists rolls back", siteDelete: true, deleteErr: status.Error(codes.NotFound, "missing version"), services: []*corev1.DpuExtensionService{{ServiceId: "existing"}}, lookupCalls: 1, expectedStatus: http.StatusNotFound},
+		{name: "failed absence lookup is not confirmation", siteDelete: true, deleteErr: status.Error(codes.NotFound, "absent"), lookupErr: status.Error(codes.NotFound, "lookup failed"), lookupCalls: 1, expectedStatus: http.StatusNotFound},
+		{name: "lookup denied rolls back", siteDelete: true, deleteErr: status.Error(codes.NotFound, "absent"), lookupErr: status.Error(codes.PermissionDenied, "denied"), lookupCalls: 1, expectedStatus: http.StatusForbidden},
+		{name: "transient lookup rolls back then same service retry succeeds", siteDelete: true, deleteErr: status.Error(codes.NotFound, "absent"), lookupErr: status.Error(codes.Unavailable, "retry later"), lookupCalls: 1, retry: true, expectedStatus: http.StatusServiceUnavailable},
+		{name: "delete denied never probes", siteDelete: true, deleteErr: status.Error(codes.PermissionDenied, "denied"), expectedStatus: http.StatusForbidden},
+		{name: "Core in-use rejection never probes", siteDelete: true, deleteErr: status.Error(codes.FailedPrecondition, "in use"), expectedStatus: http.StatusPreconditionFailed},
+		{name: "delete transient error never probes", siteDelete: true, deleteErr: status.Error(codes.Unavailable, "unavailable"), expectedStatus: http.StatusServiceUnavailable},
+		{name: "delete deadline never confirms absence", siteDelete: true, deleteErr: status.Error(codes.DeadlineExceeded, "deadline"), expectedStatus: http.StatusInternalServerError},
+		{name: "lookup cancellation never confirms absence", siteDelete: true, deleteErr: status.Error(codes.NotFound, "absent"), lookupErr: status.Error(codes.Canceled, "canceled"), lookupCalls: 1, expectedStatus: http.StatusInternalServerError},
 		{
 			name:                  "success deleting DPU Extension Service",
 			reqOrgName:            tnOrg,
@@ -1375,6 +1382,20 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+
+			if tt.siteDelete {
+				serviceType := tt.serviceType
+				if serviceType == "" {
+					serviceType = model.DpuExtensionServiceTypeDpfHelmChart
+				}
+				service := common.TestBuildDpuExtensionService(t, dbSession, "delete-regression-"+uuid.NewString(), serviceType, tn1, st1, "V1-T1761856992374052", cdbm.DpuExtensionServiceStatusReady, tnu1)
+				tt.dpuExtensionServiceID = service.ID.String()
+				tt.reqOrgName, tt.user = tnOrg, tnu1
+				tt.expectedErr = tt.expectedStatus != http.StatusAccepted && tt.expectedStatus != http.StatusNoContent
+			}
+			coreServer := &dpuDeleteCoreServer{deleteErr: tt.deleteErr, lookupErr: tt.lookupErr, services: tt.services}
+			mockTC := mockDpuDeleteSiteWorkflow(t, coreServer)
+			mockSCP := &sc.ClientPool{IDClientMap: map[string]temporalClient.Client{st1.ID.String(): mockTC}}
 			ddesh := DeleteDpuExtensionServiceHandler{
 				dbSession: dbSession,
 				tc:        mockTC,
@@ -1399,6 +1420,41 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 			require.NoError(t, err)
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			coreServer.mu.Lock()
+			lookups := append([]*corev1.DpuExtensionServicesByIdsRequest(nil), coreServer.lookups...)
+			deletes := append([]*corev1.DeleteDpuExtensionServiceRequest(nil), coreServer.deletes...)
+			coreServer.mu.Unlock()
+			require.Len(t, lookups, tt.lookupCalls)
+			if tt.lookupCalls != 0 {
+				assert.Equal(t, []string{tt.dpuExtensionServiceID}, lookups[0].ServiceIds)
+			}
+			if tt.expectedErr && !tt.siteDelete {
+				assert.Empty(t, deletes, "authorization and in-use guards precede Site workflow")
+			}
+			if tt.siteDelete && tt.expectedErr {
+				stored, getErr := cdbm.NewDpuExtensionServiceDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tt.dpuExtensionServiceID), nil)
+				require.NoError(t, getErr)
+				assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, stored.Status, "failed workflow must roll back Deleting")
+			}
+			if tt.retry {
+				coreServer.mu.Lock()
+				coreServer.lookupErr = nil
+				coreServer.mu.Unlock()
+				retryRec := httptest.NewRecorder()
+				retryContext := e.NewContext(req.Clone(ctx), retryRec)
+				retryContext.SetParamNames("orgName", "id")
+				retryContext.SetParamValues(tt.reqOrgName, tt.dpuExtensionServiceID)
+				retryContext.Set("user", tt.user)
+				require.NoError(t, ddesh.Handle(retryContext))
+				require.Equal(t, http.StatusAccepted, retryRec.Code)
+				stored, getErr := cdbm.NewDpuExtensionServiceDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tt.dpuExtensionServiceID), nil)
+				require.NoError(t, getErr)
+				assert.Equal(t, cdbm.DpuExtensionServiceStatusDeleting, stored.Status)
+				coreServer.mu.Lock()
+				assert.Len(t, coreServer.deletes, 2)
+				assert.Len(t, coreServer.lookups, 2)
+				coreServer.mu.Unlock()
+			}
 
 			if !tt.expectedErr && rec.Code == http.StatusNoContent {
 				// Verify the service status is updated to Deleting
@@ -1407,7 +1463,7 @@ func TestDeleteDpuExtensionServiceHandler_Handle(t *testing.T) {
 				require.Error(t, err)
 				assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
 			}
-			if !tt.expectedErr && rec.Code == http.StatusAccepted {
+			if rec.Code == http.StatusAccepted {
 				assertDeletionAcceptedResponse(t, rec.Body.Bytes())
 				desDAO := cdbm.NewDpuExtensionServiceDAO(dbSession)
 				stored, getErr := desDAO.GetByID(context.Background(), nil, uuid.MustParse(tt.dpuExtensionServiceID), nil)
@@ -1735,6 +1791,7 @@ func TestDeleteDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 		expectedStatus        int
 		expectedVersion       *string
 		expectServiceDeletion bool
+		coreMissing           bool
 	}{
 		{
 			name:                  "error when user not found in request context",
@@ -1790,6 +1847,7 @@ func TestDeleteDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 			expectedErr:           true,
 			expectedStatus:        http.StatusBadRequest,
 		},
+		{name: "missing Core version remains an error and retains logical version", reqOrgName: tnOrg, dpuExtensionServiceID: des1.ID, versionID: *des1.Version, user: tnu1, expectedErr: true, expectedStatus: http.StatusNotFound, coreMissing: true},
 		{
 			name:                  "success deleting DPU Extension Service version",
 			reqOrgName:            tnOrg,
@@ -1824,10 +1882,17 @@ func TestDeleteDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			casePool := mockSCP
+			var coreServer *dpuDeleteCoreServer
+			if tt.coreMissing {
+				coreServer = &dpuDeleteCoreServer{deleteErr: status.Error(codes.NotFound, "version absent")}
+				client := mockDpuDeleteSiteWorkflow(t, coreServer)
+				casePool = &sc.ClientPool{IDClientMap: map[string]temporalClient.Client{st1.ID.String(): client}}
+			}
 			ddesvh := DeleteDpuExtensionServiceVersionHandler{
 				dbSession: dbSession,
 				tc:        mockTC,
-				scp:       mockSCP,
+				scp:       casePool,
 				cfg:       cfg,
 			}
 
@@ -1848,6 +1913,17 @@ func TestDeleteDpuExtensionServiceVersionHandler_Handle(t *testing.T) {
 			require.NoError(t, err)
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.coreMissing {
+				stored, getErr := cdbm.NewDpuExtensionServiceDAO(dbSession).GetByID(ctx, nil, tt.dpuExtensionServiceID, nil)
+				require.NoError(t, getErr)
+				assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, stored.Status)
+				assert.Contains(t, stored.ActiveVersions, tt.versionID)
+				coreServer.mu.Lock()
+				assert.Empty(t, coreServer.lookups, "version NotFound never probes whole-service absence")
+				require.Len(t, coreServer.deletes, 1)
+				assert.Equal(t, []string{tt.versionID}, coreServer.deletes[0].Versions)
+				coreServer.mu.Unlock()
+			}
 
 			if rec.Code != http.StatusNoContent {
 				return
