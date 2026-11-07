@@ -636,9 +636,26 @@ pub struct TracingSinkConfig {
     pub include_diagnostics: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Startup settings for Prometheus telemetry responses. Changes require a restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct PrometheusSinkConfig {}
+pub struct PrometheusSinkConfig {
+    /// Offer negotiated gzip on `/telemetry`. Defaults to `false`.
+    pub gzip: bool,
+
+    /// Gzip compression level from 1 through 9. Defaults to 1 and is validated
+    /// whenever the sink is enabled, including when gzip is disabled.
+    pub gzip_level: u32,
+}
+
+impl Default for PrometheusSinkConfig {
+    fn default() -> Self {
+        Self {
+            gzip: false,
+            gzip_level: 1,
+        }
+    }
+}
 
 /// Configuration for the JSONL log file sink.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2882,6 +2899,12 @@ impl Config {
             ));
         }
 
+        if let Configurable::Enabled(prometheus) = &self.sinks.prometheus
+            && !(1..=9).contains(&prometheus.gzip_level)
+        {
+            return Err("sinks.prometheus.gzip_level must be from 1 through 9".to_string());
+        }
+
         self.metrics.validate()?;
 
         if let Configurable::Enabled(rate_limit) = &self.rate_limit
@@ -3131,6 +3154,40 @@ mod tests {
     use carbide_test_support::{Check, check_values, scenarios, value_scenarios};
 
     use super::*;
+
+    #[test]
+    fn prometheus_gzip_defaults_bounds_and_disabled_payloads() {
+        let invalid_level = "sinks.prometheus.gzip_level must be from 1 through 9";
+
+        value_scenarios!(run = |input: &str| {
+            let config: Config = Figment::new().merge(Toml::string(input)).extract().unwrap();
+
+            let settings = config.sinks.prometheus.as_option().map(|sink| (sink.gzip, sink.gzip_level));
+
+            (settings, config.validate())
+        };
+            "defaults" {
+                "" => (Some((false, 1)), Ok(())),
+                "[sinks.prometheus]\nenabled = true" => (Some((false, 1)), Ok(())),
+            }
+
+            "gzip settings" {
+                "[sinks.prometheus]\ngzip = true" => (Some((true, 1)), Ok(())),
+                "[sinks.prometheus]\ngzip = true\ngzip_level = 9" => (Some((true, 9)), Ok(())),
+            }
+
+            "invalid levels" {
+                "[sinks.prometheus]\ngzip_level = 0" => (Some((false, 0)), Err(invalid_level.into())),
+                "[sinks.prometheus]\ngzip = true\ngzip_level = 10" =>
+                    (Some((true, 10)), Err(invalid_level.into())),
+            }
+
+            "disabled malformed payload" {
+                "[sinks.prometheus]\nenabled = false\ngzip = 1\ngzip_level = \"invalid\"" =>
+                    (None, Ok(())),
+            }
+        );
+    }
 
     #[test]
     fn gnmi_reconciliation_config_contract() {
