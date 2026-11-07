@@ -1390,6 +1390,7 @@ async fn create_test_env_with_overrides_inner(
     let nmxc_grpc_simulator = overrides.nmxc_simulator == Some(true);
     let nmxc_sim_client = Arc::new(if nmxc_grpc_simulator {
         NmxcSimClient::simulator_for_nvlink_config(&nvlink_for_nmxc_sim)
+            .expect("test fixture requires valid NMX-C TLS configuration")
     } else if let Some(n) = overrides.nmxc_fail_after_n_creates {
         NmxcSimClient::with_fail_after_n_creates(n)
     } else if overrides.nmxc_default_partition == Some(true) {
