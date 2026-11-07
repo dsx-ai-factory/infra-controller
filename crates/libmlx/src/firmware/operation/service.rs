@@ -23,7 +23,7 @@ use rpc::protos::firmware_supervisor::{
     GetFirmwareOperationRequest, GetFirmwareOperationResponse, GetSupervisorStatusRequest,
     GetSupervisorStatusResponse, ObserveFirmwareOperationResponse, ObserveFirmwareUpdateRequest,
     SubmitFirmwareOperationRequest, SubmitFirmwareOperationResponse, SupervisorIdentity,
-    observe_firmware_operation_response,
+    observe_firmware_operation_response, submit_firmware_operation_response,
 };
 use rpc::protos::mlx_device::FirmwareOperationMissingReceipt;
 use sha2::{Digest, Sha256};
@@ -393,7 +393,7 @@ impl FirmwareSupervisor for Supervisor {
         // blocking admission, so accepted work reaches the draining queue.
         let admission = self.admissions.clone().read_owned().await;
         let supervisor = self.clone();
-        let operation = spawn_blocking(move || {
+        let result = spawn_blocking(move || {
             let _permit = permit;
             let _admission = admission;
             let mut journal = supervisor
@@ -406,7 +406,9 @@ impl FirmwareSupervisor for Supervisor {
                         "firmware operation ID identifies different work",
                     ));
                 }
-                return Ok(existing.operation.clone());
+                return Ok(submit_firmware_operation_response::Result::Operation(
+                    existing.operation.clone().into(),
+                ));
             }
             // A replacement may return a retained receipt, but it cannot infer
             // whether an absent ID ran before its journal disappeared. Keep the
@@ -479,22 +481,39 @@ impl FirmwareSupervisor for Supervisor {
             journal.check_admission(&record).map_err(journal_status)?;
             // PCI locators do not establish independent physical reset domains;
             // the admission policy deliberately serializes work host-wide.
-            let claim = MutationClaim::acquire(
+            let claim = match MutationClaim::acquire(
                 &supervisor.root,
                 &request.operation_id,
                 &supervisor.identity.device_identity,
                 &supervisor.identity.boot_id,
             )
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    Status::resource_exhausted(
-                        "another firmware operation owns the host or requires reconciliation",
-                    )
-                } else {
-                    tracing::error!(%error, "cannot persist firmware mutation claim");
-                    Status::internal("cannot persist firmware mutation claim")
+            {
+                Ok(claim) => claim,
+                Err(error)
+                    if error.kind() == io::ErrorKind::AlreadyExists
+                        && request.report_nonadmission =>
+                {
+                    // Earlier checks passed, but this submission could not claim
+                    // the host. This says nothing about an earlier uncertain
+                    // attempt, even if it used the same operation ID.
+                    return Ok(submit_firmware_operation_response::Result::NotAdmitted(
+                        wire::FirmwareOperationNotAdmitted {
+                            operation_id: request.operation_id,
+                            supervisor_instance_id: supervisor.supervisor_instance_id.clone(),
+                            identity: Some(supervisor.identity.clone()),
+                        },
+                    ));
                 }
-            })?;
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    return Err(Status::resource_exhausted(
+                        "another firmware operation owns the host or requires reconciliation",
+                    ));
+                }
+                Err(error) => {
+                    tracing::error!(%error, "cannot persist firmware mutation claim");
+                    return Err(Status::internal("cannot persist firmware mutation claim"));
+                }
+            };
             let operation = match journal.admit(record).map_err(journal_status)? {
                 Admission::Accepted(operation) | Admission::Existing(operation) => operation,
             };
@@ -515,12 +534,14 @@ impl FirmwareSupervisor for Supervisor {
                         "firmware executor is unavailable; retrieve the recorded operation",
                     )
                 })?;
-            Ok(operation)
+            Ok(submit_firmware_operation_response::Result::Operation(
+                operation.into(),
+            ))
         })
         .await
         .map_err(|error| journal_status(error.into()))??;
         Ok(Response::new(SubmitFirmwareOperationResponse {
-            operation: Some(operation.into()),
+            result: Some(result),
         }))
     }
 
@@ -808,6 +829,16 @@ mod tests {
 
     use super::*;
 
+    /// Extract the durable receipt expected by admission and recovery tests.
+    fn admitted_operation(
+        response: SubmitFirmwareOperationResponse,
+    ) -> rpc::protos::mlx_device::FirmwareOperation {
+        match response.result {
+            Some(submit_firmware_operation_response::Result::Operation(operation)) => operation,
+            other => panic!("expected a durable admission receipt, got {other:?}"),
+        }
+    }
+
     /// Use a private ledger and an absent helper, so service tests can exercise
     /// admission and known launch failures without running a hardware tool.
     fn supervisor_fixture() -> (tempfile::TempDir, Supervisor, mpsc::Receiver<Work>) {
@@ -851,6 +882,7 @@ mod tests {
     /// Submit no hardware work unless a test explicitly supplies a profile.
     fn submission(supervisor: &Supervisor, operation_id: &str) -> SubmitFirmwareOperationRequest {
         SubmitFirmwareOperationRequest {
+            report_nonadmission: false,
             core_download_config: None,
             operation_id: operation_id.into(),
             profile: None,
@@ -1134,7 +1166,7 @@ mod tests {
                 .into_inner()
                 .result,
             Some(observe_firmware_operation_response::Result::Receipt(
-                accepted.operation.clone().unwrap()
+                admitted_operation(accepted.clone())
             ))
         );
         assert_eq!(
@@ -1399,6 +1431,7 @@ mod tests {
             let saved = fs::read(&path).unwrap();
             let mut request = checked_submission(&supervisor, "missing");
             request.expected_supervisor_instance_id = Some(expected.into());
+            request.report_nonadmission = expected == "previous-instance";
             let error = supervisor
                 .submit_firmware_operation(peer_request(request))
                 .await
@@ -1422,6 +1455,105 @@ mod tests {
         }
     }
 
+    /// Rejecting a new request must preserve both durable stores and the owner.
+    /// Once admitted, receipt lookup must win over the operation's own claim.
+    #[tokio::test]
+    async fn occupied_claim_rejection_preserves_owner_and_retained_receipts() {
+        let (_root, supervisor, mut receiver) = supervisor_fixture();
+        supervisor
+            .submit_firmware_operation(peer_request(submission(&supervisor, "prior")))
+            .await
+            .unwrap();
+        supervisor
+            .execute(receiver.try_recv().unwrap())
+            .await
+            .unwrap();
+        let prior = supervisor.snapshot("prior").await.unwrap();
+        assert_eq!(prior.state, FirmwareOperationState::Complete);
+
+        let claim = MutationClaim::acquire(
+            &supervisor.root,
+            "foreign-owner",
+            &supervisor.identity.device_identity,
+            &supervisor.identity.boot_id,
+        )
+        .unwrap();
+        let claim_path = supervisor.root.join("mutation.json");
+        let journal_path = supervisor.directory.join("operations.json");
+        let held_claim = fs::read(&claim_path).unwrap();
+        let saved_journal = fs::read(&journal_path).unwrap();
+        let mut request = submission(&supervisor, "pending");
+        assert_eq!(
+            supervisor
+                .submit_firmware_operation(peer_request(request.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::ResourceExhausted
+        );
+        request.report_nonadmission = true;
+        let response = supervisor
+            .submit_firmware_operation(peer_request(request.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            response.result,
+            Some(submit_firmware_operation_response::Result::NotAdmitted(
+                wire::FirmwareOperationNotAdmitted {
+                    operation_id: "pending".into(),
+                    supervisor_instance_id: supervisor.supervisor_instance_id.clone(),
+                    identity: Some(supervisor.identity.clone()),
+                }
+            ))
+        );
+        assert_eq!(
+            supervisor.snapshot("pending").await.unwrap_err().code(),
+            tonic::Code::NotFound
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(fs::read(&claim_path).unwrap(), held_claim);
+        assert_eq!(fs::read(&journal_path).unwrap(), saved_journal);
+        assert_eq!(supervisor.snapshot("prior").await.unwrap(), prior);
+
+        // Once the owner releases its claim, the same request can be admitted.
+        claim.release().unwrap();
+        let accepted = admitted_operation(
+            supervisor
+                .submit_firmware_operation(peer_request(request.clone()))
+                .await
+                .unwrap()
+                .into_inner(),
+        );
+        assert_eq!(accepted.operation_id, "pending");
+        let work = receiver.try_recv().unwrap();
+        assert_eq!(work.operation_id, "pending");
+        let accepted_claim = fs::read(&claim_path).unwrap();
+        let accepted_journal = fs::read(&journal_path).unwrap();
+
+        // The retained receipt takes precedence over the operation's own claim.
+        for report_nonadmission in [false, true] {
+            request.report_nonadmission = report_nonadmission;
+            let repeated = admitted_operation(
+                supervisor
+                    .submit_firmware_operation(peer_request(request.clone()))
+                    .await
+                    .unwrap()
+                    .into_inner(),
+            );
+            assert_eq!(repeated, accepted);
+            assert_eq!(fs::read(&claim_path).unwrap(), accepted_claim);
+            assert_eq!(fs::read(&journal_path).unwrap(), accepted_journal);
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
+    }
+
     /// Removing a file cannot make a live service forget a prior admission.
     /// Its process token remains safe because receipt lookup uses the cache.
     #[tokio::test]
@@ -1429,13 +1561,13 @@ mod tests {
         let (_root, supervisor, mut receiver) = supervisor_fixture();
         let mut request = checked_submission(&supervisor, "saved");
         request.expected_supervisor_instance_id = Some(supervisor.supervisor_instance_id.clone());
-        let accepted = supervisor
-            .submit_firmware_operation(peer_request(request.clone()))
-            .await
-            .unwrap()
-            .into_inner()
-            .operation
-            .unwrap();
+        let accepted = admitted_operation(
+            supervisor
+                .submit_firmware_operation(peer_request(request.clone()))
+                .await
+                .unwrap()
+                .into_inner(),
+        );
         // Admission alone must remain visible; leave queued work unexecuted.
         let _work = receiver.recv().await.unwrap();
         fs::remove_file(supervisor.directory.join("operations.json")).unwrap();
@@ -1457,8 +1589,10 @@ mod tests {
                 .await
                 .unwrap()
                 .into_inner()
-                .operation,
-            Some(accepted)
+                .result,
+            Some(submit_firmware_operation_response::Result::Operation(
+                accepted
+            ))
         );
         assert!(matches!(
             receiver.try_recv(),
@@ -1536,12 +1670,14 @@ mod tests {
             // Reopening marks unfinished work for reconciliation. Read the
             // reopened receipt rather than expecting the earlier Accepted state.
             assert_eq!(
-                answer.operation,
-                Some(supervisor.snapshot("site-cache").await.unwrap().into())
+                answer.result,
+                Some(submit_firmware_operation_response::Result::Operation(
+                    supervisor.snapshot("site-cache").await.unwrap().into()
+                ))
             );
             assert_eq!(
-                answer.operation.as_ref().unwrap().operation_id,
-                accepted.operation.as_ref().unwrap().operation_id
+                admitted_operation(answer.clone()).operation_id,
+                admitted_operation(accepted.clone()).operation_id
             );
         }
         assert_eq!(
@@ -1838,13 +1974,13 @@ mod tests {
             tonic::Code::Unavailable
         );
         let saved = fs::read(supervisor.directory.join("operations.json")).unwrap();
-        let repeated = supervisor
-            .submit_firmware_operation(peer_request(request))
-            .await
-            .unwrap()
-            .into_inner()
-            .operation
-            .unwrap();
+        let repeated = admitted_operation(
+            supervisor
+                .submit_firmware_operation(peer_request(request))
+                .await
+                .unwrap()
+                .into_inner(),
+        );
         let expected: rpc::protos::mlx_device::FirmwareOperation =
             supervisor.snapshot("unstarted").await.unwrap().into();
         assert_eq!(repeated, expected);
@@ -2005,7 +2141,7 @@ mod tests {
                 ));
             } else {
                 assert_eq!(
-                    result.unwrap().into_inner().operation.unwrap().operation_id,
+                    admitted_operation(result.unwrap().into_inner()).operation_id,
                     operation_id
                 );
                 let work = receiver.recv().await.unwrap();
@@ -2092,9 +2228,11 @@ mod tests {
         fs::write(&supervisor.root, b"preserve").unwrap();
         let path = supervisor.directory.join("operations.json");
         let saved = fs::read(&path).unwrap();
+        let mut request = submission(&supervisor, "operation");
+        request.report_nonadmission = true;
         assert_eq!(
             supervisor
-                .submit_firmware_operation(peer_request(submission(&supervisor, "operation")))
+                .submit_firmware_operation(peer_request(request))
                 .await
                 .unwrap_err()
                 .code(),
@@ -2439,13 +2577,13 @@ mod tests {
         assert!(!root.path().join("mutation.json").exists());
 
         let before = fs::read(supervisor.directory.join("operations.json")).unwrap();
-        let repeated = supervisor
-            .submit_firmware_operation(peer_request(request))
-            .await
-            .expect("retrieve failed receipt")
-            .into_inner()
-            .operation
-            .expect("saved operation");
+        let repeated = admitted_operation(
+            supervisor
+                .submit_firmware_operation(peer_request(request))
+                .await
+                .expect("retrieve failed receipt")
+                .into_inner(),
+        );
         let expected: rpc::protos::mlx_device::FirmwareOperation = failed.into();
         assert_eq!(repeated, expected);
         assert_eq!(
@@ -2526,8 +2664,10 @@ printf '\000\000\000\001x'
                 .await
                 .unwrap()
                 .into_inner()
-                .operation,
-            Some(expected.clone())
+                .result,
+            Some(submit_firmware_operation_response::Result::Operation(
+                expected.clone()
+            ))
         );
         assert_eq!(
             supervisor
@@ -2571,8 +2711,10 @@ printf '\000\000\000\001x'
                 .await
                 .unwrap()
                 .into_inner()
-                .operation,
-            Some(expected)
+                .result,
+            Some(submit_firmware_operation_response::Result::Operation(
+                expected
+            ))
         );
         assert_eq!(
             supervisor
