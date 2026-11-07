@@ -277,7 +277,7 @@ func (ar *APIRack) FromProto(protoRack *flowv1.Rack, includeComponents bool) {
 	ar.ID = protoRack.GetExternalId()
 	ar.OperationStatus = enumOr(ProtoToAPIPhaseName, protoRack.GetOperationStatus(), "Unknown")
 	ar.OperationStatusDetails = nil
-	if protoRack.GetOperationStatusDetails().GetTrayCounts() != nil {
+	if protoRack.GetOperationStatusDetails().GetTrayCountsByType() != nil {
 		ar.OperationStatusDetails = &APIRackOperationStatusDetails{}
 		ar.OperationStatusDetails.FromProto(protoRack.GetOperationStatusDetails())
 	}

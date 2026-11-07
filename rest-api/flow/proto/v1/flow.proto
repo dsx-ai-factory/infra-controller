@@ -2363,7 +2363,15 @@ message RackOperationStatusDetails {
     // the same snapshot used for operation_status, independent of expansion.
     // Undiscovered records and other component types are excluded. No freshness
     // or expected-inventory completeness guarantee is implied.
-    TrayStatusCounts tray_counts = 1;
+    TrayStatusCountsByType tray_counts_by_type = 1;
+}
+
+// TrayStatusCountsByType always includes all three types, with zero counts for
+// types without participating records. Empty types do not affect rack phase.
+message TrayStatusCountsByType {
+    TrayStatusCounts compute = 1;
+    TrayStatusCounts nv_switch = 2;
+    TrayStatusCounts power_shelf = 3;
 }
 
 // TrayStatusCounts partitions participating trays by their operation phase.

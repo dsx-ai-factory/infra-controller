@@ -111,7 +111,7 @@ func TestPostgresStore_GetRackByID(t *testing.T) {
 	assert.Equal(t, *rackDAO.RackProfileID, protobuf.RackTo(byID).GetRackProfileId())
 	assert.Empty(t, byID.Components)
 	assert.Equal(t, types.PhaseInitializing, byID.OperationStatus)
-	wantDetails := &types.RackOperationStatusDetails{TrayCounts: types.TrayStatusCounts{Ready: 1, Initializing: 1}}
+	wantDetails := &types.RackOperationStatusDetails{TrayCountsByType: types.TrayStatusCountsByType{Compute: types.TrayStatusCounts{Ready: 1}, NVSwitch: types.TrayStatusCounts{Initializing: 1}}}
 	assert.Equal(t, wantDetails, byID.OperationStatusDetails)
 	assert.Equal(t, wantDetails.ToProto(), protobuf.RackTo(byID).GetOperationStatusDetails())
 

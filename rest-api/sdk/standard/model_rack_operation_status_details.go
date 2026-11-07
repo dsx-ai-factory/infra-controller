@@ -24,7 +24,7 @@ var _ MappedNullable = &RackOperationStatusDetails{}
 
 // RackOperationStatusDetails struct for RackOperationStatusDetails
 type RackOperationStatusDetails struct {
-	TrayCounts TrayStatusCounts `json:"trayCounts"`
+	TrayCountsByType TrayStatusCountsByType `json:"trayCountsByType"`
 }
 
 type _RackOperationStatusDetails RackOperationStatusDetails
@@ -33,9 +33,9 @@ type _RackOperationStatusDetails RackOperationStatusDetails
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewRackOperationStatusDetails(trayCounts TrayStatusCounts) *RackOperationStatusDetails {
+func NewRackOperationStatusDetails(trayCountsByType TrayStatusCountsByType) *RackOperationStatusDetails {
 	this := RackOperationStatusDetails{}
-	this.TrayCounts = trayCounts
+	this.TrayCountsByType = trayCountsByType
 	return &this
 }
 
@@ -47,28 +47,28 @@ func NewRackOperationStatusDetailsWithDefaults() *RackOperationStatusDetails {
 	return &this
 }
 
-// GetTrayCounts returns the TrayCounts field value
-func (o *RackOperationStatusDetails) GetTrayCounts() TrayStatusCounts {
+// GetTrayCountsByType returns the TrayCountsByType field value
+func (o *RackOperationStatusDetails) GetTrayCountsByType() TrayStatusCountsByType {
 	if o == nil {
-		var ret TrayStatusCounts
+		var ret TrayStatusCountsByType
 		return ret
 	}
 
-	return o.TrayCounts
+	return o.TrayCountsByType
 }
 
-// GetTrayCountsOk returns a tuple with the TrayCounts field value
+// GetTrayCountsByTypeOk returns a tuple with the TrayCountsByType field value
 // and a boolean to check if the value has been set.
-func (o *RackOperationStatusDetails) GetTrayCountsOk() (*TrayStatusCounts, bool) {
+func (o *RackOperationStatusDetails) GetTrayCountsByTypeOk() (*TrayStatusCountsByType, bool) {
 	if o == nil {
 		return nil, false
 	}
-	return &o.TrayCounts, true
+	return &o.TrayCountsByType, true
 }
 
-// SetTrayCounts sets field value
-func (o *RackOperationStatusDetails) SetTrayCounts(v TrayStatusCounts) {
-	o.TrayCounts = v
+// SetTrayCountsByType sets field value
+func (o *RackOperationStatusDetails) SetTrayCountsByType(v TrayStatusCountsByType) {
+	o.TrayCountsByType = v
 }
 
 func (o RackOperationStatusDetails) MarshalJSON() ([]byte, error) {
@@ -81,7 +81,7 @@ func (o RackOperationStatusDetails) MarshalJSON() ([]byte, error) {
 
 func (o RackOperationStatusDetails) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	toSerialize["trayCounts"] = o.TrayCounts
+	toSerialize["trayCountsByType"] = o.TrayCountsByType
 	return toSerialize, nil
 }
 
@@ -90,7 +90,7 @@ func (o *RackOperationStatusDetails) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
-		"trayCounts",
+		"trayCountsByType",
 	}
 
 	allProperties := make(map[string]interface{})

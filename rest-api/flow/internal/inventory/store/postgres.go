@@ -947,7 +947,7 @@ func (s *PostgresStore) racksFromDAOs(
 		converted := dao.RackFrom(&rackDAOs[i])
 		trayCounts := counts[rackDAOs[i].ID]
 		converted.OperationStatus = trayCounts.Phase()
-		converted.OperationStatusDetails = &types.RackOperationStatusDetails{TrayCounts: trayCounts}
+		converted.OperationStatusDetails = &types.RackOperationStatusDetails{TrayCountsByType: trayCounts}
 		results = append(results, converted)
 	}
 	return results, nil

@@ -13604,7 +13604,10 @@ paths:
                       description: Primary compute rack
                       operationStatus: Ready
                       operationStatusDetails:
-                        trayCounts: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+                        trayCountsByType:
+                          compute: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+                          nvSwitch: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+                          powerShelf: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
                       nvLinkDomainIds:
                         - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
                       taskStats:
@@ -13698,7 +13701,10 @@ paths:
                     description: Primary compute rack
                     operationStatus: Ready
                     operationStatusDetails:
-                      trayCounts: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+                      trayCountsByType:
+                        compute: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+                        nvSwitch: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+                        powerShelf: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
                     nvLinkDomainIds:
                       - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
                     taskStats:
@@ -27053,7 +27059,10 @@ components:
           description: Primary compute rack
           operationStatus: Ready
           operationStatusDetails:
-            trayCounts: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+            trayCountsByType:
+              compute: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+              nvSwitch: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+              powerShelf: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
           nvLinkDomainIds:
             - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
           taskStats:
@@ -27154,21 +27163,39 @@ components:
     RackOperationStatusDetails:
       type: object
       required:
-        - trayCounts
+        - trayCountsByType
       properties:
-        trayCounts:
+        trayCountsByType:
+          $ref: '#/components/schemas/TrayStatusCountsByType'
+    TrayStatusCountsByType:
+      type: object
+      description: >-
+        Counts by component type from the same snapshot used for operationStatus.
+        All three types are returned, with six zero counts for types without
+        participating records. Empty types do not affect the aggregate phase.
+      required: [compute, nvSwitch, powerShelf]
+      properties:
+        compute:
           $ref: '#/components/schemas/TrayStatusCounts'
+        nvSwitch:
+          $ref: '#/components/schemas/TrayStatusCounts'
+        powerShelf:
+          $ref: '#/components/schemas/TrayStatusCounts'
+      example:
+        compute: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+        nvSwitch: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+        powerShelf: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
     TrayStatusCounts:
       type: object
       description: >-
-        Counts of non-deleted Compute, NVSwitch and PowerShelf tray inventory
-        records, partitioned by operationStatus. The same records determine the
+        Counts of non-deleted tray inventory records for one component type,
+        partitioned by operationStatus. Records across all three types determine the
         rack phase using Unknown > Error > Initializing > Deleting > InUse > Ready.
         Other component types and undiscovered records are excluded. Missing or
         unrecognized status on a participating record counts as unknown. An empty
-        set has all zero counts and rack phase Unknown. Counts do not establish
+        rack has all zero counts and rack phase Unknown. Counts do not establish
         snapshot freshness or expected-inventory completeness. All six fields
-        are returned, including zero; their sum is the participating tray count.
+        are returned, including zero; their sum is the participating count for this type.
       required: [ready, inUse, initializing, error, deleting, unknown]
       properties:
         ready:

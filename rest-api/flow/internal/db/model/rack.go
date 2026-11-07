@@ -457,10 +457,10 @@ func GetRackOperationStatusCounts(
 	ctx context.Context,
 	idb bun.IDB,
 	rackIDs []uuid.UUID,
-) (map[uuid.UUID]types.TrayStatusCounts, error) {
-	result := make(map[uuid.UUID]types.TrayStatusCounts, len(rackIDs))
+) (map[uuid.UUID]types.TrayStatusCountsByType, error) {
+	result := make(map[uuid.UUID]types.TrayStatusCountsByType, len(rackIDs))
 	for _, rackID := range rackIDs {
-		result[rackID] = types.TrayStatusCounts{}
+		result[rackID] = types.TrayStatusCountsByType{}
 	}
 	if len(rackIDs) == 0 {
 		return result, nil
@@ -474,7 +474,7 @@ func GetRackOperationStatusCounts(
 	}
 	err := idb.NewSelect().
 		Model(&components).
-		Column("rack_id", "status").
+		Column("rack_id", "type", "status").
 		Where("rack_id IN (?)", bun.In(rackIDs)).
 		Where("type IN (?)", bun.In(supportedTypes)).
 		Scan(ctx)
@@ -485,7 +485,14 @@ func GetRackOperationStatusCounts(
 	for i := range components {
 		component := &components[i]
 		counts := result[component.RackID]
-		counts.Add(component.Status)
+		switch component.Type {
+		case devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute):
+			counts.Compute.Add(component.Status)
+		case devicetypes.ComponentTypeToString(devicetypes.ComponentTypeNVSwitch):
+			counts.NVSwitch.Add(component.Status)
+		case devicetypes.ComponentTypeToString(devicetypes.ComponentTypePowerShelf):
+			counts.PowerShelf.Add(component.Status)
+		}
 		result[component.RackID] = counts
 	}
 

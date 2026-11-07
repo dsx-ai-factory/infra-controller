@@ -25,7 +25,7 @@ func rackFromProto(r *pb.Rack) *types.Rack {
 		NVLDomainIDs:    uuidsFromProto(r.GetNvlDomainIds()),
 		OperationStatus: phaseFromProto(r.GetOperationStatus()),
 	}
-	if r.GetOperationStatusDetails().GetTrayCounts() != nil {
+	if r.GetOperationStatusDetails().GetTrayCountsByType() != nil {
 		rack.OperationStatusDetails = &types.RackOperationStatusDetails{}
 		rack.OperationStatusDetails.FromProto(r.GetOperationStatusDetails())
 	}

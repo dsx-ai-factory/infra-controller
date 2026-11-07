@@ -175,7 +175,7 @@ func TestGetRackHandler_Handle(t *testing.T) {
 	mockRack := &flowv1.Rack{
 		ExternalId:             rackID,
 		OperationStatus:        flowv1.Phase_PHASE_ERROR,
-		OperationStatusDetails: &flowv1.RackOperationStatusDetails{TrayCounts: &flowv1.TrayStatusCounts{Ready: 2, Error: 1}},
+		OperationStatusDetails: &flowv1.RackOperationStatusDetails{TrayCountsByType: &flowv1.TrayStatusCountsByType{Compute: &flowv1.TrayStatusCounts{Ready: 2}, NvSwitch: &flowv1.TrayStatusCounts{Error: 1}}},
 		Info: &flowv1.DeviceInfo{
 			Id:           &flowv1.UUID{Id: uuid.NewString()},
 			Name:         "Rack-001",
@@ -312,7 +312,7 @@ func TestGetRackHandler_Handle(t *testing.T) {
 			assert.Equal(t, rackID, apiRack.ID)
 			require.NotNil(t, apiRack.OperationStatusDetails)
 			assert.Equal(t, "Error", apiRack.OperationStatus)
-			assert.Equal(t, model.APITrayStatusCounts{Ready: 2, Error: 1}, apiRack.OperationStatusDetails.TrayCounts)
+			assert.Equal(t, model.APITrayStatusCountsByType{Compute: model.APITrayStatusCounts{Ready: 2}, NVSwitch: model.APITrayStatusCounts{Error: 1}}, apiRack.OperationStatusDetails.TrayCountsByType)
 		})
 	}
 }
@@ -364,7 +364,7 @@ func TestGetAllRackHandler_Handle(t *testing.T) {
 		modelPtr := model
 		return &flowv1.Rack{
 			OperationStatus:        flowv1.Phase_PHASE_ERROR,
-			OperationStatusDetails: &flowv1.RackOperationStatusDetails{TrayCounts: &flowv1.TrayStatusCounts{Ready: 2, Error: 1}},
+			OperationStatusDetails: &flowv1.RackOperationStatusDetails{TrayCountsByType: &flowv1.TrayStatusCountsByType{Compute: &flowv1.TrayStatusCounts{Ready: 2}, NvSwitch: &flowv1.TrayStatusCounts{Error: 1}}},
 			Info: &flowv1.DeviceInfo{
 				Id:           rackID,
 				Name:         name,
@@ -608,7 +608,7 @@ func TestGetAllRackHandler_Handle(t *testing.T) {
 			for _, rack := range apiRacks {
 				require.NotNil(t, rack.OperationStatusDetails)
 				assert.Equal(t, "Error", rack.OperationStatus)
-				assert.Equal(t, model.APITrayStatusCounts{Ready: 2, Error: 1}, rack.OperationStatusDetails.TrayCounts)
+				assert.Equal(t, model.APITrayStatusCountsByType{Compute: model.APITrayStatusCounts{Ready: 2}, NVSwitch: model.APITrayStatusCounts{Error: 1}}, rack.OperationStatusDetails.TrayCountsByType)
 			}
 
 			// Verify pagination header

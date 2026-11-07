@@ -39,11 +39,11 @@ func TestRackFromProto(t *testing.T) {
 			rack: &pb.Rack{
 				NvlDomainIds:           uuidsToProto(domainIDs),
 				OperationStatus:        pb.Phase_PHASE_DELETING,
-				OperationStatusDetails: &pb.RackOperationStatusDetails{TrayCounts: &pb.TrayStatusCounts{Deleting: 2}},
+				OperationStatusDetails: &pb.RackOperationStatusDetails{TrayCountsByType: &pb.TrayStatusCountsByType{NvSwitch: &pb.TrayStatusCounts{Deleting: 2}}},
 			},
 			want:        domainIDs,
 			wantPhase:   types.PhaseDeleting,
-			wantDetails: &types.RackOperationStatusDetails{TrayCounts: types.TrayStatusCounts{Deleting: 2}},
+			wantDetails: &types.RackOperationStatusDetails{TrayCountsByType: types.TrayStatusCountsByType{NVSwitch: types.TrayStatusCounts{Deleting: 2}}},
 		},
 	}
 
@@ -81,7 +81,7 @@ func TestRackToProto(t *testing.T) {
 		},
 		{
 			name: "rack with NVLink domains",
-			rack: &types.Rack{NVLDomainIDs: domainIDs, OperationStatus: types.PhaseError, OperationStatusDetails: &types.RackOperationStatusDetails{TrayCounts: types.TrayStatusCounts{Error: 1}}},
+			rack: &types.Rack{NVLDomainIDs: domainIDs, OperationStatus: types.PhaseError, OperationStatusDetails: &types.RackOperationStatusDetails{TrayCountsByType: types.TrayStatusCountsByType{Compute: types.TrayStatusCounts{Error: 1}}}},
 			want: uuidsToProto(domainIDs),
 		},
 	}

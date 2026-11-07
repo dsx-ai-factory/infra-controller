@@ -16375,9 +16375,9 @@ type RackOperationStatusDetails struct {
 	// the same snapshot used for operation_status, independent of expansion.
 	// Undiscovered records and other component types are excluded. No freshness
 	// or expected-inventory completeness guarantee is implied.
-	TrayCounts    *TrayStatusCounts `protobuf:"bytes,1,opt,name=tray_counts,json=trayCounts,proto3" json:"tray_counts,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	TrayCountsByType *TrayStatusCountsByType `protobuf:"bytes,1,opt,name=tray_counts_by_type,json=trayCountsByType,proto3" json:"tray_counts_by_type,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *RackOperationStatusDetails) Reset() {
@@ -16410,9 +16410,71 @@ func (*RackOperationStatusDetails) Descriptor() ([]byte, []int) {
 	return file_flow_proto_rawDescGZIP(), []int{226}
 }
 
-func (x *RackOperationStatusDetails) GetTrayCounts() *TrayStatusCounts {
+func (x *RackOperationStatusDetails) GetTrayCountsByType() *TrayStatusCountsByType {
 	if x != nil {
-		return x.TrayCounts
+		return x.TrayCountsByType
+	}
+	return nil
+}
+
+// TrayStatusCountsByType always includes all three types, with zero counts for
+// types without participating records. Empty types do not affect rack phase.
+type TrayStatusCountsByType struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Compute       *TrayStatusCounts      `protobuf:"bytes,1,opt,name=compute,proto3" json:"compute,omitempty"`
+	NvSwitch      *TrayStatusCounts      `protobuf:"bytes,2,opt,name=nv_switch,json=nvSwitch,proto3" json:"nv_switch,omitempty"`
+	PowerShelf    *TrayStatusCounts      `protobuf:"bytes,3,opt,name=power_shelf,json=powerShelf,proto3" json:"power_shelf,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TrayStatusCountsByType) Reset() {
+	*x = TrayStatusCountsByType{}
+	mi := &file_flow_proto_msgTypes[227]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TrayStatusCountsByType) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TrayStatusCountsByType) ProtoMessage() {}
+
+func (x *TrayStatusCountsByType) ProtoReflect() protoreflect.Message {
+	mi := &file_flow_proto_msgTypes[227]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TrayStatusCountsByType.ProtoReflect.Descriptor instead.
+func (*TrayStatusCountsByType) Descriptor() ([]byte, []int) {
+	return file_flow_proto_rawDescGZIP(), []int{227}
+}
+
+func (x *TrayStatusCountsByType) GetCompute() *TrayStatusCounts {
+	if x != nil {
+		return x.Compute
+	}
+	return nil
+}
+
+func (x *TrayStatusCountsByType) GetNvSwitch() *TrayStatusCounts {
+	if x != nil {
+		return x.NvSwitch
+	}
+	return nil
+}
+
+func (x *TrayStatusCountsByType) GetPowerShelf() *TrayStatusCounts {
+	if x != nil {
+		return x.PowerShelf
 	}
 	return nil
 }
@@ -16434,7 +16496,7 @@ type TrayStatusCounts struct {
 
 func (x *TrayStatusCounts) Reset() {
 	*x = TrayStatusCounts{}
-	mi := &file_flow_proto_msgTypes[227]
+	mi := &file_flow_proto_msgTypes[228]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -16446,7 +16508,7 @@ func (x *TrayStatusCounts) String() string {
 func (*TrayStatusCounts) ProtoMessage() {}
 
 func (x *TrayStatusCounts) ProtoReflect() protoreflect.Message {
-	mi := &file_flow_proto_msgTypes[227]
+	mi := &file_flow_proto_msgTypes[228]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16459,7 +16521,7 @@ func (x *TrayStatusCounts) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrayStatusCounts.ProtoReflect.Descriptor instead.
 func (*TrayStatusCounts) Descriptor() ([]byte, []int) {
-	return file_flow_proto_rawDescGZIP(), []int{227}
+	return file_flow_proto_rawDescGZIP(), []int{228}
 }
 
 func (x *TrayStatusCounts) GetReady() uint32 {
@@ -17668,10 +17730,14 @@ const file_flow_proto_rawDesc = "" +
 	"\x06_error\"d\n" +
 	"\x12PowerTaskReference\x12\x18\n" +
 	"\x02id\x18\x01 \x01(\v2\b.v1.UUIDR\x02id\x124\n" +
-	"\trelevance\x18\x02 \x01(\x0e2\x16.v1.PowerTaskRelevanceR\trelevance\"S\n" +
-	"\x1aRackOperationStatusDetails\x125\n" +
-	"\vtray_counts\x18\x01 \x01(\v2\x14.v1.TrayStatusCountsR\n" +
-	"trayCounts\"\xaf\x01\n" +
+	"\trelevance\x18\x02 \x01(\x0e2\x16.v1.PowerTaskRelevanceR\trelevance\"g\n" +
+	"\x1aRackOperationStatusDetails\x12I\n" +
+	"\x13tray_counts_by_type\x18\x01 \x01(\v2\x1a.v1.TrayStatusCountsByTypeR\x10trayCountsByType\"\xb2\x01\n" +
+	"\x16TrayStatusCountsByType\x12.\n" +
+	"\acompute\x18\x01 \x01(\v2\x14.v1.TrayStatusCountsR\acompute\x121\n" +
+	"\tnv_switch\x18\x02 \x01(\v2\x14.v1.TrayStatusCountsR\bnvSwitch\x125\n" +
+	"\vpower_shelf\x18\x03 \x01(\v2\x14.v1.TrayStatusCountsR\n" +
+	"powerShelf\"\xaf\x01\n" +
 	"\x10TrayStatusCounts\x12\x14\n" +
 	"\x05ready\x18\x01 \x01(\rR\x05ready\x12\x15\n" +
 	"\x06in_use\x18\x02 \x01(\rR\x05inUse\x12\"\n" +
@@ -17968,7 +18034,7 @@ func file_flow_proto_rawDescGZIP() []byte {
 }
 
 var file_flow_proto_enumTypes = make([]protoimpl.EnumInfo, 33)
-var file_flow_proto_msgTypes = make([]protoimpl.MessageInfo, 228)
+var file_flow_proto_msgTypes = make([]protoimpl.MessageInfo, 229)
 var file_flow_proto_goTypes = []any{
 	(BMCType)(0),                                       // 0: v1.BMCType
 	(ComponentType)(0),                                 // 1: v1.ComponentType
@@ -18230,14 +18296,15 @@ var file_flow_proto_goTypes = []any{
 	(*PowerTaskReferenceList)(nil),                     // 257: v1.PowerTaskReferenceList
 	(*PowerTaskReference)(nil),                         // 258: v1.PowerTaskReference
 	(*RackOperationStatusDetails)(nil),                 // 259: v1.RackOperationStatusDetails
-	(*TrayStatusCounts)(nil),                           // 260: v1.TrayStatusCounts
-	(*timestamppb.Timestamp)(nil),                      // 261: google.protobuf.Timestamp
-	(*fieldmaskpb.FieldMask)(nil),                      // 262: google.protobuf.FieldMask
-	(*durationpb.Duration)(nil),                        // 263: google.protobuf.Duration
-	(*v1.ComponentPowerObservation)(nil),               // 264: forge.ComponentPowerObservation
-	(*v1.ComponentPowerPolicy)(nil),                    // 265: forge.ComponentPowerPolicy
-	(*v1.ComponentPowerActionDetails)(nil),             // 266: forge.ComponentPowerActionDetails
-	(*emptypb.Empty)(nil),                              // 267: google.protobuf.Empty
+	(*TrayStatusCountsByType)(nil),                     // 260: v1.TrayStatusCountsByType
+	(*TrayStatusCounts)(nil),                           // 261: v1.TrayStatusCounts
+	(*timestamppb.Timestamp)(nil),                      // 262: google.protobuf.Timestamp
+	(*fieldmaskpb.FieldMask)(nil),                      // 263: google.protobuf.FieldMask
+	(*durationpb.Duration)(nil),                        // 264: google.protobuf.Duration
+	(*v1.ComponentPowerObservation)(nil),               // 265: forge.ComponentPowerObservation
+	(*v1.ComponentPowerPolicy)(nil),                    // 266: forge.ComponentPowerPolicy
+	(*v1.ComponentPowerActionDetails)(nil),             // 267: forge.ComponentPowerActionDetails
+	(*emptypb.Empty)(nil),                              // 268: google.protobuf.Empty
 }
 var file_flow_proto_depIdxs = []int32{
 	33,  // 0: v1.DeviceInfo.id:type_name -> v1.UUID
@@ -18291,12 +18358,12 @@ var file_flow_proto_depIdxs = []int32{
 	33,  // 48: v1.Task.component_uuids:type_name -> v1.UUID
 	8,   // 49: v1.Task.executor_type:type_name -> v1.TaskExecutorType
 	7,   // 50: v1.Task.status:type_name -> v1.TaskStatus
-	261, // 51: v1.Task.queue_expires_at:type_name -> google.protobuf.Timestamp
-	261, // 52: v1.Task.created_at:type_name -> google.protobuf.Timestamp
-	261, // 53: v1.Task.finished_at:type_name -> google.protobuf.Timestamp
+	262, // 51: v1.Task.queue_expires_at:type_name -> google.protobuf.Timestamp
+	262, // 52: v1.Task.created_at:type_name -> google.protobuf.Timestamp
+	262, // 53: v1.Task.finished_at:type_name -> google.protobuf.Timestamp
 	33,  // 54: v1.Task.applied_rule_id:type_name -> v1.UUID
-	261, // 55: v1.Task.updated_at:type_name -> google.protobuf.Timestamp
-	261, // 56: v1.Task.started_at:type_name -> google.protobuf.Timestamp
+	262, // 55: v1.Task.updated_at:type_name -> google.protobuf.Timestamp
+	262, // 56: v1.Task.started_at:type_name -> google.protobuf.Timestamp
 	42,  // 57: v1.CreateExpectedRackRequest.rack:type_name -> v1.Rack
 	33,  // 58: v1.CreateExpectedRackResponse.id:type_name -> v1.UUID
 	33,  // 59: v1.GetRackInfoByIDRequest.id:type_name -> v1.UUID
@@ -18328,8 +18395,8 @@ var file_flow_proto_depIdxs = []int32{
 	43,  // 85: v1.GetRacksForNVLDomainRequest.nvl_domain_identifier:type_name -> v1.Identifier
 	42,  // 86: v1.GetRacksForNVLDomainResponse.racks:type_name -> v1.Rack
 	44,  // 87: v1.UpgradeFirmwareRequest.target_spec:type_name -> v1.OperationTargetSpec
-	261, // 88: v1.UpgradeFirmwareRequest.start_time:type_name -> google.protobuf.Timestamp
-	261, // 89: v1.UpgradeFirmwareRequest.end_time:type_name -> google.protobuf.Timestamp
+	262, // 88: v1.UpgradeFirmwareRequest.start_time:type_name -> google.protobuf.Timestamp
+	262, // 89: v1.UpgradeFirmwareRequest.end_time:type_name -> google.protobuf.Timestamp
 	107, // 90: v1.UpgradeFirmwareRequest.queue_options:type_name -> v1.QueueOptions
 	33,  // 91: v1.UpgradeFirmwareRequest.rule_id:type_name -> v1.UUID
 	86,  // 92: v1.UpgradeFirmwareRequest.authentication_data:type_name -> v1.FirmwareAuthenticationData
@@ -18359,7 +18426,7 @@ var file_flow_proto_depIdxs = []int32{
 	38,  // 116: v1.PatchComponentRequest.position:type_name -> v1.RackPosition
 	33,  // 117: v1.PatchComponentRequest.rack_id:type_name -> v1.UUID
 	37,  // 118: v1.PatchComponentRequest.bmcs:type_name -> v1.BMCInfo
-	262, // 119: v1.PatchComponentRequest.update_mask:type_name -> google.protobuf.FieldMask
+	263, // 119: v1.PatchComponentRequest.update_mask:type_name -> google.protobuf.FieldMask
 	41,  // 120: v1.PatchComponentResponse.component:type_name -> v1.Component
 	33,  // 121: v1.SubmitTaskResponse.task_ids:type_name -> v1.UUID
 	13,  // 122: v1.QueueOptions.conflict_strategy:type_name -> v1.ConflictStrategy
@@ -18395,12 +18462,12 @@ var file_flow_proto_depIdxs = []int32{
 	125, // 152: v1.TaskOperation.firmware_control:type_name -> v1.FirmwareControlTaskOperation
 	15,  // 153: v1.PowerControlTaskOperation.operation:type_name -> v1.PowerControlOperation
 	16,  // 154: v1.FirmwareControlTaskOperation.operation:type_name -> v1.FirmwareControlOperation
-	261, // 155: v1.FirmwareControlTaskOperation.start_time:type_name -> google.protobuf.Timestamp
-	261, // 156: v1.FirmwareControlTaskOperation.end_time:type_name -> google.protobuf.Timestamp
+	262, // 155: v1.FirmwareControlTaskOperation.start_time:type_name -> google.protobuf.Timestamp
+	262, // 156: v1.FirmwareControlTaskOperation.end_time:type_name -> google.protobuf.Timestamp
 	33,  // 157: v1.OperationRule.id:type_name -> v1.UUID
 	14,  // 158: v1.OperationRule.operation_type:type_name -> v1.OperationType
-	261, // 159: v1.OperationRule.created_at:type_name -> google.protobuf.Timestamp
-	261, // 160: v1.OperationRule.updated_at:type_name -> google.protobuf.Timestamp
+	262, // 159: v1.OperationRule.created_at:type_name -> google.protobuf.Timestamp
+	262, // 160: v1.OperationRule.updated_at:type_name -> google.protobuf.Timestamp
 	14,  // 161: v1.CreateOperationRuleRequest.operation_type:type_name -> v1.OperationType
 	33,  // 162: v1.CreateOperationRuleResponse.id:type_name -> v1.UUID
 	33,  // 163: v1.UpdateOperationRuleRequest.rule_id:type_name -> v1.UUID
@@ -18421,8 +18488,8 @@ var file_flow_proto_depIdxs = []int32{
 	138, // 178: v1.EventRuleAction.noop:type_name -> v1.EventRuleNoopAction
 	33,  // 179: v1.EventRule.id:type_name -> v1.UUID
 	139, // 180: v1.EventRule.actions:type_name -> v1.EventRuleAction
-	261, // 181: v1.EventRule.created_at:type_name -> google.protobuf.Timestamp
-	261, // 182: v1.EventRule.updated_at:type_name -> google.protobuf.Timestamp
+	262, // 181: v1.EventRule.created_at:type_name -> google.protobuf.Timestamp
+	262, // 182: v1.EventRule.updated_at:type_name -> google.protobuf.Timestamp
 	139, // 183: v1.CreateEventRuleRequest.actions:type_name -> v1.EventRuleAction
 	33,  // 184: v1.GetEventRuleRequest.rule_id:type_name -> v1.UUID
 	33,  // 185: v1.GetEffectiveEventRuleRequest.rack_id:type_name -> v1.UUID
@@ -18456,8 +18523,8 @@ var file_flow_proto_depIdxs = []int32{
 	33,  // 213: v1.RackRuleAssociation.rack_id:type_name -> v1.UUID
 	14,  // 214: v1.RackRuleAssociation.operation_type:type_name -> v1.OperationType
 	33,  // 215: v1.RackRuleAssociation.rule_id:type_name -> v1.UUID
-	261, // 216: v1.RackRuleAssociation.created_at:type_name -> google.protobuf.Timestamp
-	261, // 217: v1.RackRuleAssociation.updated_at:type_name -> google.protobuf.Timestamp
+	262, // 216: v1.RackRuleAssociation.created_at:type_name -> google.protobuf.Timestamp
+	262, // 217: v1.RackRuleAssociation.updated_at:type_name -> google.protobuf.Timestamp
 	162, // 218: v1.ListRackRuleAssociationsResponse.associations:type_name -> v1.RackRuleAssociation
 	21,  // 219: v1.ScheduleSpec.type:type_name -> v1.ScheduleSpecType
 	164, // 220: v1.ScheduleConfig.spec:type_name -> v1.ScheduleSpec
@@ -18465,10 +18532,10 @@ var file_flow_proto_depIdxs = []int32{
 	33,  // 222: v1.TaskSchedule.id:type_name -> v1.UUID
 	164, // 223: v1.TaskSchedule.spec:type_name -> v1.ScheduleSpec
 	22,  // 224: v1.TaskSchedule.overlap_policy:type_name -> v1.OverlapPolicy
-	261, // 225: v1.TaskSchedule.next_run_at:type_name -> google.protobuf.Timestamp
-	261, // 226: v1.TaskSchedule.last_run_at:type_name -> google.protobuf.Timestamp
-	261, // 227: v1.TaskSchedule.created_at:type_name -> google.protobuf.Timestamp
-	261, // 228: v1.TaskSchedule.updated_at:type_name -> google.protobuf.Timestamp
+	262, // 225: v1.TaskSchedule.next_run_at:type_name -> google.protobuf.Timestamp
+	262, // 226: v1.TaskSchedule.last_run_at:type_name -> google.protobuf.Timestamp
+	262, // 227: v1.TaskSchedule.created_at:type_name -> google.protobuf.Timestamp
+	262, // 228: v1.TaskSchedule.updated_at:type_name -> google.protobuf.Timestamp
 	108, // 229: v1.ScheduledOperation.power_on:type_name -> v1.PowerOnRackRequest
 	109, // 230: v1.ScheduledOperation.power_off:type_name -> v1.PowerOffRackRequest
 	110, // 231: v1.ScheduledOperation.power_reset:type_name -> v1.PowerResetRackRequest
@@ -18483,7 +18550,7 @@ var file_flow_proto_depIdxs = []int32{
 	166, // 240: v1.ListTaskSchedulesResponse.task_schedules:type_name -> v1.TaskSchedule
 	33,  // 241: v1.UpdateTaskScheduleRequest.id:type_name -> v1.UUID
 	165, // 242: v1.UpdateTaskScheduleRequest.schedule:type_name -> v1.ScheduleConfig
-	262, // 243: v1.UpdateTaskScheduleRequest.update_mask:type_name -> google.protobuf.FieldMask
+	263, // 243: v1.UpdateTaskScheduleRequest.update_mask:type_name -> google.protobuf.FieldMask
 	33,  // 244: v1.PauseTaskScheduleRequest.id:type_name -> v1.UUID
 	33,  // 245: v1.ResumeTaskScheduleRequest.id:type_name -> v1.UUID
 	33,  // 246: v1.DeleteTaskScheduleRequest.id:type_name -> v1.UUID
@@ -18494,7 +18561,7 @@ var file_flow_proto_depIdxs = []int32{
 	47,  // 251: v1.TaskScheduleScope.types:type_name -> v1.ComponentTypes
 	46,  // 252: v1.TaskScheduleScope.components:type_name -> v1.ComponentTargets
 	33,  // 253: v1.TaskScheduleScope.last_task_id:type_name -> v1.UUID
-	261, // 254: v1.TaskScheduleScope.created_at:type_name -> google.protobuf.Timestamp
+	262, // 254: v1.TaskScheduleScope.created_at:type_name -> google.protobuf.Timestamp
 	33,  // 255: v1.AddTaskScheduleScopeRequest.schedule_id:type_name -> v1.UUID
 	44,  // 256: v1.AddTaskScheduleScopeRequest.target_spec:type_name -> v1.OperationTargetSpec
 	177, // 257: v1.AddTaskScheduleScopeResponse.scopes:type_name -> v1.TaskScheduleScope
@@ -18551,9 +18618,9 @@ var file_flow_proto_depIdxs = []int32{
 	215, // 308: v1.PercentageOperationRunPhases.phases:type_name -> v1.OperationRunPercentagePhase
 	217, // 309: v1.CountOperationRunPhases.phases:type_name -> v1.OperationRunCountPhase
 	220, // 310: v1.OperationRunConflictPolicy.retry:type_name -> v1.OperationRunConflictRetryPolicy
-	263, // 311: v1.OperationRunConflictRetryPolicy.retry_timeout:type_name -> google.protobuf.Duration
-	263, // 312: v1.OperationRunConflictRetryPolicy.initial_retry_delay:type_name -> google.protobuf.Duration
-	263, // 313: v1.OperationRunConflictRetryPolicy.max_retry_delay:type_name -> google.protobuf.Duration
+	264, // 311: v1.OperationRunConflictRetryPolicy.retry_timeout:type_name -> google.protobuf.Duration
+	264, // 312: v1.OperationRunConflictRetryPolicy.initial_retry_delay:type_name -> google.protobuf.Duration
+	264, // 313: v1.OperationRunConflictRetryPolicy.max_retry_delay:type_name -> google.protobuf.Duration
 	33,  // 314: v1.OperationRunTargetScope.exclude_operation_run_ids:type_name -> v1.UUID
 	48,  // 315: v1.OperationRunTargetScope.default_scope_component_filter:type_name -> v1.ComponentFilter
 	85,  // 316: v1.OperationRunOperation.upgrade_firmware:type_name -> v1.UpgradeFirmwareRequest
@@ -18567,10 +18634,10 @@ var file_flow_proto_depIdxs = []int32{
 	33,  // 324: v1.OperationRunSummary.id:type_name -> v1.UUID
 	224, // 325: v1.OperationRunSummary.operation_kind:type_name -> v1.OperationKind
 	223, // 326: v1.OperationRunSummary.state:type_name -> v1.OperationRunState
-	261, // 327: v1.OperationRunSummary.created_at:type_name -> google.protobuf.Timestamp
-	261, // 328: v1.OperationRunSummary.updated_at:type_name -> google.protobuf.Timestamp
-	261, // 329: v1.OperationRunSummary.started_at:type_name -> google.protobuf.Timestamp
-	261, // 330: v1.OperationRunSummary.finished_at:type_name -> google.protobuf.Timestamp
+	262, // 327: v1.OperationRunSummary.created_at:type_name -> google.protobuf.Timestamp
+	262, // 328: v1.OperationRunSummary.updated_at:type_name -> google.protobuf.Timestamp
+	262, // 329: v1.OperationRunSummary.started_at:type_name -> google.protobuf.Timestamp
+	262, // 330: v1.OperationRunSummary.finished_at:type_name -> google.protobuf.Timestamp
 	228, // 331: v1.OperationRunStats.current_phase_stats:type_name -> v1.OperationRunPhaseStats
 	228, // 332: v1.OperationRunStats.cumulative_phase_stats:type_name -> v1.OperationRunPhaseStats
 	229, // 333: v1.OperationRunPhaseStats.outcome_counts:type_name -> v1.OperationRunTargetOutcomeCounts
@@ -18580,28 +18647,28 @@ var file_flow_proto_depIdxs = []int32{
 	33,  // 337: v1.OperationRunTarget.task_id:type_name -> v1.UUID
 	27,  // 338: v1.OperationRunTarget.status:type_name -> v1.OperationRunTargetStatus
 	49,  // 339: v1.OperationRunTarget.components_by_type:type_name -> v1.ComponentsByType
-	261, // 340: v1.OperationRunTarget.created_at:type_name -> google.protobuf.Timestamp
-	261, // 341: v1.OperationRunTarget.updated_at:type_name -> google.protobuf.Timestamp
+	262, // 340: v1.OperationRunTarget.created_at:type_name -> google.protobuf.Timestamp
+	262, // 341: v1.OperationRunTarget.updated_at:type_name -> google.protobuf.Timestamp
 	232, // 342: v1.NVLDomainTargets.targets:type_name -> v1.NVLDomainTarget
 	33,  // 343: v1.NVLDomainTarget.id:type_name -> v1.UUID
 	1,   // 344: v1.NVLDomainTarget.component_types:type_name -> v1.ComponentType
-	261, // 345: v1.HealthReport.observed_at:type_name -> google.protobuf.Timestamp
+	262, // 345: v1.HealthReport.observed_at:type_name -> google.protobuf.Timestamp
 	234, // 346: v1.HealthReport.successes:type_name -> v1.HealthProbeSuccess
 	235, // 347: v1.HealthReport.alerts:type_name -> v1.HealthProbeAlert
-	261, // 348: v1.HealthProbeAlert.in_alert_since:type_name -> google.protobuf.Timestamp
+	262, // 348: v1.HealthProbeAlert.in_alert_since:type_name -> google.protobuf.Timestamp
 	238, // 349: v1.GetTrayPowerDetailsResponse.details:type_name -> v1.TrayPowerDetails
 	1,   // 350: v1.TrayPowerDetails.component_type:type_name -> v1.ComponentType
 	33,  // 351: v1.TrayPowerDetails.rack_id:type_name -> v1.UUID
 	239, // 352: v1.TrayPowerDetails.actual:type_name -> v1.PowerActualDetails
 	240, // 353: v1.TrayPowerDetails.desired:type_name -> v1.PowerDesiredDetails
 	241, // 354: v1.TrayPowerDetails.operations:type_name -> v1.PowerOperations
-	264, // 355: v1.PowerActualDetails.value:type_name -> forge.ComponentPowerObservation
+	265, // 355: v1.PowerActualDetails.value:type_name -> forge.ComponentPowerObservation
 	28,  // 356: v1.PowerActualDetails.error:type_name -> v1.PowerDetailsReadError
-	265, // 357: v1.PowerDesiredDetails.value:type_name -> forge.ComponentPowerPolicy
+	266, // 357: v1.PowerDesiredDetails.value:type_name -> forge.ComponentPowerPolicy
 	28,  // 358: v1.PowerDesiredDetails.error:type_name -> v1.PowerDetailsReadError
 	242, // 359: v1.PowerOperations.actions:type_name -> v1.PowerActionDetails
 	243, // 360: v1.PowerOperations.tasks:type_name -> v1.PowerTaskDetailsList
-	266, // 361: v1.PowerActionDetails.value:type_name -> forge.ComponentPowerActionDetails
+	267, // 361: v1.PowerActionDetails.value:type_name -> forge.ComponentPowerActionDetails
 	28,  // 362: v1.PowerActionDetails.error:type_name -> v1.PowerDetailsReadError
 	244, // 363: v1.PowerTaskDetailsList.entries:type_name -> v1.PowerTaskDetails
 	28,  // 364: v1.PowerTaskDetailsList.error:type_name -> v1.PowerDetailsReadError
@@ -18610,9 +18677,9 @@ var file_flow_proto_depIdxs = []int32{
 	123, // 367: v1.PowerTaskDetails.operation:type_name -> v1.TaskOperation
 	49,  // 368: v1.PowerTaskDetails.targets:type_name -> v1.ComponentsByType
 	7,   // 369: v1.PowerTaskDetails.status:type_name -> v1.TaskStatus
-	261, // 370: v1.PowerTaskDetails.created_at:type_name -> google.protobuf.Timestamp
-	261, // 371: v1.PowerTaskDetails.updated_at:type_name -> google.protobuf.Timestamp
-	261, // 372: v1.PowerTaskDetails.started_at:type_name -> google.protobuf.Timestamp
+	262, // 370: v1.PowerTaskDetails.created_at:type_name -> google.protobuf.Timestamp
+	262, // 371: v1.PowerTaskDetails.updated_at:type_name -> google.protobuf.Timestamp
+	262, // 372: v1.PowerTaskDetails.started_at:type_name -> google.protobuf.Timestamp
 	29,  // 373: v1.PowerTaskDetails.relevance:type_name -> v1.PowerTaskRelevance
 	246, // 374: v1.PowerTaskDetails.waiting_context:type_name -> v1.PowerTaskWaitingContext
 	245, // 375: v1.PowerTaskDetails.external_targets:type_name -> v1.PowerTaskExternalTargets
@@ -18648,168 +18715,171 @@ var file_flow_proto_depIdxs = []int32{
 	28,  // 405: v1.PowerTaskReferenceList.error:type_name -> v1.PowerDetailsReadError
 	33,  // 406: v1.PowerTaskReference.id:type_name -> v1.UUID
 	29,  // 407: v1.PowerTaskReference.relevance:type_name -> v1.PowerTaskRelevance
-	260, // 408: v1.RackOperationStatusDetails.tray_counts:type_name -> v1.TrayStatusCounts
-	121, // 409: v1.Flow.Version:input_type -> v1.VersionRequest
-	168, // 410: v1.Flow.CreateTaskSchedule:input_type -> v1.CreateTaskScheduleRequest
-	169, // 411: v1.Flow.GetTaskSchedule:input_type -> v1.GetTaskScheduleRequest
-	170, // 412: v1.Flow.ListTaskSchedules:input_type -> v1.ListTaskSchedulesRequest
-	172, // 413: v1.Flow.UpdateTaskSchedule:input_type -> v1.UpdateTaskScheduleRequest
-	173, // 414: v1.Flow.PauseTaskSchedule:input_type -> v1.PauseTaskScheduleRequest
-	174, // 415: v1.Flow.ResumeTaskSchedule:input_type -> v1.ResumeTaskScheduleRequest
-	175, // 416: v1.Flow.DeleteTaskSchedule:input_type -> v1.DeleteTaskScheduleRequest
-	176, // 417: v1.Flow.TriggerTaskSchedule:input_type -> v1.TriggerTaskScheduleRequest
-	178, // 418: v1.Flow.AddTaskScheduleScope:input_type -> v1.AddTaskScheduleScopeRequest
-	180, // 419: v1.Flow.RemoveTaskScheduleScope:input_type -> v1.RemoveTaskScheduleScopeRequest
-	181, // 420: v1.Flow.UpdateTaskScheduleScope:input_type -> v1.UpdateTaskScheduleScopeRequest
-	183, // 421: v1.Flow.ListTaskScheduleScopes:input_type -> v1.ListTaskScheduleScopesRequest
-	185, // 422: v1.Flow.CheckScheduleConflicts:input_type -> v1.CheckScheduleConflictsRequest
-	60,  // 423: v1.Flow.CreateExpectedRack:input_type -> v1.CreateExpectedRackRequest
-	62,  // 424: v1.Flow.GetRackInfoByID:input_type -> v1.GetRackInfoByIDRequest
-	63,  // 425: v1.Flow.GetRackInfoBySerial:input_type -> v1.GetRackInfoBySerialRequest
-	70,  // 426: v1.Flow.GetListOfRacks:input_type -> v1.GetListOfRacksRequest
-	65,  // 427: v1.Flow.PatchRack:input_type -> v1.PatchRackRequest
-	98,  // 428: v1.Flow.DeleteRack:input_type -> v1.DeleteRackRequest
-	100, // 429: v1.Flow.PurgeRack:input_type -> v1.PurgeRackRequest
-	85,  // 430: v1.Flow.UpgradeFirmware:input_type -> v1.UpgradeFirmwareRequest
-	112, // 431: v1.Flow.BringUpRack:input_type -> v1.BringUpRackRequest
-	113, // 432: v1.Flow.IngestRack:input_type -> v1.IngestRackRequest
-	114, // 433: v1.Flow.DecommissionRack:input_type -> v1.DecommissionRackRequest
-	108, // 434: v1.Flow.PowerOnRack:input_type -> v1.PowerOnRackRequest
-	109, // 435: v1.Flow.PowerOffRack:input_type -> v1.PowerOffRackRequest
-	110, // 436: v1.Flow.PowerResetRack:input_type -> v1.PowerResetRackRequest
-	111, // 437: v1.Flow.ACPowerCycleRack:input_type -> v1.ACPowerCycleRackRequest
-	67,  // 438: v1.Flow.GetComponentInfoByID:input_type -> v1.GetComponentInfoByIDRequest
-	68,  // 439: v1.Flow.GetComponentInfoBySerial:input_type -> v1.GetComponentInfoBySerialRequest
-	88,  // 440: v1.Flow.GetComponents:input_type -> v1.GetComponentsRequest
-	90,  // 441: v1.Flow.ValidateComponents:input_type -> v1.ValidateComponentsRequest
-	94,  // 442: v1.Flow.AddComponent:input_type -> v1.AddComponentRequest
-	104, // 443: v1.Flow.PatchComponent:input_type -> v1.PatchComponentRequest
-	96,  // 444: v1.Flow.DeleteComponent:input_type -> v1.DeleteComponentRequest
-	102, // 445: v1.Flow.PurgeComponent:input_type -> v1.PurgeComponentRequest
-	72,  // 446: v1.Flow.CreateNVLDomain:input_type -> v1.CreateNVLDomainRequest
-	74,  // 447: v1.Flow.AttachRacksToNVLDomain:input_type -> v1.AttachRacksToNVLDomainRequest
-	75,  // 448: v1.Flow.DetachRacksFromNVLDomain:input_type -> v1.DetachRacksFromNVLDomainRequest
-	76,  // 449: v1.Flow.GetListOfNVLDomains:input_type -> v1.GetListOfNVLDomainsRequest
-	83,  // 450: v1.Flow.GetRacksForNVLDomain:input_type -> v1.GetRacksForNVLDomainRequest
-	78,  // 451: v1.Flow.GetNVLinkDomain:input_type -> v1.GetNVLinkDomainRequest
-	81,  // 452: v1.Flow.GetListOfNVLinkDomains:input_type -> v1.GetListOfNVLinkDomainsRequest
-	115, // 453: v1.Flow.ListTasks:input_type -> v1.ListTasksRequest
-	117, // 454: v1.Flow.GetTasksByIDs:input_type -> v1.GetTasksByIDsRequest
-	119, // 455: v1.Flow.CancelTask:input_type -> v1.CancelTaskRequest
-	127, // 456: v1.Flow.CreateOperationRule:input_type -> v1.CreateOperationRuleRequest
-	129, // 457: v1.Flow.UpdateOperationRule:input_type -> v1.UpdateOperationRuleRequest
-	130, // 458: v1.Flow.DeleteOperationRule:input_type -> v1.DeleteOperationRuleRequest
-	132, // 459: v1.Flow.GetOperationRule:input_type -> v1.GetOperationRuleRequest
-	133, // 460: v1.Flow.ListOperationRules:input_type -> v1.ListOperationRulesRequest
-	131, // 461: v1.Flow.SetRuleAsDefault:input_type -> v1.SetRuleAsDefaultRequest
-	141, // 462: v1.Flow.CreateEventRule:input_type -> v1.CreateEventRuleRequest
-	142, // 463: v1.Flow.GetEventRule:input_type -> v1.GetEventRuleRequest
-	143, // 464: v1.Flow.GetEffectiveEventRule:input_type -> v1.GetEffectiveEventRuleRequest
-	144, // 465: v1.Flow.ListEventRules:input_type -> v1.ListEventRulesRequest
-	148, // 466: v1.Flow.UpdateEventRule:input_type -> v1.UpdateEventRuleRequest
-	149, // 467: v1.Flow.EnableEventRule:input_type -> v1.EnableEventRuleRequest
-	150, // 468: v1.Flow.DisableEventRule:input_type -> v1.DisableEventRuleRequest
-	151, // 469: v1.Flow.DeleteEventRule:input_type -> v1.DeleteEventRuleRequest
-	154, // 470: v1.Flow.CreateEventRuleBinding:input_type -> v1.CreateEventRuleBindingRequest
-	155, // 471: v1.Flow.GetEventRuleBinding:input_type -> v1.GetEventRuleBindingRequest
-	156, // 472: v1.Flow.DeleteEventRuleBinding:input_type -> v1.DeleteEventRuleBindingRequest
-	157, // 473: v1.Flow.AssociateRuleWithRack:input_type -> v1.AssociateRuleWithRackRequest
-	158, // 474: v1.Flow.DisassociateRuleFromRack:input_type -> v1.DisassociateRuleFromRackRequest
-	159, // 475: v1.Flow.GetRackRuleAssociation:input_type -> v1.GetRackRuleAssociationRequest
-	161, // 476: v1.Flow.ListRackRuleAssociations:input_type -> v1.ListRackRuleAssociationsRequest
-	187, // 477: v1.Flow.CreateOperationRun:input_type -> v1.CreateOperationRunRequest
-	190, // 478: v1.Flow.GetOperationRun:input_type -> v1.GetOperationRunRequest
-	192, // 479: v1.Flow.ListOperationRuns:input_type -> v1.ListOperationRunsRequest
-	196, // 480: v1.Flow.ListOperationRunTargets:input_type -> v1.ListOperationRunTargetsRequest
-	198, // 481: v1.Flow.PauseOperationRun:input_type -> v1.PauseOperationRunRequest
-	199, // 482: v1.Flow.ResumeOperationRun:input_type -> v1.ResumeOperationRunRequest
-	200, // 483: v1.Flow.AdvanceOperationRunPhase:input_type -> v1.AdvanceOperationRunPhaseRequest
-	201, // 484: v1.Flow.CancelOperationRun:input_type -> v1.CancelOperationRunRequest
-	236, // 485: v1.Flow.GetTrayPowerDetails:input_type -> v1.GetTrayPowerDetailsRequest
-	248, // 486: v1.Flow.GetRackPowerDetails:input_type -> v1.GetRackPowerDetailsRequest
-	122, // 487: v1.Flow.Version:output_type -> v1.BuildInfo
-	166, // 488: v1.Flow.CreateTaskSchedule:output_type -> v1.TaskSchedule
-	166, // 489: v1.Flow.GetTaskSchedule:output_type -> v1.TaskSchedule
-	171, // 490: v1.Flow.ListTaskSchedules:output_type -> v1.ListTaskSchedulesResponse
-	166, // 491: v1.Flow.UpdateTaskSchedule:output_type -> v1.TaskSchedule
-	166, // 492: v1.Flow.PauseTaskSchedule:output_type -> v1.TaskSchedule
-	166, // 493: v1.Flow.ResumeTaskSchedule:output_type -> v1.TaskSchedule
-	267, // 494: v1.Flow.DeleteTaskSchedule:output_type -> google.protobuf.Empty
-	106, // 495: v1.Flow.TriggerTaskSchedule:output_type -> v1.SubmitTaskResponse
-	179, // 496: v1.Flow.AddTaskScheduleScope:output_type -> v1.AddTaskScheduleScopeResponse
-	267, // 497: v1.Flow.RemoveTaskScheduleScope:output_type -> google.protobuf.Empty
-	182, // 498: v1.Flow.UpdateTaskScheduleScope:output_type -> v1.UpdateTaskScheduleScopeResponse
-	184, // 499: v1.Flow.ListTaskScheduleScopes:output_type -> v1.ListTaskScheduleScopesResponse
-	186, // 500: v1.Flow.CheckScheduleConflicts:output_type -> v1.CheckScheduleConflictsResponse
-	61,  // 501: v1.Flow.CreateExpectedRack:output_type -> v1.CreateExpectedRackResponse
-	64,  // 502: v1.Flow.GetRackInfoByID:output_type -> v1.GetRackInfoResponse
-	64,  // 503: v1.Flow.GetRackInfoBySerial:output_type -> v1.GetRackInfoResponse
-	71,  // 504: v1.Flow.GetListOfRacks:output_type -> v1.GetListOfRacksResponse
-	66,  // 505: v1.Flow.PatchRack:output_type -> v1.PatchRackResponse
-	99,  // 506: v1.Flow.DeleteRack:output_type -> v1.DeleteRackResponse
-	101, // 507: v1.Flow.PurgeRack:output_type -> v1.PurgeRackResponse
-	106, // 508: v1.Flow.UpgradeFirmware:output_type -> v1.SubmitTaskResponse
-	106, // 509: v1.Flow.BringUpRack:output_type -> v1.SubmitTaskResponse
-	106, // 510: v1.Flow.IngestRack:output_type -> v1.SubmitTaskResponse
-	106, // 511: v1.Flow.DecommissionRack:output_type -> v1.SubmitTaskResponse
-	106, // 512: v1.Flow.PowerOnRack:output_type -> v1.SubmitTaskResponse
-	106, // 513: v1.Flow.PowerOffRack:output_type -> v1.SubmitTaskResponse
-	106, // 514: v1.Flow.PowerResetRack:output_type -> v1.SubmitTaskResponse
-	106, // 515: v1.Flow.ACPowerCycleRack:output_type -> v1.SubmitTaskResponse
-	69,  // 516: v1.Flow.GetComponentInfoByID:output_type -> v1.GetComponentInfoResponse
-	69,  // 517: v1.Flow.GetComponentInfoBySerial:output_type -> v1.GetComponentInfoResponse
-	89,  // 518: v1.Flow.GetComponents:output_type -> v1.GetComponentsResponse
-	91,  // 519: v1.Flow.ValidateComponents:output_type -> v1.ValidateComponentsResponse
-	95,  // 520: v1.Flow.AddComponent:output_type -> v1.AddComponentResponse
-	105, // 521: v1.Flow.PatchComponent:output_type -> v1.PatchComponentResponse
-	97,  // 522: v1.Flow.DeleteComponent:output_type -> v1.DeleteComponentResponse
-	103, // 523: v1.Flow.PurgeComponent:output_type -> v1.PurgeComponentResponse
-	73,  // 524: v1.Flow.CreateNVLDomain:output_type -> v1.CreateNVLDomainResponse
-	267, // 525: v1.Flow.AttachRacksToNVLDomain:output_type -> google.protobuf.Empty
-	267, // 526: v1.Flow.DetachRacksFromNVLDomain:output_type -> google.protobuf.Empty
-	77,  // 527: v1.Flow.GetListOfNVLDomains:output_type -> v1.GetListOfNVLDomainsResponse
-	84,  // 528: v1.Flow.GetRacksForNVLDomain:output_type -> v1.GetRacksForNVLDomainResponse
-	80,  // 529: v1.Flow.GetNVLinkDomain:output_type -> v1.GetNVLinkDomainResponse
-	82,  // 530: v1.Flow.GetListOfNVLinkDomains:output_type -> v1.GetListOfNVLinkDomainsResponse
-	116, // 531: v1.Flow.ListTasks:output_type -> v1.ListTasksResponse
-	118, // 532: v1.Flow.GetTasksByIDs:output_type -> v1.GetTasksByIDsResponse
-	120, // 533: v1.Flow.CancelTask:output_type -> v1.CancelTaskResponse
-	128, // 534: v1.Flow.CreateOperationRule:output_type -> v1.CreateOperationRuleResponse
-	267, // 535: v1.Flow.UpdateOperationRule:output_type -> google.protobuf.Empty
-	267, // 536: v1.Flow.DeleteOperationRule:output_type -> google.protobuf.Empty
-	126, // 537: v1.Flow.GetOperationRule:output_type -> v1.OperationRule
-	134, // 538: v1.Flow.ListOperationRules:output_type -> v1.ListOperationRulesResponse
-	267, // 539: v1.Flow.SetRuleAsDefault:output_type -> google.protobuf.Empty
-	140, // 540: v1.Flow.CreateEventRule:output_type -> v1.EventRule
-	140, // 541: v1.Flow.GetEventRule:output_type -> v1.EventRule
-	140, // 542: v1.Flow.GetEffectiveEventRule:output_type -> v1.EventRule
-	145, // 543: v1.Flow.ListEventRules:output_type -> v1.ListEventRulesResponse
-	140, // 544: v1.Flow.UpdateEventRule:output_type -> v1.EventRule
-	140, // 545: v1.Flow.EnableEventRule:output_type -> v1.EventRule
-	140, // 546: v1.Flow.DisableEventRule:output_type -> v1.EventRule
-	267, // 547: v1.Flow.DeleteEventRule:output_type -> google.protobuf.Empty
-	153, // 548: v1.Flow.CreateEventRuleBinding:output_type -> v1.EventRuleBinding
-	153, // 549: v1.Flow.GetEventRuleBinding:output_type -> v1.EventRuleBinding
-	267, // 550: v1.Flow.DeleteEventRuleBinding:output_type -> google.protobuf.Empty
-	267, // 551: v1.Flow.AssociateRuleWithRack:output_type -> google.protobuf.Empty
-	267, // 552: v1.Flow.DisassociateRuleFromRack:output_type -> google.protobuf.Empty
-	160, // 553: v1.Flow.GetRackRuleAssociation:output_type -> v1.GetRackRuleAssociationResponse
-	163, // 554: v1.Flow.ListRackRuleAssociations:output_type -> v1.ListRackRuleAssociationsResponse
-	188, // 555: v1.Flow.CreateOperationRun:output_type -> v1.CreateOperationRunResponse
-	191, // 556: v1.Flow.GetOperationRun:output_type -> v1.GetOperationRunResponse
-	193, // 557: v1.Flow.ListOperationRuns:output_type -> v1.ListOperationRunsResponse
-	197, // 558: v1.Flow.ListOperationRunTargets:output_type -> v1.ListOperationRunTargetsResponse
-	225, // 559: v1.Flow.PauseOperationRun:output_type -> v1.OperationRun
-	225, // 560: v1.Flow.ResumeOperationRun:output_type -> v1.OperationRun
-	225, // 561: v1.Flow.AdvanceOperationRunPhase:output_type -> v1.OperationRun
-	225, // 562: v1.Flow.CancelOperationRun:output_type -> v1.OperationRun
-	237, // 563: v1.Flow.GetTrayPowerDetails:output_type -> v1.GetTrayPowerDetailsResponse
-	249, // 564: v1.Flow.GetRackPowerDetails:output_type -> v1.GetRackPowerDetailsResponse
-	487, // [487:565] is the sub-list for method output_type
-	409, // [409:487] is the sub-list for method input_type
-	409, // [409:409] is the sub-list for extension type_name
-	409, // [409:409] is the sub-list for extension extendee
-	0,   // [0:409] is the sub-list for field type_name
+	260, // 408: v1.RackOperationStatusDetails.tray_counts_by_type:type_name -> v1.TrayStatusCountsByType
+	261, // 409: v1.TrayStatusCountsByType.compute:type_name -> v1.TrayStatusCounts
+	261, // 410: v1.TrayStatusCountsByType.nv_switch:type_name -> v1.TrayStatusCounts
+	261, // 411: v1.TrayStatusCountsByType.power_shelf:type_name -> v1.TrayStatusCounts
+	121, // 412: v1.Flow.Version:input_type -> v1.VersionRequest
+	168, // 413: v1.Flow.CreateTaskSchedule:input_type -> v1.CreateTaskScheduleRequest
+	169, // 414: v1.Flow.GetTaskSchedule:input_type -> v1.GetTaskScheduleRequest
+	170, // 415: v1.Flow.ListTaskSchedules:input_type -> v1.ListTaskSchedulesRequest
+	172, // 416: v1.Flow.UpdateTaskSchedule:input_type -> v1.UpdateTaskScheduleRequest
+	173, // 417: v1.Flow.PauseTaskSchedule:input_type -> v1.PauseTaskScheduleRequest
+	174, // 418: v1.Flow.ResumeTaskSchedule:input_type -> v1.ResumeTaskScheduleRequest
+	175, // 419: v1.Flow.DeleteTaskSchedule:input_type -> v1.DeleteTaskScheduleRequest
+	176, // 420: v1.Flow.TriggerTaskSchedule:input_type -> v1.TriggerTaskScheduleRequest
+	178, // 421: v1.Flow.AddTaskScheduleScope:input_type -> v1.AddTaskScheduleScopeRequest
+	180, // 422: v1.Flow.RemoveTaskScheduleScope:input_type -> v1.RemoveTaskScheduleScopeRequest
+	181, // 423: v1.Flow.UpdateTaskScheduleScope:input_type -> v1.UpdateTaskScheduleScopeRequest
+	183, // 424: v1.Flow.ListTaskScheduleScopes:input_type -> v1.ListTaskScheduleScopesRequest
+	185, // 425: v1.Flow.CheckScheduleConflicts:input_type -> v1.CheckScheduleConflictsRequest
+	60,  // 426: v1.Flow.CreateExpectedRack:input_type -> v1.CreateExpectedRackRequest
+	62,  // 427: v1.Flow.GetRackInfoByID:input_type -> v1.GetRackInfoByIDRequest
+	63,  // 428: v1.Flow.GetRackInfoBySerial:input_type -> v1.GetRackInfoBySerialRequest
+	70,  // 429: v1.Flow.GetListOfRacks:input_type -> v1.GetListOfRacksRequest
+	65,  // 430: v1.Flow.PatchRack:input_type -> v1.PatchRackRequest
+	98,  // 431: v1.Flow.DeleteRack:input_type -> v1.DeleteRackRequest
+	100, // 432: v1.Flow.PurgeRack:input_type -> v1.PurgeRackRequest
+	85,  // 433: v1.Flow.UpgradeFirmware:input_type -> v1.UpgradeFirmwareRequest
+	112, // 434: v1.Flow.BringUpRack:input_type -> v1.BringUpRackRequest
+	113, // 435: v1.Flow.IngestRack:input_type -> v1.IngestRackRequest
+	114, // 436: v1.Flow.DecommissionRack:input_type -> v1.DecommissionRackRequest
+	108, // 437: v1.Flow.PowerOnRack:input_type -> v1.PowerOnRackRequest
+	109, // 438: v1.Flow.PowerOffRack:input_type -> v1.PowerOffRackRequest
+	110, // 439: v1.Flow.PowerResetRack:input_type -> v1.PowerResetRackRequest
+	111, // 440: v1.Flow.ACPowerCycleRack:input_type -> v1.ACPowerCycleRackRequest
+	67,  // 441: v1.Flow.GetComponentInfoByID:input_type -> v1.GetComponentInfoByIDRequest
+	68,  // 442: v1.Flow.GetComponentInfoBySerial:input_type -> v1.GetComponentInfoBySerialRequest
+	88,  // 443: v1.Flow.GetComponents:input_type -> v1.GetComponentsRequest
+	90,  // 444: v1.Flow.ValidateComponents:input_type -> v1.ValidateComponentsRequest
+	94,  // 445: v1.Flow.AddComponent:input_type -> v1.AddComponentRequest
+	104, // 446: v1.Flow.PatchComponent:input_type -> v1.PatchComponentRequest
+	96,  // 447: v1.Flow.DeleteComponent:input_type -> v1.DeleteComponentRequest
+	102, // 448: v1.Flow.PurgeComponent:input_type -> v1.PurgeComponentRequest
+	72,  // 449: v1.Flow.CreateNVLDomain:input_type -> v1.CreateNVLDomainRequest
+	74,  // 450: v1.Flow.AttachRacksToNVLDomain:input_type -> v1.AttachRacksToNVLDomainRequest
+	75,  // 451: v1.Flow.DetachRacksFromNVLDomain:input_type -> v1.DetachRacksFromNVLDomainRequest
+	76,  // 452: v1.Flow.GetListOfNVLDomains:input_type -> v1.GetListOfNVLDomainsRequest
+	83,  // 453: v1.Flow.GetRacksForNVLDomain:input_type -> v1.GetRacksForNVLDomainRequest
+	78,  // 454: v1.Flow.GetNVLinkDomain:input_type -> v1.GetNVLinkDomainRequest
+	81,  // 455: v1.Flow.GetListOfNVLinkDomains:input_type -> v1.GetListOfNVLinkDomainsRequest
+	115, // 456: v1.Flow.ListTasks:input_type -> v1.ListTasksRequest
+	117, // 457: v1.Flow.GetTasksByIDs:input_type -> v1.GetTasksByIDsRequest
+	119, // 458: v1.Flow.CancelTask:input_type -> v1.CancelTaskRequest
+	127, // 459: v1.Flow.CreateOperationRule:input_type -> v1.CreateOperationRuleRequest
+	129, // 460: v1.Flow.UpdateOperationRule:input_type -> v1.UpdateOperationRuleRequest
+	130, // 461: v1.Flow.DeleteOperationRule:input_type -> v1.DeleteOperationRuleRequest
+	132, // 462: v1.Flow.GetOperationRule:input_type -> v1.GetOperationRuleRequest
+	133, // 463: v1.Flow.ListOperationRules:input_type -> v1.ListOperationRulesRequest
+	131, // 464: v1.Flow.SetRuleAsDefault:input_type -> v1.SetRuleAsDefaultRequest
+	141, // 465: v1.Flow.CreateEventRule:input_type -> v1.CreateEventRuleRequest
+	142, // 466: v1.Flow.GetEventRule:input_type -> v1.GetEventRuleRequest
+	143, // 467: v1.Flow.GetEffectiveEventRule:input_type -> v1.GetEffectiveEventRuleRequest
+	144, // 468: v1.Flow.ListEventRules:input_type -> v1.ListEventRulesRequest
+	148, // 469: v1.Flow.UpdateEventRule:input_type -> v1.UpdateEventRuleRequest
+	149, // 470: v1.Flow.EnableEventRule:input_type -> v1.EnableEventRuleRequest
+	150, // 471: v1.Flow.DisableEventRule:input_type -> v1.DisableEventRuleRequest
+	151, // 472: v1.Flow.DeleteEventRule:input_type -> v1.DeleteEventRuleRequest
+	154, // 473: v1.Flow.CreateEventRuleBinding:input_type -> v1.CreateEventRuleBindingRequest
+	155, // 474: v1.Flow.GetEventRuleBinding:input_type -> v1.GetEventRuleBindingRequest
+	156, // 475: v1.Flow.DeleteEventRuleBinding:input_type -> v1.DeleteEventRuleBindingRequest
+	157, // 476: v1.Flow.AssociateRuleWithRack:input_type -> v1.AssociateRuleWithRackRequest
+	158, // 477: v1.Flow.DisassociateRuleFromRack:input_type -> v1.DisassociateRuleFromRackRequest
+	159, // 478: v1.Flow.GetRackRuleAssociation:input_type -> v1.GetRackRuleAssociationRequest
+	161, // 479: v1.Flow.ListRackRuleAssociations:input_type -> v1.ListRackRuleAssociationsRequest
+	187, // 480: v1.Flow.CreateOperationRun:input_type -> v1.CreateOperationRunRequest
+	190, // 481: v1.Flow.GetOperationRun:input_type -> v1.GetOperationRunRequest
+	192, // 482: v1.Flow.ListOperationRuns:input_type -> v1.ListOperationRunsRequest
+	196, // 483: v1.Flow.ListOperationRunTargets:input_type -> v1.ListOperationRunTargetsRequest
+	198, // 484: v1.Flow.PauseOperationRun:input_type -> v1.PauseOperationRunRequest
+	199, // 485: v1.Flow.ResumeOperationRun:input_type -> v1.ResumeOperationRunRequest
+	200, // 486: v1.Flow.AdvanceOperationRunPhase:input_type -> v1.AdvanceOperationRunPhaseRequest
+	201, // 487: v1.Flow.CancelOperationRun:input_type -> v1.CancelOperationRunRequest
+	236, // 488: v1.Flow.GetTrayPowerDetails:input_type -> v1.GetTrayPowerDetailsRequest
+	248, // 489: v1.Flow.GetRackPowerDetails:input_type -> v1.GetRackPowerDetailsRequest
+	122, // 490: v1.Flow.Version:output_type -> v1.BuildInfo
+	166, // 491: v1.Flow.CreateTaskSchedule:output_type -> v1.TaskSchedule
+	166, // 492: v1.Flow.GetTaskSchedule:output_type -> v1.TaskSchedule
+	171, // 493: v1.Flow.ListTaskSchedules:output_type -> v1.ListTaskSchedulesResponse
+	166, // 494: v1.Flow.UpdateTaskSchedule:output_type -> v1.TaskSchedule
+	166, // 495: v1.Flow.PauseTaskSchedule:output_type -> v1.TaskSchedule
+	166, // 496: v1.Flow.ResumeTaskSchedule:output_type -> v1.TaskSchedule
+	268, // 497: v1.Flow.DeleteTaskSchedule:output_type -> google.protobuf.Empty
+	106, // 498: v1.Flow.TriggerTaskSchedule:output_type -> v1.SubmitTaskResponse
+	179, // 499: v1.Flow.AddTaskScheduleScope:output_type -> v1.AddTaskScheduleScopeResponse
+	268, // 500: v1.Flow.RemoveTaskScheduleScope:output_type -> google.protobuf.Empty
+	182, // 501: v1.Flow.UpdateTaskScheduleScope:output_type -> v1.UpdateTaskScheduleScopeResponse
+	184, // 502: v1.Flow.ListTaskScheduleScopes:output_type -> v1.ListTaskScheduleScopesResponse
+	186, // 503: v1.Flow.CheckScheduleConflicts:output_type -> v1.CheckScheduleConflictsResponse
+	61,  // 504: v1.Flow.CreateExpectedRack:output_type -> v1.CreateExpectedRackResponse
+	64,  // 505: v1.Flow.GetRackInfoByID:output_type -> v1.GetRackInfoResponse
+	64,  // 506: v1.Flow.GetRackInfoBySerial:output_type -> v1.GetRackInfoResponse
+	71,  // 507: v1.Flow.GetListOfRacks:output_type -> v1.GetListOfRacksResponse
+	66,  // 508: v1.Flow.PatchRack:output_type -> v1.PatchRackResponse
+	99,  // 509: v1.Flow.DeleteRack:output_type -> v1.DeleteRackResponse
+	101, // 510: v1.Flow.PurgeRack:output_type -> v1.PurgeRackResponse
+	106, // 511: v1.Flow.UpgradeFirmware:output_type -> v1.SubmitTaskResponse
+	106, // 512: v1.Flow.BringUpRack:output_type -> v1.SubmitTaskResponse
+	106, // 513: v1.Flow.IngestRack:output_type -> v1.SubmitTaskResponse
+	106, // 514: v1.Flow.DecommissionRack:output_type -> v1.SubmitTaskResponse
+	106, // 515: v1.Flow.PowerOnRack:output_type -> v1.SubmitTaskResponse
+	106, // 516: v1.Flow.PowerOffRack:output_type -> v1.SubmitTaskResponse
+	106, // 517: v1.Flow.PowerResetRack:output_type -> v1.SubmitTaskResponse
+	106, // 518: v1.Flow.ACPowerCycleRack:output_type -> v1.SubmitTaskResponse
+	69,  // 519: v1.Flow.GetComponentInfoByID:output_type -> v1.GetComponentInfoResponse
+	69,  // 520: v1.Flow.GetComponentInfoBySerial:output_type -> v1.GetComponentInfoResponse
+	89,  // 521: v1.Flow.GetComponents:output_type -> v1.GetComponentsResponse
+	91,  // 522: v1.Flow.ValidateComponents:output_type -> v1.ValidateComponentsResponse
+	95,  // 523: v1.Flow.AddComponent:output_type -> v1.AddComponentResponse
+	105, // 524: v1.Flow.PatchComponent:output_type -> v1.PatchComponentResponse
+	97,  // 525: v1.Flow.DeleteComponent:output_type -> v1.DeleteComponentResponse
+	103, // 526: v1.Flow.PurgeComponent:output_type -> v1.PurgeComponentResponse
+	73,  // 527: v1.Flow.CreateNVLDomain:output_type -> v1.CreateNVLDomainResponse
+	268, // 528: v1.Flow.AttachRacksToNVLDomain:output_type -> google.protobuf.Empty
+	268, // 529: v1.Flow.DetachRacksFromNVLDomain:output_type -> google.protobuf.Empty
+	77,  // 530: v1.Flow.GetListOfNVLDomains:output_type -> v1.GetListOfNVLDomainsResponse
+	84,  // 531: v1.Flow.GetRacksForNVLDomain:output_type -> v1.GetRacksForNVLDomainResponse
+	80,  // 532: v1.Flow.GetNVLinkDomain:output_type -> v1.GetNVLinkDomainResponse
+	82,  // 533: v1.Flow.GetListOfNVLinkDomains:output_type -> v1.GetListOfNVLinkDomainsResponse
+	116, // 534: v1.Flow.ListTasks:output_type -> v1.ListTasksResponse
+	118, // 535: v1.Flow.GetTasksByIDs:output_type -> v1.GetTasksByIDsResponse
+	120, // 536: v1.Flow.CancelTask:output_type -> v1.CancelTaskResponse
+	128, // 537: v1.Flow.CreateOperationRule:output_type -> v1.CreateOperationRuleResponse
+	268, // 538: v1.Flow.UpdateOperationRule:output_type -> google.protobuf.Empty
+	268, // 539: v1.Flow.DeleteOperationRule:output_type -> google.protobuf.Empty
+	126, // 540: v1.Flow.GetOperationRule:output_type -> v1.OperationRule
+	134, // 541: v1.Flow.ListOperationRules:output_type -> v1.ListOperationRulesResponse
+	268, // 542: v1.Flow.SetRuleAsDefault:output_type -> google.protobuf.Empty
+	140, // 543: v1.Flow.CreateEventRule:output_type -> v1.EventRule
+	140, // 544: v1.Flow.GetEventRule:output_type -> v1.EventRule
+	140, // 545: v1.Flow.GetEffectiveEventRule:output_type -> v1.EventRule
+	145, // 546: v1.Flow.ListEventRules:output_type -> v1.ListEventRulesResponse
+	140, // 547: v1.Flow.UpdateEventRule:output_type -> v1.EventRule
+	140, // 548: v1.Flow.EnableEventRule:output_type -> v1.EventRule
+	140, // 549: v1.Flow.DisableEventRule:output_type -> v1.EventRule
+	268, // 550: v1.Flow.DeleteEventRule:output_type -> google.protobuf.Empty
+	153, // 551: v1.Flow.CreateEventRuleBinding:output_type -> v1.EventRuleBinding
+	153, // 552: v1.Flow.GetEventRuleBinding:output_type -> v1.EventRuleBinding
+	268, // 553: v1.Flow.DeleteEventRuleBinding:output_type -> google.protobuf.Empty
+	268, // 554: v1.Flow.AssociateRuleWithRack:output_type -> google.protobuf.Empty
+	268, // 555: v1.Flow.DisassociateRuleFromRack:output_type -> google.protobuf.Empty
+	160, // 556: v1.Flow.GetRackRuleAssociation:output_type -> v1.GetRackRuleAssociationResponse
+	163, // 557: v1.Flow.ListRackRuleAssociations:output_type -> v1.ListRackRuleAssociationsResponse
+	188, // 558: v1.Flow.CreateOperationRun:output_type -> v1.CreateOperationRunResponse
+	191, // 559: v1.Flow.GetOperationRun:output_type -> v1.GetOperationRunResponse
+	193, // 560: v1.Flow.ListOperationRuns:output_type -> v1.ListOperationRunsResponse
+	197, // 561: v1.Flow.ListOperationRunTargets:output_type -> v1.ListOperationRunTargetsResponse
+	225, // 562: v1.Flow.PauseOperationRun:output_type -> v1.OperationRun
+	225, // 563: v1.Flow.ResumeOperationRun:output_type -> v1.OperationRun
+	225, // 564: v1.Flow.AdvanceOperationRunPhase:output_type -> v1.OperationRun
+	225, // 565: v1.Flow.CancelOperationRun:output_type -> v1.OperationRun
+	237, // 566: v1.Flow.GetTrayPowerDetails:output_type -> v1.GetTrayPowerDetailsResponse
+	249, // 567: v1.Flow.GetRackPowerDetails:output_type -> v1.GetRackPowerDetailsResponse
+	490, // [490:568] is the sub-list for method output_type
+	412, // [412:490] is the sub-list for method input_type
+	412, // [412:412] is the sub-list for extension type_name
+	412, // [412:412] is the sub-list for extension extendee
+	0,   // [0:412] is the sub-list for field type_name
 }
 
 func init() { file_flow_proto_init() }
@@ -18967,7 +19037,7 @@ func file_flow_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_flow_proto_rawDesc), len(file_flow_proto_rawDesc)),
 			NumEnums:      33,
-			NumMessages:   228,
+			NumMessages:   229,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

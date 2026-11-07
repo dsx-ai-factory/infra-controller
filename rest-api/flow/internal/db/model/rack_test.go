@@ -324,13 +324,13 @@ func TestGetRackOperationStatusCounts(t *testing.T) {
 		name      string
 		rackIndex int
 		want      types.Phase
-		counts    types.TrayStatusCounts
+		counts    types.TrayStatusCountsByType
 	}{
-		{name: "unsupported component excluded", rackIndex: 0, want: types.PhaseReady, counts: types.TrayStatusCounts{Ready: 1}},
-		{name: "error precedes ready", rackIndex: 1, want: types.PhaseError, counts: types.TrayStatusCounts{Ready: 1, Error: 1}},
-		{name: "missing status", rackIndex: 2, want: types.PhaseUnknown, counts: types.TrayStatusCounts{Unknown: 1}},
+		{name: "unsupported component excluded", rackIndex: 0, want: types.PhaseReady, counts: types.TrayStatusCountsByType{Compute: types.TrayStatusCounts{Ready: 1}}},
+		{name: "error precedes ready", rackIndex: 1, want: types.PhaseError, counts: types.TrayStatusCountsByType{Compute: types.TrayStatusCounts{Ready: 1}, NVSwitch: types.TrayStatusCounts{Error: 1}}},
+		{name: "missing status", rackIndex: 2, want: types.PhaseUnknown, counts: types.TrayStatusCountsByType{PowerShelf: types.TrayStatusCounts{Unknown: 1}}},
 		{name: "no supported components", rackIndex: 3, want: types.PhaseUnknown},
-		{name: "deleted component excluded", rackIndex: 4, want: types.PhaseReady, counts: types.TrayStatusCounts{Ready: 1}},
+		{name: "deleted component excluded", rackIndex: 4, want: types.PhaseReady, counts: types.TrayStatusCountsByType{Compute: types.TrayStatusCounts{Ready: 1}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

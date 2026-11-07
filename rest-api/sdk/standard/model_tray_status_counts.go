@@ -22,7 +22,7 @@ import (
 // checks if the TrayStatusCounts type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &TrayStatusCounts{}
 
-// TrayStatusCounts Counts of non-deleted Compute, NVSwitch and PowerShelf tray inventory records, partitioned by operationStatus. The same records determine the rack phase using Unknown > Error > Initializing > Deleting > InUse > Ready. Other component types and undiscovered records are excluded. Missing or unrecognized status on a participating record counts as unknown. An empty set has all zero counts and rack phase Unknown. Counts do not establish snapshot freshness or expected-inventory completeness. All six fields are returned, including zero; their sum is the participating tray count.
+// TrayStatusCounts Counts of non-deleted tray inventory records for one component type, partitioned by operationStatus. Records across all three types determine the rack phase using Unknown > Error > Initializing > Deleting > InUse > Ready. Other component types and undiscovered records are excluded. Missing or unrecognized status on a participating record counts as unknown. An empty rack has all zero counts and rack phase Unknown. Counts do not establish snapshot freshness or expected-inventory completeness. All six fields are returned, including zero; their sum is the participating count for this type.
 type TrayStatusCounts struct {
 	// Number of trays in Ready.
 	Ready uint32 `json:"ready"`

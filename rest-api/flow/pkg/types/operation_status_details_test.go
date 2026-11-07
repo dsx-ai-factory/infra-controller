@@ -44,8 +44,10 @@ func TestRackOperationStatusDetails_ToProto(t *testing.T) {
 	}{
 		{name: "unavailable"},
 		{name: "empty", details: &RackOperationStatusDetails{}},
-		{name: "populated", details: &RackOperationStatusDetails{TrayCounts: TrayStatusCounts{
-			Ready: 6, InUse: 5, Initializing: 4, Error: 3, Deleting: 2, Unknown: 1,
+		{name: "populated", details: &RackOperationStatusDetails{TrayCountsByType: TrayStatusCountsByType{
+			Compute:    TrayStatusCounts{Ready: 6, InUse: 5},
+			NVSwitch:   TrayStatusCounts{Initializing: 4, Error: 3},
+			PowerShelf: TrayStatusCounts{Deleting: 2, Unknown: 1},
 		}}},
 	}
 	for _, tt := range tests {
@@ -58,6 +60,24 @@ func TestRackOperationStatusDetails_ToProto(t *testing.T) {
 			var got RackOperationStatusDetails
 			got.FromProto(wire)
 			assert.Equal(t, *tt.details, got)
+		})
+	}
+}
+
+func TestTrayStatusCountsByType_Phase(t *testing.T) {
+	tests := []struct {
+		name   string
+		counts TrayStatusCountsByType
+		want   Phase
+	}{
+		{name: "empty rack", want: PhaseUnknown},
+		{name: "empty types do not mask ready", counts: TrayStatusCountsByType{Compute: TrayStatusCounts{Ready: 1}}, want: PhaseReady},
+		{name: "error in another type", counts: TrayStatusCountsByType{Compute: TrayStatusCounts{Ready: 1}, NVSwitch: TrayStatusCounts{Error: 1}}, want: PhaseError},
+		{name: "unknown tray overrides error", counts: TrayStatusCountsByType{NVSwitch: TrayStatusCounts{Error: 1}, PowerShelf: TrayStatusCounts{Unknown: 1}}, want: PhaseUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.counts.Phase())
 		})
 	}
 }
