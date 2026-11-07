@@ -517,8 +517,13 @@ func (o *Rack) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
+	nullableRequiredProperties := map[string]struct{}{
+		"health":                 {},
+		"operationStatusDetails": {},
+	}
 	for _, requiredProperty := range requiredProperties {
-		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+		_, nullable := nullableRequiredProperties[requiredProperty]
+		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

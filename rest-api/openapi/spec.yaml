@@ -27043,6 +27043,10 @@ components:
     Rack:
       title: Rack
       type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - health
+        - operationStatusDetails
       description: Rack represents a physical rack in the datacenter
       required:
         - health
