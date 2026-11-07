@@ -380,7 +380,7 @@ func (rs *FlowServerImpl) ResumeTaskSchedule(
 ) (*pb.TaskSchedule, error) {
 	id := protobuf.UUIDFrom(req.GetId())
 	if id == uuid.Nil {
-		return nil, errors.New("id is required")
+		return nil, status.Error(codes.InvalidArgument, "id must be a valid non-zero UUID")
 	}
 
 	// Lock the row before reading state: a concurrent dispatcher firing could
@@ -405,7 +405,8 @@ func (rs *FlowServerImpl) ResumeTaskSchedule(
 			// cannot be re-armed.
 			if locked.SpecType == dbmodel.SpecTypeOneTime &&
 				locked.NextRunAt == nil {
-				return errors.New(
+				return status.Error(
+					codes.FailedPrecondition,
 					"cannot resume a one-time schedule that has already fired",
 				)
 			}
@@ -442,7 +443,7 @@ func (rs *FlowServerImpl) DeleteTaskSchedule(
 ) (*emptypb.Empty, error) {
 	id := protobuf.UUIDFrom(req.GetId())
 	if id == uuid.Nil {
-		return nil, errors.New("id is required")
+		return nil, status.Error(codes.InvalidArgument, "id must be a valid non-zero UUID")
 	}
 
 	if err := rs.taskScheduleStore.Delete(ctx, id); err != nil {
@@ -790,7 +791,7 @@ func (rs *FlowServerImpl) buildUpdateFields(
 	}
 
 	if sched == nil {
-		return fields, false, errors.New("schedule is required")
+		return fields, false, status.Error(codes.InvalidArgument, "schedule is required")
 	}
 
 	spec := sched.GetSpec()
@@ -799,7 +800,8 @@ func (rs *FlowServerImpl) buildUpdateFields(
 		switch path {
 		case "schedule.name":
 			if len(sched.GetName()) == 0 {
-				return fields, false, errors.New(
+				return fields, false, status.Error(
+					codes.InvalidArgument,
 					`update_mask path "schedule.name" requires a non-empty name`,
 				)
 			}
@@ -810,7 +812,8 @@ func (rs *FlowServerImpl) buildUpdateFields(
 			)
 		case "schedule.spec.timezone":
 			if spec == nil {
-				return fields, false, errors.New(
+				return fields, false, status.Error(
+					codes.InvalidArgument,
 					`update_mask path "schedule.spec.timezone" requires schedule.spec to be set`,
 				)
 			}
@@ -821,18 +824,21 @@ func (rs *FlowServerImpl) buildUpdateFields(
 			fields.Timezone = tz
 		case "schedule.spec":
 			if spec == nil {
-				return fields, false, errors.New(
+				return fields, false, status.Error(
+					codes.InvalidArgument,
 					`update_mask path "schedule.spec" requires schedule.spec to be set`,
 				)
 			}
 			if spec.GetType() ==
 				pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_UNSPECIFIED {
-				return fields, false, errors.New(
+				return fields, false, status.Error(
+					codes.InvalidArgument,
 					`update_mask path "schedule.spec" requires spec.type to be set`,
 				)
 			}
 			if len(spec.GetSpec()) == 0 {
-				return fields, false, errors.New(
+				return fields, false, status.Error(
+					codes.InvalidArgument,
 					`update_mask path "schedule.spec" requires a non-empty spec.spec`,
 				)
 			}
@@ -843,7 +849,7 @@ func (rs *FlowServerImpl) buildUpdateFields(
 			fields.SpecType = protoSpecTypeToModel(spec.GetType())
 			fields.Spec = spec.GetSpec()
 		default:
-			return fields, false, fmt.Errorf("unsupported update_mask path: %q", path)
+			return fields, false, status.Errorf(codes.InvalidArgument, "unsupported update_mask path: %q", path)
 		}
 	}
 
