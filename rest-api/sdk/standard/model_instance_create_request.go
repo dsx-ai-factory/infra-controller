@@ -72,6 +72,8 @@ type InstanceCreateRequest struct {
 	SshKeyGroupIds []string `json:"sshKeyGroupIds,omitempty"`
 	// Set to true in order to target Machines are in maintenance or have health alerts preventing regular provision flow. Requires Targeted Instance Creation capability enabled for Tenant
 	AllowUnhealthyMachine *bool `json:"allowUnhealthyMachine,omitempty"`
+	// ID of the external validation attempt this Instance is created for, from [Start a Machine external validation attempt](#tag/Machine/operation/start-machine-external-validation-attempt). Requires `machineId` and `allowUnhealthyMachine` set to `true`. A Site without external validation rejects the request with `501`.
+	ExternalValidationRequestId NullableString `json:"externalValidationRequestId,omitempty"`
 }
 
 type _InstanceCreateRequest InstanceCreateRequest
@@ -928,6 +930,49 @@ func (o *InstanceCreateRequest) SetAllowUnhealthyMachine(v bool) {
 	o.AllowUnhealthyMachine = &v
 }
 
+// GetExternalValidationRequestId returns the ExternalValidationRequestId field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *InstanceCreateRequest) GetExternalValidationRequestId() string {
+	if o == nil || IsNil(o.ExternalValidationRequestId.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.ExternalValidationRequestId.Get()
+}
+
+// GetExternalValidationRequestIdOk returns a tuple with the ExternalValidationRequestId field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *InstanceCreateRequest) GetExternalValidationRequestIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.ExternalValidationRequestId.Get(), o.ExternalValidationRequestId.IsSet()
+}
+
+// HasExternalValidationRequestId returns a boolean if a field has been set.
+func (o *InstanceCreateRequest) HasExternalValidationRequestId() bool {
+	if o != nil && o.ExternalValidationRequestId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetExternalValidationRequestId gets a reference to the given NullableString and assigns it to the ExternalValidationRequestId field.
+func (o *InstanceCreateRequest) SetExternalValidationRequestId(v string) {
+	o.ExternalValidationRequestId.Set(&v)
+}
+
+// SetExternalValidationRequestIdNil sets the value for ExternalValidationRequestId to be an explicit nil
+func (o *InstanceCreateRequest) SetExternalValidationRequestIdNil() {
+	o.ExternalValidationRequestId.Set(nil)
+}
+
+// UnsetExternalValidationRequestId ensures that no value is present for ExternalValidationRequestId, not even an explicit nil
+func (o *InstanceCreateRequest) UnsetExternalValidationRequestId() {
+	o.ExternalValidationRequestId.Unset()
+}
+
 func (o InstanceCreateRequest) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -1003,6 +1048,9 @@ func (o InstanceCreateRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.AllowUnhealthyMachine) {
 		toSerialize["allowUnhealthyMachine"] = o.AllowUnhealthyMachine
+	}
+	if o.ExternalValidationRequestId.IsSet() {
+		toSerialize["externalValidationRequestId"] = o.ExternalValidationRequestId.Get()
 	}
 	return toSerialize, nil
 }

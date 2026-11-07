@@ -279,18 +279,22 @@ type APIMachineValidationResult struct {
 	TestID       string    `json:"testID"`
 }
 
-func NewAPIMachineValidationResult(proto *corev1.MachineValidationResult) *APIMachineValidationResult {
+// NewAPIMachineValidationResult converts a Core validation result. Validation
+// output is stored unredacted, so callers leave includeOutput false for Tenants.
+func NewAPIMachineValidationResult(proto *corev1.MachineValidationResult, includeOutput bool) *APIMachineValidationResult {
 	apio := &APIMachineValidationResult{
 		Name:         proto.GetName(),
 		Description:  proto.GetDescription(),
 		Command:      proto.GetCommand(),
 		Args:         proto.GetArgs(),
-		StdOut:       proto.GetStdOut(),
-		StdErr:       proto.GetStdErr(),
 		Context:      proto.GetContext(),
 		ExitCode:     int(proto.GetExitCode()),
 		ValidationID: proto.GetValidationId().GetValue(),
 		TestID:       proto.GetTestId(),
+	}
+	if includeOutput {
+		apio.StdOut = proto.GetStdOut()
+		apio.StdErr = proto.GetStdErr()
 	}
 	if proto.GetStartTime() != nil {
 		apio.StartTime = proto.GetStartTime().AsTime()
