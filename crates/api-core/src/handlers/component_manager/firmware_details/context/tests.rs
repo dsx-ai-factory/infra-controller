@@ -429,11 +429,17 @@ async fn admission_finishes_before_database_access() -> TestResult {
 
     let ids = [host_id(203); 65];
     let result = load(&pool, &config, FirmwareTargets::Machines(&ids), None).await;
-    assert!(matches!(result, Err(CarbideError::InvalidArgument(_))));
+    assert!(matches!(
+        result,
+        Err(PreparationError::Load(error)) if matches!(*error, CarbideError::InvalidArgument(_))
+    ));
 
     let ids = [SwitchId::from(uuid::Uuid::from_u128(201))];
     let result = load(&pool, &config, FirmwareTargets::Switches(&ids), None).await;
-    assert!(matches!(result, Err(CarbideError::DBError(_))));
+    assert!(matches!(
+        result,
+        Err(PreparationError::Load(error)) if matches!(*error, CarbideError::DBError(_))
+    ));
 
     let result = load(
         &pool,
@@ -442,8 +448,7 @@ async fn admission_finishes_before_database_access() -> TestResult {
         Some(Instant::now()),
     )
     .await;
-    assert!(matches!(result, Err(CarbideError::Internal { message })
-        if message == "firmware details preparation deadline exceeded"));
+    assert!(matches!(result, Err(PreparationError::DeadlineExceeded)));
     Ok(())
 }
 
@@ -566,6 +571,7 @@ async fn context_preserves_members_aliases_sources_and_input_slots(
                 let actions = machine(
                     loaded_host(context, 2),
                     Some(&context.racks[&fixture.rack_id]),
+                    &context.bmc_aliases[&fixture.hosts[0]],
                 );
                 assert_eq!(
                     actions
@@ -985,9 +991,10 @@ async fn preparation_deadlines_bound_pool_acquisition(pool: sqlx::PgPool) -> Tes
 
         assert!(pending_before, "{scenario}: expired before its budget");
         assert!(
-            matches!(result,
-            std::task::Poll::Ready(Err(CarbideError::Internal { message }))
-                if message == "firmware details preparation deadline exceeded"),
+            matches!(
+                result,
+                std::task::Poll::Ready(Err(PreparationError::DeadlineExceeded))
+            ),
             "{scenario}"
         );
     }
