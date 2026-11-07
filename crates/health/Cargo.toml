@@ -36,6 +36,7 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 figment = { workspace = true, features = ["toml", "env"] }
+flate2 = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }

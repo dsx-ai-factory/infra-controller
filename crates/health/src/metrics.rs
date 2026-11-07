@@ -15,16 +15,21 @@
  * limitations under the License.
  */
 
+mod telemetry;
+
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
-use std::sync::Arc;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
+use bytes::Bytes;
 use dashmap::DashMap;
-use http::header::{ALLOW, CONTENT_TYPE};
-use http::{Method, Response};
-use hyper::Request;
+use dashmap::mapref::entry::Entry;
+use http::header::{ACCEPT_ENCODING, ALLOW, CONTENT_ENCODING, CONTENT_TYPE, VARY};
+use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
+use http_body_util::Full;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
@@ -34,8 +39,11 @@ use prometheus::{
     Encoder, HistogramOpts, HistogramVec, IntCounterVec, Registry, TextEncoder, proto,
 };
 use serde::{Deserialize, Serialize};
+use tokio::net::TcpStream;
+use tokio_util::sync::CancellationToken;
 
 use crate::HealthError;
+use crate::config::PrometheusSinkConfig;
 use crate::sink::MetricSemantics;
 
 pub type MetricLabel = (Cow<'static, str>, String);
@@ -251,6 +259,7 @@ impl ComponentMetrics {
 pub struct MetricsManager {
     global_registry: Registry,
     telemetry_registry: Registry,
+    telemetry_state: Arc<Mutex<telemetry::RegistryState>>,
     component_metrics: Arc<ComponentMetrics>,
     /// The instrumentation framework's registry, exposed through the same
     /// /metrics response so its events are scrapeable without migrating this
@@ -267,6 +276,7 @@ impl MetricsManager {
         Ok(Self {
             global_registry,
             telemetry_registry,
+            telemetry_state: Arc::new(Mutex::new(telemetry::RegistryState::default())),
             component_metrics,
             framework_registry: std::sync::OnceLock::new(),
         })
@@ -293,7 +303,10 @@ impl MetricsManager {
         id: String,
         prefix: impl Into<String>,
     ) -> Result<CollectorRegistry, HealthError> {
-        CollectorRegistry::new(id, self.telemetry_registry.clone(), prefix)
+        let mut registry = CollectorRegistry::new(id, self.telemetry_registry.clone(), prefix)?;
+        registry.telemetry_state = Some(self.telemetry_state.clone());
+
+        Ok(registry)
     }
 
     /// Makes the instrumentation framework's registry part of every
@@ -310,8 +323,13 @@ impl MetricsManager {
         Ok(exposition)
     }
 
+    /// Exports telemetry as uncompressed Prometheus text using the active registry.
     pub fn export_telemetry(&self) -> Result<String, HealthError> {
-        export_registry(&self.telemetry_registry)
+        let buffer = telemetry::export(self, None, &tokio_util::sync::CancellationToken::new())?;
+
+        String::from_utf8(buffer).map_err(|error| {
+            HealthError::GenericError(format!("telemetry text is not UTF-8: {error}"))
+        })
     }
 }
 
@@ -331,6 +349,7 @@ pub struct CollectorRegistry {
     prefix: String,
     registry: Box<SubRegistry>,
     parent: Registry,
+    telemetry_state: Option<Arc<Mutex<telemetry::RegistryState>>>,
 }
 
 impl CollectorRegistry {
@@ -356,6 +375,7 @@ impl CollectorRegistry {
             prefix: prefix.into(),
             registry,
             parent,
+            telemetry_state: None,
         })
     }
 
@@ -365,6 +385,13 @@ impl CollectorRegistry {
         help: impl Into<String>,
         static_labels: Vec<MetricLabel>,
     ) -> Result<Arc<GaugeMetrics>, prometheus::Error> {
+        let help = help.into();
+
+        let mut state = self
+            .telemetry_state
+            .as_ref()
+            .and_then(|state| telemetry::lock_compact(state));
+
         let metrics = Arc::new(GaugeMetrics::new(
             id,
             &self.registry.registry,
@@ -373,6 +400,14 @@ impl CollectorRegistry {
             static_labels,
         )?);
 
+        if let Some(state) = &mut state
+            && !state.generic
+        {
+            state
+                .gauges
+                .insert((self.registry.desc.id, metrics.desc.id), metrics.clone());
+        }
+
         Ok(metrics)
     }
 
@@ -380,13 +415,36 @@ impl CollectorRegistry {
         &self,
         metrics: &GaugeMetrics,
     ) -> Result<(), prometheus::Error> {
+        let mut state = self
+            .telemetry_state
+            .as_ref()
+            .and_then(|state| telemetry::lock_compact(state));
+
         self.registry
             .registry
-            .unregister(Box::new(metrics.clone()))
-            .map(|_| ())
+            .unregister(Box::new(metrics.clone()))?;
+
+        if let Some(state) = &mut state {
+            state
+                .gauges
+                .remove(&(self.registry.desc.id, metrics.desc.id));
+        }
+
+        Ok(())
     }
 
+    /// Exposes the registry for custom collectors.
+    ///
+    /// Accessing a telemetry registry selects generic encoding for that metrics
+    /// manager's lifetime because retained registry handles may register collectors.
     pub fn registry(&self) -> &Registry {
+        if let Some(state) = &self.telemetry_state {
+            let mut state = telemetry::lock(state);
+            state.generic = true;
+            // Raw unregister operations bypass managed membership; the registry owns those readings.
+            state.gauges.clear();
+        }
+
         &self.registry.registry
     }
 
@@ -413,12 +471,24 @@ impl Collector for SubRegistry {
 
 impl Drop for CollectorRegistry {
     fn drop(&mut self) {
-        if let Err(e) = self.parent.unregister(self.registry.clone()) {
-            tracing::error!(
-                error = ?e,
+        let mut state = self
+            .telemetry_state
+            .as_ref()
+            .and_then(|state| telemetry::lock_compact(state));
+
+        match self.parent.unregister(self.registry.clone()) {
+            Ok(_) => {
+                if let Some(state) = &mut state {
+                    state
+                        .gauges
+                        .retain(|(owner, _), _| *owner != self.registry.desc.id);
+                }
+            }
+            Err(error) => tracing::error!(
+                ?error,
                 collector_prefix = self.prefix().as_str(),
                 "Could not properly drop registry for collector"
-            )
+            ),
         }
     }
 }
@@ -490,11 +560,11 @@ struct GaugeData {
 
 #[derive(Clone)]
 pub struct GaugeMetrics {
-    gauges: Arc<DashMap<GaugeKey, GaugeData>>,
+    gauges: Arc<DashMap<GaugeKey, Arc<GaugeData>>>,
     current_generation: Arc<AtomicU64>,
     metric_name_prefix: String,
     metric_help: String,
-    static_labels: Vec<proto::LabelPair>,
+    static_labels: Arc<[proto::LabelPair]>,
     static_label_names: HashSet<String>,
     desc: Desc,
 }
@@ -555,21 +625,33 @@ impl GaugeMetrics {
         self.static_label_names.contains(name)
     }
 
+    /// Replaces a reading while existing export snapshots retain their captured value.
     pub fn record(&self, reading: GaugeReading) {
         let generation = self.current_generation.load(Ordering::Acquire);
 
-        self.gauges.insert(
-            reading.key,
-            GaugeData {
-                name: reading.name,
-                metric_type: reading.metric_type,
-                unit: reading.unit,
-                value: reading.value,
-                semantics: reading.semantics,
-                labels: reading.labels,
-                generation,
-            },
-        );
+        let next = GaugeData {
+            name: reading.name,
+            metric_type: reading.metric_type,
+            unit: reading.unit,
+            value: reading.value,
+            semantics: reading.semantics,
+            labels: reading.labels,
+            generation,
+        };
+
+        match self.gauges.entry(reading.key) {
+            Entry::Occupied(mut entry) => {
+                // Snapshots retain shared readings; otherwise reuse the allocation.
+                if let Some(current) = Arc::get_mut(entry.get_mut()) {
+                    *current = next;
+                } else {
+                    entry.insert(Arc::new(next));
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(Arc::new(next));
+            }
+        }
     }
 
     /// Drops readings with the selected type, unit, and label values. When given,
@@ -684,92 +766,332 @@ impl Collector for GaugeMetrics {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Encoding {
+    Identity,
+    Gzip,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("telemetry request cancelled")]
+struct RequestCancelled;
+
+/// Serves operational metrics and uncompressed telemetry until the listener stops.
+///
+/// Dropping this future closes accepted connections and cancels their export jobs.
 pub async fn run_metrics_server(
     metrics_endpoint: std::net::SocketAddr,
     metrics_manager: Arc<MetricsManager>,
 ) -> Result<(), BoxedErr> {
-    let listener = metrics_endpoint::bind_tcp_listener(metrics_endpoint)
-        .await
-        .map_err(|e| Box::new(e) as BoxedErr)?;
+    run_metrics_server_with_config(
+        metrics_endpoint,
+        metrics_manager,
+        crate::config::PrometheusSinkConfig::default(),
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+}
+
+/// Serve metrics until shutdown. Dropping the server future cancels accepted connections.
+pub(crate) async fn run_metrics_server_with_config(
+    addr: SocketAddr,
+    manager: Arc<MetricsManager>,
+    config: PrometheusSinkConfig,
+    shutdown: CancellationToken,
+) -> Result<(), BoxedErr> {
+    let shutdown = shutdown.child_token();
+    let _listener_guard = shutdown.clone().drop_guard();
+
+    let listener = metrics_endpoint::bind_tcp_listener(addr).await?;
 
     tracing::info!(
-        %metrics_endpoint,
+        metrics_endpoint = %addr,
         "Metrics server listening (paths: /metrics, /telemetry, /livez)"
     );
 
     loop {
-        let (stream, _) = listener
-            .accept()
-            .await
-            .map_err(|e| Box::new(e) as BoxedErr)?;
+        let (stream, _) = tokio::select! {
+            biased;
 
-        let io = TokioIo::new(stream);
-        let metrics_manager = metrics_manager.clone();
+            () = shutdown.cancelled() => return Ok(()),
+            accepted = listener.accept() => accepted?,
+        };
 
-        tokio::spawn(async move {
-            let service = service_fn(move |req| {
-                let metrics_manager = metrics_manager.clone();
-                async move { serve_request(req, metrics_manager) }
-            });
+        let manager = manager.clone();
+        let config = config.clone();
+        let connection = shutdown.child_token();
 
-            if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
-                tracing::error!(error=?e, "metrics server connection error");
-            }
-        });
+        tokio::spawn(serve_connection(stream, manager, config, connection));
     }
 }
 
-fn serve_request<B>(
-    req: Request<B>,
-    metrics_manager: Arc<MetricsManager>,
-) -> Result<Response<String>, hyper::Error> {
-    match (req.method(), req.uri().path()) {
-        (&Method::GET, "/livez") => Ok(Response::builder()
-            .status(http::StatusCode::OK)
-            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-            .body("ok".to_string())
-            .expect("BUG: Response::builder error")),
-        (&Method::GET, "/metrics") => {
-            serve_prometheus(metrics_manager.export_metrics(), "service metrics")
+async fn serve_connection(
+    stream: TcpStream,
+    manager: Arc<MetricsManager>,
+    config: PrometheusSinkConfig,
+    connection: CancellationToken,
+) {
+    // Hyper's default half-close policy detects EOF while awaiting a response.
+    // Dropping the connection or a pending request cancels its blocking export.
+    let _connection_guard = connection.clone().drop_guard();
+    let request_connection = connection.clone();
+
+    let service = service_fn(move |req| {
+        serve_request(
+            req,
+            manager.clone(),
+            config.clone(),
+            request_connection.clone(),
+        )
+    });
+
+    let io = TokioIo::new(stream);
+
+    tokio::select! {
+        biased;
+
+        () = connection.cancelled() => {},
+        result = http1::Builder::new().serve_connection(io, service) => {
+            if let Err(error) = result {
+                tracing::error!(?error, "metrics server connection error");
+            }
         }
-        (&Method::GET, "/telemetry") => {
-            serve_prometheus(metrics_manager.export_telemetry(), "telemetry metrics")
-        }
-        (_, "/livez" | "/metrics" | "/telemetry") => Ok(Response::builder()
-            .status(http::StatusCode::METHOD_NOT_ALLOWED)
-            .header(ALLOW, "GET")
-            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-            .body("method not allowed; use GET".to_string())
-            .expect("BUG: Response::builder error")),
-        _ => Ok(Response::builder()
-            .status(http::StatusCode::NOT_FOUND)
-            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
-            .body("not found; use /metrics, /telemetry, or /livez".to_string())
-            .expect("BUG: Response::builder error")),
     }
+}
+
+async fn serve_request<B>(
+    req: Request<B>,
+    manager: Arc<MetricsManager>,
+    config: PrometheusSinkConfig,
+    connection: CancellationToken,
+) -> Result<Response<Full<Bytes>>, RequestCancelled> {
+    match (req.method(), req.uri().path()) {
+        (&Method::GET, "/livez") => Ok(text_response(StatusCode::OK, "ok")),
+        (&Method::GET, "/metrics") => Ok(serve_prometheus(
+            manager.export_metrics().map(Bytes::from),
+            "service metrics",
+        )),
+        (&Method::GET, "/telemetry") => {
+            let mut response = serve_telemetry(req.headers(), manager, &config, connection).await?;
+
+            if config.gzip {
+                response
+                    .headers_mut()
+                    .insert(VARY, HeaderValue::from_static("Accept-Encoding"));
+            }
+
+            Ok(response)
+        }
+        (_, "/livez" | "/metrics" | "/telemetry") => {
+            let mut response = text_response(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method not allowed; use GET",
+            );
+
+            response
+                .headers_mut()
+                .insert(ALLOW, HeaderValue::from_static("GET"));
+
+            Ok(response)
+        }
+        _ => Ok(text_response(
+            StatusCode::NOT_FOUND,
+            "not found; use /metrics, /telemetry, or /livez",
+        )),
+    }
+}
+
+async fn serve_telemetry(
+    headers: &HeaderMap,
+    manager: Arc<MetricsManager>,
+    config: &PrometheusSinkConfig,
+    connection: CancellationToken,
+) -> Result<Response<Full<Bytes>>, RequestCancelled> {
+    let Some(encoding) = negotiate(headers, config.gzip) else {
+        return Ok(text_response(
+            StatusCode::NOT_ACCEPTABLE,
+            "no acceptable telemetry representation",
+        ));
+    };
+
+    let gzip_level = (encoding == Encoding::Gzip).then_some(config.gzip_level);
+    let cancellation = connection.child_token();
+    let _request_guard = cancellation.clone().drop_guard();
+    let worker_cancellation = cancellation.clone();
+
+    let job = tokio::task::spawn_blocking(move || {
+        telemetry::export(&manager, gzip_level, &worker_cancellation)
+    });
+
+    let result = tokio::select! {
+        biased;
+
+        () = cancellation.cancelled() => return Err(RequestCancelled),
+        result = job => result,
+    };
+
+    if cancellation.is_cancelled() {
+        return Err(RequestCancelled);
+    }
+
+    let export = match result {
+        Ok(result) => result.map(Bytes::from).map_err(HealthError::from),
+        Err(error) => Err(HealthError::GenericError(format!(
+            "telemetry export worker failed: {error}"
+        ))),
+    };
+
+    let mut response = serve_prometheus(export, "telemetry metrics");
+
+    if response.status().is_success() && encoding == Encoding::Gzip {
+        response
+            .headers_mut()
+            .insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    }
+
+    Ok(response)
 }
 
 fn serve_prometheus(
-    export_result: Result<String, HealthError>,
+    export: Result<Bytes, HealthError>,
     export_name: &'static str,
-) -> Result<Response<String>, hyper::Error> {
-    let encoder = TextEncoder::new();
-    let body = match export_result {
-        Ok(body) => body,
-        Err(e) => {
-            tracing::error!(error=?e, export_name, "error exporting prometheus metrics");
-            return Ok(Response::builder()
-                .status(http::StatusCode::INTERNAL_SERVER_ERROR)
-                .body(format!("error exporting {export_name}, see logs"))
-                .expect("BUG: Response::builder error"));
+) -> Response<Full<Bytes>> {
+    let bytes = match export {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::error!(?error, export_name, "error exporting prometheus metrics");
+
+            let mut response = Response::new(Full::new(Bytes::from(format!(
+                "error exporting {export_name}, see logs"
+            ))));
+
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+
+            return response;
         }
     };
 
-    Ok(Response::builder()
-        .status(200)
-        .header(CONTENT_TYPE, encoder.format_type())
-        .body(body)
-        .expect("BUG: Response::builder error"))
+    let mut response = Response::new(Full::new(bytes));
+
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static(prometheus::TEXT_FORMAT),
+    );
+
+    response
+}
+
+fn text_response(status: StatusCode, body: &'static str) -> Response<Full<Bytes>> {
+    let mut response = Response::new(Full::new(Bytes::from_static(body.as_bytes())));
+    *response.status_mut() = status;
+
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+
+    response
+}
+
+fn negotiate(headers: &HeaderMap, gzip_enabled: bool) -> Option<Encoding> {
+    let mut gzip = None;
+    let mut identity = None;
+    let mut wildcard = None;
+
+    for entry in headers
+        .get_all(ACCEPT_ENCODING)
+        .iter()
+        .flat_map(|value| value.as_bytes().split(|byte| *byte == b','))
+        .filter_map(|entry| std::str::from_utf8(entry).ok())
+    {
+        let Some((coding, weight)) = parse_coding(entry) else {
+            continue;
+        };
+
+        let quality = match coding.to_ascii_lowercase().as_str() {
+            "gzip" => &mut gzip,
+            "identity" => &mut identity,
+            "*" => &mut wildcard,
+            _ => continue,
+        };
+
+        // A valid exclusion wins over duplicate positive preferences.
+        *quality = Some(match *quality {
+            Some(0) => 0,
+            Some(previous) if weight > 0 => previous.max(weight),
+            _ => weight,
+        });
+    }
+
+    let gzip_weight = if gzip_enabled {
+        gzip.or(wildcard).unwrap_or(0)
+    } else {
+        0
+    };
+
+    let identity_weight = identity.unwrap_or(if wildcard == Some(0) { 0 } else { 1000 });
+
+    if gzip_weight > 0 && (identity.is_none() || gzip_weight >= identity_weight) {
+        return Some(Encoding::Gzip);
+    }
+
+    (identity_weight > 0).then_some(Encoding::Identity)
+}
+
+fn parse_coding(entry: &str) -> Option<(&str, u16)> {
+    let mut parts = entry.split(';');
+    let coding = parts.next()?.trim();
+
+    if coding.is_empty()
+        || !coding
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+    {
+        return None;
+    }
+
+    let Some(parameter) = parts.next() else {
+        return Some((coding, 1000));
+    };
+
+    if parts.next().is_some() {
+        return None;
+    }
+
+    let (name, value) = parameter.trim().split_once('=')?;
+
+    if !name.trim().eq_ignore_ascii_case("q") {
+        return None;
+    }
+
+    let value = value.trim();
+    let (whole, decimal) = value.split_once('.').unwrap_or((value, ""));
+
+    if decimal.len() > 3 || !decimal.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+
+    let weight = match whole {
+        "0" => {
+            let fraction = if decimal.is_empty() {
+                0
+            } else {
+                decimal.parse::<u16>().ok()?
+            };
+
+            let scale = match decimal.len() {
+                0 | 3 => 1,
+                1 => 100,
+                _ => 10,
+            };
+
+            fraction * scale
+        }
+        "1" if decimal.bytes().all(|byte| byte == b'0') => 1000,
+        _ => return None,
+    };
+
+    Some((coding, weight))
 }
 
 pub fn sanitize_unit(unit: &str) -> String {
@@ -797,7 +1119,6 @@ pub fn sanitize_unit(unit: &str) -> String {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::{Check, check_values};
-    use http::HeaderValue;
 
     use super::*;
 
@@ -830,100 +1151,6 @@ mod tests {
                     .iter()
                     .find(|bucket| bucket.cumulative_count() == 1)
                     .map(|bucket| bucket.upper_bound())
-            },
-        );
-    }
-
-    #[test]
-    fn unknown_metrics_route_returns_not_found() {
-        let request = Request::builder()
-            .uri("/definitely-not-a-route")
-            .body(())
-            .expect("test request should be valid");
-        let metrics_manager = Arc::new(
-            MetricsManager::new("test").expect("metrics manager should initialize for test"),
-        );
-
-        let response =
-            serve_request(request, metrics_manager).expect("request should produce a response");
-
-        assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
-        assert_eq!(
-            response
-                .headers()
-                .get(CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("text/plain; charset=utf-8"),
-        );
-        assert_eq!(
-            response.body(),
-            "not found; use /metrics, /telemetry, or /livez",
-        );
-    }
-
-    #[test]
-    fn metrics_routes_serve_only_get() {
-        let metrics_manager = Arc::new(
-            MetricsManager::new("test").expect("metrics manager should initialize for test"),
-        );
-
-        check_values(
-            [
-                Check {
-                    scenario: "liveness probe serves GET",
-                    input: (Method::GET, "/livez"),
-                    expect: (http::StatusCode::OK, None),
-                },
-                Check {
-                    scenario: "service metrics serve GET",
-                    input: (Method::GET, "/metrics"),
-                    expect: (http::StatusCode::OK, None),
-                },
-                Check {
-                    scenario: "telemetry metrics serve GET",
-                    input: (Method::GET, "/telemetry"),
-                    expect: (http::StatusCode::OK, None),
-                },
-                Check {
-                    scenario: "liveness probe rejects POST",
-                    input: (Method::POST, "/livez"),
-                    expect: (
-                        http::StatusCode::METHOD_NOT_ALLOWED,
-                        Some(HeaderValue::from_static("GET")),
-                    ),
-                },
-                Check {
-                    scenario: "service metrics reject POST",
-                    input: (Method::POST, "/metrics"),
-                    expect: (
-                        http::StatusCode::METHOD_NOT_ALLOWED,
-                        Some(HeaderValue::from_static("GET")),
-                    ),
-                },
-                Check {
-                    scenario: "telemetry metrics reject POST",
-                    input: (Method::POST, "/telemetry"),
-                    expect: (
-                        http::StatusCode::METHOD_NOT_ALLOWED,
-                        Some(HeaderValue::from_static("GET")),
-                    ),
-                },
-                Check {
-                    scenario: "unknown route stays not found for POST",
-                    input: (Method::POST, "/definitely-not-a-route"),
-                    expect: (http::StatusCode::NOT_FOUND, None),
-                },
-            ],
-            |(method, path)| {
-                let request = Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .body(())
-                    .expect("test request should be valid");
-
-                let response = serve_request(request, metrics_manager.clone())
-                    .expect("request should produce a response");
-                (response.status(), response.headers().get(ALLOW).cloned())
             },
         );
     }
@@ -1237,3 +1464,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "metrics/server_tests.rs"]
+mod server_tests;

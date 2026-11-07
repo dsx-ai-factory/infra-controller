@@ -112,6 +112,10 @@ include_diagnostics = false
 
 [sinks.prometheus]
 enabled = true
+# Offer negotiated gzip for /telemetry. Both settings require a restart.
+gzip = false
+# Accepted range: 1 through 9. Validated for enabled sinks even when gzip is false.
+gzip_level = 1
 
 [sinks.log_file]
 enabled = false
