@@ -70,13 +70,16 @@ service Forge {
   // allocation. Success means Core committed, not that the dataplane converged.
   rpc ChangeVpcRoutingProfile(VpcChangeRoutingProfileRequest) returns (VpcRoutingState);
   // Operator cleanup after independently verifying that no DPU or fabric route
-  // still uses the retained VNI. Core does not verify dataplane convergence.
+  // still uses the retained VNI. Success follows provider release confirmation;
+  // an error can follow committed release intent and an advanced VPC version.
+  // Core does not verify dataplane convergence.
   rpc ReleaseVpcInactiveVni(VpcReleaseInactiveVniRequest) returns (VpcReleaseInactiveVniResult);
   rpc UpdateVpcVirtualization(VpcUpdateVirtualizationRequest) returns (VpcUpdateVirtualizationResult);
   // Deletion does not release a retained VNI implicitly. Call
   // ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
   // Retained or inconsistent owned allocations cause FailedPrecondition, as do
-  // live DNS domains owned by this VPC. Deleted domains do not block deletion.
+  // unfinished remote cancellation/release and live DNS domains owned by this VPC.
+  // Deleted domains do not block deletion.
   rpc DeleteVpc(VpcDeletionRequest) returns (VpcDeletionResult);
   rpc FindVpcIds(VpcSearchFilter) returns (VpcIdList);
   rpc FindVpcsByIds(VpcsByIdsRequest) returns (VpcList);
@@ -12099,6 +12102,12 @@ enum DpuNvConfigProfile {
 // inactive VNI, and prevent attachment, peering, and routing changes through
 // cleanup. Unreachable consumers require retaining the allocation unless they
 // have been isolated. Core validates ownership, not dataplane convergence.
+// Remote release intent and the advanced VPC version commit before waiting for
+// provider confirmation. Success confirms release; cancellation, timeout, or a
+// provider/database error during that wait does not roll back the committed
+// intent. Recovery finishes the original allocation's release. Keep the original
+// observation on retries, inspect GetVpcRoutingState, and wait for confirmed
+// cleanup before attempting another routing mutation.
 message VpcReleaseInactiveVniRequest {
   // Required VPC whose inactive allocation will be released.
   common.VpcId id = 1;
@@ -12114,7 +12123,7 @@ message VpcReleaseInactiveVniRequest {
 }
 
 message VpcReleaseInactiveVniResult {
-  // Authoritative VPC with its advanced version after cleanup committed.
+  // Authoritative VPC with its advanced version after release is confirmed.
   Vpc vpc = 1;
   // Exact inactive allocation released by this operation.
   uint32 released_inactive_vni = 2;
@@ -12131,7 +12140,11 @@ message VpcRoutingStateRequest {
 // Supports any virtualization type with one owned allocation matching its
 // active VNI and at most one distinct allocation in the other pool. Missing,
 // duplicate, or inconsistent ownership fails instead of reporting no retained
-// allocation. VPCs without pool ownership (including configured admin VPCs)
+// allocation. One original remote assignment awaiting release confirmation is
+// reported as retained; this response does not distinguish it from an assignment
+// whose release has not started. Unattached pending/cancelling requests are
+// excluded. Routing mutations still reject unfinished cancellation or release.
+// VPCs without pool ownership (including configured admin VPCs)
 // fail FAILED_PRECONDITION. Pool values that cannot be parsed as signed 32-bit
 // integers fail INTERNAL; parsed negative values fail FAILED_PRECONDITION.
 // This is not an effective routing profile or evidence of DPU/fabric convergence;
@@ -12171,14 +12184,18 @@ message VpcRetainedVniAllocation {
 // separate operator action.
 //
 // Requires FNN configuration, named source/destination profiles, distinct
-// nonoverlapping materialized pools, and VNIs in 1..16777215. Site-global VNIs,
-// substantive VPC/interface routing overrides, and tenant-managed SitePrefix
-// attachments are unsupported. Empty override reset objects are allowed.
+// nonoverlapping pool membership, and VNIs in 1..16777215. Integrated membership
+// uses persisted inventory; remote membership uses acknowledged eligibility.
+// Site-global VNIs, substantive VPC/interface routing overrides, and
+// tenant-managed SitePrefix attachments are unsupported. Empty override reset objects are allowed.
 // Same-polarity changes and a destination pool already holding the active VNI
 // are rejected. Unsupported configurations and inconsistent ownership fail
 // FAILED_PRECONDITION; missing profiles/VPCs fail NOT_FOUND; automatic allocation
-// from an exhausted pool fails RESOURCE_EXHAUSTED. Rejected requests commit
-// no changes.
+// from an exhausted pool fails RESOURCE_EXHAUSTED. Unfinished cancellation or
+// release fails FAILED_PRECONDITION. Updates rejected before VPC commit preserve
+// configuration and the active assignment. An unused remote reservation can
+// remain pending cancellation until recovery confirms cleanup. A lost commit response leaves
+// VPC commit status uncertain, so inspect state using the original observation.
 //
 // Preserves the VPC ID, prefixes, instances, addresses, NSGs, metadata, and
 // creation-time requested VNI. External routing does not supply public
@@ -12205,8 +12222,9 @@ message VpcChangeRoutingProfileRequest {
   // otherwise allocates automatically. A retained destination must match an
   // explicit request; a different value fails FAILED_PRECONDITION even if free.
   // Without a retained destination, the requested value must be a free
-  // materialized destination-pool entry, regardless of its auto_assign flag.
-  // Missing or occupied entries and the active VNI fail FAILED_PRECONDITION
+  // eligible destination-pool value from either assignment partition. Integrated
+  // uses persisted inventory; remote uses its accepted eligibility revision.
+  // Missing or occupied values and the active VNI fail FAILED_PRECONDITION
   // without falling back. Zero and values above 16777215 fail INVALID_ARGUMENT.
   // Use only when every serving Core supports this field: older Core ignores
   // it and may choose another VNI. Verify the returned profile and active VNI;

@@ -1990,3 +1990,164 @@ async fn competing_preparations_preserve_the_callers_transaction(database: PgPoo
     fixture.stop().await;
     Ok(())
 }
+
+/// Two pools can retain attached generations, but older release intent must
+/// block preparation even when a newer generation is already serving.
+#[carbide_macros::sqlx_test]
+async fn retained_other_pool_cannot_hide_older_cleanup(database: PgPool) -> TestResult {
+    let local = LocalProvider::new(
+        pool(),
+        v1::ValueDomain::Integer,
+        vec![1_i64.into(), 2_i64.into()],
+        None,
+    )?;
+    let eligibility = ResourcePoolEligibility {
+        domain: ResourcePoolValueDomain::Integer,
+        entries: vec![entry(1, v1::AssignmentMode::Automatic)],
+    };
+    let mut fixture = RemotePoolFixture::new(database, local, &eligibility, Fault::None).await?;
+    let other = ResourcePool::<i32>::new("retained-other-pool".to_owned(), ValueType::Integer);
+    let mut txn = fixture.database.begin().await?;
+    fixture.registry = ResourcePoolRegistry::resolve_with_remotes(
+        PoolDefinitionSource::SeedConfiguration,
+        &mut txn,
+        &HashMap::from([(
+            other.name().to_owned(),
+            ResourcePoolSelection {
+                pool_name: other.name().to_owned(),
+                value_domain: ResourcePoolValueDomain::Integer,
+                backend_name: Some("test-provider".to_owned()),
+                backend_kind: ResourcePoolBackendKind::Grpc,
+                authority_id: fixture.remote.authority_id().to_owned(),
+                remote_pool: pool().pool_id,
+            },
+        )]),
+        &HashMap::from([(
+            fixture.remote.authority_id().to_owned(),
+            fixture.remote.clone(),
+        )]),
+    )
+    .await?;
+    txn.commit().await?;
+    registration::define(
+        &fixture.database,
+        fixture.remote.provider(),
+        &fixture
+            .registry
+            .get(other.name())
+            .expect("other binding")
+            .binding,
+        None,
+        &ResourcePoolEligibility {
+            domain: ResourcePoolValueDomain::Integer,
+            entries: vec![entry(2, v1::AssignmentMode::Automatic)],
+        },
+    )
+    .await?;
+    let mut txn = fixture.database.begin().await?;
+    let source = fixture
+        .registry
+        .select(&mut txn, &fixture.descriptor)
+        .await?
+        .expect("source pool");
+    let destination = fixture
+        .registry
+        .select(&mut txn, &other)
+        .await?
+        .expect("destination pool");
+    txn.commit().await?;
+    let cancel = CancellationToken::new();
+    let first = source
+        .prepare_allocation(
+            &fixture.database,
+            OwnerType::Machine,
+            "machine-1",
+            "test-allocation",
+            None,
+            &cancel,
+        )
+        .await?;
+    let mut txn = fixture.database.begin().await?;
+    first.allocate(&mut txn).await?;
+    txn.commit().await?;
+    let original = fixture.saved().await?;
+    let second = destination
+        .prepare_allocation(
+            &fixture.database,
+            OwnerType::Machine,
+            "machine-1",
+            "test-allocation",
+            None,
+            &cancel,
+        )
+        .await?;
+    let mut txn = fixture.database.begin().await?;
+    second.allocate(&mut txn).await?;
+    txn.commit().await?;
+    let newer = fixture.saved().await?;
+    assert_ne!(original.allocation_id, newer.allocation_id);
+    assert_eq!(newer.state, AllocationState::Attached);
+    let mut txn = fixture.database.begin().await?;
+    let owned = fixture
+        .registry
+        .find_owned(
+            &fixture.descriptor,
+            &mut txn,
+            OwnerType::Machine,
+            "machine-1",
+            "test-allocation",
+        )
+        .await?
+        .expect("retained source");
+    let cleanup = owned.cleanup().expect("remote release confirmation");
+    assert!(matches!(
+        owned.release(&mut txn).await?,
+        ConditionalWrite::Applied(())
+    ));
+    txn.commit().await?;
+    assert!(matches!(
+        source
+            .prepare_allocation(
+                &fixture.database,
+                OwnerType::Machine,
+                "machine-1",
+                "test-allocation",
+                None,
+                &cancel
+            )
+            .await,
+        Err(ResourcePoolBackendError::CleanupPending)
+    ));
+    assert_eq!(
+        fixture.saved().await?,
+        newer,
+        "latest generation alone does not reveal the older release"
+    );
+    cleanup
+        .wait(&fixture.registry, &fixture.database, &cancel)
+        .await?;
+    assert_eq!(
+        storage::load(&fixture.database, original.allocation_id)
+            .await?
+            .expect("original terminal request")
+            .state,
+        AllocationState::Released
+    );
+    let replacement = source
+        .prepare_allocation(
+            &fixture.database,
+            OwnerType::Machine,
+            "machine-1",
+            "test-allocation",
+            None,
+            &cancel,
+        )
+        .await?;
+    replacement.cancel(&fixture.database).await?;
+    fixture
+        .remote
+        .reconcile(fixture.saved().await?.allocation_id, &cancel)
+        .await?;
+    fixture.stop().await;
+    Ok(())
+}

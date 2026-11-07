@@ -16,8 +16,8 @@ use uuid::Uuid;
 use crate::remote::{RemoteResourcePoolError, wire};
 use crate::value::value_from_wire;
 use crate::{
-    IntegratedResourcePoolBackend, ResourcePoolBackend, ResourcePoolBackendError,
-    ResourcePoolRegistry, ResourcePoolRegistryError,
+    AllocationCleanup, IntegratedResourcePoolBackend, ResourcePoolBackend,
+    ResourcePoolBackendError, ResourcePoolRegistry, ResourcePoolRegistryError,
 };
 
 /// `OwnedAllocation` identifies an attached allocation found under the caller's
@@ -46,6 +46,7 @@ enum OwnedAllocationSource {
     Remote {
         request_id: Uuid,
         provider_allocation_id: String,
+        cleanup: AllocationCleanup,
     },
 }
 
@@ -57,6 +58,19 @@ where
     /// `value` returns the value held by this allocation without changing its identity.
     pub fn value(&self) -> &T {
         &self.value
+    }
+
+    /// `cleanup` captures a handle whose `wait` confirms this exact remote
+    /// assignment, even after another generation uses the owner slot.
+    /// Integrated returns `None`. Use `wait` to confirm release; `is_complete`
+    /// checks the latest controller generation and can reject an older release
+    /// handle even after its cleanup is complete.
+    /// Commit [`Self::release`] before waiting through the returned handle.
+    pub fn cleanup(&self) -> Option<AllocationCleanup> {
+        match &self.source {
+            OwnedAllocationSource::Integrated { .. } => None,
+            OwnedAllocationSource::Remote { cleanup, .. } => Some(cleanup.clone()),
+        }
     }
 
     /// `release` ends entity ownership in the transaction that found this allocation.
@@ -88,6 +102,7 @@ where
             OwnedAllocationSource::Remote {
                 request_id,
                 provider_allocation_id,
+                ..
             } => Ok(
                 match db::resource_pool::remote::request_release(
                     txn,
@@ -195,6 +210,12 @@ impl ResourcePoolRegistry {
                     source: OwnedAllocationSource::Remote {
                         request_id: allocation.allocation_id,
                         provider_allocation_id: assignment.allocation_id,
+                        cleanup: AllocationCleanup::for_request(
+                            owner_type,
+                            owner_id,
+                            slot,
+                            allocation.allocation_id,
+                        ),
                     },
                 }))
             }

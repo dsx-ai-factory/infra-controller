@@ -15,8 +15,8 @@ use crate::CarbideError;
 pub(super) const VNI_SLOT: &str = "vni";
 
 /// `validate` accepts only a usable 24-bit VNI. Provider routing policy is rejected
-/// because VPC creation does not save it or include it in DPU configuration, and
-/// SPX partitions have no route targets.
+/// because VPC creation and routing changes do not save it or include it in DPU
+/// configuration, and SPX partitions have no route targets.
 pub(super) fn validate(
     vni: i32,
     route_target_policy: Option<&ProviderRouteTargetPolicy>,

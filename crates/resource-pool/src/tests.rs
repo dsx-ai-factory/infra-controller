@@ -75,8 +75,7 @@ async fn integrated_forwards_pool_values_and_owners_in_the_borrowed_transaction(
     }
     txn.commit().await?;
 
-    let selected_backend = ResourcePoolBackend::Integrated(IntegratedResourcePoolBackend);
-    let backend = selected_backend.require_integrated()?;
+    let backend = IntegratedResourcePoolBackend;
     let mut txn = database.begin().await?;
     assert_eq!(
         backend
@@ -378,6 +377,7 @@ async fn uncached_remote_ownership_returns_an_error_and_preserves_attachment(
 async fn shared_allocation_defers_integrated_reservation_until_the_entity_transaction(
     database: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    const AUTOMATIC_VALUE: i32 = 42;
     let descriptor = ResourcePool::<i32>::new("prepared-pool".to_owned(), ValueType::Integer);
     let backend = ResourcePoolBackend::Integrated(IntegratedResourcePoolBackend);
     let selected = ResourcePoolWithBackend {
@@ -385,7 +385,7 @@ async fn shared_allocation_defers_integrated_reservation_until_the_entity_transa
         backend: &backend,
     };
     let mut txn = database.begin().await?;
-    populate(&descriptor, &mut txn, vec![42], true).await?;
+    populate(&descriptor, &mut txn, vec![AUTOMATIC_VALUE], true).await?;
     populate(&descriptor, &mut txn, vec![43], false).await?;
     txn.commit().await?;
 
@@ -463,6 +463,34 @@ async fn shared_allocation_defers_integrated_reservation_until_the_entity_transa
                 .await?,
             43,
         ),
+        (
+            "exact automatic partition",
+            selected
+                .prepare_exact_allocation(
+                    &closed,
+                    OwnerType::NetworkSegment,
+                    "segment-1",
+                    "vni",
+                    42,
+                    &CancellationToken::new(),
+                )
+                .await?,
+            42,
+        ),
+        (
+            "exact manual partition",
+            selected
+                .prepare_exact_allocation(
+                    &closed,
+                    OwnerType::NetworkSegment,
+                    "segment-1",
+                    "vni",
+                    43,
+                    &CancellationToken::new(),
+                )
+                .await?,
+            43,
+        ),
     ];
     let state_query = "SELECT state FROM resource_pool WHERE name = $1 AND value = $2";
 
@@ -477,6 +505,18 @@ async fn shared_allocation_defers_integrated_reservation_until_the_entity_transa
         assert_eq!(allocation.route_target_policy(), None, "{scenario}");
         let mut txn = database.begin().await?;
         assert_eq!(allocation.allocate(&mut txn).await?, expected, "{scenario}");
+        let automatic: bool = sqlx::query_scalar(
+            "SELECT auto_assign FROM resource_pool WHERE name = $1 AND value = $2",
+        )
+        .bind(descriptor.name())
+        .bind(expected.to_string())
+        .fetch_one(&mut *txn)
+        .await?;
+        assert_eq!(
+            automatic,
+            expected == AUTOMATIC_VALUE,
+            "{scenario}: assignment mode is preserved"
+        );
         let allocated: Json<ResourcePoolEntryState> = sqlx::query_scalar(state_query)
             .bind(descriptor.name())
             .bind(expected.to_string())

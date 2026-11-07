@@ -36,8 +36,8 @@
 //! [`ResourcePoolRegistry`] saves and checks backend selections. API startup owns
 //! remote recovery and cleanup metrics. Production configuration rejects
 //! remote selection; tests exercise the shared API below that gate.
-//! Shared allocation supports automatic and requested manual values. Exact
-//! selection across both partitions remains on the Integrated adapter.
+//! Shared allocation supports automatic and requested manual values, plus exact
+//! selection across both partitions for callers that retain existing assignments.
 
 #![cfg_attr(test, allow(txn_held_across_await, txn_without_commit))]
 
@@ -115,17 +115,6 @@ impl ResourcePoolBackend {
         match self {
             Self::Integrated(_) => None,
             Self::Grpc(remote) => Some(remote),
-        }
-    }
-
-    /// `require_integrated` selects the SQL adapter for operations whose caller
-    /// still depends on Integrated inventory. Remote selection fails before I/O.
-    pub fn require_integrated(&self) -> Result<&IntegratedResourcePoolBackend, DatabaseError> {
-        match self {
-            Self::Integrated(integrated) => Ok(integrated),
-            Self::Grpc(_) => Err(DatabaseError::FailedPrecondition(
-                "operation requires an integrated resource pool".to_owned(),
-            )),
         }
     }
 }

@@ -236,12 +236,14 @@ pub async fn latest_accepted(
 /// newest accepted revision. Missing or pending revisions return `None`, and
 /// invalid saved requests fail the same validation as [`accepted`].
 ///
-/// Allocation preparation already holds a transaction. Reuse it so the request
-/// and its accepted revision are saved together without acquiring a second
-/// connection from the same pool.
+/// Allocation preparation and consumer admission reuse their existing transaction
+/// so eligibility and dependent writes use one database connection. A saved
+/// allocation must use its original accepted revision; membership inspection can
+/// select the latest acknowledged revision.
 /// This helper does not acquire a connection, commit, or contact the provider.
-/// The caller owns transaction timeouts and completion.
-pub(crate) async fn accepted_in_transaction(
+/// The caller owns transaction timeouts and completion. This read takes no
+/// registration lock; a later acknowledgement can change the latest revision.
+pub async fn accepted_in_transaction(
     txn: &mut PgConnection,
     binding: &ResourcePoolBinding,
     revision: Option<i64>,
