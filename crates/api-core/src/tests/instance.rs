@@ -65,8 +65,8 @@ use model::instance::config::extension_services::{
 };
 use model::instance::config::network::{
     DeviceLocator, InstanceInterfaceIpFamilyMode, InstanceInterfaceVpcSelection,
-    InstanceNetworkConfig, InstanceServiceInterfaceConfig, InterfaceFunctionId,
-    Ipv6InterfaceConfig, NetworkDetails,
+    InstanceNetworkConfig, InstanceServiceInterfaceConfig, InstanceVpcLocalInterfaceConfig,
+    InterfaceFunctionId, Ipv6InterfaceConfig, NetworkDetails,
 };
 use model::instance::snapshot::InstanceSnapshot;
 use model::machine::{
@@ -534,8 +534,8 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
         nras_should_fail_parsing_flag.clone(),
         &mh,
         &mut txn,
-        ManagedHostState::PreAssignedMeasuring {
-            spdm_measuring_state: SpdmMeasuringState::PollResult,
+        |job_id| ManagedHostState::PreAssignedMeasuring {
+            spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
         },
     )
     .await;
@@ -795,9 +795,9 @@ async fn test_measurement_assigned_ready_to_waiting_for_measurements_to_ca_faile
         nras_should_fail_parsing_flag,
         &mh,
         &mut txn,
-        ManagedHostState::PostAssignedMeasuring {
+        |job_id| ManagedHostState::PostAssignedMeasuring {
             attestation_mode: AttestationMode::SpdmAttestation {
-                spdm_measuring_state: SpdmMeasuringState::PollResult,
+                spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
             },
         },
     )
@@ -1617,7 +1617,8 @@ async fn test_instance_null_hostname(_: PgPoolOptions, options: PgConnectOptions
 async fn test_instance_search_based_on_labels(pool: sqlx::PgPool) {
     let env = create_test_env(pool.clone()).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
-    for i in 0..=9 {
+    // Each search has one matching instance and two nonmatching instances.
+    for i in [1, 4, 8] {
         let mh = create_managed_host(&env).await;
 
         mh.instance_builer(&env)
@@ -1640,56 +1641,50 @@ async fn test_instance_search_based_on_labels(pool: sqlx::PgPool) {
             .await;
     }
 
-    // Test searching based on value.
-    let instance_matched_by_label = find_instances_by_label(
-        &env,
-        rpc::forge::Label {
-            key: "".to_string(),
-            value: Some("value_A_444".to_string()),
+    struct Case {
+        scenario: &'static str,
+        label: rpc::forge::Label,
+        expected_name: &'static str,
+    }
+
+    let cases = [
+        Case {
+            scenario: "value only",
+            label: rpc::forge::Label {
+                key: "".to_string(),
+                value: Some("value_A_444".to_string()),
+            },
+            expected_name: "instance_444",
         },
-    )
-    .await
-    .instances
-    .remove(0);
-
-    assert_eq!(
-        instance_matched_by_label.metadata.unwrap().name,
-        "instance_444"
-    );
-
-    // Test searching based on key.
-    let instance_matched_by_label = find_instances_by_label(
-        &env,
-        rpc::forge::Label {
-            key: "key_A_111".to_string(),
-            value: None,
+        Case {
+            scenario: "key only",
+            label: rpc::forge::Label {
+                key: "key_A_111".to_string(),
+                value: None,
+            },
+            expected_name: "instance_111",
         },
-    )
-    .await
-    .instances
-    .remove(0);
-
-    assert_eq!(
-        instance_matched_by_label.metadata.unwrap().name,
-        "instance_111"
-    );
-
-    // Test searching based on key and value.
-    let instance_matched_by_label = find_instances_by_label(
-        &env,
-        rpc::forge::Label {
-            key: "key_A_888".to_string(),
-            value: Some("value_A_888".to_string()),
+        Case {
+            scenario: "key and value",
+            label: rpc::forge::Label {
+                key: "key_A_888".to_string(),
+                value: Some("value_A_888".to_string()),
+            },
+            expected_name: "instance_888",
         },
-    )
-    .await
-    .instances
-    .remove(0);
+    ];
 
-    assert_eq!(
-        instance_matched_by_label.metadata.unwrap().name,
-        "instance_888"
-    );
+    for case in cases {
+        let instances = find_instances_by_label(&env, case.label).await.instances;
+
+        assert_eq!(instances.len(), 1, "{}", case.scenario);
+        assert_eq!(
+            instances[0].metadata.as_ref().unwrap().name,
+            case.expected_name,
+            "{}",
+            case.scenario
+        );
+    }
 }
 
 #[crate::sqlx_test]
@@ -16429,16 +16424,16 @@ async fn test_attach_extension_service_rejected_on_dpf_host(
     Ok(())
 }
 
-/// Verifies generic Kubernetes Pod termination reclaims only endpoint-free attachments while an
-/// all-protected follow-up scan still performs unrelated Ready work, preventing retained endpoint
-/// ownership from monopolizing controller iterations.
+/// Verifies generic Kubernetes Pod termination reclaims only attachments that no service-interface
+/// or VPC-local record names while an all-protected follow-up scan still performs unrelated Ready
+/// work, preventing retained endpoint ownership from monopolizing controller iterations.
 #[crate::sqlx_test]
 async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
     _: PgPoolOptions,
     options: PgConnectOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Create three Pod attachments so cleanup must distinguish active,
-    // endpoint-backed terminating, and endpoint-free terminating ownership.
+    // Create four Pod attachments so cleanup must distinguish active, endpoint-backed
+    // terminating, VPC-local-backed terminating, and endpoint-free terminating ownership.
     let pool = PgPoolOptions::new().connect_with(options).await?;
     let env = create_test_env(pool).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
@@ -16449,9 +16444,32 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
     let mh = create_managed_host(&env).await;
     let (retained_service, endpoint_backed_service, endpoint_free_service) =
         create_dpu_extension_services(&env).await?;
+    // A fourth service stands in for a VPC-local service: its attachment is named by a
+    // VPC-local record and by no service interface.
+    let vpc_local_backed_service = env
+        .api
+        .create_dpu_extension_service(tonic::Request::new(
+            rpc::forge::CreateDpuExtensionServiceRequest {
+                dpu_target: None,
+                service_vpc_interfaces: vec![],
+                service_id: None,
+                service_name: "test-service4".to_string(),
+                description: Some("Test service for instance".to_string()),
+                tenant_organization_id: "best_org".to_string(),
+                service_type: rpc::forge::DpuExtensionServiceType::KubernetesPod.into(),
+                data: create_dpu_extension_service_data("test-service4-v1"),
+                credential: None,
+                observability: None,
+                deployment_type: 0,
+            },
+        ))
+        .await?
+        .into_inner();
     let retained_service_id: ExtensionServiceId = retained_service.service_id.parse()?;
     let endpoint_backed_service_id: ExtensionServiceId =
         endpoint_backed_service.service_id.parse()?;
+    let vpc_local_backed_service_id: ExtensionServiceId =
+        vpc_local_backed_service.service_id.parse()?;
     let endpoint_free_service_id: ExtensionServiceId = endpoint_free_service.service_id.parse()?;
     let retained_version = retained_service
         .latest_version_info
@@ -16465,6 +16483,12 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         .expect("endpoint-backed service has a version")
         .version
         .clone();
+    let vpc_local_backed_version = vpc_local_backed_service
+        .latest_version_info
+        .as_ref()
+        .expect("VPC-local-backed service has a version")
+        .version
+        .clone();
     let endpoint_free_version = endpoint_free_service
         .latest_version_info
         .as_ref()
@@ -16472,7 +16496,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         .version
         .clone();
     // Each attachment's lifecycle role drives cleanup. Tenant, OS, and host
-    // network fields make the three-service instance otherwise valid.
+    // network fields make the four-service instance otherwise valid.
     let config = rpc::InstanceConfig {
         tenant: Some(default_tenant_config()),
         os: Some(default_os_config()),
@@ -16491,6 +16515,12 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
                     version: endpoint_backed_version,
                     service_vpc_ids: vec![],
                 },
+                // Terminating VPC-local-backed attachment survives until its record disappears.
+                rpc::forge::InstanceDpuExtensionServiceConfig {
+                    service_id: vpc_local_backed_service.service_id.clone(),
+                    version: vpc_local_backed_version,
+                    service_vpc_ids: vec![],
+                },
                 // Terminating endpoint-free attachment is independently reclaimable.
                 rpc::forge::InstanceDpuExtensionServiceConfig {
                     service_id: endpoint_free_service.service_id.clone(),
@@ -16503,7 +16533,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
     };
     let tinstance = mh.instance_builer(&env).config(config).build().await;
 
-    // Establish a synchronized running observation before requesting both detaches.
+    // Establish a synchronized running observation before requesting the three detaches.
     network_configured_with_health_and_ext_services(&env, &mh.dpu_ids[0], None, None).await;
     env.api
         .update_instance_config(Request::new(rpc::forge::InstanceConfigUpdateRequest {
@@ -16539,7 +16569,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
     .await;
 
     // A fresh read proves callers see only the retained service while status
-    // keeps all three entries.
+    // keeps all four entries.
     let rpc_instance = tinstance.rpc_instance().await.into_inner();
     let active_services = &rpc_instance
         .config
@@ -16559,7 +16589,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
     let extension_services_status = rpc_status
         .dpu_extension_services
         .expect("instance has extension-service status");
-    assert_eq!(extension_services_status.dpu_extension_services.len(), 3);
+    assert_eq!(extension_services_status.dpu_extension_services.len(), 4);
     assert_eq!(
         extension_services_status.configs_synced,
         rpc::forge::SyncState::Pending as i32
@@ -16567,6 +16597,8 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
     for service_id in [
         // Endpoint-backed termination remains visible until endpoint cleanup is observed.
         &endpoint_backed_service.service_id,
+        // VPC-local-backed termination remains visible until its record is removed.
+        &vpc_local_backed_service.service_id,
         // Endpoint-free termination is visible before this iteration reclaims it.
         &endpoint_free_service.service_id,
     ] {
@@ -16581,9 +16613,10 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         );
     }
 
-    // Report all three Pod services terminated without service-network cleanup evidence.
+    // Report all four Pod services terminated without service-network cleanup evidence.
     // Observe termination before seeding synthetic endpoints so the response renders only the real
-    // host network; cleanup still runs after both endpoint records have committed.
+    // host network; cleanup still runs after the seeded endpoint and VPC-local records have
+    // committed.
     network_configured_with_health_and_ext_services(
         &env,
         &mh.dpu_ids[0],
@@ -16592,7 +16625,8 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
     )
     .await;
 
-    // Seed endpoints only for the active and one terminating attachment.
+    // Seed endpoints only for the active and one terminating attachment, and a
+    // VPC-local record for another terminating attachment.
     let stored = db::instance::find_by_id(&env.pool, tinstance.id)
         .await?
         .expect("instance remains stored");
@@ -16612,6 +16646,14 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         .find(|attachment| attachment.service_id == endpoint_backed_service_id)
         .and_then(|attachment| attachment.id)
         .expect("endpoint-backed attachment has an ID");
+    let vpc_local_backed_attachment_id = stored
+        .config
+        .extension_services
+        .service_configs
+        .iter()
+        .find(|attachment| attachment.service_id == vpc_local_backed_service_id)
+        .and_then(|attachment| attachment.id)
+        .expect("VPC-local-backed attachment has an ID");
     let endpoint_free_attachment_id = stored
         .config
         .extension_services
@@ -16642,11 +16684,22 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         internal_uuid: uuid::Uuid::new_v4(),
         ..retained_service_interface.clone()
     };
+    // A VPC-local record names its attachment the same way and allocates no prefix.
+    let vpc_local_interface = InstanceVpcLocalInterfaceConfig {
+        attachment_id: vpc_local_backed_attachment_id, // This terminating owner must survive.
+        interface_ordinal: 0,
+        dpu_id: mh.dpu_ids[0],
+        slot_index: 0,
+        vpc_id: selected_vpc,
+        mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 2]),
+        internal_uuid: uuid::Uuid::new_v4(),
+    };
     let mut seeded_network = stored.config.network.clone();
     seeded_network.service_interfaces = vec![
         retained_service_interface.clone(),
         endpoint_backed_service_interface.clone(),
     ];
+    seeded_network.vpc_local_interfaces = vec![vpc_local_interface.clone()];
     let mut txn = env.db_txn().await;
     db::instance::update_network_config(
         txn.as_mut(),
@@ -16669,16 +16722,21 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
             endpoint_backed_service_interface.clone()
         ]
     );
+    assert_eq!(
+        seeded.config.network.vpc_local_interfaces,
+        vec![vpc_local_interface.clone()]
+    );
 
-    // Run cleanup against the committed endpoint records and the public Pod termination observation.
+    // Run cleanup against the committed endpoint and VPC-local records and the public Pod
+    // termination observation.
     env.run_machine_state_controller_iteration().await;
 
-    // A fresh snapshot proves cleanup removes only the endpoint-free
-    // terminating attachment and preserves both endpoint owners.
+    // A fresh snapshot proves cleanup removes only the endpoint-free terminating
+    // attachment and preserves the endpoint owners and the VPC-local record's owner.
     let mut txn = env.db_txn().await;
     let snapshot = mh.snapshot(&mut txn).await;
     let persisted = snapshot.instance.expect("instance remains assigned");
-    assert_eq!(persisted.config.extension_services.service_configs.len(), 2);
+    assert_eq!(persisted.config.extension_services.service_configs.len(), 3);
     assert_eq!(
         persisted
             .config
@@ -16687,7 +16745,11 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
             .iter()
             .map(|attachment| attachment.service_id)
             .collect::<HashSet<_>>(),
-        HashSet::from([retained_service_id, endpoint_backed_service_id])
+        HashSet::from([
+            retained_service_id,
+            endpoint_backed_service_id,
+            vpc_local_backed_service_id,
+        ])
     );
     let retained_attachment = persisted
         .config
@@ -16711,6 +16773,18 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         Some(endpoint_backed_attachment_id)
     );
     assert!(endpoint_backed_attachment.removed.is_some());
+    let vpc_local_backed_attachment = persisted
+        .config
+        .extension_services
+        .service_configs
+        .iter()
+        .find(|attachment| attachment.service_id == vpc_local_backed_service_id)
+        .expect("VPC-local-backed terminating attachment remains as a cleanup tombstone");
+    assert_eq!(
+        vpc_local_backed_attachment.id,
+        Some(vpc_local_backed_attachment_id)
+    );
+    assert!(vpc_local_backed_attachment.removed.is_some());
     assert!(
         persisted
             .config
@@ -16726,6 +16800,10 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
             endpoint_backed_service_interface
         ]
     );
+    assert_eq!(
+        persisted.config.network.vpc_local_interfaces,
+        vec![vpc_local_interface]
+    );
 
     // The exact Pod observation proves cleanup ran from the intended generic
     // termination signal rather than DPF label-derived placement status.
@@ -16735,7 +16813,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         .get(&mh.dpu_ids[0])
         .and_then(|observations| observations.for_service_type(ExtensionServiceType::KubernetesPod))
         .expect("DPU reported Kubernetes Pod service status");
-    assert_eq!(pod_observation.extension_service_statuses.len(), 3);
+    assert_eq!(pod_observation.extension_service_statuses.len(), 4);
     assert_eq!(
         pod_observation
             .extension_service_statuses
@@ -16745,6 +16823,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         HashSet::from([
             retained_service_id,
             endpoint_backed_service_id,
+            vpc_local_backed_service_id,
             endpoint_free_service_id,
         ])
     );
@@ -16773,7 +16852,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
     assert_eq!(backdate_update.rows_affected(), 1);
     txn.commit().await?;
 
-    // The remaining endpoint-backed tombstones must not suppress periodic boot observation.
+    // The remaining record-backed tombstones must not suppress periodic boot observation.
     env.redfish_sim.set_is_bios_setup(true);
     env.redfish_sim.set_is_boot_order_setup(true);
     let redfish_checkpoint = env.redfish_sim.timepoint();
@@ -16786,7 +16865,7 @@ async fn test_extension_service_cleanup_reclaims_only_endpoint_free_attachments(
         redfish_actions
             .iter()
             .any(|action| matches!(action, RedfishSimAction::IsBootOrderSetup { .. })),
-        "endpoint-protected cleanup must allow unrelated Ready observation: {redfish_actions:?}"
+        "record-protected cleanup must allow unrelated Ready observation: {redfish_actions:?}"
     );
 
     Ok(())

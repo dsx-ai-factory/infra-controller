@@ -66,11 +66,11 @@ type Client interface {
 	// from one FindSwitchesByIds snapshot.
 	FindSwitchRuntimeStatuses(ctx context.Context, switchIds []string) (map[string]ComponentRuntimeStatus, error)
 
-	// FindSwitchNvosIPs returns the resolved NVOS host IP for each switch,
-	// keyed by Core SwitchId. Core populates nvos_info only once both the NVOS
-	// MAC and its assigned address resolve, so switches without a resolved NVOS
-	// endpoint are omitted from the result.
-	FindSwitchNvosIPs(ctx context.Context, switchIds []string) (map[string]string, error)
+	// FindSwitchNvosPorts returns all status.nvos_ports, keyed by Core SwitchId.
+	// An empty port list falls back to legacy nvos_info when available.
+	// Without either port source, a present status returns an empty slice;
+	// a missing status omits the switch.
+	FindSwitchNvosPorts(ctx context.Context, switchIds []string) (map[string][]SwitchNvosPort, error)
 
 	// GetObservedNVLinkDomainMemberships returns valid rack/domain observations
 	// from a complete snapshot of Core's active switch inventory. Switches without
@@ -284,7 +284,7 @@ type Client interface {
 	SetPowerShelfRackID(shelfID, rackID string)
 	SetSwitchControllerState(switchID, state string)
 	SetSwitchHealth(switchID string, health *types.HealthReport)
-	SetSwitchNvosIP(switchID, ip string)
+	SetSwitchNvosPorts(switchID string, ports []SwitchNvosPort)
 	SetObservedNVLinkDomainMemberships(memberships []NVLinkDomainMembership)
 	SetPowerShelfControllerState(shelfID, state string)
 	SetPowerShelfHealth(shelfID string, health *types.HealthReport)

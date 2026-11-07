@@ -608,7 +608,7 @@ async fn create_os_with_artifacts(env: &TestHarness) -> OperatingSystemId {
 #[sqlx_test]
 async fn test_concurrent_operating_system_updates_preserve_committed_fields(pool: PgPool) {
     enum PendingUpdate {
-        Metadata,
+        FullDefinition,
         CachedArtifact,
     }
 
@@ -624,9 +624,9 @@ async fn test_concurrent_operating_system_updates_preserve_committed_fields(pool
 
     let cases = [
         (
-            PendingUpdate::Metadata,
+            PendingUpdate::FullDefinition,
             PersistedState {
-                scenario: "ordinary update",
+                scenario: "full definition resend",
                 name: "renamed-os".to_string(),
                 is_active: false,
                 kernel_cached_url: Some("http://cache.local/kernel".to_string()),
@@ -652,6 +652,12 @@ async fn test_concurrent_operating_system_updates_preserve_committed_fields(pool
 
     for (pending_update, expected_state) in cases {
         let os_id = create_os_with_artifacts(&env).await;
+        let definition = env
+            .api()
+            .get_operating_system(tonic::Request::new(os_id))
+            .await
+            .expect("OS fixture should be readable")
+            .into_inner();
         let mut holder = pool.begin().await.expect("holder transaction should start");
         let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *holder)
@@ -668,8 +674,8 @@ async fn test_concurrent_operating_system_updates_preserve_committed_fields(pool
             .clone();
         artifacts[0]["cached_url"] = serde_json::json!("http://cache.local/kernel");
 
-        // Keep this write uncommitted while the RPC starts. Fields the RPC
-        // omits must come from this row once the holder commits.
+        // Hold the row while the RPC starts. Even a full definition resend must
+        // retain cached URLs committed by this competing write.
         db::operating_system::update(
             &mut holder,
             &existing,
@@ -694,12 +700,19 @@ async fn test_concurrent_operating_system_updates_preserve_committed_fields(pool
 
         let update = async {
             match pending_update {
-                PendingUpdate::Metadata => env
+                PendingUpdate::FullDefinition => env
                     .api()
                     .update_operating_system(tonic::Request::new(
                         rpc::forge::UpdateOperatingSystemRequest {
                             id: Some(os_id),
                             name: Some("renamed-os".to_string()),
+                            ipxe_template_id: definition.ipxe_template_id,
+                            ipxe_template_parameters: Some(rpc::forge::IpxeTemplateParameters {
+                                items: definition.ipxe_template_parameters,
+                            }),
+                            ipxe_template_artifacts: Some(IpxeTemplateArtifacts {
+                                items: definition.ipxe_template_artifacts,
+                            }),
                             ..Default::default()
                         },
                     ))
@@ -1154,7 +1167,7 @@ async fn test_clear_cached_url_demotes_ready_to_provisioning(pool: PgPool) {
 }
 
 // ---------------------------------------------------------------------------
-// Compliance: cached_url is stripped on create/update
+// Cache ownership: create and changed definitions cannot install cached_url
 // ---------------------------------------------------------------------------
 
 #[sqlx_test]
@@ -1254,12 +1267,342 @@ async fn test_create_with_cached_only_sets_provisioning(pool: PgPool) {
     );
 }
 
+// Unchanged definitions retain the site's cache; caller-supplied URLs cannot fill it.
 #[sqlx_test]
-async fn test_update_strips_cached_url_from_artifacts(pool: PgPool) {
+async fn test_update_preserves_cached_urls_only_for_unchanged_definitions(pool: PgPool) {
+    enum DefinitionUpdate {
+        Unchanged,
+        PartialCacheWithSuppliedUrls,
+        StaleStoredHash,
+        Template,
+        ArtifactOrder,
+        CacheStrategy,
+        Parameters,
+        ParametersWithStaleHash,
+        EmptyArtifacts,
+    }
+
+    struct Case {
+        name: &'static str,
+        change: DefinitionUpdate,
+        status: TenantState,
+        keep_cache: bool,
+        hash_changes: bool,
+    }
+
+    let env = TestHarness::builder(pool).build().await;
+    for case in [
+        Case {
+            name: "unchanged REST resend",
+            change: DefinitionUpdate::Unchanged,
+            status: TenantState::Ready,
+            keep_cache: true,
+            hash_changes: false,
+        },
+        Case {
+            name: "supplied URLs cannot complete a partial cache",
+            change: DefinitionUpdate::PartialCacheWithSuppliedUrls,
+            status: TenantState::Provisioning,
+            keep_cache: true,
+            hash_changes: false,
+        },
+        Case {
+            name: "repair stale stored hash",
+            change: DefinitionUpdate::StaleStoredHash,
+            status: TenantState::Ready,
+            keep_cache: true,
+            hash_changes: true,
+        },
+        Case {
+            name: "changed cache strategy",
+            change: DefinitionUpdate::CacheStrategy,
+            status: TenantState::Provisioning,
+            keep_cache: false,
+            hash_changes: false,
+        },
+        Case {
+            name: "changed template",
+            change: DefinitionUpdate::Template,
+            status: TenantState::Provisioning,
+            keep_cache: false,
+            hash_changes: true,
+        },
+        Case {
+            name: "reordered artifacts with unchanged hash",
+            change: DefinitionUpdate::ArtifactOrder,
+            status: TenantState::Provisioning,
+            keep_cache: false,
+            hash_changes: false,
+        },
+        Case {
+            name: "changed parameters",
+            change: DefinitionUpdate::Parameters,
+            status: TenantState::Provisioning,
+            keep_cache: false,
+            hash_changes: true,
+        },
+        Case {
+            name: "changed parameters with stale hash and omitted artifacts",
+            change: DefinitionUpdate::ParametersWithStaleHash,
+            status: TenantState::Provisioning,
+            keep_cache: false,
+            hash_changes: false,
+        },
+        Case {
+            name: "explicit artifact removal with stale hash",
+            change: DefinitionUpdate::EmptyArtifacts,
+            status: TenantState::Ready,
+            keep_cache: false,
+            hash_changes: false,
+        },
+    ] {
+        let os_id = create_os_with_artifacts(&env).await;
+        if matches!(
+            case.change,
+            DefinitionUpdate::StaleStoredHash | DefinitionUpdate::Template
+        ) {
+            let original = env
+                .api()
+                .get_operating_system(tonic::Request::new(os_id))
+                .await
+                .unwrap()
+                .into_inner();
+            let mut parameters = original.ipxe_template_parameters;
+            let supplied_hash = if matches!(case.change, DefinitionUpdate::StaleStoredHash) {
+                // Older REST updates could save a new definition with its old hash.
+                parameters[0].value = "http://example.com/replacement.qcow2".to_string();
+                original.ipxe_template_definition_hash
+            } else {
+                // Both templates must accept the same parameters for a template-only change.
+                parameters.push(rpc::forge::IpxeTemplateParameter {
+                    name: "kernel_params".to_string(),
+                    value: "console=tty0".to_string(),
+                });
+                None
+            };
+            env.api()
+                .update_operating_system(tonic::Request::new(
+                    rpc::forge::UpdateOperatingSystemRequest {
+                        id: Some(os_id),
+                        ipxe_template_parameters: Some(rpc::forge::IpxeTemplateParameters {
+                            items: parameters,
+                        }),
+                        ipxe_template_definition_hash: supplied_hash,
+                        ..Default::default()
+                    },
+                ))
+                .await
+                .unwrap();
+        }
+        let cached_artifacts: &[&str] =
+            if matches!(case.change, DefinitionUpdate::PartialCacheWithSuppliedUrls) {
+                &["kernel"]
+            } else {
+                &["kernel", "initrd", "overlay"]
+            };
+        env.api()
+            .update_operating_system_cachable_ipxe_template_artifacts(tonic::Request::new(
+                rpc::forge::UpdateOperatingSystemIpxeTemplateArtifactRequest {
+                    id: Some(os_id),
+                    updates: cached_artifacts
+                        .iter()
+                        .map(|artifact| rpc::forge::IpxeTemplateArtifactUpdateRequest {
+                            name: artifact.to_string(),
+                            cached_url: Some(format!("http://cache.local/{artifact}")),
+                        })
+                        .collect(),
+                },
+            ))
+            .await
+            .unwrap();
+        let stored = env
+            .api()
+            .get_operating_system(tonic::Request::new(os_id))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            stored.status,
+            if cached_artifacts.len() == 1 {
+                TenantState::Provisioning
+            } else {
+                TenantState::Ready
+            } as i32,
+            "{}: initial cache state",
+            case.name
+        );
+        let mut request = rpc::forge::UpdateOperatingSystemRequest {
+            id: Some(os_id),
+            name: Some(case.name.to_string()),
+            ipxe_template_id: stored.ipxe_template_id,
+            ipxe_template_parameters: Some(rpc::forge::IpxeTemplateParameters {
+                items: stored.ipxe_template_parameters.clone(),
+            }),
+            ipxe_template_artifacts: Some(IpxeTemplateArtifacts {
+                items: stored.ipxe_template_artifacts.clone(),
+            }),
+            ..Default::default()
+        };
+        for artifact in &mut request.ipxe_template_artifacts.as_mut().unwrap().items {
+            artifact.cached_url =
+                if matches!(case.change, DefinitionUpdate::PartialCacheWithSuppliedUrls) {
+                    Some("http://untrusted.local/artifact".to_string())
+                } else {
+                    None
+                };
+        }
+        match case.change {
+            DefinitionUpdate::Unchanged
+            | DefinitionUpdate::PartialCacheWithSuppliedUrls
+            | DefinitionUpdate::StaleStoredHash => {}
+            DefinitionUpdate::Template => {
+                request.ipxe_template_id =
+                    Some("c4b1d4f6-69ba-5f55-90cd-ab2acd002475".parse().unwrap());
+            }
+            DefinitionUpdate::ArtifactOrder => {
+                request
+                    .ipxe_template_artifacts
+                    .as_mut()
+                    .unwrap()
+                    .items
+                    .swap(0, 1);
+            }
+            DefinitionUpdate::CacheStrategy => {
+                request.ipxe_template_artifacts.as_mut().unwrap().items[2].cache_strategy =
+                    IpxeTemplateArtifactCacheStrategy::CachedOnly as i32;
+            }
+            DefinitionUpdate::Parameters | DefinitionUpdate::ParametersWithStaleHash => {
+                request.ipxe_template_parameters.as_mut().unwrap().items[0].value =
+                    "http://example.com/new-image.qcow2".to_string();
+                if matches!(case.change, DefinitionUpdate::ParametersWithStaleHash) {
+                    request.ipxe_template_definition_hash =
+                        stored.ipxe_template_definition_hash.clone();
+                    request.ipxe_template_artifacts = None;
+                }
+            }
+            DefinitionUpdate::EmptyArtifacts => {
+                request
+                    .ipxe_template_artifacts
+                    .as_mut()
+                    .unwrap()
+                    .items
+                    .clear();
+                request.ipxe_template_definition_hash =
+                    stored.ipxe_template_definition_hash.clone();
+            }
+        }
+        let expected_params = request
+            .ipxe_template_parameters
+            .as_ref()
+            .unwrap()
+            .items
+            .clone();
+        let expected_template = request.ipxe_template_id;
+        let mut expected_artifacts = request
+            .ipxe_template_artifacts
+            .as_ref()
+            .map(|wrapper| wrapper.items.clone())
+            .unwrap_or_else(|| stored.ipxe_template_artifacts.clone());
+        if case.keep_cache {
+            expected_artifacts = stored.ipxe_template_artifacts.clone();
+        } else {
+            for artifact in &mut expected_artifacts {
+                artifact.cached_url = None;
+            }
+        }
+
+        env.api()
+            .update_operating_system(tonic::Request::new(request))
+            .await
+            .unwrap();
+        let persisted = env
+            .api()
+            .get_operating_system(tonic::Request::new(os_id))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(persisted.name, case.name);
+        assert_eq!(
+            persisted.ipxe_template_id, expected_template,
+            "{}",
+            case.name
+        );
+        assert_eq!(persisted.status, case.status as i32, "{}", case.name);
+        assert_eq!(
+            persisted.ipxe_template_parameters, expected_params,
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            persisted.ipxe_template_artifacts, expected_artifacts,
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            persisted.ipxe_template_definition_hash != stored.ipxe_template_definition_hash,
+            case.hash_changes,
+            "{}: hash changes",
+            case.name
+        );
+    }
+}
+
+// A supplied hash can bypass validation. Omitting it must validate the stored
+// definition before applying even a metadata change.
+#[sqlx_test]
+async fn test_update_without_hash_rejects_invalid_stored_definition(pool: PgPool) {
+    let env = TestHarness::builder(pool).build().await;
+    let os_id = create_os_with_artifacts(&env).await;
+    let original = env
+        .api()
+        .get_operating_system(tonic::Request::new(os_id))
+        .await
+        .unwrap()
+        .into_inner();
+    let invalid = env
+        .api()
+        .update_operating_system(tonic::Request::new(
+            rpc::forge::UpdateOperatingSystemRequest {
+                id: Some(os_id),
+                ipxe_template_parameters: Some(rpc::forge::IpxeTemplateParameters {
+                    items: vec![],
+                }),
+                ipxe_template_definition_hash: original.ipxe_template_definition_hash,
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let error = env
+        .api()
+        .update_operating_system(tonic::Request::new(
+            rpc::forge::UpdateOperatingSystemRequest {
+                id: Some(os_id),
+                name: Some("must-not-be-saved".to_string()),
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+
+    let persisted = env
+        .api()
+        .get_operating_system(tonic::Request::new(os_id))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(persisted, invalid);
+}
+
+#[sqlx_test]
+async fn test_changed_artifact_list_discards_stored_and_supplied_cached_urls(pool: PgPool) {
     let env = TestHarness::builder(pool).build().await;
     let os_id = create_os_with_artifacts(&env).await;
 
-    // First, set cached_url via the proper RPC so we can verify update strips it.
+    // Cache the existing definition, which includes an overlay artifact.
     env.api()
         .update_operating_system_cachable_ipxe_template_artifacts(tonic::Request::new(
             rpc::forge::UpdateOperatingSystemIpxeTemplateArtifactRequest {
@@ -1279,7 +1622,7 @@ async fn test_update_strips_cached_url_from_artifacts(pool: PgPool) {
         .await
         .unwrap();
 
-    // Now update via regular update, providing artifacts with cached_url set.
+    // Removing the overlay changes the definition, even though kernel/initrd match.
     env.api()
         .update_operating_system(tonic::Request::new(
             rpc::forge::UpdateOperatingSystemRequest {
@@ -1333,7 +1676,7 @@ async fn test_update_strips_cached_url_from_artifacts(pool: PgPool) {
     for a in &arts.artifacts {
         assert!(
             a.cached_url.is_none(),
-            "cached_url for '{}' must be stripped on regular update",
+            "cached_url for '{}' must be cleared when the definition changes",
             a.name
         );
     }
@@ -1372,8 +1715,8 @@ async fn test_update_with_cached_only_artifacts_recomputes_status(pool: PgPool) 
         .into_inner();
     assert_eq!(ready_os.status, TenantState::Ready as i32);
 
-    // Now update artifacts via regular update (same artifact list) — cached_url
-    // will be stripped, so status must revert to PROVISIONING.
+    // Removing overlay changes the definition, so cached URLs are invalidated
+    // and the remaining CACHED_ONLY artifacts need provisioning again.
     env.api()
         .update_operating_system(tonic::Request::new(
             rpc::forge::UpdateOperatingSystemRequest {

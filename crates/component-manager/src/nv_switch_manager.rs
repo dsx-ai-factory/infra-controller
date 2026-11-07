@@ -131,6 +131,18 @@ pub struct SwitchComponentResult {
     pub error: Option<ComponentManagerError>,
 }
 
+/// One switch's factory-reset submission result and optional backend batch reference.
+#[derive(Debug)]
+pub struct SwitchResetResponse {
+    /// Per-switch result, identified by BMC MAC. Success means accepted and its
+    /// job reference recorded, not completed.
+    pub result: SwitchComponentResult,
+    /// Opaque batch job reference for aggregate status queries, when available.
+    /// Retained even when the switch was rejected or recording its reference failed.
+    /// Its presence alone does not establish that this switch's reset was accepted.
+    pub parent_job_id: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SwitchFirmwareUpdateStatus {
     pub bmc_mac: MacAddress,
@@ -470,25 +482,31 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
     ///
     /// This destructive operation wipes switch operating-system configuration, reboots
     /// each switch, and completes after the default login is reachable again. It
-    /// preserves the factory default password. `tls_server_domain` is the TLS server
-    /// domain shared by all targets. When it is absent, the selected backend uses its
-    /// configured default. A successful submission returns a non-empty, opaque job ID
-    /// that can be passed to [`Self::get_switch_factory_reset_job_status`]. Submission
-    /// does not wait for the switches to reboot or become reachable.
+    /// preserves the factory default password. `tls_server_domain` selects the NVL
+    /// certificate domain shared by all targets. When it is absent, the selected
+    /// backend uses its configured default. Returns one result per endpoint,
+    /// identified by BMC MAC; result order is unspecified. Success means accepted
+    /// and its job reference recorded, not completed. Accepted jobs replace the
+    /// device's NVOS reset reference.
+    /// Available parent job IDs can be passed to
+    /// [`Self::get_switch_factory_reset_job_status`]. Submission does not wait for
+    /// the switches to reboot or become reachable. Invalid or rejected targets do
+    /// not prevent valid targets from being submitted.
     ///
     /// `endpoints` must contain at least one switch. Backends that support this
     /// operation return [`ComponentManagerError::InvalidArgument`] for an empty slice
     /// without dispatching work.
     ///
     /// If dispatch may have reached the backend but no job ID is available, the
-    /// implementation returns [`ComponentManagerError::OperationOutcomeUnknown`].
-    /// Callers must not automatically resubmit this destructive operation. The default
-    /// implementation returns [`ComponentManagerError::Unsupported`].
+    /// switch's result contains [`ComponentManagerError::OperationOutcomeUnknown`].
+    /// An outer error applies to every endpoint. Callers must not automatically
+    /// resubmit this destructive operation. The default implementation returns
+    /// [`ComponentManagerError::Unsupported`].
     async fn batch_reset_switch_factory_default(
         &self,
         _endpoints: &[SwitchEndpoint],
         _tls_server_domain: Option<&str>,
-    ) -> Result<String, ComponentManagerError> {
+    ) -> Result<Vec<SwitchResetResponse>, ComponentManagerError> {
         Err(ComponentManagerError::Unsupported(format!(
             "switch factory reset is not supported by the {} backend",
             self.name()
@@ -509,7 +527,7 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
         &self,
         _endpoints: &[SwitchEndpoint],
         _domain_name: Option<&str>,
-    ) -> Result<Vec<SwitchComponentResult>, ComponentManagerError> {
+    ) -> Result<Vec<SwitchResetResponse>, ComponentManagerError> {
         Err(ComponentManagerError::Unsupported(format!(
             "component reset is not supported by the {} backend",
             self.name()
@@ -533,6 +551,22 @@ pub trait NvSwitchManager: Send + Sync + Debug + 'static {
     ) -> Result<Vec<ComponentResetStatus>, ComponentManagerError> {
         Err(ComponentManagerError::Unsupported(format!(
             "component reset status is not supported by the {} backend",
+            self.name()
+        )))
+    }
+
+    /// Observes stored NVOS factory-reset references by BMC MAC without credentials.
+    ///
+    /// Uses the same per-device identity, child-job, and error semantics as
+    /// [`Self::get_sdn_factory_reset_status`], looking up only NVOS reset references.
+    /// Completion means the backend observed factory-default login after reboot.
+    /// The default implementation returns [`ComponentManagerError::Unsupported`].
+    async fn get_nvos_factory_reset_status(
+        &self,
+        _bmc_macs: &[MacAddress],
+    ) -> Result<Vec<ComponentResetStatus>, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "NVOS factory-reset status is not supported by the {} backend",
             self.name()
         )))
     }

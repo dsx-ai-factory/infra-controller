@@ -2315,7 +2315,13 @@ impl MachineStateHandler {
                         }
                     }
                     FailureCause::SpdmAttestationFailed { .. } => {
-                        handle_spdm_attestation_failed_recovery(ctx, host_machine_id, details).await
+                        handle_spdm_attestation_failed_recovery(
+                            ctx,
+                            host_machine_id,
+                            mh_snapshot,
+                            details,
+                        )
+                        .await
                     }
                     FailureCause::MachineValidation { .. }
                         if machine_id.machine_type().is_host() =>
@@ -2472,23 +2478,33 @@ impl MachineStateHandler {
                                     ctx.services,
                                     mh_snapshot,
                                     host_machine_id,
-                                    ManagedHostState::PostAssignedMeasuring {
+                                    |job_id| ManagedHostState::PostAssignedMeasuring {
                                         attestation_mode: AttestationMode::SpdmAttestation {
-                                            spdm_measuring_state: SpdmMeasuringState::PollResult,
+                                            spdm_measuring_state: SpdmMeasuringState::PollResult(
+                                                job_id,
+                                            ),
                                         },
                                     },
                                     next_skip_state,
                                 )
                                 .await
                             }
-                            SpdmMeasuringState::PollResult => {
+                            SpdmMeasuringState::PollResult(job_id) => {
                                 handle_spdm_poll_state(
-                                    &ctx.services.db_pool,
+                                    ctx.services,
+                                    mh_snapshot,
                                     host_machine_id,
+                                    job_id,
                                     FailureSource::StateMachineArea(
                                         StateMachineArea::AssignedInstance,
                                     ),
                                     next_skip_state,
+                                    ManagedHostState::PostAssignedMeasuring {
+                                        attestation_mode: AttestationMode::SpdmAttestation {
+                                            spdm_measuring_state:
+                                                SpdmMeasuringState::TriggerMeasurements,
+                                        },
+                                    },
                                 )
                                 .await
                             }
@@ -2509,19 +2525,24 @@ impl MachineStateHandler {
                             ctx.services,
                             mh_snapshot,
                             host_machine_id,
-                            ManagedHostState::PreAssignedMeasuring {
-                                spdm_measuring_state: SpdmMeasuringState::PollResult,
+                            |job_id| ManagedHostState::PreAssignedMeasuring {
+                                spdm_measuring_state: SpdmMeasuringState::PollResult(job_id),
                             },
                             next_skip_state,
                         )
                         .await
                     }
-                    SpdmMeasuringState::PollResult => {
+                    SpdmMeasuringState::PollResult(job_id) => {
                         handle_spdm_poll_state(
-                            &ctx.services.db_pool,
+                            ctx.services,
+                            mh_snapshot,
                             host_machine_id,
+                            job_id,
                             FailureSource::StateMachineArea(StateMachineArea::MainFlow),
                             next_skip_state,
+                            ManagedHostState::PreAssignedMeasuring {
+                                spdm_measuring_state: SpdmMeasuringState::TriggerMeasurements,
+                            },
                         )
                         .await
                     }
@@ -5388,7 +5409,7 @@ impl DpuMachineStateHandler {
                     }
                 })?;
 
-                let dpf_managed_bf4 = is_dpf_managed_bf4(state, dpu_snapshot)?;
+                let dpf_used_for_ingestion = state.host_snapshot.config.dpf.used_for_ingestion;
 
                 // One access-info lookup serves both the general client
                 // and the credential op below.
@@ -5444,10 +5465,10 @@ impl DpuMachineStateHandler {
                     return Ok(outcome);
                 }
 
-                // DPF owns BF4 platform configuration. NICo still owns the
+                // DPF owns platform configuration for DPUs it ingested. NICo still owns the
                 // UEFI credential change performed below until DPF credential
                 // management is available.
-                if !dpf_managed_bf4 {
+                if !dpf_used_for_ingestion {
                     let boot_interface = None; // libredfish will choose the DPU
                     if self.enable_secure_boot {
                         dpu_redfish_client
@@ -5547,8 +5568,12 @@ impl DpuMachineStateHandler {
                     .await?;
                 }
 
-                let next_state = if dpf_managed_bf4 {
-                    DpuInitState::WaitingForNetworkConfig
+                let next_state = if dpf_used_for_ingestion {
+                    if credentials_updated {
+                        DpuInitState::WaitingForUefiRestart
+                    } else {
+                        DpuInitState::WaitingForNetworkConfig
+                    }
                 } else {
                     DpuInitState::PollingBiosSetup
                 }
@@ -5575,6 +5600,36 @@ impl DpuMachineStateHandler {
                 } else {
                     Ok(StateHandlerOutcome::transition(next_state))
                 }
+            }
+
+            DpuInitState::WaitingForUefiRestart => {
+                let restart = dpu_snapshot
+                    .status
+                    .last_reboot_requested
+                    .as_ref()
+                    .ok_or_else(|| StateHandlerError::MissingData {
+                        object_id: dpu_snapshot.id.to_string(),
+                        missing: "last_reboot_requested",
+                    })?;
+                let network_is_fresh = dpu_snapshot
+                    .network_status_observation
+                    .as_ref()
+                    .is_some_and(|report| report.observed_at > restart.time);
+                let health_is_fresh = dpu_snapshot
+                    .dpu_agent_health_report()
+                    .and_then(|report| report.observed_at)
+                    .is_some_and(|observed_at| observed_at > restart.time);
+                if !network_is_fresh || !health_is_fresh {
+                    return Ok(StateHandlerOutcome::wait(format!(
+                        "Waiting for DPU {} network and health reports after the UEFI restart request",
+                        dpu_snapshot.id,
+                    )));
+                }
+
+                Ok(StateHandlerOutcome::transition(
+                    DpuInitState::WaitingForNetworkConfig
+                        .next_state(&state.managed_state, dpu_machine_id)?,
+                ))
             }
 
             DpuInitState::PollingBiosSetup => {
@@ -5660,6 +5715,13 @@ impl DpuMachineStateHandler {
             }
 
             DpuInitState::WaitingForNetworkConfig => {
+                if !state.managed_state.all_dpu_states_in_sync()? {
+                    return Ok(StateHandlerOutcome::wait(
+                        "Waiting for all DPUs to finish platform configuration and UEFI restart"
+                            .to_string(),
+                    ));
+                }
+
                 // is_network_ready is syncing over all DPUs.
                 // The code will move only when all DPUs returns network_ready signal.
                 for dsnapshot in &state.dpu_snapshots {
@@ -8744,21 +8806,31 @@ impl StateHandler for HostMachineStateHandler {
                                 ctx.services,
                                 mh_snapshot,
                                 host_machine_id,
-                                ManagedHostState::HostInit {
+                                |job_id| ManagedHostState::HostInit {
                                     machine_state: MachineState::SpdmMeasuring {
-                                        spdm_measuring_state: SpdmMeasuringState::PollResult,
+                                        spdm_measuring_state: SpdmMeasuringState::PollResult(
+                                            job_id,
+                                        ),
                                     },
                                 },
                                 next_skip_state,
                             )
                             .await
                         }
-                        SpdmMeasuringState::PollResult => {
+                        SpdmMeasuringState::PollResult(job_id) => {
                             handle_spdm_poll_state(
-                                &ctx.services.db_pool,
+                                ctx.services,
+                                mh_snapshot,
                                 host_machine_id,
+                                job_id,
                                 FailureSource::StateMachineArea(StateMachineArea::HostInit),
                                 next_skip_state,
+                                ManagedHostState::HostInit {
+                                    machine_state: MachineState::SpdmMeasuring {
+                                        spdm_measuring_state:
+                                            SpdmMeasuringState::TriggerMeasurements,
+                                    },
+                                },
                             )
                             .await
                         }
@@ -9395,7 +9467,7 @@ impl StateHandler for InstanceStateHandler {
                     .await?;
                     let extension_services_status = &mut extension_services_status;
 
-                    // Reclaim endpoint-free terminated attachments before computing readiness so
+                    // Reclaim record-free terminated attachments before computing readiness so
                     // the returned transaction commits the status entries used by that decision.
                     let txn = if extension_services_status.configs_synced == SyncState::Synced
                         && !extension_services_status
@@ -9562,7 +9634,7 @@ impl StateHandler for InstanceStateHandler {
                             {
                                 let mut txn = ctx.services.db_pool.begin().await?;
                                 // Retain the transaction only when attachment cleanup wrote,
-                                // allowing endpoint-protected tombstones to coexist with Ready work.
+                                // allowing record-protected tombstones to coexist with Ready work.
                                 if cleanup_terminated_extension_services(
                                     instance,
                                     &mut extension_services_status,
@@ -10509,6 +10581,7 @@ async fn handle_instance_network_config_update_request(
             // Legacy pending requests may carry obsolete endpoints. Only live state owns them.
             let mut new_config = update_request.new_config.clone();
             new_config.service_interfaces = current_instance.config.network.service_interfaces;
+            new_config.vpc_local_interfaces = current_instance.config.network.vpc_local_interfaces;
             // Update requested network config and increment version.
             db::instance::update_network_config(
                 txn.as_mut(),
@@ -11714,6 +11787,17 @@ impl HostUpgradeState {
                             state.managed_state.get_host_repro_retry_count(),
                         ),
                     ));
+                }
+
+                // Drive firmware goes in-band through Scout only: a Redfish
+                // upload would hand the image to the BMC, and no Core script
+                // knows the drives.
+                if let FirmwareComponentType::Drive { model } = firmware_type {
+                    return Err(StateHandlerError::GenericError(eyre!(
+                        "no scout firmware script for drive model {model} on vendor={}, model={}; set a script URL on the firmware version or package a drive-<model> script",
+                        fw_info.vendor,
+                        fw_info.model,
+                    )));
                 }
 
                 if to_install.script.is_some() {

@@ -281,6 +281,7 @@ impl<B: Bmc> ExploredComputerSystem<B> {
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
                 serial_console_ssh_port,
+                part_number: self.system.raw().part_number.clone().flatten(),
                 ..Default::default()
             }
         };

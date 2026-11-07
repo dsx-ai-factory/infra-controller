@@ -33,8 +33,8 @@ use ::rpc::forge::{
 use carbide_network::ip::prefix::{IpNet, Ipv6Net, aggregate};
 use carbide_network::virtualization::{VpcVirtualizationType, build_dual_stack_list};
 use carbide_rpc_utils::dhcp::{
-    DhcpConfig, DhcpV6ServerId, HostConfig, ServiceConfig, ServiceInterfaceReservations,
-    ServiceLink, ServiceLinkV4, ServiceLinkV6, ServiceReservation,
+    DhcpConfig, DhcpV6ServerId, HostConfig, ServiceConfig, ServiceDhcpInterfaceReservations,
+    ServiceDhcpReservation, ServiceLink, ServiceLinkV4, ServiceLinkV6,
 };
 use eyre::WrapErr;
 use mac_address::MacAddress;
@@ -45,7 +45,7 @@ use tokio::process::Command as TokioCommand;
 use tokio::time::timeout;
 
 use crate::nvue::NetworkSecurityGroupRule;
-use crate::{HBNDeviceNames, acl_rules, dhcp, hbn, nvue};
+use crate::{HBNDeviceNames, acl_rules, dhcp, hbn, nvue, service_network};
 
 /// None of the files we deal with should be bigger than this
 const MAX_EXPECTED_SIZE: u64 = 1048576; // 1 MiB
@@ -241,8 +241,8 @@ impl NvueClientContext {
 
     // Wrap the inner nvue_client's `push_config()` and try to avoid re-applying
     // a configuration we're already using. Returns Ok(Some(revision_id)) when
-    // a revision was applied, Ok(None) if the config was unchanged, and
-    // otherwise passes through errors from the inner client.
+    // a revision was applied, Ok(None) if the config was unchanged, and clears
+    // the retained hash before passing through errors from the inner client.
     async fn update_config(
         &mut self,
         config: &NvueConfig,
@@ -254,9 +254,29 @@ impl NvueClientContext {
         {
             Ok(None)
         } else {
-            let revision_id = self.nvue_client.push_config(config).await?;
-            self.last_applied_hash.replace(new_hash);
-            Ok(revision_id)
+            let result = self.nvue_client.push_config(config).await;
+            self.record_update_result(new_hash, result)
+        }
+    }
+
+    /// Records a confirmed NVUE result or discards the retained hash because a failed push cannot
+    /// prove which configuration remains applied.
+    fn record_update_result(
+        &mut self,
+        new_hash: u64,
+        result: Result<Option<String>, NvueClientError>,
+    ) -> Result<Option<String>, NvueClientError> {
+        match result {
+            Ok(revision_id) => {
+                self.last_applied_hash.replace(new_hash);
+                Ok(revision_id)
+            }
+            Err(error) => {
+                // Treat every failed push as ambiguous because an error can arrive after NVUE
+                // accepted the apply request but before its resulting revision was observed.
+                self.last_applied_hash.take();
+                Err(error)
+            }
         }
     }
 }
@@ -465,19 +485,19 @@ fn ipv6_segment_prefix(interface: &FlatInterfaceConfig, legacy_fallback: &str) -
     normalized_ipv6_segment_prefix(address).map(|prefix| prefix.to_string())
 }
 
-/// Builds stateful RA inputs for the existing primary-DPU admin VLAN SVI.
+/// Builds stateful RA inputs from an admin host `/128` and its containing segment.
 ///
+/// Callers must select admin ports only on the primary DPU.
 /// The canonical address entry keeps the host `/128` distinct from the
 /// containing segment so the host route cannot become the advertised prefix.
 fn admin_ipv6_router_advertisement(
     virtualization_type: VpcVirtualizationType,
-    interface: &FlatInterfaceConfig,
     address: &rpc::InterfaceAddressConfig,
     rdnss_servers: &[Ipv6Addr],
 ) -> Option<nvue::Ipv6RouterAdvertisementConfig> {
     // The caller supplies admin ports only on the primary DPU. Keep the
-    // render-side guard for the FNN L2 SVI that can actually emit RA.
-    if virtualization_type != VpcVirtualizationType::Fnn || !interface.is_l2_segment {
+    // render-side FNN guard for both the VLAN SVI and the routed PF.
+    if virtualization_type != VpcVirtualizationType::Fnn {
         return None;
     }
 
@@ -497,6 +517,18 @@ fn admin_ipv6_router_advertisement(
         mode: nvue::Ipv6RouterAdvertisementMode::Stateful,
         rdnss_servers: rdnss_servers.to_vec(),
     })
+}
+
+/// Selects the family-neutral host VRF loopback with legacy IPv4 fallback so rendering and
+/// shared-VPC validation use the same address.
+/// Callers must validate the family-neutral address entries before selecting the loopback.
+#[allow(deprecated)]
+pub(super) fn tenant_vrf_loopback_ip(interface: &FlatInterfaceConfig) -> Option<&str> {
+    interface
+        .addresses
+        .iter()
+        .find_map(|address| address.tenant_vrf_loopback_ip.as_deref())
+        .or(interface.tenant_vrf_loopback_ip.as_deref())
 }
 
 /// Update the NVUE network config, returning whether NVUE applied a change.
@@ -565,16 +597,18 @@ pub(super) async fn update_nvue(
         access_vlans
     };
 
-    let (has_stateful_nsg, network_security_groups) =
-        build_network_security_group_rules(&nc.tenant_interfaces)?;
+    let service_networks = service_network::validate_and_build_ports(nc)?;
+    let (has_stateful_nsg, network_security_groups) = build_network_security_group_rules(nc)?;
 
-    // If we aren't on the admin network _or_ if we are the primary DPU
-    // then we should be enabled for tenancy (i.e. VRFs and related config)
-    let tenancy_enabled = !nc.use_admin_network || nc.is_primary_dpu;
+    // Host port selection follows use_admin_network and is_primary_dpu. Service ports retain their
+    // accepted VRFs during boot and release on secondary DPUs, whose Admin responses contain no host
+    // port. Core must omit service endpoints from primary Admin responses.
+    let tenancy_enabled =
+        !nc.use_admin_network || nc.is_primary_dpu || !nc.service_interfaces.is_empty();
 
     let physical_name = hbn_device_names.reps[0].to_string();
     let (_, rdnss_servers) = split_addresses_by_family(&service_addrs.nameservers);
-    let networks = if nc.use_admin_network {
+    let mut networks = if nc.use_admin_network {
         if nc.is_primary_dpu {
             let admin_interface = nc
                 .admin_interface
@@ -602,15 +636,19 @@ pub(super) async fn update_nvue(
                 } else {
                     None
                 },
-                gateway_cidr: admin_interface.gateway.clone().unwrap_or_default(),
+                gateway_cidrs: admin_interface
+                    .gateway
+                    .iter()
+                    .filter(|address| !address.is_empty())
+                    .cloned()
+                    .collect(),
                 ipv6_port_config: admin_ipv6.map(|ipv6| nvue::Ipv6PortConfig {
-                    gateway_cidr: normalized_ipv6_segment_prefix(ipv6)
-                        .map(|prefix| prefix.to_string())
+                    gateway_cidrs: normalized_ipv6_segment_prefix(ipv6)
+                        .map(|prefix| vec![prefix.to_string()])
                         .unwrap_or_default(),
                     svi_ip: ipv6.svi_ip.clone(),
                     router_advertisement: admin_ipv6_router_advertisement(
                         vpc_virtualization_type,
-                        admin_interface,
                         ipv6,
                         &rdnss_servers,
                     ),
@@ -622,7 +660,7 @@ pub(super) async fn update_nvue(
                     &admin_interface.vpc_peer_vnis,
                 ),
                 svi_ip: admin_interface.svi_ip.clone(),
-                tenant_vrf_loopback_ip: admin_interface.tenant_vrf_loopback_ip.clone(),
+                tenant_vrf_loopback_ip: tenant_vrf_loopback_ip(admin_interface).map(str::to_owned),
                 network_security_group_id: None, // NSGs are not applied on the admin network.
                 routing_profile: admin_interface
                     .vpc_routing_profile
@@ -641,6 +679,7 @@ pub(super) async fn update_nvue(
                     // Why false in legacy case? ¯\_(ツ)_/¯
                     false
                 },
+                is_service: false,
             }]
         } else {
             vec![]
@@ -675,7 +714,12 @@ pub(super) async fn update_nvue(
                     .map(|v6| v6.interface_prefix.clone()),
                 vni: Some(net.vni), // TODO should this be nc.vni_device?
                 l3_vni: Some(net.vpc_vni),
-                gateway_cidr: net.gateway.clone().unwrap_or_default(),
+                gateway_cidrs: net
+                    .gateway
+                    .iter()
+                    .filter(|address| !address.is_empty())
+                    .cloned()
+                    .collect(),
                 ipv6_port_config: net.ipv6_interface_config.as_ref().map(|v6| {
                     // New configs derive the DPU address from Core's one
                     // authoritative prefix. Only configs without a V6 entry
@@ -683,7 +727,10 @@ pub(super) async fn update_nvue(
                     let gateway_cidr =
                         ipv6_segment_prefix(net, &v6.interface_prefix).unwrap_or_default();
                     nvue::Ipv6PortConfig {
-                        gateway_cidr,
+                        gateway_cidrs: (!gateway_cidr.is_empty())
+                            .then_some(gateway_cidr)
+                            .into_iter()
+                            .collect(),
                         svi_ip: v6.svi_ip.clone(),
                         router_advertisement: if vpc_virtualization_type
                             == VpcVirtualizationType::Fnn
@@ -702,7 +749,7 @@ pub(super) async fn update_nvue(
                     &net.vpc_peer_vnis,
                 ),
                 svi_ip: net.svi_ip.clone(),
-                tenant_vrf_loopback_ip: net.tenant_vrf_loopback_ip.clone(),
+                tenant_vrf_loopback_ip: tenant_vrf_loopback_ip(net).map(str::to_owned),
                 network_security_group_id: net
                     .network_security_group
                     .as_ref()
@@ -717,10 +764,12 @@ pub(super) async fn update_nvue(
                     .as_ref()
                     .map(nvue::InterfaceRoutingProfile::from),
                 is_l2_segment: net.is_l2_segment,
+                is_service: false,
             });
         }
         ifs
     };
+    networks.extend(service_networks);
 
     // We should explicitly guard against the absence of interfaces.
     // A follow-up should probably do some work to split out tenant enabled vs. disabled DPUs more clearly.
@@ -955,30 +1004,41 @@ pub(super) async fn update_nvue(
     }
 }
 
+/// Builds one NVUE policy per NSG ID so host and service interfaces share one ACL index.
 fn build_network_security_group_rules(
-    interfaces: &[FlatInterfaceConfig],
+    config: &ManagedHostNetworkConfigResponse,
 ) -> eyre::Result<(bool, Vec<nvue::NetworkSecurityGroup>)> {
-    let mut network_security_groups = HashMap::<String, nvue::NetworkSecurityGroup>::new();
+    let mut network_security_groups = BTreeMap::<String, nvue::NetworkSecurityGroup>::new();
     let mut has_stateful = false;
-    for iface in interfaces {
-        if let Some(ref nsg) = iface.network_security_group {
-            let rules = nsg
-                .rules
+
+    for nsg in config
+        .tenant_interfaces
+        .iter()
+        .filter_map(|interface| interface.network_security_group.as_ref())
+        .chain(
+            config
+                .service_interfaces
                 .iter()
-                .map(NetworkSecurityGroupRule::try_from)
-                .collect::<Result<Vec<NetworkSecurityGroupRule>, _>>()?;
+                .filter_map(|interface| interface.network_security_group.as_ref()),
+        )
+    {
+        let rules = nsg
+            .rules
+            .iter()
+            .map(NetworkSecurityGroupRule::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
 
-            has_stateful |= nsg.stateful_egress;
+        has_stateful |= nsg.stateful_egress;
 
-            network_security_groups
-                .entry(nsg.id.clone())
-                .or_insert_with(|| nvue::NetworkSecurityGroup {
-                    id: nsg.id.clone(),
-                    rules,
-                    stateful_egress: nsg.stateful_egress,
-                });
-        }
+        network_security_groups
+            .entry(nsg.id.clone())
+            .or_insert_with(|| nvue::NetworkSecurityGroup {
+                id: nsg.id.clone(),
+                rules,
+                stateful_egress: nsg.stateful_egress,
+            });
     }
+
     Ok((
         has_stateful,
         network_security_groups.into_values().collect(),
@@ -1190,7 +1250,7 @@ fn build_dhcp_server_config(
 struct DhcpServiceSlot {
     receiving_interface: String,
     vpc_id: Option<carbide_uuid::vpc::VpcId>,
-    reservations: Vec<ServiceReservation>,
+    reservations: Vec<ServiceDhcpReservation>,
 }
 
 /// Converts Core's fixed service-slot inventory and endpoint bindings into one validated DHCP
@@ -1305,7 +1365,7 @@ fn build_dhcp_service_config(
                 })
             }
         };
-        slot.reservations.push(ServiceReservation {
+        slot.reservations.push(ServiceDhcpReservation {
             attachment_id: service_interface
                 .attachment_id
                 .as_ref()
@@ -1343,7 +1403,7 @@ fn build_dhcp_service_config(
 
     let interface_groups = slots
         .into_values()
-        .map(|slot| ServiceInterfaceReservations {
+        .map(|slot| ServiceDhcpInterfaceReservations {
             receiving_interface: slot.receiving_interface,
             reservations: slot.reservations,
         })
@@ -1826,12 +1886,21 @@ fn prepare_dhcp_server_config(
     hbn_device_names: &HBNDeviceNames,
 ) -> eyre::Result<PreparedDhcpServerConfig> {
     let interfaces = if nc.use_admin_network {
-        let vlan_intf = nc
+        let interface_name = nc
             .admin_interface
             .as_ref()
-            .map(|x| format!("vlan{}", x.vlan_id))
+            .map(|interface| {
+                // Routed admin ports have no VLAN SVI for the DHCP listener.
+                if nc.network_virtualization_type() == ::rpc::forge::VpcVirtualizationType::Fnn
+                    && !interface.is_l2_segment
+                {
+                    hbn_device_names.reps[0].to_string()
+                } else {
+                    format!("vlan{}", interface.vlan_id)
+                }
+            })
             .ok_or_else(|| eyre::eyre!("admin interface missing on admin network"))?;
-        vec![vlan_intf]
+        vec![interface_name]
     } else {
         let mut interfaces = Vec::with_capacity(nc.tenant_interfaces.len());
         for interface in &nc.tenant_interfaces {
@@ -2440,6 +2509,186 @@ mod tests {
                 } => Fails,
             }
         );
+    }
+
+    /// Reapplies A after NVUE accepts B but its status request fails, preventing a retained A hash
+    /// from skipping recovery while B remains active.
+    #[tokio::test]
+    async fn nvue_push_error_reapplies_previously_confirmed_config() {
+        use std::sync::Arc;
+
+        use axum::body::to_bytes;
+        use axum::extract::{Request, State};
+        use axum::http::{Method, StatusCode};
+        use axum::response::IntoResponse;
+        use axum::{Json, Router};
+        use nvue_client::client::NvueServerAddress;
+        use serde_json::{Value, json};
+        use tokio::net::UnixListener;
+        use tokio::sync::{Mutex, oneshot};
+
+        /// Keeps staged and applied NVUE configuration separate so an observation error cannot undo
+        /// the accepted apply that makes restoring A necessary.
+        #[derive(Default)]
+        struct NvueState {
+            requests: Vec<String>,
+            revision_count: u32,
+            pending_config: Value,
+            applied_config: Value,
+            fail_next_observation: bool,
+        }
+
+        // Keep one server and context alive across A, ambiguous B, and restored A.
+        let directory = tempfile::tempdir().expect("NVUE socket directory should be created");
+        let socket_path = directory.path().join("nvue.sock");
+        let listener = UnixListener::bind(&socket_path).expect("NVUE socket should bind");
+        let state = Arc::new(Mutex::new(NvueState {
+            pending_config: json!({}),
+            applied_config: json!({}),
+            ..Default::default()
+        }));
+        let app = Router::new()
+            .fallback(
+                |State(state): State<Arc<Mutex<NvueState>>>, request: Request| async move {
+                    let (parts, body) = request.into_parts();
+                    let body = to_bytes(body, 1024 * 1024)
+                        .await
+                        .expect("NVUE request body should be readable");
+                    let mut state = state.lock().await;
+                    state
+                        .requests
+                        .push(format!("{} {}", parts.method, parts.uri));
+                    let response = match (parts.method, parts.uri.path()) {
+                        (Method::POST, "/nvue_v1/revision") => {
+                            state.revision_count += 1;
+                            json!({ (state.revision_count.to_string()): {} })
+                        }
+                        (Method::DELETE, "/nvue_v1/") => {
+                            state.pending_config = json!({});
+                            json!({})
+                        }
+                        (Method::PATCH, "/nvue_v1/") => {
+                            state.pending_config = serde_json::from_slice(&body)
+                                .expect("staged NVUE configuration should be JSON");
+                            json!({})
+                        }
+                        (Method::GET, "/nvue_v1/") => {
+                            if state.pending_config == state.applied_config {
+                                json!({})
+                            } else {
+                                json!({"changed": true})
+                            }
+                        }
+                        // Activate the staged configuration before any status request can fail.
+                        (Method::PATCH, path) if path.starts_with("/nvue_v1/revision/") => {
+                            state.applied_config = state.pending_config.clone();
+                            json!({"state": "applied"})
+                        }
+                        (Method::GET, path) if path.starts_with("/nvue_v1/revision/") => {
+                            // Fail only observation, preserving the configuration accepted above.
+                            if std::mem::take(&mut state.fail_next_observation) {
+                                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                            }
+                            json!({"state": "applied"})
+                        }
+                        _ => return StatusCode::NOT_FOUND.into_response(),
+                    };
+                    Json(response).into_response()
+                },
+            )
+            .with_state(Arc::clone(&state));
+        let (shutdown, shutdown_received) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_received.await;
+                })
+                .await
+                .expect("NVUE server should stop cleanly");
+        });
+        let client = NvueClient::new(NvueServerAddress::UnixSocket { socket_path })
+            .expect("NVUE client should be constructed");
+        let mut context = NvueClientContext::new(client);
+
+        // Only the hostname differs; the other fields provide an otherwise empty NVUE configuration.
+        let config_a = NvueConfig {
+            system: Some(json!({"hostname": "config-a"})), // Give A a distinct content hash.
+            bridge: None,
+            evpn: None,
+            interface: None,
+            nve: None,
+            router: None,
+            vrf: None,
+            acl: None,
+        };
+        let config_b = NvueConfig {
+            system: Some(json!({"hostname": "config-b"})), // B must be applied rather than skipped.
+            ..config_a.clone()
+        };
+        let expected_a = serde_json::to_value(&config_a).expect("A should serialize");
+        let expected_b = serde_json::to_value(&config_b).expect("B should serialize");
+
+        // Confirm A through the real client before arming the next status-request failure.
+        assert_eq!(
+            context
+                .update_config(&config_a)
+                .await
+                .expect("A should apply"),
+            Some("1".to_string())
+        );
+        {
+            let mut state = state.lock().await;
+            assert_eq!(state.applied_config, expected_a);
+            // Arm only B's status failure after confirming A is active.
+            state.fail_next_observation = true;
+        }
+
+        // Let B become active, then return the deliberately failed status observation to the context.
+        let error = context
+            .update_config(&config_b)
+            .await
+            .expect_err("B observation should fail after its apply succeeds");
+        // Verify B stayed active when its revision status request failed.
+        let NvueClientError::RequestFailed(failure) = error else {
+            panic!("expected an HTTP observation failure, got {error:?}");
+        };
+        assert_eq!(failure.method, Method::GET);
+        assert_eq!(failure.url.path(), "/nvue_v1/revision/2");
+        assert_eq!(
+            failure.source.status(),
+            Some(StatusCode::INTERNAL_SERVER_ERROR)
+        );
+        assert_eq!(state.lock().await.applied_config, expected_b);
+
+        // Return to A through the same context, proving the failure cannot leave its old hash trusted.
+        assert_eq!(
+            context
+                .update_config(&config_a)
+                .await
+                .expect("A should be restored"),
+            Some("3".to_string())
+        );
+        assert_eq!(state.lock().await.applied_config, expected_a);
+
+        // Each push must create, stage, diff, apply, and observe a revision, including restored A.
+        let expected_requests = (1..=3)
+            .flat_map(|revision| {
+                [
+                    "POST /nvue_v1/revision".to_string(),
+                    format!("DELETE /nvue_v1/?rev={revision}"),
+                    format!("PATCH /nvue_v1/?rev={revision}"),
+                    format!("GET /nvue_v1/?diff=applied&rev={revision}&filled=false"),
+                    format!("PATCH /nvue_v1/revision/{revision}"),
+                    format!("GET /nvue_v1/revision/{revision}"),
+                ]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(state.lock().await.requests, expected_requests);
+
+        // Close the client and join the server before removing its Unix socket directory.
+        drop(context);
+        shutdown.send(()).expect("NVUE server should be running");
+        server.await.expect("NVUE server task should finish");
     }
 
     /// Verifies unresolved Core-owned route targets stop `update_nvue` before
@@ -3911,6 +4160,152 @@ esac
         Ok(())
     }
 
+    /// Adds one fixed service slot with complete selected-VPC state so renderer tests exercise the
+    /// same response contract accepted by the periodic fetcher.
+    #[allow(deprecated)]
+    fn add_service_slot(
+        config: &mut rpc::ManagedHostNetworkConfigResponse,
+        link_prefixes: &[&str],
+        overlapping_host_interface: Option<usize>,
+        network_security_group: Option<rpc::FlatInterfaceNetworkSecurityGroupConfig>,
+        leak_default_route_from_underlay: bool,
+    ) {
+        // Reuse shared host VPC state when requested; otherwise construct one service-only VPC.
+        let (
+            vpc_vni,
+            vpc_prefixes,
+            vpc_peer_prefixes,
+            vpc_peer_vnis,
+            mut routing_profile,
+            loopback,
+        ) = if let Some(index) = overlapping_host_interface {
+            let host = &config.tenant_interfaces[index];
+            (
+                host.vpc_vni,
+                host.vpc_prefixes.clone(),
+                host.vpc_peer_prefixes.clone(),
+                host.vpc_peer_vnis.clone(),
+                host.vpc_routing_profile.clone().unwrap(),
+                host.tenant_vrf_loopback_ip.clone(),
+            )
+        } else {
+            (
+                1_500_001,
+                vec!["192.0.2.0/24".to_string(), "2001:db8:100::/48".to_string()],
+                vec!["198.51.100.0/24".to_string()],
+                vec![1_500_002],
+                rpc::RoutingProfile::default(),
+                Some("10.217.5.200".to_string()),
+            )
+        };
+        routing_profile.leak_default_route_from_underlay = leak_default_route_from_underlay;
+
+        // Install the complete fixed inventory before adding endpoints that reference its slot.
+        config.network_virtualization_type = Some(rpc::VpcVirtualizationType::Fnn.into());
+        config.site_global_vpc_vni = None;
+        config.vpc_peer_vnis_authoritative = true;
+        config.service_vpc_slot_inventory = Some(rpc::ServiceVpcSlotInventory {
+            slots: vec![rpc::ServiceVpcSlot {
+                slot_index: 0,
+                hbn_interface_name: "iface_svc_0".to_string(),
+            }],
+        });
+
+        // Give every requested link distinct stable identities while repeating shared VPC policy.
+        config.service_interfaces = link_prefixes
+            .iter()
+            .enumerate()
+            .map(|(index, link_prefix)| {
+                let identity = index + 1;
+                rpc::ManagedHostServiceInterfaceConfig {
+                    service_id: format!("10000000-0000-0000-0000-{identity:012}"),
+                    attachment_id: Some(::rpc::common::Uuid {
+                        value: format!("20000000-0000-0000-0000-{identity:012}"),
+                    }),
+                    interface_ordinal: 0,
+                    slot_index: 0, // Bind every endpoint to the fixed inventory slot above.
+                    vpc_id: Some("30000000-0000-0000-0000-000000000001".parse().unwrap()),
+                    vpc_vni,
+                    vpc_prefixes: vpc_prefixes.clone(),
+                    vpc_peer_prefixes: vpc_peer_prefixes.clone(),
+                    vpc_peer_vnis: vpc_peer_vnis.clone(),
+                    vpc_routing_profile: Some(routing_profile.clone()),
+                    interface_routing_profile: None,
+                    network_security_group: network_security_group.clone(),
+                    mtu: Some(9_000), // Match the fixed DPF/CNI service MTU.
+                    link_prefix: (*link_prefix).to_string(),
+                    mac_address: format!("02:00:00:00:00:{identity:02x}"),
+                    internal_uuid: Some(::rpc::common::Uuid {
+                        value: format!("40000000-0000-0000-0000-{identity:012}"),
+                    }),
+                    tenant_vrf_loopback_ip: loopback.clone(),
+                }
+            })
+            .collect();
+    }
+
+    /// Builds a VPC-sourced NSG so callers can attach its empty form to exercise default deny
+    /// rather than the no-NSG fallback.
+    fn service_network_security_group(
+        id: &str,
+        rules: Vec<rpc::ResolvedNetworkSecurityGroupRule>,
+    ) -> rpc::FlatInterfaceNetworkSecurityGroupConfig {
+        rpc::FlatInterfaceNetworkSecurityGroupConfig {
+            id: id.to_string(),
+            version: "V1-T1791792000000000".to_string(),
+            source: rpc::NetworkSecurityGroupSource::NsgSourceVpc.into(),
+            rules,
+            stateful_egress: false,
+        }
+    }
+
+    /// Renders one complete response through the startup-file path so service assertions inspect
+    /// the same YAML written for HBN rather than an intermediate Rust model.
+    async fn render_startup_yaml(
+        config: &rpc::ManagedHostNetworkConfigResponse,
+    ) -> eyre::Result<String> {
+        // Create only the HBN paths that the startup-file renderer writes.
+        let tempdir = tempfile::tempdir()?;
+        let hbn_root = tempdir.path();
+        fs::create_dir_all(hbn_root.join("var/support"))?;
+        fs::create_dir_all(hbn_root.join("etc/cumulus/acl/policy.d"))?;
+
+        // Render without posting to NVUE so assertions can inspect deterministic desired state.
+        update_nvue(
+            VpcVirtualizationType::Fnn,
+            NvueUpdateFlavor::StartupFile {
+                hbn_root,
+                skip_post: true,
+            },
+            config,
+            &test_service_addresses(),
+            HBNDeviceNames::hbn_23(),
+            None,
+            None,
+        )
+        .await?;
+
+        // Read the exact file that a later live apply would submit.
+        fs::read_to_string(hbn_root.join(nvue::PATH)).map_err(Into::into)
+    }
+
+    /// Collects one port's rendered ACL references so policy tests can compare wiring without
+    /// depending on a generated NSG index.
+    fn rendered_acl_names(
+        documents: &serde_yaml::Value,
+        interface: &str,
+    ) -> std::collections::BTreeSet<String> {
+        documents.as_sequence().expect("two YAML documents")[1]["set"]["interface"][interface]
+            ["acl"]
+            .as_mapping()
+            .into_iter()
+            .flatten()
+            .filter_map(|(name, _)| name.as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// Proves an interrupted service-bearing NVUE apply remains unapplied and is retried from the
+    /// saved desired YAML after an agent restart.
     #[tokio::test]
     async fn startup_file_retries_after_interrupted_apply() -> eyre::Result<()> {
         use std::os::unix::fs::PermissionsExt;
@@ -3920,8 +4315,15 @@ esac
         if let Some(root) = std::env::var_os("NVUE_STARTUP_TEST_ROOT") {
             let root = PathBuf::from(root);
             let stage = std::env::var("NVUE_STARTUP_TEST_STAGE")?;
-            let virtualization_type = VpcVirtualizationType::EthernetVirtualizer;
-            let network_config = netconf(virtualization_type, 32, 24, false, None, true, false);
+            let virtualization_type = VpcVirtualizationType::Fnn;
+            let mut network_config = netconf(virtualization_type, 32, 24, false, None, true, false);
+            add_service_slot(
+                &mut network_config,
+                &["192.0.2.10/31", "192.0.2.12/31"],
+                None,
+                None,
+                false,
+            );
             let update = async |skip_post| {
                 super::update_nvue(
                     virtualization_type,
@@ -3954,6 +4356,7 @@ esac
             return Ok(());
         }
 
+        // Build the shared fake HBN filesystem and crictl shim used by every process stage.
         let directory = tempfile::tempdir()?;
         let root = directory.path();
         fs::create_dir_all(root.join("var/support"))?;
@@ -3999,7 +4402,15 @@ esac
         run_startup_file_attempt(root, "save").await?;
         assert!(!root.join("commands").exists(), "skip_reload ran a command");
         let desired = fs::read_to_string(root.join(nvue::PATH))?;
+        assert!(
+            desired.contains("iface_svc_0:")
+                && desired.contains("192.0.2.10/31: {}")
+                && desired.contains("192.0.2.12/31: {}"),
+            "saved desired state must include the grouped service port"
+        );
 
+        // Fail the first live apply so the previous NVUE state and saved desired YAML remain
+        // observable.
         run_startup_file_attempt(root, "failure").await?;
         assert_eq!(
             fs::read_to_string(root.join("applied.yaml"))?,
@@ -4012,12 +4423,14 @@ esac
         let attempted_apply = "nv config replace /var/support/nvue_startup.yaml\nnv config diff\nnv config apply -y\n";
         assert_eq!(fs::read_to_string(root.join("commands"))?, attempted_apply);
 
+        // Retry the saved desired YAML to confirm apply precedes the HBN restart.
         run_startup_file_attempt(root, "retry").await?;
         assert_eq!(fs::read_to_string(root.join("applied.yaml"))?, desired);
         let successful_retry =
             format!("{attempted_apply}{attempted_apply}supervisorctl restart nl2doca\n");
         assert_eq!(fs::read_to_string(root.join("commands"))?, successful_retry);
 
+        // Reconcile the applied YAML again to confirm unchanged state detaches without a restart.
         run_startup_file_attempt(root, "unchanged").await?;
         assert_eq!(fs::read_to_string(root.join("applied.yaml"))?, desired);
         assert_eq!(
@@ -4027,6 +4440,715 @@ esac
             )
         );
         assert!(!root.join("pending.yaml").exists());
+        Ok(())
+    }
+
+    /// Verifies grouped endpoint removal preserves the host port, shared VRF, BGP neighbor, and host
+    /// loopback, accepts a later service loopback for that VRF, and removes that loopback when the
+    /// service endpoints depart.
+    /// Also verifies MTU omission so service ports follow existing host-port rendering.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn groups_service_endpoints_and_preserves_shared_vpc_state_on_removal() -> eyre::Result<()>
+    {
+        // Build one host VPC with three hidden endpoints sharing its fixed service slot.
+        let mut config = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        // Add the IPv6 link's containing VPC prefix and a host loopback so validation sees one
+        // shared VPC and later removals can distinguish host and service loopbacks.
+        config.tenant_interfaces[1]
+            .vpc_prefixes
+            .push("2001:db8:100::/48".to_string());
+        config.tenant_interfaces[1].tenant_vrf_loopback_ip = Some("10.217.5.200".to_string());
+        add_service_slot(
+            &mut config,
+            &["10.217.5.168/31", "10.217.5.170/31", "2001:db8:100::10/127"],
+            Some(1),
+            None,
+            false,
+        );
+
+        // Render all endpoints and inspect their address set on the shared slot port.
+        let output = render_startup_yaml(&config).await?;
+        let documents: serde_yaml::Value = serde_yaml::from_str(&output)?;
+        let set = &documents.as_sequence().expect("two YAML documents")[1]["set"];
+        let service_port = &set["interface"]["iface_svc_0"];
+        let addresses = service_port["ip"]["address"]
+            .as_mapping()
+            .expect("service port has addresses");
+        for address in ["10.217.5.168/31", "10.217.5.170/31", "2001:db8:100::10/127"] {
+            assert!(
+                addresses.contains_key(serde_yaml::Value::String(address.to_string())),
+                "missing grouped service address {address}"
+            );
+        }
+        assert!(service_port["link"].get("mtu").is_none());
+        assert_eq!(service_port["ip"]["vrf"].as_str(), Some("vpc_1025186"));
+        assert_eq!(
+            set["vrf"]["vpc_1025186"]["loopback"]["ip"]["address"]["10.217.5.200/32"]
+                .as_mapping()
+                .map(|mapping| mapping.len()),
+            Some(0)
+        );
+
+        // Remove only the first endpoint and prove its address leaves without disturbing its peers.
+        config.service_interfaces.remove(0);
+        let survivor_output = render_startup_yaml(&config).await?;
+        let survivor_documents: serde_yaml::Value = serde_yaml::from_str(&survivor_output)?;
+        let survivor_addresses = survivor_documents
+            .as_sequence()
+            .expect("two YAML documents")[1]["set"]["interface"]["iface_svc_0"]["ip"]["address"]
+            .as_mapping()
+            .expect("surviving service port has addresses");
+        assert!(
+            !survivor_addresses
+                .contains_key(serde_yaml::Value::String("10.217.5.168/31".to_string()))
+        );
+        assert!(
+            survivor_addresses
+                .contains_key(serde_yaml::Value::String("10.217.5.170/31".to_string()))
+        );
+        assert!(survivor_addresses.contains_key(serde_yaml::Value::String(
+            "2001:db8:100::10/127".to_string()
+        )));
+
+        // Remove the final endpoints and prove the host keeps its port, VRF, and routing neighbor.
+        config.service_interfaces.clear();
+        let host_only_output = render_startup_yaml(&config).await?;
+        let host_only_documents: serde_yaml::Value = serde_yaml::from_str(&host_only_output)?;
+        let host_only_set = &host_only_documents
+            .as_sequence()
+            .expect("two YAML documents")[1]["set"];
+        assert!(host_only_set["interface"]["iface_svc_0"].is_null());
+        assert!(!host_only_set["interface"]["pf0hpf_if"].is_null());
+        assert!(!host_only_set["vrf"]["vpc_1025186"].is_null());
+        assert!(
+            !host_only_set["vrf"]["vpc_1025186"]["loopback"]["ip"]["address"]["10.217.5.200/32"]
+                .is_null()
+        );
+        assert!(
+            !host_only_set["vrf"]["vpc_1025186"]["router"]["bgp"]["neighbor"]["10.217.5.162"]
+                .is_null()
+        );
+
+        // Remove the host loopback, then attach one service endpoint carrying the VPC loopback.
+        config.tenant_interfaces[1].tenant_vrf_loopback_ip = None;
+        add_service_slot(&mut config, &["10.217.5.168/31"], Some(1), None, false);
+        config.service_interfaces[0].tenant_vrf_loopback_ip = Some("10.217.5.201".to_string());
+
+        // The later service port must merge its loopback into the host-created VRF.
+        let merged_output = render_startup_yaml(&config).await?;
+        let merged_documents: serde_yaml::Value = serde_yaml::from_str(&merged_output)?;
+        let merged_set = &merged_documents.as_sequence().expect("two YAML documents")[1]["set"];
+        assert!(
+            !merged_set["vrf"]["vpc_1025186"]["loopback"]["ip"]["address"]["10.217.5.201/32"]
+                .is_null()
+        );
+
+        // Remove the endpoint that supplies the optional VPC loopback.
+        config.service_interfaces.clear();
+        let removed_output = render_startup_yaml(&config).await?;
+        let removed_documents: serde_yaml::Value = serde_yaml::from_str(&removed_output)?;
+        let removed_set = &removed_documents.as_sequence().expect("two YAML documents")[1]["set"];
+        // The service-supplied loopback is absent while the host BGP neighbor remains.
+        assert!(removed_set["vrf"]["vpc_1025186"]["loopback"].is_null());
+        assert!(
+            !removed_set["vrf"]["vpc_1025186"]["router"]["bgp"]["neighbor"]["10.217.5.162"]
+                .is_null()
+        );
+        Ok(())
+    }
+
+    /// Verifies an IPv6 loopback supplied by either a host or service port renders once as a /128
+    /// on their shared VRF, independently of the IPv4 service link family.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn renders_shared_vpc_ipv6_loopback_from_host_or_service() -> eyre::Result<()> {
+        use carbide_test_support::Outcome::Yields;
+        use carbide_test_support::{Case, check_cases_async};
+
+        // Compare the complete address map so an extra loopback or an incorrect mask fails either case.
+        let expected_loopbacks: serde_yaml::Value = serde_yaml::from_str("2001:db8::3/128: {}\n")?;
+        check_cases_async(
+            [
+                // A service loopback must merge into the VRF already created by the host port.
+                Case {
+                    scenario: "service supplies loopback",
+                    input: (None, Some("2001:db8::3")),
+                    expect: Yields(expected_loopbacks.clone()),
+                },
+                // An omitted service loopback must preserve the host's canonical IPv6 value.
+                Case {
+                    scenario: "host supplies loopback",
+                    input: (Some("2001:db8::3"), None),
+                    expect: Yields(expected_loopbacks),
+                },
+            ],
+            |(host_loopback, service_loopback)| async move {
+                // Keep the service link IPv4 so its family cannot accidentally determine the loopback's mask.
+                let mut config = netconf(
+                    VpcVirtualizationType::Fnn,
+                    32,
+                    24,
+                    false,
+                    None,
+                    false,
+                    false,
+                );
+                let host = &mut config.tenant_interfaces[1];
+                // IPv6 loopbacks live only in the family-neutral list, never in the legacy IPv4 field.
+                host.tenant_vrf_loopback_ip = None;
+                host.addresses = host_loopback
+                    .map(|loopback| rpc::InterfaceAddressConfig {
+                        address_family: rpc::AddressFamily::V6.into(),
+                        tenant_vrf_loopback_ip: Some(loopback.to_string()),
+                        ..Default::default()
+                    })
+                    .into_iter()
+                    .collect();
+                add_service_slot(&mut config, &["10.217.5.168/31"], Some(1), None, false);
+                config.service_interfaces[0].tenant_vrf_loopback_ip =
+                    service_loopback.map(str::to_owned);
+
+                // Render the shared host/service VPC through the normal startup-file conversion.
+                let output = render_startup_yaml(&config)
+                    .await
+                    .map_err(|error| format!("{error:#}"))?;
+                let documents: serde_yaml::Value =
+                    serde_yaml::from_str(&output).map_err(|error| error.to_string())?;
+
+                // Compare this VRF's complete loopback map with the one /128 required by both cases.
+                Ok::<_, String>(
+                    documents.as_sequence().expect("two YAML documents")[1]["set"]["vrf"]
+                        ["vpc_1025186"]["loopback"]["ip"]["address"]
+                        .clone(),
+                )
+            },
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Verifies independent fixed slots render separate service VPCs, retain multiple IPv6 links
+    /// on one port, and remove every service-only port and VRF after the final endpoint departs.
+    #[tokio::test]
+    async fn renders_independent_service_vpc_groups_and_cleans_them_up() -> eyre::Result<()> {
+        // Build one IPv6 service VPC with two service links on its fixed slot.
+        let mut config = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        add_service_slot(
+            &mut config,
+            &["2001:db8:100::10/127", "2001:db8:100::12/127"],
+            None,
+            None,
+            false,
+        );
+
+        // Add a second slot whose endpoint belongs to a different IPv4 VPC.
+        config
+            .service_vpc_slot_inventory
+            .as_mut()
+            .expect("service fixture has fixed inventory")
+            .slots
+            .push(rpc::ServiceVpcSlot {
+                slot_index: 1,
+                hbn_interface_name: "iface_svc_1".to_string(),
+            });
+        let mut second_group = config.service_interfaces[0].clone();
+        second_group.service_id = "10000000-0000-0000-0000-000000000003".to_string();
+        second_group.attachment_id = Some(::rpc::common::Uuid {
+            value: "20000000-0000-0000-0000-000000000003".to_string(),
+        });
+        second_group.slot_index = 1;
+        second_group.vpc_id = Some("30000000-0000-0000-0000-000000000002".parse().unwrap());
+        second_group.vpc_vni = 1_500_003;
+        second_group.vpc_prefixes = vec!["198.51.100.0/24".to_string()];
+        second_group.vpc_peer_prefixes.clear();
+        second_group.vpc_peer_vnis = vec![1_500_004];
+        second_group.vpc_routing_profile = Some(rpc::RoutingProfile::default());
+        second_group.link_prefix = "198.51.100.10/31".to_string();
+        second_group.mac_address = "02:00:00:00:00:03".to_string();
+        second_group.internal_uuid = Some(::rpc::common::Uuid {
+            value: "40000000-0000-0000-0000-000000000003".to_string(),
+        });
+        second_group.tenant_vrf_loopback_ip = Some("10.217.5.201".to_string());
+        config.service_interfaces.push(second_group);
+
+        // Render both groups and inspect each port and VRF independently.
+        let output = render_startup_yaml(&config).await?;
+        let documents: serde_yaml::Value = serde_yaml::from_str(&output)?;
+        let set = &documents.as_sequence().expect("two YAML documents")[1]["set"];
+        let address_keys = |value: &serde_yaml::Value| {
+            value
+                .as_mapping()
+                .expect("service port addresses")
+                .keys()
+                .map(|address| address.as_str().expect("address string").to_string())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(
+            address_keys(&set["interface"]["iface_svc_0"]["ip"]["address"]),
+            std::collections::BTreeSet::from([
+                "2001:db8:100::10/127".to_string(),
+                "2001:db8:100::12/127".to_string(),
+            ])
+        );
+        assert_eq!(
+            address_keys(&set["interface"]["iface_svc_1"]["ip"]["address"]),
+            std::collections::BTreeSet::from(["198.51.100.10/31".to_string()])
+        );
+        assert_eq!(
+            set["interface"]["iface_svc_0"]["ip"]["vrf"].as_str(),
+            Some("vpc_1500001")
+        );
+        assert_eq!(
+            set["interface"]["iface_svc_1"]["ip"]["vrf"].as_str(),
+            Some("vpc_1500003")
+        );
+        assert!(
+            set["vrf"]["vpc_1500001"]["evpn"]["vni"]["1500001"]
+                .as_mapping()
+                .is_some()
+        );
+        assert!(
+            set["vrf"]["vpc_1500003"]["evpn"]["vni"]["1500003"]
+                .as_mapping()
+                .is_some()
+        );
+
+        // Remove every endpoint while retaining the fixed service-slot inventory.
+        config.service_interfaces.clear();
+        let empty_output = render_startup_yaml(&config).await?;
+        let empty_documents: serde_yaml::Value = serde_yaml::from_str(&empty_output)?;
+        let empty_set = &empty_documents.as_sequence().expect("two YAML documents")[1]["set"];
+
+        // Neither unused slot nor either service-only VRF may remain in HBN desired state.
+        for interface in ["iface_svc_0", "iface_svc_1"] {
+            assert!(empty_set["interface"][interface].is_null());
+        }
+        for vrf in ["vpc_1500001", "vpc_1500003"] {
+            assert!(empty_set["vrf"][vrf].is_null());
+        }
+        Ok(())
+    }
+
+    /// Verifies one NSG shared by instance and VPC attachments uses one ACL index because the NSG
+    /// ID is the sole rendered policy identity.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn deduplicates_host_and_service_nsg_by_id() -> eyre::Result<()> {
+        // Build one valid host/service overlap that references one NSG ID through both source types.
+        let mut config = netconf(VpcVirtualizationType::Fnn, 32, 24, true, None, false, false);
+        config.tenant_interfaces[1].tenant_vrf_loopback_ip = Some("10.217.5.200".to_string());
+        let service_nsg = {
+            let mut host_nsg = config.tenant_interfaces[1]
+                .network_security_group
+                .clone()
+                .expect("host fixture has a security group");
+            host_nsg.id = "shared-nsg".to_string();
+            host_nsg.source = rpc::NetworkSecurityGroupSource::NsgSourceInstance.into();
+            config.tenant_interfaces[1].network_security_group = Some(host_nsg.clone());
+
+            let mut service_nsg = host_nsg;
+            service_nsg.source = rpc::NetworkSecurityGroupSource::NsgSourceVpc.into();
+            service_nsg
+        };
+        add_service_slot(
+            &mut config,
+            &["10.217.5.168/31"],
+            Some(1),
+            Some(service_nsg),
+            false,
+        );
+
+        // Render the complete response through the startup-file path.
+        let output = render_startup_yaml(&config).await?;
+        let documents: serde_yaml::Value = serde_yaml::from_str(&output)?;
+        let host_acl = rendered_acl_names(&documents, "pf0hpf_if")
+            .into_iter()
+            .filter(|name| name.contains("security_group"))
+            .collect::<std::collections::BTreeSet<_>>();
+        let service_acl = rendered_acl_names(&documents, "iface_svc_0")
+            .into_iter()
+            .filter(|name| name.contains("security_group"))
+            .collect::<std::collections::BTreeSet<_>>();
+
+        // Collect every rendered NSG ACL so an unused duplicate definition set cannot survive.
+        let globally_defined_nsg_acls =
+            documents.as_sequence().expect("two YAML documents")[1]["set"]["acl"]
+                .as_mapping()
+                .expect("rendered ACL definitions")
+                .keys()
+                .filter_map(|name| name.as_str())
+                .filter(|name| name.contains("security_group"))
+                .map(str::to_string)
+                .collect::<std::collections::BTreeSet<_>>();
+
+        // Both ports reference the only four family/direction ACLs.
+        assert_eq!(host_acl.len(), 4);
+        assert_eq!(host_acl, service_acl);
+        assert_eq!(host_acl, globally_defined_nsg_acls);
+        Ok(())
+    }
+
+    /// Verifies hidden ports use only the selected VPC NSG rules, retain configured global deny
+    /// prefixes without an NSG, preserve attached-empty default deny, inherit quarantine
+    /// overrides, honor default-route imports from an external routing profile, and render
+    /// service-only VPCs without tenant VRF loopbacks so HBN can realize service endpoints when
+    /// `use_vpc_vrf_loopback` is false.
+    /// Secondary Admin service VRFs without host or isolation routes omit `static` and retain
+    /// BGP without emitting an explicit YAML null.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn renders_service_vpc_policy_without_host_nsg_fallback() -> eyre::Result<()> {
+        // Build an accepted host/service VPC overlap with intentionally distinct effective NSGs.
+        let mut distinct_policy =
+            netconf(VpcVirtualizationType::Fnn, 32, 24, true, None, false, false);
+        distinct_policy.tenant_interfaces[1]
+            .network_security_group
+            .as_mut()
+            .expect("host fixture has a security group")
+            .source = rpc::NetworkSecurityGroupSource::NsgSourceInstance.into();
+        let host_nsg_id = distinct_policy.tenant_interfaces[1]
+            .network_security_group
+            .as_ref()
+            .expect("host fixture has an instance security group")
+            .id
+            .clone();
+        distinct_policy.tenant_interfaces[1].tenant_vrf_loopback_ip =
+            Some("10.217.5.200".to_string());
+        // Give the selected VPC NSG a unique permit rule so its referenced ACL cannot be
+        // confused with the instance NSG or an unattached policy definition.
+        let selected_vpc_rule = rpc::ResolvedNetworkSecurityGroupRule {
+            src_prefixes: vec!["203.0.113.10/32".to_string()], // Identify the selected VPC rule.
+            dst_prefixes: vec!["198.51.100.10/32".to_string()], // Distinguish it from the host rule.
+            rule: Some(rpc::NetworkSecurityGroupRuleAttributes {
+                id: Some("service-vpc-rule".to_string()),
+                // Inspect this rule through the service ingress ACL.
+                direction: rpc::NetworkSecurityGroupRuleDirection::NsgRuleDirectionIngress.into(),
+                ipv6: false, // Match the IPv4 prefixes above.
+                protocol: rpc::NetworkSecurityGroupRuleProtocol::NsgRuleProtoAny.into(),
+                // Distinguish the selected VPC permit from the host deny policy.
+                action: rpc::NetworkSecurityGroupRuleAction::NsgRuleActionPermit.into(),
+                priority: 100,
+                ..Default::default()
+            }),
+        };
+
+        add_service_slot(
+            &mut distinct_policy,
+            &["10.217.5.168/31"],
+            Some(1),
+            Some(service_network_security_group(
+                "service-vpc-nsg",
+                vec![selected_vpc_rule],
+            )),
+            false,
+        );
+
+        // Distinct host and service NSGs remain separate per-port ACL references in the shared VRF.
+        let distinct_output = render_startup_yaml(&distinct_policy).await?;
+        let distinct_documents: serde_yaml::Value = serde_yaml::from_str(&distinct_output)?;
+        let host_acl = rendered_acl_names(&distinct_documents, "pf0hpf_if")
+            .into_iter()
+            .filter(|name| name.contains("security_group"))
+            .collect::<std::collections::BTreeSet<_>>();
+        let service_acl = rendered_acl_names(&distinct_documents, "iface_svc_0")
+            .into_iter()
+            .filter(|name| name.contains("security_group"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(!host_acl.is_empty() && !service_acl.is_empty());
+        assert_ne!(
+            host_acl, service_acl,
+            "host NSG {host_nsg_id} leaked to the service port"
+        );
+
+        // The ingress ACL referenced by the service port must contain the selected VPC rule.
+        let service_ingress_acl = service_acl
+            .iter()
+            .find(|name| name.ends_with("security_group_ipv4_host_ingress"))
+            .expect("service port has an IPv4 ingress NSG ACL");
+        let rendered_selected_vpc_rule = &distinct_documents
+            .as_sequence()
+            .expect("two YAML documents")[1]["set"]["acl"][service_ingress_acl.as_str()]["rule"]["2000"];
+        assert!(
+            rendered_selected_vpc_rule["action"]["permit"]
+                .as_mapping()
+                .is_some()
+        );
+        assert_eq!(
+            rendered_selected_vpc_rule["match"]["ip"]["source-ip"].as_str(),
+            Some("203.0.113.10/32")
+        );
+        assert_eq!(
+            rendered_selected_vpc_rule["match"]["ip"]["dest-ip"].as_str(),
+            Some("198.51.100.10/32")
+        );
+
+        // Remove only the selected VPC NSG from the service endpoints.
+        for interface in &mut distinct_policy.service_interfaces {
+            interface.network_security_group = None;
+        }
+        let no_service_nsg_output = render_startup_yaml(&distinct_policy).await?;
+        let no_service_nsg_documents: serde_yaml::Value =
+            serde_yaml::from_str(&no_service_nsg_output)?;
+        // No service NSG reference remains after rendering, preventing fallback to the host NSG.
+        assert!(
+            rendered_acl_names(&no_service_nsg_documents, "iface_svc_0")
+                .iter()
+                .all(|name| !name.contains("security_group"))
+        );
+
+        // The service port retains exactly the configured global IPv4 deny policy without an NSG.
+        let no_service_nsg_set = &no_service_nsg_documents
+            .as_sequence()
+            .expect("two YAML documents")[1]["set"];
+        assert!(
+            no_service_nsg_set["interface"]["iface_svc_0"]["acl"]
+                ["p0000_deny_prefixes_ipv4"]["inbound"]
+                .as_mapping()
+                .is_some()
+        );
+        let deny_prefix_acl = &no_service_nsg_set["acl"]["p0000_deny_prefixes_ipv4"];
+        let deny_prefix_rules = deny_prefix_acl["rule"]
+            .as_mapping()
+            .expect("deny-prefix ACL rules");
+        assert_eq!(deny_prefix_rules.len(), 2);
+        for (priority, prefix) in [("1001", "192.0.2.0/24"), ("1002", "198.51.100.0/24")] {
+            let rule = &deny_prefix_acl["rule"][priority];
+            assert!(rule["action"]["deny"].as_mapping().is_some());
+            assert_eq!(rule["match"]["ip"]["dest-ip"].as_str(), Some(prefix));
+        }
+
+        // Attach a VPC NSG with no resolved rules to the service endpoints.
+        for interface in &mut distinct_policy.service_interfaces {
+            interface.network_security_group =
+                Some(service_network_security_group("service-empty-nsg", vec![]));
+        }
+        let empty_nsg_output = render_startup_yaml(&distinct_policy).await?;
+        let empty_nsg_documents: serde_yaml::Value = serde_yaml::from_str(&empty_nsg_output)?;
+        let empty_nsg_acls = rendered_acl_names(&empty_nsg_documents, "iface_svc_0")
+            .into_iter()
+            .filter(|name| name.contains("security_group"))
+            .collect::<std::collections::BTreeSet<_>>();
+        // The attached empty NSG retains all four family/direction ACLs with default-deny rules.
+        assert_eq!(empty_nsg_acls.len(), 4);
+        for suffix in [
+            "security_group_ipv4_host_egress",
+            "security_group_ipv6_host_egress",
+            "security_group_ipv4_host_ingress",
+            "security_group_ipv6_host_ingress",
+        ] {
+            let acl_name = empty_nsg_acls
+                .iter()
+                .find(|name| name.ends_with(suffix))
+                .unwrap_or_else(|| panic!("missing empty-NSG ACL {suffix}"));
+            assert!(
+                !empty_nsg_documents.as_sequence().expect("two YAML documents")[1]["set"]["acl"]
+                    [acl_name.as_str()]["rule"]["65535"]["action"]["deny"]
+                    .is_null()
+            );
+        }
+
+        // Enter the secondary-admin path independently of quarantine.
+        distinct_policy.use_admin_network = true;
+        distinct_policy.is_primary_dpu = false;
+        // Override the legacy site-fabric fallback with an explicitly empty resolved route list.
+        distinct_policy.site_fabric_null_routes = Some(rpc_common::StringList { items: vec![] });
+
+        // Secondary Admin responses suppress tenant host ports while retaining the service port.
+        let secondary_admin_output = render_startup_yaml(&distinct_policy).await?;
+        let secondary_admin_documents: serde_yaml::Value =
+            serde_yaml::from_str(&secondary_admin_output)?;
+        let secondary_admin_set = &secondary_admin_documents
+            .as_sequence()
+            .expect("two YAML documents")[1]["set"];
+        assert!(secondary_admin_set["interface"]["pf0hpf_if"].is_null());
+        assert!(!secondary_admin_set["interface"]["iface_svc_0"].is_null());
+
+        // Check membership to distinguish omission from null, while retaining BGP in the same router map.
+        let service_vrf_name = format!("vpc_{}", distinct_policy.service_interfaces[0].vpc_vni);
+        let secondary_admin_router =
+            &secondary_admin_set["vrf"][service_vrf_name.as_str()]["router"];
+        assert!(
+            !secondary_admin_router
+                .as_mapping()
+                .expect("service VRF router mapping")
+                .contains_key(serde_yaml::Value::from("static"))
+        );
+        assert!(secondary_admin_router["bgp"].as_mapping().is_some());
+
+        // Apply quarantine after proving the secondary-admin port-selection behavior.
+        distinct_policy
+            .managed_host_config
+            .as_mut()
+            .expect("fixture has managed-host config")
+            .quarantine_state = Some(rpc::ManagedHostQuarantineState {
+            mode: rpc::ManagedHostQuarantineMode::BlockAllTraffic.into(),
+            reason: Some("service policy test".to_string()),
+        });
+
+        // Quarantine adds exactly the four global deny ACL references to the retained service port.
+        let quarantined_output = render_startup_yaml(&distinct_policy).await?;
+        let quarantined_documents: serde_yaml::Value = serde_yaml::from_str(&quarantined_output)?;
+        let quarantine_acls = rendered_acl_names(&quarantined_documents, "iface_svc_0")
+            .into_iter()
+            .filter(|name| name.contains("security_policy_override"))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            quarantine_acls,
+            std::collections::BTreeSet::from([
+                "p0004_security_policy_override_ipv4_host_egress".to_string(),
+                "p0004_security_policy_override_ipv6_host_egress".to_string(),
+                "p0004_security_policy_override_ipv4_host_ingress".to_string(),
+                "p0004_security_policy_override_ipv6_host_ingress".to_string(),
+            ])
+        );
+
+        // Model `use_vpc_vrf_loopback = false` by omitting the service-only external VPC's loopback;
+        // the remaining fields provide its fixed slot, selected VPC policy, and default-route import.
+        let mut external = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        add_service_slot(&mut external, &["192.0.2.10/31"], None, None, true);
+        external.service_interfaces[0].tenant_vrf_loopback_ip = None;
+        let external_profile = external.service_interfaces[0]
+            .vpc_routing_profile
+            .as_mut()
+            .expect("service fixture has a routing profile");
+        // Give this service-only VPC distinct import and export targets so its rendered policy
+        // cannot be mistaken for the response-wide or host VPC targets.
+        external_profile.route_target_imports = vec![rpc_common::RouteTarget {
+            asn: 44_000,
+            vni: Some(55_000),
+            vni_self: false,
+        }];
+        external_profile.route_targets_on_exports = vec![rpc_common::RouteTarget {
+            asn: 77_000,
+            vni: Some(88_000),
+            vni_self: false,
+        }];
+
+        // Render the response containing the service-only VPC through the HBN startup-file path.
+        let external_output = render_startup_yaml(&external).await?;
+        let external_documents: serde_yaml::Value = serde_yaml::from_str(&external_output)?;
+        let set = &external_documents
+            .as_sequence()
+            .expect("two YAML documents")[1]["set"];
+        let service_port = &set["interface"]["iface_svc_0"];
+        let service_vrf = &set["vrf"]["vpc_1500001"];
+
+        // The service port and its EVPN VNI remain present while the VRF omits only the optional
+        // loopback.
+        assert_eq!(service_port["ip"]["vrf"].as_str(), Some("vpc_1500001"));
+        assert!(
+            service_port["ip"]["address"]["192.0.2.10/31"]
+                .as_mapping()
+                .is_some()
+        );
+        assert!(!service_vrf["evpn"]["enable"].is_null());
+        assert!(service_vrf["evpn"]["vni"]["1500001"].as_mapping().is_some());
+        assert!(
+            !service_vrf
+                .as_mapping()
+                .expect("service VPC VRF")
+                .contains_key(serde_yaml::Value::String("loopback".to_string()))
+        );
+
+        // Inspect only this service VRF's default imports and route targets.
+        let mapping_keys = |value: &serde_yaml::Value| {
+            value
+                .as_mapping()
+                .expect("routing value is a mapping")
+                .keys()
+                .map(|key| key.as_str().expect("routing key").to_string())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let policy = &set["router"]["policy"];
+        let ipv4 = &service_vrf["router"]["bgp"]["address-family"]["ipv4-unicast"];
+        let ipv6 = &service_vrf["router"]["bgp"]["address-family"]["ipv6-unicast"];
+        assert_eq!(
+            ipv4["route-import"]["from-vrf"]["route-map"].as_str(),
+            Some("FROM_DEFAULT_VRF_TO_vpc_1500001_MAP")
+        );
+        assert_eq!(
+            ipv6["route-import"]["from-vrf"]["route-map"].as_str(),
+            Some("FROM_DEFAULT_VRF_TO_vpc_1500001_MAP_V6")
+        );
+        assert_eq!(
+            mapping_keys(&ipv4["route-import"]["from-vrf"]["list"]),
+            std::collections::BTreeSet::from(["default".to_string()])
+        );
+        assert_eq!(
+            mapping_keys(&ipv6["route-import"]["from-vrf"]["list"]),
+            std::collections::BTreeSet::from(["default".to_string()])
+        );
+        assert_eq!(
+            mapping_keys(
+                &policy["prefix-list"]["FROM_DEFAULT_VRF_TO_vpc_1500001_PREFIX_LIST"]["rule"]["65534"]
+                    ["match"]
+            ),
+            std::collections::BTreeSet::from(["0.0.0.0/0".to_string()])
+        );
+        assert_eq!(
+            mapping_keys(
+                &policy["prefix-list"]["FROM_DEFAULT_VRF_TO_vpc_1500001_PREFIX_LIST_IPV6"]["rule"]
+                    ["65534"]["match"]
+            ),
+            std::collections::BTreeSet::from(["::/0".to_string()])
+        );
+        assert_eq!(
+            policy["route-map"]["FROM_DEFAULT_VRF_TO_vpc_1500001_MAP"]["rule"]["10"]["match"]
+                ["ip-prefix-list"]
+                .as_str(),
+            Some("FROM_DEFAULT_VRF_TO_vpc_1500001_PREFIX_LIST")
+        );
+        assert_eq!(
+            policy["route-map"]["FROM_DEFAULT_VRF_TO_vpc_1500001_MAP_V6"]["rule"]["10"]
+                ["match"]["ip-prefix-list"]
+                .as_str(),
+            Some("FROM_DEFAULT_VRF_TO_vpc_1500001_PREFIX_LIST_IPV6")
+        );
+        assert_eq!(
+            mapping_keys(&service_vrf["router"]["bgp"]["route-export"]["to-evpn"]["route-target"]),
+            std::collections::BTreeSet::from([
+                "11414:1500001".to_string(),
+                "11415:200".to_string(),
+                "77000:88000".to_string(),
+            ])
+        );
+        assert_eq!(
+            mapping_keys(
+                &service_vrf["router"]["bgp"]["route-import"]["from-evpn"]["route-target"]
+            ),
+            std::collections::BTreeSet::from([
+                "11111:22222".to_string(),
+                "11414:1500001".to_string(),
+                "11414:1500002".to_string(),
+                "44000:55000".to_string(),
+                "auto".to_string(),
+            ])
+        );
         Ok(())
     }
 
@@ -4411,6 +5533,7 @@ esac
 
     /// An IPv6-only admin response still uses an IPv4 DPU underlay. Its SVI, RA, and host
     /// route must render without an empty IPv4 static route or BGP network entry.
+    /// A loopback added to its canonical IPv6 entry must render as a /128 on the Admin VRF.
     #[tokio::test]
     #[allow(deprecated)]
     async fn stateful_ipv6_only_admin_renders_without_ipv4()
@@ -4558,6 +5681,181 @@ esac
             .expect("admin DHCP IPv6 host binding");
         assert_eq!(admin_ipv6.address, Some("2001:db8:9::3".parse()?));
         assert_eq!(admin_ipv6.prefix, "2001:db8:9::3/128");
+
+        // Add a loopback only to the canonical IPv6 entry after checking the retained Admin golden.
+        network_config
+            .admin_interface
+            .as_mut()
+            .expect("Admin interface")
+            .addresses[0]
+            .tenant_vrf_loopback_ip = Some("2001:db8:9::4".to_string());
+        let with_loopback = render_startup_yaml(&network_config).await?;
+        let documents: serde_yaml::Value = serde_yaml::from_str(&with_loopback)?;
+
+        // The primary Admin conversion must retain that address with an IPv6 host prefix.
+        assert!(
+            documents.as_sequence().expect("two YAML documents")[1]["set"]["vrf"]
+                ["vpc_7777"]["loopback"]["ip"]["address"]["2001:db8:9::4/128"]
+                .as_mapping()
+                .is_some()
+        );
+        Ok(())
+    }
+
+    /// Verifies routed admin renders existing gateway prefixes, PF DHCP/RA, and host routes
+    /// without a host-facing bridge or SVI, so enabling it preserves the client addressing contract.
+    /// Secondary admin service ports must retain link-prefix leaks because they use separate addressing.
+    #[tokio::test]
+    async fn routed_admin_preserves_subnet_addressing() -> eyre::Result<()> {
+        // Retain matching canonical and legacy addresses while selecting routed admin and host leaks.
+        let mut config = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        config.use_admin_network = true;
+        config.network_virtualization_type = Some(rpc::VpcVirtualizationType::Fnn.into());
+        let mut admin_interface = dual_stack_admin_interface();
+        admin_interface.is_l2_segment = false; // Route the existing /26 and /64 on the PF.
+        admin_interface.vpc_routing_profile = Some(rpc::RoutingProfile {
+            leak_tenant_host_routes_to_underlay: true, // Preserve the admin host-export policy.
+            ..Default::default()
+        });
+        config.admin_interface = Some(admin_interface);
+
+        // Render the complete response through the same startup-file path used by DPU OS agents.
+        let output = render_startup_yaml(&config).await?;
+        let documents: serde_yaml::Value = serde_yaml::from_str(&output)?;
+        let set = &documents.as_sequence().expect("two YAML documents")[1]["set"];
+        let host_port = &set["interface"]["pf0hpf_if"];
+
+        // Keep the existing gateway prefixes on the PF and remove the admin L2 attachment.
+        assert!(set.get("bridge").is_none());
+        assert!(set["interface"].get("vlan123").is_none());
+        assert!(host_port.get("bridge").is_none());
+        assert!(host_port["ip"].get("vrr").is_none());
+        assert_eq!(host_port["ip"]["vrf"].as_str(), Some("vpc_7777"));
+        assert_eq!(
+            host_port["ip"]["address"],
+            serde_yaml::from_str::<serde_yaml::Value>(
+                "10.217.4.65/26: {}\n2001:db8:100::/64: {}\n"
+            )?
+        );
+        assert!(set["vrf"]["vpc_7777"]["evpn"]["vni"]["7777"].is_mapping());
+
+        // Originate each host route through its local PF while preserving both EVPN exports.
+        let router = &set["vrf"]["vpc_7777"]["router"];
+        for (prefix, family) in [
+            // IPv4 must advertise the individual host rather than rely on the shared /26.
+            ("10.217.4.70/32", "ipv4-unicast"),
+            // IPv6 must retain a host /128 independently of the /64 advertised by RA.
+            ("2001:db8:100::70/128", "ipv6-unicast"),
+        ] {
+            assert_eq!(
+                router["static"][prefix],
+                serde_yaml::from_str::<serde_yaml::Value>(&format!(
+                    "address-family: {family}\nvia:\n  pf0hpf_if:\n    type: interface\n"
+                ))?
+            );
+            assert_eq!(
+                router["bgp"]["address-family"][family]["network"],
+                serde_yaml::from_str::<serde_yaml::Value>(&format!("{prefix}: {{}}\n"))?
+            );
+            assert_eq!(
+                router["bgp"]["address-family"][family]["route-export"]["to-evpn"]["enable"]
+                    .as_str(),
+                Some("on")
+            );
+        }
+
+        // Preserve the existing per-host IPv6 underlay leak instead of exporting the shared /64.
+        let prefix_lists = &set["router"]["policy"]["prefix-list"];
+        assert_eq!(
+            prefix_lists["ALLOW_TO_UNDERLAY_PREFIX_LIST_IPV6"]["rule"]["65002"]["match"],
+            serde_yaml::from_str::<serde_yaml::Value>("2001:db8:100::70/128: {}\n")?
+        );
+
+        // Emit stateful RA on the PF using the retained admin /64 rather than a /127 linknet.
+        let snippet = set["system"]["config"]["snippet"]["frr.conf"]
+            .as_str()
+            .expect("routed admin RA");
+        assert!(snippet.contains("interface pf0hpf_if vrf vpc_7777"));
+        assert!(!snippet.contains("interface vlan123 vrf vpc_7777"));
+        assert!(snippet.contains("ipv6 nd prefix 2001:db8:100::/64 no-autoconfig"));
+        assert!(
+            snippet
+                .lines()
+                .any(|line| line.trim() == "ipv6 nd managed-config-flag")
+        );
+
+        // Match the file-based DHCP listener and reservation to the PF without changing client masks.
+        let prepared = prepare_dhcp_server_config(
+            &config,
+            &test_service_addresses(),
+            &HBNDeviceNames::hbn_23(),
+        )?;
+        assert!(prepared.supervisor.contains("--interfaces pf0hpf_if "));
+        assert!(!prepared.supervisor.contains("--interfaces vlan123 "));
+        let host_config: HostConfig = serde_yaml::from_str(&prepared.host)?;
+        assert_eq!(host_config.host_ip_addresses.len(), 1);
+        let host_binding = host_config
+            .host_ip_addresses
+            .get("pf0hpf_if")
+            .expect("admin PF binding");
+        assert_eq!(
+            (
+                host_binding.address,
+                host_binding.gateway,
+                host_binding.prefix.as_deref()
+            ),
+            (
+                Some("10.217.4.70".parse()?),
+                Some("10.217.4.65".parse()?),
+                Some("10.217.4.64/26")
+            )
+        );
+        let ipv6_binding = host_binding
+            .ipv6
+            .as_ref()
+            .expect("stateful admin IPv6 binding");
+        assert_eq!(ipv6_binding.address, Some("2001:db8:100::70".parse()?));
+        assert_eq!(ipv6_binding.prefix, "2001:db8:100::70/128");
+
+        // Preserve the DPF DHCP control path's host PF listener for the same routed response.
+        let control_update = prepare_dhcp_grpc_update(
+            &config,
+            &test_service_addresses(),
+            HBNDeviceNames::hbn_23(),
+            None,
+        )?
+        .expect("primary admin DHCP update");
+        assert_eq!(control_update.interfaces, vec!["pf0hpf_if".to_string()]);
+
+        // Retain a service on a secondary Admin DPU, where the host PF is not rendered.
+        config.is_primary_dpu = false;
+        add_service_slot(&mut config, &["2001:db8:100:1::10/127"], None, None, false);
+        config.service_interfaces[0]
+            .vpc_routing_profile
+            .as_mut()
+            .expect("service routing profile")
+            .leak_tenant_host_routes_to_underlay = true;
+
+        // Render the secondary response and verify its service keeps the routed link-prefix leak.
+        let secondary_output = render_startup_yaml(&config).await?;
+        let secondary_documents: serde_yaml::Value = serde_yaml::from_str(&secondary_output)?;
+        let secondary_set = &secondary_documents
+            .as_sequence()
+            .expect("two YAML documents")[1]["set"];
+        assert!(secondary_set["interface"].get("pf0hpf_if").is_none());
+        assert_eq!(
+            secondary_set["router"]["policy"]["prefix-list"]["ALLOW_TO_UNDERLAY_PREFIX_LIST_IPV6"]
+                ["rule"]["65002"]["match"],
+            serde_yaml::from_str::<serde_yaml::Value>("2001:db8:100:1::10/127: {}\n")?
+        );
         Ok(())
     }
 
@@ -5790,6 +7088,7 @@ esac
             dpu_extension_services: vec![],
             astra_config: None,
             use_admin_network_changed: None,
+            accepted_lldp_snapshot_fingerprint: None,
         }
     }
 
@@ -5897,7 +7196,7 @@ esac
             vlan: 123u16,
             vni: Some(5555),
             l3_vni: Some(7777),
-            gateway_cidr: "10.217.4.65/26".to_string(),
+            gateway_cidrs: vec!["10.217.4.65/26".to_string()],
             svi_ip: if is_fnn {
                 Some("10.217.4.66/26".to_string())
             } else {
@@ -5914,6 +7213,7 @@ esac
             routing_profile: None,
             interface_routing_profile: None,
             is_l2_segment: true,
+            is_service: false,
             ipv6_port_config: None,
         }];
         let hostname = super::hostname().wrap_err("gethostname error")?;
@@ -6222,7 +7522,8 @@ esac
         );
     }
 
-    /// Verifies admin RA accepts only an FNN VLAN with a contained host `/128`.
+    /// Verifies admin RA requires FNN and a contained host `/128`, so the
+    /// containing segment is advertised without requiring a tenant `/127`.
     /// Primary-DPU/admin-mode gating remains at its sole production call site.
     #[test]
     #[allow(deprecated)]
@@ -6230,8 +7531,10 @@ esac
         use carbide_test_support::value_scenarios;
 
         let valid = dual_stack_admin_interface();
+        // Retain complete canonical IPv6 while omitting its deprecated sidecar.
         let mut canonical_only = valid.clone();
         canonical_only.ipv6_interface_config = None;
+        // Replace the individual host route with the shared segment to exercise validation.
         let mut invalid_host_route = valid.clone();
         invalid_host_route
             .addresses
@@ -6239,6 +7542,7 @@ esac
             .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))
             .expect("fixture should contain canonical IPv6")
             .interface_prefix = "2001:db8:100::/64".to_string();
+        // Keep the host address while replacing its containing segment with an unrelated prefix.
         let mut outside_segment = valid.clone();
         outside_segment
             .addresses
@@ -6253,7 +7557,6 @@ esac
                     .expect("test interface should contain canonical IPv6");
                 admin_ipv6_router_advertisement(
                     virtualization_type,
-                    &interface,
                     address,
                     &resolvers,
                 )
@@ -6272,7 +7575,7 @@ esac
                 )),
             }
             "non-FNN admin interface" {
-                // ETV has no supported admin VPC SVI RA path.
+                // ETV has no supported admin VPC RA path.
                 (VpcVirtualizationType::EthernetVirtualizer, valid) => None,
             }
             "non-host interface prefix" {
@@ -6596,6 +7899,7 @@ esac
             dpu_extension_services: vec![],
             astra_config: None,
             use_admin_network_changed: None,
+            accepted_lldp_snapshot_fingerprint: None,
         };
 
         // Include sibling backup files in the fixture's cleanup on every exit.
@@ -6838,6 +8142,7 @@ esac
             dpu_extension_services: vec![],
             astra_config: None,
             use_admin_network_changed: None,
+            accepted_lldp_snapshot_fingerprint: None,
         };
 
         let directory = tempfile::tempdir()?;

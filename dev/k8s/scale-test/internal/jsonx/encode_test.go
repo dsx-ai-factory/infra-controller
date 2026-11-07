@@ -4,6 +4,7 @@
 package jsonx
 
 import (
+	"encoding/json"
 	"math"
 	"strings"
 	"testing"
@@ -38,5 +39,40 @@ func TestEncodeChecksInsideInterfaces(t *testing.T) {
 	}
 	if out, err := Encode(box{map[string]any{"k": []any{color("red"), "é"}}}); err != nil {
 		t.Errorf("valid nested values: %s, %v", out, err)
+	}
+}
+
+// A json:"-" field is never on the wire, two in one struct included (as in result.Outcome): Encode leaves both out and
+// Decode skips a key named for either, leaving them zero.
+func TestSkippedFieldsStayOffTheWire(t *testing.T) {
+	type outcome struct {
+		Verdict string   `json:"verdict"`
+		Reasons []string `json:"-"`
+		Detail  []byte   `json:"-"`
+	}
+	if out, err := Encode(outcome{"go", []string{"r"}, []byte("{}")}); err != nil || string(out) != `{"verdict":"go"}` {
+		t.Errorf("Encode = %s, %v", out, err)
+	}
+	var got outcome
+	if err := Decode([]byte(`{"verdict":"go","-":["r"],"Reasons":["r"],"Detail":"e30="}`), &got); err != nil ||
+		got.Verdict != "go" || got.Reasons != nil || got.Detail != nil {
+		t.Errorf("Decode = %+v, %v", got, err)
+	}
+}
+
+// A json.RawMessage, such as a test's findings, reads back as its bytes; null and malformed JSON are refused without
+// repeating the input.
+func TestRawMessageKeepsItsBytes(t *testing.T) {
+	var got struct {
+		Detail json.RawMessage `json:"detail,omitempty"`
+	}
+	if err := Decode([]byte(`{"detail":{"ready":true,"checks":[{"name":"probe"}]}}`), &got); err != nil ||
+		string(got.Detail) != `{"ready":true,"checks":[{"name":"probe"}]}` {
+		t.Errorf("Decode = %s, %v", got.Detail, err)
+	}
+	for _, bad := range []string{`{"detail":null}`, `{"detail":{"secret":}}`} {
+		if err := Decode([]byte(bad), &got); err == nil || strings.Contains(err.Error(), "secret") {
+			t.Errorf("%s: err = %v, want a refusal without the input", bad, err)
+		}
 	}
 }

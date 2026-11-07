@@ -41,9 +41,11 @@ use crate::sink::MetricSemantics;
 pub type MetricLabel = (Cow<'static, str>, String);
 type BoxedErr = Box<dyn std::error::Error + Send + Sync + 'static>;
 
+/// Finite histogram boundaries in seconds, covering operations up to one hour.
 pub fn operation_duration_buckets_seconds() -> Vec<f64> {
     vec![
-        1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0, 180.0, 240.0, 300.0,
+        1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0, 180.0, 240.0, 300.0, 450.0,
+        600.0, 900.0, 1_200.0, 1_800.0, 3_600.0,
     ]
 }
 
@@ -798,6 +800,39 @@ mod tests {
     use http::HeaderValue;
 
     use super::*;
+
+    #[test]
+    fn operation_duration_histogram_resolves_slow_collections() {
+        check_values(
+            [
+                Check {
+                    scenario: "routine slow log collection",
+                    input: 400.0,
+                    expect: Some(450.0),
+                },
+                Check {
+                    scenario: "one-hour collection",
+                    input: 3_600.0,
+                    expect: Some(3_600.0),
+                },
+            ],
+            |duration| {
+                let histogram = prometheus::Histogram::with_opts(
+                    HistogramOpts::new("test_operation_duration_seconds", "Operation duration")
+                        .buckets(operation_duration_buckets_seconds()),
+                )
+                .expect("operation duration histogram should initialize");
+                histogram.observe(duration);
+
+                histogram.collect()[0].get_metric()[0]
+                    .get_histogram()
+                    .get_bucket()
+                    .iter()
+                    .find(|bucket| bucket.cumulative_count() == 1)
+                    .map(|bucket| bucket.upper_bound())
+            },
+        );
+    }
 
     #[test]
     fn unknown_metrics_route_returns_not_found() {

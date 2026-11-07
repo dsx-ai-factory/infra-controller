@@ -37,7 +37,7 @@ impl DellPowerEdgeR760Bf4<'_> {
             vendor: redfish::oem::BmcVendor::Dell,
             product: Some("Integrated Dell Remote Access Controller"),
             redfish_version: "1.18.0",
-            exposes_computer_systems: true,
+            advertises_computer_systems: true,
         }
     }
 
@@ -119,7 +119,7 @@ impl DellPowerEdgeR760Bf4<'_> {
         ];
 
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed(system_id),
                 manufacturer: Some("Dell Inc.".into()),
                 model: Some("PowerEdge R760".into()),
@@ -164,7 +164,7 @@ impl DellPowerEdgeR760Bf4<'_> {
                         "SystemManufacturer": "Dell Inc.",
                         "SystemModelName": "PowerEdge R760",
                     }))),
-            }],
+            }]),
         }
     }
 

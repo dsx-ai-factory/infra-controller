@@ -131,6 +131,10 @@ func (b expectedInventoryBatchBase) deleteAll(c echo.Context, resource, method s
 		}
 		derr := deleteDB(ctx, tx, site.ID)
 		if derr != nil {
+			var callbackErr *cutil.APIError
+			if errors.As(derr, &callbackErr) {
+				return callbackErr
+			}
 			logger.Error().Err(derr).Msg("error deleting Expected Inventory records from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Expected Inventory due to DB error", nil)
 		}

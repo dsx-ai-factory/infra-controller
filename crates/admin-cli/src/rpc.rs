@@ -202,7 +202,7 @@ fn legacy_bmc_patch_fields(
 }
 
 // Benchmarks showed 4 had better overall performance while still overlapping page fetch latency.
-const PAGED_LIST_FETCH_CONCURRENCY: usize = 4;
+pub(crate) const PAGED_LIST_FETCH_CONCURRENCY: usize = 4;
 
 /// Attempt cap for retrying a single `RESOURCE_EXHAUSTED`-rejected call inside
 /// [`ApiClient::get_all_instances`]'s paged fetch (the id listing and each id
@@ -1666,6 +1666,7 @@ impl ApiClient {
                 svi_ip: None,
                 free_ip_count_v2: None,
                 free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
             }],
             segment_type: NetworkSegmentType::Tenant as i32,
             id: Some(id),
@@ -1751,6 +1752,7 @@ impl ApiClient {
                 svi_ip: None,
                 free_ip_count_v2: None,
                 free_ip_count_saturated: false,
+                dhcpv6_link_address: None,
             }],
             segment_type: NetworkSegmentType::HostInband as i32,
             id: Some(id),

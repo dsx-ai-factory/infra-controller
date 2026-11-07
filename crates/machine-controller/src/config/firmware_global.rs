@@ -33,12 +33,10 @@ pub struct FirmwareGlobal {
     /// background firmware manager.
     #[serde(default)]
     pub autoupdate: bool,
-    /// Host model names to force-enable autoupdate on,
-    /// regardless of the global `autoupdate` setting.
+    /// Legacy field. Automatic host selection does not read it.
     #[serde(default)]
     pub host_enable_autoupdate: Vec<String>,
-    /// Host model names to force-disable autoupdate on,
-    /// regardless of the global `autoupdate` setting.
+    /// Host machine IDs excluded from automatic host selection.
     #[serde(default)]
     pub host_disable_autoupdate: Vec<String>,
     /// Frequency at which the firmware manager checks for

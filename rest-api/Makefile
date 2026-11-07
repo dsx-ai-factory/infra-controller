@@ -5,8 +5,7 @@
 .PHONY: build docker-build docker-build-local
 .PHONY: test-ipam test-site-agent test-site-manager test-workflow test-db test-api test-auth test-common test-cert-manager test-cli-commands test-site-workflow test-cli test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple test-mcp migrate core-mock-server-build core-mock-server-start core-mock-server-stop flow-mock-server-build flow-mock-server-start flow-mock-server-stop
 .PHONY: validate-openapi preview-openapi generate-client
-.PHONY: core-proto core-proto-clean core-proto-fetch core-proto-fmt core-protogen flow-proto flow-protogen tools-build tools-clean
-.PHONY: pre-commit-install pre-commit-run pre-commit-update
+.PHONY: core-proto core-proto-clean core-proto-fetch core-proto-fmt core-protogen flow-proto flow-protogen ipam-protogen tools-build tools-clean
 
 # CLI tool versions are pinned in go.mod's tool (...) stanza (Go 1.24+).
 # Tools that can be invoked directly use `go tool` so the exact pinned version
@@ -31,6 +30,8 @@ REST_IMAGES := nico-rest-api nico-rest-workflow nico-rest-site-manager \
 	nico-rest-site-agent nico-rest-db nico-rest-cert-manager nico-flow \
 	nico-psm nico-nsm nico-mcp
 
+TEST_PACKAGES ?= ./...
+
 # PostgreSQL container configuration
 POSTGRES_CONTAINER_NAME := project-test
 POSTGRES_PORT := 30432
@@ -53,7 +54,8 @@ HELM_SET_KEYCLOAK := --set nico-rest-api.config.keycloak.enabled=true \
 	--set nico-rest-api.config.keycloak.externalBaseURL=http://localhost:8082 \
 	--set nico-rest-api.config.keycloak.realm=nico-dev \
 	--set nico-rest-api.config.keycloak.clientID=nico-api \
-	--set nico-rest-api.config.keycloak.serviceAccount=true
+	--set nico-rest-api.config.keycloak.serviceAccount=true \
+	--set nico-rest-api.config.keycloak.serviceAccountOrgs={test-org}
 
 # Point the DB-connecting sub-charts at the standalone `postgres.postgres`
 # StatefulSet that kind-reset-infra deploys (deploy/kustomize/base/postgres/).
@@ -284,7 +286,7 @@ build:
 	go mod download
 	cd api && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/api ./cmd/api
 	cd workflow && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/workflow ./cmd/workflow
-	cd site-manager && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/sitemgr ./cmd/sitemgr
+	cd site-manager && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/site-manager ./cmd/site-manager
 	cd site-agent && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/site-agent ./cmd/site-agent
 	cd db && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/migrations ./cmd/migrations
 	cd cert-manager && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/credsmgr ./cmd/credsmgr
@@ -391,6 +393,13 @@ flow-protogen: .tools-stamp
 	echo "Generating protobuf for Flow"
 	cd proto/flow && PATH="$(TOOLS_DIR):$$PATH" $(BUF) generate
 	go fmt ./...
+
+# buf.gen.yaml pins the remote buf.build plugins that produced the checked-in
+# ipam/api/ code, so this target needs network access to buf.build.
+ipam-protogen:
+	echo "Generating protobuf for IPAM"
+	cd ipam/proto && $(BUF) format -w && $(BUF) lint && $(BUF) generate
+	python3 scripts/check_source_headers.py --fix
 
 # =============================================================================
 # Kind Local Deployment Targets
@@ -928,23 +937,3 @@ lint-openapi:
 preview-openapi:
 	@echo "Starting Redoc UI at http://127.0.0.1:8090"
 	docker run -it --rm -p 8090:80 -v ./openapi/spec.yaml:/usr/share/nginx/html/openapi.yaml -e SPEC_URL=openapi.yaml -e REDOC_OPTIONS="expand-responses=200,201 schemas-expansion-level=2" redocly/redoc:v2.5.1
-
-# =============================================================================
-# Pre-commit Hooks (TruffleHog Secret Detection)
-# =============================================================================
-
-# Install pre-commit hooks
-pre-commit-install:
-	@command -v pre-commit >/dev/null 2>&1 || { echo "Installing pre-commit..."; pip install pre-commit; }
-	@command -v trufflehog >/dev/null 2>&1 || { echo "Installing trufflehog..."; brew install trufflehog || go install github.com/trufflesecurity/trufflehog/v3@latest; }
-	pre-commit install
-	pre-commit install --hook-type pre-push
-	@echo "Pre-commit hooks installed successfully!"
-
-# Run pre-commit on all files
-pre-commit-run:
-	pre-commit run --all-files
-
-# Update pre-commit hooks to latest versions
-pre-commit-update:
-	pre-commit autoupdate

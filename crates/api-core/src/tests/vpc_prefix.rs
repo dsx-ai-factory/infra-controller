@@ -77,7 +77,7 @@ fn fixture_tenant_config() -> rpc::TenantConfig {
 }
 
 /// Seeds a tenant-managed SitePrefix at the requested lifecycle boundary.
-async fn seed_tenant_managed_site_prefix(
+pub(super) async fn seed_tenant_managed_site_prefix(
     env: &TestEnv,
     tenant_organization_id: &str,
     prefix: &str,
@@ -307,6 +307,7 @@ fn attached_segment_request(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         segment_type: segment_type as i32,
         infer_slaac_eui64_addresses: false,
@@ -334,6 +335,7 @@ fn unattached_host_inband_segment_request(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         segment_type: rpc::forge::NetworkSegmentType::HostInband as i32,
         infer_slaac_eui64_addresses: false,

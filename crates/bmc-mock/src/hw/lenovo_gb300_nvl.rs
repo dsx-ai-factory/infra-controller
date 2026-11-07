@@ -45,7 +45,7 @@ impl LenovoGB300Nvl<'_> {
             vendor: redfish::oem::BmcVendor::Ami,
             product: Some("AMI Redfish Server"),
             redfish_version: "1.21.1",
-            exposes_computer_systems: true,
+            advertises_computer_systems: true,
         }
     }
 
@@ -167,7 +167,7 @@ impl LenovoGB300Nvl<'_> {
 
         redfish::computer_system::Config {
             // Note: Order is exactly as it reported in json.
-            systems: vec![
+            systems: Some(vec![
                 redfish::computer_system::SingleSystemConfig {
                     base_bios: None,
                     bios_mode: redfish::computer_system::BiosMode::Generic,
@@ -214,7 +214,7 @@ impl LenovoGB300Nvl<'_> {
                     processors: None,
                     memory: None,
                 },
-            ],
+            ]),
         }
     }
 

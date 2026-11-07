@@ -627,7 +627,6 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             .site_explorer
             .rotate_switch_nvos_credentials
             .clone(),
-        carbide_config.site_explorer.explore_mode,
         carbide_config.site_explorer.explore_drive_firmware,
         db_pool.clone(),
     );
@@ -2331,6 +2330,7 @@ async fn initialize_and_start_controllers<'a>(
             .state_handler(Arc::new(SpdmAttestationStateHandler::new(
                 verifier,
                 nras_config,
+                carbide_config.spdm_state_controller.cancellation_timeout,
             )))
             .build_and_spawn(join_set, cancel_token.clone())
             .expect("Unable to build SpdmStateController");
@@ -2545,6 +2545,7 @@ async fn initialize_and_start_controllers<'a>(
         meter.clone(),
         endpoint_exploration_service.clone(),
         api_service.bmc_client.clone(),
+        api_service.resource_pool_registry.clone(),
         common_pools.clone(),
         work_lock_manager_handle.clone(),
         carbide_config.rack_profiles.clone(),

@@ -305,6 +305,8 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                     link_status: None,
                     uefi_device_path: None,
                 }],
+                firmware_version: None,
+                model: None,
             }],
             systems: vec![ComputerSystem {
                 id: "System.Embedded.1".to_string(),
@@ -321,6 +323,7 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                 bios_version: None,
                 serial_console_ssh_port: None,
                 processors: None,
+                part_number: None,
             }],
             chassis: vec![Chassis {
                 id: "System.Embedded.1".to_string(),

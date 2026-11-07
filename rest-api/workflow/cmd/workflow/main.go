@@ -363,6 +363,10 @@ func run(ctx context.Context) error {
 		// Published by the Site health monitor cron, which runs on the Cloud queue.
 		siteHealthMetrics = cwm.NewSiteHealthMetrics(reg, mconfig.Namespace)
 
+		if tcfg.Namespace == cwfn.CloudNamespace {
+			cwm.NewPendingExpectedMachineBatchMetrics(reg, dbSession, mconfig.Namespace)
+		}
+
 		if tcfg.Namespace == cwfn.SiteNamespace {
 			// The inventory workflows that report these metrics only run here.
 

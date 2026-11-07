@@ -6,6 +6,7 @@ use std::path::Path;
 
 use super::*;
 use crate::runner::attempt::{AttemptError, AttemptFailure};
+use crate::runner::write_fixture_executables;
 
 /// Select the public bounded entry point without bypassing manager validation.
 enum Operation {
@@ -38,28 +39,6 @@ impl Operation {
             }
         }
     }
-}
-
-/// Write a fake vendor executable without leaving a writable descriptor in the
-/// test process for another test's fork to inherit and cause ETXTBSY on launch.
-async fn write_fixture_script(executable: &Path, script: &str) {
-    let writer = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::process::Command::new("/bin/sh")
-            .args([
-                "-c",
-                "set -eu; umask 077; printf '%s' \"$2\" > \"$1\"; chmod 700 \"$1\"",
-                "fixture-writer",
-            ])
-            .arg(executable)
-            .arg(script)
-            .kill_on_drop(true)
-            .status(),
-    )
-    .await
-    .expect("fixture writer must finish within its watchdog")
-    .unwrap();
-    assert!(writer.success(), "{writer}");
 }
 
 /// Bounded public calls must reach the requested vendor operation and preserve
@@ -158,12 +137,15 @@ async fn bounded_access_calls_preserve_vendor_arguments_and_results() {
     for case in cases {
         let directory = tempfile::tempdir().unwrap();
         let executable = directory.path().join("flint");
-        write_fixture_script(
-            &executable,
-            &format!(
-                "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$0.args\"\n{}\n",
-                case.response
-            ),
+        write_fixture_executables(
+            directory.path(),
+            &[(
+                "flint",
+                &format!(
+                    "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$0.args\"\n{}\n",
+                    case.response
+                ),
+            )],
         )
         .await;
         let manager =
@@ -212,15 +194,18 @@ async fn bounded_access_calls_reap_stalled_vendors_and_redact_output() {
     let [query, lock, unlock] = cases.map(|(name, operation)| async move {
         let directory = tempfile::tempdir().unwrap();
         let executable = directory.path().join("flint");
-        write_fixture_script(
-            &executable,
-            concat!(
-                "#!/bin/sh\n",
-                "printf '%s' \"${5-}\"; printf '%s' \"${5-}\" >&2\n",
-                "/bin/sleep 30 &\n",
-                "printf '%s %s' \"$$\" \"$!\" > \"$0.pids\"\n",
-                "wait\n",
-            ),
+        write_fixture_executables(
+            directory.path(),
+            &[(
+                "flint",
+                concat!(
+                    "#!/bin/sh\n",
+                    "printf '%s' \"${5-}\"; printf '%s' \"${5-}\" >&2\n",
+                    "/bin/sleep 30 &\n",
+                    "printf '%s %s' \"$$\" \"$!\" > \"$0.pids\"\n",
+                    "wait\n",
+                ),
+            )],
         )
         .await;
         let manager =

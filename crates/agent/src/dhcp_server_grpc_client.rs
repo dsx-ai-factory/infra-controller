@@ -31,9 +31,9 @@ use carbide_rpc_utils::dhcp::{
     DhcpConfig as ModelDhcpConfig, HostConfig as ModelHostConfig,
     InterfaceInfo as ModelInterfaceInfo, InterfaceInfoV6 as ModelInterfaceInfoV6,
     ServiceConfig as ModelServiceConfig,
-    ServiceInterfaceReservations as ModelServiceInterfaceReservations,
-    ServiceLink as ModelServiceLink, ServiceLinkV4 as ModelServiceLinkV4,
-    ServiceLinkV6 as ModelServiceLinkV6, ServiceReservation as ModelServiceReservation,
+    ServiceDhcpInterfaceReservations as ModelServiceDhcpInterfaceReservations,
+    ServiceDhcpReservation as ModelServiceDhcpReservation, ServiceLink as ModelServiceLink,
+    ServiceLinkV4 as ModelServiceLinkV4, ServiceLinkV6 as ModelServiceLinkV6,
 };
 use carbide_uuid::machine::MachineInterfaceId;
 #[cfg(test)]
@@ -149,8 +149,8 @@ impl From<ModelServiceLinkV6> for proto::ServiceLinkV6 {
     }
 }
 
-impl From<ModelServiceReservation> for proto::ServiceReservation {
-    fn from(reservation: ModelServiceReservation) -> Self {
+impl From<ModelServiceDhcpReservation> for proto::ServiceReservation {
+    fn from(reservation: ModelServiceDhcpReservation) -> Self {
         let link = match reservation.link {
             ModelServiceLink::Ipv4(link) => proto::service_reservation::Link::Ipv4(link.into()),
             ModelServiceLink::Ipv6(link) => proto::service_reservation::Link::Ipv6(link.into()),
@@ -165,8 +165,8 @@ impl From<ModelServiceReservation> for proto::ServiceReservation {
     }
 }
 
-impl From<ModelServiceInterfaceReservations> for proto::ServiceInterfaceReservations {
-    fn from(group: ModelServiceInterfaceReservations) -> Self {
+impl From<ModelServiceDhcpInterfaceReservations> for proto::ServiceInterfaceReservations {
+    fn from(group: ModelServiceDhcpInterfaceReservations) -> Self {
         Self {
             receiving_interface: group.receiving_interface,
             reservations: group.reservations.into_iter().map(Into::into).collect(),
@@ -552,22 +552,22 @@ mod tests {
     }
 
     /// Verifies the agent's outbound control conversion preserves empty listeners and every
-    /// `ServiceReservation` field because the server cannot reconstruct them from host
+    /// `ServiceDhcpReservation` field because the server cannot reconstruct them from host
     /// configuration.
     #[test]
     fn service_reservations_survive_control_transport() {
         let service_config = ModelServiceConfig::try_new(vec![
             // Keep the first listener empty because its presence prevents host fallback after detach.
-            ModelServiceInterfaceReservations {
+            ModelServiceDhcpInterfaceReservations {
                 receiving_interface: "d_iface_svc_1".to_string(),
                 reservations: vec![],
             },
             // Populate the second listener with both families to exercise the complete wire union.
-            ModelServiceInterfaceReservations {
+            ModelServiceDhcpInterfaceReservations {
                 receiving_interface: "d_iface_svc_2".to_string(),
                 reservations: vec![
                     // The IPv4 binding drives the DHCP response fields used by service clients.
-                    ModelServiceReservation {
+                    ModelServiceDhcpReservation {
                         attachment_id: "11111111-1111-1111-1111-111111111111"
                             .parse()
                             .expect("IPv4 attachment UUID"),
@@ -583,7 +583,7 @@ mod tests {
                         }),
                     },
                     // Add an IPv6 binding to exercise transport of the independent fixed-link variant.
-                    ModelServiceReservation {
+                    ModelServiceDhcpReservation {
                         attachment_id: "33333333-3333-3333-3333-333333333333"
                             .parse()
                             .expect("IPv6 attachment UUID"),

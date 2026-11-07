@@ -199,7 +199,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -210,7 +210,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -790,12 +790,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "bmc-drivers"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "blake3",
+ "bmc-mock",
+ "bmc-platform",
+ "carbide-test-support",
+ "carbide-utils",
+ "hex",
+ "mac_address",
+ "nv-redfish",
+ "serde",
+ "serde_json",
+ "strum",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "url",
+]
+
+[[package]]
 name = "bmc-explorer"
 version = "0.1.0"
 dependencies = [
  "axum",
  "bmc-explorer",
  "bmc-mock",
+ "bmc-platform",
  "bmc-vendor",
  "carbide-api-model",
  "carbide-instrument",
@@ -835,6 +859,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "axum-server",
+ "bmc-platform",
  "bytes",
  "carbide-axum-utils",
  "chrono",
@@ -875,6 +900,50 @@ dependencies = [
  "tower-http 0.7.0",
  "tracing",
  "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "bmc-platform"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "carbide-test-support",
+ "mac_address",
+ "nv-redfish",
+ "serde",
+ "serde_json",
+ "strum",
+ "strum_macros",
+ "thiserror 2.0.18",
+ "tokio",
+ "version-compare 0.2.1",
+]
+
+[[package]]
+name = "bmc-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "bmc-drivers",
+ "bmc-mock",
+ "bmc-platform",
+ "carbide-instrument",
+ "carbide-ipmi",
+ "carbide-redfish",
+ "carbide-secrets",
+ "carbide-test-support",
+ "carbide-utils",
+ "carbide-uuid",
+ "eyre",
+ "mac_address",
+ "nv-redfish",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
  "url",
 ]
 
@@ -1157,6 +1226,8 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "bmc-drivers",
+ "bmc-explorer",
  "bmc-vendor",
  "byteorder",
  "carbide-api-db",
@@ -1414,6 +1485,7 @@ dependencies = [
  "carbide-tls",
  "carbide-utils",
  "carbide-uuid",
+ "config-version",
  "ctor",
  "eyre",
  "futures",
@@ -1444,6 +1516,7 @@ dependencies = [
  "base64",
  "bmc-vendor",
  "carbide-health-report",
+ "carbide-instrument",
  "carbide-ipxe-renderer",
  "carbide-libmlx-model",
  "carbide-macros",
@@ -3522,6 +3595,7 @@ dependencies = [
  "carbide-network",
  "carbide-rack",
  "carbide-redfish",
+ "carbide-resource-pool",
  "carbide-rpc",
  "carbide-secrets",
  "carbide-site-explorer",
@@ -3620,6 +3694,7 @@ dependencies = [
  "carbide-redfish",
  "carbide-test-support",
  "carbide-utils",
+ "chrono",
  "config-version",
  "itertools 0.14.0",
  "libredfish",
@@ -4289,7 +4364,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5412,7 +5487,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6745,7 +6820,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8115,7 +8190,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8224,9 +8299,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish"
-version = "0.22.0"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc30c999191bff8dfae8669d117bd109322833becc027e2da21ab84356a1adda"
+checksum = "48030567dcea6676a4c09ae4590df9a7644ab65533a4b6768ea5ba7e97abec02"
 dependencies = [
  "futures-core",
  "futures-util",
@@ -8242,9 +8317,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-bmc-http"
-version = "0.22.0"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64529e0a1df7a7728e8fc86a5830e043d7b20bb0327b4c97ed79ebfb9bcec6b1"
+checksum = "b401beae283041fa586422c6b815daa3f60a73d74c40317acc23f5a662edfc85"
 dependencies = [
  "bytes",
  "futures-core",
@@ -8265,9 +8340,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-core"
-version = "0.22.0"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26655bc2acc57aec4d95893242c2d03b5daeb12ca88c81f21df9866f5b3e2d52"
+checksum = "b9870fb103f830a1bcfd751aca75ebbcf321b2644f32f955dcaa3446d6c66a9e"
 dependencies = [
  "futures-core",
  "futures-io",
@@ -8281,9 +8356,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-csdl-compiler"
-version = "0.22.0"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bef7727ca258429b42e4ec552118787a550107b797e10629650f22211ea5602"
+checksum = "350d328b929c48202a0f37464ea3418128e61660b0f5b45772f57ff0b652c252"
 dependencies = [
  "clap",
  "clap_derive",
@@ -8299,9 +8374,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-dispatcher"
-version = "0.22.0"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56a82efcac6a4ff3a46f0613a61a3aa1508e28ab250377db174aa03980a32b7a"
+checksum = "ae405af6cb426bcbaf6defac536697157834799d372f48b48708b13700db5293"
 dependencies = [
  "futures-core",
  "futures-util",
@@ -8309,9 +8384,9 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-quirks"
-version = "0.22.0"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "097eafbfdd6b86e79f9d1ac7aa48ba28882f51c9ca607d07e0c120b63bfd0581"
+checksum = "4f2eaa1367b5dafc8c3107848b634773fe98b60dd8e3fa9c09c647a1654a7d32"
 dependencies = [
  "futures-util",
  "nv-redfish-core",
@@ -8322,18 +8397,18 @@ dependencies = [
 
 [[package]]
 name = "nv-redfish-schema"
-version = "0.22.0"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f38563b90794aa3cb502ed27e339fcce8eb0930ef6b1c71875ccb85c136763b"
+checksum = "12b683cd72e1962b4ae64a03641ac846f981db4a97bb082fa9340b23a2b983b1"
 dependencies = [
  "glob",
 ]
 
 [[package]]
 name = "nv-redfish-server-core"
-version = "0.22.0"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb353a2f7e793e5aef3a8febd7a8437d80510dec4c8426c22826586646066cca"
+checksum = "1bb05aaab0b070bc156b6c91c55fa897df704a89241bd478293eccdb6bb4c24f"
 dependencies = [
  "serde",
  "serde_json",
@@ -10351,7 +10426,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10419,7 +10494,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11097,7 +11172,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11678,10 +11753,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12966,18 +13041,18 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.7"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f31141ce3fc3e300ae89b78c0dd67f9708061d1d2eda54b8209346fd6be9a92c"
+checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
 dependencies = [
  "rustls-pki-types",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.7"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52f5ee44c96cf55f1b349600768e3ece3a8f26010c05265ab73f945bb1a2eb9d"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -13016,7 +13091,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

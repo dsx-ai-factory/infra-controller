@@ -38,7 +38,7 @@ impl WiwynnGB200Nvl<'_> {
             vendor: redfish::oem::BmcVendor::Wiwynn,
             product: Some("GB200 NVL"),
             redfish_version: "1.17.0",
-            exposes_computer_systems: true,
+            advertises_computer_systems: true,
         }
     }
 
@@ -120,7 +120,7 @@ impl WiwynnGB200Nvl<'_> {
         let hgx_baseboard_id = "HGX_Baseboard_0";
 
         redfish::computer_system::Config {
-            systems: vec![
+            systems: Some(vec![
                 redfish::computer_system::SingleSystemConfig {
                     id: system_id.into(),
                     manufacturer: Some("WIWYNN".into()),
@@ -178,7 +178,7 @@ impl WiwynnGB200Nvl<'_> {
                     serial_console: None,
                     secure_boot_available: false,
                 },
-            ],
+            ]),
         }
     }
 
