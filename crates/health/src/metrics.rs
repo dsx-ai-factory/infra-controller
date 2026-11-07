@@ -776,22 +776,6 @@ enum Encoding {
 #[error("telemetry request cancelled")]
 struct RequestCancelled;
 
-/// Serves operational metrics and uncompressed telemetry until the listener stops.
-///
-/// Dropping this future closes accepted connections and cancels their export jobs.
-pub async fn run_metrics_server(
-    metrics_endpoint: std::net::SocketAddr,
-    metrics_manager: Arc<MetricsManager>,
-) -> Result<(), BoxedErr> {
-    run_metrics_server_with_config(
-        metrics_endpoint,
-        metrics_manager,
-        crate::config::PrometheusSinkConfig::default(),
-        tokio_util::sync::CancellationToken::new(),
-    )
-    .await
-}
-
 /// Serve metrics until shutdown. Dropping the server future cancels accepted connections.
 pub(crate) async fn run_metrics_server_with_config(
     addr: SocketAddr,

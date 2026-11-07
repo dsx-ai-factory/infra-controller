@@ -357,7 +357,7 @@ async fn disconnect_and_shutdown_cancel_real_export_jobs_and_release_snapshots()
 }
 
 #[tokio::test]
-async fn aborting_public_listener_cancels_exports_with_clients_still_connected() {
+async fn aborting_listener_cancels_exports_with_clients_still_connected() {
     let (manager, _registry, gauge) = recorded_gauge();
 
     let (reading, mut started_rx) = pause_export(&manager, &gauge);
@@ -367,7 +367,12 @@ async fn aborting_public_listener_cancels_exports_with_clients_still_connected()
 
     drop(reservation);
 
-    let listener = tokio::spawn(run_metrics_server(addr, manager.clone()));
+    let listener = tokio::spawn(run_metrics_server_with_config(
+        addr,
+        manager.clone(),
+        PrometheusSinkConfig::default(),
+        CancellationToken::new(),
+    ));
 
     let mut client = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
