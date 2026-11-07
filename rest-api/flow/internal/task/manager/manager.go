@@ -569,7 +569,10 @@ func (m *ManagerImpl) createAndExecuteTask(
 		return m.createAndExecuteIdempotentTask(ctx, req, targetRack)
 	}
 
-	task := newTaskForRack(req, targetRack)
+	task, err := m.newFirmwareTaskForRack(ctx, req, targetRack)
+	if err != nil {
+		return uuid.Nil, err
+	}
 
 	// Check for conflicts inside a transaction to avoid a race between the
 	// check and the creation.
@@ -638,7 +641,10 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 
 			} else {
 				// No existing tasks with this idempotency key, create a new one.
-				task = newTaskForRack(req, targetRack)
+				task, err = m.newFirmwareTaskForRack(txCtx, req, targetRack)
+				if err != nil {
+					return err
+				}
 				if err := m.lockRackAndResolveConflict(txCtx, req, targetRack, &task); err != nil {
 					return err
 				}
@@ -1163,6 +1169,19 @@ func (m *ManagerImpl) executeTask(
 		return nil, fmt.Errorf("operation rule is nil")
 	}
 
+	// Reload the durable union rather than admitting new devices on promotion
+	// or an idempotent retry of an unscheduled task.
+	if len(task.Attributes.FirmwareRestartComputeIDs) > 0 {
+		var err error
+		targetRack, err = m.loadRackForTask(ctx, task)
+		if err != nil {
+			return nil, err
+		}
+		if len(targetRack.Components) != len(task.Attributes.AllComponentUUIDs()) {
+			return nil, fmt.Errorf("NVOS task inventory changed: a reserved component is missing")
+		}
+	}
+
 	err := validateResolvedRackTargets(
 		task.Operation,
 		&rule.RuleDefinition,
@@ -1186,6 +1205,20 @@ func (m *ManagerImpl) executeTask(
 			OperationInfo:  task.Operation.Info, // already json.RawMessage from the DB
 		},
 		Async: true,
+	}
+
+	if len(task.Attributes.FirmwareRestartComputeIDs) > 0 {
+		firmwareRack := rack.New(targetRack.Info, targetRack.Loc)
+		for _, comp := range targetRack.Components {
+			if slices.Contains(task.Attributes.ComponentsByType[comp.Type], comp.Info.ID) {
+				firmwareRack.AddComponent(comp)
+			}
+			if slices.Contains(task.Attributes.FirmwareRestartComputeIDs, comp.Info.ID) {
+				req.Info.FirmwareRestartComponents = append(req.Info.FirmwareRestartComponents,
+					taskdef.WorkflowComponent{Type: comp.Type, ComponentID: comp.ComponentID, MACAddress: comp.ManagementMAC()})
+			}
+		}
+		req.Info.Components = workflowComponentsFrom(firmwareRack)
 	}
 
 	return m.executor.Execute(ctx, &req)

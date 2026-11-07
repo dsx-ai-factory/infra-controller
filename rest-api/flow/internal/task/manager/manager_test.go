@@ -57,6 +57,7 @@ func (s *submitTaskInventory) GetComponentByID(
 }
 
 func TestManagerImpl_SubmitTask(t *testing.T) {
+	t.Run("NVOS restart snapshot", testNVOSRestartSubmission)
 	t.Run("rejects a Compute component target with an NVSwitch-only rack rule", func(t *testing.T) {
 		rackID := uuid.New()
 		componentID := uuid.New()

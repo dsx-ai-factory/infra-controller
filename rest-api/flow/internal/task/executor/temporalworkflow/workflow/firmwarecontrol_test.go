@@ -122,6 +122,7 @@ func firmwareTestComponents(
 }
 
 func TestFirmwareControlWorkflow(t *testing.T) {
+	t.Run("NVOS restart continuation", testNVOSRestartWorkflow)
 	now := time.Now()
 	baseInfo := &operations.FirmwareControlTaskInfo{
 		Operation: operations.FirmwareOperationUpgrade,

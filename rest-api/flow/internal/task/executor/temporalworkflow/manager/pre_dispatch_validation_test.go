@@ -25,23 +25,29 @@ import (
 )
 
 func TestValidateRequiredCapabilitiesRejectsUnsupportedCapability(t *testing.T) {
-	registry := newPreflightCapabilityRegistry(
-		t,
-		capability.CapabilityPowerStatus,
-	)
-
-	err := validateRequiredCapabilities(
-		powerControlExecutionInfo(t),
-		registry,
-	)
-
-	require.Error(t, err)
-	require.True(t, errors.Is(err, componentmanager.ErrUnsupportedCapability))
-
-	var capabilityErr componentmanager.UnsupportedCapabilityError
-	require.True(t, errors.As(err, &capabilityErr))
-	require.Equal(t, devicetypes.ComponentTypeCompute, capabilityErr.ComponentType)
-	require.Equal(t, capability.CapabilityPowerControl, capabilityErr.Capability)
+	for _, tc := range []struct {
+		name            string
+		firmwareRestart bool
+	}{
+		{name: "power task"},
+		{name: "NVOS restart requires compute power capability before flashing", firmwareRestart: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := newPreflightCapabilityRegistry(t, capability.CapabilityPowerStatus)
+			info := powerControlExecutionInfo(t)
+			if tc.firmwareRestart {
+				registry = newPreflightFirmwareRegistry(t, nil)
+				info = firmwareControlExecutionInfo(t)
+				info.FirmwareRestartComponents = info.Components
+			}
+			err := validateRequiredCapabilities(info, registry)
+			require.ErrorIs(t, err, componentmanager.ErrUnsupportedCapability)
+			var capabilityErr componentmanager.UnsupportedCapabilityError
+			require.ErrorAs(t, err, &capabilityErr)
+			require.Equal(t, devicetypes.ComponentTypeCompute, capabilityErr.ComponentType)
+			require.Equal(t, capability.CapabilityPowerControl, capabilityErr.Capability)
+		})
+	}
 }
 
 func TestExecuteValidatesCapabilitiesBeforeDispatch(t *testing.T) {
