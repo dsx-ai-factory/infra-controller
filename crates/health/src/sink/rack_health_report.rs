@@ -21,6 +21,7 @@ use carbide_instrument::{Outcome, emit};
 use carbide_uuid::rack::RackId;
 
 use super::dedup_queue::DedupQueue;
+use super::report_worker::run_report_worker;
 use super::{
     CollectorEvent, DataSink, EventContext, HealthReport, HealthReportSubmitted,
     HealthReportTarget, ReportSource,
@@ -59,42 +60,44 @@ impl RackHealthReportSink {
             Arc::new(DedupQueue::new());
 
         for worker_id in 0..config.workers {
-            let worker_client = Arc::clone(&client);
-            let worker_queue = Arc::clone(&queue);
-            handle.spawn(async move {
-                loop {
-                    let (key, report) = worker_queue.next().await;
-
-                    match report.as_ref().try_into() {
-                        Ok(converted) => {
-                            let result = worker_client
-                                .submit_rack_health_report(&key.id, converted)
-                                .await;
-                            emit(HealthReportSubmitted {
-                                target: HealthReportTarget::Rack,
-                                outcome: Outcome::from(&result),
-                                id: key.id.to_string(),
-                                worker_id,
-                                error: result.err().map(|e| e.to_string()).unwrap_or_default(),
-                            });
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                ?error,
-                                worker_id,
-                                rack_id = %key.id,
-                                "Failed to convert rack health report"
-                            );
-                        }
-                    }
-                }
-            });
+            let client = Arc::clone(&client);
+            handle.spawn(run_report_worker(Arc::clone(&queue), move |key, report| {
+                submit_report(Arc::clone(&client), worker_id, key, report)
+            }));
         }
 
         Ok(Self {
             queue,
             skip_empty_reports: config.skip_empty_reports,
         })
+    }
+}
+
+async fn submit_report(
+    client: Arc<ApiClientWrapper>,
+    worker_id: usize,
+    key: RackHealthReportKey,
+    report: Arc<HealthReport>,
+) {
+    match report.as_ref().try_into() {
+        Ok(converted) => {
+            let result = client.submit_rack_health_report(&key.id, converted).await;
+            emit(HealthReportSubmitted {
+                target: HealthReportTarget::Rack,
+                outcome: Outcome::from(&result),
+                id: key.id.to_string(),
+                worker_id,
+                error: result.err().map(|e| e.to_string()).unwrap_or_default(),
+            });
+        }
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                worker_id,
+                rack_id = %key.id,
+                "Failed to convert rack health report"
+            );
+        }
     }
 }
 

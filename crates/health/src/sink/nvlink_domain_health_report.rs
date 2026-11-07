@@ -28,6 +28,7 @@ use carbide_uuid::nvlink::NvLinkDomainId;
 use tokio_util::sync::CancellationToken;
 
 use super::dedup_queue::DedupQueue;
+use super::report_worker::run_report_worker;
 use super::{
     CollectorEvent, DataSink, EventContext, HealthReport, HealthReportSubmitted,
     HealthReportTarget, ReportSource,
@@ -59,68 +60,64 @@ impl NvLinkDomainHealthReportSink {
             ))
         })?;
 
-        let client = ApiClientWrapper::new(
+        let client = Arc::new(ApiClientWrapper::new(
             config.connection.root_ca.clone(),
             config.connection.client_cert.clone(),
             config.connection.client_key.clone(),
             &config.connection.api_url,
-        );
+        ));
 
         let queue: Arc<DedupQueue<NvLinkDomainHealthReportKey, Arc<HealthReport>>> =
             Arc::new(DedupQueue::new());
 
         let cancel_token = CancellationToken::new();
         let worker_cancel_token = cancel_token.clone();
-        let worker_queue = Arc::clone(&queue);
 
         // A single worker preserves alert and recovery order for each domain.
         // Its cancellation token bounds the worker lifetime to the sink.
+        let worker = run_report_worker(Arc::clone(&queue), move |key, report| {
+            submit_report(Arc::clone(&client), key, report)
+        });
         handle.spawn(async move {
-            loop {
-                let Some((key, report)) = worker_cancel_token
-                    .run_until_cancelled(worker_queue.next())
-                    .await
-                else {
-                    return;
-                };
-
-                match report.as_ref().try_into() {
-                    Ok(converted) => {
-                        let Some(result) = worker_cancel_token
-                            .run_until_cancelled(
-                                client.submit_nvlink_domain_health_report(&key.id, converted),
-                            )
-                            .await
-                        else {
-                            return;
-                        };
-
-                        emit(HealthReportSubmitted {
-                            target: HealthReportTarget::NvLinkDomain,
-                            outcome: Outcome::from(&result),
-                            id: key.id.to_string(),
-                            worker_id: 0,
-                            error: result
-                                .err()
-                                .map(|error| error.to_string())
-                                .unwrap_or_default(),
-                        });
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            ?error,
-                            nvlink_domain_id = %key.id,
-                            "Failed to convert NVLink domain health report"
-                        );
-                    }
-                }
-            }
+            worker_cancel_token.run_until_cancelled(worker).await;
         });
 
         Ok(Self {
             queue,
             cancel_token,
         })
+    }
+}
+
+async fn submit_report(
+    client: Arc<ApiClientWrapper>,
+    key: NvLinkDomainHealthReportKey,
+    report: Arc<HealthReport>,
+) {
+    match report.as_ref().try_into() {
+        Ok(converted) => {
+            let result = client
+                .submit_nvlink_domain_health_report(&key.id, converted)
+                .await;
+
+            emit(HealthReportSubmitted {
+                target: HealthReportTarget::NvLinkDomain,
+                outcome: Outcome::from(&result),
+                id: key.id.to_string(),
+                worker_id: 0,
+                error: result
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_default(),
+            });
+        }
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                nvlink_domain_id = %key.id,
+                "Failed to convert NVLink domain health report"
+            );
+        }
     }
 }
 

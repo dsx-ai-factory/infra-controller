@@ -29,6 +29,7 @@ pub(crate) mod otlp;
 mod power_shelf_health_report;
 mod prometheus;
 mod rack_health_report;
+mod report_worker;
 mod switch_health_report;
 mod tracing;
 
