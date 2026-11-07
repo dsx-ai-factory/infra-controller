@@ -212,6 +212,96 @@ fn fmds_reply_routes_preserve_ipv4_and_use_the_ipv6_metadata_source() {
     );
 }
 
+fn one_lldp_neighbor() -> carbide_host_support::lldp_collector::LldpNeighbor {
+    carbide_host_support::lldp_collector::LldpNeighbor {
+        local_mac: "02:00:00:00:00:01".to_string(),
+        switch: ::rpc::machine_discovery::LldpSwitchData {
+            local_port: "fabric0".to_string(),
+            remote_port_type: "ifname".to_string(),
+            remote_port_value: "swp1".to_string(),
+            ..Default::default()
+        },
+    }
+}
+
+#[derive(Default)]
+struct NetworkStatusRpcState {
+    statuses: Vec<rpc::DpuNetworkStatus>,
+}
+
+async fn handle_original_network_status(
+    axum::extract::State(state): axum::extract::State<
+        std::sync::Arc<tokio::sync::Mutex<NetworkStatusRpcState>>,
+    >,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let payload = body.get(5..).expect("gRPC request has a frame header");
+    let status = <rpc::DpuNetworkStatus as prost::Message>::decode(payload).unwrap();
+    state.lock().await.statuses.push(status);
+    crate::tests::common::respond(()).into_response()
+}
+
+fn network_status_mock(
+    state: std::sync::Arc<tokio::sync::Mutex<NetworkStatusRpcState>>,
+) -> axum::Router {
+    use axum::routing::{get, post};
+
+    axum::Router::new()
+        .route("/up", get(|| async {}))
+        .route(
+            ::rpc::service_path!("RecordDpuNetworkStatus"),
+            post(handle_original_network_status),
+        )
+        .with_state(state)
+}
+
+async fn record_network_status_before_deadline(
+    address: std::net::SocketAddr,
+    status: rpc::DpuNetworkStatus,
+) -> Result<(), eyre::Report> {
+    let client_config = forge_tls_client::ForgeClientConfig {
+        root_ca_path: concat!(env!("CARGO_MANIFEST_DIR"), "/test-certs/tls.crt").into(),
+        ..Default::default()
+    };
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        record_network_status(status, &format!("https://{address}"), &client_config),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("network status report exceeded its test deadline"))?
+}
+
+#[tokio::test]
+async fn legacy_core_success_keeps_lldp_snapshot_pending() -> eyre::Result<()> {
+    use carbide_host_support::lldp_snapshot_cache::result_of;
+
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(NetworkStatusRpcState::default()));
+    let (address, server) =
+        crate::tests::common::run_grpc_server(network_status_mock(state.clone())).await?;
+    let classified = classify_against_accepted_snapshot(Ok(vec![one_lldp_neighbor()]), None);
+    let sent_report = classified.report.clone();
+
+    record_network_status_before_deadline(
+        address,
+        rpc::DpuNetworkStatus {
+            lldp: Some(sent_report.clone()),
+            lldp_snapshot_fingerprint: classified.snapshot_fingerprint,
+            ..Default::default()
+        },
+    )
+    .await?;
+    server.abort();
+
+    let state = state.lock().await;
+    assert_eq!(state.statuses.len(), 1);
+    assert_eq!(state.statuses[0].lldp.as_ref(), Some(&sent_report));
+    let retry = classify_against_accepted_snapshot(Ok(vec![one_lldp_neighbor()]), None);
+    assert_eq!(result_of(&retry.report), rpc::LldpReportResult::Updated);
+    Ok(())
+}
+
 #[test]
 fn ipv6_only_network_requires_dhcp_acceptance() {
     for (scenario, loopback, dhcp_changed, expected_error) in [
@@ -792,6 +882,18 @@ fn current_network_version_never_matches_before_first_update() {
     let config = comparison_network_config();
 
     assert!(!CurrentNetworkVersion::default().matches_versions_from(&config, None));
+}
+
+#[test]
+fn accepted_lldp_fingerprint_is_not_a_rendered_network_input() {
+    let mut config = comparison_network_config();
+    let mut current = CurrentNetworkVersion::default();
+
+    current.update_from(&config, None);
+
+    config.accepted_lldp_snapshot_fingerprint = Some(vec![1; 32]);
+
+    assert!(current.matches_versions_from(&config, None));
 }
 
 /// The supplemental config file's path never changes between iterations, so
