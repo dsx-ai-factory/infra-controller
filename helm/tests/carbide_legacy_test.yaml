@@ -65,6 +65,7 @@ tests:
             # carbide-api.forge is in extraDnsNames by default for backwards
             # compatibility with forge-dpu-agent (see issue #2823)
             - carbide-api.forge
+            - grpc.nico
       - equal:
           path: spec.uris
           value:
