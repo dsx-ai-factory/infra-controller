@@ -34,6 +34,7 @@ use crate::gate::CallError;
 pub(crate) enum Reader {
     Devices,
     RestInventory,
+    NicoConfig,
 }
 
 impl Reader {
@@ -41,6 +42,7 @@ impl Reader {
         match self {
             Reader::Devices => "devices",
             Reader::RestInventory => "rest_inventory",
+            Reader::NicoConfig => "nico_config",
         }
     }
 }

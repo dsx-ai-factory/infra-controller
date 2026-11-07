@@ -183,7 +183,7 @@ A duration value ("500ms", "5s", "2m", "1h", "1m30s") in seconds.
 */}}
 {{- define "nico-site-health-probe.nicoReaders" -}}
 {{- with .Values.state -}}
-{{- if and .enabled .readers.devices.enabled -}}true{{- end -}}
+{{- if and .enabled (or .readers.devices.enabled .readers.nicoConfig.enabled) -}}true{{- end -}}
 {{- end -}}
 {{- end }}
 

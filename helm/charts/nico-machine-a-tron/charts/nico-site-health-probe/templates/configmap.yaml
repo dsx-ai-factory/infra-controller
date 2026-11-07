@@ -89,7 +89,7 @@ data:
           auth:
             {{- include "nico-site-health-probe.restAuth" (dict "auth" .rest.provider.auth "dir" "/var/secrets/state-provider") | nindent 12 }}
       readers:
-        {{- range $name, $key := dict "devices" "devices" "restInventory" "rest_inventory" }}
+        {{- range $name, $key := dict "devices" "devices" "restInventory" "rest_inventory" "nicoConfig" "nico_config" }}
         {{- $reader := index $.Values.state.readers $name }}
         {{ $key }}:
           enabled: {{ $reader.enabled }}

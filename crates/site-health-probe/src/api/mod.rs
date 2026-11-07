@@ -36,17 +36,18 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use carbide_site_health_probe_api::metrics::{CONTRACT_VERSION, FilterError, gauge_labels};
 use carbide_site_health_probe_api::{
-    Component, ConfigResponse, CountResponse, ErrorBody, ErrorCode, ErrorDetail, Family, Filter,
-    MetricsInfo, ReadInfo, RestResource, RestSiteBinding, Source, SweepInfo, Unit, UnitType,
-    UnitsQuery, UnitsResponse,
+    Component, ConfigNicoApi, ConfigResponse, CountResponse, ErrorBody, ErrorCode, ErrorDetail,
+    Family, Filter, FirmwareTarget, MetricsInfo, ReadInfo, RestResource, RestSiteBinding, Source,
+    SweepInfo, Unit, UnitType, UnitsQuery, UnitsResponse,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::api::spec::{Capabilities, Need, SeriesSpec, series_spec, units_listing};
-use crate::config::{HostReadMode, StateConfig};
+use crate::config::{HostReadMode, ReaderConfig, StateConfig};
 use crate::readers::devices::DEVICE_FAMILIES;
+use crate::readers::nico_config::{NICO_CONFIG_FAMILIES, NicoConfigData};
 use crate::readers::rest_inventory::{RestTotalsData, SiteMatchData};
 use crate::snapshot::AnySnapshot;
 use crate::state::store::SnapshotStore;
@@ -82,29 +83,30 @@ impl ApiState {
         process_start: SystemTime,
     ) -> Self {
         let readers = &state.readers;
-        let mut intervals: BTreeMap<Family, Duration> = DEVICE_FAMILIES
+        let schedules: [(&[Family], &ReaderConfig); 3] = [
+            (&DEVICE_FAMILIES, &readers.devices),
+            (
+                &[Family::RestTotals, Family::RestSiteMatch],
+                &readers.rest_inventory,
+            ),
+            (&NICO_CONFIG_FAMILIES, &readers.nico_config),
+        ];
+        let intervals: BTreeMap<Family, Duration> = schedules
             .iter()
-            .map(|family| (*family, readers.devices.interval))
+            .flat_map(|(families, reader)| families.iter().map(|f| (*f, reader.interval)))
             .collect();
-        for family in [Family::RestTotals, Family::RestSiteMatch] {
-            intervals.insert(family, readers.rest_inventory.interval);
-        }
         let metrics = state.metrics.as_ref().map(|metrics| MetricsInfo {
             contract_version: CONTRACT_VERSION,
             selector: metrics.selector.clone(),
             scrape_interval_seconds: metrics.scrape_interval_seconds,
             // Only families a reader sweeps: a disabled reader's families
             // have no series to read.
-            reader_intervals_seconds: intervals
+            reader_intervals_seconds: schedules
                 .iter()
-                .filter(|(family, _)| {
-                    if DEVICE_FAMILIES.contains(family) {
-                        readers.devices.enabled
-                    } else {
-                        readers.rest_inventory.enabled
-                    }
+                .filter(|(_, reader)| reader.enabled)
+                .flat_map(|(families, reader)| {
+                    families.iter().map(|f| (*f, reader.interval.as_secs_f64()))
                 })
-                .map(|(family, interval)| (*family, interval.as_secs_f64()))
                 .collect(),
             process_start_seconds: unix_seconds(process_start),
         });
@@ -591,17 +593,26 @@ async fn units_query(
     list_units(&api, &query.filter, page).map(Json)
 }
 
-/// `/v1/config` parameters. They select firmware targets and the tenant
-/// allocation, which wait for their tests (#8154, #8152): accepted, so
-/// client filters stay valid, while `nicoApi` and `rest` stay null.
+/// `/v1/config` parameters. `vendor`, `model` and `component` select
+/// firmware targets, each an exact match. `instanceType` selects the tenant
+/// allocation, which waits for its test (#8152): accepted, so client
+/// filters stay valid, while `rest` stays null.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[expect(dead_code, reason = "no config reader serves these filters yet")]
 struct ConfigQuery {
     vendor: Option<String>,
     model: Option<String>,
     component: Option<Component>,
+    #[expect(dead_code, reason = "no tenant allocation reader serves it yet")]
     instance_type: Option<String>,
+}
+
+impl ConfigQuery {
+    fn selects(&self, target: &FirmwareTarget) -> bool {
+        self.vendor.as_ref().is_none_or(|v| *v == target.vendor)
+            && self.model.as_ref().is_none_or(|m| *m == target.model)
+            && self.component.is_none_or(|c| c == target.component)
+    }
 }
 
 async fn config(
@@ -609,7 +620,7 @@ async fn config(
     RawQuery(raw): RawQuery,
 ) -> Result<Json<ConfigResponse>, ApiError> {
     let (query, _) = split_query(raw.as_deref(), &[])?;
-    let _: ConfigQuery = parse_query(&query)?;
+    let query: ConfigQuery = parse_query(&query)?;
     // The inventory reader's site check, with its own read times. No config
     // filter applies to it. With the reader off there is no check to wait
     // for: `restSite` is null, not an unknown check.
@@ -625,8 +636,23 @@ async fn config(
     } else {
         None
     };
+    // `null` before the config reader's first good read and while it is off.
+    // A failed read keeps the last config, with its age and the error.
+    let nico_api = api.store.current(Family::ConfigNicoApi).and_then(|snap| {
+        data_of::<NicoConfigData>(snap.as_ref()).map(|data| ConfigNicoApi {
+            read: api.read_info(Family::ConfigNicoApi, snap.as_ref()),
+            firmware_targets: data
+                .firmware_targets
+                .iter()
+                .filter(|target| query.selects(target))
+                .cloned()
+                .collect(),
+            runtime: data.runtime.clone(),
+            site_explorer: None,
+        })
+    });
     Ok(Json(ConfigResponse {
-        nico_api: None,
+        nico_api,
         rest: None,
         rest_site,
         metrics: api.metrics.clone(),

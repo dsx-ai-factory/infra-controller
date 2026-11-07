@@ -287,6 +287,9 @@ pub(crate) struct FakeSite {
     pub expected_rack_groups: Vec<forge::ExpectedRackGroup>,
     pub firmware_requests: Vec<HostReprovisioningListItem>,
     pub explored: BTreeMap<String, site_explorer::ExploredEndpoint>,
+    pub runtime_config: Option<forge::RuntimeConfig>,
+    pub desired_firmware: Vec<forge::DesiredFirmwareVersionEntry>,
+    pub host_firmware: Vec<forge::AvailableHostFirmware>,
     /// IDs every by-ID read leaves out although the census lists them.
     pub withheld: BTreeSet<String>,
 }
@@ -622,6 +625,25 @@ impl NicoApi for FakeNico {
                 .collect()
         })
         .await
+    }
+
+    async fn runtime_config(&self) -> Result<Option<forge::RuntimeConfig>, CallError> {
+        self.answer("version", |site| site.runtime_config.clone())
+            .await
+    }
+
+    async fn desired_firmware_versions(
+        &self,
+    ) -> Result<Vec<forge::DesiredFirmwareVersionEntry>, CallError> {
+        self.answer("get_desired_firmware_versions", |site| {
+            site.desired_firmware.clone()
+        })
+        .await
+    }
+
+    async fn host_firmware(&self) -> Result<Vec<forge::AvailableHostFirmware>, CallError> {
+        self.answer("list_host_firmware", |site| site.host_firmware.clone())
+            .await
     }
 }
 

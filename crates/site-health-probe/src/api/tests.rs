@@ -35,6 +35,7 @@ use crate::nico::host_read::{
     COMPACT_HOST_READ_MISSING, HOST_STATE_INCOMPLETE, Known, RETRY_COMPACT_AFTER_SWEEPS,
 };
 use crate::readers::devices::DevicesReader;
+use crate::readers::nico_config::NicoConfigReader;
 use crate::snapshot::{FamilySnapshot, Reader, SnapshotSink, SweepMeta, UnitsData};
 use crate::state_metrics::StateCollector;
 
@@ -1227,10 +1228,14 @@ async fn config_without_rest_reader_is_200_with_nulls() {
 
 /// A harness whose API and collector share `process_start`, with a
 /// declared metrics store and the given readers on.
-fn metrics_harness(devices: bool, rest_inventory: bool, process_start: SystemTime) -> Harness {
+fn metrics_harness(
+    [devices, rest_inventory, nico_config]: [bool; 3],
+    process_start: SystemTime,
+) -> Harness {
     let mut cfg = state_config();
     cfg.readers.devices.enabled = devices;
     cfg.readers.rest_inventory.enabled = rest_inventory;
+    cfg.readers.nico_config.enabled = nico_config;
     cfg.readers.rest_inventory.interval = Duration::from_secs(60);
     cfg.metrics = Some(crate::config::StateMetricsConfig {
         selector: [("job", "probe-metrics"), ("namespace", "nico-system")]
@@ -1258,7 +1263,7 @@ fn metrics_harness(devices: bool, rest_inventory: bool, process_start: SystemTim
 async fn config_metrics_block_names_enabled_readers_and_the_process() {
     // A start time with a fraction, as a real process has.
     let process_start = UNIX_EPOCH + Duration::from_nanos(1_761_818_400_123_456_789);
-    let h = metrics_harness(true, false, process_start);
+    let h = metrics_harness([true, false, false], process_start);
     let reply = h.get("/v1/config").await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     let device_intervals: serde_json::Map<String, Value> = DEVICE_FAMILIES
@@ -1288,7 +1293,7 @@ async fn config_metrics_block_names_enabled_readers_and_the_process() {
     );
     assert!(metrics.process_start_seconds.fract() > 0.0);
 
-    let h = metrics_harness(false, true, process_start);
+    let h = metrics_harness([false, true, false], process_start);
     site_match(&h, 1, SiteMatch::Match);
     let metrics = config_reply(h.get("/v1/config").await)
         .metrics
@@ -1296,6 +1301,15 @@ async fn config_metrics_block_names_enabled_readers_and_the_process() {
     assert_eq!(
         metrics.reader_intervals_seconds,
         BTreeMap::from([(Family::RestTotals, 60.0), (Family::RestSiteMatch, 60.0)])
+    );
+
+    let h = metrics_harness([false, false, true], process_start);
+    let metrics = config_reply(h.get("/v1/config").await)
+        .metrics
+        .expect("metrics");
+    assert_eq!(
+        metrics.reader_intervals_seconds,
+        BTreeMap::from([(Family::ConfigNicoApi, 60.0)])
     );
 }
 
@@ -1363,7 +1377,7 @@ async fn config_filters_leave_rest_site_alone() {
         h.get("/v1/config?vendor=Other&model=x&component=bmc&instanceType=it-9")
             .await,
     );
-    // Firmware targets and the tenant allocation wait for their tests.
+    // No config read yet, and the tenant allocation waits for its test.
     assert_eq!((config.nico_api, config.rest), (None, None));
     assert_eq!(
         config.rest_site.expect("restSite").result,
@@ -1439,6 +1453,174 @@ async fn rest_site_from_the_inventory_reader_without_upstream_text() {
     );
     assert!(!logs.text().is_empty(), "the failure was logged");
     assert!(!logs.text().contains(SENTINEL), "{}", logs.text());
+}
+
+/// A site with a GB200 BMC and UEFI target behind an explicit start, and a
+/// Dell BMC target without one.
+fn firmware_site() -> FakeSite {
+    let available = |vendor: &str, model: &str, kind: &str, version: &str, explicit: bool| {
+        rpc::forge::AvailableHostFirmware {
+            vendor: vendor.to_string(),
+            model: model.to_string(),
+            r#type: kind.to_string(),
+            version: version.to_string(),
+            needs_explicit_start: explicit,
+            ..Default::default()
+        }
+    };
+    let desired = |vendor: &str, model: &str, versions: &[(&str, &str)]| {
+        rpc::forge::DesiredFirmwareVersionEntry {
+            vendor: vendor.to_string(),
+            model: model.to_string(),
+            component_versions: versions
+                .iter()
+                .map(|(c, v)| (c.to_string(), v.to_string()))
+                .collect(),
+        }
+    };
+    FakeSite {
+        runtime_config: Some(rpc::forge::RuntimeConfig {
+            auto_host_firmware_update: true,
+            machine_update_policy: Some(rpc::forge::MachineUpdatePolicy {
+                effective_run_interval_seconds: 30,
+                requires_manual_upgrade: false,
+                max_concurrent_updates_absolute: Some(90),
+                max_concurrent_updates_percent: Some(10),
+            }),
+            ..Default::default()
+        }),
+        desired_firmware: vec![
+            desired(
+                "nvidia",
+                "GB200 NVL",
+                &[("bmc", "25.06-2"), ("uefi", "1.2")],
+            ),
+            desired("dell", "PowerEdge R750", &[("bmc", "7.10")]),
+        ],
+        host_firmware: vec![
+            available("nvidia", "GB200 NVL", "BMC", "25.06-2", true),
+            available("nvidia", "GB200 NVL", "UEFI", "1.2", true),
+            available("dell", "PowerEdge R750", "BMC", "7.10", false),
+        ],
+        ..FakeSite::default()
+    }
+}
+
+/// A harness with the config reader on, and the reader that feeds its store.
+fn config_reader_harness(nico: &Arc<FakeNico>) -> (Harness, NicoConfigReader) {
+    let mut h = harness();
+    let mut cfg = state_config();
+    cfg.readers.rest_inventory.enabled = false;
+    cfg.readers.nico_config.enabled = true;
+    h.router = router(ApiState::new(Arc::clone(&h.store), &cfg, SystemTime::now()));
+    let reader = NicoConfigReader::new(
+        cfg.readers.nico_config,
+        Arc::new(FakeConnector(Arc::clone(nico))),
+        Arc::new(CallGate::new(
+            "nico-api",
+            1_000.0,
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        )),
+        Arc::clone(&h.store) as Arc<dyn SnapshotSink>,
+        SystemTime::now(),
+    );
+    (h, reader)
+}
+
+#[tokio::test]
+async fn config_serves_nico_api_targets_by_filter() {
+    let nico = FakeNico::new(firmware_site());
+    let (h, reader) = config_reader_harness(&nico);
+    // Before the first read: null, not a 503.
+    assert_eq!(config_reply(h.get("/v1/config").await).nico_api, None);
+    reader
+        .run(&ObservationRecorder::default())
+        .await
+        .expect("sweep");
+
+    let config = config_reply(h.get("/v1/config").await)
+        .nico_api
+        .expect("nicoApi");
+    assert_eq!(config.read.read_interval_seconds, 60.0);
+    assert_eq!(config.read.last_attempt_error, None);
+    assert_eq!(config.site_explorer, None);
+    assert_eq!(
+        config.runtime,
+        carbide_site_health_probe_api::RuntimeSettings {
+            max_concurrent_machine_updates_absolute: Some(90),
+            max_concurrent_machine_updates_percent: Some(10),
+            machine_update_run_interval_seconds: Some(30),
+            requires_manual_upgrade: Some(false),
+            auto_host_firmware_update: Some(true),
+        }
+    );
+    let targets = |config: ConfigNicoApi| -> Vec<(String, String, bool)> {
+        config
+            .firmware_targets
+            .into_iter()
+            .map(|t| (t.model, t.component_name, t.explicit_start))
+            .collect()
+    };
+    let gb200 = |name: &str| ("GB200 NVL".to_string(), name.to_string(), true);
+    let dell = ("PowerEdge R750".to_string(), "bmc".to_string(), false);
+    assert_eq!(
+        targets(config),
+        vec![dell.clone(), gb200("bmc"), gb200("uefi")]
+    );
+    for (query, want) in [
+        ("vendor=nvidia", vec![gb200("bmc"), gb200("uefi")]),
+        ("vendor=NVIDIA", vec![]),
+        ("model=PowerEdge%20R750", vec![dell.clone()]),
+        ("component=bmc", vec![dell.clone(), gb200("bmc")]),
+        ("vendor=nvidia&component=uefi", vec![gb200("uefi")]),
+        ("component=other", vec![]),
+        // The allocation filter leaves the targets alone.
+        ("instanceType=it-9", vec![dell, gb200("bmc"), gb200("uefi")]),
+    ] {
+        let config = config_reply(h.get(&format!("/v1/config?{query}")).await);
+        assert_eq!(targets(config.nico_api.expect("nicoApi")), want, "{query}");
+    }
+}
+
+#[tokio::test]
+async fn config_nico_api_keeps_last_config_after_a_failed_read() {
+    let nico = FakeNico::new(firmware_site());
+    let (h, reader) = config_reader_harness(&nico);
+    reader
+        .run(&ObservationRecorder::default())
+        .await
+        .expect("sweep");
+    let good = config_reply(h.get("/v1/config").await)
+        .nico_api
+        .expect("nicoApi");
+
+    nico.fail_next(
+        "version",
+        crate::gate::CallError::Decode(SENTINEL.to_string()),
+    );
+    assert!(reader.run(&ObservationRecorder::default()).await.is_err());
+    let reply = h.get("/v1/config").await;
+    assert!(!reply.body.to_string().contains(SENTINEL));
+    let kept = config_reply(reply).nico_api.expect("the last config stays");
+    assert_eq!(kept.firmware_targets, good.firmware_targets);
+    assert_eq!(kept.read.read_at, good.read.read_at, "old times");
+    assert_eq!(kept.read.read_start, good.read.read_start);
+    assert!(kept.read.read_age_seconds >= good.read.read_age_seconds);
+    assert_eq!(
+        kept.read.last_attempt_error.as_deref(),
+        Some("version: undecodable reply")
+    );
+    // The next good read clears the error.
+    reader
+        .run(&ObservationRecorder::default())
+        .await
+        .expect("sweep");
+    let next = config_reply(h.get("/v1/config").await)
+        .nico_api
+        .expect("nicoApi");
+    assert_eq!(next.read.last_attempt_error, None);
+    assert!(next.read.read_at >= good.read.read_at);
 }
 
 /// Log lines written while the guard lives, at every level.

@@ -368,17 +368,22 @@ type ConfigNicoAPI struct {
 }
 
 type FirmwareTarget struct {
-	Vendor        string    `json:"vendor"`
-	Model         string    `json:"model"`
-	Component     Component `json:"component"`
-	Version       string    `json:"version"`
-	ExplicitStart bool      `json:"explicitStart"`
+	Vendor    string    `json:"vendor"`
+	Model     string    `json:"model"`
+	Component Component `json:"component"`
+	// ComponentName is nico-api's name of the component, as host firmware
+	// inventory names it, for example bmc or cx7.
+	ComponentName string `json:"componentName"`
+	Version       string `json:"version"`
+	ExplicitStart bool   `json:"explicitStart"`
 }
 
 type RuntimeSettings struct {
-	MaxConcurrentMachineUpdatesAbsolute *int64 `json:"maxConcurrentMachineUpdatesAbsolute"`
-	MaxConcurrentMachineUpdatesPercent  *int64 `json:"maxConcurrentMachineUpdatesPercent"`
-	AutoHostFirmwareUpdate              *bool  `json:"autoHostFirmwareUpdate"`
+	MaxConcurrentMachineUpdatesAbsolute *int64  `json:"maxConcurrentMachineUpdatesAbsolute"`
+	MaxConcurrentMachineUpdatesPercent  *int64  `json:"maxConcurrentMachineUpdatesPercent"`
+	MachineUpdateRunIntervalSeconds     *uint64 `json:"machineUpdateRunIntervalSeconds"`
+	RequiresManualUpgrade               *bool   `json:"requiresManualUpgrade"`
+	AutoHostFirmwareUpdate              *bool   `json:"autoHostFirmwareUpdate"`
 }
 
 type SiteExplorerRun struct {

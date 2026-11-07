@@ -509,28 +509,49 @@ pub struct RestSiteBinding {
 pub struct ConfigNicoApi {
     #[serde(flatten)]
     pub read: ReadInfo,
+    /// The target of every configured component, sorted by vendor, model
+    /// and component name.
     pub firmware_targets: Vec<FirmwareTarget>,
     pub runtime: RuntimeSettings,
+    /// Not read yet: always `null`.
     pub site_explorer: Option<SiteExplorerRun>,
 }
 
+/// The version nico-api installs on a component of one vendor and model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FirmwareTarget {
+    /// As nico-api names it, lowercase, for example `nvidia`.
     pub vendor: String,
     pub model: String,
+    /// `other` for every component without its own value here.
     pub component: Component,
+    /// nico-api's name of the component, for example `bmc` or `cx7`, as host
+    /// firmware inventory names it.
+    pub component_name: String,
     pub version: String,
+    /// Hosts of this vendor and model update only inside their update
+    /// window.
     pub explicit_start: bool,
 }
 
+/// The machine update manager's settings. The update policy fields are
+/// `null` when nico-api reports no update policy, which an unset
+/// `machineUpdateRunIntervalSeconds` shows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSettings {
+    /// Unset differs from 0. With both caps unset the manager starts no new
+    /// updates.
     pub max_concurrent_machine_updates_absolute: Option<i64>,
     pub max_concurrent_machine_updates_percent: Option<i64>,
+    /// Seconds between manager passes.
+    pub machine_update_run_interval_seconds: Option<u64>,
+    /// Every firmware update waits for an operator.
+    pub requires_manual_upgrade: Option<bool>,
+    /// The default of hosts without their own flag.
     pub auto_host_firmware_update: Option<bool>,
 }
 
@@ -1536,15 +1557,37 @@ mod tests {
             runtime: RuntimeSettings {
                 max_concurrent_machine_updates_absolute: Some(10),
                 max_concurrent_machine_updates_percent: None,
+                machine_update_run_interval_seconds: Some(300),
+                requires_manual_upgrade: Some(false),
                 auto_host_firmware_update: Some(true),
             },
             site_explorer: None,
         };
+        let nico_api = ConfigNicoApi {
+            firmware_targets: vec![FirmwareTarget {
+                vendor: "nvidia".to_string(),
+                model: "GB200 NVL".to_string(),
+                component: Component::Other,
+                component_name: "cx7".to_string(),
+                version: "28.45.1200".to_string(),
+                explicit_start: true,
+            }],
+            ..nico_api
+        };
         let mut golden = read_info_json();
-        golden["firmwareTargets"] = json!([]);
+        golden["firmwareTargets"] = json!([{
+            "vendor": "nvidia",
+            "model": "GB200 NVL",
+            "component": "other",
+            "componentName": "cx7",
+            "version": "28.45.1200",
+            "explicitStart": true,
+        }]);
         golden["runtime"] = json!({
             "maxConcurrentMachineUpdatesAbsolute": 10,
             "maxConcurrentMachineUpdatesPercent": null,
+            "machineUpdateRunIntervalSeconds": 300,
+            "requiresManualUpgrade": false,
             "autoHostFirmwareUpdate": true,
         });
         golden["siteExplorer"] = json!(null);

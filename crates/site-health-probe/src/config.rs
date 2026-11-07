@@ -247,6 +247,8 @@ impl ReaderConfig {
 pub(crate) struct Readers {
     pub devices: ReaderConfig,
     pub rest_inventory: ReaderConfig,
+    /// Off by default: only the firmware tests read nico-api's config.
+    pub nico_config: ReaderConfig,
 }
 
 impl Default for Readers {
@@ -254,16 +256,21 @@ impl Default for Readers {
         Self {
             devices: ReaderConfig::new(120, 600),
             rest_inventory: ReaderConfig::new(120, 600),
+            nico_config: ReaderConfig {
+                enabled: false,
+                ..ReaderConfig::new(60, 120)
+            },
         }
     }
 }
 
 impl Readers {
     /// Every reader with its config key, in a fixed order.
-    pub(crate) fn all(&self) -> [(&'static str, &ReaderConfig); 2] {
+    pub(crate) fn all(&self) -> [(&'static str, &ReaderConfig); 3] {
         [
             ("devices", &self.devices),
             ("rest_inventory", &self.rest_inventory),
+            ("nico_config", &self.nico_config),
         ]
     }
 }
@@ -515,8 +522,8 @@ impl StateConfig {
             errs.push("state.readers enables no reader".to_string());
         }
 
-        if self.readers.devices.enabled {
-            let nico = &self.nico_api;
+        let nico = &self.nico_api;
+        if self.readers.devices.enabled || self.readers.nico_config.enabled {
             if !is_host_port(&nico.target) {
                 errs.push(
                     "state.nico_api.target must be host:port with an explicit port and nothing \
@@ -524,15 +531,15 @@ impl StateConfig {
                         .to_string(),
                 );
             }
-            if !(1..=100).contains(&nico.batch_size) {
-                errs.push("state.nico_api.batch_size must be between 1 and 100".to_string());
-            }
             if nico.max_decoding_message_size == 0 {
                 errs.push("state.nico_api.max_decoding_message_size must be positive".to_string());
             }
             if nico.tls.ca.is_empty() || nico.tls.cert.is_empty() || nico.tls.key.is_empty() {
                 errs.push("state.nico_api.tls requires ca, cert, and key paths".to_string());
             }
+        }
+        if self.readers.devices.enabled && !(1..=100).contains(&nico.batch_size) {
+            errs.push("state.nico_api.batch_size must be between 1 and 100".to_string());
         }
 
         if self.readers.rest_inventory.enabled {
@@ -994,11 +1001,37 @@ state:
         let readers = &state.readers;
         assert_eq!(schedule(&readers.devices), (true, 120, 600));
         assert_eq!(schedule(&readers.rest_inventory), (true, 120, 600));
+        assert_eq!(schedule(&readers.nico_config), (false, 60, 120));
         assert_eq!(state.paging, Paging::default());
         assert_eq!(
             (state.paging.keep_seconds, state.paging.max_kept_snapshots),
             (300, 6)
         );
+    }
+
+    /// The host read settings are the devices reader's: the config reader
+    /// alone checks only the connection.
+    #[test]
+    fn config_reader_alone_needs_only_the_connection() {
+        let cfg = state_with(
+            "  readers:\n    devices: {enabled: false, interval: 120s, timeout: 600s}\n    \
+             nico_config: {enabled: true, interval: 30s, timeout: 60s}\n",
+        )
+        .expect("loads");
+        assert_eq!(
+            cfg.state.readers.nico_config.interval,
+            Duration::from_secs(30)
+        );
+        let cfg = load_str(&format!(
+            "{}  readers:\n    devices: {{enabled: false, interval: 120s, timeout: 600s}}\n    \
+             nico_config: {{enabled: true, interval: 30s, timeout: 60s}}\n",
+            STATE.replace(
+                "  nico_api:\n",
+                "  nico_api:\n    host_read: auto\n    batch_size: 500\n"
+            )
+        ))
+        .expect("device read settings are not checked");
+        assert_eq!(cfg.state.nico_api.batch_size, 500);
     }
 
     #[test]
@@ -1158,6 +1191,19 @@ state:
                 "nico-api reader needs tls",
                 "state:\n  enabled: true\n",
                 "state.nico_api.tls requires ca, cert, and key paths",
+            ),
+            (
+                "the config reader alone needs tls",
+                "state:\n  enabled: true\n  readers:\n    devices: {enabled: false, interval: 1s, \
+                 timeout: 1s}\n    nico_config: {enabled: true, interval: 60s, timeout: 60s}\n",
+                "state.nico_api.tls requires ca, cert, and key paths",
+            ),
+            (
+                "the config reader alone needs a target",
+                "state:\n  enabled: true\n  nico_api: {target: nico-api}\n  readers:\n    \
+                 devices: {enabled: false, interval: 1s, timeout: 1s}\n    \
+                 nico_config: {enabled: true, interval: 60s, timeout: 60s}\n",
+                "state.nico_api.target must be host:port",
             ),
             (
                 "batch above max_find_by_ids",
@@ -1355,6 +1401,10 @@ state:
       enabled: true
       interval: "120s"
       timeout: "600s"
+    nico_config:
+      enabled: false
+      interval: "60s"
+      timeout: "120s"
     rest_inventory:
       enabled: true
       interval: "120s"
@@ -1434,6 +1484,10 @@ state:
       enabled: true
       interval: "120s"
       timeout: "600s"
+    nico_config:
+      enabled: false
+      interval: "60s"
+      timeout: "120s"
     rest_inventory:
       enabled: false
       interval: "120s"
@@ -1505,6 +1559,7 @@ state:
             !readers.rest_inventory.enabled,
             "the REST reader stays off until its inputs exist"
         );
+        assert!(!readers.nico_config.enabled, "only firmware tests need it");
     }
 
     #[test]

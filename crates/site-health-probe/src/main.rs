@@ -412,6 +412,7 @@ fn build_readers(
     process_start: SystemTime,
 ) -> eyre::Result<(ProbeSet, Vec<Family>)> {
     use readers::devices::{DEVICE_FAMILIES, DevicesReader};
+    use readers::nico_config::{NICO_CONFIG_FAMILIES, NicoConfigReader};
     use readers::rest_inventory::{Inventory, RestInventoryReader};
     use rest::auth::Auth;
     use rest::client::{RestClient, new_http_client};
@@ -437,6 +438,16 @@ fn build_readers(
             process_start,
         )));
         families.extend(DEVICE_FAMILIES);
+    }
+    if schedule.nico_config.enabled {
+        out.push(Arc::new(NicoConfigReader::new(
+            schedule.nico_config.clone(),
+            Arc::clone(&nico),
+            Arc::clone(&gates.nico_api),
+            Arc::clone(&sink) as _,
+            process_start,
+        )));
+        families.extend(NICO_CONFIG_FAMILIES);
     }
     if schedule.rest_inventory.enabled {
         let rest = &state.rest;
@@ -895,6 +906,12 @@ mod tests {
             (names, families.len())
         };
         assert_eq!(names(&cfg), (vec!["devices", "rest_inventory"], 10));
+        cfg.state.readers.nico_config.enabled = true;
+        assert_eq!(
+            names(&cfg),
+            (vec!["devices", "nico_config", "rest_inventory"], 11)
+        );
+        cfg.state.readers.nico_config.enabled = false;
         cfg.state.readers.rest_inventory.enabled = false;
         assert_eq!(names(&cfg), (vec!["devices"], 8));
         cfg.state.readers.rest_inventory.enabled = true;

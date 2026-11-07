@@ -284,6 +284,7 @@ mod tests {
             vendor: "Dell".to_string(),
             model: model.to_string(),
             component: Component::Bmc,
+            component_name: "bmc".to_string(),
             version: "7.10".to_string(),
             explicit_start: false,
         };
@@ -294,6 +295,8 @@ mod tests {
                 runtime: RuntimeSettings {
                     max_concurrent_machine_updates_absolute: Some(10),
                     max_concurrent_machine_updates_percent: None,
+                    machine_update_run_interval_seconds: Some(300),
+                    requires_manual_upgrade: Some(false),
                     auto_host_firmware_update: Some(false),
                 },
                 site_explorer: None,

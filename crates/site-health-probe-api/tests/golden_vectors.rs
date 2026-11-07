@@ -344,6 +344,7 @@ fn wire_vectors_match_the_files() {
                     vendor: "NVIDIA".to_string(),
                     model: "GB200 NVL".to_string(),
                     component,
+                    component_name: format!("c{i}"),
                     version: format!("1.{i}"),
                     explicit_start: i % 2 == 0,
                 })
@@ -351,6 +352,8 @@ fn wire_vectors_match_the_files() {
                 runtime: RuntimeSettings {
                     max_concurrent_machine_updates_absolute: Some(i64::MAX),
                     max_concurrent_machine_updates_percent: Some(0),
+                    machine_update_run_interval_seconds: Some(300),
+                    requires_manual_upgrade: Some(true),
                     auto_host_firmware_update: Some(false),
                 },
                 site_explorer: Some(SiteExplorerRun {
