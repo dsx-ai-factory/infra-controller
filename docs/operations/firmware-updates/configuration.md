@@ -97,6 +97,16 @@ sha256 = "<64 hexadecimal characters>"
   `script.filename`, written for NICo releases before 2.0, is accepted and
   ignored.
 
+### Scout Script Execution Limits
+
+Scout script supervision and retained-input recovery are unreleased and require Scout builds containing [the script supervision implementation](https://github.com/dsx-ai-factory/infra-controller/pull/8841). Verify the deployed Scout image's build revision and install matching Scout/helper binaries. Older Scout builds do not provide this contract. Both packaged and URL-named scripts follow the [Scout script execution contract](host-firmware.md#scout-script-execution).
+
+Size script output and `execution_timeout_seconds` for the vendor workflow. The execution deadline includes helper startup, script execution, descendants, and output collection. Each output stream is capped at 1 MiB; exceeding a cap requests termination, including during an update. Cleanup and result delivery can add up to 5 seconds each.
+
+Core separately waits for 30 seconds of script download, plus `execution_timeout_seconds`, plus one `artifact_download_timeout_seconds` allowance per file artifact, plus 30 minutes of slack. The total is capped at 5 hours. Core can therefore time out before a long-running script finishes; the Scout deadline does not extend Core's cap.
+
+Refer to [Scout Script Recovery](host-firmware.md#scout-script-recovery) for retained inputs, cooperative hardware exclusion, and process/hardware reconciliation requirements. A cleanup diagnostic does not authorize replay, and a lost Core success report has a separate [delivery limitation](https://github.com/dsx-ai-factory/infra-controller/issues/8840).
+
 ### Minimum and default versions
 
 The pre-ingestion minimum is an upgrade trigger, not the upgrade target. When a
