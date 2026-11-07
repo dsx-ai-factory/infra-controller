@@ -21,7 +21,7 @@ use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
 use chrono::Utc;
 use eyre::eyre;
-use libredfish::{Redfish, SystemPowerControl};
+use libredfish::{Redfish, RedfishError, SystemPowerControl};
 use model::machine::{
     BiosConfigInfo, BiosConfigState, ManagedHostState, ManagedHostStateSnapshot, PowerState,
 };
@@ -39,6 +39,7 @@ use crate::context::MachineStateHandlerContextObjects;
 /// Outcome of configure_host_bios function.
 pub(super) enum BiosConfigOutcome {
     Done,
+    WaitingForBmc(String),
     WaitingForReboot(String),
     /// Dell BIOS PATCH returned a job ID; wait for it to complete before boot order.
     WaitingForBiosJob(BiosConfigInfo),
@@ -83,6 +84,18 @@ impl From<BiosRecoveryAttemptOutcome> for BiosConfigJobAdvanceOutcome {
     }
 }
 
+const SERVICE_UNAVAILABLE: u16 = 503;
+
+fn bmc_unavailable(error: &RedfishError) -> bool {
+    match error {
+        RedfishError::NetworkError { .. } => true,
+        RedfishError::HTTPErrorCode { status_code, .. } => {
+            status_code.as_u16() == SERVICE_UNAVAILABLE
+        }
+        _ => false,
+    }
+}
+
 pub(super) async fn configure_host_bios(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     reachability_params: &ReachabilityParams,
@@ -99,6 +112,16 @@ pub(super) async fn configure_host_bios(
     )
     .await
     {
+        Err(e) if bmc_unavailable(&e) => {
+            tracing::warn!(
+                machine_id = %mh_snapshot.host_snapshot.id,
+                error = %e,
+                "redfish machine_setup failed because the BMC did not answer. retrying without restarting the host"
+            );
+            return Ok(BiosConfigOutcome::WaitingForBmc(format!(
+                "redfish machine_setup failed: {e}; waiting for the BMC to answer"
+            )));
+        }
         Err(e) => {
             tracing::warn!(
                 machine_id = %mh_snapshot.host_snapshot.id,
