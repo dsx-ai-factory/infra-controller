@@ -1266,6 +1266,14 @@ async fn test_ingestion_ignores_compute_and_power_shelf_counts(
         None,
     )
     .await?;
+    let _replacement = Box::pin(new_host(
+        &env,
+        ManagedHostConfig::default().with_expected_machine_data(ExpectedMachineData {
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        }),
+    ))
+    .await?;
     let switch_id = attach_switch_with_nvos_credentials(&env, &rack_id).await?;
 
     env.run_rack_controller_iteration().await;
@@ -1320,14 +1328,6 @@ async fn test_ingestion_ignores_compute_and_power_shelf_counts(
             .collect::<Vec<_>>(),
         vec![Some("compute"), Some("power_shelf")]
     );
-    let _replacement = Box::pin(new_host(
-        &env,
-        ManagedHostConfig::default().with_expected_machine_data(ExpectedMachineData {
-            rack_id: Some(rack_id.clone()),
-            ..Default::default()
-        }),
-    ))
-    .await?;
     crate::fixtures::rack::set_rack_controller_state(
         pool.acquire().await?.as_mut(),
         &rack_id,
