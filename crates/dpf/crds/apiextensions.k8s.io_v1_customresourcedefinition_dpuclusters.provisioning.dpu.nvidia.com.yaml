@@ -244,30 +244,21 @@ spec:
                 minimum: 0
                 type: integer
               phase:
-                allOf:
-                - enum:
-                  - Pending
-                  - Creating
-                  - Ready
-                  - NotReady
-                  - Failed
-                - enum:
-                  - Pending
-                  - Creating
-                  - Ready
-                  - NotReady
-                  - Failed
                 default: Pending
                 description: |-
                   ClusterPhase describes current state of DPUCluster.
                   Only one of the following state may be specified.
                   Default is Pending.
+                enum:
+                - Pending
+                - Creating
+                - Ready
+                - NotReady
+                - Failed
                 type: string
               version:
                 description: Version is the K8s control-plane version of the cluster
                 type: string
-            required:
-            - phase
             type: object
         required:
         - spec

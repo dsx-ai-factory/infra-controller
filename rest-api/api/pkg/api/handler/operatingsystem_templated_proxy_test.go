@@ -18,7 +18,6 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -29,7 +28,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/trace"
 	enums "go.temporal.io/api/enums/v1"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
@@ -44,7 +42,6 @@ type templatedProxyFixture struct {
 	cfg       *config.Config
 	scp       *sc.ClientPool
 	tc        *tmocks.Client
-	tracer    trace.Tracer
 
 	ipOrg string
 	tnOrg string
@@ -76,6 +73,7 @@ func buildTemplatedProxyFixture(t *testing.T) *templatedProxyFixture {
 
 	tenant := testMachineBuildTenant(t, dbSession, tnOrg, "tmpl-proxy-tenant")
 	testBuildTenantSiteAssociation(t, dbSession, tnOrg, tenant.ID, site.ID, tnu.ID)
+	common.TestBuildAllocation(t, dbSession, site, tenant, "tmpl-proxy-allocation", ipu)
 
 	templateDAO := cdbm.NewIpxeTemplateDAO(dbSession)
 	tmpl, err := templateDAO.Create(ctx, nil, cdbm.IpxeTemplateCreateInput{
@@ -89,7 +87,7 @@ func buildTemplatedProxyFixture(t *testing.T) *templatedProxyFixture {
 	_, err = itsaDAO.Create(ctx, nil, cdbm.IpxeTemplateSiteAssociationCreateInput{IpxeTemplateID: tmpl.ID, SiteID: site.ID})
 	require.NoError(t, err)
 
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tcfg, _ := cfg.GetTemporalConfig()
 	scp := sc.NewClientPool(tcfg)
@@ -102,7 +100,6 @@ func buildTemplatedProxyFixture(t *testing.T) *templatedProxyFixture {
 		cfg:       cfg,
 		scp:       scp,
 		tc:        &tmocks.Client{},
-		tracer:    tracer,
 		ipOrg:     ipOrg,
 		tnOrg:     tnOrg,
 		ipu:       ipu,
@@ -170,8 +167,7 @@ func (f *templatedProxyFixture) newEchoContextForUser(method, body string, param
 	ec.SetParamNames(names...)
 	ec.SetParamValues(values...)
 	ec.Set("user", user)
-	reqCtx := context.WithValue(f.ctx, otelecho.TracerKey, f.tracer)
-	ec.SetRequest(ec.Request().WithContext(reqCtx))
+	ec.SetRequest(ec.Request().WithContext(f.ctx))
 	return ec, rec
 }
 
@@ -334,6 +330,77 @@ func TestOperatingSystemHandler_TemplatedIPXE_Proxy(t *testing.T) {
 		osDAO := cdbm.NewOperatingSystemDAO(f.dbSession)
 		_, gerr := osDAO.GetByID(f.ctx, nil, parsedID, nil)
 		assert.ErrorIs(t, gerr, cdb.ErrDoesNotExist, "OS should be soft-deleted once every site is cleaned up")
+	})
+
+	t.Run("metadata update resends a failed artifact change", func(t *testing.T) {
+		// A failed proxy call leaves the new definition saved; the next PATCH must resend it.
+		osDAO := cdbm.NewOperatingSystemDAO(f.dbSession)
+		os, err := osDAO.Create(f.ctx, nil, cdbm.OperatingSystemCreateInput{
+			Name:           "artifact-retry-os",
+			Org:            f.tnOrg,
+			TenantID:       &f.tn.ID,
+			OsType:         cdbm.OperatingSystemTypeTemplatedIPXE,
+			IpxeTemplateId: cutil.GetPtr(f.tmpl.ID.String()),
+			IpxeOSHash:     cutil.GetPtr("previous-definition-hash"),
+			IpxeTemplateArtifacts: []cdbm.OperatingSystemIpxeArtifact{
+				{Name: "kernel", URL: "http://example.com/original-kernel", CacheStrategy: cdbm.OperatingSystemIpxeArtifactCacheStrategyCacheAsNeeded},
+			},
+			Status:    cdbm.OperatingSystemStatusReady,
+			CreatedBy: f.tnu.ID,
+		})
+		require.NoError(t, err)
+		common.TestBuildOperatingSystemSiteAssociation(t, f.dbSession, os.ID, f.site.ID, cutil.GetPtr(os.ID.String()), cdbm.OperatingSystemSiteAssociationStatusSynced, f.tnu)
+
+		for _, step := range []struct {
+			name              string
+			request           model.APIOperatingSystemUpdateRequest
+			proxyError        error
+			associationStatus string
+			osStatus          string
+		}{
+			{
+				name: "artifact update fails after saving the definition",
+				request: model.APIOperatingSystemUpdateRequest{
+					IpxeTemplateArtifacts: &model.APIOperatingSystemIpxeArtifacts{
+						{Name: "kernel", URL: "http://example.com/replacement-kernel", CacheStrategy: cdbm.OperatingSystemIpxeArtifactCacheStrategyCacheAsNeeded},
+					},
+				},
+				proxyError:        errors.New("proxy workflow temporarily unavailable"),
+				associationStatus: cdbm.OperatingSystemSiteAssociationStatusError,
+				osStatus:          cdbm.OperatingSystemStatusError,
+			},
+			{
+				name:              "metadata update resends the saved artifact definition",
+				request:           model.APIOperatingSystemUpdateRequest{Description: cutil.GetPtr("updated description")},
+				associationStatus: cdbm.OperatingSystemSiteAssociationStatusSynced,
+				osStatus:          cdbm.OperatingSystemStatusReady,
+			},
+		} {
+			psc := newProxySiteClient(t, updateOperatingSystemMethod, nil, step.proxyError)
+			f.bindProxyClient(psc)
+			body, err := json.Marshal(step.request)
+			require.NoError(t, err, step.name)
+			ec, rec := f.newEchoContext(http.MethodPatch, string(body), map[string]string{"orgName": f.tnOrg, "id": os.ID.String()})
+			h := UpdateOperatingSystemHandler{dbSession: f.dbSession, tc: f.tc, scp: f.scp, cfg: f.cfg}
+			require.NoError(t, h.Handle(ec), step.name)
+			require.Equal(t, http.StatusOK, rec.Code, "%s: %s", step.name, rec.Body.String())
+			psc.client.AssertExpectations(t)
+			psc.workflow.AssertExpectations(t)
+
+			var forwarded corev1.UpdateOperatingSystemRequest
+			require.NoError(t, protojson.Unmarshal(psc.captured.RequestJSON, &forwarded))
+			require.NotNil(t, forwarded.IpxeTemplateArtifacts)
+			require.Len(t, forwarded.IpxeTemplateArtifacts.Items, 1)
+			require.Equal(t, "http://example.com/replacement-kernel", forwarded.IpxeTemplateArtifacts.Items[0].Url, step.name)
+			assert.Equal(t, step.request.Description, forwarded.Description, step.name)
+			assert.Nil(t, forwarded.IpxeTemplateDefinitionHash, step.name)
+			persisted, err := osDAO.GetByID(f.ctx, nil, os.ID, nil)
+			require.NoError(t, err)
+			require.Len(t, persisted.IpxeTemplateArtifacts, 1)
+			require.Equal(t, "http://example.com/replacement-kernel", persisted.IpxeTemplateArtifacts[0].URL, step.name)
+			require.Equal(t, step.associationStatus, f.osAssociationStatus(t, os.ID), step.name)
+			require.Equal(t, step.osStatus, persisted.Status, step.name)
+		}
 	})
 }
 

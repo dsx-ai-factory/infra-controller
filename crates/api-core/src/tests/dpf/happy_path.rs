@@ -32,7 +32,7 @@ use tonic::Request;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-use super::{dpf_config, expect_dpf_service_inventory};
+use super::{bf4_deployment_config, dpf_config, expect_dpf_service_inventory, phase_observation};
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_managed_host_with_dpf, create_managed_host_with_dpf_bf4,
     create_test_env_with_overrides, get_config,
@@ -40,12 +40,13 @@ use crate::tests::common::api_fixtures::{
 
 fn default_mock(deployment_type: DpuDeploymentType) -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(DpuPhase::Ready)));
     mock.expect_deployment_type_for_dpu()
         .returning(move |__, _| Ok(deployment_type));
     mock.expect_verify_node_labels().returning(|_, _| Ok(true));
@@ -85,15 +86,21 @@ async fn test_dpu_and_host_till_ready(pool: sqlx::PgPool) {
     )));
 }
 
-/// Provision a BF4 through DPF and verify that NICo performs only the
+/// Provision a DPU through DPF and verify that NICo performs only the
 /// credential portion of post-ready platform handling.
-async fn assert_bf4_skips_platform_configuration(pool: sqlx::PgPool, enable_secure_boot: bool) {
-    let mut mock = default_mock(DpuDeploymentType::Bf4Generic);
+async fn assert_dpf_skips_platform_configuration(
+    pool: sqlx::PgPool,
+    enable_secure_boot: bool,
+    deployment_type: DpuDeploymentType,
+) {
+    let mut mock = default_mock(deployment_type);
     expect_dpf_service_inventory(&mut mock);
     let dpf_sdk: Arc<dyn DpfOperations> = Arc::new(mock);
 
     let mut config = get_config();
     config.dpf = dpf_config();
+    // Configure the BF4 deployment to match the Bf4Generic provisioning reported by the mock.
+    config.dpf.deployments.bf4_generic = Some(bf4_deployment_config("bf4-generic"));
     config.dpu_config.dpu_enable_secure_boot = enable_secure_boot;
 
     let env = create_test_env_with_overrides(
@@ -103,9 +110,15 @@ async fn assert_bf4_skips_platform_configuration(pool: sqlx::PgPool, enable_secu
     .await;
     let redfish_timepoint = env.redfish_sim.timepoint();
 
-    let mh = timeout(TEST_TIMEOUT, create_managed_host_with_dpf_bf4(&env))
-        .await
-        .expect("timed out during BF4 initial provisioning");
+    let mh = timeout(TEST_TIMEOUT, async {
+        if deployment_type == DpuDeploymentType::Bf4Generic {
+            create_managed_host_with_dpf_bf4(&env).await
+        } else {
+            create_managed_host_with_dpf(&env).await
+        }
+    })
+    .await
+    .expect("timed out during initial provisioning");
 
     let mut txn = env.db_txn().await;
     let host = mh.host().db_machine(&mut txn).await;
@@ -121,7 +134,7 @@ async fn assert_bf4_skips_platform_configuration(pool: sqlx::PgPool, enable_secu
         .expect("DPU BMC IP must be present")
         .to_string();
 
-    // BF4 must not receive the opaque vendor machine_setup call.
+    // DPF-ingested DPUs must not receive the opaque vendor machine_setup call.
     let dpu_redfish_actions = env
         .redfish_sim
         .actions_since(&redfish_timepoint)
@@ -130,7 +143,7 @@ async fn assert_bf4_skips_platform_configuration(pool: sqlx::PgPool, enable_secu
         dpu_redfish_actions
             .iter()
             .all(|action| !matches!(action, RedfishSimAction::MachineSetup { .. })),
-        "BF4 received machine_setup: {dpu_redfish_actions:?}"
+        "DPF-ingested DPU received machine_setup: {dpu_redfish_actions:?}"
     );
 
     let platform_actions = env.redfish_sim.platform_actions();
@@ -142,10 +155,10 @@ async fn assert_bf4_skips_platform_configuration(pool: sqlx::PgPool, enable_secu
             .filter(|action| matches!(action, RedfishSimPlatformAction::UefiSetup { dpu: true }))
             .count(),
         1,
-        "BF4 DPU UEFI credential was not replaced exactly once: {platform_actions:?}"
+        "DPU UEFI credential was not replaced exactly once: {platform_actions:?}"
     );
 
-    // No BF4 platform mutation or BIOS verification may run after DPF reports Ready.
+    // No platform mutation or BIOS verification may run after DPF reports Ready.
     assert!(
         platform_actions.iter().all(|action| !matches!(
             action,
@@ -154,20 +167,30 @@ async fn assert_bf4_skips_platform_configuration(pool: sqlx::PgPool, enable_secu
                 | RedfishSimPlatformAction::IsBiosSetup { host }
                 if host == &dpu_bmc_ip
         )),
-        "BF4 received post-ready platform configuration: {platform_actions:?}"
+        "DPF-ingested DPU received post-ready platform configuration: {platform_actions:?}"
     );
 }
 
 /// BF4 skips `machine_setup` when the legacy non-secure-boot branch is selected.
 #[crate::sqlx_test]
 async fn test_bf4_dpf_skips_machine_setup(pool: sqlx::PgPool) {
-    assert_bf4_skips_platform_configuration(pool, false).await;
+    assert_dpf_skips_platform_configuration(pool, false, DpuDeploymentType::Bf4Generic).await;
 }
 
 /// BF4 skips the RShim and host-privilege mutations when secure boot is enabled.
 #[crate::sqlx_test]
 async fn test_bf4_dpf_skips_secure_boot_platform_setup(pool: sqlx::PgPool) {
-    assert_bf4_skips_platform_configuration(pool, true).await;
+    assert_dpf_skips_platform_configuration(pool, true, DpuDeploymentType::Bf4Generic).await;
+}
+
+#[crate::sqlx_test]
+async fn test_bf3_dpf_skips_machine_setup(pool: sqlx::PgPool) {
+    assert_dpf_skips_platform_configuration(pool, false, DpuDeploymentType::Bf3).await;
+}
+
+#[crate::sqlx_test]
+async fn test_bf3_dpf_skips_secure_boot_platform_setup(pool: sqlx::PgPool) {
+    assert_dpf_skips_platform_configuration(pool, true, DpuDeploymentType::Bf3).await;
 }
 
 /// Verifies DPF inventory uses the host ingestion flag and composite DPU CR name,
@@ -227,14 +250,14 @@ async fn test_dpf_inventory_uses_host_context_and_preserves_last_good_value(pool
             .is_some_and(|dpf| dpf.used_for_ingestion)
     );
     let host_node_id = host
-        .bmc_info
+        .bmc
         .as_ref()
         .and_then(|bmc| bmc.mac.as_deref())
         .expect("host BMC MAC must exist")
         .to_ascii_lowercase()
         .replace(':', "-");
     let dpu_device_id = dpu
-        .bmc_info
+        .bmc
         .as_ref()
         .and_then(|bmc| bmc.mac.as_deref())
         .expect("DPU BMC MAC must exist")

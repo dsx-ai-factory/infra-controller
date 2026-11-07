@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -51,11 +51,18 @@ const TRIGGER_EVIDENCE_TASK_ID: &str = "SpdmTriggerEvidenceTaskId";
 struct RedfishSimState {
     hosts: HashMap<String, RedfishSimHostState>,
     users: HashMap<String, String>,
+    ipmi_accounts: HashSet<String>,
     fw_version: Arc<String>,
     secure_boot: AtomicBool,
     no_component_integrities: bool,
     firmware_for_component_error: bool,
-    get_task_trigger_evidence_returns_interrupted: bool,
+    get_task_trigger_evidence_returns_exception: bool,
+    evidence_collection_running: bool,
+    evidence_collection_requests: Vec<(String, String)>,
+    task_cancellation_requests: Vec<String>,
+    cancelling_evidence_tasks: HashSet<String>,
+    next_task_cancel_error: Option<RedfishError>,
+    task_http_errors: HashMap<String, http::StatusCode>,
     machine_setup_bios_job_id: Option<String>,
     is_bios_setup: Option<bool>,
     default_lockdown: Option<EnabledDisabled>,
@@ -64,12 +71,37 @@ struct RedfishSimState {
     /// preserves the normal successful behavior; `Some(false)` models a BMC
     /// accepting the write without applying the requested policy.
     lockdown_bmc_applies: Option<bool>,
+    next_lockdown_status_error: Option<RedfishError>,
+    next_lockdown_bmc_error: Option<(EnabledDisabled, String)>,
+    /// Fail one power-state read without changing the host's actual power.
+    next_power_state_error: Option<(usize, String)>,
+    next_onboard_nics_error: Option<String>,
+    /// Fail the next matching power action before changing the host's power.
+    next_power_action_error: Option<(SystemPowerControl, RedfishError)>,
+    /// Delay one matching power action before applying or recording it.
+    next_power_action_delay: Option<(
+        SystemPowerControl,
+        Duration,
+        tokio::sync::oneshot::Sender<()>,
+    )>,
+    /// Value of `ac_powercycle_supported_by_power`. Defaults to `false`.
+    ac_powercycle_supported: bool,
+    next_chassis_reset_error: Option<RedfishError>,
+    next_ipmi_access_error: Option<String>,
     job_state_sequence: VecDeque<JobState>,
     /// Offset (in seconds) applied to the BMC `DateTime` returned by
     /// `get_manager`, relative to the controller's `Utc::now()`. Defaults to 0
     /// (perfectly in sync); tests set it to simulate a BMC clock that is out of
     /// sync to exercise the time-sync reset/retry path.
     bmc_time_offset_seconds: i64,
+    /// When enabled, powered-off hosts report the stable BlueField-3
+    /// StandbyOffline state as `Paused`.
+    paused_when_off: bool,
+    /// When enabled, successful `ForceRestart` requests leave power unchanged.
+    force_restart_leaves_power_unchanged: bool,
+    /// Number of `get_tasks` calls to fail after a BMC reset, modelling the
+    /// interval before the reset service is reachable again.
+    bmc_reset_unavailable_polls: usize,
     /// Records every call to `RedfishClientPool::create_client` so tests can
     /// assert what vendor was passed at each call site.
     create_client_calls: Vec<CreateClientCall>,
@@ -88,18 +120,25 @@ struct RedfishSimState {
     /// When set, overrides the `Product` field returned by `get_service_root`.
     /// Tests use this to model a specific DPU generation.
     service_root_product: Option<String>,
+    systems_collection_uri: Option<String>,
+    resources: HashMap<String, String>,
+    resource_requests: Vec<String>,
+    resource_failures: HashSet<String>,
     /// When set, overrides the `Manufacturer` returned by `get_chassis`, so
     /// tests can drive `probe_bmc_vendor`'s Lite-On/Delta chassis fallback.
     chassis_manufacturer: Option<String>,
     platform_actions: Vec<RedfishSimPlatformAction>,
+    uefi_setup_job_id: Option<String>,
     /// Lossless `machine_setup_status` target observations. These reads stay
     /// separate from mutating platform actions and preserve both `Pair` fields.
     machine_setup_status_targets: HashMap<String, Vec<Option<RedfishSimBootInterfaceRef>>>,
     /// Opt-in authentication enforcement. Off by default so existing tests
     /// (which pass arbitrary or anonymous credentials) are undisturbed. When on,
-    /// `get_accounts` returns `401` unless the client was created with a
-    /// `Direct` credential whose password matches the seeded `users` entry, so
-    /// credential-probe paths (e.g. `bmc_credentials_valid`) can be exercised.
+    /// `get_accounts`, `change_password`, `change_password_by_id`,
+    /// `get_systems`, and `get_power_state` return `401` unless the client was
+    /// created with a `Direct` credential whose password matches the seeded
+    /// `users` entry. This makes credential selection and rejection observable
+    /// in callers such as `bmc_credentials_valid`.
     enforce_auth: bool,
     auth_attempts: Vec<RedfishSimAuthAttempt>,
     /// When set, `get_accounts` fails with a non-authentication transport error
@@ -129,6 +168,10 @@ struct RedfishSimState {
     /// vendor probe). Drives the [`super::CredentialOpError::ClientCreation`]
     /// retry paths at credential-op call sites.
     create_client_error: Option<String>,
+    /// Optional latency for the three phases of SPDM attester discovery.
+    create_client_delay: Duration,
+    service_root_delay: Duration,
+    component_integrities_delay: Duration,
     /// When set, the sim's `BmcCredentialOps::uefi_setup` override fails with
     /// [`super::CredentialOpError::ClientCreation`] carrying this message,
     /// modeling a client-creation failure inside the credential op (the sim
@@ -204,6 +247,7 @@ pub struct RedfishSimAuthAttempt {
 #[derive(Debug)]
 struct RedfishSimHostState {
     power: PowerState,
+    onboard_nics: Option<EnabledDisabled>,
     lockdown: libredfish::EnabledDisabled,
     actions: Vec<RedfishSimAction>,
     boot_interface_targets: Vec<Option<RedfishSimBootInterfaceRef>>,
@@ -223,12 +267,14 @@ struct RedfishSimHostState {
     /// Per-host so one host's boot-order state can't flip another host's
     /// `is_boot_order_setup` check.
     is_boot_order_setup: Option<bool>,
+    bmc_reset_unavailable_polls: usize,
 }
 
 impl Default for RedfishSimHostState {
     fn default() -> Self {
         Self {
             power: PowerState::default(),
+            onboard_nics: None,
             lockdown: libredfish::EnabledDisabled::Disabled,
             actions: Vec::default(),
             boot_interface_targets: Vec::default(),
@@ -236,6 +282,7 @@ impl Default for RedfishSimHostState {
             // de-enumeration, see the boot order configure normally.
             http_dev1_enabled: true,
             is_boot_order_setup: None,
+            bmc_reset_unavailable_polls: 0,
         }
     }
 }
@@ -324,8 +371,9 @@ impl RedfishSim {
             .unwrap_or_default()
     }
 
-    /// Model a BMC that exposes no `ComponentIntegrity` collection, so nothing
-    /// is eligible for SPDM attestation.
+    /// Model a BMC whose `ComponentIntegrity` collection is empty, so nothing
+    /// is eligible for SPDM attestation. The service root still advertises the
+    /// collection.
     pub fn set_no_component_integrities(&self, no_component_integrities: bool) {
         self.state.lock().unwrap().no_component_integrities = no_component_integrities;
     }
@@ -336,13 +384,51 @@ impl RedfishSim {
         self.state.lock().unwrap().firmware_for_component_error = error;
     }
 
-    /// Return the evidence-collection task as `Interrupted`, modelling a BMC
+    /// Return the evidence-collection task as `Exception`, modelling a BMC
     /// that keeps failing to produce evidence.
-    pub fn set_get_task_trigger_evidence_returns_interrupted(&self, interrupted: bool) {
+    pub fn set_get_task_trigger_evidence_returns_exception(&self, exception: bool) {
         self.state
             .lock()
             .unwrap()
-            .get_task_trigger_evidence_returns_interrupted = interrupted;
+            .get_task_trigger_evidence_returns_exception = exception;
+    }
+
+    /// Keep evidence-collection tasks running until cleared. Tasks otherwise
+    /// complete immediately; the exception override takes precedence.
+    pub fn set_evidence_collection_running(&self, running: bool) {
+        self.state.lock().unwrap().evidence_collection_running = running;
+    }
+
+    /// Return evidence-collection requests in call order as `(url, nonce)` pairs.
+    pub fn evidence_collection_requests(&self) -> Vec<(String, String)> {
+        self.state
+            .lock()
+            .unwrap()
+            .evidence_collection_requests
+            .clone()
+    }
+
+    /// Return task IDs sent to cancellation, including failed attempts, in call order.
+    pub fn task_cancellation_requests(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .task_cancellation_requests
+            .clone()
+    }
+
+    /// Fail the next task cancellation so callers can exercise unsupported or retry paths.
+    pub fn set_next_task_cancel_error(&self, error: RedfishError) {
+        self.state.lock().unwrap().next_task_cancel_error = Some(error);
+    }
+
+    /// Return the specified HTTP error on every lookup of this task.
+    pub fn set_task_http_error(&self, task_id: &str, status_code: http::StatusCode) {
+        self.state
+            .lock()
+            .unwrap()
+            .task_http_errors
+            .insert(task_id.to_string(), status_code);
     }
 
     pub fn set_machine_setup_bios_job_id(&self, job_id: Option<String>) {
@@ -402,11 +488,113 @@ impl RedfishSim {
         self.state.lock().unwrap().lockdown_bmc_applies = Some(applies);
     }
 
+    /// Fail one lockdown observation without changing the actual policy.
+    pub fn fail_next_lockdown_status(&self, error: RedfishError) {
+        self.state.lock().unwrap().next_lockdown_status_error = Some(error);
+    }
+
+    /// Fail the next matching BMC lockdown write without applying it.
+    pub fn fail_next_lockdown_bmc(&self, target: EnabledDisabled, error: &str) {
+        self.state.lock().unwrap().next_lockdown_bmc_error = Some((target, error.to_string()));
+    }
+
+    /// Set one simulated host's power state, as a BMC would report it; the
+    /// host entry is created if no client has touched it yet.
+    pub fn set_power_state(&self, host: &str, power: PowerState) {
+        self.state
+            .lock()
+            .unwrap()
+            .hosts
+            .entry(host.to_string())
+            .or_default()
+            .power = power;
+    }
+
+    /// Inject a transient error into the next power-state read only.
+    pub fn fail_next_power_state_read(&self, error: &str) {
+        self.fail_power_state_read_after(0, error);
+    }
+
+    /// Fail one power-state read after the specified number of successful reads.
+    pub fn fail_power_state_read_after(&self, successful_reads: usize, error: &str) {
+        self.state.lock().unwrap().next_power_state_error =
+            Some((successful_reads, error.to_string()));
+    }
+
+    /// Fail one IPMI access repair before enabling access.
+    pub fn fail_next_ipmi_access(&self, error: &str) {
+        self.state.lock().unwrap().next_ipmi_access_error = Some(error.to_string());
+    }
+
+    /// Fail one onboard NIC write before applying the setting.
+    pub fn fail_next_onboard_nics_write(&self, error: &str) {
+        self.state.lock().unwrap().next_onboard_nics_error = Some(error.to_string());
+    }
+
+    /// Fail the next matching power action, recording the attempt but applying no change.
+    pub fn fail_next_power_action(&self, action: SystemPowerControl, error: &str) {
+        self.fail_next_power_action_with(
+            action,
+            RedfishError::GenericError {
+                error: error.to_string(),
+            },
+        );
+    }
+
+    /// Fail the next matching power action with the supplied error.
+    pub fn fail_next_power_action_with(&self, action: SystemPowerControl, error: RedfishError) {
+        self.state.lock().unwrap().next_power_action_error = Some((action, error));
+    }
+
+    /// Delay the next matching power action before applying or recording it.
+    /// The receiver is notified after its sleep is constructed; cancellation
+    /// during that sleep leaves the simulated power unchanged.
+    pub fn delay_next_power_action(
+        &self,
+        action: SystemPowerControl,
+        delay: Duration,
+    ) -> tokio::sync::oneshot::Receiver<()> {
+        let (started, receiver) = tokio::sync::oneshot::channel();
+        self.state.lock().unwrap().next_power_action_delay = Some((action, delay, started));
+        receiver
+    }
+
+    /// Set whether clients report AC power cycle support through `power`.
+    pub fn set_ac_powercycle_supported(&self, supported: bool) {
+        self.state.lock().unwrap().ac_powercycle_supported = supported;
+    }
+
+    /// Fail one chassis reset with the supplied error, recording the attempt.
+    pub fn fail_next_chassis_reset(&self, error: RedfishError) {
+        self.state.lock().unwrap().next_chassis_reset_error = Some(error);
+    }
+
     /// Set the offset (in seconds) applied to the BMC `DateTime` returned by
     /// `get_manager`, relative to the controller clock. Use a value larger than
     /// the time-sync threshold to simulate an out-of-sync BMC clock.
     pub fn set_bmc_time_offset_seconds(&self, offset: i64) {
         self.state.lock().unwrap().bmc_time_offset_seconds = offset;
+    }
+
+    /// Keep the simulated BMC unavailable to task queries for this many polls
+    /// after reset, before allowing the caller to power the host back on.
+    pub fn set_bmc_reset_unavailable_polls(&self, polls: usize) {
+        self.state.lock().unwrap().bmc_reset_unavailable_polls = polls;
+    }
+
+    /// Make powered-off hosts report `Paused`, matching BlueField-3.
+    /// `On` leaves this state unchanged, modeling a DPU stuck in the UEFI shell;
+    /// a restart is required to boot again.
+    pub fn set_paused_when_off(&self, paused: bool) {
+        self.state.lock().unwrap().paused_when_off = paused;
+    }
+
+    /// Model a BMC accepting `ForceRestart` without changing host power.
+    pub fn set_force_restart_leaves_power_unchanged(&self, enabled: bool) {
+        self.state
+            .lock()
+            .unwrap()
+            .force_restart_leaves_power_unchanged = enabled;
     }
 
     /// Returns a snapshot of every `create_client` call made through this sim,
@@ -435,6 +623,15 @@ impl RedfishSim {
         self.state.lock().unwrap().users.get(account_id).cloned()
     }
 
+    /// Return whether a simulated account has IPMI access.
+    pub fn ipmi_account_access_enabled(&self, account_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .ipmi_accounts
+            .contains(account_id)
+    }
+
     /// Make `change_password` (the by-username path) fail with
     /// [`RedfishError::PasswordChangeRequired`], modeling a factory BMC that
     /// blocks it until change-on-first-use. `change_password_by_id` still
@@ -450,8 +647,9 @@ impl RedfishSim {
     }
 
     /// Enable opt-in authentication enforcement (see [`RedfishSimState::enforce_auth`]):
-    /// once on, `get_accounts` authorizes against the seeded `users` map, so
-    /// credential-probe paths can distinguish valid from rejected credentials.
+    /// `get_accounts`, `change_password`, `change_password_by_id`,
+    /// `get_systems`, and `get_power_state` authorize against the seeded `users`
+    /// map, so callers can distinguish valid from rejected credentials.
     pub fn set_enforce_auth(&self, enforce: bool) {
         self.state.lock().unwrap().enforce_auth = enforce;
     }
@@ -499,6 +697,20 @@ impl RedfishSim {
         self.state.lock().unwrap().create_client_error = None;
     }
 
+    /// Delays client creation and both attester inventory reads independently.
+    /// Zero durations restore immediate responses; delays release the state lock.
+    pub fn set_attester_selection_delays(
+        &self,
+        client_creation: Duration,
+        service_root: Duration,
+        component_integrities: Duration,
+    ) {
+        let mut state = self.state.lock().unwrap();
+        state.create_client_delay = client_creation;
+        state.service_root_delay = service_root;
+        state.component_integrities_delay = component_integrities;
+    }
+
     /// Force the sim's `uefi_setup` override to fail with
     /// [`super::CredentialOpError::ClientCreation`] carrying `message`. The
     /// override replaces the default body, so this (not
@@ -514,6 +726,11 @@ impl RedfishSim {
         self.state.lock().unwrap().uefi_setup_client_creation_error = None;
     }
 
+    /// Sets the successful `uefi_setup` result; `Some` models a staged DPU password.
+    pub fn set_uefi_setup_job_id(&self, job_id: Option<String>) {
+        self.state.lock().unwrap().uefi_setup_job_id = job_id;
+    }
+
     /// Pause the next successful UEFI setup call. The receiver reports the
     /// credential sent to the device; sending on the returned sender (or
     /// dropping it) allows setup to complete. Later calls are not paused.
@@ -527,6 +744,34 @@ impl RedfishSim {
         let (resume, paused) = tokio::sync::oneshot::channel();
         self.state.lock().unwrap().uefi_setup_pause = Some((started, paused));
         (credentials, resume)
+    }
+
+    /// Sets the Systems collection link advertised by the simulated service root.
+    pub fn set_systems_collection_uri(&self, uri: impl Into<String>) {
+        self.state.lock().unwrap().systems_collection_uri = Some(uri.into());
+    }
+
+    /// Supplies the body returned by generic resource reads at the given URI.
+    pub fn set_resource(&self, uri: impl Into<String>, body: serde_json::Value) {
+        self.state
+            .lock()
+            .unwrap()
+            .resources
+            .insert(uri.into(), body.to_string());
+    }
+
+    /// Makes generic reads of the given URI fail with a simulated transport error.
+    pub fn fail_resource(&self, uri: impl Into<String>) {
+        self.state
+            .lock()
+            .unwrap()
+            .resource_failures
+            .insert(uri.into());
+    }
+
+    /// Returns the URIs requested through the generic resource API, in call order.
+    pub fn resource_requests(&self) -> Vec<String> {
+        self.state.lock().unwrap().resource_requests.clone()
     }
 
     /// Set the BIOS attribute map returned by the sim client's `bios()`,
@@ -599,10 +844,22 @@ pub struct RedfishSimTimepoint {
 /// Platform-configuration calls recorded separately from power actions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedfishSimPlatformAction {
-    SetHostRshim { host: String },
-    SetHostPrivilegeLevel { host: String },
-    IsBiosSetup { host: String },
-    UefiSetup { dpu: bool },
+    SetHostRshim {
+        host: String,
+    },
+    SetIdracLockdown {
+        host: String,
+        enabled: EnabledDisabled,
+    },
+    SetHostPrivilegeLevel {
+        host: String,
+    },
+    IsBiosSetup {
+        host: String,
+    },
+    UefiSetup {
+        dpu: bool,
+    },
 }
 
 /// Owned form of the boot-interface reference observed by the Redfish
@@ -637,7 +894,13 @@ impl From<libredfish::BootInterfaceRef<'_>> for RedfishSimBootInterfaceRef {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedfishSimAction {
+    /// Records a successfully applied onboard NIC setting.
+    SetEnableOnboardNics(EnabledDisabled),
+    /// Records an onboard NIC write rejected before it was applied.
+    SetEnableOnboardNicsFailed(EnabledDisabled),
     Power(libredfish::SystemPowerControl),
+    /// A power request rejected before its effect was applied.
+    PowerFailed(libredfish::SystemPowerControl),
     BmcReset(Option<ManagerResetType>),
     /// Records a Redfish `Chassis.Reset` call with its target and reset type.
     ChassisReset {
@@ -748,6 +1011,21 @@ impl RedfishSimClient {
 }
 
 impl Redfish for RedfishSimClient {
+    fn cancel_task<'a>(
+        &'a self,
+        task_id: &'a str,
+    ) -> libredfish::RedfishFuture<'a, Result<bool, RedfishError>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            state.task_cancellation_requests.push(task_id.to_string());
+            if let Some(error) = state.next_task_cancel_error.take() {
+                return Err(error);
+            }
+            state.cancelling_evidence_tasks.insert(task_id.to_string());
+            Ok(false)
+        })
+    }
+
     fn std_redfish(&self) -> &RedfishStandard {
         panic!("RedfishSimClient must implement Redfish operations directly")
     }
@@ -755,7 +1033,24 @@ impl Redfish for RedfishSimClient {
     fn get_power_state<'a>(
         &'a self,
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::PowerState, RedfishError>> {
-        Box::pin(async move { Ok(self.state.lock().unwrap().hosts[&self._host].power) })
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            self.authorize(&mut state, "Systems/System.Embedded.1")?;
+            if let Some((remaining, error)) = state.next_power_state_error.as_mut() {
+                if *remaining == 0 {
+                    let error = error.clone();
+                    state.next_power_state_error = None;
+                    return Err(RedfishError::GenericError { error });
+                }
+                *remaining -= 1;
+            }
+            let power = state.hosts[&self._host].power;
+            Ok(if state.paused_when_off && power == PowerState::Off {
+                PowerState::Paused
+            } else {
+                power
+            })
+        })
     }
 
     fn get_power_metrics<'a>(
@@ -769,21 +1064,55 @@ impl Redfish for RedfishSimClient {
         action: libredfish::SystemPowerControl,
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
+            let delay = {
+                let mut state = self.state.lock().unwrap();
+                state
+                    .next_power_action_delay
+                    .take_if(|(delayed_action, _, _)| *delayed_action == action)
+            };
+            if let Some((_, delay, started)) = delay {
+                let sleep = tokio::time::sleep(delay);
+                started.send(()).ok();
+                sleep.await;
+            }
             let power_state = match action {
                 libredfish::SystemPowerControl::ForceOff
                 | libredfish::SystemPowerControl::GracefulShutdown => PowerState::Off,
                 _ => PowerState::On,
             };
             let mut state = self.state.lock().unwrap();
+            if state
+                .next_power_action_error
+                .as_ref()
+                .is_some_and(|(failed_action, _)| *failed_action == action)
+            {
+                let (_, error) = state.next_power_action_error.take().unwrap();
+                state
+                    .hosts
+                    .get_mut(&self._host)
+                    .unwrap()
+                    .actions
+                    .push(RedfishSimAction::PowerFailed(action));
+                return Err(error);
+            }
+            let paused_when_off = state.paused_when_off;
+            let force_restart_leaves_power_unchanged = state.force_restart_leaves_power_unchanged;
             let host_state = state.hosts.get_mut(&self._host).unwrap();
-            host_state.power = power_state;
+            if !(paused_when_off
+                && host_state.power == PowerState::Off
+                && action == SystemPowerControl::On)
+                && !(force_restart_leaves_power_unchanged
+                    && action == SystemPowerControl::ForceRestart)
+            {
+                host_state.power = power_state;
+            }
             host_state.actions.push(RedfishSimAction::Power(action));
             Ok(())
         })
     }
 
     fn ac_powercycle_supported_by_power(&self) -> bool {
-        false
+        self.state.lock().unwrap().ac_powercycle_supported
     }
 
     fn bmc_reset<'a>(
@@ -792,10 +1121,12 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
+            let unavailable_polls = state.bmc_reset_unavailable_polls;
             let host_state = state.hosts.get_mut(&self._host).unwrap();
             host_state
                 .actions
                 .push(RedfishSimAction::BmcReset(reset_type));
+            host_state.bmc_reset_unavailable_polls = unavailable_polls;
             Ok(())
         })
     }
@@ -911,7 +1242,10 @@ impl Redfish for RedfishSimClient {
         &'a self,
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::Status, RedfishError>> {
         Box::pin(async move {
-            let state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap();
+            if let Some(error) = state.next_lockdown_status_error.take() {
+                return Err(error);
+            }
             Ok(libredfish::Status::build_fake(
                 state.hosts[&self._host].lockdown,
             ))
@@ -1096,6 +1430,33 @@ impl Redfish for RedfishSimClient {
         })
     }
 
+    fn enable_ipmi_account_access<'a>(
+        &'a self,
+        account_id: &'a str,
+        password: &'a str,
+    ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            self.authorize(&mut state, "AccountService/Accounts")?;
+            if !state
+                .users
+                .get(account_id)
+                .is_some_and(|current| current == password)
+            {
+                return Err(sim_http_error(
+                    http::StatusCode::BAD_REQUEST,
+                    "AccountService/Accounts",
+                    "sim: IPMI access requires the account's current password",
+                ));
+            }
+            if let Some(error) = state.next_ipmi_access_error.take() {
+                return Err(RedfishError::GenericError { error });
+            }
+            state.ipmi_accounts.insert(account_id.to_string());
+            Ok(())
+        })
+    }
+
     fn get_firmware<'a>(
         &'a self,
         id: &'a str,
@@ -1192,12 +1553,20 @@ impl Redfish for RedfishSimClient {
         id: &'a str,
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::model::task::Task, RedfishError>> {
         Box::pin(async move {
+            if let Some(status_code) = self.state.lock().unwrap().task_http_errors.get(id).copied()
+            {
+                return Err(sim_http_error(
+                    status_code,
+                    &format!("TaskService/Tasks/{id}"),
+                    "simulated task lookup failure",
+                ));
+            }
             if self
                 .state
                 .lock()
                 .unwrap()
-                .get_task_trigger_evidence_returns_interrupted
-                && id == TRIGGER_EVIDENCE_TASK_ID
+                .get_task_trigger_evidence_returns_exception
+                && id.starts_with(TRIGGER_EVIDENCE_TASK_ID)
             {
                 return Ok(serde_json::from_str(
                     "{
@@ -1207,13 +1576,13 @@ impl Redfish for RedfishSimClient {
                     \"PercentComplete\": 100,
                     \"StartTime\": \"2024-01-30T09:00:52+00:00\",
                     \"TaskMonitor\": \"/redfish/v1/TaskService/Tasks/0/Monitor\",
-                    \"TaskState\": \"Interrupted\",
-                    \"TaskStatus\": \"OK\"
+                    \"TaskState\": \"Exception\",
+                    \"TaskStatus\": \"Critical\"
                     }",
                 )
                 .unwrap());
             }
-            Ok(serde_json::from_str(
+            let mut task: Task = serde_json::from_str(
                 "{
             \"@odata.id\": \"/redfish/v1/TaskService/Tasks/0\",
             \"@odata.type\": \"#Task.v1_4_3.Task\",
@@ -1225,7 +1594,28 @@ impl Redfish for RedfishSimClient {
             \"TaskStatus\": \"OK\"
             }",
             )
-            .unwrap())
+            .unwrap();
+            if id.starts_with(TRIGGER_EVIDENCE_TASK_ID) {
+                // Each collection has its own task. Accepted cancellation remains
+                // asynchronous while the fixture keeps collection running.
+                let state = self.state.lock().unwrap();
+                task.id = id.to_string();
+                task.task_state = Some(
+                    match (
+                        state.cancelling_evidence_tasks.contains(id),
+                        state.evidence_collection_running,
+                    ) {
+                        (true, true) => libredfish::model::task::TaskState::Cancelling,
+                        (true, false) => libredfish::model::task::TaskState::Cancelled,
+                        (false, true) => libredfish::model::task::TaskState::Running,
+                        (false, false) => libredfish::model::task::TaskState::Completed,
+                    },
+                );
+                if state.evidence_collection_running {
+                    task.percent_complete = Some(0);
+                }
+            }
+            Ok(task)
         })
     }
 
@@ -1379,6 +1769,10 @@ impl Redfish for RedfishSimClient {
                 })
                 .collect::<Vec<_>>();
             Ok(libredfish::model::ComputerSystem {
+                odata: libredfish::model::OData {
+                    odata_id: format!("/redfish/v1/Systems/{id}"),
+                    ..Default::default()
+                },
                 id,
                 links: (!chassis.is_empty()).then_some(
                     libredfish::model::system::ComputerSystemLinks {
@@ -1599,6 +1993,11 @@ impl Redfish for RedfishSimClient {
         Result<libredfish::model::service_root::ServiceRoot, RedfishError>,
     > {
         Box::pin(async move {
+            // Never hold the simulator lock while modelling an unresponsive BMC.
+            let delay = self.state.lock().unwrap().service_root_delay;
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
             let state = self.state.lock().unwrap();
             let vendor = state
                 .service_root_vendor
@@ -1611,6 +2010,7 @@ impl Redfish for RedfishSimClient {
             Ok(ServiceRoot {
                 vendor: Some(vendor),
                 product: Some(product),
+                systems: state.systems_collection_uri.clone().map(ODataId::from),
                 component_integrity: Some(ODataId {
                     odata_id: "Valid Data".to_string(),
                 }),
@@ -1756,7 +2156,17 @@ impl Redfish for RedfishSimClient {
     }
 
     fn get_tasks<'a>(&'a self) -> libredfish::RedfishFuture<'a, Result<Vec<String>, RedfishError>> {
-        Box::pin(async move { Ok(Vec::new()) })
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            let host_state = state.hosts.get_mut(&self._host).unwrap();
+            if host_state.bmc_reset_unavailable_polls > 0 {
+                host_state.bmc_reset_unavailable_polls -= 1;
+                return Err(RedfishError::GenericError {
+                    error: "BMC reset is still in progress".to_string(),
+                });
+            }
+            Ok(Vec::new())
+        })
     }
 
     fn add_secure_boot_certificate<'a>(
@@ -1874,25 +2284,56 @@ impl Redfish for RedfishSimClient {
 
     fn get_collection<'a>(
         &'a self,
-        _id: ODataId,
+        id: ODataId,
     ) -> libredfish::RedfishFuture<'a, Result<Collection, RedfishError>> {
         Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            state.resource_requests.push(id.odata_id.clone());
+            if state.resource_failures.contains(&id.odata_id) {
+                return Err(RedfishError::GenericError {
+                    error: format!("resource {} is unavailable", id.odata_id),
+                });
+            }
+            let body = match state.resources.get(&id.odata_id) {
+                Some(body) => serde_json::from_str(body).map_err(|source| {
+                    RedfishError::JsonDeserializeError {
+                        url: id.odata_id.clone(),
+                        body: body.clone(),
+                        source,
+                    }
+                })?,
+                None => HashMap::new(),
+            };
             Ok(Collection {
-                url: String::new(),
-                body: HashMap::new(),
+                url: id.odata_id,
+                body,
             })
         })
     }
 
     fn get_resource<'a>(
         &'a self,
-        _id: ODataId,
+        id: ODataId,
     ) -> libredfish::RedfishFuture<'a, Result<Resource, RedfishError>> {
         Box::pin(async move {
-            Ok(Resource {
-                url: String::new(),
-                raw: Default::default(),
-            })
+            let mut state = self.state.lock().unwrap();
+            state.resource_requests.push(id.odata_id.clone());
+            if state.resource_failures.contains(&id.odata_id) {
+                return Err(RedfishError::GenericError {
+                    error: format!("resource {} is unavailable", id.odata_id),
+                });
+            }
+            match state.resources.get(&id.odata_id) {
+                Some(body) => Ok(Resource {
+                    url: id.odata_id,
+                    raw: serde_json::value::RawValue::from_string(body.clone())
+                        .expect("configured resource is valid JSON"),
+                }),
+                None => Ok(Resource {
+                    url: String::new(),
+                    raw: Default::default(),
+                }),
+            }
         })
     }
 
@@ -1955,6 +2396,9 @@ impl Redfish for RedfishSimClient {
                 chassis_id: chassis_id.to_string(),
                 reset_type,
             });
+            if let Some(error) = state.next_chassis_reset_error.take() {
+                return Err(error);
+            }
             Ok(())
         })
     }
@@ -1979,6 +2423,14 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
+            if state
+                .next_lockdown_bmc_error
+                .as_ref()
+                .is_some_and(|(failed, _)| *failed == target)
+            {
+                let (_, error) = state.next_lockdown_bmc_error.take().unwrap();
+                return Err(RedfishError::GenericError { error });
+            }
             if state.lockdown_bmc_applies.unwrap_or(true) {
                 let host_state = state.hosts.get_mut(&self._host).unwrap();
                 host_state.lockdown = target;
@@ -2000,6 +2452,43 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<Vec<Drives>, RedfishError>> {
         Box::pin(async move {
             todo!();
+        })
+    }
+
+    fn set_enable_onboard_nics<'a>(
+        &'a self,
+        enable_onboard_nics: EnabledDisabled,
+    ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            let error = state.next_onboard_nics_error.take();
+            let host = state.hosts.get_mut(&self._host).unwrap();
+            if let Some(error) = error {
+                host.actions
+                    .push(RedfishSimAction::SetEnableOnboardNicsFailed(
+                        enable_onboard_nics,
+                    ));
+                return Err(RedfishError::GenericError { error });
+            }
+            host.onboard_nics = Some(enable_onboard_nics);
+            host.actions
+                .push(RedfishSimAction::SetEnableOnboardNics(enable_onboard_nics));
+            Ok(())
+        })
+    }
+
+    fn are_onboard_nics_enabled<'a>(
+        &'a self,
+    ) -> libredfish::RedfishFuture<'a, Result<Option<EnabledDisabled>, RedfishError>> {
+        Box::pin(async move {
+            Ok(self
+                .state
+                .lock()
+                .unwrap()
+                .hosts
+                .get(&self._host)
+                .unwrap()
+                .onboard_nics)
         })
     }
 
@@ -2075,9 +2564,17 @@ impl Redfish for RedfishSimClient {
 
     fn set_idrac_lockdown<'a>(
         &'a self,
-        _enabled: EnabledDisabled,
+        enabled: EnabledDisabled,
     ) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
-        Box::pin(async move { Ok(()) })
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            let host = self._host.clone();
+            state.hosts.get_mut(&host).unwrap().lockdown = enabled;
+            state
+                .platform_actions
+                .push(RedfishSimPlatformAction::SetIdracLockdown { host, enabled });
+            Ok(())
+        })
     }
 
     fn get_boss_controller<'a>(
@@ -2173,6 +2670,10 @@ impl Redfish for RedfishSimClient {
         Result<libredfish::model::component_integrity::ComponentIntegrities, RedfishError>,
     > {
         Box::pin(async move {
+            let delay = self.state.lock().unwrap().component_integrities_delay;
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
             if self.state.lock().unwrap().no_component_integrities {
                 return Ok(ComponentIntegrities {
                     members: Vec::new(),
@@ -2191,11 +2692,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/ERoT_BMC_0/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2204,7 +2705,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/ERoT_BMC_0/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/ERoT_BMC_0/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/ERoT_BMC_0/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2225,11 +2726,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/HGX_IRoT_GPU_0/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2238,7 +2739,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_0/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_0/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_0/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2259,11 +2760,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/HGX_IRoT_GPU_1/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2272,7 +2773,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2293,11 +2794,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/HGX_IRoT_GPU_2/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2306,7 +2807,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_2/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_2/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_2/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2317,6 +2818,11 @@ impl Redfish for RedfishSimClient {
                         },
                     ),
                 },
+                // The next two repeat an ID a member above already used, which
+                // real Redfish forbids within a collection. They are here so a
+                // caller that skipped the eligibility rules would collide on
+                // the ID rather than quietly attest the wrong entry: one is
+                // TPM rather than SPDM, the other is disabled.
                 ComponentIntegrity {
                     component_integrity_enabled: true,
                     component_integrity_type: "TPM".to_string(),
@@ -2327,11 +2833,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/HGX_IRoT_GPU_1/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2340,7 +2846,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2361,11 +2867,11 @@ impl Redfish for RedfishSimClient {
                     spdm: Some(libredfish::model::component_integrity::SPDMData {
                         identity_authentication:
                             libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
+                                component_certificate: Some(ODataId {
                                     odata_id:
                                         "/redfish/v1/Chassis/HGX_IRoT_GPU_1/Certificates/CertChain"
                                             .to_string(),
-                                },
+                                }),
                             } },
                         requester: ODataId {
                             odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
@@ -2374,41 +2880,7 @@ impl Redfish for RedfishSimClient {
                     actions: Some(libredfish::model::component_integrity::SPDMActions {
                         get_signed_measurements: Some(
                             libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string(),
-                                target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
-                            },
-                        ),
-                    }),
-                    links: Some(
-                        libredfish::model::component_integrity::ComponentsProtectedLinks {
-                            components_protected: vec![ODataId{ odata_id: "/redfish/v1/Systems/HGX_Baseboard_0/Processors/GPU_1".to_string() }]
-                        },
-                    ),
-                },
-                ComponentIntegrity {
-                    component_integrity_enabled: true,
-                    component_integrity_type: "SPDM".to_string(),
-                    component_integrity_type_version: "0.1.0".to_string(),
-                    id: "HGX_IRoT_GPU_1".to_string(),
-                    name: "SPDM Integrity for HGX_IRoT_GPU_1".to_string(),
-                    target_component_uri: Some("/redfish/v1/Chassis/HGX_IRoT_GPU_1".to_string()),
-                    spdm: Some(libredfish::model::component_integrity::SPDMData {
-                        identity_authentication:
-                            libredfish::model::component_integrity::IdentityAuthentication { responder_authentication: libredfish::model::component_integrity::ResponderAuthentication {
-                                component_certificate: ODataId {
-                                    odata_id:
-                                        "/redfish/v1/Chassis/HGX_IRoT_GPU_1/Certificates/CertChain"
-                                            .to_string(),
-                                },
-                            } },
-                        requester: ODataId {
-                            odata_id: "/redfish/v1/Managers/BMC_0".to_string(),
-                        },
-                    }),
-                    actions: Some(libredfish::model::component_integrity::SPDMActions {
-                        get_signed_measurements: Some(
-                            libredfish::model::component_integrity::SPDMGetSignedMeasurements {
-                                action_info: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string(),
+                                action_info: Some("/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/SPDMGetSignedMeasurementsActionInfo".to_string()),
                                 target: "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_1/Actions/ComponentIntegrity.SPDMGetSignedMeasurements".to_string(),
                             },
                         ),
@@ -2421,7 +2893,7 @@ impl Redfish for RedfishSimClient {
                 },
                 ],
                 name: "ComponentIntegrities".to_string(),
-                count: 7,
+                count: 6,
             })
         })
     }
@@ -2488,15 +2960,23 @@ impl Redfish for RedfishSimClient {
 
     fn trigger_evidence_collection<'a>(
         &'a self,
-        _url: &'a str,
-        _nonce: &'a str,
+        url: &'a str,
+        nonce: &'a str,
     ) -> libredfish::RedfishFuture<'a, Result<Task, RedfishError>> {
         Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            state
+                .evidence_collection_requests
+                .push((url.to_string(), nonce.to_string()));
+            let task_id = format!(
+                "{TRIGGER_EVIDENCE_TASK_ID}-{}",
+                state.evidence_collection_requests.len()
+            );
             let task_str = format!(
                 r##"{{
-                    "@odata.id": "/redfish/v1/TaskService/Tasks/{TRIGGER_EVIDENCE_TASK_ID}",
+                    "@odata.id": "/redfish/v1/TaskService/Tasks/{task_id}",
                     "@odata.type": "#Task.v1_4_3.Task",
-                    "Id": "{TRIGGER_EVIDENCE_TASK_ID}"
+                    "Id": "{task_id}"
                 }}"##
             );
             Ok(serde_json::from_str(&task_str).unwrap())
@@ -2603,6 +3083,11 @@ impl RedfishClientPool for RedfishSim {
                 state.fw_version = Arc::new("24.10-17".to_string());
             }
         }
+        // Client creation can wait on credentials or authentication before returning a client.
+        let delay = self.state.lock().unwrap().create_client_delay;
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
         Ok(Box::new(RedfishSimClient {
             state: self.state.clone(),
             _host: host.to_string(),
@@ -2645,6 +3130,6 @@ impl super::BmcCredentialOps for RedfishSim {
                 .expect("setup observer dropped");
             resume.await.ok();
         }
-        Ok(None)
+        Ok(self.state.lock().unwrap().uefi_setup_job_id.clone())
     }
 }

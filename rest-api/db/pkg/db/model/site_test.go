@@ -12,7 +12,6 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -111,6 +110,8 @@ func TestSiteSQLDAO_GetByID(t *testing.T) {
 		id               uuid.UUID
 		includeRelations bool
 		includeDeleted   bool
+		forUpdate        bool
+		withTx           bool
 	}
 
 	// Define tests
@@ -123,6 +124,34 @@ func TestSiteSQLDAO_GetByID(t *testing.T) {
 		wantErrVal         error
 		verifyChildSpanner bool
 	}{
+		{
+			name: "locking a Site requires a transaction",
+			fields: fields{
+				dbSession: dbSession,
+			},
+			args: args{
+				ctx:       ctx,
+				id:        st1.ID,
+				forUpdate: true,
+			},
+			want:       st1,
+			wantErr:    true,
+			wantErrVal: db.ErrInvalidValue,
+		},
+		{
+			name: "lock a Site by ID with its Infrastructure Provider relation",
+			fields: fields{
+				dbSession: dbSession,
+			},
+			args: args{
+				ctx:              ctx,
+				id:               st1.ID,
+				includeRelations: true,
+				forUpdate:        true,
+				withTx:           true,
+			},
+			want: st1,
+		},
 		{
 			name: "get a Site by ID",
 			fields: fields{
@@ -191,23 +220,34 @@ func TestSiteSQLDAO_GetByID(t *testing.T) {
 				tt.want.InfrastructureProvider = nil
 			}
 
-			got, err := ssd.GetByID(tt.args.ctx, nil, tt.args.id, relations, tt.args.includeDeleted)
+			var tx *db.Tx
+			if tt.args.withTx {
+				tx, err = db.BeginTx(tt.args.ctx, dbSession, nil)
+				if !assert.NoError(t, err) {
+					return
+				}
+				defer func() { assert.NoError(t, tx.Rollback()) }()
+			}
+			got, err := ssd.GetByID(tt.args.ctx, tx, tt.args.id, relations, tt.args.includeDeleted, tt.args.forUpdate)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("SiteSQLDAO.GetByID()\nerror = %v,\nwantErr = %v", err, tt.wantErr)
 				return
 			}
 			if tt.wantErr {
-				assert.Equal(t, tt.wantErrVal, err)
+				assert.ErrorIs(t, err, tt.wantErrVal)
 				return
 			}
 			if got.ID != tt.want.ID {
 				t.Errorf("SiteSQLDAO.GetByID()\ngotID = %v,\nwantID = %v", got.ID, tt.want.ID)
 			}
+			if tt.args.includeRelations {
+				if assert.NotNil(t, got.InfrastructureProvider) {
+					assert.Equal(t, ip.ID, got.InfrastructureProvider.ID)
+				}
+			}
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -800,8 +840,6 @@ func TestSiteSQLDAO_GetAll(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1100,8 +1138,6 @@ func TestSiteSQLDAO_GetCount(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1225,8 +1261,6 @@ func TestSiteSQLDAO_Create(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1509,8 +1543,6 @@ func TestSiteSQLDAO_Update(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(tt.ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := tt.ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1613,8 +1645,6 @@ func TestSiteSQLDAO_Delete(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1912,14 +1942,14 @@ func TestSite_IsTimeWithinStaleInventoryThreshold(t *testing.T) {
 		{
 			name:       "a change older than the fallback threshold is safe to act on",
 			site:       &Site{},
-			actionTime: time.Now().Add(-(cutil.DefaultInventoryReceiptInterval + cutil.StaleInventoryBuffer + time.Second)),
+			actionTime: time.Now().Add(-(cutil.DefaultInventoryReceiptInterval + time.Second)),
 			want:       false,
 		},
 		{
 			// The same age that clears the fallback is still too recent for a slower Site.
 			name:       "follows a reported interval longer than the fallback",
 			site:       &Site{InventoryIntervalSeconds: cutil.GetPtr(300)},
-			actionTime: time.Now().Add(-(cutil.DefaultInventoryReceiptInterval + cutil.StaleInventoryBuffer + time.Second)),
+			actionTime: time.Now().Add(-(cutil.DefaultInventoryReceiptInterval + time.Second)),
 			want:       true,
 		},
 		{
@@ -1937,31 +1967,32 @@ func TestSite_IsTimeWithinStaleInventoryThreshold(t *testing.T) {
 			want:       true,
 		},
 		{
-			// The buffer keeps the check off the exact interval, where clock skew between the
-			// Site and Cloud would decide the outcome.
-			name:       "a change inside the buffer past the interval is still too recent",
+			// There is no padding past the interval. A reconciler that anchors its writes to
+			// the start of a cycle has to read them back as exactly one interval old and act
+			// on them, rather than treating its own write as an external change.
+			name:       "a change a full interval old is safe to act on",
 			site:       reportedOneMinute,
-			actionTime: time.Now().Add(-(time.Minute + cutil.StaleInventoryBuffer/2)),
-			want:       true,
+			actionTime: time.Now().Add(-time.Minute),
+			want:       false,
 		},
 		{
-			// A stored zero or negative would otherwise collapse the threshold to the buffer
-			// alone and let inventory act on data it should treat as newer.
+			// A stored zero or negative would otherwise collapse the threshold to nothing and
+			// let inventory act on data it should treat as newer.
 			name:       "falls back on a zero reported interval",
 			site:       &Site{InventoryIntervalSeconds: cutil.GetPtr(0)},
-			actionTime: time.Now().Add(-(cutil.StaleInventoryBuffer + time.Second)),
+			actionTime: time.Now().Add(-10 * time.Second),
 			want:       true,
 		},
 		{
 			name:       "falls back on a negative reported interval",
 			site:       &Site{InventoryIntervalSeconds: cutil.GetPtr(-30)},
-			actionTime: time.Now().Add(-(cutil.StaleInventoryBuffer + time.Second)),
+			actionTime: time.Now().Add(-10 * time.Second),
 			want:       true,
 		},
 		{
 			name:       "falls back on a nil Site",
 			site:       nil,
-			actionTime: time.Now().Add(-(cutil.StaleInventoryBuffer + time.Second)),
+			actionTime: time.Now().Add(-10 * time.Second),
 			want:       true,
 		},
 	}

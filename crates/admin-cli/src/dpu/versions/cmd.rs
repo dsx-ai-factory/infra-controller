@@ -58,8 +58,8 @@ struct DpuVersions {
 }
 
 impl From<Machine> for DpuVersions {
-    #[allow(deprecated)]
     fn from(machine: Machine) -> Self {
+        let bmc_version = crate::bmc::firmware_version(&machine).map(str::to_owned);
         let state = match machine.state.split_once(' ') {
             Some((state, _)) => state.to_owned(),
             None => machine.state,
@@ -69,7 +69,9 @@ impl From<Machine> for DpuVersions {
         let firmware_version;
         let bios_version;
 
-        if let Some(discovery_info) = machine.discovery_info {
+        let status = machine.status.unwrap_or_default();
+
+        if let Some(discovery_info) = status.discovery_info {
             if let Some(dmi_data) = discovery_info.dmi_data {
                 dpu_type = Some(
                     dmi_data
@@ -96,7 +98,7 @@ impl From<Machine> for DpuVersions {
             dpu_type,
             state,
             firmware_version,
-            bmc_version: machine.bmc_info.and_then(|bmc| bmc.firmware_version),
+            bmc_version,
             bios_version,
             hbn_version: machine.inventory.and_then(|inv| {
                 inv.components
@@ -104,7 +106,7 @@ impl From<Machine> for DpuVersions {
                     .find(|c| c.name.contains("hbn"))
                     .map(|c| c.version)
             }),
-            agent_version: machine.dpu_agent_version,
+            agent_version: status.dpu_agent_version,
         }
     }
 }
@@ -145,7 +147,6 @@ fn generate_firmware_status_table(machines: Vec<Machine>) -> Box<Table> {
     Box::new(table)
 }
 
-#[allow(deprecated)]
 async fn handle_dpu_versions(
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
     output_format: OutputFormat,
@@ -175,17 +176,18 @@ async fn handle_dpu_versions(
         .into_iter()
         .filter(|m| {
             if updates_only {
-                let product_name = m
-                    .discovery_info
+                let discovery_info = m
+                    .status
                     .as_ref()
+                    .and_then(|status| status.discovery_info.as_ref());
+                let product_name = discovery_info
                     .and_then(|di| di.dmi_data.as_ref())
                     .map(|dmi_data| dmi_data.product_name.as_str())
                     .unwrap_or_default();
 
                 if let Some(expected_version) = expected_versions.get(product_name) {
                     expected_version
-                        != m.discovery_info
-                            .as_ref()
+                        != discovery_info
                             .and_then(|di| di.dpu_info.as_ref())
                             .map(|dpu| dpu.firmware_version.as_str())
                             .unwrap_or("")
@@ -213,4 +215,58 @@ async fn handle_dpu_versions(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(deprecated)] // Older Core responses only populate BmcInfo.
+    fn bmc_versions_prefer_split_status() {
+        for (scenario, status, legacy_version, expected) in [
+            (
+                "split wins",
+                Some(::rpc::forge::BmcStatus {
+                    firmware_version: Some("new-firmware".into()),
+                    ..Default::default()
+                }),
+                Some("old-firmware"),
+                Some("new-firmware"),
+            ),
+            (
+                "legacy fallback despite a split endpoint",
+                None,
+                Some("old-firmware"),
+                Some("old-firmware"),
+            ),
+            (
+                "empty split is authoritative",
+                Some(::rpc::forge::BmcStatus::default()),
+                Some("old-firmware"),
+                None,
+            ),
+            ("no BMC data", None, None, None),
+        ] {
+            let machine = Machine {
+                bmc: Some(::rpc::forge::BmcEndpoint::default()),
+                status: Some(::rpc::forge::MachineStatus {
+                    bmc_status: status,
+                    ..Default::default()
+                }),
+                bmc_info: legacy_version.map(|version| ::rpc::forge::BmcInfo {
+                    firmware_version: Some(version.into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let output = generate_firmware_status_json(vec![machine]).unwrap();
+            let rows: serde_json::Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(
+                rows[0]["bmc_version"],
+                serde_json::json!(expected),
+                "{scenario}"
+            );
+        }
+    }
 }

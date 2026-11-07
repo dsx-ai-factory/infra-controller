@@ -410,32 +410,6 @@ func TestGenericComponentStepWorkflow_BringUpAndWait(t *testing.T) {
 // TestGenericComponentStepWorkflow_FirmwareControlAction tests the
 // FirmwareControl action executor with start + poll pattern.
 func TestGenericComponentStepWorkflow_FirmwareControlAction(t *testing.T) {
-	testSuite := &testsuite.WorkflowTestSuite{}
-	env := testSuite.NewTestWorkflowEnvironment()
-
-	mockStart := func(ctx context.Context, target common.Target, info operations.FirmwareControlTaskInfo) error {
-		return nil
-	}
-	mockStatus := func(ctx context.Context, target common.Target) (*activitypkg.GetFirmwareStatusResult, error) {
-		return nil, nil
-	}
-
-	env.RegisterActivityWithOptions(mockStart,
-		activity.RegisterOptions{Name: activitypkg.NameFirmwareControl})
-	env.RegisterActivityWithOptions(mockStatus,
-		activity.RegisterOptions{Name: activitypkg.NameGetFirmwareStatus})
-
-	env.OnActivity(mockStart, mock.Anything, mock.Anything, mock.Anything).Return(nil)
-	env.OnActivity(mockStatus, mock.Anything, mock.Anything).Return(
-		&activitypkg.GetFirmwareStatusResult{
-			Statuses: map[string]operations.FirmwareUpdateStatus{
-				"compute-1": {
-					ComponentID: "compute-1",
-					State:       operations.FirmwareUpdateStateCompleted,
-				},
-			},
-		}, nil)
-
 	step := operationrules.SequenceStep{
 		ComponentType: devicetypes.ComponentTypeCompute,
 		Stage:         1,
@@ -454,21 +428,82 @@ func TestGenericComponentStepWorkflow_FirmwareControlAction(t *testing.T) {
 		Type:        devicetypes.ComponentTypeCompute,
 		Identifiers: []string{"compute-1"},
 	}
-	allTargets := map[devicetypes.ComponentType]common.Target{
-		devicetypes.ComponentTypeCompute: target,
-	}
-
 	info := &operations.FirmwareControlTaskInfo{
 		Operation: operations.FirmwareOperationUpgrade,
 		StartTime: time.Now().Unix(),
 		EndTime:   time.Now().Add(2 * time.Hour).Unix(),
 	}
 
-	env.ExecuteWorkflow(genericComponentStepWorkflow, step, target,
-		info, allTargets)
+	// Partial histories preserve the child commands without version markers.
+	tests := []struct {
+		name    string
+		step    operationrules.SequenceStep
+		target  common.Target
+		info    *operations.FirmwareControlTaskInfo
+		history string
+	}{
+		{name: "start and poll completes", step: step, target: target, info: info},
+		{
+			name:   "legacy history schedules omitted layer firmware",
+			step:   createFirmwareTestRuleDef().Steps[0],
+			target: common.Target{Type: devicetypes.ComponentTypeCompute, Identifiers: []string{"comp1"}},
+			info: &operations.FirmwareControlTaskInfo{
+				Operation: operations.FirmwareOperationUpgrade, TargetVersion: `{"nvswitch":{"Id":"switch-fw"}}`,
+			},
+			history: `{"events":[
+				{"eventId":"1","eventType":"EVENT_TYPE_WORKFLOW_EXECUTION_STARTED","workflowExecutionStartedEventAttributes":{"workflowType":{"name":"GenericComponentStepWorkflow"},"taskQueue":{"name":"firmware-replay"},"input":%s}},
+				{"eventId":"2","eventType":"EVENT_TYPE_WORKFLOW_TASK_SCHEDULED","workflowTaskScheduledEventAttributes":{}},
+				{"eventId":"3","eventType":"EVENT_TYPE_WORKFLOW_TASK_STARTED","workflowTaskStartedEventAttributes":{"scheduledEventId":"2"}},
+				{"eventId":"4","eventType":"EVENT_TYPE_WORKFLOW_TASK_COMPLETED","workflowTaskCompletedEventAttributes":{"scheduledEventId":"2","startedEventId":"3"}},
+				{"eventId":"5","eventType":"EVENT_TYPE_ACTIVITY_TASK_SCHEDULED","activityTaskScheduledEventAttributes":{"activityId":"5","activityType":{"name":"FirmwareControl"},"taskQueue":{"name":"firmware-replay"}}},
+				{"eventId":"6","eventType":"EVENT_TYPE_ACTIVITY_TASK_STARTED","activityTaskStartedEventAttributes":{"scheduledEventId":"5"}},
+				{"eventId":"7","eventType":"EVENT_TYPE_ACTIVITY_TASK_COMPLETED","activityTaskCompletedEventAttributes":{"scheduledEventId":"5","startedEventId":"6"}},
+				{"eventId":"8","eventType":"EVENT_TYPE_WORKFLOW_TASK_SCHEDULED","workflowTaskScheduledEventAttributes":{}},
+				{"eventId":"9","eventType":"EVENT_TYPE_WORKFLOW_TASK_STARTED","workflowTaskStartedEventAttributes":{"scheduledEventId":"8"}},
+				{"eventId":"10","eventType":"EVENT_TYPE_WORKFLOW_TASK_COMPLETED","workflowTaskCompletedEventAttributes":{"scheduledEventId":"8","startedEventId":"9"}},
+				{"eventId":"11","eventType":"EVENT_TYPE_ACTIVITY_TASK_SCHEDULED","activityTaskScheduledEventAttributes":{"activityId":"11","activityType":{"name":"GetFirmwareStatus"},"taskQueue":{"name":"firmware-replay"}}}
+			]}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			allTargets := map[devicetypes.ComponentType]common.Target{tc.target.Type: tc.target}
+			if tc.history != "" {
+				assertWorkflowHistoryReplay(t, nameGenericComponentStepWorkflow, genericComponentStepWorkflow,
+					tc.history, tc.step, tc.target, tc.info, allTargets)
+				return
+			}
+			testSuite := &testsuite.WorkflowTestSuite{}
+			env := testSuite.NewTestWorkflowEnvironment()
 
-	assert.True(t, env.IsWorkflowCompleted())
-	assert.NoError(t, env.GetWorkflowError())
+			mockStart := func(ctx context.Context, target common.Target, info operations.FirmwareControlTaskInfo) error {
+				return nil
+			}
+			mockStatus := func(ctx context.Context, target common.Target) (*activitypkg.GetFirmwareStatusResult, error) {
+				return nil, nil
+			}
+
+			env.RegisterActivityWithOptions(mockStart,
+				activity.RegisterOptions{Name: activitypkg.NameFirmwareControl})
+			env.RegisterActivityWithOptions(mockStatus,
+				activity.RegisterOptions{Name: activitypkg.NameGetFirmwareStatus})
+
+			env.OnActivity(mockStart, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+			env.OnActivity(mockStatus, mock.Anything, mock.Anything).Return(
+				&activitypkg.GetFirmwareStatusResult{
+					Statuses: map[string]operations.FirmwareUpdateStatus{
+						"compute-1": {
+							ComponentID: "compute-1",
+							State:       operations.FirmwareUpdateStateCompleted,
+						},
+					},
+				}, nil)
+
+			env.ExecuteWorkflow(genericComponentStepWorkflow, tc.step, tc.target, tc.info, allTargets)
+			assert.True(t, env.IsWorkflowCompleted())
+			assert.NoError(t, env.GetWorkflowError())
+		})
+	}
 }
 
 // TestGenericComponentStepWorkflow_PowerControlWithParamOperation tests that

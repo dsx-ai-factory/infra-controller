@@ -12,6 +12,7 @@
 | 0.4 | 05/11/2026 | Binu Ramakrishnan | Signing key rotation (two slots), overlap policy on rotate only |
 | 0.5 | 06/02/2026 | Binu Ramakrishnan | Site master encryption key re-wrap (`ReencryptTenantIdentitySecrets` gRPC); envelope `key_id` in ciphertext (drop DB `encryption_key_id` column) |
 | 0.6 | 08/07/2026 | Parham Armani | Expose re-wrap via NICo REST (`POST .../tenant-identity/re-encrypt`, provider-admin), keeping `dryRun`; previously gRPC/Forge-Admin-CLI only |
+| 0.7 | 09/02/2026 | Bill Minckler | Read the signing-key master key through the credential chain rather than only from Vault |
 |  |  |  |  |
 
 ## 1. Introduction
@@ -70,7 +71,7 @@ From a high level, the goal for NICo is to issue a JWT-SVID identity to the requ
 
 *Figure-1 High-level architecture and flow diagram*
 
-1. The bare metal (BM) tenant process makes HTTP requests to the NICo meta-data service (IMDS) over a link-local address (169.254.169.254). IMDS is running inside the DPU as part of the NICo DPU agent (or standalone FMDS fed by the agent).
+1. The bare metal (BM) tenant process makes HTTP requests to the NICo metadata service (IMDS) on the DPU. The default IPv4 address is link-local (`169.254.169.254`); optional IPv6 transport uses the unique local address `fd00:76b9::254`. IMDS runs in the DPU agent or in standalone FMDS fed by the agent. Refer to [NICo Metadata Service](../../dpu-management/dpu-lifecycle-management.md#nico-metadata-service) for deployment-specific ports and the HBN request and reply path.
 2. IMDS obtains a JWT-SVID for the workload in one of two ways (operator choice on the DPU agent):  
    a. **Default:** mTLS-authenticated `SignMachineIdentity` gRPC to the NICo site controller. Pull keys and machine/org metadata from the database, decrypt the private key, sign the JWT-SVID, return it (implicit path to the host workload).  
    b. **Optional HTTP sign proxy:** when `[machine-identity].sign-proxy-url` is set on the agent, IMDS forwards `GET .../latest/meta-data/identity` (same query string for `aud`, same `Metadata` and `Accept` headers) to `{sign-proxy-url}/latest/meta-data/identity`; the upstream HTTP status and body are returned to the workload. Use this when signing must pass through an in-path HTTP service (e.g. corporate PKI or API gateway) instead of direct agent→NICo gRPC.
@@ -89,7 +90,7 @@ The system is composed of the following major components:
 
 | Component | Description |
 | :---- | :---- |
-| Meta-data service (IMDS) | A service part of the NICo DPU agent running inside DPU, listening on port 80 (def). Serves `GET .../meta-data/identity`; may call NICo over gRPC or forward to an optional HTTP sign proxy configured under `[machine-identity]` |
+| Meta-data service (IMDS) | Runs on the DPU, embedded in the NICo DPU agent on port 7777 by default or in standalone FMDS on port 80 by default. Serves `GET .../meta-data/identity`; may call NICo over gRPC or forward to an optional HTTP sign proxy configured under `[machine-identity]` |
 | NICo Core (gRPC) server | Site controller NICo control plane API server  |
 | NICo REST | NICo REST API server, an aggregator service that controls multiple site controllers |
 | Database (Postgres) | Store NICo node-lifecycle and accounting data  |
@@ -153,7 +154,7 @@ Per-org signing private keys and token-delegation credentials are encrypted at r
 | Concept | Where it lives |
 | :------ | :------------- |
 | Site **current** master key id | `[machine_identity].current_encryption_key_id` in site config |
-| Master key material | Site secrets `machine_identity.encryption_keys` (e.g. Vault `.../machine_identity/encryption_keys/kv1`) |
+| Master key material | Credential chain path `machine_identity/encryption_keys/{key_id}` (environment, watched file, Postgres, or Vault) |
 | Key id used to encrypt a given blob | **`key_id` inside the ciphertext envelope JSON** (standard base64 in DB), not a table column |
 
 **New encrypts** (first org provisioning, signing-key rotation, token-delegation writes) use the site **`current_encryption_key_id`**. **Decrypt** loads the AES key named by the envelope’s embedded **`key_id`**, so older keys must remain in secrets until all blobs are re-wrapped.
@@ -302,7 +303,7 @@ This is the core part of this SDD – issuing JWT-SVID based node identity token
 JWT-SVID issued to workload/tenant
 ```
 
-*Figure-6 Node Identity request flow (direct, no callback). The hop from IMDS to NICo may be gRPC `SignMachineIdentity` (default) or an HTTP forward to `sign-proxy-url` when configured on the DPU agent.*
+*Figure-6 Node Identity request flow (direct, no callback). The port-80 examples in this document use the standalone FMDS default; embedded FMDS defaults to port 7777. The hop from IMDS to NICo may be gRPC `SignMachineIdentity` (default) or an HTTP forward to `sign-proxy-url` when configured on the DPU agent.*
 
 #### 3.3.1 DPU agent / FMDS: [machine-identity] and optional HTTP sign proxy
 
@@ -322,7 +323,7 @@ The embedded IMDS identity handler (`GET .../latest/meta-data/identity` and comp
 | `sign-proxy-url` | When set, the agent issues **`GET {url}/latest/meta-data/identity`** with the same query string as the workload request (e.g. repeated `aud=`). Scheme must be `http` or `https`. Trailing slashes on the base URL are normalized. |
 | `sign-proxy-tls-root-ca` | Optional path to a PEM file (one or more certs) added as trusted roots for **`https`** sign-proxy URLs (e.g. private CA). Ignored for `http:`. Requires `sign-proxy-url`. |
 
-When `sign-proxy-url` is **omitted**, the agent uses **NICo `SignMachineIdentity`** over mTLS by default. When it is **set**, the identity path uses **only** the HTTP forward for that request; the upstream response (status, `Content-Type`, body) is returned to the workload.
+When `sign-proxy-url` is **omitted**, the agent uses **NICo `SignMachineIdentity`** over mTLS by default. When it is **set**, the identity path uses **only** the HTTP forward for that request; the upstream response (status, `Content-Type`, all `Cache-Control` fields, body) is returned to the workload.
 
 **Standalone FMDS:** `nico-dpu-agent` pushes `FmdsConfigUpdate.machine_identity` to the FMDS service as **`FmdsMachineIdentityConfig`** (`crates/rpc/proto/fmds.proto`), mirroring the same numeric fields and optional `sign_proxy_url` / `sign_proxy_tls_root_ca`. If a later `UpdateConfig` **omits** `machine_identity`, FMDS **retains** the previously applied settings.
 
@@ -364,7 +365,7 @@ NICo Tenant issue JWT-SVID to tenant workload, routed back through NICo
 
 #### 3.4.1 Database Design
 
-A new table will be created to store tenant signing key pairs and optional token delegation config. The private key will be encrypted with a master key stored in Vault. Token delegation columns are nullable when an org does not use delegation.
+A new table will be created to store tenant signing key pairs and optional token delegation config. The private key is encrypted with a site master key read through the credential chain (`machine_identity/encryption_keys/{key_id}`), which may be served by Postgres, Vault, or a local environment or file source. Token delegation columns are nullable when an org does not use delegation.
 
 | tenant_identity_config |  |  |
 | :---- | :---- | :---- |
@@ -393,7 +394,7 @@ A new table will be created to store tenant signing key pairs and optional token
 
 #### 3.4.2 Configuration
 
-The JWT spec and vault related configs are passed to the NICo Core server during startup through `site_config.toml` config file.
+The JWT and machine-identity configurations are passed to the NICo Core server during startup through the `site_config.toml` config file.
 
 ```toml
 # In site config file (e.g., site_config.toml)
@@ -1117,13 +1118,13 @@ Use standard gRPC `Status` codes, aligned with REST:
 
 1. All internal API gRPC calls to the NICo Core server use (existing) mTLS for authn/z and transport security. A future release also relies on attestation features.
 2. NICo REST is served over HTTPS and supports SSO integration
-3. The IMDS service is exposed over link-local and is exposed only to the node instance. Short-lived tokens (configurable TTL) limit the replay window. Adding Metadata: true HTTP header to the requests to limit SSRF attacks. In order to ensure that requests are directly intended for IMDS and prevent unintended or unwanted redirection of requests, requests:  
+3. The intended IMDS request path is from the instance through its local DPU's HBN metadata attachment. A wildcard listener is not an access-control boundary; validate network exposure for the deployment. Refer to [IPv6 Metadata Transport](../../dpu-management/dpu-lifecycle-management.md#ipv6-metadata-transport) for its routing scope. Short-lived tokens (configurable TTL) limit the replay window. To limit server-side request forgery (SSRF) and unintended request forwarding, requests to `GET /latest/meta-data/identity` and its supported API-version aliases must meet both requirements:
    * Must contain the header `Metadata: true`
-   * Must not contain an `X-Forwarded-For` header
+   * Must not contain `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, or `X-Forwarded-Proto` headers, including empty values
 
-   Any request that doesn't meet both of these requirements is rejected by the service.
+   Any request to this identity endpoint that doesn't meet both requirements is rejected with HTTP 400. Ordinary metadata endpoints such as `hostname` and `asn` do not require the `Metadata: true` header.
 
-4. Requests to IMDS are limited to 3 requests per second. Requests exceeding this threshold will be rejected with 429 responses. This prevents DoS on DPU-agent and NICo Core server due to frequent IMDS calls.
+4. Identity requests use a configurable rate limiter, defaulting to three requests per second with a burst capacity of eight. Requests wait for capacity for up to the configured permit timeout, two seconds by default, and receive HTTP 429 if that wait expires. This is not a service-wide limit on all IMDS requests.
 5. Input validation: The input such as machine id will be validated using the database before issuing the token.  
 6. HTTPS and optional HTTP proxy support for route token exchange call to limit SSRF attacks on internal systems.
 7. **IMDS HTTP sign proxy (DPU agent):** When `[machine-identity].sign-proxy-url` is set, the agent trusts that endpoint to return a valid identity response to the workload. The proxy must be operated and authenticated on the network path appropriate for your site; optional `sign-proxy-tls-root-ca` pins trust for private CAs only for that HTTP client. This path does not replace NICo mTLS for workloads that still use direct `SignMachineIdentity`. It is an **operator-chosen alternative transport** from IMDS to a signing-capable HTTP service.

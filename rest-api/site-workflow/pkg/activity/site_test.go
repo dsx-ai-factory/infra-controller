@@ -87,7 +87,7 @@ func TestManageSiteConfigInventory_DiscoverSiteConfigInventory(t *testing.T) {
 				TemporalPublishQueue:  "test-queue",
 			}, tt.siteAgentBuildInfo)
 
-			ctx := context.WithValue(context.Background(), "siteFabricPrefixes", siteFabricPrefixes)
+			ctx := context.WithValue(context.Background(), cClient.MockSiteFabricPrefixes, siteFabricPrefixes)
 			err := manageSiteConfigInventory.DiscoverSiteConfigInventory(ctx)
 			if tt.wantErr != nil {
 				assert.ErrorIs(t, err, tt.wantErr)

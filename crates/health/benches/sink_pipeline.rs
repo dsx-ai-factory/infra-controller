@@ -20,16 +20,19 @@ use std::hint::black_box;
 use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use carbide_health::endpoint::{BmcAddr, EndpointMetadata, MachineData, SharedSystemUuid};
 use carbide_health::metrics::MetricsManager;
+use carbide_health::otlp::convert::build_metrics_export_request;
 use carbide_health::sink::{
     Classification, CollectorEvent, CompositeDataSink, DataSink, EventContext, HealthReport,
-    HealthReportSink, LogRecord, LogSeverity, MetricSample, PrometheusSink, ReportSource,
+    HealthReportSink, LogRecord, LogSeverity, MetricSample, OtlpSink, PrometheusSink, ReportSource,
 };
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use health_report::HealthReport as CarbideHealthReport;
 use mac_address::MacAddress;
+use prost::Message;
 
 const MACHINE_ID: &str = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0";
 const MACHINE_IDS: [&str; 3] = [
@@ -39,6 +42,23 @@ const MACHINE_IDS: [&str; 3] = [
 ];
 
 struct CountingSink;
+
+/// Exercises the owned queue path as a control for shared fanout.
+struct UnsharedOtlpSink(OtlpSink);
+
+impl DataSink for UnsharedOtlpSink {
+    fn sink_type(&self) -> &'static str {
+        self.0.sink_type()
+    }
+
+    fn try_handle_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+    ) -> Result<(), carbide_health::HealthError> {
+        self.0.try_handle_event(context, event)
+    }
+}
 
 impl DataSink for CountingSink {
     fn sink_type(&self) -> &'static str {
@@ -93,6 +113,7 @@ fn metric_events(batch_size: usize, unique_keys: usize) -> Vec<CollectorEvent> {
 
             CollectorEvent::Metric(
                 MetricSample {
+                    semantics: carbide_health::sink::MetricSemantics::Gauge,
                     key: key.clone(),
                     name: "hw_sensor".to_string(),
                     metric_type: "temperature".to_string(),
@@ -137,6 +158,103 @@ fn bench_prometheus_sink(c: &mut Criterion) {
                 b.iter(|| emit_metric_batch(&sink, &context, events));
             },
         );
+    }
+
+    group.finish();
+}
+
+/// Measures public telemetry export after fixture construction has finished.
+fn bench_prometheus_export(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sink_prometheus_export");
+    group.sample_size(10);
+
+    for (scenario, endpoints, readings, label_count) in [
+        ("sparse", 256usize, 16usize, 2usize),
+        ("mixed", 32, 512, 8),
+        ("dense", 2, 16_384, 8),
+        ("unique_labels", 8, 1_024, 12),
+    ] {
+        let manager =
+            Arc::new(MetricsManager::new("bench_export").unwrap_or_else(|error| {
+                panic!("benchmark manager initialization failed: {error}")
+            }));
+
+        let sink = PrometheusSink::new(manager.clone(), "bench_export")
+            .unwrap_or_else(|error| panic!("benchmark sink initialization failed: {error}"));
+
+        for endpoint in 0..endpoints {
+            let mut context = event_context();
+            context.endpoint_key = format!("endpoint-{endpoint}");
+            let [high, low] = (endpoint as u16).to_be_bytes();
+            context.addr.mac = Some(MacAddress::new([0x02, 0, 0, 0, high, low]));
+
+            context.labels = (0..4)
+                .map(|label| {
+                    (
+                        format!("endpoint_label_{label}"),
+                        format!("value_{endpoint}"),
+                    )
+                })
+                .collect();
+
+            let mut events = metric_events(readings, readings);
+
+            for (index, event) in events.iter_mut().enumerate() {
+                let CollectorEvent::Metric(sample) = event else {
+                    continue;
+                };
+
+                sample.labels.extend((1..label_count).map(|label| {
+                    let value = if scenario == "unique_labels" {
+                        format!(
+                            "{endpoint:08x}-{index:08x}-{label:08x}-{:016x}",
+                            index * 104_729
+                        )
+                    } else {
+                        format!("component-{}", (index + label) % 32)
+                    };
+
+                    (Cow::Owned(format!("attribute_{label}")), value)
+                }));
+
+                if index.is_multiple_of(3) {
+                    sample.semantics = carbide_health::sink::MetricSemantics::CumulativeCounter {
+                        description: "Synthetic cumulative sensor readings",
+                        start_time: None,
+                    };
+                }
+            }
+
+            emit_metric_batch(&sink, &context, &events);
+        }
+
+        let bytes = {
+            let output = manager
+                .export_telemetry()
+                .unwrap_or_else(|error| panic!("benchmark fixture export failed: {error}"));
+
+            assert_eq!(
+                output.lines().filter(|line| !line.starts_with('#')).count(),
+                endpoints * (readings + readings.div_ceil(3)),
+                "{scenario}: every reading and counter alias must be retained",
+            );
+
+            output.len()
+        };
+
+        group.throughput(Throughput::Bytes(bytes as u64));
+
+        group.bench_function(scenario, |b| {
+            b.iter(|| {
+                black_box(
+                    black_box(&manager)
+                        .export_telemetry()
+                        .unwrap_or_else(|error| panic!("benchmark export failed: {error}")),
+                )
+            });
+        });
+
+        black_box(&sink);
     }
 
     group.finish();
@@ -234,7 +352,11 @@ impl HealthReportBenchState {
                 attribution: None,
                 target: Some("leak-detector".to_string()),
                 message: "leak detected".to_string(),
-                classifications: vec![Classification::Leak],
+                classifications: vec![
+                    Classification::TrayLeak,
+                    Classification::SensorCritical,
+                    Classification::PreventAllocations,
+                ],
             }],
         }));
 
@@ -362,7 +484,6 @@ fn log_events_with_attrs(count: usize, unique_sensors: usize) -> Vec<CollectorEv
 }
 
 fn bench_otlp_sink(c: &mut Criterion) {
-    use carbide_health::sink::OtlpSink;
     use carbide_health::sink::event_mapper::{OpenBmcEventMapper, RedfishEventMapper};
 
     let mut group = c.benchmark_group("sink_otlp");
@@ -418,6 +539,66 @@ fn bench_otlp_sink(c: &mut Criterion) {
     group.finish();
 }
 
+/// Measures conversion and encoding with repeated and distinct descriptors.
+fn bench_otlp_metric_conversion(c: &mut Criterion) {
+    let context = event_context();
+    let prefix = "carbide_hardware_health";
+    let observed_nanos = 1_700_000_000_000_000_000;
+
+    let mut group = c.benchmark_group("health_performance/metric_conversion");
+    group.throughput(Throughput::Elements(2_048));
+
+    for descriptor_count in [8usize, 2_048] {
+        let batch: Vec<_> = (0..2_048)
+            .map(|index| {
+                let sample = MetricSample {
+                    semantics: carbide_health::sink::MetricSemantics::Gauge,
+                    key: format!("interface-{index}"),
+                    name: "nvue_gnmi_extended".into(),
+                    metric_type: format!("reading_{:04}", index % descriptor_count),
+                    unit: "count".into(),
+                    value: (index % 100) as f64,
+                    labels: vec![(Cow::Borrowed("interface"), format!("swp{index}"))],
+                    context: None,
+                };
+
+                (context.clone(), sample)
+            })
+            .collect();
+
+        let request = build_metrics_export_request(&batch, observed_nanos, prefix);
+
+        let envelopes: usize = request
+            .resource_metrics
+            .iter()
+            .flat_map(|resource| &resource.scope_metrics)
+            .map(|scope| scope.metrics.len())
+            .sum();
+
+        eprintln!(
+            "metric fixture: points={}, descriptors={descriptor_count}, envelopes={envelopes}, encoded_bytes={}",
+            batch.len(),
+            request.encoded_len(),
+        );
+
+        group.bench_function(BenchmarkId::new("build", descriptor_count), |b| {
+            b.iter(|| {
+                black_box(build_metrics_export_request(
+                    black_box(&batch),
+                    observed_nanos,
+                    prefix,
+                ))
+            });
+        });
+
+        group.bench_function(BenchmarkId::new("encode", descriptor_count), |b| {
+            b.iter(|| black_box(black_box(&request).encode_to_vec()));
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_queue_key_construction(c: &mut Criterion) {
     use carbide_health::sink::event_mapper::{OpenBmcEventMapper, RedfishEventMapper};
 
@@ -453,6 +634,84 @@ fn bench_queue_key_construction(c: &mut Criterion) {
     group.bench_function("resource_event", |b| {
         b.iter(|| black_box(mapper.queue_key("10.85.14.144", &resource_attrs)));
     });
+
+    group.finish();
+}
+
+/// Compares owned and shared metric fanout across queue and label workloads.
+fn bench_otlp_metric_fanout(c: &mut Criterion) {
+    use carbide_health::sink::event_mapper::{OpenBmcEventMapper, RedfishEventMapper};
+
+    let metrics_manager = Arc::new(MetricsManager::new("otlp_fanout_bench").unwrap());
+    let mapper: Arc<dyn RedfishEventMapper> = Arc::new(OpenBmcEventMapper);
+
+    let mut group = c.benchmark_group("health_performance/metric_fanout");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(100));
+    group.measurement_time(Duration::from_secs(1));
+
+    for (scenario, batch_size, unique_keys, endpoint_labels, sample_labels, targets) in [
+        ("light", 4_096, 4_096, 0, 1, 2),
+        ("standard", 32_768, 32_768, 8, 4, 2),
+        ("four_targets", 32_768, 32_768, 8, 4, 4),
+        ("replacements", 131_072, 32_768, 8, 4, 2),
+        ("large_labels", 32_768, 32_768, 32, 16, 2),
+    ] {
+        let mut context = event_context();
+        context.labels = (0..endpoint_labels)
+            .map(|index| (format!("endpoint_label_{index}"), format!("value_{index}")))
+            .collect();
+
+        let mut events = metric_events(batch_size, unique_keys);
+
+        for event in &mut events {
+            if let CollectorEvent::Metric(sample) = event {
+                sample.labels.extend((1..sample_labels).map(|index| {
+                    (
+                        Cow::Owned(format!("label_{index}")),
+                        format!("value_{index}"),
+                    )
+                }));
+            }
+        }
+
+        group.throughput(Throughput::Elements(batch_size as u64));
+
+        for (label, share) in [("owned", false), ("shared", true)] {
+            group.bench_function(BenchmarkId::new(scenario, label), |b| {
+                b.iter_custom(|iterations| {
+                    let mut elapsed = Duration::ZERO;
+
+                    for _ in 0..iterations {
+                        let sinks: Vec<Arc<dyn DataSink>> = (0..targets)
+                            .map(|_| {
+                                let sink = OtlpSink::new_for_bench(mapper.clone());
+
+                                if share {
+                                    Arc::new(sink) as Arc<dyn DataSink>
+                                } else {
+                                    Arc::new(UnsharedOtlpSink(sink)) as Arc<dyn DataSink>
+                                }
+                            })
+                            .collect();
+
+                        let composite = CompositeDataSink::new(sinks, metrics_manager.clone());
+                        let start = Instant::now();
+
+                        for event in &events {
+                            black_box(&composite)
+                                .handle_event(black_box(&context), black_box(event));
+                        }
+
+                        elapsed += start.elapsed();
+                        black_box(composite);
+                    }
+
+                    elapsed
+                });
+            });
+        }
+    }
 
     group.finish();
 }
@@ -505,9 +764,12 @@ fn bench_content_hash(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_prometheus_sink,
+    bench_prometheus_export,
     bench_composite_sink,
     bench_health_report_sink,
     bench_otlp_sink,
+    bench_otlp_metric_conversion,
+    bench_otlp_metric_fanout,
     bench_queue_key_construction,
     bench_content_hash,
 );

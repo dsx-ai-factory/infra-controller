@@ -17,8 +17,10 @@ import "strings"
 // from the DPUDevice onto the DPU CR the simulator creates, or NICo cannot map
 // a DPU event back to its machine (reverse lookup in dpf.rs).
 const (
-	LabelDPUMachineID    = "carbide.nvidia.com/dpu-machine-id"
-	LabelControlledDev   = "carbide.nvidia.com/controlled.device" // "true"
+	LabelDPUMachineID  = "carbide.nvidia.com/dpu-machine-id"
+	LabelControlledDev = "carbide.nvidia.com/controlled.device" // "true"
+	// LabelHostBMCIP stores dotted IPv4 or eight four-digit IPv6 hexadecimal
+	// groups separated by hyphens.
 	LabelHostBMCIP       = "carbide.nvidia.com/host-bmc-ip"
 	LabelIsPrimaryDPU    = "carbide.nvidia.com/is-primary-dpu"
 	LabelControlledNode2 = "carbide.nvidia.com/controlled.node.v2" // on DPUNode
@@ -72,6 +74,18 @@ const (
 	// so reconciles fire far more often than PhaseDwell; this timestamp is what
 	// actually gates dwell phases, not the requeue cadence. Simulator-local.
 	AnnSimPhaseEnteredAt = "sim.dpu.nvidia.com/phase-entered-at"
+
+	// AnnSimBFBInstallTask holds a JSON {path, kind} Redfish task reference.
+	// Legacy bare paths are resource references. It is set in OS Installing
+	// only when the Redfish install is enabled. It stops a later reconcile from
+	// submitting a second install, and is cleared when the DPU leaves the
+	// phase. Simulator-local.
+	AnnSimBFBInstallTask = "sim.dpu.nvidia.com/bfb-install-task"
+
+	// AnnSimBFBInstallStarted durably claims a submission before SimpleUpdate.
+	// Without a recoverable task path its outcome is unknown and must not be
+	// submitted again. Cleared after leaving OS Installing. Simulator-local.
+	AnnSimBFBInstallStarted = "sim.dpu.nvidia.com/bfb-install-started"
 )
 
 // MaintenanceHoldName is the DPUNodeMaintenance CR name for a node's

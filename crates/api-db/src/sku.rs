@@ -17,6 +17,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
 use chrono::Utc;
 use futures_util::stream::StreamExt;
@@ -28,22 +29,26 @@ use model::machine::machine_search_config::MachineSearchConfig;
 use model::sku::{
     SKU_VERSION_WITH_DRIVE_LOCATION, Sku, SkuComponentChassis, SkuComponentCpu, SkuComponentGpu,
     SkuComponentInfinibandDevices, SkuComponentMemory, SkuComponentStorage, SkuComponentTpm,
-    SkuComponents, diff_skus,
+    SkuComponents, SkuComponentsReplacement, diff_skus,
 };
 use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
 use crate::{DatabaseError, ObjectFilter, Transaction, machine};
 
+#[cfg(test)]
+mod test_decode;
+#[cfg(test)]
+mod test_explicit_columns;
+
 /// The current version of the SKU format.  The state machine will create older
 /// versions from hardware using the currently assigned sku's version so that
 /// SKUs can maintain backward compatibility
 pub const CURRENT_SKU_VERSION: u32 = 5;
 
-/// Find a SKU that matches the specified SKU using the same comparison that
-/// the SKU validation code uses. (i.e. the description, id and others are not compared)
-///
-/// The specified SKU must not exist in the DB (otherwise it will always be the match).
+/// Find a stored SKU whose requirements match the supplied observed hardware
+/// according to [`diff_skus`]. Authored storage groups and patterns need not
+/// match themselves; this is not a component-definition identity check.
 pub async fn find_matching(
     txn: &mut PgConnection,
     sku: &Sku,
@@ -51,25 +56,50 @@ pub async fn find_matching(
     find_matching_with_exclusion(txn, sku, None).await
 }
 
+/// Apply the same observed-hardware comparison as [`find_matching`], excluding
+/// the specified stored ID. Mutation duplicate checks also compare definitions.
 pub async fn find_matching_with_exclusion(
     txn: &mut PgConnection,
     sku: &Sku,
     excluded_sku_id: Option<&String>,
 ) -> Result<Option<Sku>, DatabaseError> {
-    let mut builder = sqlx::QueryBuilder::new("SELECT * FROM machine_skus");
+    find_matching_sku(txn, sku, excluded_sku_id, SkuMatch::ObservedHardware).await
+}
+
+enum SkuMatch {
+    ObservedHardware,
+    DuplicateDefinition,
+}
+
+async fn find_matching_sku(
+    txn: &mut PgConnection,
+    sku: &Sku,
+    excluded_sku_id: Option<&String>,
+    match_kind: SkuMatch,
+) -> Result<Option<Sku>, DatabaseError> {
+    let mut builder = sqlx::QueryBuilder::new(format!(
+        "SELECT {} FROM machine_skus",
+        Sku::db_table_columns(),
+    ));
     if let Some(excluded_sku_id) = excluded_sku_id {
         builder.push(" WHERE id != ");
         builder.push_bind(excluded_sku_id);
     }
 
     let sql = builder.sql().as_str().to_string();
-    let mut sku_stream = builder.build_query_as().fetch(txn);
+    let mut sku_stream = builder.build_query_as::<Sku>().fetch(txn);
 
     while let Some(result) = sku_stream.next().await {
         match result {
             Ok(existing_sku) => {
-                let diffs = diff_skus(sku, &existing_sku);
-                if diffs.is_empty() {
+                // `diff_skus` treats each candidate storage entry as one drive.
+                // Groups with count > 1 or anchored patterns can miss themselves.
+                // Definition checks add equality; hardware matching stays unchanged.
+                let is_exact_duplicate = matches!(match_kind, SkuMatch::DuplicateDefinition)
+                    && sku.id != existing_sku.id
+                    && sku.schema_version == existing_sku.schema_version
+                    && sku.components == existing_sku.components;
+                if is_exact_duplicate || diff_skus(sku, &existing_sku).is_empty() {
                     return Ok(Some(existing_sku));
                 }
             }
@@ -90,8 +120,11 @@ pub async fn find_matching_with_exclusion(
 /// matching. This most commonly occurs when a v5 SKU is auto-generated from
 /// hardware_info that predates the size_mb/pci_path fields; those SKUs should
 /// not be persisted until the hardware has been re-enumerated.
-fn validate_storage_for_create(sku: &Sku) -> Result<(), DatabaseError> {
-    for storage in &sku.components.storage {
+fn validate_storage_for_create(
+    components: &SkuComponents,
+    schema_version: u32,
+) -> Result<(), DatabaseError> {
+    for storage in &components.storage {
         for pattern in &storage.pci_patterns {
             regex::Regex::new(pattern).map_err(|err| {
                 DatabaseError::InvalidArgument(format!(
@@ -107,7 +140,7 @@ fn validate_storage_for_create(sku: &Sku) -> Result<(), DatabaseError> {
                 storage.model
             )));
         }
-        if sku.schema_version >= SKU_VERSION_WITH_DRIVE_LOCATION
+        if schema_version >= SKU_VERSION_WITH_DRIVE_LOCATION
             && storage.pci_patterns.is_empty()
             && storage.min_size_mb.is_none()
             && storage.max_size_mb.is_none()
@@ -122,6 +155,11 @@ fn validate_storage_for_create(sku: &Sku) -> Result<(), DatabaseError> {
     Ok(())
 }
 
+/// `create` saves a current-version SKU with valid storage constraints and a
+/// nonempty ID. Invalid input or a duplicate returns [`DatabaseError::InvalidArgument`].
+/// A duplicate has equal components in the same schema version under another ID,
+/// or matches through [`diff_skus`]. Description and device type are not compared.
+/// An existing ID without such a match returns [`DatabaseError::AlreadyFoundError`].
 pub async fn create(txn: &mut PgConnection, sku: &Sku) -> Result<(), DatabaseError> {
     if sku.schema_version != CURRENT_SKU_VERSION {
         return Err(DatabaseError::InvalidArgument(
@@ -135,7 +173,7 @@ pub async fn create(txn: &mut PgConnection, sku: &Sku) -> Result<(), DatabaseErr
         ));
     }
 
-    validate_storage_for_create(sku)?;
+    validate_storage_for_create(&sku.components, sku.schema_version)?;
 
     let mut inner_txn = Transaction::begin_inner(txn).await?;
 
@@ -145,7 +183,9 @@ pub async fn create(txn: &mut PgConnection, sku: &Sku) -> Result<(), DatabaseErr
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    if let Some(existing_sku) = find_matching(&mut inner_txn, sku).await? {
+    if let Some(existing_sku) =
+        find_matching_sku(&mut inner_txn, sku, None, SkuMatch::DuplicateDefinition).await?
+    {
         return Err(DatabaseError::InvalidArgument(format!(
             "Specified SKU matches SKU with ID: {}",
             existing_sku.id
@@ -213,9 +253,12 @@ pub async fn find(
         return Ok(Vec::new());
     }
 
-    let query = "SELECT * FROM machine_skus WHERE id=ANY($1)";
+    let query = format!(
+        "SELECT {} FROM machine_skus WHERE id=ANY($1)",
+        Sku::db_table_columns(),
+    );
 
-    let skus: Vec<Sku> = sqlx::query_as(query)
+    let skus: Vec<Sku> = sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(sku_ids.iter().map(AsRef::as_ref).collect::<Vec<_>>())
         .fetch_all(txn)
         .await
@@ -264,31 +307,116 @@ pub async fn update_metadata(
     Ok(())
 }
 
+/// `replace` replaces an existing SKU's components, schema version, description,
+/// and device type, then requests verification for associated machines. It
+/// preserves the creation time and machine assignments and returns the saved SKU.
+///
+/// The schema version must equal [`CURRENT_SKU_VERSION`]. An empty ID, unsupported
+/// schema version, invalid storage constraints, or definition matching another
+/// SKU returns [`DatabaseError::InvalidArgument`] before checking for absence.
+/// Another SKU matches when its components and schema version are equal, or when
+/// [`diff_skus`] finds no differences. The target's own ID is excluded.
+/// A valid replacement that does not match another SKU returns
+/// [`DatabaseError::NotFoundError`] when its target ID is absent. Other SQLx
+/// errors are preserved.
 pub async fn replace(txn: &mut PgConnection, sku: &Sku) -> Result<Sku, DatabaseError> {
-    if sku.schema_version != CURRENT_SKU_VERSION {
+    validate_replacement(&sku.id, &sku.components, sku.schema_version)?;
+    let mut inner_txn = Transaction::begin_inner(txn).await?;
+    lock_for_replacement(&mut inner_txn).await?;
+    replace_locked(&mut inner_txn, sku).await?;
+    inner_txn.commit().await?;
+
+    find(txn, std::slice::from_ref(&sku.id))
+        .await?
+        .pop()
+        .ok_or_else(|| DatabaseError::NotFoundError {
+            kind: "SKU",
+            id: sku.id.clone(),
+        })
+}
+
+/// `replace_components` replaces the complete hardware definition and requests
+/// verification for associated machines. Omitted metadata is preserved under the
+/// replacement lock; supplied strings, including empty strings, replace it.
+/// The SKU must exist. The replacement must use the current schema version and
+/// pass the same component validation and duplicate checks as [`replace`].
+pub async fn replace_components(
+    txn: &mut PgConnection,
+    replacement: SkuComponentsReplacement,
+) -> Result<Sku, DatabaseError> {
+    validate_replacement(
+        &replacement.id,
+        &replacement.components,
+        replacement.schema_version,
+    )?;
+    let mut inner_txn = Transaction::begin_inner(txn).await?;
+    lock_for_replacement(&mut inner_txn).await?;
+
+    // Read metadata after acquiring the replacement lock so a saved metadata
+    // edit cannot be overwritten by values read before another writer commits.
+    let mut sku = find(&mut inner_txn, std::slice::from_ref(&replacement.id))
+        .await?
+        .pop()
+        .ok_or_else(|| DatabaseError::NotFoundError {
+            kind: "SKU",
+            id: replacement.id.clone(),
+        })?;
+    sku.components = replacement.components;
+    sku.schema_version = replacement.schema_version;
+    if let Some(description) = replacement.description {
+        sku.description = description;
+    }
+    if let Some(device_type) = replacement.device_type {
+        sku.device_type = Some(device_type);
+    }
+
+    replace_locked(&mut inner_txn, &sku).await?;
+    inner_txn.commit().await?;
+
+    find(txn, std::slice::from_ref(&sku.id))
+        .await?
+        .pop()
+        .ok_or_else(|| DatabaseError::NotFoundError {
+            kind: "SKU",
+            id: sku.id,
+        })
+}
+
+fn validate_replacement(
+    sku_id: &str,
+    components: &SkuComponents,
+    schema_version: u32,
+) -> Result<(), DatabaseError> {
+    if schema_version != CURRENT_SKU_VERSION {
         return Err(DatabaseError::InvalidArgument(
             "SKU version is no longer supported".to_string(),
         ));
     }
 
-    if sku.id.is_empty() {
+    if sku_id.is_empty() {
         return Err(DatabaseError::InvalidArgument(
             "SKU ID must not be empty".to_string(),
         ));
     }
 
-    validate_storage_for_create(sku)?;
+    validate_storage_for_create(components, schema_version)
+}
 
-    let mut inner_txn = Transaction::begin_inner(txn).await?;
-
+async fn lock_for_replacement(txn: &mut PgConnection) -> Result<(), DatabaseError> {
     let query = "LOCK TABLE machine_skus IN ACCESS EXCLUSIVE MODE";
     sqlx::query(query)
-        .execute(inner_txn.as_pgconn())
+        .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
+    Ok(())
+}
+
+/// The caller must hold the table lock from `lock_for_replacement` so the
+/// duplicate check and replacement cannot race another SKU writer.
+async fn replace_locked(txn: &mut PgConnection, sku: &Sku) -> Result<(), DatabaseError> {
     if let Some(existing_sku) =
-        find_matching_with_exclusion(&mut inner_txn, sku, Some(&sku.id)).await?
+        find_matching_sku(txn, sku, Some(&sku.id), SkuMatch::DuplicateDefinition).await?
     {
         return Err(DatabaseError::InvalidArgument(format!(
             "Specified SKU matches SKU with ID: {}",
@@ -304,21 +432,17 @@ pub async fn replace(txn: &mut PgConnection, sku: &Sku) -> Result<Sku, DatabaseE
         .bind(sku.schema_version as i32)
         .bind(&sku.device_type)
         .bind(&sku.id)
-        .fetch_one(inner_txn.as_pgconn())
+        .fetch_one(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::new("replace sku: update", e))?;
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => DatabaseError::NotFoundError {
+                kind: "SKU",
+                id: sku.id.clone(),
+            },
+            e => DatabaseError::new("replace sku: update", e),
+        })?;
 
-    crate::machine::update_sku_status_verify_request_time_for_sku(&mut inner_txn, &sku.id).await?;
-
-    inner_txn.commit().await?;
-
-    find(txn, std::slice::from_ref(&sku.id))
-        .await?
-        .pop()
-        .ok_or_else(|| DatabaseError::NotFoundError {
-            kind: "SKU",
-            id: sku.id.clone(),
-        })
+    crate::machine::update_sku_status_verify_request_time_for_sku(txn, &sku.id).await
 }
 
 pub async fn generate_sku_from_machine(

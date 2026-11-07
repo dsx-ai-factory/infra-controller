@@ -208,17 +208,44 @@ mod tests {
                 .starts_with(format!("id: {second}\n").as_bytes())
         );
         drop(edge);
-        carbide_test_support::value_scenarios!(run = |id: String|
-            matches!(state.subscribe(Some(&id)), Err(EventServiceError::Invalid(_)));
-            "unavailable or noncanonical replay cursors" {
-                format!("{}:0", state.stats().generation) => true,
-                format!("{}:{}", state.stats().generation, u64::MAX) => true,
-                "nonsense".into() => true,
-                format!("{}:999", state.stats().generation) => true,
-                format!("{}:02", state.stats().generation) => true,
-                self::state(1).publish(event()).unwrap() => true,
-            }
-        );
+        for (scenario, id, expected) in [
+            (
+                "unavailable or noncanonical replay cursors",
+                format!("{}:0", state.stats().generation),
+                true,
+            ),
+            (
+                "unavailable or noncanonical replay cursors",
+                format!("{}:{}", state.stats().generation, u64::MAX),
+                true,
+            ),
+            (
+                "unavailable or noncanonical replay cursors",
+                "nonsense".into(),
+                true,
+            ),
+            (
+                "unavailable or noncanonical replay cursors",
+                format!("{}:999", state.stats().generation),
+                true,
+            ),
+            (
+                "unavailable or noncanonical replay cursors",
+                format!("{}:02", state.stats().generation),
+                true,
+            ),
+            (
+                "unavailable or noncanonical replay cursors",
+                self::state(1).publish(event()).unwrap(),
+                true,
+            ),
+        ] {
+            let actual = matches!(
+                state.subscribe(Some(&id)),
+                Err(EventServiceError::Invalid(_))
+            );
+            assert_eq!(actual, expected, "{scenario}");
+        }
         let mut slow = state.subscribe(None).unwrap();
         for _ in 0..3 {
             state.publish(event()).unwrap();

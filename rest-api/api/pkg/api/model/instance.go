@@ -20,7 +20,7 @@ import (
 	goset "github.com/deckarep/golang-set/v2"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
-	"gopkg.in/yaml.v3"
+	"github.com/google/uuid"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -75,12 +75,6 @@ const (
 var validationErrorUserDataLength = fmt.Sprintf("`userData` must not exceed %d KiB", util.MaxUserDataBytes/1024)
 
 var (
-	// SitePhoneHomeCloudInit default cloudinit with phone home config
-	SitePhoneHomeCloudInit = `#cloud-config
-     phone_home:
-        url: %s
-        post: all`
-
 	// MachineIssueCategoriesFromAPIToProtobuf is the map of instance issue categories to their corresponding values
 	MachineIssueCategoriesFromAPIToProtobuf = map[string]int32{
 		MachineIssueCategoryHardware:    int32(corev1.IssueCategory_HARDWARE),
@@ -748,6 +742,21 @@ func (icr APIInstanceCreateRequest) ValidateForVpc(vpc *cdbm.Vpc) error {
 	return nil
 }
 
+// phoneHomeUserDataError names the operation that failed, so a failure to take
+// phone-home out does not send whoever reads it looking at the path that puts it
+// in.
+func phoneHomeUserDataError(enabled bool) validation.Errors {
+	if enabled {
+		return validation.Errors{
+			"userData": errors.New("failed to insert phone-home into userData"),
+		}
+	}
+
+	return validation.Errors{
+		"userData": errors.New("failed to remove phone-home from userData"),
+	}
+}
+
 // Validate the OS against any additional option combinations specified.
 func (icr *APIInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg *config.Config, os *cdbm.OperatingSystem) error {
 	// The OS passed in will either be:
@@ -884,91 +893,33 @@ func (icr *APIInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 
 	// If the request is setting PhoneHomeEnabled
 	if icr.PhoneHomeEnabled != nil {
-		// If there's some existing user-data,
-		// we'll need to modify it to either insert phone-home
-		// settings or snip them out
-		if mergedUserData != nil && *mergedUserData != "" {
-			userDataMap := &yaml.Node{}
+		var userData *string
+		var err error
 
-			var documentRoot *yaml.Node
-
-			isUserDataValidYAML := false
-			err := yaml.Unmarshal([]byte(*mergedUserData), userDataMap)
-
-			if err == nil {
-
-				// We have a slightly more restrictive view of what
-				// counts as valid YAML.
-				if len(userDataMap.Content) > 0 {
-					documentRoot = userDataMap.Content[0]
-
-					if documentRoot.Kind == yaml.MappingNode {
-						isUserDataValidYAML = true
-					}
-				}
-			}
-
-			if *mergedPhoneHomeEnabled {
-				// Phone home can only be enabled if the user-data is valid YAML
-				if !isUserDataValidYAML {
-					return validation.Errors{
-						"userData": errors.New("userData specified in request must be valid CloudInit YAML to enable phone home"),
-					}
-				}
-
-				if err := util.InsertPhoneHomeIntoUserData(documentRoot, cfg.GetSitePhoneHomeUrl()); err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to insert phone-home into userData"),
-					}
-				}
-
-			} else if isUserDataValidYAML {
-				// We have to make sure we don't try to remove from invalid yaml,
-				// but the UI will always send false if phone-home is unchecked,
-				// so we want to do this check silently and not alert people who
-				// are using non-YAML user-data.
-
-				// NICo's own block is removed by key, because the URL frozen
-				// into it may predate a change to site.phoneHomeUrl.
-				var phoneHomeURLFilter *string
-				if !nicoAuthoredPhoneHome {
-					phoneHomeURLFilter = cutil.GetPtr(cfg.GetSitePhoneHomeUrl())
-				}
-
-				if err := util.RemovePhoneHomeFromUserData(documentRoot, phoneHomeURLFilter); err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to disable phone-home in userData after processing phone home config"),
-					}
-				}
-
-			}
-
-			// If there's still user-data, marshal so that it can be stored in the DB later
-			if isUserDataValidYAML && len(documentRoot.Content) > 0 {
-
-				byteUserData, err := util.MarshalUserData(userDataMap)
-				if err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to re-construct userData after processing phone home config"),
-					}
-				}
-				icr.UserData = cutil.GetPtr(string(byteUserData))
-			} else if isUserDataValidYAML && !*mergedPhoneHomeEnabled {
-				// This would be a case of valid YAML where the user
-				// disabled phone-home.
-				// If the only user-data _was_ the phone-home data but phone-home
-				// is being disabled, then we'll blank out the field in the DB.
-				icr.UserData = cutil.GetPtr("")
-			}
-			// There's an implied case here of invalid YAML
-			// In that case, we do nothing, and icr.UserData will stay untouched.
+		if *mergedPhoneHomeEnabled {
+			userData, err = util.EnablePhoneHomeInUserData(mergedUserData, cfg.GetSitePhoneHomeUrl())
+		} else if nicoAuthoredPhoneHome {
+			userData, err = util.DisableAllPhoneHomeInUserData(mergedUserData)
 		} else {
-			// If user-data is nil or empty, but phone-home is being enabled,
-			// we need to set the default phone-home settings string.
-			// (Nothing to do if user-data is nil or empty and phone-home is being disabled.)
+			userData, err = util.DisablePhoneHomeInUserData(mergedUserData, cfg.GetSitePhoneHomeUrl())
+		}
+
+		switch {
+		case errors.Is(err, util.ErrUnsupportedUserData):
+			// Phone-home can only be enabled in cloud-init user-data. The UI
+			// always sends false when the box is unchecked, so on disable such
+			// user-data is left alone rather than rejected.
 			if *mergedPhoneHomeEnabled {
-				icr.UserData = cutil.GetPtr(fmt.Sprintf(SitePhoneHomeCloudInit, cfg.GetSitePhoneHomeUrl()))
+				return validation.Errors{
+					"userData": errors.New("userData must be a #cloud-config or #cloud-config-archive document to enable phone home"),
+				}
 			}
+		case err != nil:
+			return phoneHomeUserDataError(*mergedPhoneHomeEnabled)
+		case userData != nil:
+			// Empty means phone-home was all the user-data held, so the field is
+			// blanked.
+			icr.UserData = userData
 		}
 	}
 
@@ -983,6 +934,149 @@ func (icr *APIInstanceCreateRequest) ValidateMultiEthernetDeviceInterfaces(itNet
 // ValidateInfiniBandInterfaces validates the InfiniBand Interfaces for the Instance
 func (icr *APIInstanceCreateRequest) ValidateInfiniBandInterfaces(itIbCaps []cdbm.MachineCapability) error {
 	return ValidateInfiniBandInterfaces(itIbCaps, icr.InfiniBandInterfaces)
+}
+
+// HasNewCrossTenantInterface reports whether a requested Interface selects another Tenant's
+// VPC or VPC Prefix and has no persisted Interface, other than a Deleting one, with the same
+// identity to reuse.
+func HasNewCrossTenantInterface(tenantID uuid.UUID, requested, existing []cdbm.Interface) (bool, error) {
+	existingByKey := make(map[string]int, len(existing))
+	for _, ifc := range existing {
+		if ifc.Status == cdbm.InterfaceStatusDeleting {
+			continue
+		}
+		existingByKey[ifc.EthernetInterfaceKey()]++
+	}
+
+	for _, ifc := range requested {
+		crossTenant := false
+		switch {
+		case ifc.VpcID != nil:
+			if ifc.Vpc == nil {
+				return false, fmt.Errorf("interface selecting VPC %s is missing its VPC relation", ifc.VpcID.String())
+			}
+			crossTenant = ifc.Vpc.TenantID != tenantID
+		case ifc.VpcPrefixID != nil:
+			if ifc.VpcPrefix == nil {
+				return false, fmt.Errorf("interface selecting VPC Prefix %s is missing its VPC Prefix relation", ifc.VpcPrefixID.String())
+			}
+			crossTenant = ifc.VpcPrefix.TenantID != tenantID
+		}
+		if !crossTenant {
+			continue
+		}
+
+		key := ifc.EthernetInterfaceKey()
+		if existingByKey[key] > 0 {
+			existingByKey[key]--
+			continue
+		}
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// BuildInterfacesForCrossTenantAuthorization converts loaded VPC and VPC Prefix selectors
+// into the normalized Interface identity fields needed before detailed selector validation.
+// Selectors absent from the maps are left to the existing not-found checks.
+func BuildInterfacesForCrossTenantAuthorization(interfaces []APIInterfaceCreateOrUpdateRequest, vpcMap map[uuid.UUID]*cdbm.Vpc, vpcPrefixMap map[uuid.UUID]*cdbm.VpcPrefix) []cdbm.Interface {
+	requested := make([]cdbm.Interface, 0, len(interfaces))
+	for _, ifc := range interfaces {
+		dbIfc := cdbm.Interface{
+			Device:               ifc.Device,
+			DeviceInstance:       ifc.DeviceInstance,
+			VirtualFunctionID:    ifc.VirtualFunctionID,
+			IsPhysical:           ifc.IsPhysical,
+			RequestedIpAddress:   ifc.IPAddress,
+			InlineRoutingProfile: ifc.InlineRoutingProfile.ToDB(),
+		}
+
+		switch {
+		case ifc.VpcID != nil:
+			vpcID, err := uuid.Parse(*ifc.VpcID)
+			if err != nil {
+				continue
+			}
+			vpc, ok := vpcMap[vpcID]
+			if !ok {
+				continue
+			}
+			dbIfc.VpcID = &vpcID
+			dbIfc.Vpc = vpc
+			dbIfc.VpcIPFamilyMode = cutil.GetPtr(ifc.VpcIPFamilyMode())
+		case ifc.VpcPrefixID != nil:
+			vpcPrefixID, err := uuid.Parse(*ifc.VpcPrefixID)
+			if err != nil {
+				continue
+			}
+			vpcPrefix, ok := vpcPrefixMap[vpcPrefixID]
+			if !ok {
+				continue
+			}
+			dbIfc.VpcPrefixID = &vpcPrefixID
+			dbIfc.VpcPrefix = vpcPrefix
+		default:
+			continue
+		}
+
+		requested = append(requested, dbIfc)
+	}
+	return requested
+}
+
+// HasCrossTenantInterface return `true` of the array of Interfaces argument includes at least
+// one non-Deleting Interface that attaches to a different Tenant's VPC or VPC Prefix
+// Returns `false` otherwise
+func HasCrossTenantInterface(interfaces []APIInterfaceCreateOrUpdateRequest, tenantID uuid.UUID, vpcMap map[uuid.UUID]*cdbm.Vpc, vpcPrefixMap map[uuid.UUID]*cdbm.VpcPrefix) bool {
+	for _, ifc := range interfaces {
+		if ifc.VpcID != nil {
+			if vpcID, err := uuid.Parse(*ifc.VpcID); err == nil {
+				if vpc, ok := vpcMap[vpcID]; ok && vpc.TenantID != tenantID {
+					return true
+				}
+			}
+		}
+		if ifc.VpcPrefixID != nil {
+			if vpcPrefixID, err := uuid.Parse(*ifc.VpcPrefixID); err == nil {
+				if vpcPrefix, ok := vpcPrefixMap[vpcPrefixID]; ok && vpcPrefix.TenantID != tenantID {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// ValidateInterfaceVpcs checks the Site, readiness, and network virtualization
+// type of each VPC selected by an Interface. Run it only after any cross-Tenant
+// authorization, so a Tenant without the capability can't read another Tenant's
+// VPC state from these errors.
+func ValidateInterfaceVpcs(vpcs map[uuid.UUID]*cdbm.Vpc, interfaces []APIInterfaceCreateOrUpdateRequest, siteID uuid.UUID) *cutil.APIError {
+	seenVpcIDs := make(map[uuid.UUID]struct{}, len(vpcs))
+	for _, ifc := range interfaces {
+		if ifc.VpcID == nil {
+			continue
+		}
+		vpcID := uuid.MustParse(*ifc.VpcID)
+		if _, ok := seenVpcIDs[vpcID]; ok {
+			continue
+		}
+		seenVpcIDs[vpcID] = struct{}{}
+
+		vpc := vpcs[vpcID]
+		if vpc.SiteID != siteID {
+			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request does not belong to Site", vpcID), nil)
+		}
+		if vpc.ControllerVpcID == nil || vpc.Status != cdbm.VpcStatusReady {
+			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request data is not in Ready state", vpcID), nil)
+		}
+		if vpc.NetworkVirtualizationType == nil || *vpc.NetworkVirtualizationType != cdbm.VpcFNN {
+			return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request must have FNN network virtualization type", vpcID), nil)
+		}
+	}
+
+	return nil
 }
 
 // ValidateDpuExtensionServiceDeployments validates the DpuExtensionServiceDeployments for the Instance create request
@@ -1001,6 +1095,8 @@ func (bicr APIBatchInstanceCreateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validation.Min(2).Error("Count must be at least 2"),
 			// TODO: the number 18 is a temporary limit until we have a better way to handle topology-optimized allocation. 18 is the largest possible GB200 domain size.
+			// Batch allocation keeps one Postgres subtransaction per allocated Machine until the create commits.
+			// Keep this below 64, past which the per-backend subtransaction cache overflows and slows snapshots on every connection.
 			validation.Max(18).Error("Count cannot exceed 18")),
 		validation.Field(&bicr.Description,
 			validation.When(bicr.Description != nil,
@@ -1266,78 +1362,33 @@ func (bicr *APIBatchInstanceCreateRequest) ValidateAndSetOperatingSystemData(cfg
 
 	// If the request is setting PhoneHomeEnabled
 	if bicr.PhoneHomeEnabled != nil {
-		// If there's some existing user-data,
-		// we'll need to modify it to either insert phone-home
-		// settings or snip them out
-		if mergedUserData != nil && *mergedUserData != "" {
-			userDataMap := &yaml.Node{}
+		var userData *string
+		var err error
 
-			var documentRoot *yaml.Node
-
-			isUserDataValidYAML := false
-			err := yaml.Unmarshal([]byte(*mergedUserData), userDataMap)
-
-			if err == nil {
-
-				// We have a slightly more restrictive view of what
-				// counts as valid YAML.
-				if len(userDataMap.Content) > 0 {
-					documentRoot = userDataMap.Content[0]
-
-					if documentRoot.Kind == yaml.MappingNode {
-						isUserDataValidYAML = true
-					}
-				}
-			}
-
-			if *mergedPhoneHomeEnabled {
-				// Phone home can only be enabled if the user-data is valid YAML
-				if !isUserDataValidYAML {
-					return validation.Errors{
-						"userData": errors.New("userData specified in request must be valid CloudInit YAML to enable phone home"),
-					}
-				}
-
-				if err := util.InsertPhoneHomeIntoUserData(documentRoot, cfg.GetSitePhoneHomeUrl()); err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to insert phone-home into userData"),
-					}
-				}
-
-			} else if isUserDataValidYAML {
-				// NICo's own block is removed by key, because the URL frozen
-				// into it may predate a change to site.phoneHomeUrl.
-				var phoneHomeURLFilter *string
-				if !nicoAuthoredPhoneHome {
-					phoneHomeURLFilter = cutil.GetPtr(cfg.GetSitePhoneHomeUrl())
-				}
-
-				if err := util.RemovePhoneHomeFromUserData(documentRoot, phoneHomeURLFilter); err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to disable phone-home in userData after processing phone home config"),
-					}
-				}
-			}
-
-			// If there's still user-data, marshal so that it can be stored in the DB later
-			if isUserDataValidYAML && len(documentRoot.Content) > 0 {
-
-				byteUserData, err := util.MarshalUserData(userDataMap)
-				if err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to re-construct userData after processing phone home config"),
-					}
-				}
-				bicr.UserData = cutil.GetPtr(string(byteUserData))
-			} else if isUserDataValidYAML && !*mergedPhoneHomeEnabled {
-				bicr.UserData = cutil.GetPtr("")
-			}
+		if *mergedPhoneHomeEnabled {
+			userData, err = util.EnablePhoneHomeInUserData(mergedUserData, cfg.GetSitePhoneHomeUrl())
+		} else if nicoAuthoredPhoneHome {
+			userData, err = util.DisableAllPhoneHomeInUserData(mergedUserData)
 		} else {
-			// If user-data is nil or empty, but phone-home is being enabled,
-			// we need to set the default phone-home settings string.
+			userData, err = util.DisablePhoneHomeInUserData(mergedUserData, cfg.GetSitePhoneHomeUrl())
+		}
+
+		switch {
+		case errors.Is(err, util.ErrUnsupportedUserData):
+			// Phone-home can only be enabled in cloud-init user-data. The UI
+			// always sends false when the box is unchecked, so on disable such
+			// user-data is left alone rather than rejected.
 			if *mergedPhoneHomeEnabled {
-				bicr.UserData = cutil.GetPtr(fmt.Sprintf(SitePhoneHomeCloudInit, cfg.GetSitePhoneHomeUrl()))
+				return validation.Errors{
+					"userData": errors.New("userData must be a #cloud-config or #cloud-config-archive document to enable phone home"),
+				}
 			}
+		case err != nil:
+			return phoneHomeUserDataError(*mergedPhoneHomeEnabled)
+		case userData != nil:
+			// Empty means phone-home was all the user-data held, so the field is
+			// blanked.
+			bicr.UserData = userData
 		}
 	}
 
@@ -1581,90 +1632,33 @@ func (iur *APIInstanceUpdateRequest) ValidateAndSetOperatingSystemData(cfg *conf
 	// which could have updated the user-data,
 	// then we'll need to make sure we update user-data accordingly.
 	if iur.PhoneHomeEnabled != nil || iur.UserData != nil || iur.OperatingSystemID != nil {
-		// If there's some existing user-data,
-		// we'll need to modify it to either insert phone-home
-		// settings or snip them out
-		if mergedUserData != nil && *mergedUserData != "" {
-			userDataMap := &yaml.Node{}
+		var userData *string
+		var err error
 
-			var documentRoot *yaml.Node
-
-			isUserDataValidYAML := false
-			err := yaml.Unmarshal([]byte(*mergedUserData), userDataMap)
-
-			if err == nil {
-
-				// We have a slightly more restrictive view of what
-				// counts as valid YAML.
-				if len(userDataMap.Content) > 0 {
-					documentRoot = userDataMap.Content[0]
-
-					if documentRoot.Kind == yaml.MappingNode {
-						isUserDataValidYAML = true
-					}
-				}
-			}
-
-			if *mergedPhoneHomeEnabled {
-				// Phone home can only be enabled if the user-data is valid YAML
-				if !isUserDataValidYAML {
-					return validation.Errors{
-						"userData": errors.New("must be valid CloudInit YAML to enable phone home"),
-					}
-				}
-
-				if err := util.InsertPhoneHomeIntoUserData(documentRoot, cfg.GetSitePhoneHomeUrl()); err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to insert phone-home into userData"),
-					}
-				}
-
-			} else if isUserDataValidYAML {
-				// We have to make sure we don't try to remove from invalid yaml,
-				// but the UI will always send false if phone-home is unchecked,
-				// so we want to do this check silently and not alert people who
-				// are using non-YAML user-data.
-
-				// NICo's own block is removed by key, because the URL frozen
-				// into it may predate a change to site.phoneHomeUrl.
-				var phoneHomeURLFilter *string
-				if !nicoAuthoredPhoneHome {
-					phoneHomeURLFilter = cutil.GetPtr(cfg.GetSitePhoneHomeUrl())
-				}
-
-				if err := util.RemovePhoneHomeFromUserData(documentRoot, phoneHomeURLFilter); err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to disable phone-home in userData after processing phone home config"),
-					}
-				}
-			}
-
-			// If there's still user-data, marshal so that it can be stored in the DB later
-			if isUserDataValidYAML && len(documentRoot.Content) > 0 {
-
-				byteUserData, err := util.MarshalUserData(userDataMap)
-				if err != nil {
-					return validation.Errors{
-						"userData": errors.New("failed to re-construct userData after processing phone home config"),
-					}
-				}
-				iur.UserData = cutil.GetPtr(string(byteUserData))
-			} else if isUserDataValidYAML && !*mergedPhoneHomeEnabled {
-				// This would be a case of valid YAML where the user
-				// disabled phone-home.
-				// If the only user-data _was_ the phone-home data but phone-home
-				// is being disabled, then we'll blank out the field in the DB.
-				iur.UserData = cutil.GetPtr("")
-			}
-			// There's an implied case here of invalid YAML
-			// In that case, we do nothing, and iur.UserData will stay untouche
+		if *mergedPhoneHomeEnabled {
+			userData, err = util.EnablePhoneHomeInUserData(mergedUserData, cfg.GetSitePhoneHomeUrl())
+		} else if nicoAuthoredPhoneHome {
+			userData, err = util.DisableAllPhoneHomeInUserData(mergedUserData)
 		} else {
-			// If user-data is nil or empty, but phone-home is being enabled,
-			// we need to set the default phone-home settings string.
-			// (Nothing to do if user-data is nil or empty and phone-home is being disabled.)
+			userData, err = util.DisablePhoneHomeInUserData(mergedUserData, cfg.GetSitePhoneHomeUrl())
+		}
+
+		switch {
+		case errors.Is(err, util.ErrUnsupportedUserData):
+			// Phone-home can only be enabled in cloud-init user-data. The UI
+			// always sends false when the box is unchecked, so on disable such
+			// user-data is left alone rather than rejected.
 			if *mergedPhoneHomeEnabled {
-				iur.UserData = cutil.GetPtr(fmt.Sprintf(SitePhoneHomeCloudInit, cfg.GetSitePhoneHomeUrl()))
+				return validation.Errors{
+					"userData": errors.New("userData must be a #cloud-config or #cloud-config-archive document to enable phone home"),
+				}
 			}
+		case err != nil:
+			return phoneHomeUserDataError(*mergedPhoneHomeEnabled)
+		case userData != nil:
+			// Empty means phone-home was all the user-data held, so the field is
+			// blanked.
+			iur.UserData = userData
 		}
 	}
 
@@ -1900,10 +1894,9 @@ func (idr *APIInstanceDeleteRequest) Validate() error {
 			),
 			validation.Field(&idr.MachineHealthIssue.Summary,
 				validation.Required,
-				validation.Length(0, 1024).Error(validationErrorStringLength)),
-			// TODO: what are the constrains on Summary and Details? For now limiting to 1024..
+				validation.RuneLength(0, MachineHealthIssueSummaryMaxLength).Error(validationErrorStringLength)),
 			validation.Field(&idr.MachineHealthIssue.Details,
-				validation.Length(0, 1024).Error(validationErrorStringLength)),
+				validation.RuneLength(0, MachineHealthIssueDetailsMaxLength).Error(validationErrorStringLength)),
 		)
 
 		if err != nil {
@@ -2098,8 +2091,8 @@ func InstanceListQueryParamDeprecations() []APIDeprecation {
 }
 
 // NewAPIInstance accepts a DB layer Instance object returns an API layer object.
-// SecondaryVpcIDs are derived from Interface.VpcID or the explicit prefix relation, so
-// callers must preload Interface.VpcPrefix when explicit-prefix IDs should be populated.
+// SecondaryVpcIDs and cross-Tenant ownership are derived from Interface VPC relations,
+// so callers must preload Interface.Vpc and Interface.VpcPrefix.
 func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Interface, dbibis []cdbm.InfiniBandInterface, dbsxas []cdbm.SpectrumXAttachment, dbdesds []cdbm.DpuExtensionServiceDeployment, dbnvlis []cdbm.NVLinkInterface, dbskgs []cdbm.SSHKeyGroup, dbsds []cdbm.StatusDetail) *APIInstance {
 	var instanceTypeID *string
 	if dbinst.InstanceTypeID != nil {
@@ -2193,7 +2186,10 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 	apiInstance.Interfaces = []APIInterface{}
 	for _, dbis := range dbiss {
 		curis := dbis
-		apiInstance.Interfaces = append(apiInstance.Interfaces, *NewAPIInterface(&curis))
+		curis.Instance = dbinst
+		apiInterface := NewAPIInterface(&curis)
+		apiInterface.Instance = nil
+		apiInstance.Interfaces = append(apiInstance.Interfaces, *apiInterface)
 		if dbis.VpcID != nil && *dbis.VpcID != dbinst.VpcID {
 			secondaryVpcIDs.Add(dbis.VpcID.String())
 		} else if dbis.VpcID == nil && dbis.VpcPrefix != nil && dbis.VpcPrefix.VpcID != dbinst.VpcID {
@@ -2228,6 +2224,7 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 		apiInstance.DpuExtensionServiceDeployments = append(apiInstance.DpuExtensionServiceDeployments, *NewAPIDpuExtensionServiceDeployment(&curdesd))
 	}
 
+	apiInstance.SSHKeyGroupIDs = []string{}
 	apiInstance.SSHKeyGroups = []APISSHKeyGroupSummary{}
 	for _, dbskg := range dbskgs {
 		skg := dbskg

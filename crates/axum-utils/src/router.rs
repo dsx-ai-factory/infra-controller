@@ -28,7 +28,10 @@ use tower::Service;
 pub async fn call_router_with_new_request(router: &mut Router, request: Request<Body>) -> Response {
     let (head, body) = request.into_parts();
 
-    let mut builder = Request::builder().uri(&head.uri).method(&head.method);
+    let mut builder = Request::builder()
+        .uri(&head.uri)
+        .method(&head.method)
+        .version(head.version);
     for (key, value) in &head.headers {
         builder = builder.header(key, value);
     }

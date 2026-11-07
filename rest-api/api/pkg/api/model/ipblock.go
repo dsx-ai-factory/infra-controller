@@ -176,6 +176,8 @@ type APIIPBlock struct {
 	InfrastructureProvider *APIInfrastructureProviderSummary `json:"infrastructureProvider,omitempty"`
 	// TenantID is the ID of the Tenant
 	TenantID *string `json:"tenantId"`
+	// Managed is true for provider fabric/root/overlay and allocated blocks, false for tenant-created blocks.
+	Managed bool `json:"managed"`
 	// Tenant is the summary of the tenant
 	Tenant *APITenantSummary `json:"tenant,omitempty"`
 	// RoutingType is the routingType of the IPBlock
@@ -207,6 +209,7 @@ func NewAPIIPBlock(dbipb *cdbm.IPBlock, dbsds []cdbm.StatusDetail, dbpu *ipam.Us
 		SiteID:                   dbipb.SiteID.String(),
 		InfrastructureProviderID: dbipb.InfrastructureProviderID.String(),
 		TenantID:                 util.GetUUIDPtrToStrPtr(dbipb.TenantID),
+		Managed:                  dbipb.Managed,
 		RoutingType:              dbipb.RoutingType,
 		Prefix:                   dbipb.Prefix,
 		PrefixLength:             dbipb.PrefixLength,
@@ -252,6 +255,8 @@ type APIIPBlockSummary struct {
 	ID string `json:"id"`
 	// Name of the IPBlock, only lowercase characters, digits, hyphens and cannot begin/end with hyphen
 	Name string `json:"name"`
+	// Managed distinguishes provider-managed blocks from tenant-created blocks.
+	Managed bool `json:"managed"`
 	// RoutingType is the routingType of the IPBlock
 	RoutingType string `json:"routingType"`
 	// Prefix is the prefix of the network in CIDR notation
@@ -267,6 +272,7 @@ func NewAPIIPBlockSummary(dbipb *cdbm.IPBlock) *APIIPBlockSummary {
 	ipb := APIIPBlockSummary{
 		ID:           dbipb.ID.String(),
 		Name:         dbipb.Name,
+		Managed:      dbipb.Managed,
 		RoutingType:  dbipb.RoutingType,
 		Prefix:       dbipb.Prefix,
 		PrefixLength: dbipb.PrefixLength,

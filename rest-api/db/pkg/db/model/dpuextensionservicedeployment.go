@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 )
 
 const (
@@ -153,19 +155,15 @@ type DpuExtensionServiceDeploymentDAO interface {
 type DpuExtensionServiceDeploymentSQLDAO struct {
 	dbSession *db.Session
 	DpuExtensionServiceDeploymentDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new DpuExtensionServiceDeployment
-func (desdsd DpuExtensionServiceDeploymentSQLDAO) Create(ctx context.Context, tx *db.Tx, input DpuExtensionServiceDeploymentCreateInput) (*DpuExtensionServiceDeployment, error) {
+func (desdsd DpuExtensionServiceDeploymentSQLDAO) Create(ctx context.Context, tx *db.Tx, input DpuExtensionServiceDeploymentCreateInput) (_ *DpuExtensionServiceDeployment, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, desdDAOSpan := desdsd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDeploymentDAO.Create")
-	if desdDAOSpan != nil {
-		defer desdDAOSpan.End()
-
-		desdsd.tracerSpan.SetAttribute(desdDAOSpan, "dpu_extension_service_id", input.DpuExtensionServiceID.String())
-		desdsd.tracerSpan.SetAttribute(desdDAOSpan, "version", input.Version)
-	}
+	ctx, desdDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDeploymentDAO.Create")
+	defer func() { cotel.EndSpan(desdDAOSpan, retErr) }()
+	cotel.SetAttribute(desdDAOSpan, attribute.String("dpu_extension_service_id", input.DpuExtensionServiceID.String()))
+	cotel.SetAttribute(desdDAOSpan, attribute.String("version", input.Version))
 
 	results, err := desdsd.CreateMultiple(ctx, tx, []DpuExtensionServiceDeploymentCreateInput{input})
 	if err != nil {
@@ -176,14 +174,11 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) Create(ctx context.Context, tx
 
 // GetByID returns a DpuExtensionServiceDeployment by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (desdsd DpuExtensionServiceDeploymentSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*DpuExtensionServiceDeployment, error) {
+func (desdsd DpuExtensionServiceDeploymentSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *DpuExtensionServiceDeployment, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, desdDAOSpan := desdsd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDeploymentDAO.GetByID")
-	if desdDAOSpan != nil {
-		defer desdDAOSpan.End()
-
-		desdsd.tracerSpan.SetAttribute(desdDAOSpan, "id", id.String())
-	}
+	ctx, desdDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDeploymentDAO.GetByID")
+	defer func() { cotel.EndSpan(desdDAOSpan, retErr) }()
+	cotel.SetAttribute(desdDAOSpan, attribute.String("id", id.String()))
 
 	desd := &DpuExtensionServiceDeployment{}
 
@@ -208,12 +203,10 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) GetByID(ctx context.Context, t
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if page.OrderBy is nil, then records are ordered by column specified in DpuExtensionServiceDeploymentOrderByDefault in ascending order
-func (desdsd DpuExtensionServiceDeploymentSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DpuExtensionServiceDeploymentFilterInput, page paginator.PageInput, includeRelations []string) ([]DpuExtensionServiceDeployment, int, error) {
+func (desdsd DpuExtensionServiceDeploymentSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter DpuExtensionServiceDeploymentFilterInput, page paginator.PageInput, includeRelations []string) (_ []DpuExtensionServiceDeployment, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, desdDAOSpan := desdsd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDeploymentDAO.GetAll")
-	if desdDAOSpan != nil {
-		defer desdDAOSpan.End()
-	}
+	ctx, desdDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDeploymentDAO.GetAll")
+	defer func() { cotel.EndSpan(desdDAOSpan, retErr) }()
 
 	desds := []DpuExtensionServiceDeployment{}
 	if filter.DpuExtensionServiceDeploymentIDs != nil && len(filter.DpuExtensionServiceDeploymentIDs) == 0 {
@@ -228,34 +221,18 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) GetAll(ctx context.Context, tx
 
 	if len(filter.SiteIDs) > 0 {
 		query = query.Where("desd.site_id IN (?)", bun.In(filter.SiteIDs))
-
-		if desdDAOSpan != nil {
-			desdsd.tracerSpan.SetAttribute(desdDAOSpan, "site_ids", len(filter.SiteIDs))
-		}
 	}
 
 	if len(filter.TenantIDs) > 0 {
 		query = query.Where("desd.tenant_id IN (?)", bun.In(filter.TenantIDs))
-
-		if desdDAOSpan != nil {
-			desdsd.tracerSpan.SetAttribute(desdDAOSpan, "tenant_ids", len(filter.TenantIDs))
-		}
 	}
 
 	if len(filter.InstanceIDs) > 0 {
 		query = query.Where("desd.instance_id IN (?)", bun.In(filter.InstanceIDs))
-
-		if desdDAOSpan != nil {
-			desdsd.tracerSpan.SetAttribute(desdDAOSpan, "instance_ids", len(filter.InstanceIDs))
-		}
 	}
 
 	if len(filter.DpuExtensionServiceIDs) > 0 {
 		query = query.Where("desd.dpu_extension_service_id IN (?)", bun.In(filter.DpuExtensionServiceIDs))
-
-		if desdDAOSpan != nil {
-			desdsd.tracerSpan.SetAttribute(desdDAOSpan, "dpu_extension_service_ids", len(filter.DpuExtensionServiceIDs))
-		}
 	}
 
 	if len(filter.Versions) > 0 {
@@ -264,10 +241,6 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) GetAll(ctx context.Context, tx
 
 	if len(filter.Statuses) > 0 {
 		query = query.Where("desd.status IN (?)", bun.In(filter.Statuses))
-
-		if desdDAOSpan != nil {
-			desdsd.tracerSpan.SetAttribute(desdDAOSpan, "statuses", len(filter.Statuses))
-		}
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -278,10 +251,7 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) GetAll(ctx context.Context, tx
 				WhereOr("desd.status ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("desd.id::text ILIKE ?", "%"+searchQuery+"%")
 		})
-
-		if desdDAOSpan != nil {
-			desdsd.tracerSpan.SetAttribute(desdDAOSpan, "search_query", searchQuery)
-		}
+		cotel.SetAttribute(desdDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	for _, relation := range includeRelations {
@@ -309,14 +279,11 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) GetAll(ctx context.Context, tx
 
 // Update updates specified fields of an existing DpuExtensionServiceDeployment
 // The updated fields are assumed to be set to non-null values
-func (desdsd DpuExtensionServiceDeploymentSQLDAO) Update(ctx context.Context, tx *db.Tx, input DpuExtensionServiceDeploymentUpdateInput) (*DpuExtensionServiceDeployment, error) {
+func (desdsd DpuExtensionServiceDeploymentSQLDAO) Update(ctx context.Context, tx *db.Tx, input DpuExtensionServiceDeploymentUpdateInput) (_ *DpuExtensionServiceDeployment, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, desdDAOSpan := desdsd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDeploymentDAO.Update")
-	if desdDAOSpan != nil {
-		defer desdDAOSpan.End()
-
-		desdsd.tracerSpan.SetAttribute(desdDAOSpan, "id", input.DpuExtensionServiceDeploymentID.String())
-	}
+	ctx, desdDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDeploymentDAO.Update")
+	defer func() { cotel.EndSpan(desdDAOSpan, retErr) }()
+	cotel.SetAttribute(desdDAOSpan, attribute.String("id", input.DpuExtensionServiceDeploymentID.String()))
 
 	desd := &DpuExtensionServiceDeployment{
 		ID: input.DpuExtensionServiceDeploymentID,
@@ -327,10 +294,7 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) Update(ctx context.Context, tx
 	if input.Status != nil {
 		desd.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-
-		if desdDAOSpan != nil {
-			desdsd.tracerSpan.SetAttribute(desdDAOSpan, "status", *input.Status)
-		}
+		cotel.SetAttribute(desdDAOSpan, attribute.String("status", *input.Status))
 	}
 
 	if len(updatedFields) > 0 {
@@ -353,14 +317,11 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) Update(ctx context.Context, tx
 // Delete deletes a DpuExtensionServiceDeployment by ID
 // error is returned only if there is a db error
 // if the object being deleted doesn't exist, error is not returned
-func (desdsd DpuExtensionServiceDeploymentSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (desdsd DpuExtensionServiceDeploymentSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, desdDAOSpan := desdsd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDeploymentDAO.Delete")
-	if desdDAOSpan != nil {
-		defer desdDAOSpan.End()
-
-		desdsd.tracerSpan.SetAttribute(desdDAOSpan, "id", id.String())
-	}
+	ctx, desdDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDeploymentDAO.Delete")
+	defer func() { cotel.EndSpan(desdDAOSpan, retErr) }()
+	cotel.SetAttribute(desdDAOSpan, attribute.String("id", id.String()))
 
 	_, err := db.GetIDB(tx, desdsd.dbSession).NewDelete().Model((*DpuExtensionServiceDeployment)(nil)).Where("id = ?", id).Exec(ctx)
 	if err != nil {
@@ -371,17 +332,14 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) Delete(ctx context.Context, tx
 }
 
 // CreateMultiple creates multiple DpuExtensionServiceDeployments
-func (desdsd DpuExtensionServiceDeploymentSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []DpuExtensionServiceDeploymentCreateInput) ([]DpuExtensionServiceDeployment, error) {
+func (desdsd DpuExtensionServiceDeploymentSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []DpuExtensionServiceDeploymentCreateInput) (_ []DpuExtensionServiceDeployment, retErr error) {
 	if len(inputs) > db.MaxBatchItems {
 		return nil, fmt.Errorf("batch size %d exceeds maximum allowed %d", len(inputs), db.MaxBatchItems)
 	}
 
 	// Create a child span and set the attributes for current request
-	ctx, desdDAOSpan := desdsd.tracerSpan.CreateChildInCurrentContext(ctx, "DpuExtensionServiceDeploymentDAO.CreateMultiple")
-	if desdDAOSpan != nil {
-		defer desdDAOSpan.End()
-		desdsd.tracerSpan.SetAttribute(desdDAOSpan, "batch_size", len(inputs))
-	}
+	ctx, desdDAOSpan := cotel.StartSpan(ctx, "DpuExtensionServiceDeploymentDAO.CreateMultiple")
+	defer func() { cotel.EndSpan(desdDAOSpan, retErr) }()
 
 	if len(inputs) == 0 {
 		return []DpuExtensionServiceDeployment{}, nil
@@ -442,7 +400,6 @@ func (desdsd DpuExtensionServiceDeploymentSQLDAO) CreateMultiple(ctx context.Con
 // NewDpuExtensionServiceDeploymentDAO returns a new DpuExtensionServiceDeploymentDAO
 func NewDpuExtensionServiceDeploymentDAO(dbSession *db.Session) DpuExtensionServiceDeploymentDAO {
 	return &DpuExtensionServiceDeploymentSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

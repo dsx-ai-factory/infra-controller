@@ -14,6 +14,9 @@ name = "carbide_preingestion_manager"
 name = "integration"
 path = "tests/integration/main.rs"
 
+[features]
+test-support = []
+
 [dependencies]
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-db = { path = "../api-db" }
@@ -46,6 +49,8 @@ async-trait = { workspace = true }
 carbide-api-test-helper = { path = "../api-test-helper" }
 carbide-firmware = { path = "../firmware", features = ["test-support"] }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
+# Enable test helpers for this crate's integration tests.
+carbide-preingestion-manager = { path = ".", features = ["test-support"] }
 carbide-test-harness = { path = "../test-harness" }
 carbide-test-support = { path = "../test-support" }
 carbide-uuid = { path = "../uuid" }

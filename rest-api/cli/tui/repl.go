@@ -241,7 +241,8 @@ func RunREPL(s *Session) error {
 			fmt.Fprintf(os.Stderr, "%s %v\n\n", Red("Error:"), parseErr)
 			continue
 		}
-		if err := command.Run(s, args); err != nil {
+		err = command.Run(s, args)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "%s %v\n", Red("Error:"), err)
 		}
 		fmt.Println()
@@ -610,7 +611,7 @@ func getGeneratedResourceSuggestions(
 			resolvedValues[parameter] = value
 			continue
 		}
-		item, found := matchGeneratedAutocompleteItem(items, value)
+		item, found := matchGeneratedAutocompleteItem(descriptor, items, value)
 		if !found {
 			return nil
 		}
@@ -697,8 +698,12 @@ func endsWithWhitespace(input string) bool {
 	}
 }
 
-func matchGeneratedAutocompleteItem(items []NamedItem, value string) (NamedItem, bool) {
-	matches := matchingGeneratedResourceItems(items, value)
+func matchGeneratedAutocompleteItem(
+	descriptor GeneratedResourceDescriptor,
+	items []NamedItem,
+	value string,
+) (NamedItem, bool) {
+	matches := matchingGeneratedResourceItems(descriptor, items, value)
 	if len(matches) == 1 {
 		return matches[0], true
 	}

@@ -61,6 +61,7 @@ impl TryFrom<Args> for rpc::forge::ExpectedRack {
 
     fn try_from(args: Args) -> Result<Self, Self::Error> {
         Ok(rpc::forge::ExpectedRack {
+            rack_group_id: None,
             rack_id: Some(args.rack_id),
             rack_profile_id: None,
             metadata: Some(rpc::forge::Metadata {

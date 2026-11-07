@@ -121,7 +121,8 @@ The flow is:
 1. **Collect an observation.** A collector reads an event source and creates an
    envelope containing the event type, severity, observed resource, observation
    time, and a source key that remains stable for the occurrence. The leakage
-   collector creates one envelope for each leaking component it observes.
+   collector creates one envelope for each leaking rack or component it
+   observes.
 2. **Normalize and deliver the envelope.** The registered ingestion source adds
    its stable source name. The pair `(source_name, source_key)` becomes the
    durable occurrence identity. The ingestion pipeline retries nonterminal
@@ -241,9 +242,11 @@ that name to every envelope and retries nonterminal sink failures with the same
 source key. Terminal validation or resolution failures return immediately.
 
 The leakage detector registers source name `nico_core_leakage`. It retains one
-source key while a component appears in consecutive successful polls. A
-successful poll that omits the component ends the occurrence; a later leak gets
-a new source key. A failed source query does not end an occurrence.
+source key while a rack or component appears in consecutive successful polls.
+A successful poll that omits the resource ends the occurrence; a later leak
+gets a new source key. Rack, compute, and NVSwitch queries update independently,
+so a failed source query does not end that source's active occurrences or
+suppress observations from the others.
 
 For the first observation, the processor:
 

@@ -24,7 +24,7 @@ To add support for hardware that the NICo development team does not have access 
 | GB200 Compute Tray (1RU) | 1.3.2GA | 1.3.2GA | 1.3.2GA |
 | GB200 NVL - Wiwynn | 25.06-2_NV_WW_02 | 1.3.2GA | 1.3.2GA |
 | HPE ProLiant DL385 Gen10 Plus v2 | 3.15 | 3.80_09-05-2025 |  |
-| Lenovo GB300 Compute Tray | 3.0.0 | 1.0.0GA | 1.0.0GA |
+| Lenovo GB300 Compute Tray | 3.0.0/3.03.0 | GBHC01A_01.03.1/GBHC01A_01.05.1 | 1.0.0GA/1.0.5 |
 | Lenovo HS350X V3 | 1.20 | 2.17.0 |  |
 | Lenovo SR650 V4 | 1.90 | 1.30 | 5.03.00 |
 | Lenovo ThinkSystem SR650 | 10.40 | 4.30 | 2.13 |

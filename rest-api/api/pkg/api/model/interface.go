@@ -11,6 +11,7 @@ import (
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
+	"github.com/google/uuid"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -266,12 +267,35 @@ func (ifcr APIInterfaceCreateOrUpdateRequest) VpcIPFamilyMode() cdbm.InterfaceVp
 	return cdbm.InterfaceVpcIPFamilyModeIPv4Only
 }
 
+// APIInterfaceGetAllRequest captures optional filters for listing Interfaces.
+type APIInterfaceGetAllRequest struct {
+	VpcID            *string  `query:"vpcId"`
+	CrossTenant      *bool    `query:"crossTenant"`
+	InstanceTenantID *string  `query:"instanceTenantId"`
+	VpcTenantID      *string  `query:"vpcTenantId"`
+	Status           *string  `query:"status"`
+	IncludeRelation  []string `query:"includeRelation"`
+}
+
+// Validate ensures Interface filter IDs are valid UUIDs.
+func (r APIInterfaceGetAllRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.VpcID, validation.When(r.VpcID != nil, validation.Required, validationis.UUID)),
+		validation.Field(&r.InstanceTenantID, validation.When(r.InstanceTenantID != nil, validation.Required, validationis.UUID)),
+		validation.Field(&r.VpcTenantID, validation.When(r.VpcTenantID != nil, validation.Required, validationis.UUID)),
+	)
+}
+
 // APIInterface is the data structure to capture Interface
 type APIInterface struct {
 	// ID is the unique UUID v4 identifier for the Interface
 	ID string `json:"id"`
 	// InstanceID is the ID of the associated Instance
 	InstanceID string `json:"instanceId"`
+	// InstanceTenantID is the Instance owner when it differs from the selected VPC or VPC Prefix owner
+	InstanceTenantID *string `json:"instanceTenantId"`
+	// VpcTenantID is the selected VPC or VPC Prefix owner when it differs from the Instance owner
+	VpcTenantID *string `json:"vpcTenantId"`
 	// Instance is the summary of the Instance
 	Instance *APIInstanceSummary `json:"instance,omitempty"`
 	// SubnetID is the ID of the associated Subnet
@@ -298,6 +322,8 @@ type APIInterface struct {
 	MacAddress *string `json:"macAddress"`
 	// IPAddresses is the list of IP addresses assigned to the Interface
 	IPAddresses []string `json:"ipAddresses"`
+	// IPPrefixes lists reported IPv4 or IPv6 CIDRs, independently of IPAddresses.
+	IPPrefixes []string `json:"ipPrefixes"`
 	// RequestedIpAddress is the explicitly requested IP address for the Interface
 	RequestedIpAddress *string `json:"requestedIpAddress"`
 	// InlineRoutingProfile contains interface-local routing profile options.
@@ -312,12 +338,14 @@ type APIInterface struct {
 
 // NewAPIInterface creates a new APIInterface
 func NewAPIInterface(dbis *cdbm.Interface) *APIInterface {
+	// Addresses and prefixes serialize as empty JSON arrays even when none are reported.
 	apiInterface := &APIInterface{
 		ID:                 dbis.ID.String(),
 		InstanceID:         dbis.InstanceID.String(),
 		IsPhysical:         dbis.IsPhysical,
 		MacAddress:         dbis.MacAddress,
-		IPAddresses:        dbis.IPAddresses,
+		IPAddresses:        append([]string{}, dbis.IPAddresses...),
+		IPPrefixes:         append([]string{}, dbis.IPPrefixes...),
 		RequestedIpAddress: dbis.RequestedIpAddress,
 		Status:             dbis.Status,
 		Created:            dbis.Created,
@@ -331,6 +359,18 @@ func NewAPIInterface(dbis *cdbm.Interface) *APIInterface {
 
 	if dbis.Instance != nil {
 		apiInterface.Instance = NewAPIInstanceSummary(dbis.Instance)
+
+		var vpcTenantID *uuid.UUID
+		switch {
+		case dbis.VpcID != nil && dbis.Vpc != nil:
+			vpcTenantID = &dbis.Vpc.TenantID
+		case dbis.VpcPrefixID != nil && dbis.VpcPrefix != nil:
+			vpcTenantID = &dbis.VpcPrefix.TenantID
+		}
+		if vpcTenantID != nil && dbis.Instance.TenantID != *vpcTenantID {
+			apiInterface.InstanceTenantID = cutil.GetPtr(dbis.Instance.TenantID.String())
+			apiInterface.VpcTenantID = cutil.GetPtr(vpcTenantID.String())
+		}
 	}
 
 	if dbis.SubnetID != nil {

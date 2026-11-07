@@ -30,8 +30,12 @@ The CLI needs three things to connect:
 
 ### TLS options
 
-Every setting follows the same priority: CLI flag → environment variable →
-config file key → hard-coded default (where one exists).
+Settings prefer CLI flags, then environment variables, then config-file keys,
+then defaults or file-location fallbacks. The client certificate and key resolve
+independently. When both values are present, the CLI uses that pair, even when
+one comes from a CLI flag and the other from an environment variable. When either
+is absent, it uses the complete config-file pair, then the
+[client-cert fallbacks](#client-cert-fallbacks).
 
 | Setting | CLI flag | Environment variable | Config file key | Default |
 |---------|----------|---------------------|-----------------|---------|
@@ -83,7 +87,7 @@ with a "Only SOCKS5 Proxy supported" error. This is enforced in
 
 ```sh
 export https_proxy=socks5://localhost:1080
-nico-admin-cli machine show --all
+nico-admin-cli machine show
 ```
 
 ### Client-cert fallbacks
@@ -119,21 +123,83 @@ writes logs to **stderr**, leaving stdout for command output:
 
 ## Quick verification
 
-Once credentials are in place, `version` is the cheapest end-to-end check —
-it exercises auth without mutating anything:
+Use `version` for a read-only connectivity check:
 
 ```sh
 nico-admin-cli version
 ```
 
-If it succeeds, the API URL, root CA, and client cert/key are all working.
-`nico-admin-cli machine show --all` is a good first real query.
+This command does not verify the server certificate, sends no client
+certificate, and is allowed anonymously. Success does not verify server trust,
+the client cert/key, or admin permissions. With credentials configured and
+`DISABLE_TLS_ENFORCEMENT` unset, use `nico-admin-cli machine show` to verify a
+protected, read-only operation. An empty inventory is also a valid result.
+
+## Component reset status
+
+Use [`component-manager component-reset`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/component-manager/component-manager-component-reset.md)
+to submit resets directly, and
+[`component-manager get-reset-status`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/component-manager/component-manager-get-reset-status.md)
+to query by device and required action. The RMS backend supports
+`sdn-factory-reset` and `nvos-factory-reset` on switches. BMC resets remain
+unsupported. Targets can be switch IDs or BMC MACs, including expected inventory
+before ingestion. SDN reset disrupts fabric traffic and restores SDN defaults
+without reinstalling NVOS. NVOS reset erases operating-system configuration and
+reboots the switch. The optional `--domain-name` selector applies only to SDN
+reset; NVOS reset uses the RMS configured default NVL certificate domain and
+rejects that selector.
+
+For an ingested switch, after NVOS reset reports `COMPLETED`, an operator must
+log in over SSH using factory-default credentials and restore the NVOS account
+and password recorded in NICo for that switch before resuming managed operations.
+Direct reset does not update the credentials stored in NICo or automatically
+rerun credential rotation.
+
+Submission success means accepted and tracked; it does not mean the reset
+completed. Other valid targets can proceed when one target fails.
+`OUTCOME_UNKNOWN` means the reset may have started, including when RMS accepted
+it but NICo could not record its reference; do not automatically resubmit.
+`INVALID_ARGUMENT` means the target could not be prepared or RMS rejected it
+before dispatch. `NOT_FOUND` means the target or its credentials could not be
+resolved.
+
+NICo stores the most recently recorded accepted RMS job reference per device
+MAC and reset action. This follows firmware direct-dispatch tracking: references
+survive NICo restarts, but are not operation history or durable completion
+records. A rejected or ambiguous submission leaves the previous reference
+unchanged. If a submission response or reference write fails, status can still
+show an older reset; it does not necessarily describe the latest attempt or all
+work in progress. Concurrent responses can be recorded out of acceptance order.
+
+In the status API, the per-device result and reset state have different meanings:
+
+| Result / reset state | Meaning and next step |
+|---|---|
+| `SUCCESS` / `QUEUED` or `IN_PROGRESS` | The tracked reset is still active. Continue querying status. |
+| `SUCCESS` / `COMPLETED` or `FAILED` | RMS reports a terminal outcome for the tracked reset. Read the error for a failed reset. |
+| `NOT_FOUND` / `UNKNOWN` | NICo cannot resolve the target or has no reference. Read the error; this does not prove no reset occurred. |
+| `UNAVAILABLE` / `UNKNOWN` | Status could not be observed, for example because of a temporary RMS failure. Retry the status query. |
+| `OUTCOME_UNKNOWN` / `UNKNOWN` | The tracked RMS job cannot be found or its outcome cannot be established. Investigate before submitting another reset. |
+
+RMS job expiry or restart can make a previously observed completion unavailable.
+NICo does not retain pending submission intent or provide durable exclusion
+between reset requests. RMS admission applies to its tracked rack/node identity;
+it does not recover forgotten jobs or associate changed node IDs across ingestion.
+
+Do not automatically retry a reset after a submission error: the reset
+may have started even if NICo could not record its job reference. Investigate
+NICo/RMS logs and the device state. For a known job ID, use
+[`backend rms get-job-status`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/backend/backend-rms-get-job-status.md)
+with child records included to inspect the RMS outcome. This diagnostic requires
+the admin CLI role. Retry status queries as needed; another reset must be a
+deliberate action after establishing the outcome of the uncertain attempt.
 
 ## mTLS and authorization
 
-For generating client certificates, configuring the server-side TLS and
-Casbin policy, and understanding how certificate fields map to authorization
-roles, see [NICo mTLS and authorization](./nico-api-auth.md).
+For Vault-issued or operator-managed admin certificates, API trust and
+authorization, installation, renewal, CA overlap, recovery, and the existing
+revocation support boundary, see
+[NICo mTLS and authorization](./nico-api-auth.md).
 
 ---
 

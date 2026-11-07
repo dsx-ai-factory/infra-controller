@@ -33,9 +33,8 @@ const (
 )
 
 type rackHealthReportHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // GetAllRackHealthReportHandler lists Rack health reports.
@@ -55,9 +54,8 @@ type DeleteRackHealthReportHandler struct {
 
 func newRackHealthReportHandler(dbSession *cdb.Session, scp *sc.ClientPool) rackHealthReportHandler {
 	return rackHealthReportHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -126,7 +124,7 @@ func (h DeleteRackHealthReportHandler) Handle(c echo.Context) error {
 }
 
 func handleRackHealthReport(c echo.Context, h rackHealthReportHandler, action rackHealthReportAction) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("RackHealthReport", string(action), c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("RackHealthReport", string(action), c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

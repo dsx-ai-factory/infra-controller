@@ -14,11 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// Flat `rpc::forge::Machine` fields are deprecated in favour of `status`/`config`
-// sub-messages, but this module must still read them until the REST API is migrated.
-// See https://github.com/NVIDIA/infra-controller/issues/2793
-#![allow(deprecated)]
-
 use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -500,7 +495,11 @@ async fn fetch_dpu_health_contributors(
                 "DPU Health {}",
                 dpu.id.map(|id| id.to_string()).unwrap_or_default()
             ),
-            report: dpu.health.map(health_report_from_rpc_convert_invalid),
+            report: dpu
+                .status
+                .unwrap_or_default()
+                .health
+                .map(health_report_from_rpc_convert_invalid),
         })
         .collect())
 }
@@ -605,12 +604,11 @@ async fn fetch_machine_health_snapshot(
         }
     };
 
+    let status = machine.status.unwrap_or_default();
+
     Ok(MachineHealthSnapshot {
-        aggregate_health: machine
-            .health
-            .as_ref()
-            .map(|health| health_report_from_rpc_convert_invalid(health.clone())),
-        associated_dpu_machine_ids: machine
+        aggregate_health: status.health.map(health_report_from_rpc_convert_invalid),
+        associated_dpu_machine_ids: status
             .associated_dpu_machine_ids
             .into_iter()
             .map(Into::into)

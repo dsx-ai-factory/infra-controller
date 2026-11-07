@@ -46,7 +46,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{Config, DnsServer};
 
-// Each test gets ten seconds for setup, one packet exchange, and teardown.
+// Each case gets ten seconds for setup, packet exchanges, and teardown.
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[tokio::test]
@@ -160,6 +160,73 @@ async fn ipv6_ptr_query_over_tcp_returns_the_target_name() {
     .expect("IPv6 TCP query and teardown complete before the test deadline");
 }
 
+#[tokio::test]
+async fn negative_answers_count_one_miss_then_cached_hits() {
+    for (outcome, response_code, expected_misses) in [
+        (DnsLookupOutcome::NoSuchName, ResponseCode::NXDomain, 1.0),
+        (DnsLookupOutcome::NoData, ResponseCode::NoError, 1.0),
+        (DnsLookupOutcome::Records, ResponseCode::NoError, 0.0),
+    ] {
+        let metrics = MetricsCapture::start();
+        timeout(TEST_TIMEOUT, async {
+            let name: Name = "host.example.com.".parse().unwrap();
+            let negative = outcome != DnsLookupOutcome::Records;
+            let reply = DnsResourceRecordLookupResponse {
+                records: if negative {
+                    vec![]
+                } else {
+                    vec![DnsResourceRecord {
+                        qname: name.to_string(),
+                        qtype: "A".to_string(),
+                        content: "192.0.2.42".to_string(),
+                        ttl: 60,
+                        ..Default::default()
+                    }]
+                },
+                outcome: outcome.into(),
+                authoritative: true,
+                authority_soa: negative.then(|| DnsResourceRecord {
+                    qname: "example.com.".to_string(),
+                    qtype: "SOA".to_string(),
+                    content: "ns.example.com. hostmaster.example.com. 1 60 60 3600 120".to_string(),
+                    ttl: 120,
+                    ..Default::default()
+                }),
+            };
+            let server = TestDnsServer::start_with_reply(reply).await;
+            let packet = query(name, RecordType::A).to_vec().unwrap();
+            let client = UdpSocket::bind("[::1]:0").await.unwrap();
+            client.connect(server.udp_address).await.unwrap();
+            let response_label = format!("{response_code:?}");
+            let labels = &[("response_code", response_label.as_str())];
+
+            for expected_hits in 0..if negative { 2 } else { 1 } {
+                client.send(&packet).await.unwrap();
+                let mut buffer = [0; 512];
+                let length = client.recv(&mut buffer).await.unwrap();
+                let response = Message::from_vec(&buffer[..length]).unwrap();
+                assert_eq!(
+                    response.metadata.response_code, response_code,
+                    "{outcome:?}"
+                );
+                assert_eq!(
+                    metrics.counter_delta("carbide_dns_negative_cache_miss_count_total", labels),
+                    expected_misses,
+                    "{outcome:?}: an uncached negative counts once"
+                );
+                assert_eq!(
+                    metrics.counter_delta("carbide_dns_negative_cache_hit_count_total", labels),
+                    f64::from(expected_hits),
+                    "{outcome:?}: only replays count as hits"
+                );
+            }
+            server.shutdown().await;
+        })
+        .await
+        .expect("cache metric queries and teardown complete before the test deadline");
+    }
+}
+
 fn query(name: Name, record_type: RecordType) -> Message {
     let mut request = Message::new(0x5405, MessageType::Query, OpCode::Query);
     request.queries.push(Query::query(name, record_type));
@@ -188,7 +255,17 @@ struct TestDnsServer {
 
 impl TestDnsServer {
     async fn start(records: Vec<DnsResourceRecord>) -> Self {
-        let api = MockLookupApi::start(records).await;
+        Self::start_with_reply(DnsResourceRecordLookupResponse {
+            records,
+            outcome: DnsLookupOutcome::Records.into(),
+            authority_soa: None,
+            authoritative: true,
+        })
+        .await
+    }
+
+    async fn start_with_reply(reply: DnsResourceRecordLookupResponse) -> Self {
+        let api = MockLookupApi::start(reply).await;
         let client = ForgeTlsClient::new(&ForgeClientConfig::default())
             .build(format!("http://{}", api.address))
             .await
@@ -225,7 +302,7 @@ struct MockLookupApi {
 }
 
 impl MockLookupApi {
-    async fn start(records: Vec<DnsResourceRecord>) -> Self {
+    async fn start(reply: DnsResourceRecordLookupResponse) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         // Each packet test makes exactly one upstream lookup.
@@ -239,9 +316,7 @@ impl MockLookupApi {
             };
             let connection = http2::Builder::new(TokioExecutor::new()).serve_connection(
                 TokioIo::new(stream),
-                service_fn(move |request| {
-                    mock_lookup(request, requests_tx.clone(), records.clone())
-                }),
+                service_fn(move |request| mock_lookup(request, requests_tx.clone(), reply.clone())),
             );
             tokio::pin!(connection);
             tokio::select! {
@@ -280,7 +355,7 @@ impl Drop for MockLookupApi {
 async fn mock_lookup(
     request: Request<Incoming>,
     requests: mpsc::Sender<DnsResourceRecordLookupRequest>,
-    records: Vec<DnsResourceRecord>,
+    response: DnsResourceRecordLookupResponse,
 ) -> Result<Response<UnsyncBoxBody<Bytes, Infallible>>, Infallible> {
     assert_eq!(request.uri().path(), rpc::service_path!("LookupRecord"));
     let body = request.into_body().collect().await.unwrap().to_bytes();
@@ -290,12 +365,6 @@ async fn mock_lookup(
         .try_send(DnsResourceRecordLookupRequest::decode(payload).expect("LookupRecord decodes"))
         .expect("each test sends exactly one lookup");
 
-    let response = DnsResourceRecordLookupResponse {
-        records,
-        outcome: DnsLookupOutcome::Records.into(),
-        authority_soa: None,
-        authoritative: true,
-    };
     let mut data = vec![0];
     data.extend_from_slice(&u32::try_from(response.encoded_len()).unwrap().to_be_bytes());
     response.encode(&mut data).unwrap();

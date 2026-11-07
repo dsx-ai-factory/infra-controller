@@ -22,12 +22,14 @@ var _ MappedNullable = &NICoAPIError{}
 
 // NICoAPIError Describes the error response from NVIDIA Infra Controller REST API
 type NICoAPIError struct {
-	// Source of the error.
+	// Source of the error, taken from `api.name` in the REST API server configuration file (`/app/config.yaml` in the supplied Kubernetes deployment; default API name `nico`). This is a configurable string, for example `nico` or `carbide`
 	Source *string `json:"source,omitempty"`
 	// Message describing the error
 	Message *string `json:"message,omitempty"`
 	// Additional data about the error
 	Data map[string]interface{} `json:"data,omitempty"`
+	// True permits bounded retries with backoff, without guaranteeing success. False prohibits automatic retries. Omission means unclassified.
+	Retryable *bool `json:"retryable,omitempty"`
 }
 
 // NewNICoAPIError instantiates a new NICoAPIError object
@@ -143,6 +145,38 @@ func (o *NICoAPIError) SetData(v map[string]interface{}) {
 	o.Data = v
 }
 
+// GetRetryable returns the Retryable field value if set, zero value otherwise.
+func (o *NICoAPIError) GetRetryable() bool {
+	if o == nil || IsNil(o.Retryable) {
+		var ret bool
+		return ret
+	}
+	return *o.Retryable
+}
+
+// GetRetryableOk returns a tuple with the Retryable field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *NICoAPIError) GetRetryableOk() (*bool, bool) {
+	if o == nil || IsNil(o.Retryable) {
+		return nil, false
+	}
+	return o.Retryable, true
+}
+
+// HasRetryable returns a boolean if a field has been set.
+func (o *NICoAPIError) HasRetryable() bool {
+	if o != nil && !IsNil(o.Retryable) {
+		return true
+	}
+
+	return false
+}
+
+// SetRetryable gets a reference to the given bool and assigns it to the Retryable field.
+func (o *NICoAPIError) SetRetryable(v bool) {
+	o.Retryable = &v
+}
+
 func (o NICoAPIError) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -161,6 +195,9 @@ func (o NICoAPIError) ToMap() (map[string]interface{}, error) {
 	}
 	if o.Data != nil {
 		toSerialize["data"] = o.Data
+	}
+	if !IsNil(o.Retryable) {
+		toSerialize["retryable"] = o.Retryable
 	}
 	return toSerialize, nil
 }

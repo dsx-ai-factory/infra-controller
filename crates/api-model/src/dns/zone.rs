@@ -87,6 +87,13 @@ impl Fqdn {
             .collect()
     }
 
+    /// Whether this name equals `zone` or is beneath it on a label boundary.
+    /// The dot before the suffix prevents `notexample.com` from matching
+    /// `example.com`.
+    pub fn is_within(&self, zone: &Fqdn) -> bool {
+        self == zone || self.0.ends_with(&format!(".{}", zone.0))
+    }
+
     fn labels(&self) -> Vec<&str> {
         self.0.trim_end_matches('.').split('.').collect()
     }

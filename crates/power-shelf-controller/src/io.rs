@@ -160,7 +160,9 @@ impl StateControllerIO for PowerShelfStateControllerIO {
             PowerShelfControllerState::Maintenance { operation, .. } => {
                 let op = match operation {
                     model::power_shelf::PowerShelfMaintenanceOperation::PowerOn => "power_on",
-                    model::power_shelf::PowerShelfMaintenanceOperation::PowerOff => "power_off",
+                    model::power_shelf::PowerShelfMaintenanceOperation::PowerOff { .. } => {
+                        "power_off"
+                    }
                 };
                 ("maintenance", op)
             }

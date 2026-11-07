@@ -25,10 +25,10 @@ use crate::expected_rack_group::common::Attributes;
 EXAMPLES:
 
 Declare a group before rack and device ingestion:
-    $ nico-admin-cli expected-rack-group add nvl5-gp1-jhb01 gb200_nvl72r1_c2g4
+    $ nico-admin-cli expected-rack-group add nvl5-gp1-jhb01 NVLINK_V6 gb200_nvl72r1_c2g4
 
 Declare racks, a device, and metadata:
-    $ nico-admin-cli expected-rack-group add nvl5-gp1-jhb01 gb200_nvl72r1_c2g4 \
+    $ nico-admin-cli expected-rack-group add nvl5-gp1-jhb01 NVLINK_V6 gb200_nvl72r1_c2g4 \
     --rack '{\"rack_id\":\"rack-01\",\"members\":[{\"type\":\"Switch\",\"manufacturer\":\"NVIDIA\",\"id\":\"switch-01\"}]}' \
     --meta-name nvl5-gp1-jhb01 --label location.datacenter:JHB01
 
@@ -36,6 +36,8 @@ Declare racks, a device, and metadata:
 pub(crate) struct Args {
     /// Externally assigned group ID; UUID syntax is not required.
     rack_group_id: RackGroupId,
+    /// External rack-management protocol identifier.
+    protocol: String,
     /// External topology identifier.
     topology: String,
     #[command(flatten)]
@@ -43,6 +45,7 @@ pub(crate) struct Args {
 }
 impl From<Args> for rpc::forge::ExpectedRackGroup {
     fn from(args: Args) -> Self {
-        args.attributes.into_rpc(args.rack_group_id, args.topology)
+        args.attributes
+            .into_rpc(args.rack_group_id, args.protocol, args.topology)
     }
 }

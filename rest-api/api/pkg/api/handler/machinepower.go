@@ -27,16 +27,14 @@ func logAPIError(logger zerolog.Logger, apiErr *cutil.APIError, msg string) {
 }
 
 type MachinePowerControlHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 func NewMachinePowerControlHandler(dbSession *cdb.Session, scp *sc.ClientPool, _ *config.Config) MachinePowerControlHandler {
 	return MachinePowerControlHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
@@ -53,7 +51,7 @@ func NewMachinePowerControlHandler(dbSession *cdb.Session, scp *sc.ClientPool, _
 // @Success 202 {object} model.APIMessageResponse
 // @Router /v2/org/{org}/nico/machine/{machineId}/power [patch]
 func (h MachinePowerControlHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachinePower", "Control", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachinePower", "Control", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

@@ -25,21 +25,25 @@ var (
 
 func TestNewKeycloakConfig(t *testing.T) {
 	tests := []struct {
-		name            string
-		baseURL         string
-		externalBaseURL string
-		clientID        string
-		clientSecret    string
-		realm           string
-		want            *KeycloakConfig
+		name               string
+		baseURL            string
+		externalBaseURL    string
+		clientID           string
+		clientSecret       string
+		realm              string
+		serviceAccount     bool
+		serviceAccountOrgs []string
+		want               *KeycloakConfig
 	}{
 		{
-			name:            "valid complete configuration",
-			baseURL:         "http://localhost:8082",
-			externalBaseURL: "http://external:8082",
-			clientID:        "test-client",
-			clientSecret:    "test-secret",
-			realm:           "test-realm",
+			name:               "valid complete configuration",
+			baseURL:            "http://localhost:8082",
+			externalBaseURL:    "http://external:8082",
+			clientID:           "test-client",
+			clientSecret:       "test-secret",
+			realm:              "test-realm",
+			serviceAccount:     true,
+			serviceAccountOrgs: []string{"test-org"},
 			want: &KeycloakConfig{
 				BaseURL:         "http://localhost:8082",
 				ExternalBaseURL: "http://external:8082",
@@ -73,7 +77,8 @@ func TestNewKeycloakConfig(t *testing.T) {
 				tt.clientID,
 				tt.clientSecret,
 				tt.realm,
-				true,
+				tt.serviceAccount,
+				tt.serviceAccountOrgs,
 			)
 
 			assert.Equal(t, tt.want.BaseURL, got.BaseURL)
@@ -86,6 +91,8 @@ func TestNewKeycloakConfig(t *testing.T) {
 			// available for request-time refresh.
 			require.NotNil(t, got.jwksConfig)
 			assert.Nil(t, got.jwksConfig.GetJWKS())
+			assert.Equal(t, tt.serviceAccount, got.jwksConfig.ServiceAccount)
+			assert.Equal(t, tt.serviceAccountOrgs, got.jwksConfig.ServiceAccountOrgs)
 		})
 	}
 }
@@ -96,10 +103,11 @@ func TestKeycloakConfig_GetJwksConfig(t *testing.T) {
 		if strings.Contains(req.URL.Path, "/realms/test-realm/protocol/openid-connect/certs") {
 			res.WriteHeader(http.StatusOK)
 			res.Header().Set("Content-Type", "application/json")
-			res.Write([]byte(mockKeycloakJwks))
+			// Mock response writes are best-effort if the client closes the connection.
+			_, _ = res.Write([]byte(mockKeycloakJwks))
 		} else if strings.Contains(req.URL.Path, "/realms/bad-realm/protocol/openid-connect/certs") {
 			res.WriteHeader(http.StatusNotFound)
-			res.Write([]byte(`{"error":"realm_not_found"}`))
+			_, _ = res.Write([]byte(`{"error":"realm_not_found"}`))
 		} else {
 			res.WriteHeader(http.StatusNotFound)
 		}
@@ -192,6 +200,7 @@ func TestKeycloakConfig_GetJwksConfig(t *testing.T) {
 			"test-secret",
 			"test-realm",
 			true,
+			[]string{"test-org"},
 		)
 
 		jwksConfig, err := keycloakConfig.GetJwksConfig()
@@ -233,7 +242,7 @@ func TestKeycloakConfig_GetJwksConfig_Caching(t *testing.T) {
 			requestCount++
 			res.WriteHeader(http.StatusOK)
 			res.Header().Set("Content-Type", "application/json")
-			res.Write([]byte(mockKeycloakJwks))
+			_, _ = res.Write([]byte(mockKeycloakJwks))
 		} else {
 			res.WriteHeader(http.StatusNotFound)
 		}
@@ -269,7 +278,7 @@ func TestKeycloakConfig_GetJwksConfig_Concurrency(t *testing.T) {
 			requestCount++
 			res.WriteHeader(http.StatusOK)
 			res.Header().Set("Content-Type", "application/json")
-			res.Write([]byte(mockKeycloakJwks))
+			_, _ = res.Write([]byte(mockKeycloakJwks))
 		} else {
 			res.WriteHeader(http.StatusNotFound)
 		}
@@ -371,14 +380,14 @@ func TestKeycloakConfig_Integration(t *testing.T) {
 		case strings.Contains(req.URL.Path, "/realms/valid-realm/protocol/openid-connect/certs"):
 			res.WriteHeader(http.StatusOK)
 			res.Header().Set("Content-Type", "application/json")
-			res.Write([]byte(mockKeycloakJwks))
+			_, _ = res.Write([]byte(mockKeycloakJwks))
 		case strings.Contains(req.URL.Path, "/realms/invalid-realm/protocol/openid-connect/certs"):
 			res.WriteHeader(http.StatusNotFound)
-			res.Write([]byte(`{"error":"realm_not_found","error_description":"Realm does not exist"}`))
+			_, _ = res.Write([]byte(`{"error":"realm_not_found","error_description":"Realm does not exist"}`))
 		case strings.Contains(req.URL.Path, "/realms/malformed-realm/protocol/openid-connect/certs"):
 			res.WriteHeader(http.StatusOK)
 			res.Header().Set("Content-Type", "application/json")
-			res.Write([]byte(`{"invalid":"json"`)) // Malformed JSON
+			_, _ = res.Write([]byte(`{"invalid":"json"`)) // Malformed JSON
 		default:
 			res.WriteHeader(http.StatusNotFound)
 		}
@@ -503,11 +512,11 @@ func TestKeycloakConfig_ErrorHandling(t *testing.T) {
 			return
 		case strings.Contains(req.URL.Path, "/realms/error-realm/"):
 			res.WriteHeader(http.StatusInternalServerError)
-			res.Write([]byte(`{"error":"internal_server_error"}`))
+			_, _ = res.Write([]byte(`{"error":"internal_server_error"}`))
 		case strings.Contains(req.URL.Path, "/realms/empty-realm/"):
 			res.WriteHeader(http.StatusOK)
 			res.Header().Set("Content-Type", "application/json")
-			res.Write([]byte(`{}`)) // Empty but valid JSON
+			_, _ = res.Write([]byte(`{}`)) // Empty but valid JSON
 		default:
 			res.WriteHeader(http.StatusNotFound)
 		}

@@ -18,7 +18,10 @@ use carbide_uuid::machine::MachineId;
 use chrono::{DateTime, Utc};
 use sqlx::FromRow;
 
-#[derive(FromRow, Debug)]
+/// Verification status stored in `ek_cert_verification_status`.
+/// The table's `ca_id` is used for CA matching but is not decoded into this record.
+#[derive(FromRow, Debug, carbide_macros::DbTable)]
+#[db_table(name = "ek_cert_verification_status")]
 pub struct EkCertVerificationStatus {
     pub ek_sha256: Vec<u8>,
     pub serial_num: String,
@@ -26,10 +29,12 @@ pub struct EkCertVerificationStatus {
     pub issuer: Vec<u8>,
     pub issuer_access_info: Option<String>,
     pub machine_id: MachineId,
-    // pub ca_id: Option<i32>, // currently unused
 }
 
-#[derive(FromRow, Debug, sqlx::Encode)]
+/// Attestation challenge stored in `attestation_secret_ak_pub`.
+/// The table's `created_at` is used to expire challenges and is not decoded here.
+#[derive(FromRow, Debug, sqlx::Encode, carbide_macros::DbTable)]
+#[db_table(name = "attestation_secret_ak_pub")]
 pub struct SecretAkPub {
     pub secret: Vec<u8>,
     pub ak_pub: Vec<u8>,
@@ -91,9 +96,20 @@ pub mod spdm {
         pub evidence_target: Option<String>,
         // Collected Evidence.
         pub evidence: Option<Evidence>,
+        /// Whether this job owns the device's shared evidence collection endpoint.
+        /// Ownership lasts until evidence is saved, the BMC task is known to have stopped,
+        /// or the configured best-effort cancellation timeout expires.
+        pub evidence_collection_locked: bool,
+        // job id
+        pub job_id: uuid::Uuid,
         // timestamps
         pub started_at: DateTime<Utc>,
-        pub cancelled_at: Option<DateTime<Utc>>,
+        /// Time of the latest operator cancellation request, including after completion.
+        pub cancellation_requested_at: Option<DateTime<Utc>>,
+        /// Outcome requested by the operator; later requests may replace either target.
+        pub cancellation_target: Option<SpdmCancellationTarget>,
+        /// First cancellation request while unfinished; later requests cannot extend cleanup.
+        pub cancellation_cleanup_started_at: Option<DateTime<Utc>>,
         pub completed_at: Option<DateTime<Utc>>,
     }
 
@@ -103,18 +119,50 @@ pub mod spdm {
         }
     }
 
+    /// Operator-selected outcome after evidence collection cleanup.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+    #[serde(rename_all = "snake_case")]
+    #[sqlx(type_name = "text", rename_all = "snake_case")]
+    pub enum SpdmCancellationTarget {
+        /// Accept the attestation requirement by operator waiver.
+        Waive,
+        /// Reject the attestation requirement by operator request.
+        Fail,
+    }
+
     /// Major state, associated with Machine.
     #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
     pub enum SpdmAttestationState {
         FetchMetadata,
         FetchCertificate,
-        TriggerEvidenceCollection { retry_count: i32 },
-        PollEvidenceCollection { task_id: String, retry_count: i32 },
+        TriggerEvidenceCollection {
+            retry_count: i32,
+            /// Redfish retry count, defaulting to zero for persisted states without this field.
+            #[serde(default)]
+            redfish_retry_count: i32,
+            last_redfish_failure_tstamp: Option<DateTime<Utc>>,
+        },
+        PollEvidenceCollection {
+            task_id: String,
+            retry_count: i32,
+        },
+        /// Reconcile a BMC task after a cancellation attempt or a missing-task response.
+        WaitForTaskCancellation {
+            /// BMC task whose evidence collection claim remains held during cleanup.
+            task_id: String,
+            /// Number of collection retries already performed, excluding cancellation polling.
+            retry_count: i32,
+            /// Start of the cleanup timeout, including any earlier waiver or failure request.
+            /// Preserved across repeated operator requests and controller restarts.
+            cleanup_started_at: DateTime<Utc>,
+        },
         NrasVerification,
         ApplyAppraisalPolicy,
         Passed,
         Failed(String),
-        Cancelled,
+        /// Accepted by waiver. The legacy database spelling keeps older readers compatible.
+        #[serde(rename = "Cancelled", alias = "Waived")]
+        Waived,
     }
 
     impl<'r> sqlx::FromRow<'r, PgRow> for SpdmAttestationState {
@@ -124,18 +172,17 @@ pub mod spdm {
         }
     }
 
-    #[derive(Clone, Copy, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum SpdmAttestationStatus {
         InProgress,
-        Cancelled,
+        /// At least one device was waived, with no unfinished or failed devices.
+        Waived,
         Passed,
         Failed,
     }
 
     #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
     pub enum SpdmHandlerError {
-        #[error("unable to complete measurement trigger: {0}")]
-        TriggerMeasurementFail(String),
         #[error("nras error: {0}")]
         NrasError(#[from] nras::NrasError),
         #[error("missing values: {field} - {machine_id}/{device_id}")]
@@ -150,15 +197,6 @@ pub mod spdm {
             machine_id: MachineId,
             device_id: String,
         },
-        #[error("verification failed: {0}")]
-        VerificationFailed(String),
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    pub enum AttestationStatus {
-        Success,
-        NotSupported,
-        Failure { cause: SpdmHandlerError },
     }
 
     #[derive(Debug)]
@@ -181,41 +219,38 @@ pub mod spdm {
         }
     }
 
-    #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, FromRow)]
-    pub struct SpdmObjectId_ {
-        pub machine_id: MachineId,
-        pub device_id: String,
-    }
-
     #[derive(thiserror::Error, Debug, Clone)]
     pub enum SpdmObjectIdParseError {
-        #[error("the object ID must have 2 parts but not as should be {0:?}")]
+        #[error("the object ID must have 3 parts but not as should be {0:?}")]
         WrongFormat(String),
         #[error("the machine ID parsing failed: {0}")]
         MachineIdParsingFailed(#[from] carbide_uuid::machine::MachineIdParseError),
+        #[error("the job ID parsing failed: {0}")]
+        JobIdParsingFailed(#[from] uuid::Error),
     }
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, FromRow)]
-    pub struct SpdmObjectId(pub MachineId, pub String);
+    pub struct SpdmObjectId(pub MachineId, pub String, pub uuid::Uuid);
 
     impl FromStr for SpdmObjectId {
         type Err = SpdmObjectIdParseError;
         fn from_str(s: &str) -> Result<Self, Self::Err> {
             let values = s.split(',').collect_vec();
-            if values.len() != 2 {
+            if values.len() != 3 {
                 return Err(SpdmObjectIdParseError::WrongFormat(s.to_string()));
             }
 
             Ok(Self(
                 values[0].parse().map_err(SpdmObjectIdParseError::from)?,
                 values[1].to_string(),
+                uuid::Uuid::parse_str(values[2])?,
             ))
         }
     }
 
     impl Display for SpdmObjectId {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{},{}", self.0, self.1.clone())
+            write!(f, "{},{},{}", self.0, self.1, self.2)
         }
     }
 
@@ -277,8 +312,12 @@ pub mod spdm {
                 evidence_target: row.try_get("evidence_target")?,
                 ca_certificate: ca_certificate.map(|x| x.0),
                 evidence: evidence.map(|x| x.0),
+                evidence_collection_locked: row.try_get("evidence_collection_locked")?,
+                job_id: row.try_get("job_id")?,
                 started_at: row.try_get("started_at")?,
-                cancelled_at: row.try_get("cancelled_at")?,
+                cancellation_requested_at: row.try_get("cancellation_requested_at")?,
+                cancellation_target: row.try_get("cancellation_target")?,
+                cancellation_cleanup_started_at: row.try_get("cancellation_cleanup_started_at")?,
                 completed_at: row.try_get("completed_at")?,
             })
         }
@@ -288,23 +327,32 @@ pub mod spdm {
     pub struct SpdmDeviceAttestationDetails {
         pub machine_id: MachineId,
         pub device_id: String,
+        /// Stored attestation result; later operator overrides do not rewrite it.
         pub state: SpdmAttestationState,
         // timestamps
         pub started_at: DateTime<Utc>,
-        pub cancelled_at: Option<DateTime<Utc>>,
+        /// Time of the latest operator cancellation request.
+        pub cancellation_requested_at: Option<DateTime<Utc>>,
+        /// Operator override of terminal results; unfinished devices still require cleanup.
+        pub cancellation_target: Option<SpdmCancellationTarget>,
         pub completed_at: Option<DateTime<Utc>>,
     }
 
     impl SpdmDeviceAttestationDetails {
+        /// Describes an effective terminal failure, preserving its stored reason unless waived.
+        /// An operator failure supplies a reason only when the stored state has not failed.
         pub fn get_failure_cause(&self) -> Option<String> {
-            if let SpdmAttestationState::Failed(msg) = &self.state {
-                Some(format!(
-                    "Device: {}, failed reason: {}",
-                    self.device_id, msg
-                ))
-            } else {
-                None
-            }
+            // A waiver suppresses the failure; an operator failure must not hide its original cause.
+            let reason = match (&self.state, self.cancellation_target) {
+                (_, Some(SpdmCancellationTarget::Waive)) => None,
+                (SpdmAttestationState::Failed(reason), _) => Some(reason.as_str()),
+                (
+                    SpdmAttestationState::Passed | SpdmAttestationState::Waived,
+                    Some(SpdmCancellationTarget::Fail),
+                ) => Some("Failed by operator"),
+                _ => None,
+            };
+            reason.map(|msg| format!("Device: {}, failed reason: {}", self.device_id, msg))
         }
     }
 
@@ -317,7 +365,8 @@ pub mod spdm {
                 state: controller_state.0,
                 device_id: row.try_get("device_id")?,
                 started_at: row.try_get("started_at")?,
-                cancelled_at: row.try_get("cancelled_at")?,
+                cancellation_requested_at: row.try_get("cancellation_requested_at")?,
+                cancellation_target: row.try_get("cancellation_target")?,
                 completed_at: row.try_get("completed_at")?,
             })
         }
@@ -354,6 +403,664 @@ pub mod spdm {
     }
 }
 
+/// Operator-authored policy naming which attesters a hardware class requires.
+pub mod profile {
+    use config_version::ConfigVersion;
+    use serde::{Deserialize, Serialize};
+
+    use super::*;
+    use crate::ConfigValidationError;
+
+    /// The one reserved class an operator may write. A profile keyed `any`
+    /// covers hardware whose own class has no profile of its own.
+    pub const ANY_HARDWARE_CLASS: &str = "any";
+
+    /// The only policy document shape this build reads or writes.
+    pub const POLICY_SCHEMA_VERSION: u32 = 1;
+
+    /// Ordered from attesting nothing to naming an exact set.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+    pub enum AttesterSelectionMode {
+        /// Attest nothing. Attestation is disabled for this hardware.
+        None,
+        /// Attest every attester the BMC reports.
+        All,
+        /// Attest only the attesters matching a pattern.
+        Allowlist,
+        /// Attest every attester the BMC reports, except those matching a pattern.
+        Denylist,
+    }
+
+    /// One matcher against a `ComponentIntegrity` `Id`.
+    #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum ComponentIdMatch {
+        /// One ID, matched in full.
+        Exact(String),
+        /// Every ID starting with the given string.
+        Prefix(String),
+    }
+
+    impl ComponentIdMatch {
+        fn value(&self) -> &str {
+            match self {
+                Self::Exact(value) | Self::Prefix(value) => value,
+            }
+        }
+
+        /// Redfish treats `Id` as opaque, so this is case-sensitive.
+        fn matches(&self, attester_id: &str) -> bool {
+            match self {
+                Self::Exact(id) => attester_id == id,
+                Self::Prefix(prefix) => attester_id.starts_with(prefix),
+            }
+        }
+    }
+
+    /// What a selection decided for the attesters a BMC reported.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum SelectionOutcome {
+        /// Attest these, in the order the BMC reported them.
+        Scheduled(Vec<String>),
+        /// The mode is `NONE`. A caller resolves this before contacting the
+        /// BMC, so reaching it here means it listed anyway.
+        AttestationDisabled,
+        /// The BMC offered nothing eligible under a policy that asserted
+        /// nothing about what must be there. Not a failure, and it points at
+        /// the hardware rather than the profile.
+        NoAttestersFound,
+        /// Attest these, but some allowlist pattern matched no eligible
+        /// attester. Scheduling what matched keeps the evidence an unsatisfied
+        /// pattern would otherwise discard, since a failed selection does not
+        /// hold the machine back.
+        PartiallySatisfied {
+            selected: Vec<String>,
+            unsatisfied: Vec<ComponentIdMatch>,
+        },
+        /// An operator-authored requirement went unsatisfied, and nothing was
+        /// left to attest.
+        PolicyMatchedNothing(UnsatisfiedRequirement),
+    }
+
+    /// Which requirement went unsatisfied, so a caller can say which.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum UnsatisfiedRequirement {
+        /// These patterns matched no eligible attester. A caller holding the
+        /// attesters that failed eligibility can name the ones a pattern
+        /// matched but eligibility skipped.
+        AllowlistPatterns(Vec<ComponentIdMatch>),
+        /// A denylist removed every attester the BMC offered. `NONE` is how an
+        /// operator asks for nothing to be attested.
+        DenylistExcludedEverything,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct AttesterSelection {
+        pub mode: AttesterSelectionMode,
+        #[serde(default)]
+        pub component_ids: Vec<ComponentIdMatch>,
+    }
+
+    impl AttesterSelection {
+        /// Rejects a selection whose mode and patterns disagree, and any
+        /// empty pattern. Allowlist and denylist require at least one
+        /// pattern; all and none take none.
+        pub fn validate(&self) -> Result<(), ConfigValidationError> {
+            let patterned = matches!(
+                self.mode,
+                AttesterSelectionMode::Allowlist | AttesterSelectionMode::Denylist
+            );
+            // An allowlist of nothing can never be satisfied, and a denylist of
+            // nothing means ALL, which has its own spelling.
+            if patterned && self.component_ids.is_empty() {
+                return Err(ConfigValidationError::invalid_value(format!(
+                    "{:?} requires at least one component ID pattern",
+                    self.mode
+                )));
+            }
+            if !patterned && !self.component_ids.is_empty() {
+                return Err(ConfigValidationError::invalid_value(format!(
+                    "{:?} takes no component ID patterns",
+                    self.mode
+                )));
+            }
+            // An empty prefix matches every ID, which is ALL by another name.
+            if self.component_ids.iter().any(|id| id.value().is_empty()) {
+                return Err(ConfigValidationError::invalid_value(
+                    "a component ID pattern cannot be empty",
+                ));
+            }
+            Ok(())
+        }
+
+        /// Applies the selection to the attesters a BMC reported that already
+        /// passed eligibility, in the order it reported them.
+        ///
+        /// A selection is a requirement rather than a filter, so an allowlist
+        /// pattern matching nothing fails the whole selection while a denylist
+        /// pattern matching nothing excludes nothing.
+        pub fn evaluate(&self, eligible: &[&str]) -> SelectionOutcome {
+            match self.mode {
+                AttesterSelectionMode::None => SelectionOutcome::AttestationDisabled,
+
+                AttesterSelectionMode::All => {
+                    let selected: Vec<String> = eligible.iter().map(|id| id.to_string()).collect();
+                    if selected.is_empty() {
+                        SelectionOutcome::NoAttestersFound
+                    } else {
+                        SelectionOutcome::Scheduled(selected)
+                    }
+                }
+
+                AttesterSelectionMode::Allowlist => {
+                    // Every pattern is its own requirement, so one that matches
+                    // nothing is reported. What the others matched is still
+                    // attested: the caller proceeds either way, so discarding
+                    // the selection would only lose evidence.
+                    let unsatisfied: Vec<_> = self
+                        .component_ids
+                        .iter()
+                        .filter(|pattern| !eligible.iter().any(|id| pattern.matches(id)))
+                        .cloned()
+                        .collect();
+                    let selected: Vec<String> = eligible
+                        .iter()
+                        .filter(|id| self.matches_any(id))
+                        .map(|id| id.to_string())
+                        .collect();
+                    // An empty selection covers both an allowlist none of whose
+                    // patterns matched, and one built without `validate`, which
+                    // holds no patterns and would otherwise schedule nothing
+                    // and report success.
+                    if selected.is_empty() {
+                        return SelectionOutcome::PolicyMatchedNothing(
+                            UnsatisfiedRequirement::AllowlistPatterns(unsatisfied),
+                        );
+                    }
+                    if !unsatisfied.is_empty() {
+                        return SelectionOutcome::PartiallySatisfied {
+                            selected,
+                            unsatisfied,
+                        };
+                    }
+                    SelectionOutcome::Scheduled(selected)
+                }
+
+                AttesterSelectionMode::Denylist => {
+                    // A denylist only subtracts, so an empty BMC is the same
+                    // situation ALL reports: nothing was excluded, and nothing
+                    // about the policy caused the emptiness.
+                    if eligible.is_empty() {
+                        return SelectionOutcome::NoAttestersFound;
+                    }
+                    let selected: Vec<String> = eligible
+                        .iter()
+                        .filter(|id| !self.matches_any(id))
+                        .map(|id| id.to_string())
+                        .collect();
+                    if selected.is_empty() {
+                        SelectionOutcome::PolicyMatchedNothing(
+                            UnsatisfiedRequirement::DenylistExcludedEverything,
+                        )
+                    } else {
+                        SelectionOutcome::Scheduled(selected)
+                    }
+                }
+            }
+        }
+
+        fn matches_any(&self, attester_id: &str) -> bool {
+            self.component_ids
+                .iter()
+                .any(|pattern| pattern.matches(attester_id))
+        }
+    }
+
+    /// The profile's policy, stored as one JSON document so a later shape can
+    /// be told apart from this one without a migration.
+    #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct AttestationPolicyDocument {
+        pub schema_version: u32,
+        pub selection: AttesterSelection,
+    }
+
+    impl AttestationPolicyDocument {
+        /// Wraps a selection in a document stamped with the schema version
+        /// this build writes.
+        pub fn new(selection: AttesterSelection) -> Self {
+            Self {
+                schema_version: POLICY_SCHEMA_VERSION,
+                selection,
+            }
+        }
+
+        /// Rejects a document at a schema version this build does not write,
+        /// then validates the selection it carries. Called on the way into
+        /// storage, so a document that fails here is never persisted.
+        pub fn validate(&self) -> Result<(), ConfigValidationError> {
+            if self.schema_version != POLICY_SCHEMA_VERSION {
+                return Err(ConfigValidationError::invalid_value(format!(
+                    "unsupported policy schema version {}, expected {POLICY_SCHEMA_VERSION}",
+                    self.schema_version
+                )));
+            }
+            self.selection.validate()
+        }
+    }
+
+    /// Rejects a class name that is neither the reserved `any` nor the shape
+    /// exploration derives: two non-empty `_`-separated fields, each of
+    /// lowercase alphanumerics and `-`.
+    ///
+    /// Checking the shape rather than a list of known names is what lets a
+    /// profile be keyed to hardware this build has never seen. Whether any
+    /// endpoint has actually recorded the class is the API's to judge, since
+    /// only it can read the inventory.
+    pub fn validate_hardware_class(hardware_class: &str) -> Result<(), ConfigValidationError> {
+        if hardware_class == ANY_HARDWARE_CLASS {
+            return Ok(());
+        }
+
+        let fields: Vec<&str> = hardware_class.split('_').collect();
+        if fields.len() != 2 || !fields.iter().all(|field| is_class_field(field)) {
+            return Err(ConfigValidationError::invalid_value(format!(
+                "hardware class '{hardware_class}' must be '{ANY_HARDWARE_CLASS}' or \
+                 <manufacturer>_<model>, each field non-empty and made of \
+                 lowercase letters, digits, and '-'"
+            )));
+        }
+        Ok(())
+    }
+
+    fn is_class_field(field: &str) -> bool {
+        !field.is_empty()
+            && field
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    }
+
+    /// One stored profile, as persisted in `attestation_profiles`.
+    #[derive(Clone, Debug, FromRow)]
+    pub struct AttestationProfile {
+        pub hardware_class: String,
+        pub version: ConfigVersion,
+        #[sqlx(json)]
+        pub policy_document: AttestationPolicyDocument,
+        pub updated_at: DateTime<Utc>,
+        pub updated_by: String,
+    }
+
+    /// Which profile applies to a machine, from the class recorded on its
+    /// endpoint. An exact class match always wins over `any`.
+    #[derive(Clone, Debug)]
+    pub enum ProfileResolution {
+        /// This profile applies. `used_any_fallback` distinguishes a policy
+        /// written for this hardware from the default written for everything
+        /// else, which the class alone cannot report.
+        Resolved {
+            profile: AttestationProfile,
+            used_any_fallback: bool,
+        },
+        /// No exploration has recorded a class for the endpoint, and no `any`
+        /// profile covers it either. Distinct from [`Self::NoProfile`] because
+        /// the remedy differs: explore the endpoint, rather than write a
+        /// profile for what it turned out to be.
+        ClassNotRecorded,
+        /// The class resolved, but neither it nor `any` has a profile.
+        NoProfile,
+    }
+
+    /// A validated request to store a profile for a class that has none.
+    #[derive(Clone, Debug)]
+    pub struct NewAttestationProfile {
+        pub hardware_class: String,
+        pub policy_document: AttestationPolicyDocument,
+    }
+
+    /// A validated request to replace an existing profile's policy.
+    #[derive(Clone, Debug)]
+    pub struct UpdateAttestationProfile {
+        pub hardware_class: String,
+        pub policy_document: AttestationPolicyDocument,
+        /// When set, the write applies only if the stored version still
+        /// matches; when absent, it applies to whatever version is stored.
+        pub if_version_match: Option<ConfigVersion>,
+    }
+
+    /// A validated request to remove a profile.
+    #[derive(Clone, Debug)]
+    pub struct DeleteAttestationProfile {
+        pub hardware_class: String,
+        pub if_version_match: Option<ConfigVersion>,
+    }
+}
+
+#[cfg(test)]
+mod profile_test {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::{scenarios, value_scenarios};
+
+    use super::profile::*;
+
+    fn selection(mode: AttesterSelectionMode, ids: &[ComponentIdMatch]) -> AttesterSelection {
+        AttesterSelection {
+            mode,
+            component_ids: ids.to_vec(),
+        }
+    }
+
+    fn exact(id: &str) -> ComponentIdMatch {
+        ComponentIdMatch::Exact(id.to_string())
+    }
+
+    fn prefix(value: &str) -> ComponentIdMatch {
+        ComponentIdMatch::Prefix(value.to_string())
+    }
+
+    // A GB200 tray, as the `libredfish/test_support.rs` fixture reports it.
+    const TRAY: [&str; 4] = [
+        "HGX_IRoT_GPU_0",
+        "HGX_IRoT_GPU_1",
+        "HGX_IRoT_GPU_2",
+        "HGX_BMC_0",
+    ];
+
+    const GPUS: [&str; 3] = ["HGX_IRoT_GPU_0", "HGX_IRoT_GPU_1", "HGX_IRoT_GPU_2"];
+
+    fn scheduled(attester_ids: &[&str]) -> SelectionOutcome {
+        SelectionOutcome::Scheduled(attester_ids.iter().map(|id| id.to_string()).collect())
+    }
+
+    fn unsatisfied(patterns: &[ComponentIdMatch]) -> SelectionOutcome {
+        SelectionOutcome::PolicyMatchedNothing(UnsatisfiedRequirement::AllowlistPatterns(
+            patterns.to_vec(),
+        ))
+    }
+
+    fn partial(attester_ids: &[&str], patterns: &[ComponentIdMatch]) -> SelectionOutcome {
+        SelectionOutcome::PartiallySatisfied {
+            selected: attester_ids.iter().map(|id| id.to_string()).collect(),
+            unsatisfied: patterns.to_vec(),
+        }
+    }
+
+    #[test]
+    fn selection_validation() {
+        scenarios!(
+            run = |selection: AttesterSelection| selection.validate().map_err(drop);
+
+            "an allowlist names at least one pattern" {
+                selection(AttesterSelectionMode::Allowlist, &[prefix("HGX_IRoT_GPU_")]) => Yields(()),
+            }
+
+            "a denylist names at least one pattern" {
+                selection(AttesterSelectionMode::Denylist, &[exact("HGX_BMC_0")]) => Yields(()),
+            }
+
+            "exact and prefix patterns may be mixed" {
+                selection(
+                    AttesterSelectionMode::Allowlist,
+                    &[prefix("HGX_IRoT_GPU_"), exact("VERA_CPU_0")],
+                ) => Yields(()),
+            }
+
+            "ALL takes no patterns" {
+                selection(AttesterSelectionMode::All, &[]) => Yields(()),
+            }
+
+            "NONE takes no patterns" {
+                selection(AttesterSelectionMode::None, &[]) => Yields(()),
+            }
+
+            // An allowlist of nothing can never be satisfied.
+            "an allowlist without patterns is refused" {
+                selection(AttesterSelectionMode::Allowlist, &[]) => Fails,
+            }
+
+            // A denylist of nothing means ALL, which has its own spelling.
+            "a denylist without patterns is refused" {
+                selection(AttesterSelectionMode::Denylist, &[]) => Fails,
+            }
+
+            "ALL with patterns is refused" {
+                selection(AttesterSelectionMode::All, &[exact("HGX_BMC_0")]) => Fails,
+            }
+
+            "NONE with patterns is refused" {
+                selection(AttesterSelectionMode::None, &[exact("HGX_BMC_0")]) => Fails,
+            }
+
+            // An empty prefix matches every ID, which is ALL by another name.
+            "an empty prefix is refused" {
+                selection(AttesterSelectionMode::Allowlist, &[prefix("")]) => Fails,
+            }
+
+            "an empty exact ID is refused" {
+                selection(AttesterSelectionMode::Denylist, &[exact("")]) => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn selection_over_a_reported_tray() {
+        value_scenarios!(
+            run = |selection: AttesterSelection| selection.evaluate(&TRAY);
+
+            "an allowlist prefix takes the GPUs and not the BMC" {
+                selection(AttesterSelectionMode::Allowlist, &[prefix("HGX_IRoT_GPU_")]) => scheduled(&GPUS),
+            }
+
+            "a denylist of the BMC leaves the same three" {
+                selection(AttesterSelectionMode::Denylist, &[exact("HGX_BMC_0")]) => scheduled(&GPUS),
+            }
+
+            "ALL takes everything reported" {
+                selection(AttesterSelectionMode::All, &[]) => scheduled(&TRAY),
+            }
+
+            "NONE takes nothing" {
+                selection(AttesterSelectionMode::None, &[]) => SelectionOutcome::AttestationDisabled,
+            }
+
+            "mixed patterns take the union" {
+                selection(
+                    AttesterSelectionMode::Allowlist,
+                    &[prefix("HGX_IRoT_GPU_"), exact("HGX_BMC_0")],
+                ) => scheduled(&TRAY),
+            }
+
+            "an attester two patterns match is taken once" {
+                selection(
+                    AttesterSelectionMode::Allowlist,
+                    &[prefix("HGX_IRoT_GPU_"), exact("HGX_IRoT_GPU_1")],
+                ) => scheduled(&GPUS),
+            }
+
+            // Redfish treats `Id` as opaque, so the lowercase prefix matches
+            // nothing and the requirement it states goes unsatisfied.
+            "matching is case-sensitive" {
+                selection(AttesterSelectionMode::Allowlist, &[prefix("hgx_irot_gpu_")])
+                    => unsatisfied(&[prefix("hgx_irot_gpu_")]),
+            }
+
+            // An unsatisfied allowlist pattern is reported without discarding
+            // what the others matched, since a failed selection would not hold
+            // the machine back and the GPUs would go unattested for nothing. A
+            // dead denylist pattern excludes nothing and needs no report.
+            "an unsatisfied allowlist pattern still attests what matched" {
+                selection(
+                    AttesterSelectionMode::Allowlist,
+                    &[prefix("HGX_IRoT_GPU_"), exact("VERA_CPU_0")],
+                ) => partial(&GPUS, &[exact("VERA_CPU_0")]),
+            }
+
+            "a denylist pattern matching nothing excludes nothing" {
+                selection(AttesterSelectionMode::Denylist, &[exact("VERA_CPU_0")]) => scheduled(&TRAY),
+            }
+
+            // An operator who wants nothing attested writes NONE.
+            "a denylist that excludes everything fails" {
+                selection(AttesterSelectionMode::Denylist, &[prefix("HGX_")])
+                    => SelectionOutcome::PolicyMatchedNothing(
+                        UnsatisfiedRequirement::DenylistExcludedEverything,
+                    ),
+            }
+        );
+    }
+
+    #[test]
+    fn selecting_nothing_is_not_one_outcome() {
+        value_scenarios!(
+            run = |(selection, eligible): (AttesterSelection, Vec<&str>)| selection.evaluate(&eligible);
+
+            // The two reasons for selecting nothing have to stay apart: ALL
+            // states no requirement, so a BMC with nothing to offer is not a
+            // failure, while an allowlist on that same BMC went unsatisfied.
+            "ALL over a BMC offering nothing eligible" {
+                (selection(AttesterSelectionMode::All, &[]), vec![])
+                    => SelectionOutcome::NoAttestersFound,
+            }
+
+            "an allowlist over that same BMC" {
+                (
+                    selection(AttesterSelectionMode::Allowlist, &[prefix("HGX_IRoT_GPU_")]),
+                    vec![],
+                ) => unsatisfied(&[prefix("HGX_IRoT_GPU_")]),
+            }
+
+            // A denylist asserts nothing about what must be there, so it lands
+            // with ALL rather than with the allowlist. It excluded nothing.
+            "a denylist over that same BMC" {
+                (
+                    selection(AttesterSelectionMode::Denylist, &[exact("HGX_BMC_0")]),
+                    vec![],
+                ) => SelectionOutcome::NoAttestersFound,
+            }
+
+            // `validate` refuses this, but the fields are public, so evaluate
+            // must not call scheduling nothing a success.
+            "an allowlist with no patterns selects nothing and fails" {
+                (
+                    selection(AttesterSelectionMode::Allowlist, &[]),
+                    vec!["HGX_BMC_0"],
+                ) => unsatisfied(&[]),
+            }
+        );
+    }
+
+    #[test]
+    fn hardware_class_validation() {
+        scenarios!(
+            run = |class: &str| validate_hardware_class(class).map_err(drop);
+
+            "a derived class is a profile key" {
+                "dell-inc_poweredge-r750" => Yields(()),
+                // A BMC that reports nothing usable still derives a class, so
+                // the markers exploration substitutes stay writable.
+                "unknown_nomodel" => Yields(()),
+            }
+
+            // `any` is the one reserved class an operator may write.
+            "the any fallback is writable" {
+                ANY_HARDWARE_CLASS => Yields(()),
+            }
+
+            // Nothing outside the derived shape could ever match a recorded
+            // class, so each way of missing it is refused at the boundary.
+            "a class the derivation could not have produced is refused" {
+                "" => Fails,
+                "dell-inc" => Fails,
+                // A third field is what a class keyed on the SKU looked like.
+                "dell-inc_poweredge-r750_0a6b" => Fails,
+                "dell-inc_" => Fails,
+                "Dell-Inc_poweredge-r750" => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn policy_document_rejects_a_foreign_schema_version() {
+        // The server always writes the current version, so a foreign one can
+        // only arrive from a build that is not this one.
+        let mut document =
+            AttestationPolicyDocument::new(selection(AttesterSelectionMode::All, &[]));
+        assert!(document.validate().is_ok());
+
+        document.schema_version = POLICY_SCHEMA_VERSION + 1;
+        assert!(
+            document.validate().is_err(),
+            "a document from a later shape must not be read as this one"
+        );
+    }
+
+    #[test]
+    fn policy_document_round_trips_through_its_stored_shape() {
+        // Operators read and write this JSON, so the spelling is a contract.
+        let document = AttestationPolicyDocument::new(selection(
+            AttesterSelectionMode::Allowlist,
+            &[prefix("HGX_IRoT_GPU_"), exact("VERA_CPU_0")],
+        ));
+
+        let stored = serde_json::to_value(&document).expect("serializes");
+        assert_eq!(
+            stored,
+            serde_json::json!({
+                "schema_version": 1,
+                "selection": {
+                    "mode": "ALLOWLIST",
+                    "component_ids": [
+                        { "prefix": "HGX_IRoT_GPU_" },
+                        { "exact": "VERA_CPU_0" },
+                    ],
+                },
+            })
+        );
+
+        let read_back: AttestationPolicyDocument =
+            serde_json::from_value(stored).expect("deserializes");
+        assert_eq!(read_back, document);
+    }
+
+    #[test]
+    fn mode_spellings_are_stable() {
+        // Stored documents are keyed to these strings.
+        value_scenarios!(
+            run = |mode| serde_json::to_value(mode).expect("serializes");
+            "none" { AttesterSelectionMode::None => serde_json::json!("NONE"), }
+            "all" { AttesterSelectionMode::All => serde_json::json!("ALL"), }
+            "allowlist" { AttesterSelectionMode::Allowlist => serde_json::json!("ALLOWLIST"), }
+            "denylist" { AttesterSelectionMode::Denylist => serde_json::json!("DENYLIST"), }
+        );
+    }
+
+    #[test]
+    fn a_document_this_build_does_not_understand_is_refused() {
+        // Silently dropping a key would read a future policy as a weaker one.
+        value_scenarios!(
+            run = |json| serde_json::from_str::<AttestationPolicyDocument>(json).is_err();
+
+            "an unknown top-level key" {
+                r#"{"schema_version":1,"selection":{"mode":"ALL"},"extra":true}"# => true,
+            }
+
+            "an unknown selection key" {
+                r#"{"schema_version":1,"selection":{"mode":"ALL","extra":true}}"# => true,
+            }
+
+            "an unknown pattern kind" {
+                r#"{"schema_version":1,"selection":{"mode":"ALLOWLIST","component_ids":[{"glob":"HGX_*"}]}}"# => true,
+            }
+
+            "the documented shape still reads" {
+                r#"{"schema_version":1,"selection":{"mode":"ALL","component_ids":[]}}"# => false,
+            }
+        );
+    }
+}
+
 #[cfg(test)]
 mod test {
     use carbide_test_support::Outcome::*;
@@ -366,16 +1073,49 @@ mod test {
 
     // A valid serialized MachineId, reused across rows.
     const VALID_MACHINE_ID: &str = "fm100htv4fu8fpktl0e0qrg4dl58g2bc2g7naq0l6c15ruc22po1i5rfsq0";
+    const JOB_ID: uuid::Uuid = uuid::uuid!("d2697720-9e96-4f9a-8183-e7f7feb98327");
+    const JOB_ID_STR: &str = "d2697720-9e96-4f9a-8183-e7f7feb98327";
 
     fn machine_id() -> MachineId {
         VALID_MACHINE_ID.parse().expect("valid machine id")
     }
 
     #[test]
-    fn spdm_object_id_round_trips() {
-        let spdm_object_id = SpdmObjectId(machine_id(), "Device-1".to_string());
+    fn spdm_evidence_collection_deserializes_legacy_states() {
+        // Persisted states must retain support for missing retry fields and legacy waiver names.
+        scenarios!(run = |json| serde_json::from_str::<SpdmAttestationState>(json).map_err(drop);
+            "legacy trigger state" {
+                r#"{"TriggerEvidenceCollection":{"retry_count":2}}"# => Yields(SpdmAttestationState::TriggerEvidenceCollection {
+                    retry_count: 2,
+                    redfish_retry_count: 0,
+                    last_redfish_failure_tstamp: None,
+                }),
+            }
+            "legacy poll state" {
+                r#"{"PollEvidenceCollection":{"task_id":"t1","retry_count":2}}"# => Yields(SpdmAttestationState::PollEvidenceCollection {
+                    task_id: "t1".to_string(),
+                    retry_count: 2,
+                }),
+            }
+            "legacy waiver spelling" {
+                r#""Cancelled""# => Yields(SpdmAttestationState::Waived),
+            }
+            "explicit waiver spelling" {
+                r#""Waived""# => Yields(SpdmAttestationState::Waived),
+            }
+        );
+        // Database writes retain the spelling understood by older running API instances.
+        assert_eq!(
+            serde_json::to_string(&SpdmAttestationState::Waived).unwrap(),
+            r#""Cancelled""#
+        );
+    }
 
-        let expected_str = format!("{VALID_MACHINE_ID},Device-1");
+    #[test]
+    fn spdm_object_id_round_trips() {
+        let spdm_object_id = SpdmObjectId(machine_id(), "Device-1".to_string(), JOB_ID);
+
+        let expected_str = format!("{VALID_MACHINE_ID},Device-1,{JOB_ID_STR}");
         assert_eq!(expected_str, spdm_object_id.to_string());
 
         let parsed_object_id: SpdmObjectId = spdm_object_id.to_string().parse().unwrap();
@@ -387,19 +1127,19 @@ mod test {
         value_scenarios!(
             run = |id| id.to_string();
             "simple device id" {
-                SpdmObjectId(machine_id(), "Device-1".to_string()) => format!("{VALID_MACHINE_ID},Device-1"),
+                SpdmObjectId(machine_id(), "Device-1".to_string(), JOB_ID) => format!("{VALID_MACHINE_ID},Device-1,{JOB_ID_STR}"),
             }
 
             "empty device id" {
-                SpdmObjectId(machine_id(), String::new()) => format!("{VALID_MACHINE_ID},"),
+                SpdmObjectId(machine_id(), String::new(), JOB_ID) => format!("{VALID_MACHINE_ID},,{JOB_ID_STR}"),
             }
 
             "device id with internal comma" {
-                SpdmObjectId(machine_id(), "a,b".to_string()) => format!("{VALID_MACHINE_ID},a,b"),
+                SpdmObjectId(machine_id(), "a,b".to_string(), JOB_ID) => format!("{VALID_MACHINE_ID},a,b,{JOB_ID_STR}"),
             }
 
             "device id with spaces" {
-                SpdmObjectId(machine_id(), "HGX IRoT GPU 0".to_string()) => format!("{VALID_MACHINE_ID},HGX IRoT GPU 0"),
+                SpdmObjectId(machine_id(), "HGX IRoT GPU 0".to_string(), JOB_ID) => format!("{VALID_MACHINE_ID},HGX IRoT GPU 0,{JOB_ID_STR}"),
             }
         );
     }
@@ -410,14 +1150,14 @@ mod test {
         check_cases(
             [
                 Case {
-                    scenario: "valid two parts",
-                    input: format!("{VALID_MACHINE_ID},Device-1"),
-                    expect: Yields(SpdmObjectId(machine_id(), "Device-1".to_string())),
+                    scenario: "valid three parts",
+                    input: format!("{VALID_MACHINE_ID},Device-1,{JOB_ID_STR}"),
+                    expect: Yields(SpdmObjectId(machine_id(), "Device-1".to_string(), JOB_ID)),
                 },
                 Case {
                     scenario: "valid with empty device id",
-                    input: format!("{VALID_MACHINE_ID},"),
-                    expect: Yields(SpdmObjectId(machine_id(), String::new())),
+                    input: format!("{VALID_MACHINE_ID},,{JOB_ID_STR}"),
+                    expect: Yields(SpdmObjectId(machine_id(), String::new(), JOB_ID)),
                 },
                 Case {
                     scenario: "no comma is wrong format",
@@ -430,19 +1170,29 @@ mod test {
                     expect: Fails,
                 },
                 Case {
-                    scenario: "three parts is wrong format",
-                    input: format!("{VALID_MACHINE_ID},Device-1,extra"),
+                    scenario: "two parts is wrong format",
+                    input: format!("{VALID_MACHINE_ID},Device-1"),
                     expect: Fails,
                 },
                 Case {
-                    scenario: "only a comma is wrong format",
-                    input: ",".to_string(),
-                    // two parts ("" and ""), but the first fails to parse as MachineId
+                    scenario: "four parts is wrong format",
+                    input: format!("{VALID_MACHINE_ID},Device-1,{JOB_ID_STR},extra"),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "only commas is wrong format",
+                    input: ",,".to_string(),
+                    // Three parts, but the first fails to parse as MachineId.
                     expect: Fails,
                 },
                 Case {
                     scenario: "bad machine id",
-                    input: "not-a-machine-id,Device-1".to_string(),
+                    input: format!("not-a-machine-id,Device-1,{JOB_ID_STR}"),
+                    expect: Fails,
+                },
+                Case {
+                    scenario: "bad job id",
+                    input: format!("{VALID_MACHINE_ID},Device-1,not-a-job-id"),
                     expect: Fails,
                 },
             ],
@@ -510,7 +1260,8 @@ mod test {
             device_id: "GPU_0".to_string(),
             state,
             started_at: now,
-            cancelled_at: None,
+            cancellation_requested_at: None,
+            cancellation_target: None,
             completed_at: None,
         }
     }
@@ -529,12 +1280,29 @@ mod test {
                 details_with_state(SpdmAttestationState::Failed(String::new())) => Some("Device: GPU_0, failed reason: ".to_string()),
             }
 
+            "operator failure preserves the original failure reason" {
+                SpdmDeviceAttestationDetails {
+                    cancellation_target: Some(spdm::SpdmCancellationTarget::Fail),
+                    ..details_with_state(SpdmAttestationState::Failed("signature mismatch".to_string()))
+                } => Some("Device: GPU_0, failed reason: signature mismatch".to_string()),
+            }
+
+            "operator failure supplies a cause for a terminal pass" {
+                SpdmDeviceAttestationDetails { cancellation_target: Some(spdm::SpdmCancellationTarget::Fail), ..details_with_state(SpdmAttestationState::Passed) }
+                    => Some("Device: GPU_0, failed reason: Failed by operator".to_string()),
+            }
+            "operator waiver suppresses a historical verification failure" {
+                SpdmDeviceAttestationDetails { cancellation_target: Some(spdm::SpdmCancellationTarget::Waive), ..details_with_state(SpdmAttestationState::Failed("historical".into())) } => None,
+            }
+            "pending operator failure has no terminal cause yet" {
+                SpdmDeviceAttestationDetails { cancellation_target: Some(spdm::SpdmCancellationTarget::Fail), ..details_with_state(SpdmAttestationState::FetchMetadata) } => None,
+            }
             "passed state has no cause" {
                 details_with_state(SpdmAttestationState::Passed) => None,
             }
 
-            "cancelled state has no cause" {
-                details_with_state(SpdmAttestationState::Cancelled) => None,
+            "waived state has no cause" {
+                details_with_state(SpdmAttestationState::Waived) => None,
             }
 
             "fetch metadata state has no cause" {
@@ -548,6 +1316,8 @@ mod test {
             "trigger evidence collection state has no cause" {
                 details_with_state(SpdmAttestationState::TriggerEvidenceCollection {
                     retry_count: 0,
+                    redfish_retry_count: 0,
+                    last_redfish_failure_tstamp: None,
                 }) => None,
             }
 

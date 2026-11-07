@@ -1,0 +1,52 @@
+suite: External API Service port
+templates:
+  - external-service.yaml
+tests:
+  - it: exposes port 443 to the gRPC target port by default
+    set:
+      externalService:
+        enabled: true
+    asserts:
+      - equal:
+          path: spec.ports[0]
+          value: { port: 443, targetPort: 1079, name: grpc, protocol: TCP }
+      - equal:
+          path: spec.externalTrafficPolicy
+          value: Local
+
+  - it: overrides the external port while keeping the target port
+    set:
+      externalService:
+        enabled: true
+        port: 8443
+    asserts:
+      - equal:
+          path: spec.ports[0]
+          value: { port: 8443, targetPort: 1079, name: grpc, protocol: TCP }
+
+  - it: rejects a non-numeric port
+    set:
+      externalService:
+        enabled: true
+        port: https
+    asserts:
+      - failedTemplate:
+          errorPattern: 'nico-api: externalService.port must be a port number, got "https"'
+
+  - it: rejects a port above 65535
+    set:
+      externalService:
+        enabled: true
+        port: 70000
+    asserts:
+      - failedTemplate:
+          errorPattern: 'nico-api: externalService.port must be a port number, got "70000"'
+
+  - it: rejects port 0 instead of falling back to the default
+    set:
+      externalService:
+        enabled: true
+        port: 0
+    asserts:
+      - failedTemplate:
+          errorPattern: 'nico-api: externalService.port must be a port number, got "0"'

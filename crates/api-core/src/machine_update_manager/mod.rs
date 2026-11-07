@@ -19,6 +19,7 @@ pub(crate) mod dpu_nic_firmware_metrics;
 mod host_firmware;
 pub(crate) mod machine_update_module;
 pub(crate) mod metrics;
+mod nic_firmware;
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -26,12 +27,13 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use carbide_machine_controller::config::FirmwareGlobal;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_utils::managed_loop::{self, LoopManager};
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::HostMachineId;
 use db::Transaction;
-use db::work_lock_manager::{AcquireLockError, WorkLockManagerHandle};
+use db::work_lock_manager::{AcquireLockError, WorkLock, WorkLockManagerHandle};
 use host_firmware::HostFirmwareUpdate;
 use machine_update_module::MachineUpdateModule;
 use model::dpu_machine_update::DpuMachineUpdate;
@@ -81,7 +83,7 @@ impl MachineUpdateManager {
         MachineUpdateManager {
             database_connection,
             max_concurrent_machine_updates: config.max_concurrent_machine_updates(),
-            run_interval: Duration::from_secs(config.machine_update_run_interval.unwrap_or(300)),
+            run_interval: Duration::from_secs(config.machine_update_run_interval_secs()),
             update_modules: modules,
             metrics: None,
             host_health: config.host_health,
@@ -113,16 +115,22 @@ impl MachineUpdateManager {
         {
             update_modules.push(Box::new(host_firmware));
         }
+        update_modules.push(Box::new(nic_firmware::NicFirmwareUpdate));
 
         MachineUpdateManager {
             database_connection,
             max_concurrent_machine_updates: config.max_concurrent_machine_updates(),
-            run_interval: Duration::from_secs(config.machine_update_run_interval.unwrap_or(300)),
+            run_interval: Duration::from_secs(config.machine_update_run_interval_secs()),
             update_modules,
             metrics: Some(machine_update_metrics),
             host_health: config.host_health,
             work_lock_manager_handle,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn run_interval(&self) -> Duration {
+        self.run_interval
     }
 
     /// Start the MachineUpdateManager and return a [sending channel](tokio::sync::oneshot::Sender) that will stop the MachineUpdateManager when dropped.
@@ -188,7 +196,7 @@ impl MachineUpdateManager {
     pub(crate) async fn run_single_iteration(&self) -> CarbideResult<()> {
         let mut updates_started_count = 0;
 
-        let _lock = match self
+        let work_lock = match self
             .work_lock_manager_handle
             .try_acquire_lock(Self::ITERATION_WORK_KEY.into())
             .await
@@ -213,11 +221,18 @@ impl MachineUpdateManager {
             "Machine update manager acquired the lock",
         );
 
-        let mut txn = Transaction::begin(&self.database_connection).await?;
+        let mut txn = update_transaction(&self.database_connection, &work_lock).await?;
 
+        let mut completion_events = Vec::new();
         for update_module in self.update_modules.iter() {
-            update_module.clear_completed_updates(&mut txn).await?;
+            completion_events.extend(update_module.clear_completed_updates(&mut txn).await?);
         }
+        txn.commit().await?;
+        for event in completion_events {
+            carbide_instrument::emit(event);
+        }
+
+        let mut txn = Transaction::begin(&self.database_connection).await?;
 
         // current host machines in maintenance
         let mut current_updating_machines = HashSet::<HostMachineId>::new();
@@ -235,7 +250,7 @@ impl MachineUpdateManager {
             db::machine::count_healthy_unhealthy_host_machines(&snapshots);
         let max_concurrent_updates = self
             .max_concurrent_machine_updates
-            .max_concurrent_updates(all_count, unhealthy_count)
+            .max_concurrent_updates(unhealthy_count, all_count)
             .unwrap_or(MachineUpdateManager::DEFAULT_MAX_CONCURRENT_MACHINE_UPDATES); // XXX
         for update_module in self.update_modules.iter() {
             if (current_updating_machines.len() as i32) >= max_concurrent_updates {
@@ -250,6 +265,7 @@ impl MachineUpdateManager {
             let updates_started = update_module
                 .start_updates(
                     &self.database_connection,
+                    &work_lock,
                     available_updates,
                     &current_updating_machines,
                     &snapshots,
@@ -312,4 +328,39 @@ impl MachineUpdateManager {
 
         Ok(())
     }
+}
+
+/// Begin a protected update transaction with a five-second per-statement
+/// limit, preserving a shorter operator limit. The cap and ownership fence
+/// remain until commit or rollback; connection acquisition and total transaction
+/// duration are not bounded here. A worker replaced by a takeover is rejected;
+/// nominal lease expiry without takeover still permits the transaction.
+/// Keep filesystem and network work outside this transaction.
+async fn update_transaction<'a>(
+    pool: &'a PgPool,
+    work_lock: &WorkLock,
+) -> CarbideResult<Transaction<'a>> {
+    let mut txn = Transaction::begin(pool).await?;
+    sqlx::query(
+        "SELECT set_config('statement_timeout', \
+            LEAST(NULLIF(setting::bigint, 0), $1::text::bigint)::text, true) \
+         FROM pg_settings WHERE name = 'statement_timeout'",
+    )
+    .bind(Duration::from_secs(5).as_millis().to_string())
+    .execute(txn.as_pgconn())
+    .await
+    .map_err(|error| db::DatabaseError::query("set machine update statement timeout", error))?;
+    work_lock.fence_transaction(txn.as_mut()).await?;
+    Ok(txn)
+}
+
+/// Whether `host_disable_autoupdate` lists the host. The list holds host IDs.
+pub(crate) fn host_on_disable_list(
+    firmware_global: &FirmwareGlobal,
+    host_id: &HostMachineId,
+) -> bool {
+    firmware_global
+        .host_disable_autoupdate
+        .iter()
+        .any(|listed| *listed == host_id.to_string())
 }

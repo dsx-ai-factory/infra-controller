@@ -41,7 +41,7 @@ escape a token.
 The checked-in inventory has three deliberate boundaries:
 
 - Linux amd64 and Linux arm64 each build 13 commands. The ten production image
-  entrypoints are `api`, `migrations`, `sitemgr`, `workflow`, `site-agent`,
+  entrypoints are `api`, `migrations`, `site-manager`, `workflow`, `site-agent`,
   `credsmgr`, `flow`, `psm`, `nsm`, and `nico-mcp`. They use the same settings
   and metadata fields as their production Dockerfiles. Bundle timestamps use
   canonical UTC values rather than inheriting a runner's local timezone. The
@@ -55,7 +55,7 @@ The checked-in inventory has three deliberate boundaries:
   site-agent, and flow commands keep their runtime version metadata without
   acquiring Linux static-linker flags or new CLI/MCP builds.
 
-All three targets build `api`, `migrations`, `sitemgr`, `workflow`,
+All three targets build `api`, `migrations`, `site-manager`, `workflow`,
 `site-agent`, `mock-core`, `mock-flow`, `credsmgr`, `flow`, `psm`, and `nsm`.
 The two Linux targets also build `nicocli` and `nico-mcp`. The independent
 command-contract test pins the exact package, target, CGO, linker-flag, and
@@ -120,10 +120,10 @@ is empty for a retry. If cleanup itself fails, the error names each path it
 could not remove.
 
 All three commands require Python 3.10 or newer. `build` also requires Git,
-[Go 1.26.4 or newer](../../rest-api/go.mod), and the `file` utility; `verify` requires Go
+[Go 1.27.3 or newer](../../rest-api/go.mod), and the `file` utility; `verify` requires Go
 and `file`. Building `linux-amd64` also requires a C compiler for `mock-core`
 and `mock-flow`. CI checks the Python minimum, selects the module's minimum Go
-1.26.4, and checks `file --version` before compiling. A contract, command, tool,
+1.27.3, and checks `file --version` before compiling. A contract, command, tool,
 or verification failure prints `error: <message>` to standard error and exits
 with status 1. Argument parsing and missing required flags print `usage:` and
 exit with status 2.

@@ -19,6 +19,7 @@
 mod tests;
 
 mod artifact_cache;
+mod digest_cache;
 
 mod artifact_resolution;
 
@@ -36,4 +37,7 @@ pub use artifact_resolution::{
     ResolvedFirmwareArtifact, ResolvedFirmwareArtifactSource, resolve_files_firmware_artifact,
 };
 pub use config::{FirmwareConfig, FirmwareConfigSnapshot};
-pub use downloader::FirmwareDownloader;
+pub use digest_cache::{
+    ArtifactDigest, CacheError, CacheLookup, CachedArtifact, FirmwareArtifactCache,
+};
+pub use downloader::{ArtifactStatus, FirmwareDownloader};

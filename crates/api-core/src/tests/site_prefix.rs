@@ -50,6 +50,7 @@ use crate::tests::common::postgres::wait_for_blocked_query;
 use crate::tests::common::rpc_builder::VpcCreationRequest;
 
 mod readiness;
+mod retirement;
 
 fn tenant_managed_site_prefix(
     prefix: &str,
@@ -702,6 +703,7 @@ async fn open_isolation_does_not_require_tenant_null_routes_or_rule_budget(pool:
     let mut overrides = TestEnvOverrides::with_config(config).with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: true,
+        l3_only: false,
         vpc_vni: Some(10000),
         routing_profile: Default::default(),
     });
@@ -769,6 +771,7 @@ async fn uncovered_retained_tenant_root_blocks_fnn_admin_and_startup_but_not_ver
     let mut overrides = TestEnvOverrides::with_config(config).with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: true,
+        l3_only: false,
         vpc_vni: Some(10000),
         routing_profile: Default::default(),
     });

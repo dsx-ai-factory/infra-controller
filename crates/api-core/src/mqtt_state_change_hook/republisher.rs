@@ -26,6 +26,7 @@ use chrono::{DateTime, Utc};
 use db::work_lock_manager::{AcquireLockError, WorkLockManagerHandle};
 use health_report::HealthReport;
 use model::machine::{HostHealthConfig, LoadSnapshotOptions, ManagedHostState};
+use sqlx::Error::{ColumnDecode, Decode};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -186,6 +187,7 @@ impl<P: MqttPublisher> ManagedHostStateRepublisher<P> {
         let mut reader: db::db_read::PgPoolReader = self.db_pool.clone().into();
         let mut published = 0usize;
         let mut skipped_healthy = 0usize;
+        let mut first_error = None;
 
         'sweep: for machine_id in host_ids {
             if cancel_token.is_cancelled() {
@@ -204,7 +206,16 @@ impl<P: MqttPublisher> ManagedHostStateRepublisher<P> {
             // A host can be deleted between the ID load and the per-host
             // snapshot read.
             let Some(snapshot) =
-                db::managed_host::load_snapshot(&mut reader, &machine_id, options).await?
+                (match db::managed_host::load_snapshot(&mut reader, &machine_id, options).await {
+                    Err(db::DatabaseError::Sqlx(error))
+                        if matches!(error.source, Decode(_) | ColumnDecode { .. }) =>
+                    {
+                        tracing::warn!(%machine_id, %error, "Skipping invalid host snapshot");
+                        first_error.get_or_insert(error);
+                        continue;
+                    }
+                    result => result?,
+                })
             else {
                 continue;
             };
@@ -244,7 +255,7 @@ impl<P: MqttPublisher> ManagedHostStateRepublisher<P> {
             "Managed host state republish sweep complete"
         );
 
-        Ok(())
+        first_error.map_or(Ok(()), |error| Err(error.into()))
     }
 }
 
@@ -367,6 +378,99 @@ mod tests {
             let _ = self.sender.send((topic.to_string(), payload));
             Ok(())
         }
+    }
+
+    #[crate::sqlx_test]
+    async fn sweep_continues_after_invalid_snapshot_and_retries_repaired_host(
+        pool: sqlx::PgPool,
+    ) -> eyre::Result<()> {
+        let mut txn = pool.begin().await?;
+        let segment_id: carbide_uuid::network::NetworkSegmentId = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version, network_segment_type)
+             VALUES ('republisher-admin', 'V1-T0', 'admin') RETURNING id",
+        )
+        .fetch_one(txn.as_mut())
+        .await?;
+        for index in 1..=2 {
+            let host_id = carbide_uuid::machine::MachineId::new(
+                MachineIdSource::ProductBoardChassisSerial,
+                [index; 32],
+                MachineType::Host,
+            );
+            let dpu_id = carbide_uuid::machine::MachineId::new(
+                MachineIdSource::ProductBoardChassisSerial,
+                [index; 32],
+                MachineType::Dpu,
+            );
+            for id in [host_id, dpu_id] {
+                db::machine::create(txn.as_mut(), None, &id, ManagedHostState::Ready, None, 2)
+                    .await?;
+            }
+            sqlx::query(
+                "INSERT INTO machine_interfaces
+                    (segment_id, mac_address, primary_interface, hostname, machine_id,
+                     attached_dpu_machine_id, interface_type, association_type)
+                 VALUES ($1, $2::macaddr, true, 'republisher-host', $3, $4, 'Data', 'Machine')",
+            )
+            .bind(segment_id)
+            .bind(format!("02:00:00:00:00:0{index}"))
+            .bind(host_id)
+            .bind(dpu_id)
+            .execute(txn.as_mut())
+            .await?;
+        }
+        txn.commit().await?;
+
+        // Choose the first host in the actual scan order, then change only its
+        // interface so the machines scan remains unchanged before the sweep.
+        let host_ids = db::managed_host::load_host_ids(&pool).await?;
+        assert_eq!(host_ids.len(), 2);
+        sqlx::query(
+            "UPDATE machine_interfaces SET primary_interface = false WHERE machine_id = $1",
+        )
+        .bind(host_ids[0])
+        .execute(&pool)
+        .await?;
+        assert_eq!(db::managed_host::load_host_ids(&pool).await?, host_ids);
+
+        let mut join_set = JoinSet::new();
+        let work_lock_manager_handle =
+            db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+        let (publisher, mut receiver) = SignalingPublisher::new();
+        let republisher = ManagedHostStateRepublisher::new(
+            publisher,
+            ManagedHostStateRepublisherParams {
+                db_pool: pool.clone(),
+                work_lock_manager_handle,
+                topic_prefix: "NICO/v1/machine".to_string(),
+                publish_timeout: Duration::from_secs(1),
+                config: PeriodicStateRepublishConfig::default(),
+                host_health_config: HostHealthConfig::default(),
+            },
+        );
+        let cancel_token = CancellationToken::new();
+        let error = republisher
+            .run_sweep(true, &cancel_token)
+            .await
+            .expect_err("a partial sweep must remain an error for managed-loop reporting");
+        assert!(error.to_string().contains("missing primary interface"));
+        assert!(error.to_string().contains(&host_ids[0].to_string()));
+        let (topic, _) = receiver.try_recv()?;
+        assert_eq!(topic, format!("NICO/v1/machine/{}/state", host_ids[1]));
+        assert!(receiver.try_recv().is_err());
+
+        sqlx::query("UPDATE machine_interfaces SET primary_interface = true WHERE machine_id = $1")
+            .bind(host_ids[0])
+            .execute(&pool)
+            .await?;
+        republisher.run_sweep(true, &cancel_token).await?;
+        let topics = [receiver.try_recv()?.0, receiver.try_recv()?.0];
+        for id in host_ids {
+            assert!(topics.contains(&format!("NICO/v1/machine/{id}/state")));
+        }
+        assert!(receiver.try_recv().is_err());
+        join_set.shutdown().await;
+        Ok(())
     }
 
     #[test]

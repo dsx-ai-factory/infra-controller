@@ -18,6 +18,7 @@
 //! Durable markers for work carbide still owes an external system per machine,
 //! and a bounded history of the work already done.
 
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
 use model::machine_pending_action::{
     MachinePendingAction, MachinePendingActionActor, MachinePendingActionKind,
@@ -42,20 +43,23 @@ pub async fn request(
     // only an unfinished request collides. `kind` already equals `EXCLUDED.kind`
     // there; assigning it is the way to make this a `DO UPDATE` -- which returns
     // the existing row -- without changing any column.
-    const QUERY: &str = "INSERT INTO machine_pending_actions (
-        machine_id,
-        kind
-    ) VALUES ($1, $2)
-    ON CONFLICT (machine_id, kind) WHERE completed_at IS NULL DO UPDATE SET
-        kind = EXCLUDED.kind
-    RETURNING machine_id, kind, requested_at, completed_at, completed_by";
+    let query = format!(
+        "INSERT INTO machine_pending_actions (
+            machine_id,
+            kind
+        ) VALUES ($1, $2)
+        ON CONFLICT (machine_id, kind) WHERE completed_at IS NULL DO UPDATE SET
+            kind = EXCLUDED.kind
+        RETURNING {}",
+        MachinePendingAction::db_table_columns(),
+    );
 
-    sqlx::query_as(QUERY)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(machine_id)
         .bind(kind)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Returns whether `kind` is still owed for `machine_id`.
@@ -137,22 +141,20 @@ pub async fn find_outstanding_by_machine_ids(
     kind: MachinePendingActionKind,
     machine_ids: &[impl MachineIdSubtypeTrait],
 ) -> DatabaseResult<Vec<MachinePendingAction>> {
-    const QUERY: &str = "SELECT
-        machine_id,
-        kind,
-        requested_at,
-        completed_at,
-        completed_by
-    FROM machine_pending_actions
-    WHERE kind = $1 AND completed_at IS NULL AND machine_id = ANY($2)
-    ORDER BY requested_at ASC, machine_id ASC";
+    let query = format!(
+        "SELECT {}
+        FROM machine_pending_actions
+        WHERE kind = $1 AND completed_at IS NULL AND machine_id = ANY($2)
+        ORDER BY requested_at ASC, machine_id ASC",
+        MachinePendingAction::db_table_columns(),
+    );
 
-    sqlx::query_as(QUERY)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(kind)
         .bind(machine_ids)
         .fetch_all(db)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Returns a machine's actions, newest first.
@@ -163,21 +165,19 @@ pub async fn find_all_for_machine(
     db: impl DbReader<'_>,
     machine_id: &MachineId,
 ) -> DatabaseResult<Vec<MachinePendingAction>> {
-    const QUERY: &str = "SELECT
-        machine_id,
-        kind,
-        requested_at,
-        completed_at,
-        completed_by
-    FROM machine_pending_actions
-    WHERE machine_id = $1
-    ORDER BY id DESC";
+    let query = format!(
+        "SELECT {}
+        FROM machine_pending_actions
+        WHERE machine_id = $1
+        ORDER BY id DESC",
+        MachinePendingAction::db_table_columns(),
+    );
 
-    sqlx::query_as(QUERY)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(machine_id)
         .fetch_all(db)
         .await
-        .map_err(|e| DatabaseError::query(QUERY, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 #[cfg(test)]

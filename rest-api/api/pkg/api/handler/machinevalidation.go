@@ -9,42 +9,42 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/attribute"
 	tclient "go.temporal.io/sdk/client"
 	tp "go.temporal.io/sdk/temporal"
+
+	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 )
 
 // ~~~~~ Create Handler ~~~~~ //
 
 // CreateMachineValidationTestHandler is the API Handler for creating new MachineValidationTest
 type CreateMachineValidationTestHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateMachineValidationTestHandler initializes and returns a new handler for creating MachineValidationTest
 func NewCreateMachineValidationTestHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) CreateMachineValidationTestHandler {
 	return CreateMachineValidationTestHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -60,7 +60,7 @@ func NewCreateMachineValidationTestHandler(dbSession *cdb.Session, tc tclient.Cl
 // @Success 201 {object} model.APIMachineValidationTest
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/test [post]
 func (handler CreateMachineValidationTestHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationTest", "Create", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationTest", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -180,21 +180,19 @@ func (handler CreateMachineValidationTestHandler) Handle(c echo.Context) error {
 
 // UpdateMachineValidationTestHandler is the API Handler for update existing MachineValidationTest
 type UpdateMachineValidationTestHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateMachineValidationTestHandler initializes and returns a new handler for updating MachineValidationTest
 func NewUpdateMachineValidationTestHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateMachineValidationTestHandler {
 	return UpdateMachineValidationTestHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -210,7 +208,7 @@ func NewUpdateMachineValidationTestHandler(dbSession *cdb.Session, tc tclient.Cl
 // @Success 201 {object} model.APIMachineValidationTest
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/test/{id}/version/{version} [patch]
 func (handler UpdateMachineValidationTestHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationTest", "Update", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationTest", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -239,9 +237,9 @@ func (handler UpdateMachineValidationTestHandler) Handle(c echo.Context) error {
 
 	// get ID of the test
 	testID := c.Param("id")
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_validation_test_id", testID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_validation_test_id", testID))
 	testVersion := c.Param("version")
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_validation_test_version", testVersion), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_validation_test_version", testVersion))
 
 	// Validate request
 	// Bind request data to API model
@@ -376,21 +374,19 @@ func getMachineValidationTest(ctx context.Context, echoCtx echo.Context, logger 
 
 // GetAllMachineValidationTestHandler is the API Handler to get all MachineValidationTests
 type GetAllMachineValidationTestHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetAllMachineValidationTestHandler initializes and returns a new handler to get all MachineValidationTests
 func NewGetAllMachineValidationTestHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) GetAllMachineValidationTestHandler {
 	return GetAllMachineValidationTestHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -405,7 +401,7 @@ func NewGetAllMachineValidationTestHandler(dbSession *cdb.Session, tc tclient.Cl
 // @Success 200 {object} []model.APIMachineValidationTest
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/test [get]
 func (handler GetAllMachineValidationTestHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationTest", "GetAll", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationTest", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -512,21 +508,19 @@ func (handler GetAllMachineValidationTestHandler) Handle(c echo.Context) error {
 
 // GetMachineValidationTestHandler is the API Handler to get MachineValidationTest
 type GetMachineValidationTestHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetMachineValidationTestHandler initializes and returns a new handler to get MachineValidationTest
 func NewGetMachineValidationTestHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) GetMachineValidationTestHandler {
 	return GetMachineValidationTestHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -541,7 +535,7 @@ func NewGetMachineValidationTestHandler(dbSession *cdb.Session, tc tclient.Clien
 // @Success 200 {object} model.APIMachineValidationTest
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/test [get]
 func (handler GetMachineValidationTestHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationTest", "Get", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationTest", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -570,9 +564,9 @@ func (handler GetMachineValidationTestHandler) Handle(c echo.Context) error {
 
 	// get ID of the test
 	testID := c.Param("id")
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_validation_test_id", testID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_validation_test_id", testID))
 	testVersion := c.Param("version")
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_validation_test_version", testVersion), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_validation_test_version", testVersion))
 
 	// Check that infrastructureProvider exists in org
 	ip, err := common.GetInfrastructureProviderForOrg(ctx, nil, handler.dbSession, org)
@@ -677,24 +671,22 @@ func getMachineForValidation(ctx context.Context, logger zerolog.Logger, dbSessi
 
 // CreateMachineValidationRunHandler creates an on-demand validation run for a Machine.
 type CreateMachineValidationRunHandler struct {
-	dbSession  *cdb.Session
-	scp        *sc.ClientPool
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	scp       *sc.ClientPool
 }
 
 // NewCreateMachineValidationRunHandler returns a new CreateMachineValidationRunHandler.
 func NewCreateMachineValidationRunHandler(dbSession *cdb.Session, scp *sc.ClientPool, _ *config.Config) CreateMachineValidationRunHandler {
 	return CreateMachineValidationRunHandler{
-		dbSession:  dbSession,
-		scp:        scp,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		scp:       scp,
 	}
 }
 
 // Handle godoc
 // @Summary Create an on-demand Machine validation run
 // @Description Create an on-demand validation run for a Machine.
-// @Tags Machine Validation
+// @Tags machine
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -704,7 +696,7 @@ func NewCreateMachineValidationRunHandler(dbSession *cdb.Session, scp *sc.Client
 // @Success 202 {object} model.APIMachineValidationRun
 // @Router /v2/org/{org}/nico/machine/{machineId}/validation/run [post]
 func (h CreateMachineValidationRunHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationRun", "Create", c, h.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationRun", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -817,28 +809,26 @@ func resolveMachineValidationTarget(ctx context.Context, c echo.Context, logger 
 
 // GetMachineValidationResultsHandler is the API Handler to get MachineValidationResults
 type GetMachineValidationResultsHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetMachineValidationResultsHandler initializes and returns a new handler to get MachineValidationResults
 func NewGetMachineValidationResultsHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) GetMachineValidationResultsHandler {
 	return GetMachineValidationResultsHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
 // @Summary Get Machine validation results
 // @Description Get Machine validation results
-// @Tags Machine Validation
+// @Tags machine
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -847,7 +837,7 @@ func NewGetMachineValidationResultsHandler(dbSession *cdb.Session, tc tclient.Cl
 // @Success 200 {object} []model.APIMachineValidationResult
 // @Router /v2/org/{org}/nico/machine/{machineId}/validation/result [get]
 func (handler GetMachineValidationResultsHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationResult", "Get", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationResult", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -880,7 +870,7 @@ func (handler GetMachineValidationResultsHandler) Handle(c echo.Context) error {
 	}
 
 	machineID, site, apiError := resolveMachineValidationTarget(ctx, c, logger, handler.dbSession, ip)
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_id", machineID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_id", machineID))
 	if apiError != nil {
 		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
@@ -943,28 +933,26 @@ func (handler GetMachineValidationResultsHandler) Handle(c echo.Context) error {
 
 // GetAllMachineValidationRunHandler is the API Handler to get all MachineValidationRuns
 type GetAllMachineValidationRunHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetAllMachineValidationRunHandler initializes and returns a new handler to get all MachineValidationRuns
 func NewGetAllMachineValidationRunHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) GetAllMachineValidationRunHandler {
 	return GetAllMachineValidationRunHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
 // Handle godoc
 // @Summary Get Machine validation runs
 // @Description Get Machine validation runs
-// @Tags Machine Validation
+// @Tags machine
 // @Accept json
 // @Produce json
 // @Security ApiKeyAuth
@@ -973,7 +961,7 @@ func NewGetAllMachineValidationRunHandler(dbSession *cdb.Session, tc tclient.Cli
 // @Success 200 {object} []model.APIMachineValidationRun
 // @Router /v2/org/{org}/nico/machine/{machineId}/validation/run [get]
 func (handler GetAllMachineValidationRunHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationRun", "GetAll", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationRun", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1006,7 +994,7 @@ func (handler GetAllMachineValidationRunHandler) Handle(c echo.Context) error {
 	}
 
 	machineID, site, apiError := resolveMachineValidationTarget(ctx, c, logger, handler.dbSession, ip)
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("machine_id", machineID), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("machine_id", machineID))
 	if apiError != nil {
 		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
@@ -1069,21 +1057,19 @@ func (handler GetAllMachineValidationRunHandler) Handle(c echo.Context) error {
 
 // GetAllMachineValidationExternalConfigHandler is the API Handler to get all MachineValidationExternalConfigs
 type GetAllMachineValidationExternalConfigHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetAllMachineValidationExternalConfigHandler initializes and returns a new handler to get all MachineValidationExternalConfigs
 func NewGetAllMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) GetAllMachineValidationExternalConfigHandler {
 	return GetAllMachineValidationExternalConfigHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1098,7 +1084,7 @@ func NewGetAllMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc 
 // @Success 200 {object} []model.APIMachineValidationExternalConfig
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/external-config [get]
 func (handler GetAllMachineValidationExternalConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "GetAll", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1198,21 +1184,19 @@ func (handler GetAllMachineValidationExternalConfigHandler) Handle(c echo.Contex
 
 // GetMachineValidationExternalConfigHandler is the API Handler to get MachineValidationExternalConfig
 type GetMachineValidationExternalConfigHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewGetMachineValidationExternalConfigHandler initializes and returns a new handler to get MachineValidationTest
 func NewGetMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) GetMachineValidationExternalConfigHandler {
 	return GetMachineValidationExternalConfigHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1227,7 +1211,7 @@ func NewGetMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc tcl
 // @Success 200 {object} model.APIMachineValidationExternalConfig
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/external-config/{name} [get]
 func (handler GetMachineValidationExternalConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "Get", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1256,7 +1240,7 @@ func (handler GetMachineValidationExternalConfigHandler) Handle(c echo.Context) 
 
 	// get ID of the test
 	cfgName := c.Param("cfgName")
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("external_config_name", cfgName), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("external_config_name", cfgName))
 
 	// Check that infrastructureProvider exists in org
 	ip, err := common.GetInfrastructureProviderForOrg(ctx, nil, handler.dbSession, org)
@@ -1337,21 +1321,19 @@ func (handler GetMachineValidationExternalConfigHandler) Handle(c echo.Context) 
 
 // CreateMachineValidationExternalConfigHandler is the API Handler for creating new MachineValidationExternalConfig
 type CreateMachineValidationExternalConfigHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewCreateMachineValidationExternalConfigHandler initializes and returns a new handler for creating MachineValidationExternalConfig
 func NewCreateMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) CreateMachineValidationExternalConfigHandler {
 	return CreateMachineValidationExternalConfigHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1367,7 +1349,7 @@ func NewCreateMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc 
 // @Success 201 {object} model.APIMachineValidationExternalConfig
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/external-config [post]
 func (handler CreateMachineValidationExternalConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "Create", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "Create", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1471,10 +1453,9 @@ func (handler CreateMachineValidationExternalConfigHandler) Handle(c echo.Contex
 	logger.Info().Str("Workflow ID", createWorkflowID).Msg("completed synchronous create MachineValidationExternalConfig workflow")
 
 	// get newly created test
-	createdExtCfg, err := getMachineValidationExtCfg(ctx, c, logger, temporalClient, apiRequest.Name)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to synchronously execute Temporal workflow to get created MachineValidationExternalConfig")
-		return err
+	createdExtCfg, apiErr := getMachineValidationExtCfg(ctx, logger, temporalClient, apiRequest.Name)
+	if apiErr != nil {
+		return apiErr.Send(c)
 	}
 
 	// Create response
@@ -1485,21 +1466,19 @@ func (handler CreateMachineValidationExternalConfigHandler) Handle(c echo.Contex
 
 // UpdateMachineValidationExternalConfigHandler is the API Handler for update existing MachineValidationExternalConfig
 type UpdateMachineValidationExternalConfigHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewUpdateMachineValidationExternalConfigHandler initializes and returns a new handler for updating MachineValidationExternalConfig
 func NewUpdateMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) UpdateMachineValidationExternalConfigHandler {
 	return UpdateMachineValidationExternalConfigHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1515,7 +1494,7 @@ func NewUpdateMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc 
 // @Success 200 {object} model.APIMachineValidationExternalConfig
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/external-config/{name} [patch]
 func (handler UpdateMachineValidationExternalConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "Update", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "Update", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1544,7 +1523,7 @@ func (handler UpdateMachineValidationExternalConfigHandler) Handle(c echo.Contex
 
 	// get name
 	extCfgName := c.Param("cfgName")
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("external_config_name", extCfgName), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("external_config_name", extCfgName))
 
 	// Bind request data to API model
 	apiRequest := model.APIMachineValidationExternalConfigUpdateRequest{}
@@ -1580,10 +1559,9 @@ func (handler UpdateMachineValidationExternalConfigHandler) Handle(c echo.Contex
 	}
 
 	// get existing external config
-	currentExtCfgProto, err := getMachineValidationExtCfg(ctx, c, logger, temporalClient, extCfgName)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to synchronously execute Temporal workflow to get existing MachineValidationExternalConfig")
-		return err
+	currentExtCfgProto, apiErr := getMachineValidationExtCfg(ctx, logger, temporalClient, extCfgName)
+	if apiErr != nil {
+		return apiErr.Send(c)
 	}
 
 	// create workflow
@@ -1634,10 +1612,9 @@ func (handler UpdateMachineValidationExternalConfigHandler) Handle(c echo.Contex
 	logger.Info().Str("Workflow ID", updateWorkflowID).Msg("completed synchronous update MachineValidationExternalConfig workflow")
 
 	// get updated external config
-	updatedExtCfgProto, err := getMachineValidationExtCfg(ctx, c, logger, temporalClient, extCfgName)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to synchronously execute Temporal workflow to get updated MachineValidationExternalConfig")
-		return err
+	updatedExtCfgProto, apiErr := getMachineValidationExtCfg(ctx, logger, temporalClient, extCfgName)
+	if apiErr != nil {
+		return apiErr.Send(c)
 	}
 
 	// Create response
@@ -1646,8 +1623,7 @@ func (handler UpdateMachineValidationExternalConfigHandler) Handle(c echo.Contex
 	return c.JSON(http.StatusOK, apiObject)
 }
 
-func getMachineValidationExtCfg(ctx context.Context, echoCtx echo.Context, logger zerolog.Logger, temporalClient tclient.Client, cfgName string) (*corev1.MachineValidationExternalConfig, error) {
-	// get newly created test to be returned
+func getMachineValidationExtCfg(ctx context.Context, logger zerolog.Logger, temporalClient tclient.Client, cfgName string) (*corev1.MachineValidationExternalConfig, *cutil.APIError) {
 	getWorkflowOptions := tclient.StartWorkflowOptions{
 		ID:                       fmt.Sprintf("machine-validation-ext-cfg-get-%s", cfgName),
 		WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
@@ -1669,7 +1645,7 @@ func getMachineValidationExtCfg(ctx context.Context, echoCtx echo.Context, logge
 	getWorkflowRun, err := temporalClient.ExecuteWorkflow(getCtx, getWorkflowOptions, "GetMachineValidationExternalConfigs", getProtoRequest)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to synchronously start Temporal workflow to get MachineValidationExternalConfig")
-		return nil, cutil.NewAPIErrorResponse(echoCtx, http.StatusInternalServerError, fmt.Sprintf("Failed to start sync workflow to get Machine Validation External Config on Site: %s", err), nil)
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to start sync workflow to get Machine Validation External Config on Site: %s", err), nil)
 	}
 
 	getWorkflowID := getWorkflowRun.GetID()
@@ -1680,35 +1656,36 @@ func getMachineValidationExtCfg(ctx context.Context, echoCtx echo.Context, logge
 	err = getWorkflowRun.Get(getCtx, &getProtoResponse)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to synchronously execute Temporal workflow to get MachineValidationExternalConfig")
-		return nil, cutil.NewAPIErrorResponse(echoCtx, http.StatusInternalServerError, fmt.Sprintf("Failed to execute sync workflow to get Machine Validation External Config on Site: %s", err), nil)
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to execute sync workflow to get Machine Validation External Config on Site: %s", err), nil)
 	}
 
 	logger.Info().Str("Workflow ID", getWorkflowID).Msg("completed synchronous get MachineValidationExternalConfig workflow")
 
-	if len(getProtoResponse.Configs) != 1 {
-		logger.Error().Err(err).Msgf("expected to get 1 MachineValidationTest and instead got %d", len(getProtoResponse.Configs))
-		return nil, cutil.NewAPIErrorResponse(echoCtx, http.StatusInternalServerError, fmt.Sprintf("Expected to get 1 Machine Validation External Config from Site and instead got %d", len(getProtoResponse.Configs)), nil)
+	if len(getProtoResponse.Configs) == 0 {
+		return nil, cutil.NewAPIError(http.StatusNotFound, "No Machine Validation External Config found", nil)
+	}
+	if len(getProtoResponse.Configs) > 1 {
+		logger.Error().Msgf("expected to get 1 MachineValidationExternalConfig and instead got %d", len(getProtoResponse.Configs))
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Expected to get 1 Machine Validation External Config from Site and instead got %d", len(getProtoResponse.Configs)), nil)
 	}
 	return getProtoResponse.Configs[0], nil
 }
 
 // DeleteMachineValidationExternalConfigHandler is the API Handler for delete existing MachineValidationExternalConfig
 type DeleteMachineValidationExternalConfigHandler struct {
-	dbSession  *cdb.Session
-	tc         tclient.Client
-	scp        *sc.ClientPool
-	cfg        *config.Config
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
+	tc        tclient.Client
+	scp       *sc.ClientPool
+	cfg       *config.Config
 }
 
 // NewDeleteMachineValidationExternalConfigHandler initializes and returns a new handler for updating MachineValidationExternalConfig
 func NewDeleteMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc tclient.Client, scp *sc.ClientPool, cfg *config.Config) DeleteMachineValidationExternalConfigHandler {
 	return DeleteMachineValidationExternalConfigHandler{
-		dbSession:  dbSession,
-		tc:         tc,
-		scp:        scp,
-		cfg:        cfg,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
+		tc:        tc,
+		scp:       scp,
+		cfg:       cfg,
 	}
 }
 
@@ -1723,7 +1700,7 @@ func NewDeleteMachineValidationExternalConfigHandler(dbSession *cdb.Session, tc 
 // @Success 202
 // @Router /v2/org/{org}/nico/site/{site}/machine-validation/external-config/{name} [delete]
 func (handler DeleteMachineValidationExternalConfigHandler) Handle(c echo.Context) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "Delete", c, handler.tracerSpan)
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineValidationExternalConfig", "Delete", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -1752,7 +1729,7 @@ func (handler DeleteMachineValidationExternalConfigHandler) Handle(c echo.Contex
 
 	// get name
 	extCfgName := c.Param("cfgName")
-	handler.tracerSpan.SetAttribute(handlerSpan, attribute.String("external_config_name", extCfgName), logger)
+	cotel.SetAttribute(handlerSpan, attribute.String("external_config_name", extCfgName))
 
 	// Check that infrastructureProvider exists in org
 	ip, err := common.GetInfrastructureProviderForOrg(ctx, nil, handler.dbSession, org)
@@ -1785,6 +1762,9 @@ func (handler DeleteMachineValidationExternalConfigHandler) Handle(c echo.Contex
 		WorkflowExecutionTimeout: cutil.WorkflowExecutionTimeout,
 		TaskQueue:                queue.SiteTaskQueue,
 	}
+	deleteProtoRequest := &corev1.RemoveMachineValidationExternalConfigRequest{
+		Name: extCfgName,
+	}
 
 	logger.Info().Msg("triggering MachineValidationExternalConfig delete workflow")
 
@@ -1792,15 +1772,15 @@ func (handler DeleteMachineValidationExternalConfigHandler) Handle(c echo.Contex
 	defer cancel()
 
 	// Trigger Site workflow
-	deleteWorkflowRun, err := temporalClient.ExecuteWorkflow(deleteCtx, deleteWorkflowOptions, "RemoveMachineValidationExternalConfig")
+	deleteWorkflowRun, err := temporalClient.ExecuteWorkflow(deleteCtx, deleteWorkflowOptions, "RemoveMachineValidationExternalConfig", deleteProtoRequest)
 	if err != nil {
-		logger.Error().Err(err).Msg("failed to synchronously start Temporal workflow to delete update MachineValidationExternalConfig")
+		logger.Error().Err(err).Msg("failed to synchronously start Temporal workflow to delete MachineValidationExternalConfig")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to start sync workflow to delete Machine Validation External Config on Site: %s", err), nil)
 	}
 	deleteWorkflowID := deleteWorkflowRun.GetID()
 	logger.Info().Str("Workflow ID", deleteWorkflowID).Msg("executed synchronous delete MachineValidationExternalConfig workflow")
 
-	// Execute update workflow synchronously
+	// Wait for the removal workflow to finish.
 	err = deleteWorkflowRun.Get(deleteCtx, nil)
 	if err != nil {
 		var timeoutErr *tp.TimeoutError
@@ -1808,6 +1788,11 @@ func (handler DeleteMachineValidationExternalConfigHandler) Handle(c echo.Contex
 			return common.TerminateWorkflowOnTimeOut(c, logger, temporalClient, deleteWorkflowID, err, "MachineValidationExternalConfig", "RemoveMachineValidationExternalConfig")
 		}
 		logger.Error().Err(err).Msg("failed to synchronously execute Temporal workflow to delete MachineValidationExternalConfig")
+		// Only `NotFound` changes the response; other workflow failures stay 500.
+		code, _ := common.UnwrapWorkflowError(err)
+		if code == http.StatusNotFound {
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "No Machine Validation External Config found", nil)
+		}
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to execute sync workflow to delete Machine Validation External Config on Site: %s", err), nil)
 	}
 

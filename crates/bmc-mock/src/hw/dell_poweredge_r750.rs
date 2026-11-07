@@ -36,6 +36,15 @@ pub(crate) struct EmbeddedNic {
 }
 
 impl DellPowerEdgeR750<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Dell,
+            product: None,
+            redfish_version: "1.18.0",
+            advertises_computer_systems: true,
+        }
+    }
+
     fn sensor_layout() -> redfish::sensor::Layout {
         redfish::sensor::Layout {
             temperature: 10,
@@ -58,7 +67,7 @@ impl DellPowerEdgeR750<'_> {
                     redfish::ethernet_interface::builder(
                         &redfish::ethernet_interface::manager_resource("iDRAC.Embedded.1", "NIC.1"),
                     )
-                    .mac_address(self.bmc_mac_address)
+                    .mac_address((self.bmc_mac_address).to_string())
                     .interface_enabled(true)
                     .build(),
                 ]),
@@ -93,8 +102,8 @@ impl DellPowerEdgeR750<'_> {
             let eth_id = format!("NIC.Embedded.{port}-1-1");
             let resource = redfish::ethernet_interface::system_resource(system_id, &eth_id);
             redfish::ethernet_interface::builder(&resource)
-                .description(&format!("Embedded NIC 1 Port {port} Partition 1"))
-                .mac_address(*mac)
+                .description(format!("Embedded NIC 1 Port {port} Partition 1"))
+                .mac_address((*mac).to_string())
                 .interface_enabled(true)
                 .build()
         })
@@ -102,15 +111,15 @@ impl DellPowerEdgeR750<'_> {
             let eth_id = format!("NIC.Slot.{slot_number}-1");
             let resource = redfish::ethernet_interface::system_resource(system_id, &eth_id);
             redfish::ethernet_interface::builder(&resource)
-                .description(&format!("NIC in Slot {slot_number} Port 1"))
-                .mac_address(nic.mac_address)
+                .description(format!("NIC in Slot {slot_number} Port 1"))
+                .mac_address((nic.mac_address).to_string())
                 .interface_enabled(true)
                 .build()
         }))
         .collect();
 
-        let boot_opt_builder = |id: &str, kind| {
-            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id), kind)
+        let boot_opt_builder = |id: &str| {
+            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id))
                 .boot_option_reference(id)
         };
         let boot_options = self
@@ -128,14 +137,14 @@ impl DellPowerEdgeR750<'_> {
             )))
             .enumerate()
             .map(|(index, (display_name, kind))| {
-                boot_opt_builder(&format!("Boot{index:04X}"), kind)
+                boot_opt_builder(&format!("Boot{index:04X}"))
                     .display_name(&display_name)
-                    .build()
+                    .build(kind)
             })
             .collect::<Vec<_>>();
 
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed(system_id),
                 manufacturer: Some("Dell Inc.".into()),
                 model: Some("PowerEdge R750".into()),
@@ -162,7 +171,7 @@ impl DellPowerEdgeR750<'_> {
                 serial_console: None,
                 secure_boot_available: true,
                 base_bios: Some(redfish::bios::builder(&redfish::bios::resource(system_id))
-                    .attributes(json!({
+                    .with_attributes(json!({
                         "BootSeqRetry": "Disabled",
                         "SetBootOrderEn": "NIC.HttpDevice.1-1,Disk.Bay.2:Enclosure.Internal.0-1",
                         "InBandManageabilityInterface": "Enabled",
@@ -179,8 +188,8 @@ impl DellPowerEdgeR750<'_> {
                         "HttpDev1EnDis": "Enabled",
                         "PxeDev1EnDis": "Disabled",
                         "HttpDev1Interface": "NIC.Slot.5-1",
-                    })).build()),
-            }],
+                    }))),
+            }]),
         }
     }
 
@@ -205,7 +214,10 @@ impl DellPowerEdgeR750<'_> {
                 &function_id,
             );
             let function = redfish::network_device_function::builder(func_resource)
-                .ethernet(json!({"MACAddress": &nic.mac_address}))
+                .ethernet(
+                    redfish::schema::network_device_function::Ethernet::new()
+                        .mac_address(nic.mac_address.to_string()),
+                )
                 .oem(redfish::oem::dell::network_device_function::dell_nic_info(
                     &function_id,
                     *slot,
@@ -218,15 +230,14 @@ impl DellPowerEdgeR750<'_> {
                 &redfish::network_adapter::chassis_resource(chassis_id, &network_adapter_id),
                 nic,
             )
-            .network_device_functions(
+            .status(redfish::resource::Status::Ok.into())
+            .build_with_functions(
                 &redfish::network_device_function::chassis_collection(
                     chassis_id,
                     &network_adapter_id,
                 ),
                 vec![function],
             )
-            .status(redfish::resource::Status::Ok)
-            .build()
         }))
         .collect();
 
@@ -239,7 +250,7 @@ impl DellPowerEdgeR750<'_> {
                     &redfish::pcie_device::chassis_resource(chassis_id, &pcie_device_id),
                     nic,
                 )
-                .status(redfish::resource::Status::Ok)
+                .status(redfish::resource::Status::Ok.into())
                 .build()
             })
             .collect();
@@ -247,7 +258,7 @@ impl DellPowerEdgeR750<'_> {
         redfish::chassis::ChassisConfig {
             chassis: vec![redfish::chassis::SingleChassisConfig {
                 id: Cow::Borrowed(chassis_id),
-                chassis_type: "RackMount".into(),
+                chassis_type: redfish::schema::chassis::ChassisType::RackMount,
                 manufacturer: Some("Dell Inc.".into()),
                 part_number: Some("01J4WFA05".into()),
                 model: Some("PowerEdge R750".into()),
@@ -276,7 +287,7 @@ impl DellPowerEdgeR750<'_> {
                 redfish::software_inventory::builder(
                     &redfish::software_inventory::firmware_inventory_resource(id),
                 )
-                .version(version)
+                .version(*version)
                 .build()
             })
             .collect(),

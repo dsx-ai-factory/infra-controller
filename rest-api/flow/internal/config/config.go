@@ -23,6 +23,13 @@ type Config struct {
 	DisableInventory      bool          `yaml:"disable_inventory"`
 	LeakDetectionInterval time.Duration `yaml:"leak_detection_interval"`
 	DisableLeakDetection  bool          `yaml:"disable_leak_detection"`
+	Tracing               TracingConfig `yaml:"tracing"`
+}
+
+// TracingConfig controls local span export independently of the OTLP endpoint.
+type TracingConfig struct {
+	// Enabled defaults to false; trace-context propagation remains active.
+	Enabled bool `yaml:"enabled"`
 }
 
 // defaultConfig sets up the default values used when something is not specified

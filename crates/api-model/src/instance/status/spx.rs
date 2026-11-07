@@ -67,9 +67,17 @@ impl InstanceSpxStatus {
                     }
                     InstanceSpxAttachmentStatus {
                         mac_address: mac_addr.to_string(),
-                        virtual_function_id: cfg.virtual_function_id.unwrap_or_default(),
                         attachment_type: cfg.attachment_type.clone(),
                         spx_partition_id: cfg.spx_partition_id,
+                        attachment_vf: cfg.attachment_vf.as_ref().map(|vf| SpxAttachmentVfStatus {
+                            vf_index: vf.vf_index,
+                        }),
+                        attachment_ovs: cfg.attachment_ovs.as_ref().map(|ovs| {
+                            SpxAttachmentOvsStatus {
+                                bridge_name: ovs.bridge_name.clone(),
+                                ovn_network_name: ovs.ovn_network_name.clone(),
+                            }
+                        }),
                     }
                 }
                 None => {
@@ -80,9 +88,17 @@ impl InstanceSpxStatus {
                     configs_synced = SyncState::Pending;
                     InstanceSpxAttachmentStatus {
                         mac_address: mac_addr.to_string(),
-                        virtual_function_id: cfg.virtual_function_id.unwrap_or_default(),
                         attachment_type: cfg.attachment_type.clone(),
                         spx_partition_id: cfg.spx_partition_id,
+                        attachment_vf: cfg.attachment_vf.as_ref().map(|vf| SpxAttachmentVfStatus {
+                            vf_index: vf.vf_index,
+                        }),
+                        attachment_ovs: cfg.attachment_ovs.as_ref().map(|ovs| {
+                            SpxAttachmentOvsStatus {
+                                bridge_name: ovs.bridge_name.clone(),
+                                ovn_network_name: ovs.ovn_network_name.clone(),
+                            }
+                        }),
                     }
                 }
             };
@@ -101,9 +117,10 @@ impl InstanceSpxStatus {
                 .iter()
                 .map(|cfg| InstanceSpxAttachmentStatus {
                     mac_address: cfg.mac_address.as_deref().unwrap_or_default().to_string(),
-                    virtual_function_id: 0,
                     attachment_type: SpxAttachmentType::Physical,
                     spx_partition_id: SpxPartitionId::default(),
+                    attachment_vf: None,
+                    attachment_ovs: None,
                 })
                 .collect(),
             configs_synced: SyncState::Pending,
@@ -114,7 +131,19 @@ impl InstanceSpxStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceSpxAttachmentStatus {
     pub mac_address: String,
-    pub virtual_function_id: u32,
     pub attachment_type: SpxAttachmentType,
     pub spx_partition_id: SpxPartitionId,
+    pub attachment_vf: Option<SpxAttachmentVfStatus>,
+    pub attachment_ovs: Option<SpxAttachmentOvsStatus>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpxAttachmentVfStatus {
+    pub vf_index: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpxAttachmentOvsStatus {
+    pub bridge_name: String,
+    pub ovn_network_name: Option<String>,
 }

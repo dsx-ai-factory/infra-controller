@@ -58,23 +58,18 @@ func TestWorkflowOrchestrator(t *testing.T) {
 		master       bool
 		reload       bool
 		failedReload bool
-		omitLeaf     bool
 		invalidKey   bool
 		nilGauge     bool
 	}{
 		{name: "master loads existing client certificate", master: true},
 		{name: "non-master loads existing client certificate"},
 		{name: "reload updates client expiration", reload: true},
-		{name: "load and reload without cached leaf", omitLeaf: true, reload: true},
 		{name: "failed reload retains previous expiration", failedReload: true},
 		{name: "invalid key leaves metric unchanged", invalidKey: true},
 		{name: "missing gauge does not interrupt certificate loading", nilGauge: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.omitLeaf {
-				t.Setenv("GODEBUG", os.Getenv("GODEBUG")+",x509keypairleaf=0")
-			}
 			previousAccess := ManagerAccess
 			previousGauge := CertExpirationMetric
 			previousRegisterer := prometheus.DefaultRegisterer
@@ -139,7 +134,7 @@ func TestWorkflowOrchestrator(t *testing.T) {
 
 			// Omit the CA file to stop after loading the client certificate, before
 			// dialing Temporal. The chain has different leaf and CA expirations.
-			loadErr := workflowOrchestrator()
+			_, loadErr := workflowOrchestrator()
 			if tt.invalidKey {
 				require.ErrorContains(t, loadErr, "PEM data in key input")
 				assert.Zero(t, gaugeValue())
@@ -155,28 +150,28 @@ func TestWorkflowOrchestrator(t *testing.T) {
 			assert.Equal(t, float64(expiration.Unix()), gaugeValue())
 			metrics, gatherErr := registry.Gather()
 			require.NoError(t, gatherErr)
-			require.Len(t, metrics, 4)
 			var expirationMetric *dto.MetricFamily
 			for _, metric := range metrics {
-				if metric.GetName() == "nico_rest_site_agent_temporal_cert_expiration" {
+				if metric.GetName() == "nico_rest_site_agent_temporal_cert_expiration_timestamp_seconds" {
 					expirationMetric = metric
 					break
 				}
 			}
 			require.NotNil(t, expirationMetric)
+			assert.Equal(t, "Unix timestamp in seconds when the Temporal client certificate expires", expirationMetric.GetHelp())
 			require.Len(t, expirationMetric.GetMetric(), 1)
 			assert.Equal(t, float64(expiration.Unix()), expirationMetric.GetMetric()[0].GetGauge().GetValue())
 			if tt.failedReload {
 				err = os.WriteFile(conf.Temporal.GetTemporalClientKeyFullPath(), []byte("invalid PEM"), 0600)
 				require.NoError(t, err)
-				loadErr = workflowOrchestrator()
+				_, loadErr = workflowOrchestrator()
 				require.ErrorContains(t, loadErr, "PEM data in key input")
 				assert.Equal(t, float64(expiration.Unix()), gaugeValue())
 			}
 			if tt.reload {
 				newExpiration := expiration.Add(24 * time.Hour)
 				writeCertificate(newExpiration)
-				loadErr = workflowOrchestrator()
+				_, loadErr = workflowOrchestrator()
 				require.ErrorAs(t, loadErr, &pathErr)
 				assert.Equal(t, float64(newExpiration.Unix()), gaugeValue())
 			}
@@ -240,7 +235,7 @@ func TestWorkflowOrchestrator(t *testing.T) {
 			registrationErr := errors.New("stop after connecting Temporal clients")
 			api := &managerapi.ManagerAPI{Site: siteRegistrationFailure{err: registrationErr}}
 			NewWorkflowManager(data, api, &managerapi.ManagerConf{EB: conf})
-			err = workflowOrchestrator()
+			_, err = workflowOrchestrator()
 			require.ErrorIs(t, err, registrationErr)
 			assert.EqualValues(t, 2, service.calls.Load())
 			assert.NotNil(t, data.Managers.Workflow.Temporal.Publisher)

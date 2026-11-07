@@ -15,10 +15,6 @@
  * limitations under the License.
  */
 
-// The deprecated flat fields on `rpc::forge::Machine` must still be read here for
-// backwards-compat until a follow-up PR migrates this crate to the new config/status sub-messages.
-#![allow(deprecated)]
-
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Display;
 use std::sync::Arc;
@@ -32,8 +28,8 @@ use itertools::Itertools;
 use rpc::common::DpuMachineIdList;
 // use rpc::forge::forge_server::Forge;
 use rpc::forge::{
-    BmcInfo, ConnectedDevice, GetSiteExplorationRequest, MachineType, ManagedHostQuarantineState,
-    NetworkDevice, NetworkDeviceIdList,
+    BmcEndpoint, BmcInfo, BmcStatus, ConnectedDevice, GetSiteExplorationRequest, MachineType,
+    ManagedHostQuarantineState, NetworkDevice, NetworkDeviceIdList,
 };
 use rpc::machine_discovery::MemoryDeviceGroup;
 use rpc::site_explorer::{EndpointExplorationReport, ExploredEndpoint};
@@ -80,7 +76,8 @@ impl ManagedHostMetadata {
         let dpu_id_request = tonic::Request::new(DpuMachineIdList {
             machine_ids: machines
                 .iter()
-                .flat_map(|m| m.associated_dpu_machine_ids.clone())
+                .filter_map(|machine| machine.status.as_ref())
+                .flat_map(|status| status.associated_dpu_machine_ids.iter().copied())
                 .collect(),
         });
         let connected_devices = api
@@ -158,7 +155,9 @@ pub struct ManagedHostOutput {
 
 impl From<Machine> for ManagedHostOutput {
     fn from(machine: Machine) -> ManagedHostOutput {
-        let primary_interface = machine.interfaces.iter().find(|x| x.primary_interface);
+        let status = machine.status.unwrap_or_default();
+        let config = machine.config.unwrap_or_default();
+        let primary_interface = status.interfaces.iter().find(|x| x.primary_interface);
         let (host_admin_ip, host_admin_mac) = primary_interface
             .map(|x| {
                 (
@@ -168,14 +167,15 @@ impl From<Machine> for ManagedHostOutput {
             })
             .unwrap_or((None, None));
 
-        let BmcInfoDisplay {
+        #[allow(deprecated)] // The CLI can connect to older Core versions.
+        let BmcDisplay {
             ip: host_bmc_ip,
             mac: host_bmc_mac,
             version: host_bmc_version,
             firmware_version: host_bmc_firmware_version,
-        } = machine.bmc_info.into();
+        } = (machine.bmc, status.bmc_status, machine.bmc_info).into();
 
-        let discovery_info = machine.discovery_info;
+        let discovery_info = status.discovery_info;
         let host_gpu_count = discovery_info
             .as_ref()
             .map(|di| di.gpus.len())
@@ -217,14 +217,14 @@ impl From<Machine> for ManagedHostOutput {
             .and_then(|di| di.dmi_data.as_ref())
             .into();
 
-        let health = machine
+        let health = status
             .health
             .map(|h| {
                 health_report::HealthReport::try_from(h)
                     .unwrap_or_else(health_report::HealthReport::malformed_report)
             })
             .unwrap_or_else(health_report::HealthReport::missing_report);
-        let health_sources = machine
+        let health_sources = status
             .health_sources
             .into_iter()
             .map(|o| o.source)
@@ -282,29 +282,29 @@ impl From<Machine> for ManagedHostOutput {
             host_gpu_count,
             host_ib_ifs_count,
             host_memory,
-            failure_details: machine.failure_details.clone(),
-            maintenance_reference: machine.maintenance_reference.clone(),
-            maintenance_start_time: to_time(machine.maintenance_start_time, machine.id),
+            failure_details: status.failure_details.clone(),
+            maintenance_reference: config.maintenance_reference.clone(),
+            maintenance_start_time: to_time(config.maintenance_start_time, machine.id),
             host_last_reboot_time: machine
                 .id
                 .as_ref()
-                .and_then(|id| to_time(machine.last_reboot_time, Some(id))),
+                .and_then(|id| to_time(status.last_reboot_time, Some(id))),
             host_last_reboot_requested_time_and_mode: machine.id.as_ref().map(|id| {
                 format!(
                     "{}/{}",
-                    to_time(machine.last_reboot_requested_time, Some(id))
+                    to_time(status.last_reboot_requested_time, Some(id))
                         .unwrap_or("Unknown".to_string()),
-                    machine.last_reboot_requested_mode.unwrap_or_default()
+                    status.last_reboot_requested_mode.unwrap_or_default()
                 )
             }),
-            quarantine_state: machine.quarantine_state.clone(),
-            instance_type_id: machine.instance_type_id.clone(),
+            quarantine_state: status.quarantine.clone(),
+            instance_type_id: config.instance_type_id.clone(),
             slot_number: machine.placement_in_rack.and_then(|p| p.slot_number),
             tray_index: machine.placement_in_rack.and_then(|p| p.tray_index),
             rack_id,
             health,
             health_sources,
-            dpf: machine.dpf,
+            dpf: config.dpf,
             // dpus and exploration_report are filled in later
             dpus: Default::default(),
             exploration_report: Default::default(),
@@ -363,18 +363,15 @@ impl ManagedHostAttachedDpu {
         exploration_report: Option<EndpointExplorationReport>,
         is_primary: bool,
     ) -> Self {
+        let status = dpu_machine.status.unwrap_or_default();
         let last_reboot_requested_time_and_mode = Some(format!(
             "{}/{}",
-            to_time(dpu_machine.last_reboot_requested_time, dpu_machine.id)
+            to_time(status.last_reboot_requested_time, dpu_machine.id)
                 .unwrap_or("Unknown".to_string()),
-            dpu_machine.last_reboot_requested_mode()
+            status.last_reboot_requested_mode.unwrap_or_default()
         ));
 
-        let (oob_ip, oob_mac) = match dpu_machine
-            .interfaces
-            .into_iter()
-            .find(|x| x.primary_interface)
-        {
+        let (oob_ip, oob_mac) = match status.interfaces.into_iter().find(|x| x.primary_interface) {
             Some(primary_interface) => (
                 Some(primary_interface.address.join(",")),
                 Some(primary_interface.mac_address.to_owned()),
@@ -382,25 +379,26 @@ impl ManagedHostAttachedDpu {
             None => (None, None),
         };
 
-        let BmcInfoDisplay {
+        #[allow(deprecated)] // The CLI can connect to older Core versions.
+        let BmcDisplay {
             ip: bmc_ip,
             mac: bmc_mac,
             version: bmc_version,
             firmware_version: bmc_firmware_version,
-        } = dpu_machine.bmc_info.into();
+        } = (dpu_machine.bmc, status.bmc_status, dpu_machine.bmc_info).into();
 
         let DmiDataDisplay {
             product_serial: serial_number,
             chassis_serial: _,
             bios_version,
-        } = dpu_machine
+        } = status
             .discovery_info
             .as_ref()
             .and_then(|d| d.dmi_data.as_ref())
             .into();
 
         ManagedHostAttachedDpu {
-            discovery_info: dpu_machine.discovery_info.unwrap_or_default(),
+            discovery_info: status.discovery_info.unwrap_or_default(),
             machine_id: dpu_machine.id.map(|i| i.to_string()),
             state: Some(dpu_machine.state),
             serial_number,
@@ -409,22 +407,22 @@ impl ManagedHostAttachedDpu {
             bmc_mac,
             bmc_version,
             bmc_firmware_version,
-            last_reboot_time: to_time(dpu_machine.last_reboot_time, dpu_machine.id),
+            last_reboot_time: to_time(status.last_reboot_time, dpu_machine.id),
             exploration_report,
             last_reboot_requested_time_and_mode,
-            last_observation_time: to_time(dpu_machine.last_observation_time, dpu_machine.id),
+            last_observation_time: to_time(status.last_observation_time, dpu_machine.id),
             oob_ip,
             oob_mac,
             switch_connections,
             is_primary,
-            health: dpu_machine
+            health: status
                 .health
                 .map(|h| {
                     health_report::HealthReport::try_from(h)
                         .unwrap_or_else(health_report::HealthReport::malformed_report)
                 })
                 .unwrap_or_else(health_report::HealthReport::missing_report),
-            failure_details: dpu_machine.failure_details,
+            failure_details: status.failure_details,
         }
     }
 }
@@ -435,14 +433,20 @@ pub fn get_managed_host_output(source: ManagedHostMetadata) -> Vec<ManagedHostOu
         .managed_hosts
         .into_iter()
         .map(|machine| {
-            let primary_dpu_id = machine.interfaces.iter().find_map(|iface| {
-                if iface.primary_interface {
-                    iface.attached_dpu_machine_id
-                } else {
-                    None
-                }
+            let primary_dpu_id = machine.status.as_ref().and_then(|status| {
+                status.interfaces.iter().find_map(|interface| {
+                    if interface.primary_interface {
+                        interface.attached_dpu_machine_id
+                    } else {
+                        None
+                    }
+                })
             });
-            let dpu_machine_ids = machine.associated_dpu_machine_ids.clone();
+            let dpu_machine_ids = machine
+                .status
+                .as_ref()
+                .map(|status| status.associated_dpu_machine_ids.clone())
+                .unwrap_or_default();
 
             let mut managed_host_output = ManagedHostOutput::from(machine);
             managed_host_output.exploration_report = managed_host_output
@@ -466,11 +470,13 @@ pub fn get_managed_host_output(source: ManagedHostMetadata) -> Vec<ManagedHostOu
                         })
                 })
                 .map(|(dpu_id, dpu)| {
-                    let dpu_exploration_report = dpu
-                        .bmc_info
-                        .as_ref()
-                        .and_then(|bmc_info| bmc_info.ip.as_ref())
-                        .and_then(|ip| index.exploration_reports_by_address.remove(ip));
+                    let bmc_ip = match dpu.bmc.as_ref() {
+                        Some(endpoint) => endpoint.ip.as_ref(),
+                        #[allow(deprecated)] // The CLI can connect to older Core versions.
+                        None => dpu.bmc_info.as_ref().and_then(|info| info.ip.as_ref()),
+                    };
+                    let dpu_exploration_report =
+                        bmc_ip.and_then(|ip| index.exploration_reports_by_address.remove(ip));
 
                     let switch_connections = index
                         .switch_connections_by_dpu_id
@@ -628,26 +634,36 @@ pub fn to_time<M: Display>(t: Option<Timestamp>, machine_id: Option<M>) -> Optio
     }
 }
 
-/// Helper to easily turn an Option<BmcInfo> into optional fields for display, without cloning
+/// BMC endpoint and status fields for display, without cloning.
 #[derive(Default)]
-struct BmcInfoDisplay {
+struct BmcDisplay {
     ip: Option<String>,
     mac: Option<String>,
     version: Option<String>,
     firmware_version: Option<String>,
 }
 
-impl From<Option<BmcInfo>> for BmcInfoDisplay {
-    fn from(value: Option<BmcInfo>) -> Self {
-        if let Some(bmc_info) = value {
-            Self {
-                ip: bmc_info.ip.none_if_empty(),
-                mac: bmc_info.mac.none_if_empty(),
-                version: bmc_info.version.none_if_empty(),
-                firmware_version: bmc_info.firmware_version.none_if_empty(),
-            }
-        } else {
-            Self::default()
+impl From<(Option<BmcEndpoint>, Option<BmcStatus>, Option<BmcInfo>)> for BmcDisplay {
+    fn from(
+        (endpoint, status, legacy): (Option<BmcEndpoint>, Option<BmcStatus>, Option<BmcInfo>),
+    ) -> Self {
+        let legacy = legacy.unwrap_or_default();
+        // A present split message is authoritative, including unknown fields.
+        let endpoint = endpoint.unwrap_or(BmcEndpoint {
+            ip: legacy.ip,
+            mac: legacy.mac,
+            port: legacy.port,
+            machine_interface_id: legacy.machine_interface_id,
+        });
+        let status = status.unwrap_or(BmcStatus {
+            version: legacy.version,
+            firmware_version: legacy.firmware_version,
+        });
+        Self {
+            ip: endpoint.ip.none_if_empty(),
+            mac: endpoint.mac.none_if_empty(),
+            version: status.version.none_if_empty(),
+            firmware_version: status.firmware_version.none_if_empty(),
         }
     }
 }
@@ -748,22 +764,25 @@ mod tests {
     #[allow(deprecated)]
     fn managed_host_output_falls_back_to_legacy_memory_when_all_groups_are_zero_count() {
         let host_memory = ManagedHostOutput::from(Machine {
-            discovery_info: Some(DiscoveryInfo {
-                memory_device_groups: vec![MemoryDeviceGroup {
-                    size_mb: Some(8192),
-                    mem_type: Some("DDR4".to_string()),
-                    count: 0,
-                }],
-                memory_devices: vec![
-                    rpc::machine_discovery::MemoryDevice {
-                        size_mb: Some(16384),
-                        mem_type: Some("DDR5".to_string()),
-                    },
-                    rpc::machine_discovery::MemoryDevice {
-                        size_mb: Some(16384),
-                        mem_type: Some("DDR5".to_string()),
-                    },
-                ],
+            status: Some(rpc::forge::MachineStatus {
+                discovery_info: Some(DiscoveryInfo {
+                    memory_device_groups: vec![MemoryDeviceGroup {
+                        size_mb: Some(8192),
+                        mem_type: Some("DDR4".to_string()),
+                        count: 0,
+                    }],
+                    memory_devices: vec![
+                        rpc::machine_discovery::MemoryDevice {
+                            size_mb: Some(16384),
+                            mem_type: Some("DDR5".to_string()),
+                        },
+                        rpc::machine_discovery::MemoryDevice {
+                            size_mb: Some(16384),
+                            mem_type: Some("DDR5".to_string()),
+                        },
+                    ],
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
             ..Default::default()
@@ -773,14 +792,127 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)] // Exercise responses from Core before the BMC split.
+    fn machine_displays_use_bmc_endpoint_and_status() {
+        let endpoint = BmcEndpoint {
+            ip: Some("192.0.2.10".into()),
+            mac: Some("02:03:04:05:06:07".into()),
+            ..Default::default()
+        };
+        let status = BmcStatus {
+            version: Some("2.0".into()),
+            firmware_version: Some("24.10".into()),
+        };
+        let legacy = BmcInfo {
+            ip: Some("192.0.2.20".into()),
+            mac: Some("02:03:04:05:06:08".into()),
+            version: Some("1.0".into()),
+            firmware_version: Some("23.10".into()),
+            ..Default::default()
+        };
+        let new_values = (
+            Some("192.0.2.10"),
+            Some("02:03:04:05:06:07"),
+            Some("2.0"),
+            Some("24.10"),
+        );
+        let old_values = (
+            Some("192.0.2.20"),
+            Some("02:03:04:05:06:08"),
+            Some("1.0"),
+            Some("23.10"),
+        );
+        for (scenario, bmc, bmc_status, bmc_info, expected) in [
+            (
+                "split only",
+                Some(endpoint.clone()),
+                Some(status.clone()),
+                None,
+                new_values,
+            ),
+            (
+                "split messages win",
+                Some(endpoint.clone()),
+                Some(status.clone()),
+                Some(legacy.clone()),
+                new_values,
+            ),
+            ("legacy only", None, None, Some(legacy.clone()), old_values),
+            (
+                "legacy status",
+                Some(endpoint),
+                None,
+                Some(legacy.clone()),
+                (new_values.0, new_values.1, old_values.2, old_values.3),
+            ),
+            (
+                "legacy endpoint",
+                None,
+                Some(status),
+                Some(legacy.clone()),
+                (old_values.0, old_values.1, new_values.2, new_values.3),
+            ),
+            (
+                "empty split messages win",
+                Some(BmcEndpoint::default()),
+                Some(BmcStatus::default()),
+                Some(legacy),
+                (None, None, None, None),
+            ),
+            (
+                "missing BMC fields",
+                None,
+                None,
+                None,
+                (None, None, None, None),
+            ),
+        ] {
+            let machine = Machine {
+                bmc,
+                bmc_info,
+                status: Some(rpc::forge::MachineStatus {
+                    bmc_status,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let host = ManagedHostOutput::from(machine.clone());
+            let dpu = ManagedHostAttachedDpu::new_from_dpu_machine(machine, vec![], None, true);
+            assert_eq!(
+                (
+                    host.host_bmc_ip.as_deref(),
+                    host.host_bmc_mac.as_deref(),
+                    host.host_bmc_version.as_deref(),
+                    host.host_bmc_firmware_version.as_deref()
+                ),
+                expected,
+                "{scenario}: host display"
+            );
+            assert_eq!(
+                (
+                    dpu.bmc_ip.as_deref(),
+                    dpu.bmc_mac.as_deref(),
+                    dpu.bmc_version.as_deref(),
+                    dpu.bmc_firmware_version.as_deref()
+                ),
+                expected,
+                "{scenario}: DPU display"
+            );
+        }
+    }
+
+    #[test]
     fn managed_host_output_preserves_all_primary_interface_addresses() {
         value_scenarios!(
             run = |addresses| ManagedHostOutput::from(Machine {
-                interfaces: vec![rpc::MachineInterface {
-                    primary_interface: true,
-                    address: addresses,
+                status: Some(rpc::forge::MachineStatus {
+                    interfaces: vec![rpc::MachineInterface {
+                        primary_interface: true,
+                        address: addresses,
+                        ..Default::default()
+                    }],
                     ..Default::default()
-                }],
+                }),
                 ..Default::default()
             })
             .host_admin_ip;

@@ -545,7 +545,8 @@ ListRules List Operation Rules
 
 List Operation Rules on a Site. Filters compose with AND; results are paginated
 and the `X-Pagination` response header reports the total count over the
-post-filter set.
+post-filter set. Results are ordered by creation time descending, then
+Rule UUID descending.
 
 Org must have an Infrastructure Provider entity. User must have authorization
 role with `PROVIDER_ADMIN` suffix.

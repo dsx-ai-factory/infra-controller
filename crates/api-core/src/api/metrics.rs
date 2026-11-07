@@ -44,15 +44,19 @@ impl ApiMetricsEmitter {
     /// Creates histogram bucket configuration for machine reboot duration
     ///
     /// Machine reboots typically take 5-20 minutes (300-1200 seconds).
-    /// Buckets are optimized for this range with additional buckets for faster/slower reboots.
+    /// Buckets retain minute-scale resolution and cover slow request-to-completion
+    /// intervals up to two days.
     ///
-    /// Boundaries in seconds: 3min, 5min, 10min, 15min, 30min, 60min
+    /// Boundaries: 3min, 5min, 10min, 15min, 30min, 1h, 2h, 4h, 8h, 12h, 1d, 2d.
     pub fn machine_reboot_duration_view() -> carbide_metrics_utils::Result<OtelView> {
         carbide_metrics_utils::new_view(
             MACHINE_REBOOT_DURATION_METRIC_NAME,
             Some(InstrumentKind::Histogram),
             Aggregation::ExplicitBucketHistogram {
-                boundaries: vec![180.0, 300.0, 600.0, 900.0, 1800.0, 3600.0],
+                boundaries: vec![
+                    180.0, 300.0, 600.0, 900.0, 1800.0, 3600.0, 7200.0, 14400.0, 28800.0, 43200.0,
+                    86400.0, 172800.0,
+                ],
                 record_min_max: true,
             },
         )

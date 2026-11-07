@@ -49,9 +49,9 @@ use crate::machine::network::{MachineNetworkStatusObservation, ManagedHostNetwor
 use crate::machine::topology::{DiscoveryData, MachineTopology, TopologyData};
 use crate::machine::{
     CURRENT_STATE_MODEL_VERSION, Dpf, DpuMachine, FailureCause, FailureDetails, FailureSource,
-    HostMachine, HostProfile, MachineInterfaceSnapshot, MachineLastRebootRequested,
-    MachineLastRebootRequestedMode, ManagedHostState, ManagedHostStateSnapshot, StableHostMachine,
-    UpgradeDecision,
+    HardwareInfoScope, HostMachine, HostProfile, MachineInterfaceSnapshot,
+    MachineLastRebootRequested, MachineLastRebootRequestedMode, ManagedHostState,
+    ManagedHostStateSnapshot, StableHostMachine, UpgradeDecision,
 };
 use crate::machine_interface::InterfaceType;
 use crate::network_segment::NetworkSegmentType;
@@ -368,6 +368,7 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
 
     MachineSnapshotPgJson {
         machine_maintenance_requested: None,
+        spx_multiplane: None,
         decommission_requested: false,
         bmc_credential_rotation_requested: false,
         uefi_credential_rotation_requested: false,
@@ -409,6 +410,7 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
                 agent_version_superseded_at: None,
                 instance_network_observation: None,
                 fabric_interfaces: vec![],
+                accepted_lldp_snapshot_fingerprint: None,
             }
         }),
         infiniband_status_observation: Some(MachineInfinibandStatusObservation {
@@ -425,6 +427,8 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
         }),
         nvlink_status_observation: None,
         spx_status_observation: None,
+        spx_multiplane_status: None,
+        mlx_device_observation: None,
         extension_service_status_observations: Default::default(),
         controller_state_version: config_version(5).version_string(),
         controller_state: ManagedHostState::Ready,
@@ -458,6 +462,8 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
             last_updated: fixture_time(1600),
         }),
         firmware_autoupdate: Some(true),
+        nic_firmware_profile_id: None,
+        nic_firmware_card_selections: vec![],
         health_reports: Some(health_reports(if dpu_machine_id.is_some() {
             HealthReport::DPU_AGENT_SOURCE
         } else {
@@ -544,6 +550,7 @@ pub fn managed_host_state_snapshot() -> ManagedHostStateSnapshot {
         managed_state,
         aggregate_health: health_report_with_source("aggregate-health"),
         rack_health_overrides: None,
+        hardware_info_scope: HardwareInfoScope::Full,
     }
 }
 

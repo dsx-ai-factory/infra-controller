@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+mod nic;
 mod show;
 mod start_updates;
 
@@ -26,6 +27,10 @@ use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
 pub(crate) enum Cmd {
+    #[dispatch]
+    #[clap(subcommand, about = "Manage NIC firmware")]
+    Nic(nic::Cmd),
+
     #[clap(about = "Show available firmware")]
     Show(show::Args),
 }

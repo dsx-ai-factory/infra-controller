@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Publishes the Fern documentation site on push to main when fern/, docs/, or this
+# Publishes the Fern documentation site on push to main when a Fern input or this
 # workflow file changes, or when manually triggered from the Actions tab.
 #
 # Required configuration:
@@ -28,6 +28,7 @@ on:
     paths:
       - 'fern/**'
       - 'docs/**'
+      - 'RELEASE.md'
       - '.github/workflows/publish-fern-docs.yml'
   workflow_dispatch: {}
 
@@ -50,7 +51,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24.22.1'
 
       - name: Install Fern CLI
         run: npm install -g fern-api@$(node -e "console.log(require('./fern/fern.config.json').version)")

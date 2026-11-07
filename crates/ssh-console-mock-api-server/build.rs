@@ -43,6 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         proto_files: vec![
             PathBuf::from("codegen/v1/machine_id_types.proto"),
             PathBuf::from("proto/common.proto"),
+            PathBuf::from("proto/console_log.proto"),
             PathBuf::from("proto/scout_firmware_upgrade.proto"),
             PathBuf::from("proto/dns.proto"),
             PathBuf::from("proto/forge.proto"),

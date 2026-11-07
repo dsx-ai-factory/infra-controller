@@ -452,11 +452,15 @@ impl MlxConfigRunner {
         }
 
         // Discover the device to get its info.
-        let device_info = crate::device::discovery::discover_device(&self.device).map_err(|e| {
-            MlxRunnerError::GenericError(format!(
-                "Failed to discover device '{}': {}",
-                self.device, e
-            ))
+        let device_info = crate::device::discovery::discover_device_with_settlement(&self.device)
+            .map_err(|error| match error {
+            crate::device::discovery::DeviceDiscoveryError::DirectQuery(
+                error @ MlxRunnerError::ProcessUnsettled { .. },
+            ) => error,
+            error => MlxRunnerError::GenericError(format!(
+                "failed to discover device '{}': {error}",
+                self.device
+            )),
         })?;
 
         // Check if the device matches the registry filters.

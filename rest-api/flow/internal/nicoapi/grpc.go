@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"slices"
 	"strings"
@@ -14,13 +15,14 @@ import (
 	"testing"
 	"time"
 
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/certs"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/grpclog"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"go.opentelemetry.io/otel"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/proto"
@@ -52,6 +54,7 @@ const (
 	// HealthAlertClassification::prevent_allocations() in
 	// crates/health-report/src/lib.rs.
 	classificationPreventAllocations = "PreventAllocations"
+	classificationRackLeak           = "RackLeak"
 
 	// flowFindByIDsBatchSize bounds the number of full protobuf resources Flow
 	// retains in one detail-lookup batch. Core's max_find_by_ids remains the
@@ -142,6 +145,22 @@ func (c *batchingForgeClient) FindPowerShelvesByIds(
 	return &corev1.PowerShelfList{PowerShelves: shelves}, nil
 }
 
+func (c *batchingForgeClient) FindRacksByIds(
+	ctx context.Context,
+	request *corev1.RacksByIdsRequest,
+	options ...grpc.CallOption,
+) (*corev1.RackList, error) {
+	racks := make([]*corev1.Rack, 0, len(request.GetRackIds()))
+	err := c.visitRackBatches(ctx, request, func(batch []*corev1.Rack) error {
+		racks = append(racks, batch...)
+		return nil
+	}, options...)
+	if err != nil {
+		return nil, err
+	}
+	return &corev1.RackList{Racks: racks}, nil
+}
+
 func (c *batchingForgeClient) visitMachineBatches(
 	ctx context.Context,
 	request *corev1.MachinesByIdsRequest,
@@ -170,6 +189,20 @@ func (c *batchingForgeClient) visitSwitchBatches(
 		}, visit)
 }
 
+func (c *batchingForgeClient) visitSwitchBatchesAllowPartial(
+	ctx context.Context,
+	request *corev1.SwitchesByIdsRequest,
+	visit func([]*corev1.Switch) error,
+	options ...grpc.CallOption,
+) error {
+	return visitFindByIDBatchesWithValidator(ctx, "FindSwitchesByIds", c.loadMaxFindByIDs, protoIDsToStrings(request.GetSwitchIds()),
+		func(ctx context.Context, batch []string) ([]*corev1.Switch, error) {
+			return c.fetchSwitchesByIDs(ctx, request, batch, options...)
+		}, func(sw *corev1.Switch) string {
+			return sw.GetId().GetId()
+		}, validateByIDsPartialResponse, visit)
+}
+
 func (c *batchingForgeClient) visitPowerShelfBatches(
 	ctx context.Context,
 	request *corev1.PowerShelvesByIdsRequest,
@@ -184,15 +217,60 @@ func (c *batchingForgeClient) visitPowerShelfBatches(
 		}, visit)
 }
 
+func (c *batchingForgeClient) visitPowerShelfBatchesAllowPartial(
+	ctx context.Context,
+	request *corev1.PowerShelvesByIdsRequest,
+	visit func([]*corev1.PowerShelf) error,
+	options ...grpc.CallOption,
+) error {
+	return visitFindByIDBatchesWithValidator(ctx, "FindPowerShelvesByIds", c.loadMaxFindByIDs, protoIDsToStrings(request.GetPowerShelfIds()),
+		func(ctx context.Context, batch []string) ([]*corev1.PowerShelf, error) {
+			return c.fetchPowerShelvesByIDs(ctx, request, batch, options...)
+		}, func(shelf *corev1.PowerShelf) string {
+			return shelf.GetId().GetId()
+		}, validateByIDsPartialResponse, visit)
+}
+
+func (c *batchingForgeClient) visitRackBatches(
+	ctx context.Context,
+	request *corev1.RacksByIdsRequest,
+	visit func([]*corev1.Rack) error,
+	options ...grpc.CallOption,
+) error {
+	return visitFindByIDBatches(ctx, "FindRacksByIds", c.loadMaxFindByIDs, protoIDsToStrings(request.GetRackIds()),
+		func(ctx context.Context, batch []string) ([]*corev1.Rack, error) {
+			return c.fetchRacksByIDs(ctx, request, batch, options...)
+		}, func(rack *corev1.Rack) string {
+			return rack.GetId().GetId()
+		}, visit)
+}
+
+func (c *batchingForgeClient) visitRackBatchesAllowPartial(
+	ctx context.Context,
+	request *corev1.RacksByIdsRequest,
+	visit func([]*corev1.Rack) error,
+	options ...grpc.CallOption,
+) error {
+	return visitFindByIDBatchesWithValidator(ctx, "FindRacksByIds", c.loadMaxFindByIDs, protoIDsToStrings(request.GetRackIds()),
+		func(ctx context.Context, batch []string) ([]*corev1.Rack, error) {
+			return c.fetchRacksByIDs(ctx, request, batch, options...)
+		}, func(rack *corev1.Rack) string {
+			return rack.GetId().GetId()
+		}, validateByIDsPartialResponse, visit)
+}
+
 var testingMsgOnce sync.Once
 
 func coreGRPCDialOptions(transportCredentials credentials.TransportCredentials) []grpc.DialOption {
-	return []grpc.DialOption{
+	options := []grpc.DialOption{
 		grpc.WithTransportCredentials(transportCredentials),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(coreGRPCMaxRecvMsgSize)),
-		grpc.WithStatsHandler(otelgrpc.NewClientHandler(otelgrpc.WithPropagators(otel.GetTextMapPropagator()))),
 		grpc.WithChainUnaryInterceptor(grpclog.UnaryClientInterceptor("nico-core-api")),
 	}
+	if cotel.TransportEnabled() {
+		options = append(options, grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
+	}
+	return options
 }
 
 // NewClient creates a GRPC connection pool to nico-core-api.  Returning success does not mean that we have yet made an actual connection;
@@ -213,7 +291,7 @@ func NewClient(grpcTimeout time.Duration) (Client, error) {
 	tlsConfig, _, dynamicConfig, err := certs.DynamicTLSConfig()
 	if err != nil {
 		if err == certs.ErrNotPresent {
-			return nil, errors.New("Certificates not present, unable to authenticate with nico-core-api")
+			return nil, errors.New("certificates not present, unable to authenticate with nico-core-api")
 		}
 		return nil, err
 	}
@@ -221,7 +299,7 @@ func NewClient(grpcTimeout time.Duration) (Client, error) {
 	conn, err := grpc.NewClient(nicoURL, coreGRPCDialOptions(credentials.NewTLS(tlsConfig))...)
 	if err != nil {
 		dynamicConfig.Close()
-		return nil, fmt.Errorf("Unable to connect to nico-core-api: %w", err)
+		return nil, fmt.Errorf("unable to connect to nico-core-api: %w", err)
 	}
 
 	return &grpcClient{
@@ -243,9 +321,7 @@ func (c *grpcClient) GetMachines(ctx context.Context) ([]MachineDetail, error) {
 	}
 
 	req := &corev1.MachinesByIdsRequest{}
-	for _, machineID := range machineIDs.MachineIds {
-		req.MachineIds = append(req.MachineIds, machineID)
-	}
+	req.MachineIds = append(req.MachineIds, machineIDs.GetMachineIds()...)
 
 	if len(req.MachineIds) == 0 {
 		return nil, nil
@@ -337,6 +413,46 @@ func (c *grpcClient) GetPowerShelves(ctx context.Context) ([]ObservedControllerD
 	return result, nil
 }
 
+// GetLeakingRackIds retrieves IDs of racks whose aggregate health contains an
+// active RackLeak classification. The ID and detail RPCs receive independent
+// timeout budgets so a slow ID lookup cannot starve the batched health lookup.
+func (c *grpcClient) GetLeakingRackIds(ctx context.Context) ([]string, error) {
+	idsCtx, idsCancel := context.WithTimeout(ctx, c.grpcTimeout)
+	idsResponse, err := c.gclient.FindRackIds(idsCtx, &corev1.RackSearchFilter{})
+	idsCancel()
+	if err != nil {
+		return nil, fmt.Errorf("FindRackIds for leak detection: %w", err)
+	}
+
+	rackIDs := idsResponse.GetRackIds()
+	if len(rackIDs) == 0 {
+		return []string{}, nil
+	}
+
+	detailsCtx, detailsCancel := context.WithTimeout(ctx, c.grpcTimeout)
+	defer detailsCancel()
+	request := &corev1.RacksByIdsRequest{RackIds: rackIDs}
+	leakingRackIDs := make([]string, 0, len(rackIDs))
+	err = c.gclient.visitRackBatchesAllowPartial(detailsCtx, request, func(batch []*corev1.Rack) error {
+		for _, rack := range batch {
+			health := rack.GetStatus().GetHealth()
+			for _, alert := range health.GetAlerts() {
+				if slices.Contains(alert.GetClassifications(), classificationRackLeak) {
+					leakingRackIDs = append(leakingRackIDs, rack.GetId().GetId())
+					break
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("FindRacksByIds for leak detection: %w", err)
+	}
+
+	slices.Sort(leakingRackIDs)
+	return leakingRackIDs, nil
+}
+
 // GetLeakingMachineIds retrieves IDs of all machines which are leaking and are powered on.
 // The search filter passed in to FindMachineIds limits the results to these two conditions.
 func (c *grpcClient) GetLeakingMachineIds(ctx context.Context) ([]string, error) {
@@ -410,7 +526,7 @@ func (c *batchingForgeClient) loadMaxFindByIDs(ctx context.Context) (uint32, err
 		return c.maxFindByIDs, nil
 	}
 
-	response, err := c.ForgeClient.Version(ctx, &corev1.VersionRequest{DisplayConfig: true})
+	response, err := c.Version(ctx, &corev1.VersionRequest{DisplayConfig: true})
 	if err != nil {
 		return 0, fmt.Errorf("get Core runtime config: %w", err)
 	}
@@ -430,6 +546,21 @@ func visitFindByIDBatches[T any](
 	ids []string,
 	fetch func(context.Context, []string) ([]T, error),
 	identity func(T) string,
+	visit func([]T) error,
+) error {
+	return visitFindByIDBatchesWithValidator(
+		ctx, rpcName, loadLimit, ids, fetch, identity, validateByIDsResponse, visit,
+	)
+}
+
+func visitFindByIDBatchesWithValidator[T any](
+	ctx context.Context,
+	rpcName string,
+	loadLimit func(context.Context) (uint32, error),
+	ids []string,
+	fetch func(context.Context, []string) ([]T, error),
+	identity func(T) string,
+	validateResponse func([]string, []string, string) error,
 	visit func([]T) error,
 ) error {
 	if len(ids) == 0 {
@@ -458,7 +589,7 @@ func visitFindByIDBatches[T any](
 		for _, value := range values {
 			returnedIDs = append(returnedIDs, identity(value))
 		}
-		if err := validateByIDsResponse(batch, returnedIDs, rpcName); err != nil {
+		if err := validateResponse(batch, returnedIDs, rpcName); err != nil {
 			return err
 		}
 		if err := visit(values); err != nil {
@@ -485,6 +616,30 @@ func validateByIDsRequest(ids []string, rpcName string) error {
 
 // validateByIDsResponse requires the response identities to exactly match the request.
 func validateByIDsResponse(requested, returned []string, rpcName string) error {
+	missing, err := validateByIDsResponseSubset(requested, returned, rpcName)
+	if err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("%s returned an incomplete response; missing IDs: %s", rpcName, strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// validateByIDsPartialResponse accepts missing requested IDs while retaining
+// identity checks that prevent a response from updating the wrong resources.
+func validateByIDsPartialResponse(requested, returned []string, rpcName string) error {
+	missing, err := validateByIDsResponseSubset(requested, returned, rpcName)
+	if err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		log.Warn().Str("rpc", rpcName).Strs("missing_ids", missing).Msg("Core lookup returned a partial response")
+	}
+	return nil
+}
+
+func validateByIDsResponseSubset(requested, returned []string, rpcName string) ([]string, error) {
 	requestedSet := make(map[string]struct{}, len(requested))
 	for _, id := range requested {
 		requestedSet[id] = struct{}{}
@@ -493,13 +648,13 @@ func validateByIDsResponse(requested, returned []string, rpcName string) error {
 	returnedSet := make(map[string]struct{}, len(returned))
 	for _, id := range returned {
 		if id == "" {
-			return fmt.Errorf("%s returned an empty ID", rpcName)
+			return nil, fmt.Errorf("%s returned an empty ID", rpcName)
 		}
 		if _, ok := requestedSet[id]; !ok {
-			return fmt.Errorf("%s returned unrequested ID: %s", rpcName, id)
+			return nil, fmt.Errorf("%s returned unrequested ID: %s", rpcName, id)
 		}
 		if _, ok := returnedSet[id]; ok {
-			return fmt.Errorf("%s returned duplicate ID: %s", rpcName, id)
+			return nil, fmt.Errorf("%s returned duplicate ID: %s", rpcName, id)
 		}
 		returnedSet[id] = struct{}{}
 	}
@@ -510,10 +665,7 @@ func validateByIDsResponse(requested, returned []string, rpcName string) error {
 			missing = append(missing, id)
 		}
 	}
-	if len(missing) > 0 {
-		return fmt.Errorf("%s returned an incomplete response; missing IDs: %s", rpcName, strings.Join(missing, ", "))
-	}
-	return nil
+	return missing, nil
 }
 
 // protoID is the common generated-protobuf ID contract used by Core resources.
@@ -738,6 +890,25 @@ func (c *batchingForgeClient) fetchPowerShelvesByIDs(
 	return response.GetPowerShelves(), nil
 }
 
+// fetchRacksByIDs clones the caller's request for one raw Core batch.
+func (c *batchingForgeClient) fetchRacksByIDs(
+	ctx context.Context,
+	request *corev1.RacksByIdsRequest,
+	batch []string,
+	options ...grpc.CallOption,
+) ([]*corev1.Rack, error) {
+	batchRequest := proto.Clone(request).(*corev1.RacksByIdsRequest)
+	batchRequest.RackIds = make([]*corev1.RackId, 0, len(batch))
+	for _, id := range batch {
+		batchRequest.RackIds = append(batchRequest.RackIds, &corev1.RackId{Id: id})
+	}
+	response, err := c.ForgeClient.FindRacksByIds(ctx, batchRequest, options...)
+	if err != nil {
+		return nil, fmt.Errorf("FindRacksByIds: %w", err)
+	}
+	return response.GetRacks(), nil
+}
+
 // FindSwitchRackIDs returns the rack assignment of each given switch.
 func (c *grpcClient) FindSwitchRackIDs(ctx context.Context, switchIds []string) (map[string]string, error) {
 	if len(switchIds) == 0 {
@@ -808,11 +979,43 @@ func (c *grpcClient) FindSwitchControllerStates(ctx context.Context, switchIds [
 	return result, nil
 }
 
-// FindSwitchNvosIPs returns the resolved NVOS host IP for each given switch,
-// keyed by Core SwitchId. Core resolves nvos_info from the expected switch's
-// NVOS MAC and its assigned interface address, and only populates it once both
-// are known, so switches without a resolved NVOS endpoint are omitted.
-func (c *grpcClient) FindSwitchNvosIPs(ctx context.Context, switchIds []string) (map[string]string, error) {
+// FindSwitchRuntimeStatuses returns controller state and aggregate health from
+// the same Core switch snapshot.
+func (c *grpcClient) FindSwitchRuntimeStatuses(ctx context.Context, switchIds []string) (map[string]ComponentRuntimeStatus, error) {
+	if len(switchIds) == 0 {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.grpcTimeout)
+	defer cancel()
+	req := &corev1.SwitchesByIdsRequest{SwitchIds: make([]*corev1.SwitchId, 0, len(switchIds))}
+	for _, id := range switchIds {
+		req.SwitchIds = append(req.SwitchIds, &corev1.SwitchId{Id: id})
+	}
+	result := make(map[string]ComponentRuntimeStatus, len(switchIds))
+	err := c.gclient.visitSwitchBatchesAllowPartial(ctx, req, func(batch []*corev1.Switch) error {
+		for _, sw := range batch {
+			id := sw.GetId().GetId()
+			if id == "" {
+				continue
+			}
+			result[id] = ComponentRuntimeStatus{
+				ControllerState: sw.GetControllerState(),
+				Health:          healthReportFromPb(sw.GetStatus().GetHealth()),
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("FindSwitchesByIds: %w", err)
+	}
+	return result, nil
+}
+
+// FindSwitchNvosPorts returns every observed NVOS port from status.nvos_ports.
+// It preserves Core's port and address ordering. An empty port list falls back to
+// legacy nvos_info when available. Without either port source, a present status
+// returns an empty slice; a missing status omits the switch.
+func (c *grpcClient) FindSwitchNvosPorts(ctx context.Context, switchIds []string) (map[string][]SwitchNvosPort, error) {
 	if len(switchIds) == 0 {
 		return nil, nil
 	}
@@ -827,19 +1030,69 @@ func (c *grpcClient) FindSwitchNvosIPs(ctx context.Context, switchIds []string) 
 		req.SwitchIds = append(req.SwitchIds, &corev1.SwitchId{Id: id})
 	}
 
-	result := make(map[string]string, len(switchIds))
-	if err := c.gclient.visitSwitchBatches(ctx, req, func(batch []*corev1.Switch) error {
+	result := make(map[string][]SwitchNvosPort, len(switchIds))
+	err := c.gclient.visitSwitchBatches(ctx, req, func(batch []*corev1.Switch) error {
 		for _, sw := range batch {
 			sid := sw.GetId().GetId()
 			if sid == "" {
 				continue
 			}
-			if ip := sw.GetNvosInfo().GetIp(); ip != "" {
-				result[sid] = ip
+			nvosPorts := sw.GetStatus().GetNvosPorts()
+			legacy := sw.GetNvosInfo() //nolint:staticcheck // Older Core populates status but omits nvos_ports.
+			if len(nvosPorts) == 0 && legacy != nil {
+				port := SwitchNvosPort{
+					MAC:         legacy.Mac,
+					ServicePort: legacy.Port,
+					Addresses:   []IPAddress{},
+					IsPrimary:   true,
+				}
+				if legacy.GetIp() != "" {
+					family := corev1.AddressFamily_ADDRESS_FAMILY_UNSPECIFIED
+					ip := net.ParseIP(legacy.GetIp())
+					switch {
+					case ip.To4() != nil:
+						family = corev1.AddressFamily_ADDRESS_FAMILY_V4
+					case ip != nil:
+						family = corev1.AddressFamily_ADDRESS_FAMILY_V6
+					}
+					port.Addresses = append(port.Addresses, IPAddress{
+						AddressFamily: family.String(),
+						Address:       legacy.GetIp(),
+					})
+				}
+				result[sid] = []SwitchNvosPort{port}
+				continue
 			}
+			if sw.GetStatus() == nil {
+				continue
+			}
+			ports := make([]SwitchNvosPort, 0, len(nvosPorts))
+			for _, port := range nvosPorts {
+				if port == nil {
+					continue
+				}
+				addresses := make([]IPAddress, 0, len(port.GetAddresses()))
+				for _, address := range port.GetAddresses() {
+					if address == nil {
+						continue
+					}
+					addresses = append(addresses, IPAddress{
+						AddressFamily: address.GetAddressFamily().String(),
+						Address:       address.GetAddress(),
+					})
+				}
+				ports = append(ports, SwitchNvosPort{
+					MAC:         port.Mac,
+					ServicePort: port.ServicePort,
+					Addresses:   addresses,
+					IsPrimary:   port.GetIsPrimary(),
+				})
+			}
+			result[sid] = ports
 		}
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, fmt.Errorf("FindSwitchesByIds: %w", err)
 	}
 	return result, nil
@@ -992,6 +1245,90 @@ func (c *grpcClient) FindPowerShelfControllerStates(ctx context.Context, shelfId
 		return nil, fmt.Errorf("FindPowerShelvesByIds: %w", err)
 	}
 	return result, nil
+}
+
+// FindPowerShelfRuntimeStatuses returns controller state and aggregate health
+// from the same Core power-shelf snapshot.
+func (c *grpcClient) FindPowerShelfRuntimeStatuses(ctx context.Context, shelfIds []string) (map[string]ComponentRuntimeStatus, error) {
+	if len(shelfIds) == 0 {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.grpcTimeout)
+	defer cancel()
+	req := &corev1.PowerShelvesByIdsRequest{PowerShelfIds: make([]*corev1.PowerShelfId, 0, len(shelfIds))}
+	for _, id := range shelfIds {
+		req.PowerShelfIds = append(req.PowerShelfIds, &corev1.PowerShelfId{Id: id})
+	}
+	result := make(map[string]ComponentRuntimeStatus, len(shelfIds))
+	err := c.gclient.visitPowerShelfBatchesAllowPartial(ctx, req, func(batch []*corev1.PowerShelf) error {
+		for _, shelf := range batch {
+			id := shelf.GetId().GetId()
+			if id == "" {
+				continue
+			}
+			result[id] = ComponentRuntimeStatus{
+				ControllerState: shelf.GetControllerState(),
+				Health:          healthReportFromPb(shelf.GetStatus().GetHealth()),
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("FindPowerShelvesByIds: %w", err)
+	}
+	return result, nil
+}
+
+// FindRackHealthReports returns aggregate health from Core rack snapshots.
+func (c *grpcClient) FindRackHealthReports(ctx context.Context, rackIds []string) (map[string]*types.HealthReport, error) {
+	if len(rackIds) == 0 {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.grpcTimeout)
+	defer cancel()
+	req := &corev1.RacksByIdsRequest{RackIds: make([]*corev1.RackId, 0, len(rackIds))}
+	for _, id := range rackIds {
+		req.RackIds = append(req.RackIds, &corev1.RackId{Id: id})
+	}
+	result := make(map[string]*types.HealthReport, len(rackIds))
+	err := c.gclient.visitRackBatchesAllowPartial(ctx, req, func(batch []*corev1.Rack) error {
+		for _, rack := range batch {
+			id := rack.GetId().GetId()
+			if id != "" {
+				result[id] = healthReportFromPb(rack.GetStatus().GetHealth())
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("FindRacksByIds: %w", err)
+	}
+	return result, nil
+}
+
+// FindRackGroupIDs reads the identity chosen at expected-rack creation from actual racks.
+// The timeout covers the complete batch sequence, not each individual batch.
+func (c *grpcClient) FindRackGroupIDs(ctx context.Context, rackIDs []string) (map[string]string, error) {
+	if len(rackIDs) == 0 {
+		return nil, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, c.grpcTimeout)
+	defer cancel()
+	req := &corev1.RacksByIdsRequest{}
+	for _, id := range rackIDs {
+		req.RackIds = append(req.RackIds, &corev1.RackId{Id: id})
+	}
+	groups := make(map[string]string, len(rackIDs))
+	err := c.gclient.visitRackBatchesAllowPartial(ctx, req, func(batch []*corev1.Rack) error {
+		for _, rack := range batch {
+			groups[rack.GetId().GetId()] = rack.GetRackGroupId().GetId()
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read rack groups: %w", err)
+	}
+	return groups, nil
 }
 
 // GetMachinePositionInfo returns position information for the given machine IDs
@@ -1268,7 +1605,7 @@ func (c *grpcClient) InsertHealthReportOverride(ctx context.Context, machineID s
 		},
 	}
 
-	_, err := c.gclient.InsertHealthReportOverride(ctx, req)
+	_, err := c.gclient.InsertHealthReportOverride(ctx, req) //nolint:staticcheck // Retain the existing maintenance RPC for older Core servers.
 	if err != nil {
 		return fmt.Errorf("failed to insert health report override for machine %s: %w", machineID, err)
 	}
@@ -1284,7 +1621,7 @@ func (c *grpcClient) RemoveHealthReportOverride(ctx context.Context, machineID s
 		Source:    source,
 	}
 
-	_, err := c.gclient.RemoveHealthReportOverride(ctx, req)
+	_, err := c.gclient.RemoveHealthReportOverride(ctx, req) //nolint:staticcheck // Pair cleanup with the legacy maintenance RPC used above.
 	if err != nil {
 		return fmt.Errorf("failed to remove health report override for machine %s: %w", machineID, err)
 	}
@@ -1723,6 +2060,18 @@ func (c *grpcClient) AddPowerState(machineID string, state PowerState) {
 	panic("Not a unit test")
 }
 
+func (c *grpcClient) SetSwitchHealth(switchID string, health *types.HealthReport) {
+	panic("Not a unit test")
+}
+
+func (c *grpcClient) SetPowerShelfHealth(shelfID string, health *types.HealthReport) {
+	panic("Not a unit test")
+}
+
+func (c *grpcClient) SetRackHealth(rackID string, health *types.HealthReport) {
+	panic("Not a unit test")
+}
+
 func (c *grpcClient) SetFirmwareUpdateTimeWindowError(err error) {
 	panic("Not a unit test")
 }
@@ -1743,6 +2092,10 @@ func (c *grpcClient) SetLeakingMachineIds(ids []string) {
 	panic("Not a unit test")
 }
 
+func (c *grpcClient) SetLeakingRackIds(ids []string) {
+	panic("Not a unit test")
+}
+
 func (c *grpcClient) SetLeakingSwitchIds(ids []string) {
 	panic("Not a unit test")
 }
@@ -1759,7 +2112,7 @@ func (c *grpcClient) SetSwitchControllerState(switchID, state string) {
 	panic("Not a unit test")
 }
 
-func (c *grpcClient) SetSwitchNvosIP(switchID, ip string) {
+func (c *grpcClient) SetSwitchNvosPorts(switchID string, ports []SwitchNvosPort) {
 	panic("Not a unit test")
 }
 

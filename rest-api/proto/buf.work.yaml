@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Flow imports Core power models without generating a second copy of Core bindings.
+version: v1
+directories:
+  - core/src/v1
+  - flow/src/v1

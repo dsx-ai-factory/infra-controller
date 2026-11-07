@@ -470,6 +470,7 @@ type fakeInventoryTargetSource struct {
 func (s *fakeInventoryTargetSource) GetRacksForNVLDomain(
 	_ context.Context,
 	id identifier.Identifier,
+	_ bool,
 ) ([]*rack.Rack, error) {
 	return s.domainRacks[id.ID], nil
 }
@@ -493,6 +494,7 @@ func (s *fakeInventoryTargetSource) GetListOfRacks(
 	_ *dbquery.StringQueryInfo,
 	pagination *dbquery.Pagination,
 	_ *dbquery.OrderBy,
+	_ bool,
 	_ bool,
 ) ([]*rack.Rack, int32, error) {
 	if pagination != nil {

@@ -21,11 +21,11 @@ use tonic::transport::Channel;
 
 use super::collector_metrics::ExportMetricsServiceRequest;
 use super::collector_metrics::metrics_service_client::MetricsServiceClient;
-use super::convert::build_metrics_export_request;
-use super::{OtlpExport, OtlpSignal, run_drain};
+use super::convert::build_queued_metrics_export_request;
+use super::metrics::metric;
+use super::{OtlpExport, OtlpExportResponse, OtlpSignal, run_drain};
 use crate::config::OtlpTargetConfig;
-use crate::sink::otlp::OtlpMetricsQueue;
-use crate::sink::{EventContext, MetricSample};
+use crate::sink::otlp::{OtlpMetricsQueue, QueuedMetric};
 
 pub(crate) struct OtlpMetricsDrainTask {
     queue: Arc<OtlpMetricsQueue>,
@@ -69,11 +69,11 @@ struct MetricsExport {
 }
 
 impl OtlpExport for MetricsExport {
-    type Item = (EventContext, MetricSample);
+    type Item = QueuedMetric;
     type Request = ExportMetricsServiceRequest;
 
     fn build(&self, items: &[Self::Item], observed_nanos: u64) -> Self::Request {
-        build_metrics_export_request(items, observed_nanos, &self.metric_name_prefix)
+        build_queued_metrics_export_request(items, observed_nanos, &self.metric_name_prefix)
     }
 
     fn record_count(request: &Self::Request) -> usize {
@@ -81,7 +81,15 @@ impl OtlpExport for MetricsExport {
             .resource_metrics
             .iter()
             .flat_map(|rm| &rm.scope_metrics)
-            .map(|sm| sm.metrics.len())
+            .flat_map(|sm| &sm.metrics)
+            .map(|metric| match metric.data.as_ref() {
+                Some(metric::Data::Gauge(gauge)) => gauge.data_points.len(),
+                Some(metric::Data::Sum(sum)) => sum.data_points.len(),
+                Some(metric::Data::Histogram(histogram)) => histogram.data_points.len(),
+                Some(metric::Data::ExponentialHistogram(histogram)) => histogram.data_points.len(),
+                Some(metric::Data::Summary(summary)) => summary.data_points.len(),
+                None => 0,
+            })
             .sum()
     }
 
@@ -89,7 +97,57 @@ impl OtlpExport for MetricsExport {
         prost::Message::encoded_len(request)
     }
 
-    async fn send(&mut self, request: Self::Request) -> Result<(), tonic::Status> {
-        self.client.export(request).await.map(drop)
+    async fn send(&mut self, request: Self::Request) -> Result<OtlpExportResponse, tonic::Status> {
+        let response = self.client.export(request).await?.into_inner();
+
+        Ok(response
+            .partial_success
+            .map_or_else(OtlpExportResponse::default, |partial| OtlpExportResponse {
+                rejected_records: partial.rejected_data_points,
+                error_message: partial.error_message,
+            }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::otlp::metrics::{
+        Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, Sum, metric,
+    };
+
+    #[test]
+    fn export_record_count_counts_datapoints_in_grouped_metrics() {
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                scope_metrics: vec![ScopeMetrics {
+                    metrics: vec![
+                        Metric {
+                            data: Some(metric::Data::Gauge(Gauge {
+                                data_points: vec![
+                                    NumberDataPoint::default(),
+                                    NumberDataPoint::default(),
+                                ],
+                            })),
+                            ..Default::default()
+                        },
+                        Metric {
+                            data: Some(metric::Data::Sum(Sum {
+                                data_points: vec![
+                                    NumberDataPoint::default(),
+                                    NumberDataPoint::default(),
+                                ],
+                                ..Default::default()
+                            })),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+
+        assert_eq!(MetricsExport::record_count(&request), 4);
     }
 }

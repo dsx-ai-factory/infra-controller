@@ -10,15 +10,20 @@ import (
 	"context"
 	"time"
 
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 // Client allow us to have both a real implemenation and a mock implementation for unit tests which can be switched transparently
 type Client interface {
+	// GetComponentPowerDetails reads passive hardware, policy, and tracked actions
+	// through the shared Core connection, bounded by both caller and client timeouts.
+	GetComponentPowerDetails(context.Context, *corev1.GetComponentPowerDetailsRequest) (*corev1.GetComponentPowerDetailsResponse, error)
 	// Close releases the connection and certificate watcher after callers stop using the client.
 	Close() error
 	Version(ctx context.Context) (string, error)
 	GetMachines(ctx context.Context) ([]MachineDetail, error)
+	GetLeakingRackIds(ctx context.Context) ([]string, error)
 	GetLeakingMachineIds(ctx context.Context) ([]string, error)
 	GetLeakingSwitchIds(ctx context.Context) ([]string, error)
 	GetPowerStates(ctx context.Context, machineIds []string) (ret []MachinePowerState, err error)
@@ -57,12 +62,15 @@ type Client interface {
 	// core (e.g. `{"state":"ready"}`); decoding is the caller's job. Switches
 	// for which Core returns no controller_state are omitted from the result.
 	FindSwitchControllerStates(ctx context.Context, switchIds []string) (map[string]string, error)
+	// FindSwitchRuntimeStatuses returns controller state and aggregate health
+	// from one FindSwitchesByIds snapshot.
+	FindSwitchRuntimeStatuses(ctx context.Context, switchIds []string) (map[string]ComponentRuntimeStatus, error)
 
-	// FindSwitchNvosIPs returns the resolved NVOS host IP for each switch,
-	// keyed by Core SwitchId. Core populates nvos_info only once both the NVOS
-	// MAC and its assigned address resolve, so switches without a resolved NVOS
-	// endpoint are omitted from the result.
-	FindSwitchNvosIPs(ctx context.Context, switchIds []string) (map[string]string, error)
+	// FindSwitchNvosPorts returns all status.nvos_ports, keyed by Core SwitchId.
+	// An empty port list falls back to legacy nvos_info when available.
+	// Without either port source, a present status returns an empty slice;
+	// a missing status omits the switch.
+	FindSwitchNvosPorts(ctx context.Context, switchIds []string) (map[string][]SwitchNvosPort, error)
 
 	// GetObservedNVLinkDomainMemberships returns valid rack/domain observations
 	// from a complete snapshot of Core's active switch inventory. Switches without
@@ -73,6 +81,14 @@ type Client interface {
 	// FindPowerShelfControllerStates is the power-shelf equivalent of
 	// FindSwitchControllerStates.
 	FindPowerShelfControllerStates(ctx context.Context, shelfIds []string) (map[string]string, error)
+	// FindPowerShelfRuntimeStatuses is the power-shelf equivalent of
+	// FindSwitchRuntimeStatuses.
+	FindPowerShelfRuntimeStatuses(ctx context.Context, shelfIds []string) (map[string]ComponentRuntimeStatus, error)
+
+	// FindRackHealthReports returns Core aggregate health keyed by rack ID.
+	FindRackHealthReports(ctx context.Context, rackIds []string) (map[string]*types.HealthReport, error)
+	// FindRackGroupIDs returns persisted group identities from actual Core racks.
+	FindRackGroupIDs(ctx context.Context, rackIDs []string) (map[string]string, error)
 
 	// GetSwitches returns a complete snapshot of active Core switches with the
 	// runtime ID and BMC MAC needed for actual-inventory reconciliation.
@@ -261,17 +277,21 @@ type Client interface {
 	SetAdminPowerControlError(err error)
 	AddMachineInterface(iface MachineInterface)
 	AddExpectedSwitchInfo(info ExpectedSwitchInfo)
+	SetLeakingRackIds(ids []string)
 	SetLeakingMachineIds(ids []string)
 	SetLeakingSwitchIds([]string)
 	SetSwitchRackID(switchID, rackID string)
 	SetPowerShelfRackID(shelfID, rackID string)
 	SetSwitchControllerState(switchID, state string)
-	SetSwitchNvosIP(switchID, ip string)
+	SetSwitchHealth(switchID string, health *types.HealthReport)
+	SetSwitchNvosPorts(switchID string, ports []SwitchNvosPort)
 	SetObservedNVLinkDomainMemberships(memberships []NVLinkDomainMembership)
 	SetPowerShelfControllerState(shelfID, state string)
+	SetPowerShelfHealth(shelfID string, health *types.HealthReport)
 	SetObservedSwitches(devices []ObservedControllerDevice)
 	SetObservedPowerShelves(devices []ObservedControllerDevice)
 	SetRackHostMachineIDs(rackID string, machineIDs []string)
+	SetRackHealth(rackID string, health *types.HealthReport)
 	AddExpectedRackDetail(detail ExpectedRackDetail)
 	AddExpectedMachineDetail(detail ExpectedMachineDetail)
 	AddExpectedSwitchDetail(detail ExpectedSwitchDetail)

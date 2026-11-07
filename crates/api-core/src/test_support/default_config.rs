@@ -50,7 +50,7 @@ use crate::cfg::file::{
     default_database_pool_acquire_timeout, default_database_pool_idle_timeout,
     default_database_pool_max_lifetime, default_database_startup_retry_timeout,
     default_max_find_by_ids, default_max_site_prefix_isolation_rules,
-    default_max_site_prefixes_per_tenant, default_pxe_public_base_url,
+    default_max_site_prefixes_per_tenant, default_pxe_public_base_url, default_shutdown_timeout,
 };
 #[cfg(test)]
 use crate::cfg::file::{
@@ -116,6 +116,7 @@ pub fn fully_populated() -> CarbideConfig {
     CarbideConfig {
         auth: Some(AuthConfig {
             permissive_mode: true,
+            allow_machineatron_scout_stream: false,
             casbin_policy_file: None,
             cli_certs: None,
             trust: None,
@@ -129,6 +130,7 @@ pub fn fully_populated() -> CarbideConfig {
             use_vpc_vrf_loopback: false,
         }),
         dsx_exchange_event_bus: Some(DsxExchangeEventBusConfig::default()),
+        ssh_console_url: Some("https://ssh-console.example:1079".parse().unwrap()),
         secrets: Some(SecretsConfig {
             kms: KmsConfig {
                 active: "local".to_string(),
@@ -144,6 +146,7 @@ pub fn fully_populated() -> CarbideConfig {
             fmds_use_node_tokens: Some(false),
             ..Default::default()
         },
+        admin_lock_admission_permits: Some(16),
         ..get()
     }
 }
@@ -173,6 +176,7 @@ pub fn get() -> CarbideConfig {
         database_pool_idle_timeout: default_database_pool_idle_timeout(),
         database_pool_max_lifetime: default_database_pool_max_lifetime(),
         database_startup_retry_timeout: default_database_startup_retry_timeout(),
+        admin_lock_admission_permits: None,
         api_admission_control: Default::default(),
         compute_allocation_enforcement: Default::default(),
         asn: 0,
@@ -197,8 +201,10 @@ pub fn get() -> CarbideConfig {
             identity_keyfile_path: "Not a real keyfile".to_string(),
             admin_root_cafile_path: "Not a real cafile".to_string(),
         }),
+        ssh_console_url: None,
         auth: None,
         pools: None,
+        resource_pool_backends: HashMap::new(),
         networks: None,
         vpcs: None,
         dpu_ipmi_tool_impl: None,
@@ -238,6 +244,8 @@ pub fn get() -> CarbideConfig {
             IbFabricDefinition {
                 // The actual IP is not used and thereby does not matter
                 endpoints: vec!["https://127.0.0.1:443".to_string()],
+                backend: None,
+                remote_pool: None,
                 pkeys: vec![resource_pool::Range {
                     start: "1".to_string(),
                     end: "100".to_string(),
@@ -286,10 +294,13 @@ pub fn get() -> CarbideConfig {
             dpu_enable_secure_boot: true,
             num_of_vfs: crate::cfg::file::DEFAULT_DPU_NUM_OF_VFS,
             service_vpc_slot_count: 0,
+            max_active_service_vpc_interfaces_per_dpu: 0,
+            allow_service_vpc_tenant_overlap: false,
             additional_managed_sf: 0,
             restart_ovs_on_use_admin_network_change: false,
         },
         host_models: host_firmware_example(),
+        bmc_driver_rules: Vec::new(),
         firmware_global: FirmwareGlobal::test_default(),
         machine_updater: MachineUpdater {
             instance_autoreboot_period: None,
@@ -323,8 +334,10 @@ pub fn get() -> CarbideConfig {
             enabled: true,
             svpc_enabled: true,
             astra_enabled: false,
+            partial_multiplane: Default::default(),
             subnet_ip: Ipv4Addr::UNSPECIFIED,
-            subnet_mask: 0_i32,
+            subnet_mask: EwEthersConfig::default_subnet_mask(),
+            astra: Default::default(),
             monitor_run_interval: std::time::Duration::from_secs(10),
             svpc: SvpcConfig {
                 mqtt_endpoint: "mqtt.forge".to_string(),
@@ -347,9 +360,7 @@ pub fn get() -> CarbideConfig {
         deprecated_rack_management_enabled: None,
         rms: RmsConfig::default(),
         rack_profiles: Default::default(),
-        spdm_state_controller: SpdmStateControllerConfig {
-            controller: StateControllerConfig::default(),
-        },
+        spdm_state_controller: SpdmStateControllerConfig::default(),
         spdm: SpdmConfig {
             enabled: false,
             nras_config: Some(nras::Config::default()),
@@ -378,6 +389,8 @@ pub fn get() -> CarbideConfig {
         credentials: Default::default(),
         dhcp_lease_expiry_handling: false,
         certificates: Default::default(),
+        shutdown_timeout: default_shutdown_timeout(),
+        panic_on_early_task_return: true,
     }
 }
 

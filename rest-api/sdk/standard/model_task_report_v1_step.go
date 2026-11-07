@@ -23,17 +23,17 @@ import (
 // checks if the TaskReportV1Step type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &TaskReportV1Step{}
 
-// TaskReportV1Step Execution state of one rule sequence step. Pairs 1:1 with the rule's ordered steps within the containing stage and shares its index.
+// TaskReportV1Step Execution state of one rule sequence step. Pairs 1:1 with the rule's ordered steps within the containing stage and shares its index. Unresolved components (`totalComponents - succeededComponents - failedComponents`) have no reported terminal outcome, even if the step has failed or timed out.
 type TaskReportV1Step struct {
 	// Component class this step targets, e.g. `Compute`, `NVLSwitch`, `PowerShelf`.
 	ComponentType string             `json:"componentType"`
 	Status        TaskReportV1Status `json:"status"`
-	// Count of components of `componentType` this step targets. Surfaced here because the task representation does not include the per-type component map.
-	TotalComponents *int32 `json:"totalComponents,omitempty"`
-	// Reserved for a future best-effort activity contract that reports per-component outcomes. Not written under the current fail-fast contract and omitted by the producer.
-	CompletedComponents *int32 `json:"completedComponents,omitempty"`
-	// Reserved (see `completedComponents`).
-	FailedComponents *int32 `json:"failedComponents,omitempty"`
+	// Count of components of `componentType` this step targets, including zero for skipped steps.
+	TotalComponents int32 `json:"totalComponents"`
+	// Number of requested components reported as successfully completed, combining the latest successful poll of the current batch with outcomes from completed batches. May decrease if a component is absent from a later poll. Zero when no successful outcomes have been reported.
+	SucceededComponents int32 `json:"succeededComponents"`
+	// Number of requested components reported as `Failed`, using the same counting rules as `succeededComponents`. Zero when no failed outcomes have been reported.
+	FailedComponents int32 `json:"failedComponents"`
 	// Set when the step leaves `pending`. `skipped` steps carry no timestamp.
 	StartedAt *time.Time `json:"startedAt,omitempty"`
 	// Set when the step reaches a terminal state.
@@ -48,10 +48,13 @@ type _TaskReportV1Step TaskReportV1Step
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTaskReportV1Step(componentType string, status TaskReportV1Status) *TaskReportV1Step {
+func NewTaskReportV1Step(componentType string, status TaskReportV1Status, totalComponents int32, succeededComponents int32, failedComponents int32) *TaskReportV1Step {
 	this := TaskReportV1Step{}
 	this.ComponentType = componentType
 	this.Status = status
+	this.TotalComponents = totalComponents
+	this.SucceededComponents = succeededComponents
+	this.FailedComponents = failedComponents
 	return &this
 }
 
@@ -111,100 +114,76 @@ func (o *TaskReportV1Step) SetStatus(v TaskReportV1Status) {
 	o.Status = v
 }
 
-// GetTotalComponents returns the TotalComponents field value if set, zero value otherwise.
+// GetTotalComponents returns the TotalComponents field value
 func (o *TaskReportV1Step) GetTotalComponents() int32 {
-	if o == nil || IsNil(o.TotalComponents) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.TotalComponents
+
+	return o.TotalComponents
 }
 
-// GetTotalComponentsOk returns a tuple with the TotalComponents field value if set, nil otherwise
+// GetTotalComponentsOk returns a tuple with the TotalComponents field value
 // and a boolean to check if the value has been set.
 func (o *TaskReportV1Step) GetTotalComponentsOk() (*int32, bool) {
-	if o == nil || IsNil(o.TotalComponents) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TotalComponents, true
+	return &o.TotalComponents, true
 }
 
-// HasTotalComponents returns a boolean if a field has been set.
-func (o *TaskReportV1Step) HasTotalComponents() bool {
-	if o != nil && !IsNil(o.TotalComponents) {
-		return true
-	}
-
-	return false
-}
-
-// SetTotalComponents gets a reference to the given int32 and assigns it to the TotalComponents field.
+// SetTotalComponents sets field value
 func (o *TaskReportV1Step) SetTotalComponents(v int32) {
-	o.TotalComponents = &v
+	o.TotalComponents = v
 }
 
-// GetCompletedComponents returns the CompletedComponents field value if set, zero value otherwise.
-func (o *TaskReportV1Step) GetCompletedComponents() int32 {
-	if o == nil || IsNil(o.CompletedComponents) {
+// GetSucceededComponents returns the SucceededComponents field value
+func (o *TaskReportV1Step) GetSucceededComponents() int32 {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.CompletedComponents
+
+	return o.SucceededComponents
 }
 
-// GetCompletedComponentsOk returns a tuple with the CompletedComponents field value if set, nil otherwise
+// GetSucceededComponentsOk returns a tuple with the SucceededComponents field value
 // and a boolean to check if the value has been set.
-func (o *TaskReportV1Step) GetCompletedComponentsOk() (*int32, bool) {
-	if o == nil || IsNil(o.CompletedComponents) {
+func (o *TaskReportV1Step) GetSucceededComponentsOk() (*int32, bool) {
+	if o == nil {
 		return nil, false
 	}
-	return o.CompletedComponents, true
+	return &o.SucceededComponents, true
 }
 
-// HasCompletedComponents returns a boolean if a field has been set.
-func (o *TaskReportV1Step) HasCompletedComponents() bool {
-	if o != nil && !IsNil(o.CompletedComponents) {
-		return true
-	}
-
-	return false
+// SetSucceededComponents sets field value
+func (o *TaskReportV1Step) SetSucceededComponents(v int32) {
+	o.SucceededComponents = v
 }
 
-// SetCompletedComponents gets a reference to the given int32 and assigns it to the CompletedComponents field.
-func (o *TaskReportV1Step) SetCompletedComponents(v int32) {
-	o.CompletedComponents = &v
-}
-
-// GetFailedComponents returns the FailedComponents field value if set, zero value otherwise.
+// GetFailedComponents returns the FailedComponents field value
 func (o *TaskReportV1Step) GetFailedComponents() int32 {
-	if o == nil || IsNil(o.FailedComponents) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.FailedComponents
+
+	return o.FailedComponents
 }
 
-// GetFailedComponentsOk returns a tuple with the FailedComponents field value if set, nil otherwise
+// GetFailedComponentsOk returns a tuple with the FailedComponents field value
 // and a boolean to check if the value has been set.
 func (o *TaskReportV1Step) GetFailedComponentsOk() (*int32, bool) {
-	if o == nil || IsNil(o.FailedComponents) {
+	if o == nil {
 		return nil, false
 	}
-	return o.FailedComponents, true
+	return &o.FailedComponents, true
 }
 
-// HasFailedComponents returns a boolean if a field has been set.
-func (o *TaskReportV1Step) HasFailedComponents() bool {
-	if o != nil && !IsNil(o.FailedComponents) {
-		return true
-	}
-
-	return false
-}
-
-// SetFailedComponents gets a reference to the given int32 and assigns it to the FailedComponents field.
+// SetFailedComponents sets field value
 func (o *TaskReportV1Step) SetFailedComponents(v int32) {
-	o.FailedComponents = &v
+	o.FailedComponents = v
 }
 
 // GetStartedAt returns the StartedAt field value if set, zero value otherwise.
@@ -315,15 +294,9 @@ func (o TaskReportV1Step) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["componentType"] = o.ComponentType
 	toSerialize["status"] = o.Status
-	if !IsNil(o.TotalComponents) {
-		toSerialize["totalComponents"] = o.TotalComponents
-	}
-	if !IsNil(o.CompletedComponents) {
-		toSerialize["completedComponents"] = o.CompletedComponents
-	}
-	if !IsNil(o.FailedComponents) {
-		toSerialize["failedComponents"] = o.FailedComponents
-	}
+	toSerialize["totalComponents"] = o.TotalComponents
+	toSerialize["succeededComponents"] = o.SucceededComponents
+	toSerialize["failedComponents"] = o.FailedComponents
 	if !IsNil(o.StartedAt) {
 		toSerialize["startedAt"] = o.StartedAt
 	}
@@ -343,6 +316,9 @@ func (o *TaskReportV1Step) UnmarshalJSON(data []byte) (err error) {
 	requiredProperties := []string{
 		"componentType",
 		"status",
+		"totalComponents",
+		"succeededComponents",
+		"failedComponents",
 	}
 
 	allProperties := make(map[string]interface{})

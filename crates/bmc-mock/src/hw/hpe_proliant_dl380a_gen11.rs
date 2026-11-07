@@ -35,6 +35,15 @@ const MODEL: &str = "ProLiant DL380a Gen11";
 const SKU: &str = "P54903-B21";
 
 impl HpeProliantDl380aGen11<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Hpe,
+            product: Some("ProLiant DL380a Gen11"),
+            redfish_version: "1.13.0",
+            advertises_computer_systems: true,
+        }
+    }
+
     pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
         Some(crate::EventServiceConfig::default())
     }
@@ -48,7 +57,7 @@ impl HpeProliantDl380aGen11<'_> {
                         &redfish::ethernet_interface::manager_resource("1", "1"),
                     )
                     .description("Manager Dedicated Network Interface")
-                    .mac_address(self.bmc_mac_address)
+                    .mac_address((self.bmc_mac_address).to_string())
                     .interface_enabled(true)
                     .build(),
                 ]),
@@ -74,14 +83,14 @@ impl HpeProliantDl380aGen11<'_> {
                 let eth_id = format!("DA00000{index}");
                 let resource = redfish::ethernet_interface::system_resource(system_id, &eth_id);
                 redfish::ethernet_interface::builder(&resource)
-                    .mac_address(nic.mac_address)
+                    .mac_address((nic.mac_address).to_string())
                     .interface_enabled(true)
                     .build()
             })
             .collect();
 
-        let boot_opt_builder = |id: &str, kind| {
-            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id), kind)
+        let boot_opt_builder = |id: &str| {
+            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id))
                 .boot_option_reference(id)
         };
         let boot_options = self
@@ -102,14 +111,14 @@ impl HpeProliantDl380aGen11<'_> {
             )))
             .enumerate()
             .map(|(index, (display_name, kind))| {
-                boot_opt_builder(&format!("Boot{index:04X}"), kind)
+                boot_opt_builder(&format!("Boot{index:04X}"))
                     .display_name(&display_name)
-                    .build()
+                    .build(kind)
             })
             .collect::<Vec<_>>();
 
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed(system_id),
                 manufacturer: Some("HPE".into()),
                 model: Some(MODEL.into()),
@@ -135,7 +144,7 @@ impl HpeProliantDl380aGen11<'_> {
                 base_bios: Some(
                     redfish::bios::builder(&redfish::bios::resource(system_id))
                         .odata_context("/redfish/v1/$metadata#Bios.Bios")
-                        .attributes(json!({
+                        .with_attributes(json!({
                             "UsbBoot": "Disabled",
                             "IntelProcVtd": "Enabled",
                             "Dhcpv4": "Enabled",
@@ -147,10 +156,9 @@ impl HpeProliantDl380aGen11<'_> {
                             "SerialConsolePort": "Virtual",
                             "UefiSerialDebugLevel": "ErrorsOnly",
                             "VirtualSerialPort": "Com1Irq4",
-                        }))
-                        .build(),
+                        })),
                 ),
-            }],
+            }]),
         }
     }
 
@@ -168,7 +176,7 @@ impl HpeProliantDl380aGen11<'_> {
                     ),
                     nic,
                 )
-                .status(redfish::resource::Status::Ok)
+                .status(redfish::resource::Status::Ok.into())
                 .build()
             })
             .collect();
@@ -182,7 +190,7 @@ impl HpeProliantDl380aGen11<'_> {
                     &redfish::pcie_device::chassis_resource(chassis_id, &pcie_device_id),
                     nic,
                 )
-                .status(redfish::resource::Status::Ok)
+                .status(redfish::resource::Status::Ok.into())
                 .build()
             })
             .collect();
@@ -190,7 +198,7 @@ impl HpeProliantDl380aGen11<'_> {
         redfish::chassis::ChassisConfig {
             chassis: vec![redfish::chassis::SingleChassisConfig {
                 id: Cow::Borrowed(chassis_id),
-                chassis_type: "RackMount".into(),
+                chassis_type: redfish::schema::chassis::ChassisType::RackMount,
                 manufacturer: Some("HPE".into()),
                 model: Some(MODEL.into()),
                 part_number: Some(SKU.into()),

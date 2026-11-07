@@ -92,6 +92,7 @@ pub(super) async fn show(args: Args, ctx: &mut RuntimeContext) -> CarbideCliResu
     let mut table = Table::new();
     table.set_titles(row![
         "Rack Group ID",
+        "Protocol",
         "Topology",
         "Racks",
         "Name",
@@ -106,6 +107,7 @@ pub(super) async fn show(args: Args, ctx: &mut RuntimeContext) -> CarbideCliResu
                 .as_ref()
                 .map(|id| id.as_str())
                 .unwrap_or_default(),
+            group.protocol,
             group.topology,
             racks,
             group

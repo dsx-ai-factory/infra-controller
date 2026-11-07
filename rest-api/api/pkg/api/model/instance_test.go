@@ -177,6 +177,7 @@ func TestNewAPIInstance(t *testing.T) {
 		IsPhysical:  true,
 		MacAddress:  cutil.GetPtr("test-mac-address"),
 		IPAddresses: []string{"12.70.0.1"},
+		IPPrefixes:  []string{"12.70.0.0/24", "2001:db8::/64"},
 		Status:      cdbm.InterfaceStatusPending,
 		Created:     time.Now(),
 		Updated:     time.Now(),
@@ -336,8 +337,9 @@ func TestNewAPIInstance(t *testing.T) {
 		expectedSecondaryVpcIDs []string
 	}
 	tests := []struct {
-		name string
-		args args
+		name                   string
+		args                   args
+		wantSSHKeyGroupIDsJSON string
 	}{
 		{
 			name: "test new API Instance initializer",
@@ -351,6 +353,7 @@ func TestNewAPIInstance(t *testing.T) {
 				dbskg:                   []cdbm.SSHKeyGroup{dbskg, dbskg2},
 				expectedSecondaryVpcIDs: []string{secondaryVpcID1.String(), secondaryVpcID2.String()},
 			},
+			wantSSHKeyGroupIDsJSON: fmt.Sprintf(`[%q,%q]`, dbskg.ID.String(), dbskg2.ID.String()),
 		},
 		{
 			name: "test new API Instance initializer with power status change",
@@ -361,6 +364,7 @@ func TestNewAPIInstance(t *testing.T) {
 				dbis:   []cdbm.Interface{dbis2},
 				dbdesd: []cdbm.DpuExtensionServiceDeployment{dbdesd2},
 			},
+			wantSSHKeyGroupIDsJSON: `[]`,
 		},
 	}
 	for _, tt := range tests {
@@ -423,7 +427,8 @@ func TestNewAPIInstance(t *testing.T) {
 			if got.Interfaces[0].MacAddress != nil {
 				assert.Equal(t, *tt.args.dbis[0].MacAddress, *got.Interfaces[0].MacAddress)
 			}
-			assert.Equal(t, tt.args.dbis[0].IPAddresses, got.Interfaces[0].IPAddresses)
+			assert.Equal(t, append([]string{}, tt.args.dbis[0].IPAddresses...), got.Interfaces[0].IPAddresses)
+			assert.Equal(t, append([]string{}, tt.args.dbis[0].IPPrefixes...), got.Interfaces[0].IPPrefixes)
 			assert.Equal(t, tt.args.dbis[0].Status, got.Interfaces[0].Status)
 			assert.Equal(t, tt.args.dbis[0].Created, got.Interfaces[0].Created)
 			assert.Equal(t, tt.args.dbis[0].Updated, got.Interfaces[0].Updated)
@@ -456,13 +461,26 @@ func TestNewAPIInstance(t *testing.T) {
 
 			assert.Equal(t, *tt.args.dbic.TpmEkCertificate, *got.TpmEkCertificate)
 
-			jsonResp, err := json.Marshal(got)
-			assert.NoError(t, err)
-			var attrMap map[string]interface{}
-			err = json.Unmarshal(jsonResp, &attrMap)
-			assert.NoError(t, err)
+			var attrMap map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(marshalled, &attrMap))
+			require.Contains(t, attrMap, "networkSecurityGroupPropagationDetails")
+			assert.JSONEq(t, "null", string(attrMap["networkSecurityGroupPropagationDetails"]))
+			require.Contains(t, attrMap, "sshKeyGroupIds")
+			assert.JSONEq(t, tt.wantSSHKeyGroupIDsJSON, string(attrMap["sshKeyGroupIds"]))
 		})
 	}
+
+	t.Run("cross-Tenant Interface ownership", func(t *testing.T) {
+		vpcTenantID := uuid.New()
+		crossTenantInterface := dbis1Secondary1
+		crossTenantInterface.Vpc = &cdbm.Vpc{TenantID: vpcTenantID}
+
+		got := NewAPIInstance(dbi1, dbs, []cdbm.Interface{crossTenantInterface}, nil, nil, nil, nil, nil, nil)
+		require.Len(t, got.Interfaces, 1)
+		assert.Equal(t, cutil.GetPtr(dbi1.TenantID.String()), got.Interfaces[0].InstanceTenantID)
+		assert.Equal(t, cutil.GetPtr(vpcTenantID.String()), got.Interfaces[0].VpcTenantID)
+		assert.Nil(t, got.Interfaces[0].Instance)
+	})
 
 	controllerInstanceID := uuid.New()
 	urlPrefix := "ssh://" + controllerInstanceID.String() + "@"
@@ -518,6 +536,132 @@ func TestAPIInstanceUpdateRequest_PowerProfileJSON(t *testing.T) {
 			var request APIInstanceUpdateRequest
 			require.NoError(t, json.Unmarshal([]byte(tt.payload), &request))
 			assert.Equal(t, tt.want, request.PowerProfile)
+		})
+	}
+}
+
+func TestHasCrossTenantInterface(t *testing.T) {
+	tenantID := uuid.New()
+	otherTenantID := uuid.New()
+	localVpcID := uuid.New()
+	otherVpcID := uuid.New()
+	otherPrefixID := uuid.New()
+
+	vpcs := map[uuid.UUID]*cdbm.Vpc{
+		localVpcID: {ID: localVpcID, TenantID: tenantID},
+		otherVpcID: {ID: otherVpcID, TenantID: otherTenantID},
+	}
+	vpcPrefixes := map[uuid.UUID]*cdbm.VpcPrefix{otherPrefixID: {ID: otherPrefixID, TenantID: otherTenantID}}
+
+	tests := []struct {
+		name       string
+		interfaces []APIInterfaceCreateOrUpdateRequest
+		want       bool
+	}{
+		{name: "same-Tenant VPC", interfaces: []APIInterfaceCreateOrUpdateRequest{{VpcID: cutil.GetPtr(localVpcID.String())}}},
+		{name: "other Tenant's VPC", interfaces: []APIInterfaceCreateOrUpdateRequest{{VpcID: cutil.GetPtr(localVpcID.String())}, {VpcID: cutil.GetPtr(otherVpcID.String())}}, want: true},
+		{name: "other Tenant's VPC Prefix", interfaces: []APIInterfaceCreateOrUpdateRequest{{VpcPrefixID: cutil.GetPtr(otherPrefixID.String())}}, want: true},
+		{name: "selector missing from the maps is left to the not-found checks", interfaces: []APIInterfaceCreateOrUpdateRequest{{VpcID: cutil.GetPtr(uuid.NewString())}}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, HasCrossTenantInterface(tc.interfaces, tenantID, vpcs, vpcPrefixes))
+		})
+	}
+}
+
+func TestBuildInterfacesForCrossTenantAuthorization(t *testing.T) {
+	vpcID := uuid.New()
+	vpcPrefixID := uuid.New()
+	device := "eth0"
+	deviceInstance := 1
+	virtualFunctionID := 2
+	requestedIPAddress := "192.0.2.10"
+	vpc := &cdbm.Vpc{ID: vpcID}
+	vpcPrefix := &cdbm.VpcPrefix{ID: vpcPrefixID, VpcID: vpcID}
+
+	requested := BuildInterfacesForCrossTenantAuthorization(
+		[]APIInterfaceCreateOrUpdateRequest{
+			{
+				VpcID:             cutil.GetPtr(vpcID.String()),
+				IPFamilies:        []IPFamily{IPFamilyIPv6},
+				IPAddress:         &requestedIPAddress,
+				Device:            &device,
+				DeviceInstance:    &deviceInstance,
+				VirtualFunctionID: &virtualFunctionID,
+				IsPhysical:        true,
+			},
+			{VpcPrefixID: cutil.GetPtr(vpcPrefixID.String())},
+			{VpcID: cutil.GetPtr(uuid.NewString())},
+			{SubnetID: cutil.GetPtr(uuid.NewString())},
+		},
+		map[uuid.UUID]*cdbm.Vpc{vpcID: vpc},
+		map[uuid.UUID]*cdbm.VpcPrefix{vpcPrefixID: vpcPrefix},
+	)
+
+	require.Len(t, requested, 2)
+	assert.Equal(t, &vpcID, requested[0].VpcID)
+	assert.Same(t, vpc, requested[0].Vpc)
+	assert.Equal(t, cutil.GetPtr(cdbm.InterfaceVpcIPFamilyModeIPv6Only), requested[0].VpcIPFamilyMode)
+	assert.Equal(t, &requestedIPAddress, requested[0].RequestedIpAddress)
+	assert.Equal(t, &device, requested[0].Device)
+	assert.Equal(t, &deviceInstance, requested[0].DeviceInstance)
+	assert.Equal(t, &virtualFunctionID, requested[0].VirtualFunctionID)
+	assert.True(t, requested[0].IsPhysical)
+	assert.Equal(t, &vpcPrefixID, requested[1].VpcPrefixID)
+	assert.Same(t, vpcPrefix, requested[1].VpcPrefix)
+}
+
+func TestHasNewCrossTenantInterface(t *testing.T) {
+	tenantID := uuid.New()
+	crossTenantTenantID := uuid.New()
+	localVpcID := uuid.New()
+	crossTenantVpcID := uuid.New()
+	otherCrossTenantVpcID := uuid.New()
+	device := "eth0"
+	deviceInstance := 1
+
+	local := cdbm.Interface{
+		VpcID:          &localVpcID,
+		Vpc:            &cdbm.Vpc{ID: localVpcID, TenantID: tenantID},
+		Device:         &device,
+		DeviceInstance: &deviceInstance,
+	}
+	crossTenant := cdbm.Interface{
+		VpcID:          &crossTenantVpcID,
+		Vpc:            &cdbm.Vpc{ID: crossTenantVpcID, TenantID: crossTenantTenantID},
+		Device:         &device,
+		DeviceInstance: &deviceInstance,
+	}
+	otherCrossTenant := crossTenant
+	otherCrossTenant.VpcID = &otherCrossTenantVpcID
+	otherCrossTenant.Vpc = &cdbm.Vpc{ID: otherCrossTenantVpcID, TenantID: crossTenantTenantID}
+	changedCrossTenant := crossTenant
+	changedDeviceInstance := 2
+	changedCrossTenant.DeviceInstance = &changedDeviceInstance
+	deletingCrossTenant := crossTenant
+	deletingCrossTenant.Status = cdbm.InterfaceStatusDeleting
+
+	tests := []struct {
+		name      string
+		requested []cdbm.Interface
+		existing  []cdbm.Interface
+		want      bool
+	}{
+		{name: "unchanged cross-Tenant identity", requested: []cdbm.Interface{crossTenant}, existing: []cdbm.Interface{crossTenant}},
+		{name: "remove cross-Tenant Interface", requested: []cdbm.Interface{local}, existing: []cdbm.Interface{crossTenant}},
+		{name: "retarget cross-Tenant Interface", requested: []cdbm.Interface{otherCrossTenant}, existing: []cdbm.Interface{crossTenant}, want: true},
+		{name: "change cross-Tenant Interface identity", requested: []cdbm.Interface{changedCrossTenant}, existing: []cdbm.Interface{crossTenant}, want: true},
+		{name: "duplicate cross-Tenant request needs one match each", requested: []cdbm.Interface{crossTenant, crossTenant}, existing: []cdbm.Interface{crossTenant}, want: true},
+		{name: "deleting Interface cannot be reused", requested: []cdbm.Interface{crossTenant}, existing: []cdbm.Interface{deletingCrossTenant}, want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := HasNewCrossTenantInterface(tenantID, tc.requested, tc.existing)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
 		})
 	}
 }
@@ -2483,6 +2627,7 @@ func TestAPIInstanceUpdateRequest_Validate(t *testing.T) {
 						Device:               "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC",
 						DeviceInstance:       cutil.GetPtr(0),
 						AttachmentType:       cdbm.SpectrumXAttachmentTypeOVS,
+						BridgeName:           cutil.GetPtr("br-spx0"),
 					},
 				},
 			},
@@ -2923,7 +3068,7 @@ func TestAPIInstanceUpdateRequest_ValidateAndSetOperatingSystemData_Phonehome(t 
 		ID:               uuid.New(),
 		Name:             "ab",
 		IpxeScript:       cutil.GetPtr("original ipxe"),
-		UserData:         cutil.GetPtr("#cloud-config\n{'hostname': 'd2def8d8-29b2-11ef-81e6-07a09293ef16'}"),
+		UserData:         cutil.GetPtr("{'hostname': 'd2def8d8-29b2-11ef-81e6-07a09293ef16'}"),
 		PhoneHomeEnabled: true,
 		IsActive:         true,
 		Status:           cdbm.OperatingSystemStatusReady,
@@ -2938,7 +3083,7 @@ func TestAPIInstanceUpdateRequest_ValidateAndSetOperatingSystemData_Phonehome(t 
 		IpxeScript:               cutil.GetPtr("#!ipxe 9ea0c946-29af-11ef-b798-df4626ad0292"),
 		AlwaysBootWithCustomIpxe: true,
 		PhoneHomeEnabled:         true,
-		UserData:                 cutil.GetPtr("#cloud-config\n{'hostname': '815f5bd8-29b2-11ef-b3b1-ab4be50a4e4d'}"),
+		UserData:                 cutil.GetPtr("{'hostname': '815f5bd8-29b2-11ef-b3b1-ab4be50a4e4d'}"),
 	}
 
 	// Instance with ipxe and user-data.
@@ -3139,11 +3284,12 @@ phone_home:
 				OperatingSystemID: cutil.GetPtr(uuid.NewString()),
 				UserData:          cutil.GetPtr(""),
 			},
-			wantErr:            false,
-			cfg:                cfg1,
-			instance:           instance1,
-			os:                 os1,
-			userDataExactMatch: cutil.GetPtr(fmt.Sprintf(SitePhoneHomeCloudInit, cfg1.GetSitePhoneHomeUrl())),
+			wantErr:  false,
+			cfg:      cfg1,
+			instance: instance1,
+			os:       os1,
+			userDataExactMatch: cutil.GetPtr("#cloud-config\nphone_home:\n  post: all\n  url: " +
+				cfg1.GetSitePhoneHomeUrl() + "\n"),
 		},
 		{
 			name: "PhoneHome enabled in instance and request updates only base OS",
@@ -3360,6 +3506,30 @@ func TestAPIInstanceDeleteRequest_Validate(t *testing.T) {
 					Category: "Storage",
 					Summary:  cutil.GetPtr("Test summary"),
 					Details:  cutil.GetPtr(""),
+				},
+				IsRepairTenant: cutil.GetPtr(true),
+			},
+			wantErr: true,
+		},
+		{
+			// Limits count characters, not bytes: a two-byte rune at every position still fits.
+			name: "test valid Instance delete request - multibyte summary and details at character limits",
+			fields: fields{
+				MachineHealthIssue: &APIMachineHealthIssue{
+					Category: "Hardware",
+					Summary:  cutil.GetPtr(strings.Repeat("é", MachineHealthIssueSummaryMaxLength)),
+					Details:  cutil.GetPtr(strings.Repeat("é", MachineHealthIssueDetailsMaxLength)),
+				},
+				IsRepairTenant: cutil.GetPtr(true),
+			},
+			wantErr: false,
+		},
+		{
+			name: "test invalid Instance delete request - summary exceeds character limit",
+			fields: fields{
+				MachineHealthIssue: &APIMachineHealthIssue{
+					Category: "Hardware",
+					Summary:  cutil.GetPtr(strings.Repeat("é", MachineHealthIssueSummaryMaxLength+1)),
 				},
 				IsRepairTenant: cutil.GetPtr(true),
 			},
@@ -3722,13 +3892,19 @@ func TestValidateInfiniBandRequestForMachineCapability(t *testing.T) {
 func TestValidateSpectrumXAttachments(t *testing.T) {
 	device := "NVIDIA BlueField-3 B3140L E-Series FHHL SuperNIC"
 	attachment := func(deviceInstance int, attachmentType cdbm.SpectrumXAttachmentType, virtualFunctionID *int) APISpectrumXAttachmentCreateOrUpdateRequest {
-		return APISpectrumXAttachmentCreateOrUpdateRequest{
+		req := APISpectrumXAttachmentCreateOrUpdateRequest{
 			SpectrumXPartitionID: uuid.NewString(),
 			Device:               device,
 			DeviceInstance:       cutil.GetPtr(deviceInstance),
 			AttachmentType:       attachmentType,
 			VirtualFunctionID:    virtualFunctionID,
 		}
+		// bridgeName is required for OVS, so a helper-built OVS attachment carries one to
+		// isolate these cases from the per-attachment OVS validation.
+		if attachmentType == cdbm.SpectrumXAttachmentTypeOVS {
+			req.BridgeName = cutil.GetPtr("br-spx0")
+		}
+		return req
 	}
 	overCap := make([]APISpectrumXAttachmentCreateOrUpdateRequest, 0, MaxSpectrumXAttachmentCount+1)
 	for i := range MaxSpectrumXAttachmentCount + 1 {

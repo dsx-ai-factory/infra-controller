@@ -52,6 +52,9 @@ fn dpu_report(nic_mode: BlueFieldOperatingMode) -> EndpointExplorationReport {
 /// we just need a row that `set_pause_remediation` can update.
 fn host_bmc_report() -> EndpointExplorationReport {
     EndpointExplorationReport {
+        component_integrities: None,
+        component_integrity_unavailable: false,
+        hardware_class: None,
         endpoint_type: EndpointType::Bmc,
         vendor: Some(bmc_vendor::BMCVendor::Dell),
         last_exploration_error: None,
@@ -74,6 +77,8 @@ fn host_bmc_report() -> EndpointExplorationReport {
             boot_order: None,
             bios_version: None,
             serial_console_ssh_port: None,
+            processors: None,
+            part_number: None,
         }],
         chassis: vec![Chassis {
             id: String::new(),
@@ -94,6 +99,7 @@ fn host_bmc_report() -> EndpointExplorationReport {
                 description: None,
                 version: Some("6.10.00.00".to_string()),
                 release_date: None,
+                drive: None,
             }],
         }],
         machine_id: None,
@@ -104,11 +110,8 @@ fn host_bmc_report() -> EndpointExplorationReport {
         lockdown_status: None,
         power_shelf_id: None,
         switch_id: None,
-        compute_tray_index: None,
-        physical_slot_number: None,
-        revision_id: None,
-        topology_id: None,
         remediation_error: None,
+        ..Default::default()
     }
 }
 
@@ -180,6 +183,7 @@ async fn test_preingestion_nic_mode_skips_bfb_recovery_needed(
         "test seed".to_string(),
         HOST_BMC_IP,
         false,
+        None,
         &mut txn,
     )
     .await?;
@@ -216,8 +220,13 @@ async fn test_preingestion_nic_mode_skips_bfb_installation_wait(
 
     seed_nic_mode_pair(&env).await;
     let mut txn = pool.begin().await?;
-    db::explored_endpoints::set_preingestion_bfb_installation_wait(DPU_IP, HOST_BMC_IP, &mut txn)
-        .await?;
+    db::explored_endpoints::set_preingestion_bfb_installation_wait(
+        DPU_IP,
+        HOST_BMC_IP,
+        None,
+        &mut txn,
+    )
+    .await?;
     txn.commit().await?;
 
     mgr.run_single_iteration().await?;
@@ -248,8 +257,13 @@ async fn test_preingestion_nic_mode_does_not_skip_bfb_copy_in_progress(
 
     seed_nic_mode_pair(&env).await;
     let mut txn = pool.begin().await?;
-    db::explored_endpoints::set_preingestion_bfb_copy_in_progress(DPU_IP, HOST_BMC_IP, &mut txn)
-        .await?;
+    db::explored_endpoints::set_preingestion_bfb_copy_in_progress(
+        DPU_IP,
+        HOST_BMC_IP,
+        None,
+        &mut txn,
+    )
+    .await?;
     txn.commit().await?;
 
     mgr.run_single_iteration().await?;

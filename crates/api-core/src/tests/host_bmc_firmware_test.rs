@@ -27,7 +27,10 @@ use common::api_fixtures::instance::TestInstance;
 use common::api_fixtures::{
     self, TestEnv, TestManagedHost, create_test_env_with_overrides, get_config,
 };
-use model::firmware::{Firmware, FirmwareComponent, FirmwareComponentType, FirmwareEntry};
+use model::controller_outcome::PersistentStateHandlerOutcome;
+use model::firmware::{
+    Firmware, FirmwareComponent, FirmwareComponentType, FirmwareEntry, FirmwareFileArtifact,
+};
 use model::instance::status::tenant::TenantState;
 use model::machine::{
     HostReprovisionState, InstanceState, MAX_FIRMWARE_UPGRADE_RETRIES, ManagedHostState,
@@ -1317,12 +1320,12 @@ async fn test_instance_upgrading_actual_part_3(
 
     update_manager.run_single_iteration().await.unwrap();
 
-    assert!(host.host_reprovision_requested.is_none()); // Should be cleared
+    let host = mh.host().db_machine(&mut txn).await;
+    assert!(host.host_reprovision_requested.is_none());
     let reqs = db::host_machine_update::find_upgrade_needed(&mut txn, true, false)
         .await
         .unwrap();
     assert!(reqs.is_empty());
-    let host = mh.host().db_machine(&mut txn).await;
 
     // Make sure TenantState agrees
     let instance = tinstance.db_instance(&mut txn).await;
@@ -1637,6 +1640,111 @@ async fn test_script_upgrade_failure(pool: sqlx::PgPool) -> CarbideResult<()> {
     Ok(())
 }
 
+/// A remote artifact that cannot be downloaded must surface on the machine: the request survives
+/// while the download runs, and the failure becomes a FailedFirmwareUpgrade with the error as its
+/// reason, so the retry budget applies instead of a silent loop from Ready.
+#[crate::sqlx_test]
+async fn test_artifact_download_failure_fails_upgrade(pool: sqlx::PgPool) -> CarbideResult<()> {
+    let cache_dir = TempDir::with_prefix("test_artifact_download_failure").unwrap();
+    let missing_url = format!("file://{}", cache_dir.path().join("missing.bin").display());
+    let mut entry = FirmwareEntry::standard("99.99.99.99");
+    entry.files = vec![FirmwareFileArtifact {
+        filename: None,
+        url: Some(missing_url),
+        sha256: String::new(),
+    }];
+
+    let mut config = get_config();
+    config.firmware_global.firmware_download_cache_directory = cache_dir.path().join("cache");
+    config.host_models = HashMap::from([(
+        "1".to_string(),
+        Firmware {
+            vendor: bmc_vendor::BMCVendor::Dell,
+            model: "PowerEdge R750".to_string(),
+            explicit_start_needed: false,
+            components: HashMap::from([(
+                FirmwareComponentType::Bmc,
+                FirmwareComponent {
+                    current_version_reported_as: Some(Regex::new("^Installed-.*__iDRAC.").unwrap()),
+                    preingest_upgrade_when_below: None,
+                    known_firmware: vec![entry],
+                },
+            )]),
+            ordering: vec![FirmwareComponentType::Bmc],
+        },
+    )]);
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let mh = common::api_fixtures::create_managed_host(&env).await;
+    let update_manager = MachineUpdateManager::new(
+        env.pool.clone(),
+        env.config.clone(),
+        env.test_meter.meter(),
+        env.api.work_lock_manager_handle.clone(),
+        None,
+    );
+    update_manager.run_single_iteration().await.unwrap();
+
+    // The first pass starts the download and waits for it without dropping the request.
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.pool.begin().await.unwrap();
+    let host = mh.host().db_machine(&mut txn).await;
+    assert_eq!(host.current_state(), &ManagedHostState::Ready);
+    assert!(host.host_reprovision_requested.is_some());
+    let Some(PersistentStateHandlerOutcome::Wait { reason, .. }) = &host.controller_state_outcome
+    else {
+        panic!(
+            "expected a Wait outcome, got {:?}",
+            host.controller_state_outcome
+        );
+    };
+    assert!(reason.contains("missing.bin"), "{reason}");
+    txn.commit().await.unwrap();
+
+    // The background download fails within milliseconds, but keep running passes until one
+    // records it so a slow runner cannot fail the test; the limit keeps it from hanging.
+    let mut failed_host = None;
+    for _ in 0..50 {
+        sleep(Duration::from_millis(100)).await;
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.pool.begin().await.unwrap();
+        let host = mh.host().db_machine(&mut txn).await;
+        txn.commit().await.unwrap();
+        if host.current_state() != &ManagedHostState::Ready {
+            failed_host = Some(host);
+            break;
+        }
+    }
+    let host = failed_host.expect("the download failure was never recorded on the machine");
+    assert!(host.host_reprovision_requested.is_some());
+    let ManagedHostState::HostReprovision {
+        reprovision_state:
+            HostReprovisionState::FailedFirmwareUpgrade {
+                firmware_type,
+                reason: Some(reason),
+                ..
+            },
+        retry_count: 0,
+    } = host.current_state()
+    else {
+        panic!(
+            "expected FailedFirmwareUpgrade, got {:?}",
+            host.current_state()
+        );
+    };
+    assert_eq!(firmware_type, &FirmwareComponentType::Bmc);
+    assert!(
+        reason.contains("could not be downloaded") && reason.contains("missing.bin"),
+        "{reason}"
+    );
+    assert!(
+        host.health_reports
+            .merges
+            .contains_key(HOST_FW_UPDATE_HEALTH_REPORT_SOURCE)
+    );
+
+    Ok(())
+}
+
 #[crate::sqlx_test]
 async fn test_explicit_update(pool: sqlx::PgPool) -> CarbideResult<()> {
     let mut config = common::api_fixtures::get_config();
@@ -1918,6 +2026,101 @@ async fn test_manual_firmware_upgrade_workflow(pool: sqlx::PgPool) -> CarbideRes
     let host = mh.host().db_machine(&mut txn).await;
 
     assert!(host.manual_firmware_upgrade_completed.is_none());
+
+    Ok(())
+}
+
+/// A drive component is upgraded only through Scout. Without a script URL or a
+/// packaged script it stops with an error and never falls back to the Redfish
+/// upload the same entry would take as another component.
+#[crate::sqlx_test]
+async fn test_drive_without_scout_script_errors_instead_of_redfish_upload(
+    pool: sqlx::PgPool,
+) -> CarbideResult<()> {
+    let model = model::firmware::DriveModel::new("KCD8DPUG15T3").unwrap();
+    let drive = FirmwareComponentType::Drive { model };
+    let mut config = get_config();
+    config.host_models = HashMap::from([(
+        "1".to_string(),
+        Firmware {
+            vendor: bmc_vendor::BMCVendor::Dell,
+            model: "PowerEdge R750".to_string(),
+            explicit_start_needed: false,
+            components: HashMap::from([(
+                drive,
+                FirmwareComponent {
+                    current_version_reported_as: Some(Regex::new("^Drive_KCD8DPUG15T3_").unwrap()),
+                    preingest_upgrade_when_below: None,
+                    known_firmware: vec![FirmwareEntry::standard("1XET7107")],
+                },
+            )]),
+            ordering: vec![drive],
+        },
+    )]);
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let mh = common::api_fixtures::create_managed_host(&env).await;
+
+    let mut txn = env.pool.begin().await.unwrap();
+    let host = mh.host().db_machine(&mut txn).await;
+    let address = host.status.bmc_info.ip_addr().unwrap();
+    let mut endpoint = db::explored_endpoints::find_by_ips(txn.as_mut(), vec![address])
+        .await
+        .unwrap()
+        .remove(0);
+    endpoint.report.service[0]
+        .inventories
+        .push(model::site_explorer::Inventory {
+            id: "Drive_KCD8DPUG15T3_drive_bay_0".to_string(),
+            version: Some("1XET7106".to_string()),
+            ..Default::default()
+        });
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            address,
+            endpoint.report_version,
+            &endpoint.report,
+            false,
+            &mut txn,
+        )
+        .await
+        .unwrap(),
+        db::ConditionalWrite::Applied(())
+    );
+    let checking = HostReprovisionState::CheckingFirmwareV2 {
+        firmware_type: None,
+        firmware_number: None,
+    };
+    let state = ManagedHostState::HostReprovision {
+        reprovision_state: checking.clone(),
+        retry_count: 0,
+    };
+    db::machine::advance(&host, &mut txn, &state, None)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    env.run_machine_state_controller_iteration().await;
+
+    let mut txn = env.pool.begin().await.unwrap();
+    let host = mh.host().db_machine(&mut txn).await;
+    let ManagedHostState::HostReprovision {
+        reprovision_state, ..
+    } = host.current_state()
+    else {
+        panic!("Not in HostReprovision: {:?}", host.current_state());
+    };
+    assert_eq!(reprovision_state, &checking);
+    let Some(PersistentStateHandlerOutcome::Error { err, .. }) = &host.controller_state_outcome
+    else {
+        panic!(
+            "expected an Error outcome, got {:?}",
+            host.controller_state_outcome
+        );
+    };
+    assert!(
+        err.contains("no scout firmware script for drive model KCD8DPUG15T3"),
+        "{err}"
+    );
 
     Ok(())
 }

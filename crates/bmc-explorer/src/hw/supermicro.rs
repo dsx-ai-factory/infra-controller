@@ -32,7 +32,7 @@ pub const EXPECTED_BIOS_ATTRS_PREFIXES: [BiosAttr; 15] = [
     // Attributes to enable CPU virtualization support for faster VMs
     // Not that some are "Enable" and some are "Enabled". Subtle.
     BiosAttr::new_str("IntelVTforDirectedI_O_VT_d", "Enable"),
-    BiosAttr::new_str("IntelVirtualizationTechnology", "Enable"),
+    BiosAttr::new_any_str("IntelVirtualizationTechnology", &["Enable", "Enabled"]),
     BiosAttr::new_str("SR-IOVSupport", "Enabled"),
     BiosAttr::new_str("SR_IOVSupport", "Enabled"),
     // UEFI NIC boot
@@ -43,3 +43,49 @@ pub const EXPECTED_BIOS_ATTRS_PREFIXES: [BiosAttr; 15] = [
     // TPM:
     BiosAttr::new_any_str("SecurityDeviceSupport", &["Enabled", "Enable"]),
 ];
+
+/// Supermicro reports the BIOS version with its date, as
+/// "BIOS Date: 12/13/2024 Ver 2.0b". Returns the part after "Ver ", so that
+/// firmware versions compare correctly. Other versions are returned unchanged.
+pub(crate) fn firmware_version(version: &str) -> &str {
+    version
+        .strip_prefix("BIOS Date: ")
+        .and_then(|rest| rest.split_once(" Ver "))
+        .map_or(version, |(_, version)| version)
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+    use crate::hw::BiosAttrValue;
+
+    #[test]
+    fn firmware_version_keeps_only_the_bios_version() {
+        value_scenarios!(run = firmware_version;
+            "BIOS version with date" {
+                "BIOS Date: 12/13/2024 Ver 2.0b" => "2.0b",
+                "BIOS Date: 01/01/2025 Ver 2.4.V1" => "2.4.V1",
+            }
+            "other versions are unchanged" {
+                "01.03.41" => "01.03.41",
+                "CPLD_ID: 03E0 Rev: 0F" => "CPLD_ID: 03E0 Rev: 0F",
+                "Not Present" => "Not Present",
+            }
+        );
+    }
+
+    #[test]
+    fn intel_virtualization_accepts_both_value_vocabularies() {
+        let expected = EXPECTED_BIOS_ATTRS_PREFIXES
+            .iter()
+            .find(|attr| attr.key == "IntelVirtualizationTechnology")
+            .expect("Intel virtualization expectation");
+        let BiosAttrValue::AnyStr(values) = expected.value else {
+            panic!("Intel virtualization must accept multiple value vocabularies");
+        };
+
+        assert_eq!(values, &["Enable", "Enabled"]);
+    }
+}

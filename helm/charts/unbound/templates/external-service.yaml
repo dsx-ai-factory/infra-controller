@@ -1,10 +1,12 @@
 {{- if .Values.externalService.enabled }}
 {{- /*
 External LoadBalancer exposure for unbound (bare-metal / MetalLB). DPUs and bare-metal
-hosts use this VIP as their DHCP-advertised resolver to reach the .forge zone. Two Services
-(UDP + TCP on 53) share one VIP via metallb.universe.tf/allow-shared-ip. Set the VIP with:
-  externalService.annotations: { metallb.universe.tf/loadBalancerIPs: "10.x.x.x" }
+hosts use these VIPs as their resolver to reach the .forge zone. Two Services
+(UDP + TCP on 53) share the configured VIPs via the externalService.sharedIpAnnotation key.
+Set one address per family with externalService.annotations, for example:
+  metallb.io/loadBalancerIPs: "192.0.2.53,2001:db8::53"
 */}}
+{{- $annotations := include "nico.sharedIpAnnotations" (dict "service" .Values.externalService "group" (printf "%s-external" (include "unbound.name" .)) "annotations" .Values.externalService.annotations) | fromYaml }}
 ---
 apiVersion: v1
 kind: Service
@@ -13,14 +15,14 @@ metadata:
   namespace: {{ include "unbound.namespace" . }}
   labels:
     {{- include "unbound.labels" . | nindent 4 }}
+  {{- with $annotations }}
   annotations:
-    metallb.universe.tf/allow-shared-ip: "{{ include "unbound.name" . }}-external"
-    {{- with .Values.externalService.annotations }}
     {{- toYaml . | nindent 4 }}
-    {{- end }}
+  {{- end }}
 spec:
-  ipFamilyPolicy: SingleStack
-  ipFamilies: [IPv4]
+  ipFamilyPolicy: {{ .Values.externalService.ipFamilyPolicy | default "SingleStack" }}
+  ipFamilies:
+    {{- .Values.externalService.ipFamilies | default (list "IPv4") | toYaml | nindent 4 }}
   type: {{ .Values.externalService.type | default "LoadBalancer" }}
   {{- with .Values.externalService.externalTrafficPolicy }}
   externalTrafficPolicy: {{ . }}
@@ -40,14 +42,14 @@ metadata:
   namespace: {{ include "unbound.namespace" . }}
   labels:
     {{- include "unbound.labels" . | nindent 4 }}
+  {{- with $annotations }}
   annotations:
-    metallb.universe.tf/allow-shared-ip: "{{ include "unbound.name" . }}-external"
-    {{- with .Values.externalService.annotations }}
     {{- toYaml . | nindent 4 }}
-    {{- end }}
+  {{- end }}
 spec:
-  ipFamilyPolicy: SingleStack
-  ipFamilies: [IPv4]
+  ipFamilyPolicy: {{ .Values.externalService.ipFamilyPolicy | default "SingleStack" }}
+  ipFamilies:
+    {{- .Values.externalService.ipFamilies | default (list "IPv4") | toYaml | nindent 4 }}
   type: {{ .Values.externalService.type | default "LoadBalancer" }}
   {{- with .Values.externalService.externalTrafficPolicy }}
   externalTrafficPolicy: {{ . }}

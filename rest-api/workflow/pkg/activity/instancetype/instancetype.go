@@ -16,6 +16,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
@@ -44,7 +45,7 @@ func (mv ManageInstanceType) UpdateInstanceTypesInDB(ctx context.Context, siteID
 
 	stDAO := cdbm.NewSiteDAO(mv.dbSession)
 
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Error().Err(err).Msg("received InstanceType inventory for unknown or deleted Site")
@@ -123,7 +124,7 @@ func (mv ManageInstanceType) UpdateInstanceTypesInDB(ctx context.Context, siteID
 
 	// TODO: We should not delete Instance Type just because they are missing from Site
 	// We will introduce a isMissingOnSite flag for Instance Type DB model
-	if instanceTypeInventory.InventoryPage == nil || instanceTypeInventory.InventoryPage.TotalPages == 0 || (instanceTypeInventory.InventoryPage.CurrentPage == instanceTypeInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(instanceTypeInventory.GetInventoryPage()) {
 		// Clear out any that don't exist on site.
 		for _, instanceType := range existingInstanceTypeIDMap {
 			slogger := logger.With().Str("InstanceType ID", instanceType.ID.String()).Logger()
@@ -213,11 +214,7 @@ func (mv ManageInstanceType) UpdateInstanceTypeInCloud(ctx context.Context, site
 	}
 
 	txCommitted := false
-	defer func(dbTx *cdb.Tx, committed *bool) {
-		if committed != nil && !*committed {
-			dbTx.Rollback()
-		}
-	}(tx, &txCommitted)
+	defer cdb.RollbackTx(ctx, tx, &txCommitted)
 
 	_, err = instanceTypeDAO.Update(ctx, tx, cdbm.InstanceTypeUpdateInput{ID: instanceType.ID, Name: &instanceType.Name, Description: instanceType.Description, Version: &controllerInstanceType.Version})
 	if err != nil {
@@ -306,11 +303,7 @@ func (mv ManageInstanceType) AddInstanceTypeToCloud(ctx context.Context, site *c
 	}
 
 	txCommitted := false
-	defer func(dbTx *cdb.Tx, committed *bool) {
-		if committed != nil && !*committed {
-			dbTx.Rollback()
-		}
-	}(tx, &txCommitted)
+	defer cdb.RollbackTx(ctx, tx, &txCommitted)
 
 	// Start by adding the InstanceType
 	instanceType, err := instanceTypeDAO.Create(ctx, tx, cdbm.InstanceTypeCreateInput{

@@ -22,6 +22,7 @@ use carbide_secrets::credentials::{
 };
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::switch::SwitchId;
+use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::{SwitchComponentResult, SwitchEndpoint};
 use db::switch as db_switch;
 use mac_address::MacAddress;
@@ -63,8 +64,8 @@ pub async fn handle_maintenance(
         SwitchMaintenanceOperation::PowerOn => {
             handle_power_on(switch_id, state, request, ctx).await
         }
-        SwitchMaintenanceOperation::PowerOff => {
-            handle_power_off(switch_id, state, request, ctx).await
+        SwitchMaintenanceOperation::PowerOff { graceful } => {
+            handle_power_off(switch_id, state, request, ctx, *graceful).await
         }
         SwitchMaintenanceOperation::Reset => handle_reset(switch_id, state, request, ctx).await,
         SwitchMaintenanceOperation::ReconfigureCertificate => {
@@ -106,14 +107,20 @@ async fn handle_power_off(
     state: &Switch,
     request: Option<&SwitchMaintenanceRequest>,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
+    graceful: bool,
 ) -> Result<StateHandlerOutcome<SwitchControllerState>, StateHandlerError> {
-    tracing::info!(switch_id = %switch_id, "Switch maintenance: PowerOff");
+    let action = if graceful {
+        PowerAction::GracefulShutdown
+    } else {
+        PowerAction::ForceOff
+    };
+    tracing::info!(switch_id = %switch_id, graceful, "Switch maintenance: PowerOff");
     invoke_power_operation(
         switch_id,
         state,
         request,
         ctx,
-        PowerAction::ForceOff,
+        action,
         "PowerOff",
         SwitchControllerState::Ready,
     )
@@ -334,7 +341,9 @@ async fn invoke_power_operation(
             let result = results.into_iter().next().unwrap_or(SwitchComponentResult {
                 bmc_mac: endpoint.bmc_mac,
                 success: false,
-                error: Some("component manager returned no result".into()),
+                error: Some(ComponentManagerError::Internal(
+                    "component manager returned no result".into(),
+                )),
             });
 
             if result.success {
@@ -348,9 +357,10 @@ async fn invoke_power_operation(
                 return finish_maintenance(switch_id, request, ctx, success_state).await;
             }
 
-            let summary = result
-                .error
-                .unwrap_or_else(|| "power control failed".into());
+            let summary = match result.error {
+                Some(error) => error.to_string(),
+                None => "power control failed".into(),
+            };
             tracing::warn!(
                 switch_id = %switch_id,
                 rack_id = %rack_id,

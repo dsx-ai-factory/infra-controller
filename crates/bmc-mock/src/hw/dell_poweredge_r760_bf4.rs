@@ -32,6 +32,15 @@ pub(crate) struct DellPowerEdgeR760Bf4<'a> {
 const BF4_SLOT: hw::nic::SlotNumber = 2;
 
 impl DellPowerEdgeR760Bf4<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Dell,
+            product: Some("Integrated Dell Remote Access Controller"),
+            redfish_version: "1.18.0",
+            advertises_computer_systems: true,
+        }
+    }
+
     fn sensor_layout() -> redfish::sensor::Layout {
         // R760 BF4 System.Embedded.1 dump contains 38 sensors total. The
         // generic mock layout currently models Temperature, Fan, Power,
@@ -58,7 +67,7 @@ impl DellPowerEdgeR760Bf4<'_> {
                     redfish::ethernet_interface::builder(
                         &redfish::ethernet_interface::manager_resource("iDRAC.Embedded.1", "NIC.1"),
                     )
-                    .mac_address(self.bmc_mac_address)
+                    .mac_address((self.bmc_mac_address).to_string())
                     .interface_enabled(true)
                     .build(),
                 ]),
@@ -89,28 +98,28 @@ impl DellPowerEdgeR760Bf4<'_> {
             redfish::ethernet_interface::builder(&redfish::ethernet_interface::system_resource(
                 system_id, &eth_id,
             ))
-            .description(&format!("NIC in Slot {BF4_SLOT} Port 1"))
-            .mac_address(self.bf4.mac_address)
+            .description(format!("NIC in Slot {BF4_SLOT} Port 1"))
+            .mac_address((self.bf4.mac_address).to_string())
             .interface_enabled(true)
             .build(),
         ];
 
-        let boot_opt_builder = |id: &str, kind| {
-            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id), kind)
+        let boot_opt_builder = |id: &str| {
+            redfish::boot_option::builder(&redfish::boot_option::resource(system_id, id))
                 .boot_option_reference(id)
         };
         let boot_options = vec![
-            boot_opt_builder("Boot0000", BootOptionKind::Network)
-                .display_name(&format!("HTTP Device 1: NIC in Slot {BF4_SLOT} Port 1"))
-                .build(),
-            boot_opt_builder("Boot0001", BootOptionKind::Disk)
+            boot_opt_builder("Boot0000")
+                .display_name(format!("HTTP Device 1: NIC in Slot {BF4_SLOT} Port 1"))
+                .build(BootOptionKind::Network),
+            boot_opt_builder("Boot0001")
                 .display_name("Unavailable: Ubuntu")
                 .uefi_device_path("HD(1,GPT,2D26D4C6-A7B5-4F71-93D4-7F6DF36BC8A8,0x800,0x219800)/\\EFI\\ubuntu\\shimx64.efi")
-                .build(),
+                .build(BootOptionKind::Disk),
         ];
 
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed(system_id),
                 manufacturer: Some("Dell Inc.".into()),
                 model: Some("PowerEdge R760".into()),
@@ -134,7 +143,7 @@ impl DellPowerEdgeR760Bf4<'_> {
                 serial_console: None,
                 secure_boot_available: true,
                 base_bios: Some(redfish::bios::builder(&redfish::bios::resource(system_id))
-                    .attributes(json!({
+                    .with_attributes(json!({
                         "BootSeqRetry": "Disabled",
                         "SetBootOrderEn": "NIC.HttpDevice.1-1,Disk.Bay.2:Enclosure.Internal.0-1",
                         "InBandManageabilityInterface": "Enabled",
@@ -154,8 +163,8 @@ impl DellPowerEdgeR760Bf4<'_> {
                         "SystemBiosVersion": "2.2.7",
                         "SystemManufacturer": "Dell Inc.",
                         "SystemModelName": "PowerEdge R760",
-                    })).build()),
-            }],
+                    }))),
+            }]),
         }
     }
 
@@ -170,7 +179,10 @@ impl DellPowerEdgeR760Bf4<'_> {
                 &function_id,
             ),
         )
-        .ethernet(json!({"MACAddress": &self.bf4.mac_address}))
+        .ethernet(
+            redfish::schema::network_device_function::Ethernet::new()
+                .mac_address(self.bf4.mac_address.to_string()),
+        )
         .oem(redfish::oem::dell::network_device_function::dell_nic_info(
             &function_id,
             BF4_SLOT,
@@ -185,15 +197,14 @@ impl DellPowerEdgeR760Bf4<'_> {
                 &redfish::network_adapter::chassis_resource(chassis_id, &network_adapter_id),
                 &self.bf4,
             )
-            .network_device_functions(
+            .status(redfish::resource::Status::Ok.into())
+            .build_with_functions(
                 &redfish::network_device_function::chassis_collection(
                     chassis_id,
                     &network_adapter_id,
                 ),
                 vec![function],
-            )
-            .status(redfish::resource::Status::Ok)
-            .build(),
+            ),
         ];
 
         let pcie_device_id = format!("mat_{BF4_SLOT}");
@@ -202,14 +213,14 @@ impl DellPowerEdgeR760Bf4<'_> {
                 &redfish::pcie_device::chassis_resource(chassis_id, &pcie_device_id),
                 &self.bf4,
             )
-            .status(redfish::resource::Status::Ok)
+            .status(redfish::resource::Status::Ok.into())
             .build(),
         ];
 
         redfish::chassis::ChassisConfig {
             chassis: vec![redfish::chassis::SingleChassisConfig {
                 id: Cow::Borrowed(chassis_id),
-                chassis_type: "RackMount".into(),
+                chassis_type: redfish::schema::chassis::ChassisType::RackMount,
                 manufacturer: Some("Dell Inc.".into()),
                 part_number: Some("0C9W19A01".into()),
                 model: Some("PowerEdge R760".into()),

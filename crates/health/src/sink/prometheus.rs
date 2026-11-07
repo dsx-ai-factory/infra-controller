@@ -27,6 +27,9 @@ use crate::metrics::{CollectorRegistry, GaugeMetrics, GaugeReading, MetricsManag
 
 /// Publishes metric samples to the Prometheus telemetry registry.
 ///
+/// Individual gNMI event records are excluded. Other sinks, including OTLP,
+/// still receive those samples.
+///
 /// In dynamic label names, characters other than ASCII letters, digits, and
 /// `_` become `_`; an initial ASCII digit gains an `_` prefix, and an empty
 /// name becomes `_`. A sample is rejected when normalization collides with
@@ -34,6 +37,12 @@ use crate::metrics::{CollectorRegistry, GaugeMetrics, GaugeReading, MetricsManag
 pub struct PrometheusSink {
     collector_registry: Arc<CollectorRegistry>,
     stream_metrics: DashMap<String, DashMap<&'static str, Arc<GaugeMetrics>>>,
+    #[cfg(test)]
+    // Called with the endpoint entry guard held; must not access `stream_metrics`.
+    before_endpoint_remove: Option<Box<dyn Fn() + Send + Sync>>,
+    #[cfg(test)]
+    // Called when registration observes `Locked`, before the blocking read.
+    on_registration_blocked: Option<Box<dyn Fn() + Send + Sync>>,
 }
 
 impl PrometheusSink {
@@ -48,6 +57,10 @@ impl PrometheusSink {
         Ok(Self {
             collector_registry,
             stream_metrics: DashMap::new(),
+            #[cfg(test)]
+            before_endpoint_remove: None,
+            #[cfg(test)]
+            on_registration_blocked: None,
         })
     }
 
@@ -73,17 +86,22 @@ impl PrometheusSink {
     }
 
     fn metric_reading_key(sample: &MetricSample) -> String {
+        Self::metric_reading_key_parts(&sample.key, &sample.metric_type, &sample.unit)
+    }
+
+    fn metric_reading_key_parts(key: &str, metric_type: &str, unit: &str) -> String {
         const KEY_SEPARATOR: &str = "::";
         let separators_len = KEY_SEPARATOR.len() * 2;
-        let mut key = String::with_capacity(
-            sample.key.len() + sample.metric_type.len() + sample.unit.len() + separators_len,
-        );
-        key.push_str(&sample.key);
-        key.push_str(KEY_SEPARATOR);
-        key.push_str(&sample.metric_type);
-        key.push_str(KEY_SEPARATOR);
-        key.push_str(&sample.unit);
-        key
+
+        let mut reading_key =
+            String::with_capacity(key.len() + metric_type.len() + unit.len() + separators_len);
+
+        reading_key.push_str(key);
+        reading_key.push_str(KEY_SEPARATOR);
+        reading_key.push_str(metric_type);
+        reading_key.push_str(KEY_SEPARATOR);
+        reading_key.push_str(unit);
+        reading_key
     }
 
     fn is_valid_label_name(name: &str) -> bool {
@@ -96,7 +114,7 @@ impl PrometheusSink {
     }
 
     /// Converts sink-neutral attribute names to Prometheus label names.
-    fn normalize_label_name(name: Cow<'static, str>) -> Cow<'static, str> {
+    pub(crate) fn normalize_label_name(name: Cow<'static, str>) -> Cow<'static, str> {
         if Self::is_valid_label_name(&name) {
             return name;
         }
@@ -157,105 +175,92 @@ impl PrometheusSink {
         Ok(())
     }
 
-    fn stream_static_labels(context: &EventContext) -> Vec<(Cow<'static, str>, String)> {
-        let mut labels = vec![
-            (
-                Cow::Borrowed("endpoint_key"),
-                context.endpoint_key().to_string(),
-            ),
-            // An empty value means this inventory endpoint has no MAC address.
-            (
-                Cow::Borrowed("endpoint_mac"),
-                context
-                    .addr
-                    .mac
-                    .map(|mac| mac.to_string())
-                    .unwrap_or_default(),
-            ),
-            (Cow::Borrowed("endpoint_ip"), context.addr.ip.to_string()),
-            (
-                Cow::Borrowed("collector_type"),
-                context.collector_type.to_string(),
-            ),
-        ];
-
-        if let Some(machine_id) = context.machine_id() {
-            labels.push((Cow::Borrowed("machine_id"), machine_id.to_string()));
-        }
-        if let Some(system_uuid) = context.system_uuid() {
-            labels.push((Cow::Borrowed("system_uuid"), system_uuid.to_string()));
-        }
-        if let Some(switch_id) = context.switch_id() {
-            labels.push((Cow::Borrowed("switch_id"), switch_id.to_string()));
-        }
-        if let Some(power_shelf_id) = context.power_shelf_id() {
-            labels.push((Cow::Borrowed("power_shelf_id"), power_shelf_id.to_string()));
-        }
-        if let Some(serial) = context.serial_number() {
-            labels.push((Cow::Borrowed("serial_number"), serial.to_string()));
-        }
-        if let Some(rack_id) = context.rack_id() {
-            labels.push((Cow::Borrowed("rack_id"), rack_id.to_string()));
-        }
-        if let Some(slot) = context.slot_number() {
-            labels.push((Cow::Borrowed("machine_slot_number"), slot.to_string()));
-        }
-        if let Some(tray) = context.tray_index() {
-            labels.push((Cow::Borrowed("machine_tray_index"), tray.to_string()));
-        }
-        if let Some(domain) = context.nvlink_domain_uuid() {
-            labels.push((Cow::Borrowed("nvlink_domain_uuid"), domain.to_string()));
-        }
-        if let Some(slot) = context.switch_slot_number() {
-            labels.push((Cow::Borrowed("switch_slot_number"), slot.to_string()));
-        }
-        if let Some(tray) = context.switch_tray_index() {
-            labels.push((Cow::Borrowed("switch_tray_index"), tray.to_string()));
-        }
-
-        labels
-    }
-
     fn get_or_create_stream_metrics(
         &self,
         context: &EventContext,
     ) -> Result<Arc<GaugeMetrics>, HealthError> {
-        if let Some(endpoint_metrics) = self.stream_metrics.get::<str>(context.endpoint_key())
+        #[cfg(test)]
+        let endpoint_metrics = match &self.on_registration_blocked {
+            Some(on_blocked) => match self.stream_metrics.try_get::<str>(context.endpoint_key()) {
+                dashmap::try_result::TryResult::Present(metrics) => Some(metrics),
+                dashmap::try_result::TryResult::Absent => None,
+                dashmap::try_result::TryResult::Locked => {
+                    on_blocked();
+                    self.stream_metrics.get::<str>(context.endpoint_key())
+                }
+            },
+            None => self.stream_metrics.get::<str>(context.endpoint_key()),
+        };
+        #[cfg(not(test))]
+        let endpoint_metrics = self.stream_metrics.get::<str>(context.endpoint_key());
+
+        if let Some(endpoint_metrics) = endpoint_metrics
             && let Some(entry) = endpoint_metrics.get(context.collector_type)
         {
             return Ok(entry.value().clone());
         }
 
+        // Registration and final removal share the endpoint's exclusive entry guard.
+        let endpoint_entry = self
+            .stream_metrics
+            .entry(context.endpoint_key().to_string());
+
+        if let dashmap::mapref::entry::Entry::Occupied(endpoint) = &endpoint_entry
+            && let Some(metrics) = endpoint.get().get(context.collector_type)
+        {
+            return Ok(metrics.value().clone());
+        }
+
         let metrics = self.collector_registry.create_gauge_metrics(
             Self::stream_metric_id(context),
             "Metrics forwarded through sink pipeline",
-            Self::stream_static_labels(context),
+            context.series_labels(),
         )?;
 
-        let endpoint_metrics = self
-            .stream_metrics
-            .entry(context.endpoint_key().to_string())
-            .or_default();
-
-        match endpoint_metrics.entry(context.collector_type) {
-            dashmap::mapref::entry::Entry::Occupied(existing) => Ok(existing.get().clone()),
-            dashmap::mapref::entry::Entry::Vacant(vacant) => {
-                vacant.insert(metrics.clone());
-                Ok(metrics)
+        match endpoint_entry {
+            dashmap::mapref::entry::Entry::Occupied(endpoint) => {
+                endpoint
+                    .get()
+                    .insert(context.collector_type, metrics.clone());
+            }
+            dashmap::mapref::entry::Entry::Vacant(endpoint) => {
+                let endpoint_metrics = DashMap::new();
+                endpoint_metrics.insert(context.collector_type, metrics.clone());
+                endpoint.insert(endpoint_metrics);
             }
         }
+
+        Ok(metrics)
     }
 
     fn remove_collector_metrics(&self, context: &EventContext) -> Result<(), HealthError> {
-        let Some(endpoint_metrics) = self.stream_metrics.get::<str>(context.endpoint_key()) else {
-            return Ok(());
-        };
-        let Some((_, metrics)) = endpoint_metrics.remove(context.collector_type) else {
+        let dashmap::mapref::entry::Entry::Occupied(endpoint) = self
+            .stream_metrics
+            .entry(context.endpoint_key().to_string())
+        else {
             return Ok(());
         };
 
+        let Some((_, metrics)) = endpoint.get().remove(context.collector_type) else {
+            return Ok(());
+        };
+
+        // Unregister before allowing another stream with the same descriptor identity.
+        let unregister_result = self.collector_registry.unregister_gauge_metrics(&metrics);
+
+        if endpoint.get().is_empty() {
+            #[cfg(test)]
+            if let Some(before_remove) = &self.before_endpoint_remove {
+                before_remove();
+            }
+            endpoint.remove();
+        } else {
+            drop(endpoint);
+        }
+
         metrics.clear();
-        if let Err(error) = self.collector_registry.unregister_gauge_metrics(&metrics) {
+
+        if let Err(error) = unregister_result {
             tracing::warn!(
                 ?error,
                 endpoint_key = context.endpoint_key(),
@@ -272,6 +277,70 @@ impl PrometheusSink {
 impl DataSink for PrometheusSink {
     fn sink_type(&self) -> &'static str {
         "prometheus_sink"
+    }
+
+    fn prune_metrics(
+        &self,
+        context: &EventContext,
+        metric_type: Option<&str>,
+        labels: &[crate::metrics::MetricLabel],
+        unit: Option<&str>,
+        label_names: Option<&[&str]>,
+    ) {
+        let metrics = self
+            .stream_metrics
+            .get::<str>(context.endpoint_key())
+            .and_then(|endpoint| {
+                endpoint
+                    .get(context.collector_type)
+                    .map(|entry| entry.value().clone())
+            });
+
+        if let Some(metrics) = metrics {
+            let labels = labels
+                .iter()
+                .map(|(name, value)| (Self::normalize_label_name(name.clone()), value.clone()))
+                .collect::<Vec<_>>();
+
+            let label_names = label_names.map(|names| {
+                names
+                    .iter()
+                    .copied()
+                    .chain(context.labels().keys().map(String::as_str))
+                    .map(|name| Self::normalize_label_name(Cow::Owned(name.to_string())))
+                    .collect::<Vec<_>>()
+            });
+
+            metrics.prune(metric_type, &labels, unit, label_names.as_deref());
+        }
+    }
+
+    fn prune_metric_key(&self, context: &EventContext, key: &str, metric_type: &str, unit: &str) {
+        if let Some(endpoint_metrics) = self.stream_metrics.get::<str>(context.endpoint_key())
+            && let Some(entry) = endpoint_metrics.get(context.collector_type)
+        {
+            let reading_key = Self::metric_reading_key_parts(key, metric_type, unit);
+
+            entry.value().prune_key(&reading_key);
+        }
+    }
+
+    fn try_handle_classified_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        is_event_record: bool,
+    ) -> Result<(), HealthError> {
+        if is_event_record {
+            // An excluded event can replace a hardware source for the same key.
+            if let CollectorEvent::Metric(sample) = event {
+                self.prune_metric_key(context, &sample.key, &sample.metric_type, &sample.unit);
+            }
+
+            return Ok(());
+        }
+
+        self.try_handle_event(context, event)
     }
 
     fn try_handle_event(
@@ -293,6 +362,12 @@ impl DataSink for PrometheusSink {
                         return Err(error);
                     }
                 }
+            }
+            // Per-event IDs and creation times turn retained system-event history
+            // into distinct series. Filter only these rows at the Prometheus sink
+            // so OTLP delivery and aggregate event counters remain unchanged.
+            CollectorEvent::Metric(sample) if sample.name == "nvue_gnmi_events" => {
+                return Ok(());
             }
             CollectorEvent::Metric(sample) => match self.get_or_create_stream_metrics(context) {
                 Ok(stream_metrics) => {
@@ -320,7 +395,8 @@ impl DataSink for PrometheusSink {
                             sample.unit.clone(),
                             sample.value,
                         )
-                        .with_labels(labels),
+                        .with_labels(labels)
+                        .with_semantics(sample.semantics),
                     );
                 }
                 Err(error) => {
@@ -336,11 +412,17 @@ impl DataSink for PrometheusSink {
                 }
             },
             CollectorEvent::MetricCollectionEnd => {
-                if let Some(endpoint_metrics) =
-                    self.stream_metrics.get::<str>(context.endpoint_key())
-                    && let Some(entry) = endpoint_metrics.get(context.collector_type)
-                {
-                    entry.value().sweep_stale();
+                let metrics = self
+                    .stream_metrics
+                    .get::<str>(context.endpoint_key())
+                    .and_then(|endpoint| {
+                        endpoint
+                            .get(context.collector_type)
+                            .map(|entry| entry.value().clone())
+                    });
+
+                if let Some(metrics) = metrics {
+                    metrics.sweep_stale();
                 }
             }
             CollectorEvent::CollectorRemoved => return self.remove_collector_metrics(context),
@@ -367,12 +449,155 @@ mod tests {
     use crate::endpoint::{
         BmcAddr, EndpointMetadata, MachineData, PowerShelfData, SwitchData, SwitchEndpointRole,
     };
+    use crate::sink::CompositeDataSink;
 
     fn test_switch_id(label: &str) -> SwitchId {
         let mut hash = [0u8; 32];
         let bytes = label.as_bytes();
         hash[..bytes.len().min(32)].copy_from_slice(&bytes[..bytes.len().min(32)]);
         SwitchId::new(SwitchIdSource::Tpm, hash, SwitchType::NvLink)
+    }
+
+    #[test]
+    fn removing_last_stream_drops_endpoint_and_preserves_sibling_streams() {
+        let manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
+        let sink = PrometheusSink::new(manager.clone(), "test").expect("sink");
+
+        let context = EventContext {
+            endpoint_key: "endpoint".to_string(),
+            addr: BmcAddr {
+                ip: "10.0.0.1".parse().unwrap(),
+                port: None,
+                mac: None,
+            },
+            collector_type: "collector_a",
+            labels: Default::default(),
+            metadata: None,
+            rack_id: None,
+        };
+
+        let sibling = EventContext {
+            collector_type: "collector_b",
+            ..context.clone()
+        };
+
+        let sample = CollectorEvent::Metric(Box::new(MetricSample {
+            semantics: crate::sink::MetricSemantics::Gauge,
+            key: "temperature".to_string(),
+            name: "temperature".to_string(),
+            metric_type: "sensor".to_string(),
+            unit: "celsius".to_string(),
+            value: 42.0,
+            labels: Vec::new(),
+            context: None,
+        }));
+
+        sink.try_handle_event(&context, &sample).unwrap();
+        sink.try_handle_event(&sibling, &sample).unwrap();
+        sink.remove_collector_metrics(&context).unwrap();
+
+        let exposition = manager.export_telemetry().unwrap();
+
+        assert!(!exposition.contains("collector_type=\"collector_a\""));
+        assert!(exposition.contains("collector_type=\"collector_b\""));
+
+        sink.remove_collector_metrics(&sibling).unwrap();
+
+        assert!(sink.stream_metrics.is_empty());
+        assert!(manager.export_telemetry().unwrap().is_empty());
+
+        sink.try_handle_event(&context, &sample)
+            .expect("removed stream must register again");
+
+        sink.remove_collector_metrics(&context).unwrap();
+
+        assert!(sink.stream_metrics.is_empty());
+    }
+
+    #[test]
+    fn concurrent_registration_and_last_stream_removal_preserve_new_stream() {
+        use std::sync::{Mutex, mpsc};
+        use std::time::Duration;
+
+        let manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
+        let mut sink = PrometheusSink::new(manager.clone(), "test").expect("sink");
+
+        let context = EventContext {
+            endpoint_key: "endpoint".to_string(),
+            addr: BmcAddr {
+                ip: "10.0.0.1".parse().unwrap(),
+                port: None,
+                mac: None,
+            },
+            collector_type: "collector_a",
+            labels: Default::default(),
+            metadata: None,
+            rack_id: None,
+        };
+        let sibling = EventContext {
+            collector_type: "collector_b",
+            ..context.clone()
+        };
+        sink.get_or_create_stream_metrics(&context).unwrap();
+
+        let (removing_tx, removing_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let (blocked_tx, blocked_rx) = mpsc::channel();
+        let resume_rx = Mutex::new(resume_rx);
+        let timeout = Duration::from_secs(10);
+        sink.before_endpoint_remove = Some(Box::new(move || {
+            removing_tx.send(()).expect("report final removal");
+            resume_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(timeout)
+                .expect("resume final removal");
+        }));
+        sink.on_registration_blocked = Some(Box::new(move || {
+            blocked_tx.send(()).expect("report registration contention");
+        }));
+
+        let metrics = std::thread::scope(|scope| {
+            let removal = scope.spawn(|| sink.remove_collector_metrics(&context));
+            removing_rx
+                .recv_timeout(timeout)
+                .expect("reach final endpoint removal");
+
+            let registration = scope.spawn(|| sink.get_or_create_stream_metrics(&sibling));
+
+            let blocked = blocked_rx.recv_timeout(timeout);
+            // Release removal before checking the registration signal.
+            let resumed = resume_tx.send(());
+            let removal = removal.join();
+            let registration = registration.join();
+            blocked.expect("registration encountered the endpoint lock");
+            resumed.expect("release final removal");
+            removal.expect("removal thread").unwrap();
+            registration.expect("registration thread").unwrap()
+        });
+        sink.before_endpoint_remove = None;
+        sink.on_registration_blocked = None;
+
+        assert_eq!(sink.stream_metrics.len(), 1);
+        assert!(
+            sink.stream_metrics
+                .get(context.endpoint_key())
+                .unwrap()
+                .contains_key(sibling.collector_type)
+        );
+        metrics.record(GaugeReading::new(
+            "temperature".to_string(),
+            "temperature".to_string(),
+            "sensor".to_string(),
+            "celsius".to_string(),
+            42.0,
+        ));
+        let exposition = manager.export_telemetry().unwrap();
+        assert!(exposition.contains("collector_type=\"collector_b\""));
+
+        sink.remove_collector_metrics(&sibling).unwrap();
+        assert!(sink.stream_metrics.is_empty());
+        assert!(manager.export_telemetry().unwrap().is_empty());
     }
 
     #[test]
@@ -397,6 +622,7 @@ mod tests {
             sink.try_handle_event(
                 &context,
                 &CollectorEvent::Metric(Box::new(MetricSample {
+                    semantics: crate::sink::MetricSemantics::Gauge,
                     key: "temperature".to_string(),
                     name: "temperature".to_string(),
                     metric_type: "sensor".to_string(),
@@ -423,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stream_static_labels_includes_machine_metadata() {
+    fn test_series_labels_includes_machine_metadata() {
         let context = EventContext {
             endpoint_key: "42:9e:b1:bd:9d:dd".to_string(),
             addr: BmcAddr {
@@ -449,7 +675,7 @@ mod tests {
             rack_id: Some(RackId::new("RACK_1")),
         };
 
-        let labels = PrometheusSink::stream_static_labels(&context);
+        let labels = context.series_labels();
         let label_value = |key: &str| {
             labels
                 .iter()
@@ -476,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stream_static_labels_includes_switch_placement_metadata() {
+    fn test_series_labels_includes_switch_placement_metadata() {
         let switch_id = test_switch_id("switch-a");
         let switch_id_label = switch_id.to_string();
         let nvlink_domain_uuid = NvLinkDomainId::new();
@@ -492,8 +718,9 @@ mod tests {
             collector_type: "switch_collector",
             labels: Default::default(),
             metadata: Some(EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: Some(switch_id),
-                serial: "SN-SWITCH-001".to_string(),
+                serial: Some("SN-SWITCH-001".to_string()),
                 slot_number: Some(7),
                 tray_index: Some(3),
                 nvlink_domain_uuid: Some(nvlink_domain_uuid),
@@ -505,7 +732,7 @@ mod tests {
             rack_id: Some(RackId::new("RACK_2")),
         };
 
-        let labels = PrometheusSink::stream_static_labels(&context);
+        let labels = context.series_labels();
         let label_value = |key: &str| {
             labels
                 .iter()
@@ -522,10 +749,26 @@ mod tests {
             label_value("nvlink_domain_uuid"),
             Some(nvlink_domain_uuid_label.as_str())
         );
+
+        let mut context = context;
+
+        let Some(EndpointMetadata::Switch(switch)) = context.metadata.as_mut() else {
+            panic!("expected switch metadata");
+        };
+
+        switch.serial = None;
+
+        let labels = context.series_labels();
+
+        assert!(
+            !labels
+                .iter()
+                .any(|(key, _)| key.as_ref() == "serial_number")
+        );
     }
 
     #[test]
-    fn test_stream_static_labels_includes_available_power_shelf_metadata() {
+    fn test_series_labels_includes_available_power_shelf_metadata() {
         let power_shelf_id =
             PowerShelfId::from_str("ps100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg")
                 .expect("valid power shelf id");
@@ -547,7 +790,7 @@ mod tests {
             rack_id: Some(RackId::new("RACK_3")),
         };
 
-        let labels = PrometheusSink::stream_static_labels(&context);
+        let labels = context.series_labels();
         let label_value = |key: &str| {
             labels
                 .iter()
@@ -569,7 +812,7 @@ mod tests {
             })),
             ..context
         };
-        let labels_without_id = PrometheusSink::stream_static_labels(&context_without_id);
+        let labels_without_id = context_without_id.series_labels();
 
         assert!(
             labels_without_id
@@ -596,7 +839,7 @@ mod tests {
                         .expect("test MAC address should parse"),
                 ),
             },
-            collector_type: "nvue_gnmi_events",
+            collector_type: "test_dynamic_labels",
             labels: [("site".to_string(), "test".to_string())].into(),
             metadata: None,
             rack_id: None,
@@ -605,8 +848,9 @@ mod tests {
         sink.handle_event(
             &context,
             &CollectorEvent::Metric(Box::new(MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: "event:42".to_string(),
-                name: "nvue_gnmi_events".to_string(),
+                name: "test_dynamic_labels".to_string(),
                 metric_type: "on_change_row".to_string(),
                 unit: "severity".to_string(),
                 value: 1.0,
@@ -648,8 +892,9 @@ mod tests {
 
         for (scenario, names) in collision_cases {
             let sample = CollectorEvent::Metric(Box::new(MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: scenario.to_string(),
-                name: "nvue_gnmi_events".to_string(),
+                name: "test_dynamic_labels".to_string(),
                 metric_type: "on_change_row".to_string(),
                 unit: "severity".to_string(),
                 value: 1.0,
@@ -685,5 +930,102 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(PrometheusSink::normalize_label_name(input.into()), expected);
         }
+    }
+
+    #[test]
+    fn prometheus_prune_matches_labels_through_composite_sink() {
+        let manager = Arc::new(MetricsManager::new("test").expect("metrics manager"));
+
+        let prometheus =
+            PrometheusSink::new(manager.clone(), "test_sink").expect("Prometheus sink");
+
+        let sink = CompositeDataSink::new(vec![Arc::new(prometheus)], manager.clone());
+
+        let assert_interfaces = |expected: &[&str]| {
+            let exposition = manager.export_telemetry().expect("telemetry");
+            for (name, kind) in [
+                ("test_sink_nvue_gnmi_extended_reading_count", "gauge"),
+                (
+                    "test_sink_nvue_gnmi_extended_reading_count_total",
+                    "counter",
+                ),
+            ] {
+                assert!(
+                    exposition.contains(&format!("# TYPE {name} {kind}\n")),
+                    "{name}"
+                );
+                let mut interfaces = exposition
+                    .lines()
+                    .filter(|line| line.starts_with(&format!("{name}{{")))
+                    .map(|line| {
+                        line.split("interface_name=\"")
+                            .nth(1)
+                            .and_then(|suffix| suffix.split('"').next())
+                            .expect("interface label")
+                    })
+                    .collect::<Vec<_>>();
+                interfaces.sort_unstable();
+                assert_eq!(interfaces, expected, "{name}");
+            }
+        };
+
+        let context = EventContext {
+            endpoint_key: "switch-1".to_string(),
+            addr: BmcAddr {
+                ip: "10.0.0.1".parse().expect("test IP"),
+                port: None,
+                mac: None,
+            },
+            collector_type: "nvue_gnmi_extended",
+            labels: Default::default(),
+            metadata: None,
+            rack_id: None,
+        };
+
+        for (key, subscription, iface) in [
+            ("a:old", "a", "old"),
+            ("a:live", "a", "live"),
+            ("a:live-shadow", "a", "live"),
+            ("b:other", "b", "other"),
+        ] {
+            sink.handle_event(
+                &context,
+                &CollectorEvent::Metric(Box::new(MetricSample {
+                    semantics: crate::sink::MetricSemantics::CumulativeCounter {
+                        description: "Number of events reported by the interface",
+                        start_time: None,
+                    },
+                    key: key.to_string(),
+                    name: "nvue_gnmi_extended".to_string(),
+                    metric_type: "reading".to_string(),
+                    unit: "count".to_string(),
+                    value: 1.0,
+                    labels: vec![
+                        (Cow::Borrowed("subscription"), subscription.to_string()),
+                        (Cow::Borrowed("interface_name"), iface.to_string()),
+                    ],
+                    context: None,
+                })),
+            );
+        }
+
+        assert_interfaces(&["live", "live", "old", "other"]);
+
+        sink.prune_metrics(
+            &context,
+            Some("reading"),
+            &[
+                (Cow::Borrowed("subscription"), "a".to_string()),
+                (Cow::Borrowed("interface_name"), "old".to_string()),
+            ],
+            None,
+            None,
+        );
+
+        assert_interfaces(&["live", "live", "other"]);
+
+        sink.prune_metric_key(&context, "a:live", "reading", "count");
+
+        assert_interfaces(&["live", "other"]);
     }
 }

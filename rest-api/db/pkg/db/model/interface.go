@@ -12,12 +12,15 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
-	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 const (
@@ -127,6 +130,7 @@ type Interface struct {
 	RequestedIpAddress   *string                        `bun:"requested_ip_address"`
 	MacAddress           *string                        `bun:"mac_address"`
 	IPAddresses          []string                       `bun:"ip_addresses,type:text[]"`
+	IPPrefixes           []string                       `bun:"ip_prefixes,type:text[]"`
 	InlineRoutingProfile *InterfaceInlineRoutingProfile `bun:"inline_routing_profile,type:jsonb"`
 	Status               string                         `bun:"status,notnull"`
 	Created              time.Time                      `bun:"created,nullzero,notnull,default:current_timestamp"`
@@ -220,19 +224,25 @@ type InterfaceUpdateInput struct {
 	InlineRoutingProfile *InterfaceInlineRoutingProfile
 	MacAddress           *string
 	IpAddresses          []string
+	IPPrefixes           []string // Nil preserves stored prefixes; an empty slice clears them.
 	Status               *string
 }
 
 // InterfaceFilterInput input parameters for Filter method
 type InterfaceFilterInput struct {
-	InstanceIDs    []uuid.UUID
-	SubnetID       *uuid.UUID
-	VpcPrefixID    *uuid.UUID
-	Device         *string
-	DeviceInstance *int
-	IsPhysical     *bool
-	Statuses       []string
-	IPAddresses    []string
+	InstanceIDs       []uuid.UUID
+	InstanceTenantID  *uuid.UUID
+	VpcTenantID       *uuid.UUID
+	VisibleToTenantID *uuid.UUID
+	CrossTenant       *bool
+	SubnetID          *uuid.UUID
+	VpcID             *uuid.UUID
+	VpcPrefixID       *uuid.UUID
+	Device            *string
+	DeviceInstance    *int
+	IsPhysical        *bool
+	Statuses          []string
+	IPAddresses       []string
 }
 
 // InterfaceClearInput input parameters for Clear method
@@ -293,16 +303,13 @@ type InterfaceDAO interface {
 type InterfaceSQLDAO struct {
 	dbSession *db.Session
 	InterfaceDAO
-	tracerSpan *stracer.TracerSpan
 }
 
 // Create creates a new Interface from the given parameters
-func (ifcd InterfaceSQLDAO) Create(ctx context.Context, tx *db.Tx, input InterfaceCreateInput) (*Interface, error) {
+func (ifcd InterfaceSQLDAO) Create(ctx context.Context, tx *db.Tx, input InterfaceCreateInput) (_ *Interface, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, interfaceDAOSpan := ifcd.tracerSpan.CreateChildInCurrentContext(ctx, "InterfaceDAO.Create")
-	if interfaceDAOSpan != nil {
-		defer interfaceDAOSpan.End()
-	}
+	ctx, interfaceDAOSpan := cotel.StartSpan(ctx, "InterfaceDAO.Create")
+	defer func() { cotel.EndSpan(interfaceDAOSpan, retErr) }()
 
 	results, err := ifcd.CreateMultiple(ctx, tx, []InterfaceCreateInput{input})
 	if err != nil {
@@ -313,14 +320,11 @@ func (ifcd InterfaceSQLDAO) Create(ctx context.Context, tx *db.Tx, input Interfa
 
 // GetByID returns a Interface by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (ifcd InterfaceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*Interface, error) {
+func (ifcd InterfaceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *Interface, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, interfaceDAOSpan := ifcd.tracerSpan.CreateChildInCurrentContext(ctx, "InterfaceDAO.GetByID")
-	if interfaceDAOSpan != nil {
-		defer interfaceDAOSpan.End()
-
-		ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "id", id.String())
-	}
+	ctx, interfaceDAOSpan := cotel.StartSpan(ctx, "InterfaceDAO.GetByID")
+	defer func() { cotel.EndSpan(interfaceDAOSpan, retErr) }()
+	cotel.SetAttribute(interfaceDAOSpan, attribute.String("id", id.String()))
 
 	is := &Interface{}
 
@@ -341,25 +345,62 @@ func (ifcd InterfaceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID
 	return is, nil
 }
 
-func (ifcd InterfaceSQLDAO) setQueryWithFilter(filter InterfaceFilterInput, query *bun.SelectQuery, interfaceDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (ifcd InterfaceSQLDAO) setQueryWithFilter(filter InterfaceFilterInput, query *bun.SelectQuery, interfaceDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if filter.InstanceIDs != nil {
 		if len(filter.InstanceIDs) == 1 {
 			query = query.Where("ifc.instance_id = ?", filter.InstanceIDs[0])
 		} else {
 			query = query.Where("ifc.instance_id IN (?)", bun.In(filter.InstanceIDs))
 		}
+	}
 
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "instance_ids", filter.InstanceIDs)
+	if filter.VisibleToTenantID != nil ||
+		filter.InstanceTenantID != nil ||
+		filter.VpcTenantID != nil ||
+		filter.CrossTenant != nil ||
+		filter.VpcID != nil {
+		query = query.
+			Join("JOIN instance AS fi ON fi.id = ifc.instance_id AND fi.deleted IS NULL").
+			Join("LEFT JOIN vpc AS fv ON fv.id = ifc.vpc_id AND fv.deleted IS NULL").
+			Join("LEFT JOIN vpc_prefix AS fvp ON fvp.id = ifc.vpc_prefix_id AND fvp.deleted IS NULL")
+	}
+
+	if filter.VisibleToTenantID != nil {
+		query = query.Where(
+			"(fi.tenant_id = ? OR COALESCE(fv.tenant_id, fvp.tenant_id) = ?)",
+			*filter.VisibleToTenantID,
+			*filter.VisibleToTenantID,
+		)
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("visible_to_tenant_id", filter.VisibleToTenantID.String()))
+	}
+
+	if filter.InstanceTenantID != nil {
+		query = query.Where("fi.tenant_id = ?", *filter.InstanceTenantID)
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("instance_tenant_id", filter.InstanceTenantID.String()))
+	}
+
+	if filter.VpcTenantID != nil {
+		query = query.Where("COALESCE(fv.tenant_id, fvp.tenant_id) = ?", *filter.VpcTenantID)
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("vpc_tenant_id", filter.VpcTenantID.String()))
+	}
+
+	if filter.CrossTenant != nil {
+		if *filter.CrossTenant {
+			query = query.Where("COALESCE(fv.tenant_id, fvp.tenant_id) <> fi.tenant_id")
+		} else {
+			query = query.Where("(ifc.subnet_id IS NOT NULL OR COALESCE(fv.tenant_id, fvp.tenant_id) = fi.tenant_id)")
 		}
+		cotel.SetAttribute(interfaceDAOSpan, attribute.Bool("cross_tenant", *filter.CrossTenant))
 	}
 
 	if filter.SubnetID != nil {
 		query = query.Where("ifc.subnet_id = ?", *filter.SubnetID)
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("subnet_id", filter.SubnetID.String()))
+	}
 
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "subnet_id", filter.SubnetID.String())
-		}
+	if filter.VpcID != nil {
+		query = query.Where("COALESCE(ifc.vpc_id, fvp.vpc_id) = ?", *filter.VpcID)
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("vpc_id", filter.VpcID.String()))
 	}
 
 	if filter.VpcPrefixID != nil {
@@ -368,33 +409,20 @@ func (ifcd InterfaceSQLDAO) setQueryWithFilter(filter InterfaceFilterInput, quer
 			*filter.VpcPrefixID,
 			*filter.VpcPrefixID,
 		)
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "vpc_prefix_id", filter.VpcPrefixID.String())
-		}
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("vpc_prefix_id", filter.VpcPrefixID.String()))
 	}
 
 	if filter.IsPhysical != nil {
 		query = query.Where("ifc.is_physical = ?", *filter.IsPhysical)
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "is_physical", *filter.IsPhysical)
-		}
 	}
 
 	if filter.Device != nil {
 		query = query.Where("ifc.device = ?", *filter.Device)
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "device", *filter.Device)
-		}
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("device", *filter.Device))
 	}
 
 	if filter.DeviceInstance != nil {
 		query = query.Where("ifc.device_instance = ?", *filter.DeviceInstance)
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "device_instance", *filter.DeviceInstance)
-		}
 	}
 
 	if filter.Statuses != nil {
@@ -403,19 +431,11 @@ func (ifcd InterfaceSQLDAO) setQueryWithFilter(filter InterfaceFilterInput, quer
 		} else {
 			query = query.Where("ifc.status IN (?)", bun.In(filter.Statuses))
 		}
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "statuses", filter.Statuses)
-		}
 	}
 
 	if filter.IPAddresses != nil {
 		// Use array overlap operator to find interfaces with any matching IP address
 		query = query.Where("ifc.ip_addresses && ARRAY[?]::text[]", bun.In(filter.IPAddresses))
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "ip_addresses", filter.IPAddresses)
-		}
 	}
 
 	return query, nil
@@ -425,12 +445,10 @@ func (ifcd InterfaceSQLDAO) setQueryWithFilter(filter InterfaceFilterInput, quer
 // errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
 // if orderBy is nil, then records are ordered by column specified in InterfaceOrderByDefault in ascending order
-func (ifcd InterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter InterfaceFilterInput, page paginator.PageInput, includeRelations []string) ([]Interface, int, error) {
+func (ifcd InterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter InterfaceFilterInput, page paginator.PageInput, includeRelations []string) (_ []Interface, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, interfaceDAOSpan := ifcd.tracerSpan.CreateChildInCurrentContext(ctx, "InterfaceDAO.GetAll")
-	if interfaceDAOSpan != nil {
-		defer interfaceDAOSpan.End()
-	}
+	ctx, interfaceDAOSpan := cotel.StartSpan(ctx, "InterfaceDAO.GetAll")
+	defer func() { cotel.EndSpan(interfaceDAOSpan, retErr) }()
 
 	iss := []Interface{}
 
@@ -447,30 +465,31 @@ func (ifcd InterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter Interf
 
 	// if no order is passed, set default to make sure objects return always in the same order and pagination works properly
 	if page.OrderBy == nil {
-		page.OrderBy = paginator.NewDefaultOrderBy(VpcOrderByDefault)
+		page.OrderBy = paginator.NewDefaultOrderBy(InterfaceOrderByDefault)
 	}
 
-	paginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, InterfaceOrderByFields)
+	dbPaginator, err := paginator.NewPaginator(ctx, query, page.Offset, page.Limit, page.OrderBy, InterfaceOrderByFields)
+	if err != nil {
+		return nil, 0, err
+	}
+	if filter.VpcID != nil || filter.VisibleToTenantID != nil {
+		dbPaginator.Query = dbPaginator.Query.OrderExpr("ifc.id ASC")
+	}
+
+	err = dbPaginator.Query.Limit(dbPaginator.Limit).Offset(dbPaginator.Offset).Scan(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	err = paginator.Query.Limit(paginator.Limit).Offset(paginator.Offset).Scan(ctx)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return iss, paginator.Total, nil
+	return iss, dbPaginator.Total, nil
 }
 
 // Update updates specified fields of an existing Interface
 // The updated fields are assumed to be set to non-null values
-func (ifcd InterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, input InterfaceUpdateInput) (*Interface, error) {
+func (ifcd InterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, input InterfaceUpdateInput) (_ *Interface, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, interfaceDAOSpan := ifcd.tracerSpan.CreateChildInCurrentContext(ctx, "InterfaceDAO.Update")
-	if interfaceDAOSpan != nil {
-		defer interfaceDAOSpan.End()
-	}
+	ctx, interfaceDAOSpan := cotel.StartSpan(ctx, "InterfaceDAO.Update")
+	defer func() { cotel.EndSpan(interfaceDAOSpan, retErr) }()
 
 	is := &Interface{
 		ID: input.InterfaceID,
@@ -481,84 +500,52 @@ func (ifcd InterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, input Interfa
 	if input.InstanceID != nil {
 		is.InstanceID = *input.InstanceID
 		updatedFields = append(updatedFields, "instance_id")
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "instance_id", input.InstanceID.String())
-		}
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("instance_id", input.InstanceID.String()))
 	}
 	if input.SubnetID != nil {
 		is.SubnetID = input.SubnetID
 		updatedFields = append(updatedFields, "subnet_id")
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "subnet_id", input.SubnetID.String())
-		}
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("subnet_id", input.SubnetID.String()))
 	}
 	if input.VpcID != nil {
 		is.VpcID = input.VpcID
 		updatedFields = append(updatedFields, "vpc_id")
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "vpc_id", input.VpcID.String())
-		}
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("vpc_id", input.VpcID.String()))
 	}
 	if input.VpcIPFamilyMode != nil {
 		is.VpcIPFamilyMode = input.VpcIPFamilyMode
 		updatedFields = append(updatedFields, "vpc_ip_family_mode")
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "vpc_ip_family_mode", string(*input.VpcIPFamilyMode))
-		}
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("vpc_ip_family_mode", string(*input.VpcIPFamilyMode)))
 	}
 	if input.VpcPrefixID != nil {
 		is.VpcPrefixID = input.VpcPrefixID
 		updatedFields = append(updatedFields, "vpc_prefix_id")
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "vpc_prefix_id", input.VpcPrefixID.String())
-		}
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("vpc_prefix_id", input.VpcPrefixID.String()))
 	}
 	if input.SecondaryVpcPrefixID != nil {
 		is.SecondaryVpcPrefixID = input.SecondaryVpcPrefixID
 		updatedFields = append(updatedFields, "secondary_vpc_prefix_id")
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "secondary_vpc_prefix_id", input.SecondaryVpcPrefixID.String())
-		}
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("secondary_vpc_prefix_id", input.SecondaryVpcPrefixID.String()))
 	}
 	if input.Device != nil {
 		is.Device = input.Device
 		updatedFields = append(updatedFields, "device")
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "device", *input.Device)
-		}
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("device", *input.Device))
 	}
 
 	if input.DeviceInstance != nil {
 		is.DeviceInstance = input.DeviceInstance
 		updatedFields = append(updatedFields, "device_instance")
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "device_instance", *input.DeviceInstance)
-		}
 	}
 
 	if input.VirtualFunctionID != nil {
 		is.VirtualFunctionID = input.VirtualFunctionID
 		updatedFields = append(updatedFields, "virtual_function_id")
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "virtual_function_id", *input.VirtualFunctionID)
-		}
 	}
 	if input.RequestedIpAddress != nil {
 		is.RequestedIpAddress = input.RequestedIpAddress
 		updatedFields = append(updatedFields, "requested_ip_address")
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "requested_ip_address", *input.RequestedIpAddress)
-		}
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("requested_ip_address", *input.RequestedIpAddress))
 	}
 	if input.InlineRoutingProfile != nil {
 		is.InlineRoutingProfile = input.InlineRoutingProfile
@@ -567,10 +554,7 @@ func (ifcd InterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, input Interfa
 	if input.MacAddress != nil {
 		is.MacAddress = input.MacAddress
 		updatedFields = append(updatedFields, "mac_address")
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "mac_address", *input.MacAddress)
-		}
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("mac_address", *input.MacAddress))
 	}
 	if input.IpAddresses != nil {
 		for _, ipAddress := range input.IpAddresses {
@@ -582,18 +566,22 @@ func (ifcd InterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, input Interfa
 
 		is.IPAddresses = input.IpAddresses
 		updatedFields = append(updatedFields, "ip_addresses")
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "ip_addresses", input.IpAddresses)
+	}
+	if input.IPPrefixes != nil {
+		for _, prefix := range input.IPPrefixes {
+			_, parseErr := netip.ParsePrefix(prefix)
+			if parseErr != nil {
+				return nil, fmt.Errorf("invalid Interface IP prefix %q: %w", prefix, parseErr)
+			}
 		}
+
+		is.IPPrefixes = input.IPPrefixes
+		updatedFields = append(updatedFields, "ip_prefixes")
 	}
 	if input.Status != nil {
 		is.Status = *input.Status
 		updatedFields = append(updatedFields, "status")
-
-		if interfaceDAOSpan != nil {
-			ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "status", *input.Status)
-		}
+		cotel.SetAttribute(interfaceDAOSpan, attribute.String("status", *input.Status))
 	}
 
 	if len(updatedFields) > 0 {
@@ -616,14 +604,11 @@ func (ifcd InterfaceSQLDAO) Update(ctx context.Context, tx *db.Tx, input Interfa
 // Delete deletes an Interface by ID
 // error is returned only if there is a db error
 // if the object being deleted doesnt exist, error is not returned
-func (ifcd InterfaceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error {
+func (ifcd InterfaceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, interfaceDAOSpan := ifcd.tracerSpan.CreateChildInCurrentContext(ctx, "InterfaceDAO.DeleteByID")
-	if interfaceDAOSpan != nil {
-		defer interfaceDAOSpan.End()
-
-		ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "id", id.String())
-	}
+	ctx, interfaceDAOSpan := cotel.StartSpan(ctx, "InterfaceDAO.DeleteByID")
+	defer func() { cotel.EndSpan(interfaceDAOSpan, retErr) }()
+	cotel.SetAttribute(interfaceDAOSpan, attribute.String("id", id.String()))
 
 	is := &Interface{
 		ID: id,
@@ -640,13 +625,9 @@ func (ifcd InterfaceSQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID)
 // DeleteAllByInstanceIDs soft-deletes every Interface whose instance id is in
 // the provided list.
 // error is returned only if there is a db error
-func (ifcd InterfaceSQLDAO) DeleteAllByInstanceIDs(ctx context.Context, tx *db.Tx, instanceIDs []uuid.UUID) error {
-	ctx, interfaceDAOSpan := ifcd.tracerSpan.CreateChildInCurrentContext(ctx, "InterfaceDAO.DeleteAllByInstanceIDs")
-	if interfaceDAOSpan != nil {
-		defer interfaceDAOSpan.End()
-
-		ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "instance_id_count", len(instanceIDs))
-	}
+func (ifcd InterfaceSQLDAO) DeleteAllByInstanceIDs(ctx context.Context, tx *db.Tx, instanceIDs []uuid.UUID) (retErr error) {
+	ctx, interfaceDAOSpan := cotel.StartSpan(ctx, "InterfaceDAO.DeleteAllByInstanceIDs")
+	defer func() { cotel.EndSpan(interfaceDAOSpan, retErr) }()
 
 	if len(instanceIDs) == 0 { // no-op
 		return nil
@@ -672,17 +653,14 @@ func (ifcd InterfaceSQLDAO) DeleteAllByInstanceIDs(ctx context.Context, tx *db.T
 }
 
 // CreateMultiple creates multiple Interfaces from the given parameters
-func (ifcd InterfaceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []InterfaceCreateInput) ([]Interface, error) {
+func (ifcd InterfaceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []InterfaceCreateInput) (_ []Interface, retErr error) {
 	if len(inputs) > db.MaxBatchItems {
 		return nil, fmt.Errorf("batch size %d exceeds maximum allowed %d", len(inputs), db.MaxBatchItems)
 	}
 
 	// Create a child span and set the attributes for current request
-	ctx, interfaceDAOSpan := ifcd.tracerSpan.CreateChildInCurrentContext(ctx, "InterfaceDAO.CreateMultiple")
-	if interfaceDAOSpan != nil {
-		defer interfaceDAOSpan.End()
-		ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "batch_size", len(inputs))
-	}
+	ctx, interfaceDAOSpan := cotel.StartSpan(ctx, "InterfaceDAO.CreateMultiple")
+	defer func() { cotel.EndSpan(interfaceDAOSpan, retErr) }()
 
 	if len(inputs) == 0 {
 		return []Interface{}, nil
@@ -744,21 +722,18 @@ func (ifcd InterfaceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, input
 // NewInterfaceDAO returns a new InterfaceDAO
 func NewInterfaceDAO(dbSession *db.Session) InterfaceDAO {
 	return &InterfaceSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }
 
 // Clear sets parameters of an existing Interface to null values in db.
 // Since there are 2 operations (UPDATE, SELECT), this must be within
 // a transaction.
-func (ifcd InterfaceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InterfaceClearInput) (*Interface, error) {
+func (ifcd InterfaceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InterfaceClearInput) (_ *Interface, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, interfaceDAOSpan := ifcd.tracerSpan.CreateChildInCurrentContext(ctx, "InterfaceDAO.Clear")
-	if interfaceDAOSpan != nil {
-		defer interfaceDAOSpan.End()
-		ifcd.tracerSpan.SetAttribute(interfaceDAOSpan, "id", input.InterfaceID.String())
-	}
+	ctx, interfaceDAOSpan := cotel.StartSpan(ctx, "InterfaceDAO.Clear")
+	defer func() { cotel.EndSpan(interfaceDAOSpan, retErr) }()
+	cotel.SetAttribute(interfaceDAOSpan, attribute.String("id", input.InterfaceID.String()))
 
 	i := &Interface{
 		ID: input.InterfaceID,

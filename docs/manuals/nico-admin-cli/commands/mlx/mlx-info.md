@@ -46,6 +46,7 @@ Print help (see a summary with -h)
 ```sh
 nico-admin-cli mlx info device 12345678-1234-5678-90ab-cdef01234567 0000:01:00.0
 nico-admin-cli mlx info machine 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli mlx info identities fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
 ```
 
 ## Subcommands
@@ -54,6 +55,7 @@ nico-admin-cli mlx info machine 12345678-1234-5678-90ab-cdef01234567
 |---|---|
 | [`device`](./mlx-info-device.md) | Get MlxDeviceInfo for a device on a machine |
 | [`machine`](./mlx-info-machine.md) | Get an MlxDeviceReport for a machine |
+| [`identities`](./mlx-info-identities.md) | Show stored NIC identity evidence for a host |
 
 ---
 

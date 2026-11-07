@@ -353,7 +353,7 @@ fn word_literal(word: &str) -> Option<Literal> {
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
+
     use serde_json::json;
 
     use super::*;
@@ -372,162 +372,138 @@ mod tests {
             "Resolved": false,
             "Links": {"OriginOfCondition": {"@odata.id": "/redfish/v1/Systems/S"}},
         });
-        check_values(
-            [
-                Check {
-                    scenario: "quoted instant in another offset orders as an instant",
-                    input: "Created gt '2026-02-11T18:06:57-08:00'",
-                    expect: true,
-                },
-                Check {
-                    scenario: "bare instant, inclusive bound",
-                    input: "Created ge 2026-02-12T02:06:58Z",
-                    expect: true,
-                },
-                Check {
-                    scenario: "bare instant whose `+` decoded to a space",
-                    input: "Created le 2026-02-12T02:06:58 00:00",
-                    expect: true,
-                },
-                Check {
-                    scenario: "quoted instant whose `+` decoded to a space is not lexically after itself",
-                    input: "Created gt '2026-02-12T02:06:58 00:00'",
-                    expect: false,
-                },
-                Check {
-                    scenario: "a string Id compares numerically against an integer",
-                    input: "Id gt 9",
-                    expect: true,
-                },
-                Check {
-                    scenario: "strings compare lexically",
-                    input: "Severity eq 'OK'",
-                    expect: true,
-                },
-                Check {
-                    scenario: "numbers compare numerically",
-                    input: "Count lt 10",
-                    expect: true,
-                },
-                Check {
-                    scenario: "a number compares against a quoted number",
-                    input: "Count eq '3'",
-                    expect: true,
-                },
-                Check {
-                    scenario: "booleans",
-                    input: "Resolved eq false",
-                    expect: true,
-                },
-                Check {
-                    scenario: "nested path",
-                    input: "Links/OriginOfCondition/@odata.id eq '/redfish/v1/Systems/S'",
-                    expect: true,
-                },
-                Check {
-                    scenario: "an absent property is null",
-                    input: "MessageId eq null",
-                    expect: true,
-                },
-                Check {
-                    scenario: "mismatched types satisfy only ne",
-                    input: "Severity ne 3 and not Severity gt 3",
-                    expect: true,
-                },
-                Check {
-                    scenario: "or, and, parentheses, not",
-                    input: "(Severity eq 'Critical' or Count eq 3) and not Resolved eq true",
-                    expect: true,
-                },
-                Check {
-                    scenario: "and binds tighter than or",
-                    input: "Severity eq 'Critical' and Count eq 3 or Resolved eq false",
-                    expect: true,
-                },
-                Check {
-                    scenario: "a doubled quote is one quote",
-                    input: "Severity eq 'O''K'",
-                    expect: false,
-                },
-            ],
-            |expression| admits(expression, &entry).unwrap(),
-        );
+        for (scenario, expression, expected) in [
+            (
+                "quoted instant in another offset orders as an instant",
+                "Created gt '2026-02-11T18:06:57-08:00'",
+                true,
+            ),
+            (
+                "bare instant, inclusive bound",
+                "Created ge 2026-02-12T02:06:58Z",
+                true,
+            ),
+            (
+                "bare instant whose `+` decoded to a space",
+                "Created le 2026-02-12T02:06:58 00:00",
+                true,
+            ),
+            (
+                "quoted instant whose `+` decoded to a space is not lexically after itself",
+                "Created gt '2026-02-12T02:06:58 00:00'",
+                false,
+            ),
+            (
+                "a string Id compares numerically against an integer",
+                "Id gt 9",
+                true,
+            ),
+            ("strings compare lexically", "Severity eq 'OK'", true),
+            ("numbers compare numerically", "Count lt 10", true),
+            (
+                "a number compares against a quoted number",
+                "Count eq '3'",
+                true,
+            ),
+            ("booleans", "Resolved eq false", true),
+            (
+                "nested path",
+                "Links/OriginOfCondition/@odata.id eq '/redfish/v1/Systems/S'",
+                true,
+            ),
+            ("an absent property is null", "MessageId eq null", true),
+            (
+                "mismatched types satisfy only ne",
+                "Severity ne 3 and not Severity gt 3",
+                true,
+            ),
+            (
+                "or, and, parentheses, not",
+                "(Severity eq 'Critical' or Count eq 3) and not Resolved eq true",
+                true,
+            ),
+            (
+                "and binds tighter than or",
+                "Severity eq 'Critical' and Count eq 3 or Resolved eq false",
+                true,
+            ),
+            ("a doubled quote is one quote", "Severity eq 'O''K'", false),
+        ] {
+            let actual = admits(expression, &entry).unwrap();
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 
     #[test]
     fn malformed_expressions_are_rejected_without_repeating_them() {
         let property = |property: &str| property.to_owned();
-        check_values(
-            [
-                Check {
-                    scenario: "empty",
-                    input: "",
-                    expect: FilterError::ExpectedProperty { at: 0 },
+        for (scenario, expression, expected) in [
+            ("empty", "", FilterError::ExpectedProperty { at: 0 }),
+            (
+                "property alone",
+                "Created",
+                FilterError::ExpectedOperator {
+                    property: property("Created"),
                 },
-                Check {
-                    scenario: "property alone",
-                    input: "Created",
-                    expect: FilterError::ExpectedOperator {
-                        property: property("Created"),
-                    },
+            ),
+            (
+                "operator without a literal",
+                "Created ge",
+                FilterError::ExpectedLiteral {
+                    property: property("Created"),
                 },
-                Check {
-                    scenario: "operator without a literal",
-                    input: "Created ge",
-                    expect: FilterError::ExpectedLiteral {
-                        property: property("Created"),
-                    },
+            ),
+            (
+                "unknown operator",
+                "Created between 1 and 2",
+                FilterError::ExpectedOperator {
+                    property: property("Created"),
                 },
-                Check {
-                    scenario: "unknown operator",
-                    input: "Created between 1 and 2",
-                    expect: FilterError::ExpectedOperator {
-                        property: property("Created"),
-                    },
+            ),
+            (
+                "a bare word that is no literal",
+                "Created ge secret-value",
+                FilterError::InvalidLiteral {
+                    property: property("Created"),
                 },
-                Check {
-                    scenario: "a bare word that is no literal",
-                    input: "Created ge secret-value",
-                    expect: FilterError::InvalidLiteral {
-                        property: property("Created"),
-                    },
+            ),
+            (
+                "unterminated string",
+                "Created ge 'secret",
+                FilterError::UnterminatedString,
+            ),
+            (
+                "unclosed parenthesis",
+                "(Created ge 2026-02-12T02:06:58Z",
+                FilterError::UnbalancedOpen,
+            ),
+            (
+                "stray parenthesis",
+                "Created ge 2026-02-12T02:06:58Z)",
+                FilterError::UnbalancedClose { at: 3 },
+            ),
+            (
+                "two expressions without a connective",
+                "Created ge 2026-02-12T02:06:58Z Severity eq 'secret'",
+                FilterError::TrailingToken { at: 3 },
+            ),
+            (
+                "empty path segment",
+                "Created/ ge 1",
+                FilterError::InvalidPropertyPath {
+                    property: property("Created/"),
                 },
-                Check {
-                    scenario: "unterminated string",
-                    input: "Created ge 'secret",
-                    expect: FilterError::UnterminatedString,
-                },
-                Check {
-                    scenario: "unclosed parenthesis",
-                    input: "(Created ge 2026-02-12T02:06:58Z",
-                    expect: FilterError::UnbalancedOpen,
-                },
-                Check {
-                    scenario: "stray parenthesis",
-                    input: "Created ge 2026-02-12T02:06:58Z)",
-                    expect: FilterError::UnbalancedClose { at: 3 },
-                },
-                Check {
-                    scenario: "two expressions without a connective",
-                    input: "Created ge 2026-02-12T02:06:58Z Severity eq 'secret'",
-                    expect: FilterError::TrailingToken { at: 3 },
-                },
-                Check {
-                    scenario: "empty path segment",
-                    input: "Created/ ge 1",
-                    expect: FilterError::InvalidPropertyPath {
-                        property: property("Created/"),
-                    },
-                },
-            ],
-            |expression| {
+            ),
+        ] {
+            let actual = {
                 let error = Filter::parse(expression).unwrap_err();
                 assert!(
                     !error.to_string().contains("secret"),
                     "{error} repeats a literal"
                 );
                 error
-            },
-        );
+            };
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 }

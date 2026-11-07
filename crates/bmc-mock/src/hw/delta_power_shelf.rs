@@ -51,6 +51,15 @@ pub(crate) struct DeltaPowerShelf<'a> {
 }
 
 impl DeltaPowerShelf<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Delta,
+            product: None,
+            redfish_version: "1.9.0",
+            advertises_computer_systems: false,
+        }
+    }
+
     pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
         Some(crate::EventServiceConfig::default())
     }
@@ -63,7 +72,7 @@ impl DeltaPowerShelf<'_> {
                     redfish::ethernet_interface::builder(
                         &redfish::ethernet_interface::manager_resource("SMC", "eth0"),
                     )
-                    .mac_address(self.bmc_mac_address)
+                    .mac_address((self.bmc_mac_address).to_string())
                     .interface_enabled(true)
                     .build(),
                 ]),
@@ -75,18 +84,17 @@ impl DeltaPowerShelf<'_> {
         }
     }
 
-    /// Delta power shelves expose no `ComputerSystem`; the collection is empty
-    /// and (via the `exposes_computer_systems` gate) is not advertised or
-    /// served. Site-explorer synthesizes a system from the chassis instead.
+    /// Delta power shelves neither advertise nor serve a Systems collection.
+    /// Site-explorer synthesizes a system from the chassis instead.
     pub(crate) fn system_config<C: Callbacks>(&self) -> redfish::computer_system::Config<C> {
-        redfish::computer_system::Config { systems: vec![] }
+        redfish::computer_system::Config { systems: None }
     }
 
     pub(crate) fn chassis_config(&self) -> redfish::chassis::ChassisConfig {
         redfish::chassis::ChassisConfig {
             chassis: vec![redfish::chassis::SingleChassisConfig {
                 id: CHASSIS_ID.into(),
-                chassis_type: "RackMount".into(),
+                chassis_type: redfish::schema::chassis::ChassisType::RackMount,
                 manufacturer: Some("DELTA".into()),
                 part_number: Some("ECD68000048".into()),
                 model: Some("810".into()),
@@ -99,15 +107,15 @@ impl DeltaPowerShelf<'_> {
                         .iter()
                         .enumerate()
                         .map(|(idx, &on)| {
-                            redfish::power_supply::builder(&redfish::power_supply::resource(
-                                CHASSIS_ID,
-                                &format!("PowerSupplyUnit {}", idx + 1),
-                            ))
-                            .oem_delta_power_state(on)
-                            .oem_delta_fan_speed_target(0)
-                            .power_capacity_watts(5500.0)
-                            .status(redfish::resource::Status::Ok)
-                            .build()
+                            redfish::power_supply::PowerSupply::delta(
+                                &redfish::power_supply::resource(
+                                    CHASSIS_ID,
+                                    &format!("PowerSupplyUnit {}", idx + 1),
+                                ),
+                                on,
+                                5500.0,
+                                0,
+                            )
                         })
                         .collect(),
                 ),

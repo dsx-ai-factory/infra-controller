@@ -1062,17 +1062,23 @@ pub(crate) async fn copy_bfb_to_dpu_rshim(
     log_request_data(&request);
     let req = request.into_inner();
 
-    let ip_str = match &req.ssh_request {
-        Some(ssh_req) => match &ssh_req.endpoint_request {
-            Some(bmc_request) => bmc_request.ip_address.clone(),
-            None => return Err(CarbideError::MissingArgument("bmc_endpoint_request").into()),
-        },
-        None => return Err(CarbideError::MissingArgument("ssh_request").into()),
-    };
-
+    let bmc_request = req
+        .ssh_request
+        .as_ref()
+        .ok_or(CarbideError::MissingArgument("ssh_request"))?
+        .endpoint_request
+        .as_ref()
+        .ok_or(CarbideError::MissingArgument("bmc_endpoint_request"))?;
+    let ip_str = &bmc_request.ip_address;
     let dpu_ip: std::net::IpAddr = ip_str
         .parse()
         .map_err(|_| CarbideError::InvalidArgument(format!("invalid DPU IP: {ip_str}")))?;
+    let requested_mac = bmc_request
+        .mac_address
+        .as_deref()
+        .map(str::parse::<MacAddress>)
+        .transpose()
+        .map_err(|_| CarbideError::InvalidArgument("invalid DPU BMC MAC address".to_string()))?;
 
     if req.host_bmc_ip.is_empty() {
         return Err(CarbideError::MissingArgument("host_bmc_ip").into());
@@ -1157,11 +1163,28 @@ pub(crate) async fn copy_bfb_to_dpu_rshim(
     api.database_connection
         .with_txn(|txn| {
             Box::pin(async move {
+                // Addresses are unique across interfaces. Bind recovery to the
+                // resolved identity even when the caller omits the MAC constraint.
+                let interface = find_by_ip(&mut **txn, dpu_ip).await?.ok_or_else(|| {
+                    CarbideError::InvalidArgument(format!(
+                        "cannot trigger BFB recovery: no machine interface for DPU {dpu_ip}"
+                    ))
+                })?;
+                if let Some(mac) = requested_mac
+                    && mac != interface.mac_address
+                {
+                    return Err(CarbideError::InvalidArgument(format!(
+                        "DPU BMC MAC {mac} does not match {} assigned to {dpu_ip}",
+                        interface.mac_address,
+                    )));
+                }
+
                 db::explored_endpoints::set_preingestion_bfb_recovery_needed(
                     dpu_ip,
                     "Triggered via CLI".to_string(),
                     host_bmc_ip,
                     pre_copy_powercycle,
+                    Some(interface.mac_address),
                     txn,
                 )
                 .await?;
@@ -1170,12 +1193,11 @@ pub(crate) async fn copy_bfb_to_dpu_rshim(
                 // issue BMC resets during the power-cycle phases.
                 db::explored_endpoints::set_pause_remediation(host_bmc_ip, true, txn).await?;
 
-                Ok::<(), db::DatabaseError>(())
+                Ok::<(), CarbideError>(())
             })
         })
         .await
-        .map_err(|e| CarbideError::internal(e.to_string()))?
-        .map_err(|e| CarbideError::internal(e.to_string()))?;
+        .map_err(|e| CarbideError::internal(e.to_string()))??;
 
     Ok(Response::new(()))
 }
@@ -1203,11 +1225,24 @@ pub(super) async fn resolve_bmc_interface(
     Ok((bmc_addr, bmc_mac_address))
 }
 
+// Never Debug-format this request: it contains a plaintext BMC account password.
+// Record only fixed, non-content-bearing targeting metadata in the request span.
+fn record_create_bmc_user_request(request: &Request<rpc::CreateBmcUserRequest>) {
+    let req = request.get_ref();
+    log_request_data_redacted(format!(
+        "CreateBmcUserRequest {{ bmc_endpoint_request_present: {}, machine_id_present: {}, create_username_present: {}, create_password: <redacted>, create_role_id_present: {} }}",
+        req.bmc_endpoint_request.is_some(),
+        req.machine_id.is_some(),
+        !req.create_username.is_empty(),
+        req.create_role_id.is_some(),
+    ));
+}
+
 pub(crate) async fn create_bmc_user(
     api: &Api,
     request: Request<rpc::CreateBmcUserRequest>,
 ) -> Result<Response<rpc::CreateBmcUserResponse>, Status> {
-    log_request_data(&request);
+    record_create_bmc_user_request(&request);
     let req = request.into_inner();
 
     // Note: CreateBmcUserRequest uses a string for machine_id instead of a real MachineId, which is wrong.
@@ -1520,6 +1555,44 @@ mod tests {
     use model::network_segment::NetworkSegmentType;
 
     use super::*;
+
+    #[test]
+    fn create_bmc_user_request_redaction() {
+        use tracing_subscriber::prelude::*;
+
+        use crate::logging::stream::{LogStream, LogStreamLayer};
+
+        // The actual span recorder is exercised without invoking the handler,
+        // which would access the database and BMC. No real credentials are used.
+        const CANARY: &str = "nico-test-canary-6358-not-a-secret";
+        let request = Request::new(rpc::CreateBmcUserRequest {
+            bmc_endpoint_request: None,
+            machine_id: Some(CANARY.to_string()),
+            create_username: CANARY.to_string(),
+            create_password: CANARY.to_string(),
+            create_role_id: Some(CANARY.to_string()),
+        });
+        let stream = LogStream::new(16, 64 * 1024);
+        let subscriber = tracing_subscriber::registry().with(LogStreamLayer::new(stream.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            let span =
+                tracing::info_span!("create_bmc_user_request", request = tracing::field::Empty);
+            let _entered = span.enter();
+            record_create_bmc_user_request(&request);
+        });
+        let summaries = stream.latest(10);
+        assert_eq!(summaries.len(), 1);
+        let summary = &summaries[0];
+        assert_eq!(summary.level, "SPAN");
+        let recorded = summary
+            .fields
+            .get("request")
+            .expect("request field recorded");
+        assert!(recorded.contains("create_password: <redacted>"));
+        assert!(recorded.contains("machine_id_present: true"));
+        assert!(recorded.contains("bmc_endpoint_request_present: false"));
+        assert!(!recorded.contains(CANARY));
+    }
 
     fn row(mac: &str, primary: bool, boot_interface_id: Option<&str>) -> MachineInterfaceSnapshot {
         let mut row = MachineInterfaceSnapshot::mock_with_mac(mac.parse().unwrap());

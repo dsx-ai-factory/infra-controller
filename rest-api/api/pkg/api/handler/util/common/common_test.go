@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
+	"github.com/labstack/echo/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,6 +33,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 )
 
@@ -672,64 +675,134 @@ func TestAuthorizeProviderSiteForCore(t *testing.T) {
 	tenantOrg := "tenant-org"
 	tenantUser := TestBuildUser(t, dbSession, uuid.NewString(), tenantOrg, []string{authz.TenantAdminRole})
 	assert.NotNil(t, tenantUser)
-	tenant := TestBuildTenant(t, dbSession, tenantOrg, "Tenant", tenantUser)
-	assert.NotNil(t, tenant)
-	tenantSite := TestBuildTenantSite(t, dbSession, tenant, site, user)
-	assert.NotNil(t, tenantSite)
+	pendingSite := TestBuildSite(t, dbSession, ip, "Pending Site", user)
+	uninitializedOrg := "uninitialized-provider-org"
+	uninitializedUser := TestBuildUser(t, dbSession, uuid.NewString(), uninitializedOrg, []string{authz.ProviderAdminRole})
+	missingSiteID := uuid.NewString()
 
-	scp := &stubSiteTemporalClientPool{client: &tmocks.Client{}}
-	authInput := func(org string, user *cdbm.User, siteID string) AuthorizeProviderSiteForCoreInput {
-		return AuthorizeProviderSiteForCoreInput{
-			Ctx:       ctx,
-			Logger:    logger,
-			DBSession: dbSession,
-			SCP:       scp,
-			Org:       org,
-			User:      user,
-			SiteID:    siteID,
-		}
+	cases := []struct {
+		name        string
+		org         string
+		user        *cdbm.User
+		siteID      string
+		clientError error
+		wantCode    int
+		wantMessage string
+		wantLookups []uuid.UUID
+	}{
+		{
+			name:        "success",
+			org:         org,
+			user:        user,
+			siteID:      site.ID.String(),
+			wantLookups: []uuid.UUID{site.ID},
+		},
+		{
+			name:        "nil user",
+			org:         org,
+			siteID:      site.ID.String(),
+			wantCode:    http.StatusInternalServerError,
+			wantMessage: "Failed to retrieve current user",
+		},
+		{
+			name:        "user is not a provider admin",
+			org:         tenantOrg,
+			user:        tenantUser,
+			siteID:      site.ID.String(),
+			wantCode:    http.StatusForbidden,
+			wantMessage: "User does not have Provider Admin role with org",
+		},
+		{
+			name:        "user is not an org member",
+			org:         "unrelated-org",
+			user:        user,
+			siteID:      site.ID.String(),
+			wantCode:    http.StatusForbidden,
+			wantMessage: "Failed to validate membership for org: unrelated-org",
+		},
+		{
+			name:        "org has no provider",
+			org:         uninitializedOrg,
+			user:        uninitializedUser,
+			siteID:      site.ID.String(),
+			wantCode:    http.StatusNotFound,
+			wantMessage: "Org 'uninitialized-provider-org' does not have an Infrastructure Provider",
+		},
+		{
+			name:        "site not found",
+			org:         org,
+			user:        user,
+			siteID:      missingSiteID,
+			wantCode:    http.StatusBadRequest,
+			wantMessage: "Could not find Site with ID specified in request data: " + missingSiteID,
+		},
+		{
+			name:        "site belongs to another provider",
+			org:         org,
+			user:        user,
+			siteID:      otherSite.ID.String(),
+			wantCode:    http.StatusForbidden,
+			wantMessage: "Site specified in request doesn't belong to current org's Provider",
+		},
+		{
+			name:        "owned Site is not Registered",
+			org:         org,
+			user:        user,
+			siteID:      pendingSite.ID.String(),
+			wantCode:    http.StatusBadRequest,
+			wantMessage: "Site is not in Registered state, unable to execute operation on Site",
+		},
+		{
+			name:        "client lookup fails",
+			org:         org,
+			user:        user,
+			siteID:      site.ID.String(),
+			clientError: errors.New("client unavailable"),
+			wantCode:    http.StatusInternalServerError,
+			wantMessage: "Failed to retrieve client for Site",
+			wantLookups: []uuid.UUID{site.ID},
+		},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			scp := &stubSiteTemporalClientPool{client: &tmocks.Client{}, err: tc.clientError}
 
-	t.Run("success", func(t *testing.T) {
-		client, siteID, apiErr := AuthorizeProviderSiteForCore(authInput(org, user, site.ID.String()))
-		require.Nil(t, apiErr)
-		require.NotNil(t, client)
-		assert.Equal(t, site.ID.String(), siteID)
-	})
+			client, siteID, apiErr := AuthorizeProviderSiteForCore(AuthorizeProviderSiteForCoreInput{
+				Ctx:       ctx,
+				Logger:    logger,
+				DBSession: dbSession,
+				SCP:       scp,
+				Org:       tc.org,
+				User:      tc.user,
+				SiteID:    tc.siteID,
+			})
 
-	t.Run("nil user", func(t *testing.T) {
-		_, _, apiErr := AuthorizeProviderSiteForCore(authInput(org, nil, site.ID.String()))
-		require.NotNil(t, apiErr)
-		assert.Equal(t, http.StatusInternalServerError, apiErr.Code)
-	})
-
-	t.Run("user is not a provider admin", func(t *testing.T) {
-		_, _, apiErr := AuthorizeProviderSiteForCore(authInput(tenantOrg, tenantUser, site.ID.String()))
-		require.NotNil(t, apiErr)
-		assert.Equal(t, http.StatusForbidden, apiErr.Code)
-	})
-
-	t.Run("site not found", func(t *testing.T) {
-		missingSiteID := uuid.NewString()
-		_, _, apiErr := AuthorizeProviderSiteForCore(authInput(org, user, missingSiteID))
-		require.NotNil(t, apiErr)
-		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
-		assert.Contains(t, apiErr.Message, missingSiteID)
-	})
-
-	t.Run("site belongs to another provider", func(t *testing.T) {
-		_, _, apiErr := AuthorizeProviderSiteForCore(authInput(org, user, otherSite.ID.String()))
-		require.NotNil(t, apiErr)
-		assert.Equal(t, http.StatusForbidden, apiErr.Code)
-	})
+			assert.Equal(t, tc.wantLookups, scp.lookups)
+			if tc.wantCode == 0 {
+				require.Nil(t, apiErr)
+				assert.Same(t, scp.client, client)
+				assert.Equal(t, tc.siteID, siteID)
+				return
+			}
+			require.NotNil(t, apiErr)
+			assert.Equal(t, tc.wantCode, apiErr.Code)
+			assert.Equal(t, tc.wantMessage, apiErr.Message)
+			assert.Nil(t, client)
+			assert.Empty(t, siteID)
+		})
+	}
 }
 
+// stubSiteTemporalClientPool records resolution attempts and can return a client error.
 type stubSiteTemporalClientPool struct {
-	client tclient.Client
+	client  tclient.Client
+	err     error
+	lookups []uuid.UUID
 }
 
 func (s *stubSiteTemporalClientPool) GetClientByID(siteID uuid.UUID) (tclient.Client, error) {
-	return s.client, nil
+	s.lookups = append(s.lookups, siteID)
+	return s.client, s.err
 }
 
 func TestGetIPBlockFromIDString(t *testing.T) {
@@ -1016,7 +1089,12 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 
 	tx, _ := cdb.BeginTx(ctx, dbSession, &sql.TxOptions{})
 	assert.NotNil(t, tx)
-	defer tx.Rollback()
+	defer func(rollback func() error) {
+		err := rollback()
+		if !errors.Is(err, sql.ErrTxDone) {
+			assert.NoError(t, err)
+		}
+	}(tx.Rollback)
 
 	// Add user entry
 	ipOrg1 := "test-ip-org-1"
@@ -1062,12 +1140,52 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 		assert.NotNil(t, mit)
 	}
 
+	// machineLockedElsewhere reports whether another transaction is holding the Machine's advisory lock
+	machineLockedElsewhere := func(t *testing.T, machineID string) bool {
+		t.Helper()
+		other, err := cdb.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		defer func() { _ = other.Rollback() }()
+		lockErr := other.AcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(machineID), false)
+		if errors.Is(lockErr, cdb.ErrXactAdvisoryLockFailed) {
+			return true
+		}
+		require.NoError(t, lockErr)
+		return false
+	}
+
 	tests := []struct {
 		name         string
 		instancetype *cdbm.InstanceType
 		request      *cam.APIInstanceCreateRequest
 		expectErr    bool
+		wantErr      error
 	}{
+		{
+			name:         "missing SpectrumX capabilities must not fall back to incompatible machines",
+			instancetype: inst1,
+			request: &cam.APIInstanceCreateRequest{
+				SpectrumXAttachments: []cam.APISpectrumXAttachmentCreateOrUpdateRequest{{
+					Device:         "ConnectX-8",
+					DeviceInstance: cutil.GetPtr(0),
+				}},
+			},
+			expectErr: true,
+			wantErr:   ErrSpectrumXMachineSelection,
+		},
+		{
+			name:         "SpectrumX request without available candidates preserves capacity error",
+			instancetype: inst1,
+			request: &cam.APIInstanceCreateRequest{
+				MachineLabelSelector: map[string]string{"failure-domain": "missing"},
+				SpectrumXAttachments: []cam.APISpectrumXAttachmentCreateOrUpdateRequest{{
+					Device:         "ConnectX-8",
+					DeviceInstance: cutil.GetPtr(0),
+				}},
+			},
+			expectErr: true,
+			wantErr:   ErrInstanceTypeMachineNotFound,
+		},
 		{
 			name:         "error when no Machine matches label selector",
 			instancetype: inst1,
@@ -1099,8 +1217,21 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, err := GetUnallocatedMachineForInstanceType(ctx, zerolog.Nop(), tx, dbSession, tc.instancetype, tc.request)
 			assert.Equal(t, tc.expectErr, err != nil)
+			if tc.wantErr != nil {
+				assert.ErrorIs(t, err, tc.wantErr)
+			}
 			if err == nil {
-				assert.NotNil(t, s)
+				require.NotNil(t, s)
+				persisted, getErr := cdbm.NewMachineDAO(dbSession).GetByID(ctx, tx, s.ID, nil, false)
+				require.NoError(t, getErr)
+				assert.True(t, persisted.IsAssigned)
+				assert.Equal(t, cdbm.MachineStatusInUse, persisted.Status)
+				assert.True(t, machineLockedElsewhere(t, s.ID), "selected Machine must stay locked until the transaction ends")
+				details, _, historyErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, tx, cdbm.StatusDetailFilterInput{EntityIDs: []string{s.ID}}, cdbp.PageInput{})
+				require.NoError(t, historyErr)
+				require.Len(t, details, 1)
+				assert.Equal(t, persisted.Status, details[0].Status)
+				assert.Equal(t, cutil.GetPtr(cdbm.MachineStatusInUseMessage), details[0].Message)
 				if tc.request != nil {
 					assert.True(t, s.MatchesLabelSelector(tc.request.MachineLabelSelector))
 				}
@@ -1108,74 +1239,87 @@ func TestGetUnallocatedMachineForInstanceType(t *testing.T) {
 		})
 	}
 
-	t.Run("rechecks labels after a concurrent update", func(t *testing.T) {
-		concurrentInstanceType := testCommonBuildInstanceType(t, dbSession, "concurrent-label-update", site1, ip, tnuser)
-		machine := testCommonBuildMachine(t, dbSession, ip.ID, site1.ID, cutil.GetPtr(concurrentInstanceType.ID), uuid.New(), nil, nil, nil, cdbm.MachineStatusReady)
-		_, err := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{
-			MachineID: machine.ID,
-			Labels:    map[string]string{"failure-domain": "fd-a"},
-		})
-		require.NoError(t, err)
-		testCommonBuildMachineInstanceType(t, dbSession, machine.ID, concurrentInstanceType.ID)
+	for _, tc := range []struct {
+		name          string
+		forceDeletion bool
+	}{
+		{"labels", false},
+		{"force-deletion marker", true},
+	} {
+		t.Run("rechecks "+tc.name+" after a concurrent update, unlocks the rejected Machine", func(t *testing.T) {
+			concurrentInstanceType := testCommonBuildInstanceType(t, dbSession, "concurrent-"+tc.name, site1, ip, tnuser)
+			machine := testCommonBuildMachine(t, dbSession, ip.ID, site1.ID, cutil.GetPtr(concurrentInstanceType.ID), uuid.New(), nil, nil, nil, cdbm.MachineStatusReady)
+			_, err := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{
+				MachineID: machine.ID,
+				Labels:    map[string]string{"failure-domain": "fd-a"},
+			})
+			require.NoError(t, err)
+			testCommonBuildMachineInstanceType(t, dbSession, machine.ID, concurrentInstanceType.ID)
 
-		labelTx, err := cdb.BeginTx(ctx, dbSession, nil)
-		require.NoError(t, err)
-		_, err = cdbm.NewMachineDAO(dbSession).Update(ctx, labelTx, cdbm.MachineUpdateInput{
-			MachineID: machine.ID,
-			Labels:    map[string]string{"failure-domain": "fd-b"},
-		})
-		require.NoError(t, err)
-
-		allocationTx, err := cdb.BeginTx(ctx, dbSession, nil)
-		require.NoError(t, err)
-		labelTxFinished := false
-		defer func() {
-			if !labelTxFinished {
-				assert.NoError(t, labelTx.Rollback())
+			labelTx, err := cdb.BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			update := cdbm.MachineUpdateInput{MachineID: machine.ID, Labels: map[string]string{"failure-domain": "fd-b"}}
+			if tc.forceDeletion {
+				update.Labels = nil
+				update.IsForceDeletionRequested = cutil.GetPtr(true)
+				update.IsUsableByTenant = cutil.GetPtr(false)
 			}
-			require.NoError(t, allocationTx.Rollback())
-		}()
-		var allocationBackendPID int
-		err = allocationTx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &allocationBackendPID)
-		require.NoError(t, err)
+			_, err = cdbm.NewMachineDAO(dbSession).Update(ctx, labelTx, update)
+			require.NoError(t, err)
 
-		type allocationResult struct {
-			machine *cdbm.Machine
-			err     error
-		}
-		resultCh := make(chan allocationResult, 1)
-		go func() {
-			selected, selectionErr := GetUnallocatedMachineForInstanceType(
-				ctx,
-				zerolog.Nop(),
-				allocationTx,
-				dbSession,
-				concurrentInstanceType,
-				&cam.APIInstanceCreateRequest{MachineLabelSelector: map[string]string{"failure-domain": "fd-a"}},
-			)
-			resultCh <- allocationResult{machine: selected, err: selectionErr}
-		}()
+			allocationTx, err := cdb.BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			labelTxFinished := false
+			defer func() {
+				if !labelTxFinished {
+					assert.NoError(t, labelTx.Rollback())
+				}
+				require.NoError(t, allocationTx.Rollback())
+			}()
+			var allocationBackendPID int
+			err = allocationTx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &allocationBackendPID)
+			require.NoError(t, err)
 
-		require.Eventually(t, func() bool {
-			var waitEventType string
-			queryErr := dbSession.DB.QueryRowContext(ctx, `
-				SELECT COALESCE(wait_event_type, '')
-				FROM pg_catalog.pg_stat_activity
-				WHERE pid = ?
-			`, allocationBackendPID).Scan(&waitEventType)
-			return queryErr == nil && waitEventType == "Lock"
-		}, 5*time.Second, 10*time.Millisecond, "Machine selection did not wait for the concurrent label update")
+			type allocationResult struct {
+				machine *cdbm.Machine
+				err     error
+			}
+			resultCh := make(chan allocationResult, 1)
+			go func() {
+				selected, selectionErr := GetUnallocatedMachineForInstanceType(
+					ctx,
+					zerolog.Nop(),
+					allocationTx,
+					dbSession,
+					concurrentInstanceType,
+					&cam.APIInstanceCreateRequest{MachineLabelSelector: map[string]string{"failure-domain": "fd-a"}},
+				)
+				resultCh <- allocationResult{machine: selected, err: selectionErr}
+			}()
 
-		require.NoError(t, labelTx.Commit())
-		labelTxFinished = true
-		select {
-		case result := <-resultCh:
-			require.Nil(t, result.machine)
-			require.Error(t, result.err)
-		case <-time.After(5 * time.Second):
-			t.Fatal("Machine selection did not resume after the concurrent label update committed")
-		}
-	})
+			require.Eventually(t, func() bool {
+				var waitEventType string
+				queryErr := dbSession.DB.QueryRowContext(ctx, `
+					SELECT COALESCE(wait_event_type, '')
+					FROM pg_catalog.pg_stat_activity
+					WHERE pid = ?
+				`, allocationBackendPID).Scan(&waitEventType)
+				return queryErr == nil && waitEventType == "Lock"
+			}, 5*time.Second, 10*time.Millisecond, "Machine selection did not wait for the concurrent label update")
+
+			require.NoError(t, labelTx.Commit())
+			labelTxFinished = true
+			select {
+			case result := <-resultCh:
+				require.Nil(t, result.machine)
+				require.Error(t, result.err)
+				// allocationTx is still open, so a lock held through it would block this attempt
+				assert.False(t, machineLockedElsewhere(t, machine.ID), "rejected Machine must be unlocked before the transaction ends")
+			case <-time.After(5 * time.Second):
+				t.Fatal("Machine selection did not resume after the concurrent label update committed")
+			}
+		})
+	}
 }
 
 func TestGetSiteMachineCountStats(t *testing.T) {
@@ -1187,7 +1331,12 @@ func TestGetSiteMachineCountStats(t *testing.T) {
 
 	tx, _ := cdb.BeginTx(ctx, dbSession, &sql.TxOptions{})
 	assert.NotNil(t, tx)
-	defer tx.Rollback()
+	defer func(rollback func() error) {
+		err := rollback()
+		if !errors.Is(err, sql.ErrTxDone) {
+			assert.NoError(t, err)
+		}
+	}(tx.Rollback)
 
 	// Add user entry
 	ipOrg1 := "test-ip-org-1"
@@ -1866,6 +2015,40 @@ func TestGetInstanceTypeAllocationStats(t *testing.T) {
 			}
 		})
 	}
+	t.Run("retained force deletion removes usable capacity but preserves ownership counts", func(t *testing.T) {
+		_, err := cdbm.NewAllocationConstraintDAO(dbSession).Update(ctx, nil, cdbm.AllocationConstraintUpdateInput{
+			AllocationConstraintID: alc3.ID, ConstraintValue: cutil.GetPtr(alc3.ConstraintValue - 5),
+		})
+		require.NoError(t, err)
+		before, apiErr := GetInstanceTypeAllocationStats(ctx, dbSession, zerolog.Nop(), *it1, nil)
+		require.Nil(t, apiErr)
+		require.Equal(t, cutil.GetPtr(5), before.MaxAllocatable)
+		for _, tc := range []struct {
+			name           string
+			retained       int
+			maxAllocatable int
+		}{
+			{"remaining eligible capacity", 1, 4},
+			{"acknowledged capacity shortfall", 6, 0},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				for i := range tc.retained {
+					_, err := cdbm.NewMachineDAO(dbSession).Update(ctx, nil, cdbm.MachineUpdateInput{
+						MachineID: m1s[allocatedMachines+i].ID, IsForceDeletionRequested: cutil.GetPtr(true), IsUsableByTenant: cutil.GetPtr(false),
+					})
+					require.NoError(t, err)
+				}
+				after, apiErr := GetInstanceTypeAllocationStats(ctx, dbSession, zerolog.Nop(), *it1, nil)
+				require.Nil(t, apiErr)
+				assert.Equal(t, before.UnusedUsable-tc.retained, after.UnusedUsable)
+				assert.Equal(t, cutil.GetPtr(tc.maxAllocatable), after.MaxAllocatable)
+				assert.Equal(t, before.Assigned, after.Assigned)
+				assert.Equal(t, before.Used, after.Used)
+				assert.Equal(t, before.Total, after.Total)
+			})
+		}
+	})
+
 }
 
 func TestGetIsProviderRequest(t *testing.T) {
@@ -2335,7 +2518,12 @@ func TestMatchInstanceTypeCapabilitiesForMachines(t *testing.T) {
 
 	tx, _ := cdb.BeginTx(ctx, dbSession, &sql.TxOptions{})
 	assert.NotNil(t, tx)
-	defer tx.Rollback()
+	defer func(rollback func() error) {
+		err := rollback()
+		if !errors.Is(err, sql.ErrTxDone) {
+			assert.NoError(t, err)
+		}
+	}(tx.Rollback)
 
 	// Add user entry
 	ipOrg1 := "test-ip-org-1"
@@ -3426,6 +3614,49 @@ func TestTenantHasTargetedInstanceCreation(t *testing.T) {
 	})
 }
 
+func TestTenantHasSiteAccess(t *testing.T) {
+	ctx := context.Background()
+	dbSession := TestInitDB(t)
+	defer dbSession.Close()
+	TestSetupSchema(t, dbSession)
+
+	user := TestBuildUser(t, dbSession, uuid.NewString(), "site-access-org", []string{authz.ProviderAdminRole})
+	ip := TestBuildInfrastructureProvider(t, dbSession, "provider", "site-access-org", user)
+	site := TestBuildSite(t, dbSession, ip, "site", user)
+	buildTenant := func(name string, privileged bool) *cdbm.Tenant {
+		tn := TestBuildTenant(t, dbSession, name, name+"-org", user)
+		if privileged {
+			TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn.ID, tn.Org, cdbm.TenantAccountStatusReady, user)
+		} else {
+			TestBuildTenantAccount(t, dbSession, ip, &tn.ID, tn.Org, cdbm.TenantAccountStatusReady, user)
+		}
+		return tn
+	}
+
+	allocated := buildTenant("allocated", false)
+	TestBuildAllocation(t, dbSession, site, allocated, "allocation", user)
+	blocked := buildTenant("blocked", true)
+	cdbm.TestBuildTenantSite(t, dbSession, blocked, site, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, user)
+
+	tests := []struct {
+		name   string
+		tenant *cdbm.Tenant
+		want   bool
+	}{
+		{name: "allocation grants access", tenant: allocated, want: true},
+		{name: "privilege grants access", tenant: buildTenant("privileged", true), want: true},
+		{name: "site denial without allocation denies access", tenant: blocked, want: false},
+		{name: "no allocation or privilege denies access", tenant: buildTenant("unprivileged", false), want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := TenantHasSiteAccess(ctx, nil, dbSession, tc.tenant, site.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestTenantHasLegacyTargetedInstanceCreation(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testCommonInitDB(t)
@@ -3501,6 +3732,101 @@ func TestTenantHasLegacyTargetedInstanceCreation(t *testing.T) {
 			got, err := TenantHasLegacyTargetedInstanceCreation(ctx, nil, dbSession, tc.tenant)
 			require.NoError(t, err)
 			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
+func TestTenantHasCrossTenantInterfaceCreation(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testCommonInitDB(t)
+	defer dbSession.Close()
+	testCommonSetupSchema(t, dbSession)
+
+	user := testCommonBuildUser(t, dbSession, uuid.NewString(), []string{"cross-interface-provider"}, []string{authz.ProviderAdminRole})
+	provider := testCommonBuildInfrastructureProvider(t, dbSession, "Cross Interface Provider", "cross-interface-provider", user)
+	otherProvider := testCommonBuildInfrastructureProvider(t, dbSession, "Other Provider", "cross-interface-other-provider", user)
+	defaultSite := testCommonBuildSite(t, dbSession, provider, "Default Site", user)
+	overrideSite := testCommonBuildSite(t, dbSession, provider, "Override Site", user)
+	otherProviderSite := testCommonBuildSite(t, dbSession, otherProvider, "Other Provider Site", user)
+
+	buildTenant := func(name, status string, accountDefault bool) *cdbm.Tenant {
+		tenant := cdbm.TestBuildTenant(t, dbSession, name, name+"-org", user)
+		_, err := cdbm.NewTenantAccountDAO(dbSession).Create(ctx, nil, cdbm.TenantAccountCreateInput{
+			AccountNumber:             uuid.NewString(),
+			TenantID:                  &tenant.ID,
+			TenantOrg:                 tenant.Org,
+			InfrastructureProviderID:  provider.ID,
+			InfrastructureProviderOrg: provider.Org,
+			Status:                    status,
+			Config: &cdbm.TenantAccountConfig{
+				CrossTenantInterfaceCreation: accountDefault,
+			},
+			CreatedBy: user.ID,
+		})
+		require.NoError(t, err)
+		return tenant
+	}
+
+	enabledTenant := buildTenant("cross-interface-enabled", cdbm.TenantAccountStatusReady, true)
+	disabledTenant := buildTenant("cross-interface-disabled", cdbm.TenantAccountStatusReady, false)
+	pendingTenant := buildTenant("cross-interface-pending", cdbm.TenantAccountStatusPending, true)
+
+	cdbm.TestBuildTenantSite(t, dbSession, enabledTenant, overrideSite, &cdbm.TenantSiteConfig{
+		CrossTenantInterfaceCreation: cutil.GetPtr(false),
+	}, user)
+	cdbm.TestBuildTenantSite(t, dbSession, disabledTenant, overrideSite, &cdbm.TenantSiteConfig{
+		CrossTenantInterfaceCreation: cutil.GetPtr(true),
+	}, user)
+	cdbm.TestBuildTenantSite(t, dbSession, enabledTenant, otherProviderSite, &cdbm.TenantSiteConfig{
+		CrossTenantInterfaceCreation: cutil.GetPtr(true),
+	}, user)
+
+	tests := []struct {
+		name     string
+		tenant   *cdbm.Tenant
+		siteID   uuid.UUID
+		expected bool
+		wantErr  bool
+	}{
+		{name: "nil Tenant is disabled", siteID: defaultSite.ID},
+		{name: "enabled account default", tenant: enabledTenant, siteID: defaultSite.ID, expected: true},
+		{name: "disabled account default", tenant: disabledTenant, siteID: defaultSite.ID},
+		{name: "false Site override disables true default", tenant: enabledTenant, siteID: overrideSite.ID},
+		{name: "true Site override enables false default", tenant: disabledTenant, siteID: overrideSite.ID, expected: true},
+		{name: "non-Ready account does not authorize", tenant: pendingTenant, siteID: defaultSite.ID},
+		{name: "override without Ready account at Site Provider fails closed", tenant: enabledTenant, siteID: otherProviderSite.ID},
+		{name: "missing Site returns an error", tenant: enabledTenant, siteID: uuid.New(), wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := cdbm.TenantHasCrossTenantInterfaceCreation(ctx, nil, dbSession, tc.tenant, tc.siteID)
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
+func TestHandleTxError(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		err  error
+		body string
+	}{
+		{"wrapped classification", fmt.Errorf("rollback: %w", cutil.NewAPIError(400, "unavailable", nil).WithRetryable(true)), `{"source":"nico","message":"unavailable","data":null,"retryable":true}`},
+		{"unclassified error unchanged", cutil.NewAPIError(400, "invalid", nil), `{"source":"nico","message":"invalid","data":null}`},
+		{"unknown outcome", cutil.NewAPIError(500, "Unknown outcome. Do not retry automatically. Ask the Site operator to verify the Core allocation.", nil).WithRetryable(false), `{"source":"nico","message":"Unknown outcome. Do not retry automatically. Ask the Site operator to verify the Core allocation.","data":null,"retryable":false}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c := echo.New().NewContext(httptest.NewRequest(http.MethodPost, "/", nil), rec)
+			c.Set(cutil.APINameContextKey, "nico")
+			require.NoError(t, HandleTxError(c, zerolog.Nop(), tt.err, "fallback"))
+			assert.JSONEq(t, tt.body, rec.Body.String())
 		})
 	}
 }

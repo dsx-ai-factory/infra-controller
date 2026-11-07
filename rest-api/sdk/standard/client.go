@@ -57,15 +57,11 @@ type APIClient struct {
 
 	BMCCredentialAPI *BMCCredentialAPIService
 
-	BMCResetAPI *BMCResetAPIService
-
 	CredentialRotationAPI *CredentialRotationAPIService
 
 	DPUExtensionServiceAPI *DPUExtensionServiceAPIService
 
 	DPUMachineAPI *DPUMachineAPIService
-
-	DPUReprovisionAPI *DPUReprovisionAPIService
 
 	DomainAPI *DomainAPIService
 
@@ -93,9 +89,9 @@ type APIClient struct {
 
 	InstanceTypeAPI *InstanceTypeAPIService
 
-	MachineAPI *MachineAPIService
+	InterfaceAPI *InterfaceAPIService
 
-	MachineValidationAPI *MachineValidationAPIService
+	MachineAPI *MachineAPIService
 
 	MeasuredBootTrustedMachineAPI *MeasuredBootTrustedMachineAPIService
 
@@ -171,11 +167,9 @@ func NewAPIClient(cfg *Configuration) *APIClient {
 	c.AllocationAPI = (*AllocationAPIService)(&c.common)
 	c.AuditAPI = (*AuditAPIService)(&c.common)
 	c.BMCCredentialAPI = (*BMCCredentialAPIService)(&c.common)
-	c.BMCResetAPI = (*BMCResetAPIService)(&c.common)
 	c.CredentialRotationAPI = (*CredentialRotationAPIService)(&c.common)
 	c.DPUExtensionServiceAPI = (*DPUExtensionServiceAPIService)(&c.common)
 	c.DPUMachineAPI = (*DPUMachineAPIService)(&c.common)
-	c.DPUReprovisionAPI = (*DPUReprovisionAPIService)(&c.common)
 	c.DomainAPI = (*DomainAPIService)(&c.common)
 	c.ExpectedMachineAPI = (*ExpectedMachineAPIService)(&c.common)
 	c.ExpectedPowerShelfAPI = (*ExpectedPowerShelfAPIService)(&c.common)
@@ -189,8 +183,8 @@ func NewAPIClient(cfg *Configuration) *APIClient {
 	c.InfrastructureProviderAPI = (*InfrastructureProviderAPIService)(&c.common)
 	c.InstanceAPI = (*InstanceAPIService)(&c.common)
 	c.InstanceTypeAPI = (*InstanceTypeAPIService)(&c.common)
+	c.InterfaceAPI = (*InterfaceAPIService)(&c.common)
 	c.MachineAPI = (*MachineAPIService)(&c.common)
-	c.MachineValidationAPI = (*MachineValidationAPIService)(&c.common)
 	c.MeasuredBootTrustedMachineAPI = (*MeasuredBootTrustedMachineAPIService)(&c.common)
 	c.MeasuredBootTrustedProfileAPI = (*MeasuredBootTrustedProfileAPIService)(&c.common)
 	c.MetadataAPI = (*MetadataAPIService)(&c.common)

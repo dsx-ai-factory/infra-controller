@@ -38,7 +38,8 @@ pub enum RouteServerSourceType {
 // RouteServer is a sqlx-mapped struct modeling a
 // route_servers row in the database, containing the
 // IpAddr address and source_type.
-#[derive(FromRow)]
+#[derive(FromRow, carbide_macros::DbTable)]
+#[db_table(name = "route_servers")]
 pub struct RouteServer {
     pub address: IpAddr,
     pub source_type: RouteServerSourceType,

@@ -19,6 +19,10 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use model::controller_outcome::PersistentStateHandlerOutcome;
+use model::machine::{
+    FailureCause, FailureDetails, FailureSource, InstanceState, ManagedHostState,
+};
+use rpc::forge::machine_cleanup_info::{CleanupResult, CleanupStepResult};
 use state_controller::controller::StateController;
 use tokio_util::sync::CancellationToken;
 
@@ -31,7 +35,7 @@ use crate::tests::common::api_fixtures::{
     TestManagedHost, create_managed_host_multi_dpu, network_configured_with_health,
 };
 
-fn controller(env: &TestEnv) -> StateController<SitePrefixReadiness> {
+pub(super) fn controller(env: &TestEnv) -> StateController<SitePrefixReadiness> {
     StateController::builder()
         .database(env.pool.clone(), env.api.work_lock_manager_handle.clone())
         .processor_id("site-prefix-readiness-test".to_string())
@@ -75,7 +79,10 @@ async fn stored_prefix(env: &TestEnv, id: SitePrefixId) -> SitePrefix {
         .unwrap()
 }
 
-async fn stored_outcome(env: &TestEnv, id: SitePrefixId) -> PersistentStateHandlerOutcome {
+pub(super) async fn stored_outcome(
+    env: &TestEnv,
+    id: SitePrefixId,
+) -> PersistentStateHandlerOutcome {
     sqlx::query_scalar::<_, sqlx::types::Json<PersistentStateHandlerOutcome>>(
         "SELECT controller_state_outcome FROM site_prefixes WHERE id = $1",
     )
@@ -349,6 +356,40 @@ async fn creation_waits_for_every_host_and_dpu_without_repeating_fanout(pool: sq
             }
             txn.commit().await.unwrap();
         }
+
+        // Retirement has no second DPU acknowledgement or fanout. A host with
+        // an unrelated outstanding version must not retain a childless root.
+        let mut txn = env.pool.begin().await.unwrap();
+        let before = host.snapshot(&mut txn).await;
+        assert_eq!(
+            db::machine::try_update_network_config(
+                &mut txn,
+                &host.id,
+                before.host_snapshot.network_config.version,
+                &before.host_snapshot.network_config.value,
+            )
+            .await
+            .unwrap(),
+            db::ConditionalWrite::Applied(())
+        );
+        let outstanding = host.snapshot(&mut txn).await;
+        assert!(!outstanding.managed_host_network_config_version_synced());
+        txn.commit().await.unwrap();
+        controller(&env).run_single_iteration_ext(false).await;
+        assert!(
+            db::site_prefix::find_by_ids(&env.pool, &[id])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let mut txn = env.pool.begin().await.unwrap();
+        let after = host.snapshot(&mut txn).await;
+        assert_eq!(
+            after.host_snapshot.network_config.version,
+            outstanding.host_snapshot.network_config.version
+        );
+        assert!(!after.managed_host_network_config_version_synced());
+        txn.commit().await.unwrap();
     })
     .await;
 }
@@ -682,4 +723,127 @@ async fn idle_hosts_skip_fanout_and_later_assignment_receives_the_prefix(pool: s
             .site_fabric_prefixes
             .contains(&"10.69.0.0/24".to_string())
     );
+}
+
+/// A failure after Admin is applied must not require an offline DPU to report again.
+#[crate::sqlx_test]
+async fn failed_host_with_admin_applied_does_not_delay_readiness(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    create_fixture_tenant(&env, "prefix-owner").await.unwrap();
+    let host = create_managed_host(&env).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let instance = env
+        .api
+        .allocate_instance(Request::new(allocation_request(&host, segment_id)))
+        .await
+        .unwrap()
+        .into_inner();
+    let instance_id = instance.id.unwrap();
+
+    // The fixture starts on Admin. Arrange teardown with an Instance still
+    // present, then acknowledge Admin before injecting the cleanup failure.
+    let mut txn = env.pool.begin().await.unwrap();
+    db::instance::mark_as_deleted(instance_id, &mut txn)
+        .await
+        .unwrap();
+    let machine = host.host().db_machine(&mut txn).await;
+    db::machine::advance(
+        &machine,
+        &mut txn,
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForNetworkReconfig,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+    host.network_configured(&env).await;
+    let mut txn = env.pool.begin().await.unwrap();
+    let acknowledged = host.snapshot(&mut txn).await;
+    assert!(acknowledged.use_admin_network());
+    assert!(acknowledged.managed_host_network_config_version_synced());
+    assert!(acknowledged.instance.as_ref().unwrap().deleted.is_some());
+    txn.commit().await.unwrap();
+
+    // A late Scout failure takes precedence over finishing network teardown.
+    env.api
+        .cleanup_machine_completed(Request::new(rpc::MachineCleanupInfo {
+            machine_id: Some(host.id.into()),
+            nvme: Some(CleanupStepResult {
+                result: CleanupResult::Error as i32,
+                message: "test NVMe failure".to_string(),
+            }),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    env.run_machine_state_controller_iteration().await;
+    let mut txn = env.pool.begin().await.unwrap();
+    let failed = host.snapshot(&mut txn).await;
+    assert!(matches!(
+        &failed.managed_state,
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::Failed {
+                details: FailureDetails {
+                    cause: FailureCause::NVMECleanFailed { err },
+                    source: FailureSource::Scout,
+                    ..
+                },
+                machine_id,
+            },
+        } if err == "NVMe cleanup failed: test NVMe failure"
+            && *machine_id == host.id.into()
+    ));
+    assert_eq!(failed.instance.as_ref().unwrap().id, instance_id);
+    assert!(failed.use_admin_network());
+    assert!(failed.managed_host_network_config_version_synced());
+    assert_eq!(
+        failed.host_snapshot.network_config.version,
+        acknowledged.host_snapshot.network_config.version
+    );
+    txn.commit().await.unwrap();
+
+    // No further DPU reports arrive. Creating a prefix must keep the existing
+    // Admin acknowledgement valid, even though the failed host has an Instance.
+    let id = SitePrefixId::new();
+    env.api
+        .create_site_prefix(Request::new(creation_request(
+            id,
+            "prefix-owner",
+            "10.72.0.0/24",
+        )))
+        .await
+        .unwrap();
+    let mut txn = env.pool.begin().await.unwrap();
+    let after = host.snapshot(&mut txn).await;
+    for (name, actual, expected) in [
+        (
+            "host",
+            &after.host_snapshot.network_config,
+            &acknowledged.host_snapshot.network_config,
+        ),
+        (
+            "DPU",
+            &after.dpu_snapshots[0].network_config,
+            &acknowledged.dpu_snapshots[0].network_config,
+        ),
+    ] {
+        assert_eq!(
+            (actual.version, &actual.value),
+            (expected.version, &expected.value),
+            "{name}",
+        );
+    }
+    assert!(after.managed_host_network_config_version_synced());
+    txn.commit().await.unwrap();
+    controller(&env).run_single_iteration_ext(false).await;
+    assert_eq!(
+        stored_prefix(&env, id).await.status.lifecycle_state,
+        SitePrefixLifecycleState::Ready
+    );
+    assert!(matches!(
+        stored_outcome(&env, id).await,
+        PersistentStateHandlerOutcome::Transition { .. }
+    ));
 }

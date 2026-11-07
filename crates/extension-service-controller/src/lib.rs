@@ -20,4 +20,5 @@
 pub mod context;
 pub mod dpu_service;
 pub mod handler;
+pub mod interface_mac;
 pub mod io;

@@ -12,7 +12,7 @@ The NICo API server manages several distinct IP address pools. Each pool is draw
 
 Pool capacity planning is therefore a pre-deployment concern. Pools can be extended at runtime without a restart, but running out of addresses causes provisioning failures that must be resolved before work can continue.
 
-> **Note**: Tenant instance IP addresses — the addresses that instances see on their network interfaces — are not managed through IP resource pools.  The pools described on this page are infrastructure addresses, not tenant workload addresses.
+> **Note**: Tenant instance IP addresses — the addresses that instances see on their network interfaces — are not managed through IP resource pools. The pools described on this page are infrastructure addresses, not tenant workload addresses.
 
 ---
 
@@ -85,7 +85,6 @@ ranges = [
 ]
 ```
 
-
 ---
 
 ## Sizing
@@ -94,7 +93,7 @@ ranges = [
 
 One address is consumed per managed DPU. For a site with **H** hosts, each having **D** DPUs:
 
-```
+```text
 lo-ip pool size = H × D
 ```
 
@@ -106,7 +105,7 @@ For example, 100 hosts with 2 DPUs each require 200 addresses.
 
 Consumption depends on the number of VPCs and how broadly their instances are distributed across DPUs. In the worst case, every DPU participates in every VPC:
 
-```
+```text
 vpc-dpu-lo pool size (worst case) = number of VPCs × total number of DPUs
 ```
 
@@ -132,27 +131,23 @@ If `listen_only = true` is set in the API server configuration, pool registratio
 
 ## Runtime Operations
 
-### Listing pools
+### Listing Pools
 
+Run the following command to inspect resource pools:
+
+```bash
+nico-admin-cli resource-pool list
 ```
-admin-cli resource-pool list
-```
 
-This queries the API server for current pool state. The output is a table with the following columns:
+The table contains eight columns: `Name`, `Backend`, `Remote Pool`, `Min`, `Max`, `Size`, `Used`, and `Status`. For column definitions, missing counts, diagnostics, older-server behavior, and an example, refer to [Listing Pools in the VNI manual](../vpc/vni_resource_pools.md#listing-pools).
 
-| Column | Meaning |
-|---|---|
-| Name | Pool name |
-| Min | Lowest address in the pool |
-| Max | Highest address in the pool |
-| Size | Total number of addresses in the pool |
-| Used | Number currently allocated, and percentage of total |
+For IP pools, `Min` and `Max` show the lowest and highest addresses or prefixes in stored local inventory. Prefixes retain their CIDR length, such as `/64`; empty inventory has blank bounds.
 
-Monitor pools that are approaching their limit. When `Used` is near `Size`, the next provisioning operation that needs that pool will fail. Grow the pool before that point.
+In v2.4, `nico-api` fails to start if a pool selects a gRPC backend; [gRPC lifecycle integration](https://github.com/dsx-ai-factory/infra-controller/issues/7140) is tracked separately. Monitor known counts and the required automatic or manual range before it is exhausted. Provisioning fails when the selected pool has no eligible free address or prefix.
 
 ### Growing a pool
 
-```
+```bash
 admin-cli resource-pool grow -f <toml-file>
 ```
 
@@ -185,4 +180,3 @@ If the original pool was prefix-based, the grow file may also provide additional
 - `docs/manuals/vpc/vpc_network_virtualization.md` — end-to-end VPC network virtualization overview that ties VNI pools, IP pools, and routing profiles together
 - `docs/getting-started/prerequisites/network.md` — site-level networking requirements including IPv4 prefix sizing formulas
 - `docs/manuals/vpc/vpc_routing_profiles.md` — VPC routing profile configuration, which governs the VPC overlay network configuration and therefore drives `vpc-dpu-lo` consumption
-

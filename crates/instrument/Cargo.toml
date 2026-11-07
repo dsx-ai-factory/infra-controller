@@ -29,6 +29,11 @@ opentelemetry = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+# otlp-tracing only. Kept optional
+opentelemetry-otlp = { workspace = true, features = ["grpc-tonic"], optional = true }
+tokio = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+
 # test-support only
 ctor = { workspace = true, optional = true }
 opentelemetry-prometheus = { workspace = true, optional = true }
@@ -36,6 +41,13 @@ opentelemetry_sdk = { workspace = true, optional = true }
 prometheus = { workspace = true, optional = true }
 
 [features]
+# OTLP span export setup for binaries that emit traces.
+otlp-tracing = [
+  "dep:opentelemetry-otlp",
+  "dep:opentelemetry_sdk",
+  "dep:tokio",
+  "dep:tracing-opentelemetry",
+]
 # Capture helpers for asserting that an event logged and/or metered in tests.
 test-support = [
   "dep:ctor",
@@ -45,7 +57,7 @@ test-support = [
 ]
 
 [dev-dependencies]
-carbide-instrument = { path = ".", features = ["test-support"] }
+carbide-instrument = { path = ".", features = ["otlp-tracing", "test-support"] }
 carbide-test-support = { path = "../test-support" }
 futures-util = { workspace = true }
 logfmt = { path = "../logfmt" }

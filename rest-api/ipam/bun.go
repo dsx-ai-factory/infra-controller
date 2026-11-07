@@ -10,8 +10,10 @@ import (
 	"context"
 	dbsql "database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
+	"github.com/rs/zerolog/log"
 	"github.com/uptrace/bun"
 )
 
@@ -50,7 +52,10 @@ type Bundb struct {
 	userTx *bun.Tx
 }
 
-// NewBunStorage will create a new Bundb interface to ipam
+// NewBunStorage will create a new Bundb interface to IPAM. The caller owns
+// database instrumentation; REST's shared DB session attaches the Bun tracing
+// hook before passing the DB here. Attaching another hook in this wrapper would
+// duplicate spans because a new wrapper can be created for each transaction.
 func NewBunStorage(db *bun.DB, tx *bun.Tx) *Bundb {
 	return &Bundb{
 		db:     db,
@@ -111,6 +116,15 @@ func (s *Bundb) rollbackTx(tx *bun.Tx) error {
 	return tx.Rollback()
 }
 
+// rollbackTxWithLog reports cleanup failures unless the transaction context is done.
+// ctx must be the context passed to beginTx; cleanup is always attempted.
+func (s *Bundb) rollbackTxWithLog(ctx context.Context, tx *bun.Tx) {
+	err := s.rollbackTx(tx)
+	if err != nil && !errors.Is(err, dbsql.ErrTxDone) && ctx.Err() == nil {
+		log.Error().Err(err).Msg("failed to rollback transaction")
+	}
+}
+
 // prefixExists - does the prefix exist
 func (s *Bundb) prefixExists(ctx context.Context, prefix Prefix, namespace string) (*Prefix, bool) {
 	p, err := s.ReadPrefix(ctx, prefix.Cidr, prefix.Namespace)
@@ -138,7 +152,7 @@ func (s *Bundb) CreatePrefix(ctx context.Context, prefix Prefix, namespace strin
 	value := &BunPrefix{Cidr: prefix.Cidr, Namespace: prefix.Namespace, Prefix: pj}
 	_, err = tx.NewInsert().Model(value).Exec(ctx)
 	if err != nil {
-		s.rollbackTx(tx)
+		s.rollbackTxWithLog(ctx, tx)
 		return Prefix{}, fmt.Errorf("unable to insert prefix:%w", err)
 	}
 	return prefix, s.commitTx(tx)
@@ -214,22 +228,22 @@ func (s *Bundb) UpdatePrefix(ctx context.Context, prefix Prefix, namespace strin
 	query := tx.NewSelect().Model(&p).Column("prefix").Where("cidr = ? AND namespace = ? AND bp.prefix->>'Version' = '?'", prefix.Cidr, prefix.Namespace, oldVersion).For("UPDATE")
 	err = query.Scan(ctx)
 	if err != nil {
-		s.rollbackTx(tx)
+		s.rollbackTxWithLog(ctx, tx)
 		return Prefix{}, fmt.Errorf("%w: unable to select for update prefix:%s", ErrOptimisticLockError, prefix.Cidr)
 	}
 	p.Prefix = pn
 	result, err := tx.NewUpdate().Model(&p).Column("prefix").Where("cidr = ? AND namespace = ? AND prefix->>'Version' = '?'", prefix.Cidr, prefix.Namespace, oldVersion).Exec(ctx)
 	if err != nil {
-		s.rollbackTx(tx)
+		s.rollbackTxWithLog(ctx, tx)
 		return Prefix{}, fmt.Errorf("%w: unable to update prefix:%s", ErrOptimisticLockError, prefix.Cidr)
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
-		s.rollbackTx(tx)
+		s.rollbackTxWithLog(ctx, tx)
 		return Prefix{}, err
 	}
 	if rows == 0 {
-		s.rollbackTx(tx)
+		s.rollbackTxWithLog(ctx, tx)
 		return Prefix{}, fmt.Errorf("%w: updatePrefix did not effect any row", ErrOptimisticLockError)
 	}
 	return prefix, s.commitTx(tx)
@@ -244,7 +258,7 @@ func (s *Bundb) DeletePrefix(ctx context.Context, prefix Prefix, namespace strin
 	p := BunPrefix{}
 	_, err = tx.NewDelete().Model(&p).Where("cidr = ? and namespace = ?", prefix.Cidr, prefix.Namespace).Exec(ctx)
 	if err != nil {
-		s.rollbackTx(tx)
+		s.rollbackTxWithLog(ctx, tx)
 		return Prefix{}, fmt.Errorf("unable delete prefix:%w", err)
 	}
 	return prefix, s.commitTx(tx)

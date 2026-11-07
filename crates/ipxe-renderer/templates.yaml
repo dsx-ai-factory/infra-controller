@@ -261,6 +261,9 @@ templates:
       echo ${nvgreen}${bold}IP............${boldoff}${white} ${netX/ip}
       echo ${nvgreen}${bold}Gateway.......${boldoff}${white} ${netX/gateway}
       echo ${nvgreen}${bold}DNS...........${boldoff}${white} ${netX/dns}
+      echo ${nvgreen}${bold}IPv6..........${boldoff}${white} ${netX/ip6}
+      echo ${nvgreen}${bold}IPv6 Gateway..${boldoff}${white} ${netX/gateway6}
+      echo ${nvgreen}${bold}IPv6 DNS......${boldoff}${white} ${netX/dns6}
       echo ${nvgreen}${bold}Hostname......${boldoff}${white} ${hostname}
       echo ${nvgreen}${bold}Domain........${boldoff}${white} ${domain}
       echo ${nvgreen}${bold}Next Server...${boldoff}${white} ${next-server}

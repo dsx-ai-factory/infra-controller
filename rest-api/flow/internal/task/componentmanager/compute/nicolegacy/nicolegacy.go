@@ -338,7 +338,7 @@ func nicoPowerStateToOperationsPowerStatus(state nicoapi.PowerState) operations.
 	switch state {
 	case nicoapi.PowerStateOn:
 		return operations.PowerStatusOn
-	case nicoapi.PowerStateOff, nicoapi.PowerStateDisabled:
+	case nicoapi.PowerStateOff:
 		return operations.PowerStatusOff
 	default:
 		return operations.PowerStatusUnknown
@@ -364,6 +364,10 @@ func nicoPowerStateToOperationsPowerStatus(state nicoapi.PowerState) operations.
 // nicolegacy path inherits the same `version` semantics as compute/nico:
 // info.TargetVersion is ignored on the DPU branch because Core's
 // reprovisioning state machine does not accept a per-request version.
+//
+// The legacy firmware APIs cannot select compute-tray sub-targets or override
+// version checks. Requests using either option are rejected before readiness
+// checks or external calls so the manager never broadens the requested update.
 func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, info operations.FirmwareControlTaskInfo) error {
 	if target.UsesMACAddresses() {
 		return fmt.Errorf("MAC-address targets are not supported by the nicolegacy compute manager")
@@ -372,6 +376,11 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 	if info.AccessToken != "" {
 		return fmt.Errorf("firmware authentication data is not supported by the nicolegacy compute manager")
 	}
+
+	if err := m.ValidateFirmwareControl(info); err != nil {
+		return err
+	}
+	_, hasDpu := firmwarecomponents.SplitNICoComputeTraySubTargets(info.SubTargets)
 
 	log.Debug().
 		Str("components", target.String()).
@@ -396,11 +405,8 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 		return fmt.Errorf("refused: %w", err)
 	}
 
-	computeTraySubs, hasDpu := firmwarecomponents.SplitNICoComputeTraySubTargets(info.SubTargets)
-
-	dpuOnly := hasDpu && len(info.SubTargets) > 0 && len(computeTraySubs) == 0
-	if !dpuOnly {
-		if err := m.scheduleComputeTrayFirmware(ctx, target, info, computeTraySubs); err != nil {
+	if !hasDpu {
+		if err := m.scheduleComputeTrayFirmware(ctx, target, info); err != nil {
 			return err
 		}
 	}
@@ -418,25 +424,28 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 	return nil
 }
 
-// scheduleComputeTrayFirmware is the legacy compute-tray-internal
-// firmware scheduling path extracted from FirmwareControl so the DPU
-// branch can skip it when the request is DPU-only. Behaviour for
-// compute-tray sub-targets is unchanged: SetFirmwareUpdateTimeWindow +
-// SetMachineAutoUpdate do not expose per-sub-target selection, so we
-// log the requested subset and apply the whole bundle.
+// ValidateFirmwareControl rejects options that the legacy machine-centric
+// firmware APIs cannot enforce. It performs no readiness checks or RPCs.
+func (m *Manager) ValidateFirmwareControl(info operations.FirmwareControlTaskInfo) error {
+	computeTraySubs, _ := firmwarecomponents.SplitNICoComputeTraySubTargets(info.SubTargets)
+	if len(computeTraySubs) > 0 {
+		return fmt.Errorf("compute firmware sub-target selection is not supported by the nicolegacy compute manager")
+	}
+	if info.OverrideVersionCheck {
+		return fmt.Errorf("firmware version-check override is not supported by the nicolegacy compute manager")
+	}
+
+	return nil
+}
+
+// scheduleComputeTrayFirmware is the legacy compute-tray-internal firmware
+// scheduling path extracted from FirmwareControl so the DPU branch can skip it
+// when the request is DPU-only.
 func (m *Manager) scheduleComputeTrayFirmware(
 	ctx context.Context,
 	target common.Target,
 	info operations.FirmwareControlTaskInfo,
-	computeTraySubs []string,
 ) error {
-	if len(computeTraySubs) > 0 {
-		log.Warn().
-			Str("components", target.String()).
-			Strs("sub_targets", computeTraySubs).
-			Msg("compute firmware sub-target selection is not yet honored on nicolegacy; whole bundle will be applied")
-	}
-
 	desiredEntries, err := m.nicoClient.GetDesiredFirmwareVersions(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to query desired firmware versions: %w", err)

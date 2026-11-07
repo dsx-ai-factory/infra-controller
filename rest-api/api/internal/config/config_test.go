@@ -64,6 +64,63 @@ func TestNewConfig(t *testing.T) {
 	}
 }
 
+func TestConfig_GetAPIPort(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(c *Config)
+		want      int
+	}{
+		{
+			name:      "unset falls back to the default",
+			configure: func(c *Config) {},
+			want:      8388,
+		},
+		{
+			name:      "override is honored",
+			configure: func(c *Config) { c.v.Set(ConfigAPIPort, 18388) },
+			want:      18388,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewConfig()
+			tt.configure(c)
+			defer c.v.Set(ConfigAPIPort, 8388)
+
+			assert.Equal(t, tt.want, c.GetAPIPort())
+		})
+	}
+}
+
+func TestConfig_GetExpectedMachineBatchRecoveryEnabled(t *testing.T) {
+	tests := []struct {
+		name   string
+		config string
+		want   bool
+	}{
+		{name: "omission disables new reservations", config: "{}"},
+		{
+			name: "explicit activation enables new reservations",
+			config: `api:
+  expectedMachineBatchRecovery:
+    enabled: true
+`,
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(strings.ToUpper(ConfigExpectedMachineBatchRecoveryEnabled), "")
+			configPath := writeConfigForTest(t, tt.config)
+			c := &Config{v: newAPIConfigViper()}
+			c.v.SetConfigFile(configPath)
+			require.NoError(t, c.v.ReadInConfig())
+			assert.Equal(t, configPath, c.v.ConfigFileUsed())
+			assert.Equal(t, tt.want, c.GetExpectedMachineBatchRecoveryEnabled())
+		})
+	}
+}
+
 func TestConfig_GetIssuersConfig(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -213,12 +270,39 @@ func TestConfig_ValidateIssuersConfig(t *testing.T) {
 		}
 	}
 	kasIssuer := IssuerConfig{Name: "kas-api-key", Origin: cauth.TokenOriginKas, Issuer: "https://ngc-api.example.com"}
+	serviceAccountIssuer := func(name, org string) IssuerConfig {
+		issuer := jwtIssuer(name, cauth.TokenOriginCustom)
+		issuer.ClaimMappings = []cauth.ClaimMapping{{OrgName: org, OrgDisplayName: org, IsServiceAccount: true}}
+		return issuer
+	}
 
 	tests := []struct {
-		name    string
-		issuers []IssuerConfig
-		wantErr string
+		name         string
+		issuers      []IssuerConfig
+		disconnected bool
+		wantErr      string
 	}{
+		{
+			name:         "one service account mapping in disconnected mode",
+			issuers:      []IssuerConfig{serviceAccountIssuer("custom-one", "automation")},
+			disconnected: true,
+		},
+		{
+			name: "service account mappings in two issuers",
+			issuers: []IssuerConfig{
+				serviceAccountIssuer("custom-one", "automation"),
+				serviceAccountIssuer("custom-two", "automation-two"),
+			},
+			disconnected: true,
+			wantErr:      "only one claimMapping with isServiceAccount is allowed across all issuers",
+		},
+		{
+			name: "service account mappings in two issuers in connected mode",
+			issuers: []IssuerConfig{
+				serviceAccountIssuer("custom-one", "automation"),
+				serviceAccountIssuer("custom-two", "automation-two"),
+			},
+		},
 		{
 			name: "direct and legacy KAS",
 			issuers: []IssuerConfig{
@@ -315,6 +399,7 @@ func TestConfig_ValidateIssuersConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			v := viper.New()
+			v.Set(ConfigEnvDisconnected, tt.disconnected)
 			cfg := &Config{v: v}
 
 			err := cfg.ValidateIssuersConfig(tt.issuers)
@@ -342,6 +427,8 @@ func TestGetOrInitTokenOriginConfig(t *testing.T) {
 		v.Set(ConfigKeycloakRealm, "test-realm")
 		v.Set(ConfigKeycloakClientID, "test-client")
 		v.Set(ConfigKeycloakClientSecret, "test-secret")
+		v.Set(ConfigKeycloakServiceAccountEnabled, true)
+		v.Set(ConfigKeycloakServiceAccountOrgs, []string{" NCX ", "acme", "ncx", ""})
 
 		c := &Config{v: v}
 		tokenOriginConfig := c.GetOrInitTokenOriginConfig()
@@ -350,7 +437,64 @@ func TestGetOrInitTokenOriginConfig(t *testing.T) {
 		jwksConfig := tokenOriginConfig.GetConfig("https://keycloak.example.com/realms/test-realm")
 		require.NotNil(t, jwksConfig)
 		assert.Nil(t, jwksConfig.GetJWKS())
+		assert.True(t, jwksConfig.ServiceAccount)
+		assert.Equal(t, []string{"ncx", "acme"}, jwksConfig.ServiceAccountOrgs)
 	})
+}
+
+func TestConfig_ValidateKeycloakConfig(t *testing.T) {
+	tests := []struct {
+		name               string
+		disconnected       bool
+		serviceAccount     bool
+		serviceAccountOrgs []string
+		wantErr            string
+	}{
+		{
+			name:               "service account in disconnected mode with one org",
+			disconnected:       true,
+			serviceAccount:     true,
+			serviceAccountOrgs: []string{"ncx"},
+		},
+		{
+			name:               "service account in disconnected mode with two orgs",
+			disconnected:       true,
+			serviceAccount:     true,
+			serviceAccountOrgs: []string{"ncx", "acme"},
+			wantErr:            "keycloak service account orgs must list exactly one org in disconnected mode",
+		},
+		{
+			name:               "service account in connected mode with two orgs",
+			serviceAccount:     true,
+			serviceAccountOrgs: []string{"ncx", "acme"},
+		},
+		{
+			name:           "service account without orgs",
+			serviceAccount: true,
+			wantErr:        "keycloak service account orgs must be specified",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := viper.New()
+			v.Set(ConfigKeycloakEnabled, true)
+			v.Set(ConfigKeycloakBaseURL, "http://keycloak:8082")
+			v.Set(ConfigKeycloakRealm, "nico")
+			v.Set(ConfigKeycloakClientID, "nico-rest")
+			v.Set(ConfigKeycloakClientSecret, "test-secret")
+			v.Set(ConfigEnvDisconnected, tt.disconnected)
+			v.Set(ConfigKeycloakServiceAccountEnabled, tt.serviceAccount)
+			v.Set(ConfigKeycloakServiceAccountOrgs, tt.serviceAccountOrgs)
+
+			err := (&Config{v: v}).ValidateKeycloakConfig()
+
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, tt.wantErr)
+			}
+		})
+	}
 }
 
 func TestConfig_WatchConfigFile(t *testing.T) {
@@ -421,3 +565,30 @@ site:
 		})
 	}
 }
+
+// TestConfig_GetTracingServiceName proves the binary supplies a service name
+// when the config omits or empties it, so an export never lacks service.name.
+func TestConfig_GetTracingServiceName(t *testing.T) {
+	tcs := []struct {
+		descr      string
+		configured *string
+		want       string
+	}{
+		{descr: "binary default when omitted", want: DefaultTracingServiceName},
+		{descr: "binary default when explicitly empty", configured: new(string), want: DefaultTracingServiceName},
+		{descr: "configured name wins", configured: ptr("custom-api"), want: "custom-api"},
+	}
+
+	for _, tc := range tcs {
+		t.Run(tc.descr, func(t *testing.T) {
+			v := viper.New()
+			if tc.configured != nil {
+				v.Set(ConfigTracingServiceName, *tc.configured)
+			}
+			cfg := &Config{v: v}
+			assert.Equal(t, tc.want, cfg.GetTracingServiceName())
+		})
+	}
+}
+
+func ptr(s string) *string { return &s }

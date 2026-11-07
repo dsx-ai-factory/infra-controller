@@ -137,8 +137,6 @@ fn is_gbx00_compute_tray(hardware_type: HardwareType) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::Outcome::*;
-    use carbide_test_support::{Case, check_cases};
 
     use super::*;
 
@@ -167,81 +165,52 @@ mod tests {
 
     #[test]
     fn rack_placement_validation() {
-        check_cases(
-            [
-                Case {
-                    scenario: "valid WIWYNN GB200 rack",
-                    input: ValidationInput {
+        for (scenario, input, expected) in [
+                ("valid WIWYNN GB200 rack", ValidationInput {
                         rack_type: RackType::WiwynnGb200Nvl72,
                         mutation: Mutation::None,
-                    },
-                    expect: Yields(()),
-                },
-                Case {
-                    scenario: "valid Lenovo GB300 rack",
-                    input: ValidationInput {
+                    }, Ok(())),
+                ("valid Lenovo GB300 rack", ValidationInput {
                         rack_type: RackType::LenovoGb300Nvl72,
                         mutation: Mutation::None,
-                    },
-                    expect: Yields(()),
-                },
-                Case {
-                    scenario: "rack position outside the 48-position design",
-                    input: ValidationInput {
+                    }, Ok(())),
+                ("rack position outside the 48-position design", ValidationInput {
                         rack_type: RackType::WiwynnGb200Nvl72,
                         mutation: Mutation::OutOfRangePosition,
-                    },
-                    expect: FailsWith(
+                    }, Err(
                         "WIWYNN GB200 NVL72 rack design position 0 must be between 1 and 48"
                             .to_string(),
-                    ),
-                },
-                Case {
-                    scenario: "duplicate occupied position",
-                    input: ValidationInput {
+                    )),
+                ("duplicate occupied position", ValidationInput {
                         rack_type: RackType::WiwynnGb200Nvl72,
                         mutation: Mutation::DuplicatePosition,
-                    },
-                    expect: FailsWith(
+                    }, Err(
                         "WIWYNN GB200 NVL72 rack design position 6 is occupied more than once"
                             .to_string(),
-                    ),
-                },
-                Case {
-                    scenario: "compute tray outside CBC ranges",
-                    input: ValidationInput {
+                    )),
+                ("compute tray outside CBC ranges", ValidationInput {
                         rack_type: RackType::WiwynnGb200Nvl72,
                         mutation: Mutation::InvalidComputePosition,
-                    },
-                    expect: FailsWith(
+                    }, Err(
                         "WIWYNN GB200 NVL72 compute tray at rack position 10 cannot be mapped to a CBC index; compute trays must occupy positions 11 through 18 or 28 through 37"
                             .to_string(),
-                    ),
-                },
-                Case {
-                    scenario: "CBC index without a machine",
-                    input: ValidationInput {
+                    )),
+                ("CBC index without a machine", ValidationInput {
                         rack_type: RackType::WiwynnGb200Nvl72,
                         mutation: Mutation::MissingComputeTray,
-                    },
-                    expect: FailsWith(
+                    }, Err(
                         "WIWYNN GB200 NVL72 rack design CBC compute tray index 17 must resolve to exactly one machine, found 0"
                             .to_string(),
-                    ),
-                },
-                Case {
-                    scenario: "compute hardware from the wrong design",
-                    input: ValidationInput {
+                    )),
+                ("compute hardware from the wrong design", ValidationInput {
                         rack_type: RackType::WiwynnGb200Nvl72,
                         mutation: Mutation::WrongComputeHardware,
-                    },
-                    expect: FailsWith(
+                    }, Err(
                         "WIWYNN GB200 NVL72 rack design position 11 uses Lenovo GB300 NVL, expected WIWYNN GB200 NVL"
                             .to_string(),
-                    ),
-                },
-            ],
-            |input| {
+                    )),
+            ] {
+let actual = {
                 let rack_info = RackInfo {
                     rack_type: input.rack_type,
                 };
@@ -281,7 +250,8 @@ mod tests {
                 rack_info
                     .validate_elevation(&elevation)
                     .map_err(|error| error.to_string())
-            },
-        );
+            };
+assert_eq!(actual, expected, "{scenario}");
+}
     }
 }

@@ -17,7 +17,7 @@ import (
 // NVLDomainRackReader provides the inventory lookup needed to expand NVLink
 // domain targets into rack targets.
 type NVLDomainRackReader interface {
-	GetRacksForNVLDomain(context.Context, identifier.Identifier) ([]*rack.Rack, error)
+	GetRacksForNVLDomain(context.Context, identifier.Identifier, bool) ([]*rack.Rack, error)
 }
 
 // ResolveNVLDomainRackTargets expands NVLink domain targets into rack targets
@@ -29,7 +29,7 @@ func ResolveNVLDomainRackTargets(
 ) ([]operation.RackTarget, error) {
 	rackTargets := make([]operation.RackTarget, 0)
 	for domainIndex, domain := range domains {
-		domainRacks, err := inventory.GetRacksForNVLDomain(ctx, domain.Identifier)
+		domainRacks, err := inventory.GetRacksForNVLDomain(ctx, domain.Identifier, true)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"NVLink domain target %d: %w",

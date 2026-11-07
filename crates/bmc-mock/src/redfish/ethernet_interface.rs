@@ -17,12 +17,8 @@
 
 use std::borrow::Cow;
 
-use mac_address::MacAddress;
-use serde_json::json;
-
-use crate::json::{JsonExt, JsonPatch};
 use crate::redfish;
-use crate::redfish::Builder;
+use crate::redfish::schema::ethernet_interface as schema;
 
 pub(super) fn manager_collection(manager_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!("/redfish/v1/Managers/{manager_id}/EthernetInterfaces");
@@ -40,7 +36,9 @@ pub(crate) fn manager_resource<'a>(
     let odata_id = format!("/redfish/v1/Managers/{manager_id}/EthernetInterfaces/{iface_id}");
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#EthernetInterface.v1_6_0.EthernetInterface"),
+        odata_type: Cow::Borrowed(
+            redfish::schema::ethernet_interface::EthernetInterface::ODATA_TYPE,
+        ),
         id: Cow::Borrowed(iface_id),
         name: Cow::Borrowed("Manager Ethernet Interface"),
     }
@@ -59,17 +57,20 @@ pub(crate) fn system_resource<'a>(system_id: &str, iface_id: &'a str) -> redfish
     let odata_id = format!("/redfish/v1/Systems/{system_id}/EthernetInterfaces/{iface_id}");
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#EthernetInterface.v1_6_0.EthernetInterface"),
+        odata_type: Cow::Borrowed(
+            redfish::schema::ethernet_interface::EthernetInterface::ODATA_TYPE,
+        ),
         id: Cow::Borrowed(iface_id),
         name: Cow::Borrowed("System Ethernet Interface"),
     }
 }
 
-pub(crate) fn builder(resource: &redfish::Resource) -> EthernetInterfaceBuilder {
-    EthernetInterfaceBuilder {
-        id: Cow::Owned(resource.id.to_string()),
-        value: resource.json_patch(),
-    }
+pub(crate) fn builder(resource: &redfish::Resource) -> schema::EthernetInterface {
+    schema::EthernetInterface::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
 }
 
 #[derive(Clone)]
@@ -84,53 +85,26 @@ impl EthernetInterface {
     }
 }
 
-pub(crate) struct EthernetInterfaceBuilder {
-    id: Cow<'static, str>,
-    value: serde_json::Value,
-}
-
-impl Builder for EthernetInterfaceBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-            id: self.id,
+impl schema::EthernetInterface {
+    pub(crate) fn build(self) -> EthernetInterface {
+        EthernetInterface {
+            id: Cow::Owned(self.id.clone()),
+            value: serde_json::to_value(self).expect("generated Redfish model is serializable"),
         }
     }
 }
 
-impl EthernetInterfaceBuilder {
-    /// Adds the one static IPv4 address exposed by this mock interface.
+impl schema::EthernetInterface {
+    /// The one static IPv4 address exposed by this mock interface.
     pub(crate) fn static_ipv4_address(
         self,
         address: &str,
         subnet_mask: &str,
         gateway: &str,
     ) -> Self {
-        self.apply_patch(json!({
-            "IPv4StaticAddresses": [{
-                "Address": address,
-                "SubnetMask": subnet_mask,
-                "Gateway": gateway,
-            }],
-        }))
-    }
-
-    pub(crate) fn mac_address(self, addr: MacAddress) -> Self {
-        self.add_str_field("MACAddress", &addr.to_string())
-    }
-
-    pub(crate) fn interface_enabled(self, v: bool) -> Self {
-        self.apply_patch(json!({ "InterfaceEnabled": v }))
-    }
-
-    pub(crate) fn description(self, v: &str) -> Self {
-        self.add_str_field("Description", v)
-    }
-
-    pub(crate) fn build(self) -> EthernetInterface {
-        EthernetInterface {
-            id: self.id,
-            value: self.value,
-        }
+        self.ipv4static_addresses([super::schema::ip_addresses::Ipv4address::new()
+            .address(address)
+            .subnet_mask(subnet_mask)
+            .gateway(gateway)])
     }
 }

@@ -1,4 +1,4 @@
-# Changing a VPC Routing Profile
+# Changing a VPC Routing Profile <Badge intent="info">v2.3</Badge> <Badge intent="launch" minimal>New</Badge>
 
 You can change an existing FNN VPC between configured internal and external routing profiles without recreating the VPC or its instances. Core changes the profile and active Virtual Network Identifier (VNI) in one transaction and retains the previous VNI for possible reversal.
 

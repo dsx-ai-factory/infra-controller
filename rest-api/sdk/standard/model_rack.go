@@ -38,13 +38,15 @@ type Rack struct {
 	Description *string `json:"description,omitempty"`
 	// Operability phase aggregated from tray operationStatus values.
 	OperationStatus string `json:"operationStatus"`
-	// IDs of the NVLink Domains containing this Rack. Empty when the Rack is not assigned to an NVLink Domain.
+	// Domain external IDs (rack group IDs) containing this Rack. Empty when no rack-group Domain is assigned.
 	NvLinkDomainIds []string `json:"nvLinkDomainIds"`
 	// Physical or logical location of the Rack
 	Location *RackLocation `json:"location,omitempty"`
 	// Components within the Rack. Only returned when includeComponents is true.
 	Components []RackComponent `json:"components,omitempty"`
 	TaskStats  TaskStats       `json:"taskStats"`
+	// Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
+	Health NullableAggregateHealth `json:"health"`
 }
 
 type _Rack Rack
@@ -53,11 +55,12 @@ type _Rack Rack
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewRack(operationStatus string, nvLinkDomainIds []string, taskStats TaskStats) *Rack {
+func NewRack(operationStatus string, nvLinkDomainIds []string, taskStats TaskStats, health NullableAggregateHealth) *Rack {
 	this := Rack{}
 	this.OperationStatus = operationStatus
 	this.NvLinkDomainIds = nvLinkDomainIds
 	this.TaskStats = taskStats
+	this.Health = health
 	return &this
 }
 
@@ -397,6 +400,32 @@ func (o *Rack) SetTaskStats(v TaskStats) {
 	o.TaskStats = v
 }
 
+// GetHealth returns the Health field value
+// If the value is explicit nil, the zero value for AggregateHealth will be returned
+func (o *Rack) GetHealth() AggregateHealth {
+	if o == nil || o.Health.Get() == nil {
+		var ret AggregateHealth
+		return ret
+	}
+
+	return *o.Health.Get()
+}
+
+// GetHealthOk returns a tuple with the Health field value
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *Rack) GetHealthOk() (*AggregateHealth, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Health.Get(), o.Health.IsSet()
+}
+
+// SetHealth sets field value
+func (o *Rack) SetHealth(v AggregateHealth) {
+	o.Health.Set(&v)
+}
+
 func (o Rack) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -434,6 +463,7 @@ func (o Rack) ToMap() (map[string]interface{}, error) {
 		toSerialize["components"] = o.Components
 	}
 	toSerialize["taskStats"] = o.TaskStats
+	toSerialize["health"] = o.Health.Get()
 	return toSerialize, nil
 }
 
@@ -445,6 +475,7 @@ func (o *Rack) UnmarshalJSON(data []byte) (err error) {
 		"operationStatus",
 		"nvLinkDomainIds",
 		"taskStats",
+		"health",
 	}
 
 	allProperties := make(map[string]interface{})

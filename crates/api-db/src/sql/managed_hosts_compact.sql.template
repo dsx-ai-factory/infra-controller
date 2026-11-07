@@ -1,0 +1,145 @@
+-- Compact managed-host snapshots for FindHostStatesByIds. The shape matches
+-- managed_hosts.sql.template, but only the inputs of
+-- ManagedHostStateSnapshot::is_usable_as_instance and derive_aggregate_health
+-- are loaded. Host topology, host interface addresses and vendors, DPU
+-- interfaces, DPU topology and BMC info, NIC firmware, power options and the
+-- SKU device type are blank. A rule that starts reading one of them must load
+-- it here too.
+--
+-- PERF: as in managed_hosts.sql.template, every JOIN LATERAL filters with a
+-- WHERE clause, and the host snapshot keeps its OFFSET 0 fence so snapshots
+-- are built only for the requested hosts.
+
+SELECT m.* FROM (
+    SELECT
+    m.id,
+    row_to_json((array_agg(host_snapshot))[1]) AS host_snapshot,
+    COALESCE(json_agg(dpu_snapshots.*), '[]') AS dpu_snapshots,
+    COALESCE(json_agg(rack_health_overrides.*), '[]') AS rack_health_overrides
+    FROM machines m
+
+    -- (1) Host snapshot as JSON
+    INNER JOIN LATERAL (
+        SELECT
+        m2.*,
+        boot_interface.desired_mac_address AS desired_boot_interface_mac,
+        boot_interface.desired_interface_id AS desired_boot_interface_id,
+        boot_interface.desired_version AS desired_boot_interface_version,
+        boot_interface.selection_source AS boot_interface_selection_source,
+        boot_interface.selection_updated_at AS boot_interface_selection_updated_at,
+        boot_interface.verified_version AS boot_interface_verified_version,
+        boot_interface.observed_at AS boot_interface_observed_at,
+        COALESCE(boot_interface.assumed, false) AS boot_interface_observation_assumed,
+        NULL::text AS hw_sku_device_type,
+        COALESCE(i.json, '[]') AS interfaces,
+        '[]'::json AS topology,
+        COALESCE(bmc.json, t.bmc_info - 'ip' - 'mac', '{}'::jsonb) AS bmc_info
+        FROM machines m2
+        LEFT JOIN machine_boot_interfaces boot_interface
+        ON boot_interface.machine_id = m2.id
+
+        -- (1.1) Interfaces, which carry the primary flag and the attached DPUs
+        LEFT JOIN LATERAL (
+            SELECT json_agg(x) AS json
+            FROM (
+                SELECT
+                i2.*,
+                '[]'::json AS addresses,
+                '[]'::json AS vendors,
+                ns.network_segment_type
+                FROM machine_interfaces i2
+                INNER JOIN network_segments ns ON ns.id = i2.segment_id
+                WHERE i2.machine_id = m2.id
+                  AND i2.interface_type != 'Bmc'
+            ) x
+        ) AS i ON true
+
+        -- (1.2) BMC info of the latest topology, without the topology itself
+        LEFT JOIN LATERAL (
+            SELECT mt2.topology->'bmc_info' AS bmc_info
+            FROM machine_topologies mt2
+            WHERE mt2.machine_id = m2.id
+            ORDER BY mt2.created DESC
+            LIMIT 1
+        ) AS t ON true
+
+        -- (1.3) The BMC interface selected by topology
+        LEFT JOIN LATERAL (
+            SELECT jsonb_strip_nulls(
+                COALESCE(t.bmc_info, '{}'::jsonb) ||
+                jsonb_build_object(
+                    'machine_interface_id', bmc_i.id,
+                    'ip', host(bmc_addr.address),
+                    'mac', bmc_i.mac_address::text
+                )
+            ) AS json
+            FROM machine_interfaces bmc_i
+            LEFT JOIN LATERAL (
+                SELECT a.address
+                FROM machine_interface_addresses a
+                WHERE a.interface_id = bmc_i.id
+                ORDER BY family(a.address), a.address
+                LIMIT 1
+            ) AS bmc_addr ON true
+            WHERE bmc_i.machine_id = m2.id
+              AND bmc_i.interface_type = 'Bmc'
+              AND (
+                  t.bmc_info->>'machine_interface_id' IS NULL
+                  OR bmc_i.id::text = t.bmc_info->>'machine_interface_id'
+              )
+            ORDER BY bmc_i.created ASC
+            LIMIT 1
+        ) AS bmc ON true
+        WHERE m2.id = m.id
+        -- Prevent PostgreSQL from flattening this subquery and enriching
+        -- unrequested machines before applying the outer ID filter.
+        OFFSET 0
+    ) AS host_snapshot ON true
+
+    -- (2) DPU snapshots, machine rows and boot interface state only
+    LEFT JOIN LATERAL (
+        SELECT
+        mi_parent.machine_id AS managed_host_id,
+        m2.*,
+        boot_interface.desired_mac_address AS desired_boot_interface_mac,
+        boot_interface.desired_interface_id AS desired_boot_interface_id,
+        boot_interface.desired_version AS desired_boot_interface_version,
+        boot_interface.selection_source AS boot_interface_selection_source,
+        boot_interface.selection_updated_at AS boot_interface_selection_updated_at,
+        boot_interface.verified_version AS boot_interface_verified_version,
+        boot_interface.observed_at AS boot_interface_observed_at,
+        COALESCE(boot_interface.assumed, false) AS boot_interface_observation_assumed,
+        '[]'::json AS interfaces,
+        '[]'::json AS topology,
+        '{}'::jsonb AS bmc_info
+        FROM machine_interfaces mi_parent
+        INNER JOIN machines m2
+        ON (m2.id = mi_parent.attached_dpu_machine_id)
+        LEFT JOIN machine_boot_interfaces boot_interface
+        ON boot_interface.machine_id = m2.id
+        WHERE mi_parent.machine_id = m.id
+        AND mi_parent.attached_dpu_machine_id != mi_parent.machine_id
+        AND mi_parent.interface_type != 'Bmc'
+    ) AS dpu_snapshots ON true
+
+    -- (3) Rack-level health reports
+    LEFT JOIN LATERAL (
+        SELECT x.json
+        FROM (
+            SELECT
+            rack.id,
+            rack.health_reports AS json,
+            row_number() OVER (
+                PARTITION BY rack.id
+            ) AS rn
+            FROM racks rack
+            WHERE rack.health_reports IS NOT NULL
+            AND rack.deleted IS NULL
+            AND m.rack_id = rack.id
+            GROUP BY rack.id
+        ) x
+        WHERE x.rn = 1
+    ) AS rack_health_overrides ON true
+
+    GROUP BY m.id
+) m

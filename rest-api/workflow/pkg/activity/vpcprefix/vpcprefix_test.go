@@ -395,18 +395,17 @@ func TestManageVpcPrefix_UpdateVpcPrefixesInDB(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                     string
-		fields                   fields
-		args                     args
-		updatedVpcPrefix         *cdbm.VpcPrefix
-		deletingVpcPrefixes      []*cdbm.VpcPrefix
-		readyVpcPrefixes         []*cdbm.VpcPrefix
-		deletedStatusVpcPrefixes []*cdbm.VpcPrefix
-		deletedVpcPrefixes       []*cdbm.VpcPrefix
-		missingVpcPrefixes       []*cdbm.VpcPrefix
-		restoredVpcPrefixes      []*cdbm.VpcPrefix
-		unpairedVpcPrefixes      []*cdbm.VpcPrefix
-		wantErr                  bool
+		name                string
+		fields              fields
+		args                args
+		updatedVpcPrefix    *cdbm.VpcPrefix
+		deletingVpcPrefixes []*cdbm.VpcPrefix
+		readyVpcPrefixes    []*cdbm.VpcPrefix
+		deletedVpcPrefixes  []*cdbm.VpcPrefix
+		missingVpcPrefixes  []*cdbm.VpcPrefix
+		restoredVpcPrefixes []*cdbm.VpcPrefix
+		unpairedVpcPrefixes []*cdbm.VpcPrefix
+		wantErr             bool
 	}{
 		{
 			name: "test Vpc Prefix inventory processing error, non-existent Site",
@@ -482,13 +481,12 @@ func TestManageVpcPrefix_UpdateVpcPrefixesInDB(t *testing.T) {
 					},
 				},
 			},
-			updatedVpcPrefix:         vpcPrefix12,
-			deletingVpcPrefixes:      []*cdbm.VpcPrefix{vpcPrefix3, vpcPrefix4, vpcPrefix10, vpcPrefix13},
-			deletedStatusVpcPrefixes: []*cdbm.VpcPrefix{vpcPrefix14},
-			deletedVpcPrefixes:       []*cdbm.VpcPrefix{vpcPrefix5, vpcPrefix6},
-			missingVpcPrefixes:       []*cdbm.VpcPrefix{vpcPrefix7, vpcPrefix11},
-			restoredVpcPrefixes:      []*cdbm.VpcPrefix{vpcPrefix8},
-			wantErr:                  false,
+			updatedVpcPrefix:    vpcPrefix12,
+			deletingVpcPrefixes: []*cdbm.VpcPrefix{vpcPrefix3, vpcPrefix4, vpcPrefix10, vpcPrefix13, vpcPrefix14},
+			deletedVpcPrefixes:  []*cdbm.VpcPrefix{vpcPrefix5, vpcPrefix6},
+			missingVpcPrefixes:  []*cdbm.VpcPrefix{vpcPrefix7, vpcPrefix11},
+			restoredVpcPrefixes: []*cdbm.VpcPrefix{vpcPrefix8},
+			wantErr:             false,
 		},
 		{
 			name: "test paged Vpc Prefix inventory processing, empty inventory",
@@ -595,12 +593,6 @@ func TestManageVpcPrefix_UpdateVpcPrefixesInDB(t *testing.T) {
 				rv, _ := vpcPrefixDAO.GetByID(ctx, nil, vpcPrefix.ID, nil)
 				assert.False(t, rv.IsMissingOnSite)
 				assert.Equal(t, cdbm.VpcPrefixStatusDeleting, rv.Status)
-			}
-
-			for _, vpcPrefix := range tt.deletedStatusVpcPrefixes {
-				rv, _ := vpcPrefixDAO.GetByID(ctx, nil, vpcPrefix.ID, nil)
-				assert.False(t, rv.IsMissingOnSite)
-				assert.Equal(t, cdbm.VpcPrefixStatusDeleted, rv.Status)
 			}
 
 			for _, vpcPrefix := range tt.deletedVpcPrefixes {
@@ -1067,6 +1059,7 @@ func TestManageVpcPrefix_CreateOrUpdateVpcPrefixFromSite(t *testing.T) {
 			InfrastructureProviderID: provider.ID,
 			TenantID:                 &authorizedTenant.ID,
 			SitePrefixID:             cutil.GetPtr(uuid.New()),
+			Managed:                  cutil.GetPtr(false),
 			RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
 			Prefix:                   "10.6.0.0",
 			PrefixLength:             16,

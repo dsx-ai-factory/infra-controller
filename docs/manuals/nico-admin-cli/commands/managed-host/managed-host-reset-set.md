@@ -11,13 +11,24 @@ host.
 
 ```text
 nico-admin-cli managed-host reset set <--machine>
-[--allow-reset-with-instance] [--update-message]
-[--extended] [--sort-by] [-h|--help]
+[--allow-reset-with-instance] [--ignore-cleanup]
+[--update-message] [--extended] [--sort-by]
+[-h|--help]
 ```
 
 ## DESCRIPTION
 
 Request a reset of a managed host.
+
+If the host still has an Instance, including one already terminating,
+Reset requests Admin networking. The Instance can lose tenant
+connectivity while Reset waits for every attached DPU to acknowledge the
+change. Reset retains the Instance and its network resources until then.
+An unreachable DPU can keep Reset waiting indefinitely. Hosts without an
+Instance skip this network wait.
+
+After Reset starts, it cannot be canceled with managed-host reset clear,
+including while waiting for the DPUs.
 
 ## OPTIONS
 
@@ -27,8 +38,15 @@ Managed host machine ID to reset.
 
 `--allow-reset-with-instance`
 
-Acknowledge that resetting an assigned host destroys the live instance
-and its data. Required when the host has an instance.
+Acknowledge destruction of the live Instance. Host cleanup also deletes
+its data unless --ignore-cleanup is set. Required for a live Instance;
+does not bypass the Admin network acknowledgement.
+
+`--ignore-cleanup`
+
+Skip host cleanup after the Instance is deleted. Data from the previous
+tenant stays on the host. Requires --allow-reset-with-instance and does
+not bypass the Admin network acknowledgement.
 
 `--update-message <UPDATE_MESSAGE>`
 
@@ -60,8 +78,8 @@ Print help (see a summary with -h)
 ## Examples
 
 ```sh
-nico-admin-cli managed-host reset set --machine 12345678-1234-5678-90ab-cdef01234567 --update-message "recovering wedged DPU"
-nico-admin-cli managed-host reset set --machine 12345678-1234-5678-90ab-cdef01234567 --allow-reset-with-instance --update-message "forced recovery"
+nico-admin-cli managed-host reset set --machine fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg --update-message "recovering wedged DPU"
+nico-admin-cli managed-host reset set --machine fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg --allow-reset-with-instance --update-message "forced recovery"
 ```
 
 ---

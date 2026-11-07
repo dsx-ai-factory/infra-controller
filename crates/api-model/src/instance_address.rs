@@ -20,12 +20,12 @@ use carbide_uuid::vpc::VpcId;
 use ipnetwork::IpNetwork;
 use sqlx::FromRow;
 
-#[derive(Debug, FromRow, Clone)]
+#[derive(Debug, FromRow, Clone, carbide_macros::DbTable)]
+#[db_table(name = "instance_addresses")]
 pub struct InstanceAddress {
     pub instance_id: InstanceId,
     pub segment_id: NetworkSegmentId,
     pub vpc_id: VpcId,
-    // pub id: Uuid,          // unused
     pub address: std::net::IpAddr,
     /// The address's network in CIDR form, e.g. `10.3.2.0/30`.
     pub prefix: IpNetwork,
@@ -33,4 +33,6 @@ pub struct InstanceAddress {
     /// stored so the `dns_records_instance` view serves it without
     /// re-deriving in SQL. Nullable in the table.
     pub hostname: Option<String>,
+    // Available from the table but intentionally unmapped:
+    // id: Uuid,
 }

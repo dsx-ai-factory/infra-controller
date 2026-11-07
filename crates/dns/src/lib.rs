@@ -25,7 +25,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{DynamicLog, Event, LabelValue, LogAt, emit};
 use dns_record::DnsResourceRecordType;
 use eyre::Report;
 use hickory_resolver::proto::op::ResponseCode;
@@ -415,8 +415,8 @@ impl From<ResponseCode> for Rcode {
 ///
 /// A derived `LabelValue` would turn values such as `NXDomain` and `ServFail`
 /// into snake_case. The manual implementation remains bounded because these
-/// Events only receive `classify_failure` results or cache entries populated
-/// from those same results.
+/// Events only receive `classify_failure` or `classify_outcome` results, or
+/// cache entries populated from those same results.
 #[derive(Debug, Clone, Copy)]
 struct NegativeCacheResponseCode(ResponseCode);
 
@@ -450,15 +450,13 @@ struct DnsNegativeCacheHit {
     response_code: NegativeCacheResponseCode,
 }
 
-/// `DnsNegativeCacheMiss` records an upstream failure before it enters the
-/// negative cache. Its error remains log-only context while the bounded
-/// response code labels both the WARN diagnostic and counter.
+/// Counts uncached negative replies, logging a warning only for RPC failures.
 #[derive(Event)]
 #[event(
     event_name = "dns_negative_cache_miss",
     metric_name = "carbide_dns_negative_cache_miss_count_total",
     component = "carbide-dns",
-    log = warn,
+    log = dynamic,
     metric = counter,
     message = "DNS lookup failed",
     describe = "Number of negative DNS cache misses, by response code"
@@ -467,7 +465,18 @@ struct DnsNegativeCacheMiss {
     #[label]
     response_code: NegativeCacheResponseCode,
     #[context]
-    error: String,
+    error: Option<String>,
+}
+
+/// Only log warning for RPC-error, not normal negative answers.
+impl DynamicLog for DnsNegativeCacheMiss {
+    fn log_at(&self) -> LogAt {
+        if self.error.is_some() {
+            LogAt::Level(tracing::Level::WARN)
+        } else {
+            LogAt::Off
+        }
+    }
 }
 
 /// A query arrived, counted by query type: the request rate is the signal, so
@@ -660,6 +669,10 @@ impl RequestHandler for DnsServer {
                         // SOA TTL is clamped to the cache lifetime so this
                         // answer and every replay of it expire together.
                         let authority = if classification.cache_negative {
+                            emit(DnsNegativeCacheMiss {
+                                response_code: NegativeCacheResponseCode(classification.code),
+                                error: None,
+                            });
                             let negative = NegativeAnswer {
                                 code: classification.code,
                                 authoritative: classification.authoritative,
@@ -682,7 +695,7 @@ impl RequestHandler for DnsServer {
                         // cache miss, even when admission evicts another entry.
                         emit(DnsNegativeCacheMiss {
                             response_code: NegativeCacheResponseCode(code),
-                            error: e.to_string(),
+                            error: Some(e.to_string()),
                         });
 
                         // The LRU cache always admits the entry; a `true` return means
@@ -1258,9 +1271,8 @@ mod tests {
         );
     }
 
-    /// `dns_negative_cache_events_pair_metrics_and_logs` pins one counter
-    /// increment and one diagnostic record to the same `emit`, including the
-    /// shared `response_code` label spelling.
+    /// Cache events preserve their counters and diagnostics, while normal
+    /// negative replies increment misses silently.
     #[test]
     fn dns_negative_cache_events_pair_metrics_and_logs() {
         use carbide_instrument::testing::{MetricsCapture, capture_logs};
@@ -1270,7 +1282,7 @@ mod tests {
             Hit(ResponseCode),
             Miss {
                 response_code: ResponseCode,
-                error: &'static str,
+                error: Option<&'static str>,
             },
         }
 
@@ -1289,7 +1301,7 @@ mod tests {
         struct Observation {
             log_count: usize,
             log: Option<LogObservation>,
-            counters: [f64; 2],
+            counters: [f64; 3],
         }
 
         fn expected_log(
@@ -1326,14 +1338,14 @@ mod tests {
                             "NXDomain",
                             None,
                         ),
-                        counters: [1.0, 0.0],
+                        counters: [1.0, 0.0, 0.0],
                     },
                 },
                 Check {
                     scenario: "negative-cache miss",
                     input: NegativeCacheEvent::Miss {
                         response_code: ResponseCode::ServFail,
-                        error: "upstream unavailable",
+                        error: Some("upstream unavailable"),
                     },
                     expect: Observation {
                         log_count: 1,
@@ -1345,7 +1357,19 @@ mod tests {
                             "ServFail",
                             Some("upstream unavailable"),
                         ),
-                        counters: [0.0, 1.0],
+                        counters: [0.0, 1.0, 0.0],
+                    },
+                },
+                Check {
+                    scenario: "normal negative-cache miss",
+                    input: NegativeCacheEvent::Miss {
+                        response_code: ResponseCode::NoError,
+                        error: None,
+                    },
+                    expect: Observation {
+                        log_count: 0,
+                        log: None,
+                        counters: [0.0, 0.0, 1.0],
                     },
                 },
             ],
@@ -1360,7 +1384,7 @@ mod tests {
                         error,
                     } => emit(DnsNegativeCacheMiss {
                         response_code: NegativeCacheResponseCode(response_code),
-                        error: error.to_string(),
+                        error: error.map(str::to_string),
                     }),
                 });
                 let log = logs.first().map(|log| LogObservation {
@@ -1384,6 +1408,10 @@ mod tests {
                         metrics.counter_delta(
                             "carbide_dns_negative_cache_miss_count_total",
                             &[("response_code", "ServFail")],
+                        ),
+                        metrics.counter_delta(
+                            "carbide_dns_negative_cache_miss_count_total",
+                            &[("response_code", "NoError")],
                         ),
                     ],
                 }

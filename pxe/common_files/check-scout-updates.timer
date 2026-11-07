@@ -3,6 +3,7 @@ Description=Run scout daily update check
 
 [Timer]
 OnCalendar=daily
+RandomizedDelaySec=1h
 Persistent=true
 
 [Install]

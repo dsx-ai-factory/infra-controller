@@ -52,6 +52,8 @@ mod bmc_proxy;
 pub mod bootstrap;
 pub mod cfg;
 mod compat;
+#[doc(hidden)]
+pub mod console_logs;
 mod credentials;
 mod db_init;
 mod dhcp;
@@ -71,12 +73,15 @@ mod machine_validation;
 mod measured_boot;
 mod mqtt_state_change_hook;
 mod network_segment;
+mod nic_firmware;
 mod node_auth;
+mod resource_pool;
 mod scout_stream;
 pub mod secrets;
 mod setup;
 mod site_prefix_controller;
 mod storage;
+mod vpc_peering_controller;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
@@ -98,11 +103,11 @@ pub use crate::admission::AdminAdmissionControl;
 pub use crate::api::{Api, DefaultCredential};
 pub use crate::auth::AuthContext;
 use crate::cfg::file::ToolLink;
-pub use crate::dynamic_settings::DynamicSettings;
 pub use crate::errors::CarbideError;
 pub use crate::handlers::redfish::NUM_REQUIRED_APPROVALS;
 pub use crate::listener::AdminUiRoutesBuilder;
 pub use crate::logging::stream::{LogLine, LogStream};
+pub use crate::setup::{start_runtime, validate_resource_pool_config};
 
 /// Process-global tool list rendered in the admin web UI's "Tools" sidebar.
 ///

@@ -82,6 +82,8 @@ async fn test_domain_writes_reject_reverse_roots(pool: PgPool) {
     let original = api
         .create_domain(Request::new(CreateDomainRequest {
             name: DOMAIN_NAME.to_string(),
+            default_ttl: None,
+            vpc_id: None,
         }))
         .await
         .expect("valid DNS test fixture")
@@ -97,6 +99,8 @@ async fn test_domain_writes_reject_reverse_roots(pool: PgPool) {
         let error = api
             .create_domain(Request::new(CreateDomainRequest {
                 name: name.to_string(),
+                default_ttl: None,
+                vpc_id: None,
             }))
             .await
             .expect_err("reverse domain writes are rejected");
@@ -105,22 +109,21 @@ async fn test_domain_writes_reject_reverse_roots(pool: PgPool) {
             error.message().contains("reverse DNS zone"),
             "create {name}"
         );
-
-        let error = api
-            .update_domain(Request::new(UpdateDomainRequest {
-                domain: Some(rpc::protos::dns::Domain {
-                    name: name.to_string(),
-                    ..original.clone()
-                }),
-            }))
-            .await
-            .expect_err("reverse domain writes are rejected");
-        assert_eq!(error.code(), tonic::Code::InvalidArgument, "update {name}");
-        assert!(
-            error.message().contains("reverse DNS zone"),
-            "update {name}"
-        );
     }
+
+    // UpdateDomain cannot rename a domain at all, so the reverse-name rule
+    // never applies there.
+    let error = api
+        .update_domain(Request::new(UpdateDomainRequest {
+            domain: Some(rpc::protos::dns::Domain {
+                name: "renamed.example".to_string(),
+                ..original.clone()
+            }),
+        }))
+        .await
+        .expect_err("renaming is rejected");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument, "rename");
+    assert!(error.message().contains("not supported"), "rename");
 
     let domains = api
         .find_domain(Request::new(DomainSearchQuery::default()))
@@ -133,6 +136,124 @@ async fn test_domain_writes_reject_reverse_roots(pool: PgPool) {
         vec![original],
         "rejected writes must leave no changes"
     );
+}
+
+// Older clients and the legacy adapter omit vpc_id, so updates must keep the
+// stored owner. Supplying a different owner must fail.
+#[sqlx_test]
+async fn test_update_domain_preserves_vpc_ownership(pool: PgPool) {
+    use rpc::dns::{CreateDomainRequest, UpdateDomainRequest};
+
+    let env = TestHarness::builder(pool).build().await;
+    let vpc_id = env.network_controller().create_vpc("dns-owner").await;
+    let api = env.api();
+    let created = api
+        .create_domain(Request::new(CreateDomainRequest {
+            name: "owned.example".to_string(),
+            vpc_id: Some(vpc_id),
+            default_ttl: None,
+        }))
+        .await
+        .expect("create VPC-owned domain")
+        .into_inner();
+    assert_eq!(created.vpc_id, Some(vpc_id));
+
+    let updated = api
+        .update_domain(Request::new(UpdateDomainRequest {
+            domain: Some(rpc::dns::Domain {
+                vpc_id: None,
+                default_ttl: Some(600),
+                ..created
+            }),
+        }))
+        .await
+        .expect("update without changing the owner")
+        .into_inner();
+    assert_eq!(updated.vpc_id, Some(vpc_id));
+
+    let other_vpc = env.network_controller().create_vpc("dns-other").await;
+    let error = api
+        .update_domain(Request::new(UpdateDomainRequest {
+            domain: Some(rpc::dns::Domain {
+                vpc_id: Some(other_vpc),
+                ..updated
+            }),
+        }))
+        .await
+        .expect_err("ownership cannot be reassigned");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert!(
+        error.message().contains("VPC ownership"),
+        "expected the ownership rejection, got: {}",
+        error.message()
+    );
+}
+
+// UpdateDomain treats an empty or unchanged name and an absent default_ttl as
+// "keep the stored value", and both Create and Update reject a TTL outside
+// 30..=86400 with INVALID_ARGUMENT before anything is written.
+#[sqlx_test]
+async fn test_domain_default_ttl_omission_and_range_rules(pool: PgPool) {
+    use rpc::protos::dns::{CreateDomainRequest, UpdateDomainRequest};
+
+    let env = TestHarness::builder(pool).build().await;
+    let api = env.api();
+    let created = api
+        .create_domain(Request::new(CreateDomainRequest {
+            name: DOMAIN_NAME.to_string(),
+            default_ttl: Some(600),
+            vpc_id: None,
+        }))
+        .await
+        .expect("create domain with a default TTL")
+        .into_inner();
+    assert_eq!(created.default_ttl, Some(600));
+
+    // An update carrying only the id leaves both the name and the TTL as stored.
+    let unchanged = api
+        .update_domain(Request::new(UpdateDomainRequest {
+            domain: Some(rpc::protos::dns::Domain {
+                id: created.id,
+                ..Default::default()
+            }),
+        }))
+        .await
+        .expect("update without touching the name or TTL")
+        .into_inner();
+    assert_eq!(unchanged.name, created.name);
+    assert_eq!(unchanged.default_ttl, Some(600));
+
+    // Sending a fetched domain straight back, name included, is not a rename.
+    let echoed = api
+        .update_domain(Request::new(UpdateDomainRequest {
+            domain: Some(unchanged.clone()),
+        }))
+        .await
+        .expect("echoing the stored name back")
+        .into_inner();
+    assert_eq!(echoed.name, created.name);
+
+    let error = api
+        .create_domain(Request::new(CreateDomainRequest {
+            name: "short-ttl.example".to_string(),
+            default_ttl: Some(5),
+            vpc_id: None,
+        }))
+        .await
+        .expect_err("TTL below the floor on create");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+
+    let error = api
+        .update_domain(Request::new(UpdateDomainRequest {
+            domain: Some(rpc::protos::dns::Domain {
+                id: created.id,
+                default_ttl: Some(5),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .expect_err("TTL below the floor on update");
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
 }
 
 #[sqlx_test]

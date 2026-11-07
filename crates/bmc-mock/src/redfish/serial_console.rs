@@ -18,7 +18,7 @@
 use serde_json::json;
 
 use crate::json::JsonExt;
-use crate::redfish::Builder;
+use crate::redfish::ModelExt;
 
 #[derive(Clone)]
 pub(crate) struct SerialConsole {
@@ -45,90 +45,30 @@ impl SerialConsole {
     }
 }
 
-pub(crate) fn builder() -> SerialConsoleBuilder {
-    SerialConsoleBuilder { value: json!({}) }
+pub(crate) fn builder() -> super::schema::computer_system::HostSerialConsole {
+    super::schema::computer_system::HostSerialConsole::new()
+}
+
+pub(crate) fn protocol_builder() -> super::schema::computer_system::SerialConsoleProtocol {
+    super::schema::computer_system::SerialConsoleProtocol::new()
 }
 
 pub(crate) fn simulated_ssh(port: u16) -> SerialConsole {
     builder()
-        .ssh(&protocol_builder().service_enabled(true).port(port).build())
-        // Legacy libredfish requires both SSH and IPMI whenever SerialConsole is present,
-        // even though Redfish permits unsupported protocols to be omitted.
-        .ipmi(&protocol_builder().service_enabled(false).build())
+        .ssh(
+            protocol_builder()
+                .service_enabled(true)
+                .port(i64::from(port)),
+        )
+        // Legacy libredfish requires both protocols whenever SerialConsole is present.
+        .ipmi(protocol_builder().service_enabled(false))
         .build()
 }
 
-pub(crate) struct SerialConsoleBuilder {
-    value: serde_json::Value,
-}
-
-impl Builder for SerialConsoleBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-        }
-    }
-}
-
-impl SerialConsoleBuilder {
-    pub(crate) fn max_concurrent_sessions(self, value: u64) -> Self {
-        self.apply_patch(json!({ "MaxConcurrentSessions": value }))
-    }
-
-    pub(crate) fn ssh(self, value: &SerialConsoleProtocol) -> Self {
-        self.apply_patch(json!({ "SSH": value.to_json() }))
-    }
-
-    pub(crate) fn ipmi(self, value: &SerialConsoleProtocol) -> Self {
-        self.apply_patch(json!({ "IPMI": value.to_json() }))
-    }
-
+impl super::schema::computer_system::HostSerialConsole {
     pub(crate) fn build(self) -> SerialConsole {
-        SerialConsole { value: self.value }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct SerialConsoleProtocol {
-    value: serde_json::Value,
-}
-
-impl SerialConsoleProtocol {
-    fn to_json(&self) -> serde_json::Value {
-        self.value.clone()
-    }
-}
-
-pub(crate) fn protocol_builder() -> SerialConsoleProtocolBuilder {
-    SerialConsoleProtocolBuilder { value: json!({}) }
-}
-
-pub(crate) struct SerialConsoleProtocolBuilder {
-    value: serde_json::Value,
-}
-
-impl Builder for SerialConsoleProtocolBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
+        SerialConsole {
+            value: self.into_json(),
         }
-    }
-}
-
-impl SerialConsoleProtocolBuilder {
-    pub(crate) fn service_enabled(self, value: bool) -> Self {
-        self.apply_patch(json!({ "ServiceEnabled": value }))
-    }
-
-    pub(crate) fn port(self, value: u16) -> Self {
-        self.apply_patch(json!({ "Port": value }))
-    }
-
-    pub(crate) fn hot_key_sequence_display(self, value: &str) -> Self {
-        self.add_str_field("HotKeySequenceDisplay", value)
-    }
-
-    pub(crate) fn build(self) -> SerialConsoleProtocol {
-        SerialConsoleProtocol { value: self.value }
     }
 }

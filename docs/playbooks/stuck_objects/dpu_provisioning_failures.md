@@ -14,6 +14,11 @@ DPU provisioning issues usually show up in two places:
 
 Start with NICo state. Move to DPF resources when NICo is waiting on DPF.
 
+Refer to [Recover a Stalled Update](../../operations/firmware-updates/dpu-firmware.md#recover-a-stalled-update)
+for DPF compatibility deferrals and the DPU status NICo retains in failure
+states and state history. The diagnostic capture also applies during initial
+DPU provisioning.
+
 ```bash
 nico-admin-cli managed-host show <host-machine-id>
 nico-admin-cli -f json machine show <host-machine-id>
@@ -53,6 +58,10 @@ Check:
 - `nico-pxe` logs for HTTP boot requests.
 - DPF operator status.
 - `nico-dpu-agent` startup logs once the OS boots.
+
+If an NVIDIA BlueField-2 DPU remains in `DPUInitializing/Init` and exposes
+`ib0` and `ib1` instead of Ethernet interfaces, use
+[Machine Stuck in DPUInitializing/Init During Ingestion](dpu_initializing_init.md).
 
 ### `WaitingForNetworkConfig`
 

@@ -24,10 +24,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::str::FromStr;
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::config::FaultConfig;
+use crate::config::{FaultConfig, RmsMockConfig};
 use crate::envelope::{BatchOutcome, NodeResult, UNMATCHED_NODE};
 use crate::resolve::NodeRef;
 use crate::rms;
@@ -39,15 +39,9 @@ const JOB_ID_PREFIX: &str = "rms-mock";
 /// running.
 const TERMINAL_AFTER_OBSERVATIONS: u32 = 2;
 
-/// Failed node-level jobs kept before the oldest is forgotten; bounds memory
-/// when a caller keeps issuing batches for unmatched nodes. RMS instead keeps
-/// completed and failed jobs for 24 hours by default and caps its job tracker
-/// at 10,000 records. A failed job forgotten here reads as completed.
-const MAX_FAILED_JOBS: usize = 4096;
-
 /// The id a job is polled by. The ids this crate issues are
 /// `rms-mock-<run>-<n>`, but a caller may poll any spelling, and one the
-/// store has no record of reads as a completed job. Never blank.
+/// store has no record of is unknown. Never blank.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct JobId(String);
 
@@ -63,6 +57,7 @@ impl JobId {
 
     /// The `(run, n)` of an id spelled as this crate issues them; `None` for
     /// any other string, `-01` for `-1` included.
+    #[cfg(test)]
     fn parts(&self) -> Option<(u64, u64)> {
         let (run, n) = self
             .0
@@ -146,16 +141,28 @@ impl JobState {
 }
 
 /// What completing a node-level job does to the mock's state.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Effect {
-    /// The switch loses its fabric primary role, as a factory reset would.
-    ResetFabricRole,
+    /// Restore NVOS factory credentials and clear the switch fabric role.
+    ResetSwitch { bmc_mac: mac_address::MacAddress },
+    /// The switch's NVOS user `username` takes `password`, as a completed
+    /// password rotation leaves it. The switch is the device whose BMC has
+    /// `bmc_mac`, the one identifier every simulated device carries.
+    SetSwitchPassword {
+        bmc_mac: mac_address::MacAddress,
+        username: Arc<str>,
+        password: Arc<str>,
+    },
 }
 
 /// A job the ledger tracks.
 enum Job {
     Node(NodeJob),
     Parent(ParentJob),
+    Terminal {
+        status: JobStatus,
+        completed_at: Instant,
+    },
 }
 
 /// A job for one node, or for a rack with no node to tie it to.
@@ -187,34 +194,37 @@ enum NewJob<'a> {
     RackFailure { rack_id: &'a str, error: String },
     /// One child of the batch `parent`. The child of a node no device
     /// matched fails with [`UNMATCHED_NODE`]; any other carries `effect`,
-    /// and the fault table decides its outcome.
+    /// and the fault table decides its outcome, unless the effect could not
+    /// be built, which fails the child with the reason.
     Child {
         node: &'a NodeRef<'a>,
         parent: &'a JobId,
-        effect: Option<Effect>,
+        effect: Result<Option<Effect>, String>,
     },
 }
 
 struct Ledger {
     jobs: HashMap<JobId, Job>,
-    /// Node-level jobs that have reported failed, oldest first.
-    failed: VecDeque<JobId>,
+    /// Terminal records in completion order.
+    terminal: VecDeque<JobId>,
     next_id: u64,
+    retention_limit_warned: bool,
 }
 
 /// Every job handed out and still to be reported on.
 ///
-/// A job seen complete is forgotten, a parent is forgotten once it has
-/// reported a terminal state or has no child left, and a forgotten job reads
-/// as complete. A failed node-level job keeps reading failed until
-/// `max_failed` newer jobs have failed.
+/// Terminal records retain their identities and outcomes without replaying
+/// effects. Records exceeding `max_terminal` are evicted in completion order
+/// after `min_retention` has elapsed, with a hard ceiling of four times the
+/// target even for younger records.
 pub(crate) struct JobStore {
     ledger: Mutex<Ledger>,
     /// Unix nanoseconds at which the store was created. Part of every id, so a
     /// restart never re-issues an id a client still polls.
     run: u64,
     faults: FaultConfig,
-    max_failed: usize,
+    max_terminal: usize,
+    min_retention: Duration,
 }
 
 /// The ids a batch was issued.
@@ -245,25 +255,27 @@ pub(crate) struct JobStatus {
 }
 
 impl JobStore {
-    pub(crate) fn new(faults: FaultConfig) -> Self {
+    pub(crate) fn new(config: &RmsMockConfig) -> Self {
         let run = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
             .and_then(|since| u64::try_from(since.as_nanos()).ok())
             .unwrap_or_default();
-        Self::with_run(faults, run, MAX_FAILED_JOBS)
+        Self::with_run(config, run)
     }
 
-    fn with_run(faults: FaultConfig, run: u64, max_failed: usize) -> Self {
+    fn with_run(config: &RmsMockConfig, run: u64) -> Self {
         Self {
             ledger: Mutex::new(Ledger {
                 jobs: HashMap::new(),
-                failed: VecDeque::new(),
+                terminal: VecDeque::new(),
                 next_id: 1,
+                retention_limit_warned: false,
             }),
             run,
-            faults,
-            max_failed,
+            faults: config.faults.clone(),
+            max_terminal: config.max_terminal_jobs,
+            min_retention: Duration::from_secs(config.min_terminal_retention_secs),
         }
     }
 
@@ -289,6 +301,18 @@ impl JobStore {
         refs: impl IntoIterator<Item = &'a NodeRef<'a>>,
         effect: Option<Effect>,
     ) -> BatchJobIds<'a> {
+        self.start_batch_with(refs, |_| Ok(effect.clone()))
+    }
+
+    /// [`Self::start_batch`], with each child's effect chosen from its node
+    /// by `effect_for`, for an effect that names the device it acts on. A
+    /// node whose effect cannot be built, `Err` with the reason, gets a child
+    /// that fails with it.
+    pub(crate) fn start_batch_with<'a>(
+        &self,
+        refs: impl IntoIterator<Item = &'a NodeRef<'a>>,
+        effect_for: impl Fn(&NodeRef<'a>) -> Result<Option<Effect>, String>,
+    ) -> BatchJobIds<'a> {
         let refs: Vec<&NodeRef<'a>> = refs.into_iter().collect();
         let racks: HashSet<&str> = refs.iter().map(|r| r.rack_id).collect();
         let rack_id = match racks.len() {
@@ -306,7 +330,7 @@ impl JobStore {
                     NewJob::Child {
                         node,
                         parent: &parent,
-                        effect,
+                        effect: effect_for(node),
                     },
                 );
                 (node.node_id, id)
@@ -328,68 +352,77 @@ impl JobStore {
 
     /// Whether this process issued `job_id`: it carries this run and a
     /// sequence number handed out so far.
-    pub(crate) fn issued(&self, job_id: &JobId) -> bool {
+    #[cfg(test)]
+    fn issued(&self, job_id: &JobId) -> bool {
         job_id.parts().is_some_and(|(run, n)| {
             run == self.run && (1..crate::lock(&self.ledger).next_id).contains(&n)
         })
     }
 
-    /// Poll a job, advancing it. Polling a parent advances each of its
-    /// children once and reports their aggregate. A job this process never
-    /// issued, or has forgotten, is reported complete.
-    pub(crate) fn observe(&self, job_id: &JobId) -> JobStatus {
-        let mut ledger = crate::lock(&self.ledger);
+    /// Advance a job and apply each completion effect under the ledger lock,
+    /// before any caller can observe completion. Failed effects fail the job.
+    pub(crate) fn observe_with(
+        &self,
+        job_id: &JobId,
+        apply: impl Fn(&str, &str, &Effect) -> Result<(), String>,
+    ) -> Result<JobStatus, tonic::Status> {
+        self.observe_locked(&mut crate::lock(&self.ledger), job_id, &apply)
+    }
+
+    fn observe_locked(
+        &self,
+        ledger: &mut Ledger,
+        job_id: &JobId,
+        apply: &impl Fn(&str, &str, &Effect) -> Result<(), String>,
+    ) -> Result<JobStatus, tonic::Status> {
         let (rack_id, child_refs) = match ledger.jobs.get(job_id) {
             None => {
-                tracing::warn!(%job_id, "Reporting an unknown job as complete");
-                return Self::forgotten(job_id, None);
+                return Err(tonic::Status::not_found(crate::envelope::job_not_found(
+                    job_id,
+                )));
             }
-            Some(Job::Node(_)) => {
-                let status = self
-                    .observe_node(&mut ledger, job_id)
-                    .expect("looked up under the same lock");
-                if status.state == JobState::Completed {
-                    Self::forget_node(&mut ledger, job_id);
-                }
-                return status;
-            }
+            Some(Job::Terminal { status, .. }) => return Ok(status.clone()),
+            Some(Job::Node(_)) => return Ok(self.observe_node(ledger, job_id, apply)),
             Some(Job::Parent(parent)) => (parent.rack_id.clone(), parent.children.clone()),
         };
-
-        let children: Vec<JobStatus> = child_refs
-            .iter()
-            .map(|(_, id)| {
-                let status = self
-                    .observe_node(&mut ledger, id)
-                    .unwrap_or_else(|| Self::forgotten(id, Some(job_id)));
-                if status.state == JobState::Completed {
-                    ledger.jobs.remove(id);
+        let mut children = Vec::with_capacity(child_refs.len());
+        for (node_id, child_id) in &child_refs {
+            match self.observe_locked(ledger, child_id, apply) {
+                Ok(child) => children.push(child),
+                Err(error) => {
+                    children.push(JobStatus {
+                        job_id: child_id.clone(),
+                        state: JobState::Failed,
+                        node_id: Some(node_id.clone()),
+                        rack_id: rack_id.clone(),
+                        parent_job_id: Some(job_id.clone()),
+                        error_message: Some(format!(
+                            "record evicted for child {child_id}: {}",
+                            error.message()
+                        )),
+                        children: Vec::new(),
+                        effect: None,
+                    });
                 }
-                status
-            })
-            .collect();
-        let state = JobState::of_children(&children);
-        let error_message = match state {
-            JobState::Failed => {
-                let results: Vec<NodeResult<'_>> = child_refs
-                    .iter()
-                    .zip(&children)
-                    .map(|((node_id, _), c)| {
-                        (
-                            node_id.as_str(),
-                            c.error_message.clone().map_or(Ok(()), Err),
-                        )
-                    })
-                    .collect();
-                Some(BatchOutcome::of(&results).message)
             }
-            JobState::Running | JobState::Completed => None,
-        };
-        if state.is_terminal() {
-            ledger.jobs.remove(job_id);
         }
-
-        JobStatus {
+        let state = JobState::of_children(&children);
+        let error_message = if state == JobState::Failed {
+            let results: Vec<NodeResult<'_>> = child_refs
+                .iter()
+                .zip(&children)
+                .map(|((node_id, _), child)| {
+                    (
+                        node_id.as_str(),
+                        child.error_message.clone().map_or(Ok(()), Err),
+                    )
+                })
+                .collect();
+            Some(BatchOutcome::of(&results).message)
+        } else {
+            None
+        };
+        let status = JobStatus {
             job_id: job_id.clone(),
             state,
             node_id: None,
@@ -398,7 +431,20 @@ impl JobStore {
             error_message,
             children,
             effect: None,
+        };
+        if status
+            .children
+            .iter()
+            .all(|child| child.state.is_terminal())
+        {
+            self.retain_terminal(ledger, &status);
         }
+        Ok(status)
+    }
+
+    #[cfg(test)]
+    fn observe(&self, job_id: &JobId) -> JobStatus {
+        self.observe_with(job_id, |_, _, _| Ok(())).unwrap()
     }
 
     /// Insert a node-level job. An earlier job for the same node is left to
@@ -425,18 +471,24 @@ impl JobStore {
                 node,
                 parent,
                 effect,
-            } => NodeJob {
-                node_id: Some(node.node_id.to_owned()),
-                rack_id: node.rack_id.to_owned(),
-                failure: if node.matched() {
-                    self.fault(node.node_id)
-                } else {
-                    Some(UNMATCHED_NODE.to_owned())
-                },
-                observations: 0,
-                parent: Some(parent.clone()),
-                effect,
-            },
+            } => {
+                let (effect, unbuildable) = match effect {
+                    Ok(effect) => (effect, None),
+                    Err(reason) => (None, Some(reason)),
+                };
+                NodeJob {
+                    node_id: Some(node.node_id.to_owned()),
+                    rack_id: node.rack_id.to_owned(),
+                    failure: if node.matched() {
+                        unbuildable.or_else(|| self.fault(node.node_id))
+                    } else {
+                        Some(UNMATCHED_NODE.to_owned())
+                    },
+                    observations: 0,
+                    parent: Some(parent.clone()),
+                    effect,
+                }
+            }
         };
         let id = self.allocate_id(ledger);
         ledger.jobs.insert(id.clone(), Job::Node(job));
@@ -461,83 +513,101 @@ impl JobStore {
             })
     }
 
-    /// Advance a node-level job by one poll; `None` when the ledger has no
-    /// such job. The poll that first fails a job records it, forgetting the
-    /// oldest failed job once more than `max_failed` are kept.
-    fn observe_node(&self, ledger: &mut Ledger, job_id: &JobId) -> Option<JobStatus> {
-        let job = match ledger.jobs.get_mut(job_id)? {
-            Job::Node(job) => job,
-            Job::Parent(_) => return None,
+    /// Advance a node once. Only a successful effect may become Completed.
+    fn observe_node(
+        &self,
+        ledger: &mut Ledger,
+        job_id: &JobId,
+        apply: &impl Fn(&str, &str, &Effect) -> Result<(), String>,
+    ) -> JobStatus {
+        let Some(Job::Node(job)) = ledger.jobs.get_mut(job_id) else {
+            unreachable!("observe_locked selected a node under the same ledger lock");
         };
         job.observations += 1;
-        let (state, error_message) = if job.observations < TERMINAL_AFTER_OBSERVATIONS {
-            (JobState::Running, None)
-        } else {
-            match &job.failure {
-                Some(reason) => (JobState::Failed, Some(reason.clone())),
-                None => (JobState::Completed, None),
+        let mut state = JobState::Running;
+        let mut effect = None;
+        if job.observations >= TERMINAL_AFTER_OBSERVATIONS {
+            if job.failure.is_none() {
+                effect = job.effect.take();
+                if let Some(effect) = &effect {
+                    // A panicking callback must leave a failed record after the
+                    // ledger's poisoned mutex is recovered, never false completion.
+                    job.failure = Some("completion effect did not finish".to_string());
+                    job.failure = apply(
+                        &job.rack_id,
+                        job.node_id.as_deref().expect("effects name a node"),
+                        effect,
+                    )
+                    .err();
+                }
             }
-        };
+            state = if job.failure.is_some() {
+                JobState::Failed
+            } else {
+                JobState::Completed
+            };
+        }
         let status = JobStatus {
             job_id: job_id.clone(),
             state,
             node_id: job.node_id.clone(),
             rack_id: Some(job.rack_id.clone()),
             parent_job_id: job.parent.clone(),
-            error_message,
+            error_message: if state == JobState::Failed {
+                job.failure.clone()
+            } else {
+                None
+            },
             children: Vec::new(),
-            effect: match state {
-                JobState::Completed => job.effect,
-                JobState::Running | JobState::Failed => None,
+            effect: if state == JobState::Completed {
+                effect
+            } else {
+                None
             },
         };
-        if state == JobState::Failed && job.observations == TERMINAL_AFTER_OBSERVATIONS {
-            ledger.failed.push_back(job_id.clone());
-            if ledger.failed.len() > self.max_failed
-                && let Some(oldest) = ledger.failed.pop_front()
-            {
-                Self::forget_node(ledger, &oldest);
+        if state.is_terminal() {
+            self.retain_terminal(ledger, &status);
+        }
+        status
+    }
+
+    fn retain_terminal(&self, ledger: &mut Ledger, status: &JobStatus) {
+        let mut retained = status.clone();
+        retained.effect = None;
+        for child in &mut retained.children {
+            child.effect = None;
+        }
+        ledger.jobs.insert(
+            status.job_id.clone(),
+            Job::Terminal {
+                status: retained,
+                completed_at: Instant::now(),
+            },
+        );
+        ledger.terminal.push_back(status.job_id.clone());
+        let hard_limit = self.max_terminal.saturating_mul(4);
+        while ledger.terminal.len() > self.max_terminal {
+            let Some(oldest) = ledger.terminal.front() else {
+                break;
+            };
+            let Some(Job::Terminal { completed_at, .. }) = ledger.jobs.get(oldest) else {
+                unreachable!("the terminal queue contains only retained terminal jobs");
+            };
+            if completed_at.elapsed() < self.min_retention {
+                if ledger.terminal.len() <= hard_limit {
+                    break;
+                }
+                if !ledger.retention_limit_warned {
+                    tracing::warn!(
+                        max_terminal_jobs = self.max_terminal,
+                        hard_limit,
+                        "Terminal job hard ceiling reached; evicting records before their retention age"
+                    );
+                    ledger.retention_limit_warned = true;
+                }
             }
-        }
-        Some(status)
-    }
-
-    /// Drop a node-level job, and its parent once no child of it is left.
-    fn forget_node(ledger: &mut Ledger, job_id: &JobId) {
-        let parent = match ledger.jobs.remove(job_id) {
-            Some(Job::Node(job)) => job.parent,
-            Some(Job::Parent(_)) | None => return,
-        };
-        if let Some(parent) = parent
-            && let Some(Job::Parent(batch)) = ledger.jobs.get(&parent)
-            && batch
-                .children
-                .iter()
-                .all(|(_, id)| !ledger.jobs.contains_key(id))
-        {
-            ledger.jobs.remove(&parent);
-        }
-    }
-
-    /// A job the ledger does not have reads as complete, listing one
-    /// completed child when it is polled as a parent.
-    fn forgotten(job_id: &JobId, parent: Option<&JobId>) -> JobStatus {
-        let completed = |job_id: &JobId, parent: Option<&JobId>| JobStatus {
-            job_id: job_id.clone(),
-            state: JobState::Completed,
-            node_id: None,
-            rack_id: None,
-            parent_job_id: parent.cloned(),
-            error_message: None,
-            children: Vec::new(),
-            effect: None,
-        };
-        match parent {
-            Some(_) => completed(job_id, parent),
-            None => JobStatus {
-                children: vec![completed(&JobId(format!("{job_id}-child")), Some(job_id))],
-                ..completed(job_id, None)
-            },
+            let oldest = ledger.terminal.pop_front().unwrap();
+            ledger.jobs.remove(&oldest);
         }
     }
 
@@ -551,8 +621,8 @@ impl JobStore {
 mod tests {
     use carbide_test_support::{Check, check_values};
 
-    use super::{Effect, JobId, JobState, JobStatus, JobStore, MAX_FAILED_JOBS};
-    use crate::config::FaultConfig;
+    use super::{Effect, JobId, JobState, JobStatus, JobStore};
+    use crate::config::{FaultConfig, RmsMockConfig};
     use crate::inventory::SimNode;
     use crate::resolve::NodeRef;
 
@@ -560,7 +630,13 @@ mod tests {
     const RUN: u64 = 7;
 
     fn store(faults: FaultConfig) -> JobStore {
-        JobStore::with_run(faults, RUN, MAX_FAILED_JOBS)
+        JobStore::with_run(
+            &RmsMockConfig {
+                faults,
+                ..RmsMockConfig::default()
+            },
+            RUN,
+        )
     }
 
     fn fail_nodes(ids: &[&str]) -> FaultConfig {
@@ -585,6 +661,10 @@ mod tests {
             rack_id,
             node: None,
         }
+    }
+
+    fn mac() -> mac_address::MacAddress {
+        mac_address::MacAddress::new([0; 6])
     }
 
     fn id(s: &str) -> JobId {
@@ -649,15 +729,21 @@ mod tests {
         // Another run issues the same n under a different run, so an id from
         // before a restart is unknown to the process after it rather than
         // another node's job.
-        let later = JobStore::with_run(FaultConfig::default(), RUN + 1, MAX_FAILED_JOBS);
+        let later = JobStore::with_run(&RmsMockConfig::default(), RUN + 1);
         let fresh = later.start("n9", "rack-a");
         assert_eq!(fresh, id("rms-mock-8-1"));
         assert!(!later.issued(&id("rms-mock-7-1")));
         assert!(later.issued(&fresh));
-        assert_eq!(later.observe(&id("rms-mock-7-1")).node_id, None);
+        assert_eq!(
+            later
+                .observe_with(&id("rms-mock-7-1"), |_, _, _| Ok(()))
+                .unwrap_err()
+                .code(),
+            tonic::Code::NotFound
+        );
         assert_eq!(later.observe(&fresh).node_id.as_deref(), Some("n9"));
 
-        let clock = JobStore::new(FaultConfig::default()).start("n1", "rack-a");
+        let clock = JobStore::new(&RmsMockConfig::default()).start("n1", "rack-a");
         let (run, n) = clock.parts().unwrap_or_else(|| panic!("{clock}"));
         assert_eq!(n, 1);
         assert!(run > 1_700_000_000_000_000_000, "{clock}");
@@ -800,29 +886,32 @@ mod tests {
         let device = SimNode::default();
         let jobs = store(fail_nodes(&["n2"]));
         let nodes = [node("rack-a", "n1", &device), node("rack-a", "n2", &device)];
-        let batch = jobs.start_batch(&nodes, Some(Effect::ResetFabricRole));
+        let batch = jobs.start_batch(&nodes, Some(Effect::ResetSwitch { bmc_mac: mac() }));
 
         let running = jobs.observe(&batch.parent);
         assert_eq!(
             running
                 .children
                 .iter()
-                .map(|c| c.effect)
+                .map(|c| c.effect.clone())
                 .collect::<Vec<_>>(),
             [None, None]
         );
 
-        // Once: the completed child is forgotten with its effect delivered;
+        // Once: the completed child is retained with its effect consumed;
         // the failed child never has one.
         let terminal = jobs.observe(&batch.parent);
         assert_eq!(
             terminal
                 .children
                 .iter()
-                .map(|c| (c.state, c.effect))
+                .map(|c| (c.state, c.effect.clone()))
                 .collect::<Vec<_>>(),
             [
-                (JobState::Completed, Some(Effect::ResetFabricRole)),
+                (
+                    JobState::Completed,
+                    Some(Effect::ResetSwitch { bmc_mac: mac() })
+                ),
                 (JobState::Failed, None)
             ]
         );
@@ -830,41 +919,347 @@ mod tests {
         assert_eq!(jobs.observe(&batch.children[0].1).effect, None);
     }
 
+    /// A child whose effect cannot be built fails with the reason, ahead of
+    /// the fault table; the other children are unaffected.
     #[test]
-    fn the_ledger_forgets_a_job_once_its_outcome_is_reported() {
+    fn a_child_whose_effect_cannot_be_built_fails_with_the_reason() {
         let device = SimNode::default();
-        let jobs = store(fail_nodes(&["n4"]));
+        let jobs = store(fail_nodes(&["n2"]));
+        let nodes = [node("rack-a", "n1", &device), node("rack-a", "n2", &device)];
+        let batch = jobs.start_batch_with(&nodes, |node| {
+            if node.node_id == "n2" {
+                Err("n2 has no address to act on".to_owned())
+            } else {
+                Ok(Some(Effect::ResetSwitch { bmc_mac: mac() }))
+            }
+        });
 
-        // Children polled directly: the parent goes with its last child.
+        jobs.observe(&batch.parent);
+        let terminal = jobs.observe(&batch.parent);
+        assert_eq!(
+            terminal
+                .children
+                .iter()
+                .map(|c| (c.state, c.effect.clone(), c.error_message.clone()))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    JobState::Completed,
+                    Some(Effect::ResetSwitch { bmc_mac: mac() }),
+                    None
+                ),
+                (
+                    JobState::Failed,
+                    None,
+                    Some("n2 has no address to act on".to_owned())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_records_keep_the_job_tree_and_missing_ids_are_unknown() {
+        let device = SimNode::default();
+        let jobs = store(FaultConfig::default());
         let nodes = [node("rack-a", "n1", &device), node("rack-a", "n2", &device)];
         let batch = jobs.start_batch(&nodes, None);
-        let child = |i: usize| &batch.children[i].1;
-        jobs.observe(child(0));
-        assert_eq!(jobs.observe(child(0)).state, JobState::Completed);
-        assert_eq!(jobs.tracked(), 2, "the parent waits for its other child");
-        jobs.observe(child(1));
-        assert_eq!(jobs.observe(child(1)).state, JobState::Completed);
-        assert_eq!(jobs.tracked(), 0);
+        for (_, child) in &batch.children {
+            jobs.observe(child);
+            assert_eq!(jobs.observe(child).state, JobState::Completed);
+        }
+        let parent = jobs.observe(&batch.parent);
+        assert_eq!(parent.state, JobState::Completed);
+        assert_eq!(jobs.observe(&batch.parent), parent);
+        assert_eq!(jobs.tracked(), 3);
+        assert_eq!(
+            jobs.observe_with(&id("rms-mock-0-99"), |_, _, _| Ok(()))
+                .unwrap_err()
+                .code(),
+            tonic::Code::NotFound
+        );
+    }
 
-        // A parent polled to failure has reported its outcome and goes; the
-        // failed child keeps reading failed for a caller that polls it.
-        let nodes = [node("rack-a", "n3", &device), node("rack-a", "n4", &device)];
-        let batch = jobs.start_batch(&nodes, None);
+    #[test]
+    fn an_effect_failure_is_retained_and_never_retried_by_polling() {
+        let device = SimNode::default();
+        let jobs = store(FaultConfig::default());
+        let nodes = [node("rack-a", "n1", &device)];
+        let batch = jobs.start_batch(&nodes, Some(Effect::ResetSwitch { bmc_mac: mac() }));
         jobs.observe(&batch.parent);
-        assert_eq!(jobs.observe(&batch.parent).state, JobState::Failed);
-        assert_eq!(jobs.tracked(), 1);
-        assert_eq!(jobs.observe(&batch.children[1].1).state, JobState::Failed);
-        assert_eq!(jobs.tracked(), 1);
+        let failed = jobs
+            .observe_with(&batch.parent, |_, _, _| {
+                Err("device unavailable".to_string())
+            })
+            .unwrap();
+        assert_eq!(failed.state, JobState::Failed);
+        assert!(
+            failed
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("device unavailable")
+        );
+        assert_eq!(
+            jobs.observe_with(&batch.parent, |_, _, _| panic!(
+                "terminal effects must not replay"
+            ))
+            .unwrap(),
+            failed
+        );
+    }
 
-        // A job never issued here reads complete with one completed child
-        // and is not added.
-        let unknown = jobs.observe(&id("rms-mock-0-99"));
-        assert_eq!(unknown.state, JobState::Completed);
-        assert_eq!(unknown.children.len(), 1);
-        assert_eq!(unknown.children[0].state, JobState::Completed);
-        assert_eq!(unknown.children[0].parent_job_id, Some(id("rms-mock-0-99")));
-        assert_ne!(unknown.children[0].job_id, unknown.job_id);
-        assert_eq!(jobs.tracked(), 1);
+    #[test]
+    fn a_panicking_effect_fails_without_replaying() {
+        let device = SimNode::default();
+        let jobs = store(FaultConfig::default());
+        let nodes = [node("rack-a", "n1", &device)];
+        let batch = jobs.start_batch(&nodes, Some(Effect::ResetSwitch { bmc_mac: mac() }));
+        jobs.observe(&batch.parent);
+        let panic = std::panic::catch_unwind(|| {
+            jobs.observe_with(&batch.parent, |_, _, _| panic!("device callback panicked"))
+        });
+        assert!(panic.is_err());
+        let failed = jobs
+            .observe_with(&batch.parent, |_, _, _| panic!("effect replayed"))
+            .unwrap();
+        assert_eq!(failed.state, JobState::Failed);
+        assert!(
+            failed
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("completion effect did not finish")
+        );
+        assert_eq!(jobs.observe(&batch.parent), failed);
+    }
+
+    #[test]
+    fn young_reset_records_survive_unrelated_jobs_beyond_the_count_target() {
+        let config = RmsMockConfig {
+            max_terminal_jobs: 3,
+            ..RmsMockConfig::default()
+        };
+        let jobs = JobStore::with_run(&config, RUN);
+        let device = SimNode::default();
+        let nodes = [node("rack-a", "switch", &device)];
+        let batch = jobs.start_batch(&nodes, Some(Effect::ResetSwitch { bmc_mac: mac() }));
+        jobs.observe(&batch.parent);
+        assert_eq!(jobs.observe(&batch.parent).state, JobState::Completed);
+        for _ in 0..config.max_terminal_jobs + 5 {
+            let unrelated = jobs.start("other", "rack-a");
+            jobs.observe(&unrelated);
+            jobs.observe(&unrelated);
+        }
+        assert_eq!(jobs.observe(&batch.parent).state, JobState::Completed);
+        assert_eq!(
+            jobs.observe(&batch.children[0].1).state,
+            JobState::Completed
+        );
+        assert_eq!(jobs.tracked(), config.max_terminal_jobs + 7);
+
+        // Age only the reset's records; the next completion may evict them,
+        // while newer records remain protected even above the count target.
+        {
+            let mut ledger = crate::lock(&jobs.ledger);
+            for job_id in [&batch.parent, &batch.children[0].1] {
+                let Some(super::Job::Terminal { completed_at, .. }) = ledger.jobs.get_mut(job_id)
+                else {
+                    panic!("reset record not retained");
+                };
+                *completed_at -= std::time::Duration::from_secs(config.min_terminal_retention_secs);
+            }
+        }
+        let unrelated = jobs.start("other", "rack-a");
+        jobs.observe(&unrelated);
+        jobs.observe(&unrelated);
+        assert_eq!(
+            jobs.observe_with(&batch.parent, |_, _, _| Ok(()))
+                .unwrap_err()
+                .code(),
+            tonic::Code::NotFound
+        );
+        assert_eq!(jobs.tracked(), config.max_terminal_jobs + 6);
+    }
+
+    #[test]
+    fn concurrent_parent_and_child_polls_apply_the_effect_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let device = SimNode::default();
+        let jobs = store(FaultConfig::default());
+        let nodes = [node("rack-a", "n1", &device)];
+        let batch = jobs.start_batch(&nodes, Some(Effect::ResetSwitch { bmc_mac: mac() }));
+        let calls = AtomicUsize::new(0);
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for id in [&batch.parent, &batch.children[0].1] {
+                let (jobs, calls, barrier) = (&jobs, &calls, &barrier);
+                scope.spawn(move || {
+                    barrier.wait();
+                    for _ in 0..3 {
+                        jobs.observe_with(id, |_, _, _| {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            Ok(())
+                        })
+                        .unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(jobs.observe(&batch.parent).state, JobState::Completed);
+    }
+
+    #[test]
+    fn an_evicted_child_cannot_make_its_parent_complete() {
+        let device = SimNode::default();
+        let jobs = JobStore::with_run(
+            &RmsMockConfig {
+                max_terminal_jobs: 1,
+                min_terminal_retention_secs: 0,
+                ..RmsMockConfig::default()
+            },
+            RUN,
+        );
+        let nodes = [node("rack-a", "n1", &device)];
+        let batch = jobs.start_batch(&nodes, None);
+        jobs.observe(&batch.children[0].1);
+        jobs.observe(&batch.children[0].1);
+        let newer = jobs.start("n2", "rack-a");
+        jobs.observe(&newer);
+        jobs.observe(&newer);
+        let failed = jobs.observe(&batch.parent);
+        assert_eq!(failed.state, JobState::Failed);
+        assert!(
+            failed
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains(&batch.children[0].1.to_string())
+        );
+        assert_eq!(jobs.observe(&batch.parent), failed);
+        let newer = jobs.start("n3", "rack-a");
+        jobs.observe(&newer);
+        jobs.observe(&newer);
+        assert!(
+            jobs.observe_with(&batch.parent, |_, _, _| Ok(())).is_err(),
+            "failed parents participate in terminal eviction"
+        );
+    }
+
+    #[test]
+    fn an_evicted_middle_child_does_not_freeze_the_other_children() {
+        let config = RmsMockConfig {
+            max_terminal_jobs: 1,
+            ..RmsMockConfig::default()
+        };
+        let jobs = JobStore::with_run(&config, RUN);
+        let device = SimNode::default();
+        let nodes = [
+            node("rack-a", "n1", &device),
+            node("rack-a", "n2", &device),
+            node("rack-a", "n3", &device),
+        ];
+        let batch = jobs.start_batch(&nodes, Some(Effect::ResetSwitch { bmc_mac: mac() }));
+        let applied = std::sync::Mutex::new(std::collections::HashMap::new());
+        let apply = |_: &str, node: &str, _: &Effect| {
+            *applied.lock().unwrap().entry(node.to_owned()).or_insert(0) += 1;
+            Ok(())
+        };
+        let middle = &batch.children[1].1;
+        jobs.observe_with(middle, apply).unwrap();
+        jobs.observe_with(middle, apply).unwrap();
+        {
+            let mut ledger = crate::lock(&jobs.ledger);
+            let Some(super::Job::Terminal { completed_at, .. }) = ledger.jobs.get_mut(middle)
+            else {
+                panic!("middle child did not complete");
+            };
+            *completed_at -= std::time::Duration::from_secs(config.min_terminal_retention_secs);
+        }
+        let newer = jobs.start("other", "rack-a");
+        jobs.observe(&newer);
+        jobs.observe(&newer);
+        assert!(!crate::lock(&jobs.ledger).jobs.contains_key(middle));
+
+        let first = jobs.observe_with(&batch.parent, apply).unwrap();
+        assert_eq!(
+            states(&first.children),
+            [JobState::Running, JobState::Failed, JobState::Running]
+        );
+        assert!(matches!(
+            crate::lock(&jobs.ledger).jobs.get(&batch.parent),
+            Some(super::Job::Parent(_))
+        ));
+        let terminal = jobs.observe_with(&batch.parent, apply).unwrap();
+        assert_eq!(terminal.state, JobState::Failed);
+        assert_eq!(
+            states(&terminal.children),
+            [JobState::Completed, JobState::Failed, JobState::Completed]
+        );
+        assert!(
+            terminal.children[1]
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("record evicted")
+        );
+        assert_eq!(terminal.children[1].node_id.as_deref(), Some("n2"));
+        assert_eq!(
+            terminal.children[1].parent_job_id.as_ref(),
+            Some(&batch.parent)
+        );
+        let repeated = jobs.observe_with(&batch.parent, apply).unwrap();
+        assert_eq!(repeated.state, terminal.state);
+        assert_eq!(states(&repeated.children), states(&terminal.children));
+        assert_eq!(repeated.children[1], terminal.children[1]);
+        assert!(matches!(
+            crate::lock(&jobs.ledger).jobs.get(&batch.parent),
+            Some(super::Job::Terminal { .. })
+        ));
+        assert_eq!(
+            *applied.lock().unwrap(),
+            std::collections::HashMap::from([
+                ("n1".to_owned(), 1),
+                ("n2".to_owned(), 1),
+                ("n3".to_owned(), 1),
+            ])
+        );
+    }
+
+    #[test]
+    fn the_hard_ceiling_evicts_young_records_in_completion_order() {
+        let config = RmsMockConfig {
+            max_terminal_jobs: 2,
+            ..RmsMockConfig::default()
+        };
+        let jobs = JobStore::with_run(&config, RUN);
+        let mut ids = Vec::new();
+        for _ in 0..config.max_terminal_jobs * 4 {
+            let id = jobs.start("n1", "rack-a");
+            jobs.observe(&id);
+            jobs.observe(&id);
+            ids.push(id);
+        }
+        assert_eq!(jobs.tracked(), config.max_terminal_jobs * 4);
+        assert!(!crate::lock(&jobs.ledger).retention_limit_warned);
+        for _ in 0..3 {
+            let id = jobs.start("n1", "rack-a");
+            jobs.observe(&id);
+            jobs.observe(&id);
+            ids.push(id);
+        }
+        assert_eq!(jobs.tracked(), config.max_terminal_jobs * 4);
+        assert!(crate::lock(&jobs.ledger).retention_limit_warned);
+        for id in &ids[..3] {
+            assert_eq!(
+                jobs.observe_with(id, |_, _, _| Ok(())).unwrap_err().code(),
+                tonic::Code::NotFound
+            );
+        }
+        for id in &ids[3..] {
+            assert_eq!(jobs.observe(id).state, JobState::Completed);
+        }
     }
 
     #[test]
@@ -892,7 +1287,15 @@ mod tests {
 
     #[test]
     fn the_ledger_keeps_the_most_recent_failed_jobs_only() {
-        let jobs = JobStore::with_run(fail_nodes(&["n1"]), RUN, 2);
+        let jobs = JobStore::with_run(
+            &RmsMockConfig {
+                faults: fail_nodes(&["n1"]),
+                max_terminal_jobs: 2,
+                min_terminal_retention_secs: 0,
+                ..RmsMockConfig::default()
+            },
+            RUN,
+        );
         let fail = || {
             let id = jobs.start("n1", "rack-a");
             jobs.observe(&id);
@@ -903,12 +1306,17 @@ mod tests {
         let middle = fail();
         assert_eq!(jobs.tracked(), 2, "at the cap nothing is forgotten");
 
-        // One more failure forgets the oldest, which then reads complete like
-        // any job the ledger has no record of; the rest keep reading failed,
+        // One more failure evicts the oldest, which becomes unknown;
+        // the rest keep reading failed,
         // and polling them again does not count as a new failure.
         let newest = fail();
         assert_eq!(jobs.tracked(), 2);
-        assert_eq!(jobs.observe(&oldest).state, JobState::Completed);
+        assert_eq!(
+            jobs.observe_with(&oldest, |_, _, _| Ok(()))
+                .unwrap_err()
+                .code(),
+            tonic::Code::NotFound
+        );
         assert_eq!(jobs.observe(&middle).state, JobState::Failed);
         assert_eq!(jobs.observe(&newest).state, JobState::Failed);
         assert_eq!(jobs.tracked(), 2);

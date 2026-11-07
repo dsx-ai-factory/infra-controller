@@ -375,3 +375,13 @@ func (r *Resolver) HasScheduleConflict(
 
 	return false
 }
+
+// MetadataConflicts applies the same rack policy used for task admission.
+// Both tasks must belong to the same rack. The built-in rules match task kinds
+// and recorded targets; they do not inspect action codes or operation payloads.
+func MetadataConflicts(incoming, other taskdef.TaskContextMetadata) bool {
+	return builtinRule.Conflicts(
+		&taskdef.Task{Operation: operation.Wrapper{Type: incoming.Type}, Attributes: incoming.Attributes},
+		[]*taskdef.Task{{Operation: operation.Wrapper{Type: other.Type}, Attributes: other.Attributes}},
+	)
+}

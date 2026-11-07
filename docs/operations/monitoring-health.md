@@ -21,6 +21,7 @@ For reference, see:
 - [Health Probe IDs](../architecture/health/health_probe_ids.md)
 - [Health Alert Classifications](../architecture/health/health_alert_classifications.md)
 - [Redfish Workflow](../architecture/redfish_workflow.md)
+- [Leak Detection and Handling](leak-detection-handling.md)
 
 ## Health Sources
 
@@ -41,6 +42,21 @@ more classifications. Classifications define operational impact. For example,
 `PreventAllocations` blocks new allocations while the alert is active, and
 `ExcludeFromStateMachineSla` excludes the host from state-machine SLA
 evaluation.
+
+## Rack and Tray Health Snapshots
+
+Rack and tray list and detail responses expose Core aggregate health in the
+nullable `health` field. Rack responses also expose component health when
+`includeComponents=true`. These values are Flow inventory snapshots, not live
+Core reads, so their freshness follows the inventory synchronization interval.
+Before the first successful synchronization, or when Core successfully reports
+no aggregate health, the field is `null`. A failed refresh or an omitted object
+preserves the last snapshot; an explicitly empty report clears it.
+
+Use the [Rack](api:GET/v2/org/:org/nico/rack) and
+[Tray](api:GET/v2/org/:org/nico/tray) inventory endpoints for these snapshots.
+For leak-specific fields and their location in responses, see
+[Leak Detection and Handling](leak-detection-handling.md#health-reporting-and-allocation-protection).
 
 ## Hardware Health Monitoring
 
@@ -98,17 +114,31 @@ client_key = "/var/run/secrets/spiffe.io/tls.key"
 api_url = "https://nico-api.nico-system.svc.cluster.local:1079"
 ```
 
-Static BMC endpoints are supported for local, mock, or special deployments:
+Static BMC endpoints use a shared credentials file for local, mock, or special deployments:
 
 ```toml
+[endpoint_sources]
+static_credentials_file = "/run/secrets/bmc/credentials.json"
+
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.0.1"
 port = 443
 mac = "aa:bb:cc:dd:ee:ff"
-username = "admin"
-password = "secret"
+credentials_profile = "bmc"
 labels = { site = "rno-dev7", cluster = "cluster-01", environment = "development" }
 ```
+
+Static endpoints reject inline `username` and `password` fields. Move those
+values into the shared file and select a profile, or supply a per-MAC override.
+The JSON file contains optional `profiles` (named username/password sets) and
+`overrides` (partial credentials keyed by MAC, ignoring letter case). Each field
+uses the per-MAC override first, then the explicitly selected profile; there is
+no default profile. A username must resolve; passwords are optional.
+
+Replace the file atomically. File events and 60-second polling reload the cached
+credentials; failed reloads retain the last valid snapshot. Collectors refresh
+credentials after authentication fails. Target lists and profile selections in
+the main configuration still require a restart.
 
 Configure direct switch host endpoints separately when desired:
 
@@ -117,16 +147,14 @@ Configure direct switch host endpoints separately when desired:
 ip = "10.0.1.2"
 port = 443
 mac = "11:22:33:44:55:77"
-username = "admin"
-password = "secret"
+credentials_profile = "switch"
 switch = { serial = "SN-SWITCH-HOST-001", is_primary = true }
 ```
 
 This list is optional. Each entry requires `switch` metadata. The
 `endpoint_role` field defaults to `host`, and only `host` is accepted in this
 list. Switch host entries under `static_bmc_endpoints` use the same `host`
-default when `endpoint_role` is omitted. MAC addresses in
-`static_switch_host_endpoints` must be unique across both static lists.
+default when `endpoint_role` is omitted. MAC addresses must be unique across both static lists.
 
 For a switch host entry, `port` selects the NVUE REST HTTPS port and defaults
 to `443`. The gNMI and NMX-C ports use the global
@@ -243,9 +271,9 @@ Sensor-backed values (carrying a Redfish `DataSourceUri`) are skipped:
 the sensor collector already publishes them as `hw_sensor` series, so nothing
 is double-reported.
 
-Exported series are named
-`{prefix}_hw_metric_{metric_type}_{unit}` — with the default
-`carbide_hardware_health` prefix, for example:
+The entity metrics collector exports gauges named
+`{prefix}_hw_metric_{metric_type}_{unit}`. With the default
+`carbide_hardware_health` prefix, examples include:
 
 ```text
 carbide_hardware_health_hw_metric_correctable_core_errors_count
@@ -254,21 +282,166 @@ carbide_hardware_health_hw_metric_bandwidth_percent
 carbide_hardware_health_hw_metric_input_power_watts
 ```
 
-On the Prometheus endpoint, series carry entity labels (`processor_id`,
+Readings classified as cumulative counters also export a
+[counter alias](https://github.com/dsx-ai-factory/infra-controller/issues/7902) named
+`{prefix}_hw_metric_{metric_type}_{unit}_total` when the value is finite and
+nonnegative. The alias appends `_total` to the gauge name. For example, the
+PCIe correctable error count exports the following gauge and counter:
+
+```text
+carbide_hardware_health_hw_metric_pcie_correctable_errors_count
+carbide_hardware_health_hw_metric_pcie_correctable_errors_count_total
+```
+
+Within each sink, the gauge and its counter alias expose the same labels
+and absolute hardware reading. Repeated polls do not add readings together.
+If the source resets from 13 to 2, both series report 2 after collection.
+Readings classified as gauges, and negative or non-finite counter readings,
+export only the gauge. Processor core error counts and drive bad-block counts,
+for example, are gauges.
+
+On the `/telemetry` Prometheus endpoint, series carry entity labels (`processor_id`,
 `memory_id`, `drive_id`, `powersupply_id`, `system_id`, `model`, ...) plus the
 standard identity labels added by the sink (`machine_id`, `endpoint_ip`,
 `serial_number`, `rack_id`, ...), with `collector_type="metrics_collector"`.
+The Prometheus sink rejects an incoming sample, including its alias, and logs a
+warning if label names collide after normalization to Prometheus label names.
+This includes collisions between sample labels, custom endpoint labels, and
+identity labels supplied by the sink.
 
-The OTLP sink (`[sinks.otlp]`) emits the same metric *names*, but places the
-identity context on OTLP resource attributes rather than datapoint labels;
-whether those appear as query labels depends on the backend (VictoriaMetrics,
-for example, flattens resource attributes onto every series).
+The OTLP sink (`[sinks.otlp]`) uses the same metric names and absolute readings.
+It exports gauge names as `Gauge` metrics and counter aliases as `Sum`
+metrics with cumulative temporality and `is_monotonic = true`.
+
+The OTLP sink puts identity context in resource attributes and adds standard
+identity labels and custom endpoint labels to each data point. If a sample
+label's normalized Prometheus name matches an added context label, the data
+point keeps the sample label and omits the conflicting context label. This
+precedence does not change resource attributes.
+
+If your backend uses data point attributes as series labels, those identity and
+custom labels are available without converting resource attributes, subject to
+this precedence. A backend configured to also convert resource attributes into
+series labels can expose additional names such as `switch_serial_number`
+alongside `serial_number`.
+
+A counter point's `start_time_unix_nano` identifies the source accumulation
+start when valid source metadata is available. The OTLP sink sets each point's
+`time_unix_nano` to the batch export time and preserves it across request
+splitting and retries. A missing start, a start before the Unix epoch, a start
+later than that point timestamp, or a start that does not fit in Unix
+nanoseconds is encoded as `0`, meaning unknown. A lower reading, collector
+startup, or reconnection does not establish a source accumulation start.
+
+Redfish `LifetimeStartDateTime` supplies the start for memory lifetime errors,
+drive I/O errors, and `DriveMetrics.PowerOnHours`. The drive power-on reading is
+in hours. Inline `PowerSupplyMetrics.EnergykWh.Reading`, measured in
+kilowatt-hours, uses `SensorResetTime`. This energy metric does not use
+`Sensor.LifetimeReading` or `Sensor.LifetimeStartDateTime`.
+
+The separate NVUE gNMI collector (`[collectors.nvue.gnmi]`) applies the same
+gauge and alias rules to seven OpenConfig interface counters and 10 InfiniBand
+port counters under `/infiniband/state/counters/port/*`. Its aliases use
+`{prefix}_nvue_gnmi_interface_{name}_{unit}_total`, for example
+`{prefix}_nvue_gnmi_interface_in_packets_count_total` for `in-pkts`.
+The generated [Core metrics catalogue](../observability/core_metrics.md) lists
+hardware metric names, types, and descriptions.
+
+The seven OpenConfig counters are `in-errors`, `out-errors`, `out-discards`,
+`in-octets`, `out-octets`, `in-pkts`, and `out-pkts`. They use `last-clear` from
+the same interface and streaming subscription. A known start requires a
+positive metadata notification timestamp, no earlier than `last-clear`, and a
+counter notification timestamp no earlier than the metadata notification.
+These are source notification times; OTLP points use the batch export time.
+Without valid metadata for the observation, the emitted start is unknown. Each
+new streaming subscription attempt, including a reconnect, clears retained
+starts. Source deletions covering the metadata can invalidate it. Starting a
+reconciliation snapshot does not clear starts. A completed snapshot can
+invalidate an interface's start if its telemetry disappeared. InfiniBand port
+counter aliases have unknown starts.
+
+With `collectors.nvue.gnmi.paths.interface_paths` set, the collector requests
+only mapped metric leaves and does not request `last-clear`. Selecting
+`state/counters/last-clear` in this list fails when the collector starts.
+Unrequested metadata received on that same stream can still supply a valid
+start.
 
 Entity discovery runs as its own periodic task (`[collectors.discovery]`,
 always on) that walks each BMC's Redfish Systems and Chassis trees and
 publishes an inventory snapshot; the metrics collector only reads that
 snapshot. Until the first discovery pass completes, the metrics collector
 emits nothing.
+
+### OTLP Ingress and Egress Rates
+
+The hardware health service exposes ingress and acknowledged egress counters on
+its `/metrics` endpoint. Each counter has a `target` label containing the
+configured OTLP endpoint and a `signal` label with the value `logs` or `metrics`.
+Each configured target exposes both counters for both signals, including when
+the target is idle. The counters are cumulative and reset to zero when the
+service restarts. Their names are fixed and do not use `metrics.prefix`.
+
+| Counter | Meaning |
+| --- | --- |
+| `carbide_health_otlp_ingress_records_total` | Log records or metric samples accepted into a target queue, including replacements and insertions that evict an older entry. |
+| `carbide_health_otlp_egress_records_total` | Log records or metric data points acknowledged by the receiver, excluding explicit partial-success rejections. |
+
+For `metrics`, each sample with a counter alias contributes two data points to
+the request: the `Gauge` and the cumulative `Sum`. Other samples contribute one
+gauge point. Ingress counts one input sample for each accepted reading, before
+this expansion.
+
+Notifications marking collection start, collection end, or collector removal
+are not queued and do not count as ingress. Sending the same record to multiple
+targets increments ingress once for each target. Failed attempts do not count
+as egress; successful retries and split requests count only their acknowledged
+records.
+
+Partial-success responses are not retried. If the receiver reports a negative
+rejection count or rejects more records or data points than the request contains,
+the service logs a warning and does not increment egress for that response.
+
+Calculate ingress in records per second:
+
+```promql
+sum by (target, signal) (
+  rate(carbide_health_otlp_ingress_records_total[5m])
+)
+```
+
+Calculate acknowledged egress in records per second:
+
+```promql
+sum by (target, signal) (
+  rate(carbide_health_otlp_egress_records_total[5m])
+)
+```
+
+Both queries sum rates across service instances with the same target and signal.
+The units are log records per second for `logs`. For `metrics`, ingress measures
+input samples per second, while egress measures acknowledged data points per
+second. The `[5m]` range averages each rate over five minutes.
+Add scrape-label selectors to restrict either query to a specific instance.
+
+Counter aliases can make metric egress exceed ingress. Samples removed from
+the queue but awaiting export form a staged metrics batch. Replacements in the
+queue or this batch, capacity evictions, receiver rejections, export failures,
+and staged or in-flight samples also affect the difference. Subtracting the
+rates does not measure queue growth.
+
+Compare the rates with `carbide_health_otlp_queue_depth`,
+`carbide_health_otlp_queue_dropped_total`, and
+`carbide_health_otlp_export_failures_total`, plus the replacement counters
+`{prefix}_otlp_sink_replaced_total` and
+`{prefix}_otlp_sink_metrics_replaced_total`, where `{prefix}` is `metrics.prefix`.
+For metrics, queue depth, queue replacements, and capacity drops count input
+entries before alias expansion. Queue depth excludes staged and in-flight
+batches. Before export, a newer reading can also replace the same series in a
+staged metrics batch. The superseded reading contributes ingress but no egress,
+and it does not increment either queue replacement counter.
+
+Egress measures receiver acknowledgment, not unique delivery or downstream
+storage: a receiver can accept a request whose response is lost before a retry.
 
 ### Hardware Health Logs
 
@@ -398,6 +571,7 @@ Common DPU alert IDs include:
 - `ContainerExists`
 - `ServiceRunning`
 - `DhcpServer`
+- `Fmds`
 - `BgpStats`
 - `BgpPeeringTor`
 - `BgpPeeringRouteServer`
@@ -423,6 +597,8 @@ reloads local DHCP in ContainerExec mode. It includes `PreventAllocations` and
 `PreventHostStateChanges`, then clears when the agent sends a fresh sample. If
 it appears in consecutive reports, check the DPU agent logs for repeated
 configuration applications.
+
+On DPF, `DhcpServer` and `Fmds` mean that the DPU agent could not reach or update the DHCP server or FMDS pod on that DPU, and the message contains the error. Both prevent allocations but not host state changes. Check whether that pod is running on the DPU.
 
 Refer to [DPU ToR Uplink Health](../dpu-management/dpu_configuration.md#dpu-tor-uplink-health)
 for the configuration values, classifications, and complete transport matrix.
@@ -534,12 +710,14 @@ for common workflows:
 | `HostUpdate` | Mark host as in DPU reprovision or host update. |
 | `InternalMaintenance` | Internal maintenance window. |
 | `OutForRepair` | Host removed from service for repair. |
+| `ComputeTrayDueForSwap` | Compute tray about to be moved or replaced. Also removes the host's GPUs from every NVLink partition, and the NVLink partition monitor reports progress under the `nvlink-isolation` source (`NvlinkIsolationPending` or `NvlinkIsolated`); see [Moving or Replacing a Compute Tray](../manuals/nvlink_partitioning.md#moving-or-replacing-a-compute-tray). |
 | `Degraded` | Mark host as degraded. |
 | `Validation` | Mark host for validation. |
 | `SuppressExternalAlerting` | Suppress external alerting behavior. |
 | `MarkHealthy` | Force healthy. |
 | `StopRebootForAutomaticRecoveryFromStateMachine` | Block automatic recovery reboots during manual work. |
 | `TenantReportedIssue` | Tenant-reported issue while releasing an instance. |
+| `RequestOnlineRepair` | Keep an unhealthy instance assigned until the online repair override is cleared. |
 | `RequestRepair` | Tenant-reported issue requiring repair. |
 
 Examples:

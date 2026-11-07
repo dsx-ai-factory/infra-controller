@@ -255,6 +255,17 @@ func (a *NVLinkLogicalPartitionAPIService) DeleteNvlinkLogicalPartitionExecute(r
 			body:  localVarBody,
 			error: localVarHTTPResponse.Status,
 		}
+		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
 		if localVarHTTPResponse.StatusCode == 403 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -319,7 +330,7 @@ func (r ApiGetAllNvlinkInterfaceRequest) NvLinkLogicalPartitionId(nvLinkLogicalP
 	return r
 }
 
-// Filter NVLink Interfaces by NVLink Domain ID.  Can be specified multiple times to filter on more than one ID.
+// Filter NVLink Interfaces by Core-reported NVLink domain UUID, not the rack group ID returned by the Domain API. Can be specified multiple times to filter on more than one UUID.
 func (r ApiGetAllNvlinkInterfaceRequest) NvLinkDomainId(nvLinkDomainId string) ApiGetAllNvlinkInterfaceRequest {
 	r.nvLinkDomainId = &nvLinkDomainId
 	return r

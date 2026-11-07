@@ -24,9 +24,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
@@ -79,6 +77,9 @@ func testNetworkSecurityGroupSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create Security Group table
 	err := dbSession.DB.ResetModel(context.Background(), (*cdbm.NetworkSecurityGroup)(nil))
 	assert.Nil(t, err)
+	// create TenantAccount table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.TenantAccount)(nil))
+	assert.Nil(t, err)
 }
 
 func testCreateNetworkSecurityGroup(t *testing.T, dbSession *cdb.Session, name string, site *cdbm.Site, tn *cdbm.Tenant) *cdbm.NetworkSecurityGroup {
@@ -127,11 +128,10 @@ func TestNewCreateNetworkSecurityGroupHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: CreateNetworkSecurityGroupHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				scp:        scp,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -174,9 +174,11 @@ func TestNetworkSecurityGroupHandler_Create(t *testing.T) {
 
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn1.ID, st.ID, tnu1.ID)
 	assert.NotNil(t, ts1)
+	testInstanceSiteBuildAllocation(t, dbSession, st, tn1, "test-allocation-1", ipu)
 
 	ts1s2 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn1.ID, st2.ID, tnu1.ID)
 	assert.NotNil(t, ts1s2)
+	testInstanceSiteBuildAllocation(t, dbSession, st2, tn1, "test-allocation-2", ipu)
 
 	// Tenant 2
 	tnu2 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg2, tnOrgRoles)
@@ -184,6 +186,20 @@ func TestNetworkSecurityGroupHandler_Create(t *testing.T) {
 
 	ts2 := testBuildTenantSiteAssociation(t, dbSession, tnOrg2, tn2.ID, st.ID, tnu2.ID)
 	assert.NotNil(t, ts2)
+	testInstanceSiteBuildAllocation(t, dbSession, st, tn2, "test-allocation-3", ipu)
+
+	// Tenant 3 has an account-level grant, a Site denial, and no Allocations
+	tnOrg3 := "test-tenant-org-3"
+	tnu3 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-4", tnOrg3, tnOrgRoles)
+	tn3 := testInstanceBuildTenant(t, dbSession, "test-tenant", tnOrg3, tnu3)
+	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn3.ID, tnOrg3, cdbm.TenantAccountStatusReady, tnu3)
+	cdbm.TestBuildTenantSite(t, dbSession, tn3, st, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, tnu3)
+
+	// Tenant 4 has an account-level grant but no Tenant/Site association or Allocations
+	tnOrg4 := "test-tenant-org-4"
+	tnu4 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-5", tnOrg4, tnOrgRoles)
+	tn4 := testInstanceBuildTenant(t, dbSession, "test-tenant", tnOrg4, tnu4)
+	common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn4.ID, tnOrg4, cdbm.TenantAccountStatusReady, tnu4)
 
 	requestedNetworkSecurityGroupID := uuid.New()
 	existingNetworkSecurityGroupID := uuid.New()
@@ -221,7 +237,7 @@ func TestNetworkSecurityGroupHandler_Create(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock per-Site client for st1
 	tsc := &tmocks.Client{}
@@ -386,6 +402,44 @@ func TestNetworkSecurityGroupHandler_Create(t *testing.T) {
 				Labels: map[string]string{
 					"flavor": "coconut",
 				},
+			},
+		},
+		{
+			name:             "test Site denied for Tenant without Allocations - fail",
+			wantErr:          false,
+			wantResponseCode: http.StatusForbidden,
+			handlerConfig: handlerConfig{
+				dbSession:      dbSession,
+				temporalClient: tc,
+				clientPool:     scp,
+				config:         cfg,
+			},
+			params: params{
+				org:  tnOrg3,
+				user: tnu3,
+			},
+			requestPayload: &model.APINetworkSecurityGroupCreateRequest{
+				Name:   "Denied Site Firewall",
+				SiteID: st.ID.String(),
+			},
+		},
+		{
+			name:             "test privileged Tenant without Tenant/Site association - success",
+			wantErr:          false,
+			wantResponseCode: http.StatusCreated,
+			handlerConfig: handlerConfig{
+				dbSession:      dbSession,
+				temporalClient: tc,
+				clientPool:     scp,
+				config:         cfg,
+			},
+			params: params{
+				org:  tnOrg4,
+				user: tnu4,
+			},
+			requestPayload: &model.APINetworkSecurityGroupCreateRequest{
+				Name:   "Privileged Site Firewall",
+				SiteID: st.ID.String(),
 			},
 		},
 		{
@@ -726,7 +780,6 @@ func TestNetworkSecurityGroupHandler_Create(t *testing.T) {
 			ec.SetParamValues(test.params.org)
 			ec.Set("user", test.params.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 			err := csh.Handle(ec)
 
@@ -809,10 +862,9 @@ func TestNewGetAllNetworkSecurityGroupHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetAllNetworkSecurityGroupHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -983,7 +1035,7 @@ func TestNetworkSecurityGroupHandler_GetAll(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type params struct {
 		org  string
@@ -1155,7 +1207,6 @@ func TestNetworkSecurityGroupHandler_GetAll(t *testing.T) {
 			ec.SetParamValues(test.params.org)
 			ec.Set("user", test.params.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := csh.Handle(ec)
@@ -1227,10 +1278,9 @@ func TestNewGetNetworkSecurityGroupHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: GetNetworkSecurityGroupHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -1377,7 +1427,7 @@ func TestNetworkSecurityGroupHandler_Get(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	type params struct {
 		org                    string
@@ -1479,7 +1529,6 @@ func TestNetworkSecurityGroupHandler_Get(t *testing.T) {
 			ec.SetParamValues(test.params.org, test.params.networkSecurityGroupID)
 			ec.Set("user", test.params.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := csh.Handle(ec)
@@ -1551,11 +1600,10 @@ func TestNewDeleteNetworkSecurityGroupHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: DeleteNetworkSecurityGroupHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				scp:        scp,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -1664,7 +1712,7 @@ func TestNetworkSecurityGroupHandler_Delete(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock per-Site client for st1
 	tsc := &tmocks.Client{}
@@ -1874,7 +1922,6 @@ func TestNetworkSecurityGroupHandler_Delete(t *testing.T) {
 			ec.SetParamValues(test.params.org, test.params.networkSecurityGroupID)
 			ec.Set("user", test.params.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := dnsg.Handle(ec)
@@ -1925,11 +1972,10 @@ func TestNewUpdateNetworkSecurityGroupHandler(t *testing.T) {
 				cfg:       cfg,
 			},
 			want: UpdateNetworkSecurityGroupHandler{
-				dbSession:  dbSession,
-				tc:         tc,
-				scp:        scp,
-				cfg:        cfg,
-				tracerSpan: sutil.NewTracerSpan(),
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
 			},
 		},
 	}
@@ -2083,7 +2129,7 @@ func TestNetworkSecurityGroupHandler_Update(t *testing.T) {
 	tc := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Mock per-Site client for st1
 	tsc := &tmocks.Client{}
@@ -2336,7 +2382,6 @@ func TestNetworkSecurityGroupHandler_Update(t *testing.T) {
 			ec.SetParamValues(test.params.org, test.params.networkSecurityGroupID)
 			ec.Set("user", test.params.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 			err := unsgh.Handle(ec)
 

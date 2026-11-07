@@ -182,23 +182,33 @@ Example tenant account detail (Ready, with active allocations):
 
 ### Accepting the Invitation (Tenant Side)
 
-The tenant admin must accept the invitation to transition the account to `Ready`. The non-interactive form sends an empty PATCH body -- note the flag-first ordering:
+The tenant admin accepts the invitation, which moves the account to `Ready`.
+
+Accepting is a tenant call, so `nicocli` has to act as the tenant. Two things decide who it acts as: the token it sends, and the org in the request path. Both have to name the tenant org.
+
+Give the tenant its own config file, and set `api.org` to the tenant org in it. Pass that file with `--config` to `nicocli login` and to every tenant command. The request then carries the tenant's token, which can act only in orgs it holds a role for. If it holds no role for the org in `api.org`, the request fails with `403 Requested organization not found in token claims`. If it holds roles in several orgs, `api.org` picks which one it acts as.
+
+Don't log in to the provider's config file. Login overwrites the provider's `auth.oidc` credentials there. A provider token in `auth.token` also outranks `auth.oidc.token`. In that case the tenant's login changes nothing that is sent.
+
+On Keycloak deployments, [Pointing `nicocli` at the Tenant Org](tenant-management-keycloak.md#pointing-nicocli-at-the-tenant-org) has the commands.
+
+To accept, send an empty PATCH body. Flags go before the account ID:
 
 ```bash
-nicocli tenant-account update --data '{}' <account-id>
+nicocli --config ~/.nico/<tenant-org>.yaml tenant-account update --data '{}' <account-id>
 ```
 
-TUI:
+Or use the TUI:
 
 ```bash
-nicocli tui
+nicocli --config ~/.nico/<tenant-org>.yaml tui
 > tenant-account update
 ```
 
-Only accounts in `Invited` status can be accepted. Attempting to update a `Ready` account returns the verified error:
+Only an account in `Invited` status can be accepted. An account that is already `Ready` returns this error:
 
 ```bash
-$ nicocli tenant-account update --data '{}' <account-id>
+$ nicocli --config ~/.nico/<tenant-org>.yaml tenant-account update --data '{}' <account-id>
 Error: API error 400: Tenant Account status is not Invited
 ```
 
@@ -210,6 +220,9 @@ Error: API error 400: Tenant Account status is not Invited
 - Set `isRepairTenant: true` when releasing an instance, which is what the repair tenant workflow requires.
 - Read a set of otherwise provider-only resources, including machines, machine health, SKUs, racks, trays, and expected machines, at the sites of a provider it holds a `Ready` tenant account with, wherever the capability is effective. A site override that disables it also removes these reads at that site.
 - Receive alternative VPC routing profiles from `tenant/current/routing-profile`.
+
+Attaching interfaces to another tenant's VPC is a separate capability. See
+[Granting Cross-Tenant Interface Creation](#granting-cross-tenant-interface-creation).
 
 A Provider Admin configures it per tenant account with the `siteCapabilities` field. This is
 the only supported way to grant it, and it applies to regular tenants as well as
@@ -226,12 +239,15 @@ nicocli tenant-account update \
 - Exactly one entry must have an empty or omitted `siteIds`. That entry sets the account-level default.
 - Any further entry lists site IDs that override the default. Each site must already be associated with the tenant, which happens when the tenant's first allocation at that site is created.
 - No site ID may appear in more than one entry.
-- `targetedInstanceCreation` is required on every entry.
+- Every entry must set at least one capability: `targetedInstanceCreation`, `crossTenantInterfaceCreation`, or both.
+- A site entry may only set capabilities that the account-default entry also sets.
 - The request must not also carry `tenantContactId`, which is the invitation-acceptance field. Sending both returns HTTP 400.
 
-Updates use replace semantics. A per-site override whose site ID is omitted from a later
-payload is cleared. To leave the capability on everywhere except one site, send both
-entries together:
+Updates replace each capability on its own. For every capability set in the account-default
+entry, the default is replaced and any per-site override of that capability whose site ID is
+omitted from the payload is cleared. A capability left out of the account-default entry keeps
+its current default and site overrides. To leave the capability on everywhere except one
+site, send both entries together:
 
 ```json
 {
@@ -266,6 +282,58 @@ Do not read `capabilities.targetedInstanceCreation` from `nicocli tenant current
 
 Use `nicocli tenant-account list` instead.
 </Warning>
+
+### Granting Cross-Tenant Interface Creation
+
+`crossTenantInterfaceCreation` lets a tenant attach non-primary instance interfaces to
+another tenant's VPC or VPC prefix at the same site. The interface selects the VPC with
+`vpcId` or the VPC prefix with `vpcPrefixId` on instance create, batch create, or update. The
+caller must be a Tenant Admin, and the VPC must be a `Ready` FNN VPC. The VPC or VPC prefix ID
+comes from the owning tenant out of band, because the capability does not grant discovery of
+or CRUD access to VPCs or VPC prefixes owned by other Tenants.
+
+These rules still apply with the capability:
+
+- The primary VPC and the primary physical interface must belong to the instance's own tenant.
+- Subnets owned by another tenant are rejected.
+- Instance-level Network Security Group policy takes precedence on every interface, including cross-tenant ones.
+
+A Provider Admin sets it with the same `siteCapabilities` field, following the
+[payload rules](#payload-rules) and [resolution order](#how-the-effective-value-resolves)
+described for `targetedInstanceCreation`. The two capabilities are independent, so this
+request leaves `targetedInstanceCreation` unchanged:
+
+```bash
+nicocli tenant-account update \
+  --data '{"siteCapabilities":[{"siteIds":[],"crossTenantInterfaceCreation":true}]}' \
+  <account-id>
+```
+
+#### After revocation
+
+Revoking the capability does not detach existing cross-tenant interfaces. Only a new
+cross-tenant interface identity needs the capability. After revocation, these requests still
+succeed:
+
+- An instance update that does not include `interfaces`.
+- An `interfaces` replacement that keeps every existing cross-tenant interface unchanged.
+- An `interfaces` replacement that removes one or more cross-tenant interfaces, including removing one while keeping another.
+- Instance deletion.
+
+Adding a cross-tenant interface, or retargeting one to a different VPC or VPC prefix owned by
+another tenant, returns HTTP 403.
+
+#### Seeing cross-tenant interfaces
+
+[`GET /v2/org/{org}/nico/interface`](api:GET/v2/org/:org/nico/interface) lists the interfaces
+on the caller's instances, plus interfaces on other tenants' instances that select one of the
+caller's VPCs or VPC prefixes. Listing does not require either capability. Set
+`crossTenant=true` to return only interfaces whose instance and VPC have different owners. On
+those results, `instanceTenantId` and `vpcTenantId` name the two owners. Both are `null` when
+the owners match. Filter by either owner with the `instanceTenantId` or `vpcTenantId` query
+parameter. `includeRelation` expands the instance or VPC prefix, including another tenant's.
+
+A VPC cannot be deleted while another tenant's instance still has an interface on it.
 
 ## Instance Types
 
@@ -500,7 +568,7 @@ Prefixes or Subnets and instances.
 | `--site-id` | yes | The site this VPC belongs to |
 | `--routing-profile` | no | One of `external`, `internal`, `privileged-internal` (REST API mapping); see core docs for semantics |
 | `--network-virtualization-type` | no | `FNN` for VPC Prefixes, `ETHERNET_VIRTUALIZER` for IPv4 Subnets, or `FLAT` for zero-DPU and NIC-mode hosts |
-| `--nv-link-logical-partition-id` | no | Attach to a specific NVLink partition (GB200) |
+| `--nv-link-logical-partition-id` | no | Attach to a specific NVLink partition (GB200/GB300/VR) |
 | `--vni` | no | Pin a specific VXLAN Network Identifier |
 | `--description` | no | |
 
@@ -627,7 +695,7 @@ An instance in NICo is a bare-metal machine assigned to a tenant within a VPC. C
 | `--instance-type-id` | no | Pick from the pool of machines of this type (alternative to `--machine-id`) |
 | `--operating-system-id` | no | OS for PXE provisioning; see [Templated iPXE Operating Systems](templated-ipxe-operating-systems.md) |
 | `--allow-unhealthy-machine` | no | Override health checks |
-| `--ipxe-script` | no | Custom iPXE script |
+| `--ipxe-script` | no | Custom iPXE script that can use [iPXE script variables](../provisioning/ipxe-script-variables.md). |
 | `--user-data` | no | cloud-init style user data |
 | `--phone-home-enabled` | no | Whether to wait for the OS to phone home for `BootCompleted` |
 | `--network-security-group-id` | no | NSG to apply |
@@ -670,6 +738,10 @@ nicocli tui
    automatically and skip this prompt.
 6. **SSH key groups** -- optional, attaches SSH keys for serial-console access
 
+For key registration, Site synchronization, and the connection procedure, see
+[SSH Console Setup and Access](ssh-console.md). The guide also covers updating
+an existing Instance's key-group attachments.
+
 For an image-based operating system, review [Image-Based Operating Systems](image-based-operating-systems.md) before making the definition available to tenants. Its disk selector applies to every eligible target and the selected whole disk is overwritten during installation.
 
 ### Verifying an Instance Is Running
@@ -699,23 +771,100 @@ nicocli instance status-history <instance-id>
 
 The instance detail response is rich -- it includes `interfaces[]` with assigned IP addresses and VPC prefix info, `ipxeScript` showing the live boot script, `serialConsoleUrl` for console access, full machine and SKU metadata, and any active `deprecations[]` warnings. The API uses inline `deprecations[]` arrays to flag fields scheduled for removal -- watch for these in your responses.
 
+### Network settings in cloud-init user-data
+
+For tenant boots using NICo's NoCloud datasource, NICo extracts a top-level
+`network:` value from user data and serves it as the separate `network-config`
+document. In a `#cloud-config` block mapping, an unindented `network:` entry is
+also removed from the served `user-data` when it can be separated safely. The
+remaining YAML source is preserved. Layouts that cannot be safely rewritten
+remain in user-data, while network extraction is still attempted. These changes
+apply to the boot responses; the stored user data is unchanged.
+
+A `#cloud-config-archive` can carry the same settings inside its cloud-config
+parts. NICo supports static parts declared as `text/cloud-config`, parts beginning
+with a `#cloud-config` header, and untyped parts containing an unmarked YAML
+mapping or a mapping preceded by a comment starting with `#` and a space. Explicit MIME types take
+precedence over content headers. Header matching is case-insensitive and permits
+leading whitespace. Under the default merge rules, the last part defining
+`network` supplies the entire network configuration. NICo removes that key from
+each supported cloud-config part; a network-only part becomes an empty
+cloud-config mapping. Script parts with a `text/x-shellscript` type (including its
+frequency suffixes), untyped scripts beginning with `#!`, and parts explicitly
+typed as `text/cloud-boothook` are preserved. An untyped `#cloud-boothook` part is
+unsupported and causes the entire archive to use the fallback below. Phone-home
+settings and nested installer settings such as `autoinstall.network` are preserved.
+
+When an archive is split, its envelope is rendered as JSON, which is valid YAML.
+String-valued part metadata and the remaining embedded YAML strings are preserved,
+but envelope comments and formatting are not. Use quoted strings for filenames
+and other MIME header metadata to avoid YAML scalar interpretation differences.
+Unquoted metadata values can change meaning under cloud-init's YAML 1.1 rules
+when NICo rewrites the archive as JSON. An archive without network settings is
+served unchanged. Archives with custom merge rules, launch-index filters,
+templates, unsupported part types or layouts, malformed content, metadata that
+cannot survive JSON conversion (such as YAML tags), or references that prevent
+safe splitting are also served unchanged. In these archive fallback cases, the
+separate network response supplies NICo's default DHCPv4 and DHCPv6 configuration
+for interfaces matching `en*` and `eth*`. Do not rely on archive-contained static
+network settings when the archive requires one of these unsupported features.
+
 ### Phone-home
 
 `phoneHomeEnabled` (`--phone-home-enabled`) controls whether NICo waits for the booted operating system to call back -- to "phone home" -- before it reports the instance as ready. It is a property of the operating-system definition (`operating-system create` / `operating-system update`) and can also be set per instance (`instance create` / `instance update`).
 
 **What it does.** When phone-home is enabled, NICo does not consider the instance fully provisioned until the booted OS contacts NICo's metadata service from inside the guest. The instance is held in a provisioning state -- the transition to `Ready` is gated -- until that callback arrives. When it is disabled, NICo reports the instance ready as soon as provisioning and config sync finish, without waiting for any signal from the OS.
 
-**What NICo injects.** When phone-home is enabled, NICo edits your `userData` for you -- you do *not* add the callback yourself. NICo parses your cloud-init YAML, strips any existing [`phone_home`](https://cloudinit.readthedocs.io/en/latest/reference/modules.html#phone-home) block, and inserts one that POSTs to the site's metadata endpoint:
+**What NICo injects.** When phone-home is enabled, NICo edits your `userData`. You do not add the callback yourself. NICo parses your cloud-init YAML, removes the existing [`phone_home`](https://cloudinit.readthedocs.io/en/latest/reference/modules.html#phone-home) blocks that it can edit, and inserts one that sends a POST request to the site's metadata endpoint:
 
 ```yaml
 #cloud-config
 # ... your first-boot setup (SSH keys, passwords, packages, ...) ...
 phone_home:
-  url: http://169.254.169.254/latest/meta-data/phone_home
   post: all
+  url: http://169.254.169.254/latest/meta-data/phone_home
 ```
 
-The injected `url` is the site-configured phone-home endpoint (`site.phoneHomeUrl`; default `http://169.254.169.254/latest/meta-data/phone_home`), which the platform operator can override per deployment. If you supply no `userData`, NICo generates a minimal `#cloud-config` containing only the block above. Disabling phone-home reverses this, and NICo removes the matching `phone_home` block it manages. Because NICo rewrites your user-data as YAML, **any `userData` you provide must be valid cloud-init YAML (a `#cloud-config` mapping) when phone-home is enabled**. The API rejects requests with invalid user-data. (Supplying no user-data is fine: NICo generates the minimal `#cloud-config` shown above.)
+The injected `url` is the site-configured phone-home endpoint in `site.phoneHomeUrl`. The default is `http://169.254.169.254/latest/meta-data/phone_home`. The platform operator controls this site-wide value; it is not a per-instance transport selection. If you supply no `userData` when enabling phone-home, NICo generates a minimal `#cloud-config` that contains only the block above.
+
+For direct access to the embedded agent's default listener, set the URL to `http://169.254.169.254:7777/latest/meta-data/phone_home`, or `http://[fd00:76b9::254]:7777/latest/meta-data/phone_home` when IPv6 metadata is enabled. Standalone FMDS defaults to port 80; both modes support listener overrides. A site mixing deployment modes must provide one URL reachable by all affected instances, accounting for any deployment-specific proxy or port forwarding. NICo does not choose the URL's address family or port separately for each DPU.
+
+When you disable phone-home, the removal behavior depends on whether the request supplies `userData`. If it does, NICo removes only a `phone_home` block that reports to the site endpoint and leaves blocks that report elsewhere unchanged. If the request omits `userData`, NICo edits the stored blob. If NICo stored that blob with phone-home enabled, it removes every `phone_home` block. A stored block can contain a URL from before a change to `site.phoneHomeUrl`.
+
+**Which user data NICo can edit.** When phone-home is enabled, the `userData` you provide must be one of these formats:
+
+- A `#cloud-config` mapping.
+- A `#cloud-config-archive` sequence.
+
+The API rejects these inputs:
+
+- A `#!` script.
+- A `## template: jinja` document, because NICo cannot render the template back to text.
+- Another cloud-init format, including `#cloud-boothook` or `#cloud-config-jsonp`.
+- More than one YAML document.
+- Text that is not YAML.
+
+NICo treats user data without a format marker as `#cloud-config`, including user data with only a comment above the keys. Enabling phone-home writes the marker at the top so that cloud-init reads the document. When you disable phone-home for user data that NICo cannot edit, NICo leaves the document unchanged instead of rejecting the request. Any `phone_home` block in that document remains.
+
+**Where the block lands.** In a `#cloud-config` document, NICo adds the block at the top level. If the document contains an `autoinstall` section, NICo adds the block under `autoinstall.user-data`. This placement makes the callback come from the installed system instead of the installer.
+
+In a `#cloud-config-archive`, NICo adds the block to the part that installs a target system, again under `autoinstall.user-data`. Cloud-init determines a part's format from its `type` without reading the content. If `type` is absent, cloud-init uses the content's first line. If neither value identifies a format, cloud-init treats the part as `cloud-config`. The first-line rule above therefore applies to the document you send, not to the parts inside it.
+
+NICo leaves a part whose content is a `## template: jinja` document unchanged because it cannot render the template back to text. If no part installs a target system, NICo appends a `#cloud-config` part that contains only the block. NICo does the same when the installation part is a template that it leaves unchanged. In both cases, NICo leaves your parts unchanged:
+
+```yaml
+#cloud-config-archive
+- type: text/x-shellscript
+  content: |
+    #!/bin/sh
+    # ... your part, untouched ...
+- type: text/cloud-config
+  content: |
+    #cloud-config
+    phone_home:
+      post: all
+      url: http://169.254.169.254/latest/meta-data/phone_home
+```
 
 cloud-init runs the `phone_home` module in its final stage, after the rest of your configuration has been applied, so the callback fires only after your setup has completed. When NICo receives the POST, it records the contact and releases the readiness gate, allowing the instance to become `Ready`.
 
@@ -725,7 +874,7 @@ cloud-init runs the `phone_home` module in its final stage, after the rest of yo
 
 - Phone-home only gates *status reporting*. It does not change how the host is provisioned or booted -- the reboot into the provisioned OS happens identically whether or not phone-home is enabled.
 - If phone-home is enabled but the booted OS never runs cloud-init, or the guest cannot reach the metadata endpoint, the callback never arrives and the instance stays in its provisioning state, never reporting ready.
-- The metadata endpoint (by default, `169.254.169.254`) is not a tenant-facing API, and is reachable only from the provisioned host over its link-local metadata link.
+- The callback uses the operator-configured `site.phoneHomeUrl`, which defaults to the DPU-local IPv4 metadata endpoint. Enabling IPv6 metadata transport does not change this setting. Before changing the site-wide URL, the platform operator must confirm that every affected phone-home-enabled guest can reach the selected address and deployment-specific port. Refer to [IPv6 Metadata Transport](../dpu-management/dpu-lifecycle-management.md#ipv6-metadata-transport). Changing the site setting does not rewrite existing stored user data automatically.
 - Rebooting the instance with a one-time custom iPXE override (`instance update --reboot-with-custom-ipxe=true`) re-arms the gate when phone-home is enabled: NICo clears the recorded contact, so the OS must phone home again before the instance is reported ready.
 
 ### Batch Instance Creation
@@ -823,19 +972,17 @@ nicocli instance delete <instance-id>
 
 In TUI mode, `instance delete` prompts for confirmation before proceeding. Deletion triggers the full sanitization workflow: secure erase of NVMe storage, GPU and system memory wipe, TPM reset, re-attestation, and network isolation teardown. The machine returns to the available pool once sanitization completes.
 
-### Machine-Level Emergency Operations (gRPC Only)
+### Machine-Level Emergency Operations
 
-For stuck or unresponsive machines that cannot be managed through the instance API, nico-admin-cli provides direct BMC operations:
+If a machine is stuck or unresponsive, operators can use `nico-admin-cli` for
+recovery. Choose the operation that matches the problem:
 
-```bash
-# Force-reboot via BMC
-nico-admin-cli -a <core-api-url> machine reboot --machine-id="<machine-id>"
-
-# Force-delete a stuck machine (destructive -- wipes machine state)
-nico-admin-cli -a <core-api-url> machine force-delete --machine="<machine-id>"
-```
-
-See the [Machine Reboot](../playbooks/machine_reboot.md) and [Force Delete](../playbooks/force_delete.md) playbooks in the core documentation for detailed procedures.
+- To restart the machine, refer to the
+  [`machine reboot` reference](../manuals/nico-admin-cli/commands/machine/machine-reboot.md).
+- To remove its NICo records and restart discovery, follow
+  [Force Deleting and Rebuilding NICo Hosts](../playbooks/force_delete.md).
+  Force deletion does not wipe the tenant operating system or its data. The
+  playbook explains deletion consent and the optional wait for DPU confirmation.
 
 ## Tenant Lifecycle Operations
 
@@ -881,15 +1028,21 @@ NICo has no first-class "disable" operation. Options:
 
 ### Tenant Teardown Sequence
 
-There is no `DELETE /tenant` endpoint -- tenant records are permanent. To fully decommission:
+There is no `DELETE /tenant` endpoint -- tenant records are permanent. For peerings
+with another tenant, arrange deletion with the Site's Provider Admin.
+
+To fully decommission:
 
 1. **Terminate all instances** -- delete every instance; each must reach `Terminated` status.
 2. **Delete all tenant network resources** -- remove VPC Prefixes or Subnets
    from every VPC, according to its `networkVirtualizationType`.
-3. **Delete all VPCs** -- remove the tenant's VPCs.
-4. **Delete all allocations** -- provider admin removes compute and network allocations.
-5. **Delete the tenant account** -- provider admin severs the link.
-6. **Revoke identity provider access** -- remove roles and optionally org membership.
+3. **Delete all VPC peerings** -- follow the
+   [peering deletion guide](../manuals/vpc/vpc_peering_management.md#deleting-vpc-peering-connections)
+   and wait for each connection to disappear.
+4. **Delete all VPCs** -- remove the tenant's VPCs.
+5. **Delete all allocations** -- provider admin removes compute and network allocations.
+6. **Delete the tenant account** -- provider admin severs the link.
+7. **Revoke identity provider access** -- remove roles and optionally org membership.
 
 After this sequence, the tenant record still exists but is inert.
 
@@ -1080,7 +1233,7 @@ Flag-first ordering -- always put flags before positional args.
 - [Quick Start Guide](../getting-started/quick-start.md), NICo deployment and Day Zero walkthrough
 - [VPC Routing Profiles](../manuals/vpc/vpc_routing_profiles.md), profile configuration and behavior
 - [VPC Network Virtualization](../manuals/vpc/vpc_network_virtualization.md), full networking architecture
-- [VPC Peering](../manuals/vpc/vpc_peering_management.md), connecting VPCs (gRPC only)
+- [VPC Peering](../manuals/vpc/vpc_peering_management.md), connecting VPCs and waiting for peering deletion
 - [NVLink Partitioning](../manuals/nvlink_partitioning.md), NVLink logical partition management
 - [Machine Reboot Playbook](../playbooks/machine_reboot.md), emergency BMC reboot procedures
 - [Force Delete Playbook](../playbooks/force_delete.md), removing stuck machines

@@ -1,0 +1,109 @@
+{{- $networks := .Values.serviceVpcNetworks | default dict }}
+{{- $ipv4 := get $networks "ipv4" | default dict }}
+{{- $enabled := false }}
+{{- if hasKey $ipv4 "enabled" }}
+{{- $enabled = get $ipv4 "enabled" }}
+{{- end }}
+{{- if $enabled }}
+{{- $daemonName := printf "%s-dhcp-cni" (include "nico-dhcp-server.fullname" . | trunc 54 | trimSuffix "-") }}
+{{- $daemonAppName := printf "%s-dhcp-cni" (include "nico-dhcp-server.name" . | trunc 54 | trimSuffix "-") }}
+{{- $daemonSelectorLabels := dict
+  "app.kubernetes.io/name" $daemonAppName
+  "app.kubernetes.io/instance" .Release.Name
+  "app.kubernetes.io/component" "dhcp-cni-daemon"
+}}
+{{- $daemonLabels := omit (.Values.serviceDaemonSet.labels | default dict) "app.kubernetes.io/name" "app.kubernetes.io/instance" "app.kubernetes.io/component" }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $daemonName }}
+  labels:
+    {{- include "nico-dhcp-server.labels" . | nindent 4 }}
+    {{- with $daemonLabels }}
+      {{- toYaml . | nindent 4 }}
+    {{- end }}
+    app.kubernetes.io/component: dhcp-cni-daemon
+  annotations:
+    {{- with .Values.serviceDaemonSet.annotations }}
+      {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- with .Values.serviceDaemonSet.updateStrategy }}
+  updateStrategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- toYaml $daemonSelectorLabels | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- with .Values.serviceDaemonSet.annotations }}
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- with $daemonLabels }}
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- toYaml $daemonSelectorLabels | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      hostNetwork: true
+      {{- if not (empty .Values.serviceDaemonSet.nodeSelector) }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+              {{- toYaml .Values.serviceDaemonSet.nodeSelector | nindent 12 }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: dhcp-cni-daemon
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /opt/cni/bin/dhcp
+            - daemon
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          {{- with toYaml .Values.serviceDaemonSet.resources }}
+          resources:
+            limits:
+              {{- . | nindent 14 }}
+            requests:
+              {{- . | nindent 14 }}
+          {{- end }}
+          volumeMounts:
+            - name: dhcp-cni-bin-dir
+              mountPath: /opt/cni/bin
+              readOnly: true
+            - name: netns
+              mountPath: /var/run/netns
+              mountPropagation: Bidirectional
+            # Publish the daemon's standard socket path at the host path used by the NAD.
+            - name: dhcp-daemon-socket-dir
+              mountPath: /run/cni
+              mountPropagation: Bidirectional
+      volumes:
+        - name: dhcp-cni-bin-dir
+          hostPath:
+            path: /opt/cni/bin
+            type: Directory
+        - name: netns
+          hostPath:
+            path: /var/run/netns
+            type: DirectoryOrCreate
+        - name: dhcp-daemon-socket-dir
+          hostPath:
+            path: /run/vpc/cni
+            type: DirectoryOrCreate
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

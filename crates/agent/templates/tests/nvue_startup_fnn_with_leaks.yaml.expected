@@ -103,6 +103,9 @@
                 action: permit
                 match:
                   10.217.5.161/30: {}
+              '65003':
+                action: permit
+                match:
                   10.217.5.169/29: {}
 
           ALLOW_TO_UNDERLAY_PREFIX_LIST_IPV6:
@@ -660,7 +663,7 @@
               to-evpn:
                 route-target:
                   11414:1025186: {}
-                  11415:200: {} 
+                  11415:200: {}
                   77415:800: {}
             route-import:
               from-evpn:
@@ -749,7 +752,7 @@
               to-evpn:
                 route-target:
                   11414:1025197: {}
-                  11415:200: {} 
+                  11415:200: {}
                   77415:800: {}
             route-import:
               from-evpn:

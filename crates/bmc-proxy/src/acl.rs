@@ -14,13 +14,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//! Per-principal HTTP method and path authorization for proxied requests.
+
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::str::FromStr;
 
-use http::uri;
 use serde::de::Error as SerdeError;
 use serde::{Deserialize, Deserializer};
+
+use crate::pattern::{PatternParseError, RequestPattern, WildcardEscapes};
 
 /// Top-level ACL configuration keyed by authenticated principal identifier.
 ///
@@ -63,9 +67,8 @@ impl AclConfig {
 
 /// An entry in the access control list for a client to carbide-bmc-proxy.
 ///
-/// The text form for use in the config takes the form of a single string with a leading `!` if the
-/// entry is disallowed (otherwise the entry is allowed), a list of HTTP verbs, and a wildcarded HTTP
-/// path
+/// The text form for use in the config is a [`RequestPattern`] with a leading
+/// `!` if the entry is disallowed (otherwise the entry is allowed).
 ///
 /// Examples:
 ///
@@ -73,9 +76,9 @@ impl AclConfig {
 /// - `!POST,PATCH /redfish/v1/Systems/*/SecureBoot/**`: Deny anything in Systems/*/SecureBoot
 #[derive(Clone)]
 struct AclEntry {
-    verbs: Vec<AclVerb>,
-    path: AclPath,
+    pattern: RequestPattern,
     action: AclAction,
+    allow_escapes: WildcardEscapes,
 }
 
 impl<'de> Deserialize<'de> for AclEntry {
@@ -83,8 +86,52 @@ impl<'de> Deserialize<'de> for AclEntry {
     where
         D: Deserializer<'de>,
     {
-        let s = String::deserialize(deserializer)?;
-        s.parse().map_err(D::Error::custom)
+        #[derive(Deserialize)]
+        #[serde(untagged, deny_unknown_fields)]
+        enum ConfigEntry {
+            Text(String),
+            Options {
+                pattern: String,
+                #[serde(default)]
+                allow_escapes: Vec<String>,
+            },
+        }
+
+        let (pattern, escapes) = match ConfigEntry::deserialize(deserializer)? {
+            ConfigEntry::Text(pattern) => (pattern, Vec::new()),
+            ConfigEntry::Options {
+                pattern,
+                allow_escapes,
+            } => (pattern, allow_escapes),
+        };
+        let mut entry = pattern.parse::<Self>().map_err(D::Error::custom)?;
+        if matches!(entry.action, AclAction::Deny) && !escapes.is_empty() {
+            return Err(D::Error::custom(
+                "allow_escapes is only supported on allow rules",
+            ));
+        }
+        entry.allow_escapes = if escapes.as_slice() == ["*"] {
+            WildcardEscapes::All
+        } else {
+            let octets = escapes
+                .iter()
+                .map(|escape| {
+                    escape
+                        .strip_prefix('%')
+                        .filter(|digits| {
+                            digits.len() == 2 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())
+                        })
+                        .and_then(|digits| u8::from_str_radix(digits, 16).ok())
+                        .ok_or_else(|| {
+                            D::Error::custom(
+                                "allow_escapes must contain %HH escapes or a single \"*\"",
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            WildcardEscapes::Listed(octets)
+        };
+        Ok(entry)
     }
 }
 
@@ -93,24 +140,7 @@ impl Display for AclEntry {
         if matches!(self.action, AclAction::Deny) {
             write!(f, "! ")?;
         }
-
-        if !self.verbs.is_empty() {
-            write!(
-                f,
-                "{} ",
-                self.verbs
-                    .iter()
-                    .map(|v| v.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )?;
-        }
-
-        for component in &self.path.components {
-            write!(f, "/{component}")?;
-        }
-
-        Ok(())
+        self.pattern.fmt(f)
     }
 }
 
@@ -123,109 +153,35 @@ impl AclEntry {
         }
     }
 
-    /// Returns whether this ACL entry matches `method` and `path`.
-    ///
-    /// Verb matching is exact unless this entry omits verbs, in which case any
-    /// HTTP method matches. Path matching uses the wildcard semantics described
-    /// by [`WildcardPathComponent`].
+    /// Allow wildcards consume only opted-in escapes; other escapes must be
+    /// literal. Deny wildcards retain their unrestricted escape matching.
     fn matches(&self, method: &http::Method, path: &str) -> bool {
-        if !self.verbs.is_empty() && !self.verbs.iter().any(|verb| verb.0.eq(method)) {
-            return false;
-        }
-
-        let Some(path) = path.strip_prefix('/') else {
-            return false;
-        };
-        // `/redfish/v1/` and `/redfish/v1` name the same resource (libredfish
-        // requests the service root with the trailing slash), so a single
-        // trailing slash is not a path component.
-        let path = path.strip_suffix('/').unwrap_or(path);
-        if path.is_empty() {
-            return self.path.components.is_empty()
-                || matches!(
-                    self.path.components.as_slice(),
-                    [WildcardPathComponent::DoubleWildcard]
-                );
-        }
-
-        let path_components = path.split('/').collect::<Vec<_>>();
-        if path_components.iter().any(|component| component.is_empty()) {
-            return false;
-        }
-
-        let acl_components = &self.path.components;
-        let double_wildcard_index = acl_components
-            .iter()
-            .position(|component| matches!(component, WildcardPathComponent::DoubleWildcard));
-
-        match double_wildcard_index {
-            None => {
-                acl_components.len() == path_components.len()
-                    && acl_components.iter().zip(path_components.iter()).all(
-                        |(acl_component, path_component)| acl_component.matches(path_component),
-                    )
+        match self.action {
+            AclAction::Allow => {
+                self.pattern
+                    .matches_allow_escapes(method, path, &self.allow_escapes)
             }
-            Some(double_wildcard_index) => {
-                let (prefix, suffix_with_wildcard) = acl_components.split_at(double_wildcard_index);
-                let suffix = &suffix_with_wildcard[1..];
-
-                if path_components.len() < prefix.len() + suffix.len() {
-                    return false;
-                }
-
-                prefix
-                    .iter()
-                    .zip(path_components.iter())
-                    .all(|(acl_component, path_component)| acl_component.matches(path_component))
-                    && suffix.iter().rev().zip(path_components.iter().rev()).all(
-                        |(acl_component, path_component)| acl_component.matches(path_component),
-                    )
-            }
+            AclAction::Deny => self.pattern.matches(method, path),
         }
     }
 }
 
-#[derive(thiserror::Error, Debug)]
-#[error("error parsing ACL path {orig}: {err}")]
-struct AclPathParseError {
-    orig: String,
-    err: String,
-}
-
 impl FromStr for AclEntry {
-    type Err = AclPathParseError;
+    type Err = PatternParseError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        if input.is_empty() {
-            return Err(AclPathParseError {
-                orig: input.to_string(),
-                err: "ACL entry cannot be empty".to_string(),
-            });
-        }
         let (allowed, s) = if let Some(suffix) = input.strip_prefix('!') {
             (false, suffix.trim())
         } else {
             (true, input.trim())
         };
 
-        let (verbs, path) = if let Some(pair) = s.split_once(' ') {
-            let verbs = pair
-                .0
-                .trim()
-                .split(',')
-                .map(AclVerb::from_str)
-                .collect::<Result<Vec<_>, _>>()?;
-            let path = pair.1.trim().parse::<AclPath>()?;
-            (verbs, path)
-        } else {
-            let path = s.parse::<AclPath>()?;
-            (Vec::new(), path)
-        };
-
+        let pattern: RequestPattern = s.parse()?;
+        pattern.validate_percent_escapes()?;
         Ok(Self {
-            path,
-            verbs,
+            pattern,
             action: allowed.into(),
+            allow_escapes: WildcardEscapes::Listed(Vec::new()),
         })
     }
 }
@@ -249,174 +205,6 @@ impl AclAction {
     /// Returns `true` when this action permits the request.
     fn is_allowed(&self) -> bool {
         matches!(self, Self::Allow)
-    }
-}
-
-#[derive(Clone)]
-struct AclPath {
-    components: Vec<WildcardPathComponent>,
-}
-
-impl FromStr for AclPath {
-    type Err = AclPathParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let Some(s) = s.strip_prefix('/') else {
-            return Err(AclPathParseError {
-                orig: s.to_string(),
-                err: "Path must begin with '/'".to_string(),
-            });
-        };
-
-        let components = s
-            .split('/')
-            .map(WildcardPathComponent::from_str)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| AclPathParseError {
-                orig: s.to_string(),
-                err: format!("Path contains invalid component: {e}"),
-            })?;
-
-        if components
-            .iter()
-            .filter(|s| matches!(s, WildcardPathComponent::DoubleWildcard))
-            .count()
-            > 1
-        {
-            return Err(AclPathParseError {
-                orig: s.to_string(),
-                err: "Paths may only contain one double-wildcard (**)".to_string(),
-            });
-        }
-
-        Ok(Self { components })
-    }
-}
-
-#[derive(Clone)]
-enum WildcardPathComponent {
-    SingleWildcard,
-    DoubleWildcard,
-    PrefixWildcard(String),
-    SuffixWildcard(String),
-    Exact(String),
-}
-
-impl FromStr for WildcardPathComponent {
-    type Err = AclPathParseError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.is_empty() {
-            return Err(AclPathParseError {
-                orig: s.to_string(),
-                err: "Empty path component".to_string(),
-            });
-        }
-        if s.eq("*") {
-            return Ok(WildcardPathComponent::SingleWildcard);
-        } else if s.eq("**") {
-            return Ok(WildcardPathComponent::DoubleWildcard);
-        }
-
-        if s.contains('*') {
-            if s.matches('*').count() > 1 {
-                return Err(AclPathParseError {
-                    orig: s.to_string(),
-                    err: "Path component may contain at most one single-wildcard (`*`) unless it is the double-wildcard (`**`)".to_string(),
-                });
-            }
-
-            if let Some(suffix) = s.strip_prefix('*') {
-                validate_path_component(s, &format!("/x{suffix}"))?;
-                return Ok(WildcardPathComponent::SuffixWildcard(suffix.to_string()));
-            }
-
-            if let Some(prefix) = s.strip_suffix('*') {
-                validate_path_component(s, &format!("/{prefix}x"))?;
-                return Ok(WildcardPathComponent::PrefixWildcard(prefix.to_string()));
-            }
-
-            return Err(AclPathParseError {
-                orig: s.to_string(),
-                err: "Path component may only use `*` as the whole component or at the beginning or end".to_string(),
-            });
-        }
-
-        validate_path_component(s, &format!("/{s}"))?;
-
-        Ok(WildcardPathComponent::Exact(s.to_string()))
-    }
-}
-
-fn validate_path_component(orig: &str, as_whole_path: &str) -> Result<(), AclPathParseError> {
-    let path_and_query =
-        uri::PathAndQuery::from_str(as_whole_path).map_err(|e| AclPathParseError {
-            orig: orig.to_string(),
-            err: format!("Invalid path: {e}"),
-        })?;
-    if path_and_query.query().is_some() {
-        return Err(AclPathParseError {
-            orig: orig.to_string(),
-            err: "Path must not have query parameters".to_string(),
-        });
-    }
-    if path_and_query.path().ne(as_whole_path) {
-        return Err(AclPathParseError {
-            orig: orig.to_string(),
-            err: "Path must be normalized".to_string(),
-        });
-    }
-
-    Ok(())
-}
-
-impl Display for WildcardPathComponent {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match &self {
-            WildcardPathComponent::SingleWildcard => write!(f, "*"),
-            WildcardPathComponent::DoubleWildcard => write!(f, "**"),
-            WildcardPathComponent::PrefixWildcard(s) => write!(f, "{}*", s),
-            WildcardPathComponent::SuffixWildcard(s) => write!(f, "*{}", s),
-            WildcardPathComponent::Exact(s) => write!(f, "{}", s),
-        }
-    }
-}
-
-impl WildcardPathComponent {
-    fn matches(&self, s: &str) -> bool {
-        match self {
-            WildcardPathComponent::SingleWildcard | WildcardPathComponent::DoubleWildcard => true,
-            WildcardPathComponent::PrefixWildcard(prefix) => s.starts_with(prefix),
-            WildcardPathComponent::SuffixWildcard(suffix) => s.ends_with(suffix),
-            WildcardPathComponent::Exact(expected) => expected == s,
-        }
-    }
-}
-
-#[derive(Clone)]
-struct AclVerb(http::Method);
-
-impl FromStr for AclVerb {
-    type Err = AclPathParseError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_ascii_uppercase().as_str() {
-            "GET" => Ok(Self(http::Method::GET)),
-            "POST" => Ok(Self(http::Method::POST)),
-            "PUT" => Ok(Self(http::Method::PUT)),
-            "PATCH" => Ok(Self(http::Method::PATCH)),
-            "DELETE" => Ok(Self(http::Method::DELETE)),
-            "HEAD" => Ok(Self(http::Method::HEAD)),
-            _ => Err(AclPathParseError {
-                orig: s.to_string(),
-                err: "Invalid verb".to_string(),
-            }),
-        }
-    }
-}
-
-impl Display for AclVerb {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        self.0.fmt(f)
     }
 }
 
@@ -453,7 +241,7 @@ mod tests {
         config.acls
     }
 
-    fn round_trip_as_acl_entry(s: &str) -> Result<String, AclPathParseError> {
+    fn round_trip_as_acl_entry(s: &str) -> Result<String, PatternParseError> {
         s.parse::<AclEntry>().map(|entry| entry.to_string())
     }
 
@@ -473,6 +261,15 @@ mod tests {
                 ),
                 "GET /redfish/v1/Systems/*Boot/SecureBoot" => Yields(
                     "GET /redfish/v1/Systems/*Boot/SecureBoot".to_string()
+                ),
+            }
+
+            "literal percent escapes" {
+                "GET /redfish/v1/Registries/%23*" => Yields(
+                    "GET /redfish/v1/Registries/%23*".to_string()
+                ),
+                "GET /redfish/v1/Oem/%aBResource" => Yields(
+                    "GET /redfish/v1/Oem/%ABResource".to_string()
                 ),
             }
 
@@ -503,6 +300,10 @@ mod tests {
                 "GET /foo/ba r*" => Fails,
                 "GET /foo/*ba r" => Fails,
                 "GET /foo#fragment" => Fails,
+                "GET /foo/%2" => Fails,
+                "GET /foo/%GG" => Fails,
+                "GET /foo/%+1" => Fails,
+                "GET /foo/%2*" => Fails,
             }
         );
     }
@@ -697,6 +498,93 @@ mod tests {
                 } => false,
             }
 
+            "allow entries require literal percent escapes" {
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/**",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => false,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => false,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/%23*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => true,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/%23*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23Smart%20StorageMessages",
+                } => false,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/**/%23SmartStorageMessages",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => true,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/**/SmartStorageMessages",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/%23Registries/SmartStorageMessages",
+                } => false,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/%4A*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%4aResource",
+                } => true,
+            }
+
+            "hex case normalization preserves other literal distinctions" {
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/%4aResource",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%4AResource",
+                } => true,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/%4AResource",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%4aresource",
+                } => false,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/J*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%4aResource",
+                } => false,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Registries/%4A*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/JResource",
+                } => false,
+            }
+
+            "suffix wildcard literals must name every escape" {
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Oem/*%3aThing",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Oem/Vendor%3AThing",
+                } => true,
+                EntryMatchInput {
+                    entry: "GET /redfish/v1/Oem/*%3aThing",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Oem/Vendor%20Name%3aThing",
+                } => false,
+            }
+
+            "deny entries remain broad for percent escapes" {
+                EntryMatchInput {
+                    entry: "!GET /redfish/v1/**",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => true,
+                EntryMatchInput {
+                    entry: "!GET /redfish/v1/Registries/*",
+                    method: http::Method::GET,
+                    path: "/redfish/v1/Registries/%23SmartStorageMessages",
+                } => true,
+            }
+
             "verbless entries" {
                 EntryMatchInput {
                     entry: "/redfish/v1/**",
@@ -778,6 +666,121 @@ mod tests {
                     method: http::Method::GET,
                     path: "/redfish/v1/Systems/System1",
                 } => true,
+            }
+        );
+    }
+
+    #[test]
+    fn acl_config_requires_an_explicit_allow_for_percent_escapes() {
+        let acls = parse_acl_config(
+            r#"
+        [acls]
+        explicit_after_broad_allow = ["/**", "GET /redfish/v1/Registries/%23*"]
+        broad_deny_first = ["!GET /redfish/v1/**", "GET /redfish/v1/Registries/%23*"]
+        explicit_allow_first = ["GET /redfish/v1/Registries/%23*", "!GET /redfish/v1/**"]
+        escaped_deny_first = ["!GET /redfish/v1/Registries/%4aResource", "GET /redfish/v1/Registries/%4A*"]
+        "#,
+        );
+
+        value_scenarios!(
+            run = |(principal, path)| acls.allows(principal, &http::Method::GET, path);
+            "a broad allow is skipped but a later literal allow matches" {
+                ("explicit_after_broad_allow", "/redfish/v1/Registries/%23SmartStorageMessages") => true,
+            }
+            "a broad denial still wins" {
+                ("broad_deny_first", "/redfish/v1/Registries/%23SmartStorageMessages") => false,
+            }
+            "a literal allow can precede a broad denial" {
+                ("explicit_allow_first", "/redfish/v1/Registries/%23SmartStorageMessages") => true,
+            }
+            "changing hex case cannot bypass an explicit denial" {
+                ("escaped_deny_first", "/redfish/v1/Registries/%4AResource") => false,
+            }
+        );
+    }
+
+    /// Structured escape policies affect only their principal and matching allow.
+    #[test]
+    fn acl_escape_policies_are_scoped_to_each_allow() {
+        let acls = parse_acl_config(
+            r#"
+        [acls]
+        strict = [{ pattern = "GET /nvue_v1/**" }]
+        empty = [{ pattern = "GET /nvue_v1/**", allow_escapes = [] }]
+        nvue = [
+            "!GET /nvue_v1/private/**",
+            { pattern = "GET /nvue_v1/**", allow_escapes = ["%2f", "%3A"] },
+            "GET /redfish/v1/**",
+        ]
+        prefix = [{ pattern = "GET /nvue_v1/revision/changeset%23*", allow_escapes = ["%2F"] }]
+        suffix = [{ pattern = "GET /nvue_v1/revision/*%23status", allow_escapes = ["%2F"] }]
+        literal = ["GET /nvue_v1/revision/changeset%2Fadmin%2F*"]
+        admin = [{ pattern = "/nvue_v1/**", allow_escapes = ["*"] }]
+        "#,
+        );
+
+        value_scenarios!(
+            run = |(principal, method, path)| acls.allows(principal, &method, path);
+            "omitted and empty policies keep wildcards strict" {
+                ("strict", http::Method::GET, "/nvue_v1/revision/1") => true,
+                ("strict", http::Method::GET, "/nvue_v1/revision/changeset%2Fadmin%2F1") => false,
+                ("empty", http::Method::GET, "/nvue_v1/revision/changeset%2Fadmin%2F1") => false,
+            }
+            "listed escapes support variable IDs and IPv6 CIDRs" {
+                ("nvue", http::Method::GET, "/nvue_v1/revision/changeset%2Fadmin%2f1%2Fextra") => true,
+                ("nvue", http::Method::GET, "/nvue_v1/interface/lo/ip/address/2001%3adb8%3A%3A1%2F64") => true,
+                ("nvue", http::Method::GET, "/nvue_v1/revision/name%20with%2Fspace") => false,
+            }
+            "the policy does not widen other entries, methods or denials" {
+                ("nvue", http::Method::GET, "/redfish/v1/Systems/a%2Fb") => false,
+                ("nvue", http::Method::PATCH, "/nvue_v1/revision/changeset%2Fadmin%2F1") => false,
+                ("nvue", http::Method::GET, "/nvue_v1/private/name%2Fsecret") => false,
+            }
+            "single wildcards check only the portion they consume" {
+                ("prefix", http::Method::GET, "/nvue_v1/revision/changeset%23admin%2F1") => true,
+                ("prefix", http::Method::GET, "/nvue_v1/revision/changeset%23admin%20name") => false,
+                ("suffix", http::Method::GET, "/nvue_v1/revision/admin%2F1%23status") => true,
+                ("suffix", http::Method::GET, "/nvue_v1/revision/admin%20name%23status") => false,
+            }
+            "literal slash exceptions still work without opt-in" {
+                ("literal", http::Method::GET, "/nvue_v1/revision/changeset%2fadmin%2F1") => true,
+            }
+            "the star policy accepts unlisted escapes without changing literal prefixes" {
+                ("admin", http::Method::DELETE, "/nvue_v1/revision/name%20with%2Fspace%23suffix") => true,
+                ("admin", http::Method::GET, "/redfish/v1/Systems/a%2Fb") => false,
+            }
+        );
+    }
+
+    /// Invalid escape policy syntax and unknown fields fail configuration loading.
+    #[test]
+    fn acl_escape_policy_configuration_errors() {
+        #[derive(Deserialize)]
+        struct MockConfig {
+            #[serde(rename = "acls")]
+            _acls: AclConfig,
+        }
+
+        scenarios!(
+            run = |entries| figment::Figment::new()
+                .merge(Toml::string(&format!("[acls]\nservice = {entries}")))
+                .extract::<MockConfig>()
+                .map(drop)
+                .map_err(drop);
+            "invalid escape spellings" {
+                r#"[{ pattern = "/nvue_v1/**", allow_escapes = ["%2"] }]"# => Fails,
+                r#"[{ pattern = "/nvue_v1/**", allow_escapes = ["%GG"] }]"# => Fails,
+                r#"[{ pattern = "/nvue_v1/**", allow_escapes = ["%+1"] }]"# => Fails,
+                r#"[{ pattern = "/nvue_v1/**", allow_escapes = ["2F"] }]"# => Fails,
+            }
+            "star must be the sole list value" {
+                r#"[{ pattern = "/nvue_v1/**", allow_escapes = ["*", "%2F"] }]"# => Fails,
+                r#"[{ pattern = "/nvue_v1/**", allow_escapes = "*" }]"# => Fails,
+            }
+            "misconfigured structured entries" {
+                r#"[{ pattern = "!GET /nvue_v1/**", allow_escapes = ["%2F"] }]"# => Fails,
+                r#"[{ pattern = "/nvue_v1/**", allow_escape = ["%2F"] }]"# => Fails,
+                r#"[{ allow_escapes = ["%2F"] }]"# => Fails,
             }
         );
     }

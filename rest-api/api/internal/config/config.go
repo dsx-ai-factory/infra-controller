@@ -49,8 +49,13 @@ const (
 
 	// ConfigAPIName specifies the name of the API
 	ConfigAPIName = "api.name"
+	// ConfigAPIPort specifies the port the API server listens on
+	ConfigAPIPort = "api.port"
 	// ConfigAPIRouteVersion specifies the version of the API
 	ConfigAPIRouteVersion = "api.route.version"
+	// ConfigExpectedMachineBatchRecoveryEnabled enables durable reservations
+	// for new Expected Machine create batches.
+	ConfigExpectedMachineBatchRecoveryEnabled = "api.expectedMachineBatchRecovery.enabled"
 
 	// ConfigLogLevel specifies the log level
 	ConfigLogLevel = "log.level"
@@ -113,6 +118,9 @@ const (
 	ConfigTracingEnabled = "tracing.enabled"
 	// ConfigTracingServiceName is the name of the tracing service
 	ConfigTracingServiceName = "tracing.serviceName"
+	// DefaultTracingServiceName is the service.name used when neither the
+	// config nor the OTEL environment supplies one
+	DefaultTracingServiceName = "nico-rest-api"
 
 	// ConfigKeycloakEnabled is a feature flag for Keycloak authentication
 	ConfigKeycloakEnabled = "keycloak.enabled"
@@ -130,6 +138,8 @@ const (
 	ConfigKeycloakClientSecret = "keycloak.clientSecret"
 	// ConfigKeycloakServiceAccountEnabled is a feature flag for service account support
 	ConfigKeycloakServiceAccountEnabled = "keycloak.serviceAccount"
+	// ConfigKeycloakServiceAccountOrgs lists the only orgs whose Keycloak clients can be service accounts
+	ConfigKeycloakServiceAccountOrgs = "keycloak.serviceAccountOrgs"
 
 	// ConfigRateLimiterEnabled is a feature flag for rate limiter
 	ConfigRateLimiterEnabled = "rateLimiter.enabled"
@@ -229,17 +239,13 @@ func NewConfig() *Config {
 	}
 
 	c := Config{
-		v: newViper(),
+		v: newAPIConfigViper(),
 	}
 
 	// Set defaults
 	c.v.SetDefault(ConfigLogLevel, "info")
 	c.v.SetDefault(ConfigEnvDev, false)
 	c.v.SetDefault(ConfigEnvDisconnected, false)
-
-	// Set API name
-	c.v.SetDefault(ConfigAPIName, "nico")
-	c.v.SetDefault(ConfigAPIRouteVersion, "v1")
 
 	// Set config file
 	// Check environment variable. If not set, use default
@@ -280,7 +286,6 @@ func NewConfig() *Config {
 	c.v.SetDefault(ConfigDPSEnabled, false)
 	c.v.SetDefault(ConfigDPSRequestTimeout, 15*time.Second)
 
-	c.v.AutomaticEnv()
 	c.v.SetConfigFile(c.GetPathToConfig())
 
 	log.Warn().Str("config.file", c.GetPathToConfig()).Msg("loading config")
@@ -640,6 +645,7 @@ func (c *Config) ValidateIssuersConfig(issuers []IssuerConfig) error {
 	seenURLs := make(map[string]bool)
 	seenStaticOrgs := make(map[string]bool)
 	seenDynamicOrg := false
+	seenServiceAccountMapping := false
 	originCounts := make(map[string]int)
 
 	for i, issuer := range issuers {
@@ -723,9 +729,11 @@ func (c *Config) ValidateIssuersConfig(issuers []IssuerConfig) error {
 				if mapping.OrgAttribute != "" {
 					return fmt.Errorf("issuer %s: claimMapping %d: orgAttribute cannot be specified when isServiceAccount is true", issuer.Name, j)
 				}
-				if !c.GetEnvDisconnected() {
-					return fmt.Errorf("issuer %s: claimMapping %d: isServiceAccount is only supported in disconnected mode", issuer.Name, j)
+				// A disconnected deployment has a single Site, which only one org can claim.
+				if c.GetEnvDisconnected() && seenServiceAccountMapping {
+					return fmt.Errorf("issuer %s: claimMapping %d: only one claimMapping with isServiceAccount is allowed across all issuers in disconnected mode", issuer.Name, j)
 				}
+				seenServiceAccountMapping = true
 			}
 
 			// Dynamic org mapping
@@ -755,13 +763,6 @@ func (c *Config) ValidateIssuersConfig(issuers []IssuerConfig) error {
 				if !cauth.IsValidRole(role) {
 					return fmt.Errorf("issuer %s: claimMapping %d: invalid role: %s", issuer.Name, j, role)
 				}
-			}
-		}
-
-		// Service account validation
-		if issuer.ServiceAccount {
-			if !c.GetEnvDisconnected() {
-				return fmt.Errorf("issuer %s: service account is only supported in disconnected mode", issuer.Name)
 			}
 		}
 	}
@@ -850,9 +851,20 @@ func (c *Config) GetAPIName() string {
 	return c.v.GetString(ConfigAPIName)
 }
 
+// GetAPIPort returns the port the API server listens on
+func (c *Config) GetAPIPort() int {
+	return c.v.GetInt(ConfigAPIPort)
+}
+
 // GetAPIRouteVersion returns the version of the API
 func (c *Config) GetAPIRouteVersion() string {
 	return c.v.GetString(ConfigAPIRouteVersion)
+}
+
+// GetExpectedMachineBatchRecoveryEnabled reports whether new create batches
+// use durable reservations. It defaults to false.
+func (c *Config) GetExpectedMachineBatchRecoveryEnabled() bool {
+	return c.v.GetBool(ConfigExpectedMachineBatchRecoveryEnabled)
 }
 
 // GetLogLevel returns the log level
@@ -1060,9 +1072,14 @@ func (c *Config) GetTracingEnabled() bool {
 	return c.v.GetBool(ConfigTracingEnabled)
 }
 
-// GetTracingServiceName gets the service name for tracing
+// GetTracingServiceName gets the service name for tracing, falling back to
+// the binary's default when the config omits it or leaves it empty. The OTEL
+// environment variables still take precedence over either value.
 func (c *Config) GetTracingServiceName() string {
-	return c.v.GetString(ConfigTracingServiceName)
+	if name := c.v.GetString(ConfigTracingServiceName); name != "" {
+		return name
+	}
+	return DefaultTracingServiceName
 }
 
 // Keycloak configuration methods
@@ -1155,12 +1172,25 @@ func (c *Config) SetKeycloakServiceAccountEnabled(value bool) {
 	c.v.Set(ConfigKeycloakServiceAccountEnabled, value)
 }
 
+// GetKeycloakServiceAccountOrgs gets the orgs whose Keycloak clients can be service accounts, lowercased
+// to match the org names NICo reads from realm roles, without empty or repeated entries
+func (c *Config) GetKeycloakServiceAccountOrgs() []string {
+	var orgs []string
+	for _, org := range c.v.GetStringSlice(ConfigKeycloakServiceAccountOrgs) {
+		org = strings.ToLower(strings.TrimSpace(org))
+		if org != "" && !slices.Contains(orgs, org) {
+			orgs = append(orgs, org)
+		}
+	}
+	return orgs
+}
+
 // GetOrInitKeycloakConfig gets the Keycloak configuration
 func (c *Config) GetOrInitKeycloakConfig() (*cauth.KeycloakConfig, error) {
 	if c.KeycloakConfig == nil {
 		if !c.GetKeycloakEnabled() {
 			log.Info().Msg("Keycloak is disabled in configuration")
-			return nil, errors.New("Keycloak is not enabled")
+			return nil, errors.New("keycloak is not enabled")
 		}
 
 		log.Info().Str("baseURL", c.GetKeycloakBaseURL()).
@@ -1177,6 +1207,7 @@ func (c *Config) GetOrInitKeycloakConfig() (*cauth.KeycloakConfig, error) {
 			c.GetKeycloakClientSecret(),
 			c.GetKeycloakRealm(),
 			c.GetKeycloakServiceAccountEnabled(),
+			c.GetKeycloakServiceAccountOrgs(),
 		)
 		log.Info().Msg("Keycloak configuration created successfully")
 	}
@@ -1203,6 +1234,17 @@ func (c *Config) ValidateKeycloakConfig() error {
 
 	if c.GetKeycloakClientSecret() == "" && c.GetKeycloakClientSecretPath() == "" {
 		return fmt.Errorf("keycloak client secret or client secret path must be specified when Keycloak is enabled")
+	}
+
+	if c.GetKeycloakServiceAccountEnabled() {
+		orgs := c.GetKeycloakServiceAccountOrgs()
+		if len(orgs) == 0 {
+			return fmt.Errorf("keycloak service account orgs must be specified when service account is enabled")
+		}
+		// A disconnected deployment has a single Site, which only one org can claim.
+		if c.GetEnvDisconnected() && len(orgs) > 1 {
+			return fmt.Errorf("keycloak service account orgs must list exactly one org in disconnected mode")
+		}
 	}
 
 	return nil
@@ -1246,7 +1288,7 @@ func (c *Config) WatchSecretFilePaths() {
 						eventsWG.Done()
 						return
 					}
-					if !(event.Has(fsnotify.Write) || event.Has(fsnotify.Create)) {
+					if !event.Has(fsnotify.Write) && !event.Has(fsnotify.Create) {
 						continue
 					}
 					eventFilePath := filepath.Clean(event.Name)
@@ -1272,11 +1314,17 @@ func (c *Config) WatchSecretFilePaths() {
 
 		// Add secret file paths to watcher
 		log.Info().Str("WatchSecretFilePaths", dbPassFileDir).Msg("adding db path for watcher")
-		watcher.Add(dbPassFileDir)
+		err = watcher.Add(dbPassFileDir)
+		if err != nil {
+			log.Error().Err(err).Str("WatchSecretFilePaths", dbPassFileDir).Msg("failed to add db path to watcher")
+		}
 
 		if c.GetKeycloakEnabled() {
 			log.Info().Str("WatchSecretFilePaths", keycloakClientSecretFileDir).Msg("adding keycloak client secret path for watcher")
-			watcher.Add(keycloakClientSecretFileDir)
+			err = watcher.Add(keycloakClientSecretFileDir)
+			if err != nil {
+				log.Error().Err(err).Str("WatchSecretFilePaths", keycloakClientSecretFileDir).Msg("failed to add keycloak client secret path to watcher")
+			}
 		}
 
 		initWG.Done()   // done initializing the watch in this go routine, so the parent routine can move on...
@@ -1361,6 +1409,16 @@ func (c *Config) GetRateLimiterExpiresIn() int {
 // SetRateLimiterExpiresIn sets the expiration time in seconds
 func (c *Config) SetRateLimiterExpiresIn(value int) {
 	c.v.Set(ConfigRateLimiterExpiresIn, value)
+}
+
+func newAPIConfigViper() *viper.Viper {
+	v := newViper()
+	v.SetDefault(ConfigAPIName, "nico")
+	v.SetDefault(ConfigAPIPort, 8388)
+	v.SetDefault(ConfigAPIRouteVersion, "v1")
+	v.SetDefault(ConfigExpectedMachineBatchRecoveryEnabled, false)
+	v.AutomaticEnv()
+	return v
 }
 
 func newViper() *viper.Viper {

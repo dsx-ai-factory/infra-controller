@@ -26,10 +26,11 @@ pub struct IterationConfig {
     /// However they will also increase the load on the system
     pub iteration_time: Duration,
 
-    /// Configures the maximum time that the state handler will spend on evaluating
-    /// and advancing the state of a single object. If more time elapses during
-    /// state handling than this timeout allows for, state handling will fail with
-    /// a `TimeoutError`.
+    /// Configures the shared time budget for claiming queued objects and evaluating
+    /// and advancing each object's state. The deadline starts before acquiring the
+    /// claim connection and does not reset at dispatch. A late claim is not dispatched;
+    /// a late handler fails with `StateHandlerError::Timeout`. Abandoned reservations
+    /// become eligible again after three times this duration. Defaults to 180 seconds.
     pub max_object_handling_time: Duration,
 
     /// Configures the maximum amount of concurrency for the object state controller

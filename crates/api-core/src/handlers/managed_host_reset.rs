@@ -17,6 +17,7 @@
 use ::rpc::forge as rpc;
 use carbide_uuid::machine::MachineId;
 use itertools::Itertools;
+use model::machine::nic_firmware::NicFirmwarePhase;
 use model::machine::{LoadSnapshotOptions, ManagedHostState, ManagedHostStateSnapshot};
 use model::machine_update_module::HOST_UPDATE_HEALTH_PROBE_ID;
 use tonic::{Request, Response, Status};
@@ -35,6 +36,16 @@ fn validate_managed_host_reset_request(
     if matches!(snapshot.managed_state, ManagedHostState::ForceDeletion) {
         return Err(CarbideError::FailedPrecondition(format!(
             "cannot reset host {machine_id}: machine is being force-deleted"
+        )));
+    }
+
+    // `Failed` is reached only after independent lockdown readback. Other phases
+    // still own firmware effects or restoration, so reset cannot take over.
+    if let ManagedHostState::NicFirmwareUpdating { operation } = &snapshot.managed_state
+        && !matches!(operation.phase, NicFirmwarePhase::Failed { .. })
+    {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "cannot reset host {machine_id}: NIC firmware recovery has not finished restoring the original NIC lockdown policy"
         )));
     }
 
@@ -101,7 +112,7 @@ pub(crate) async fn trigger_managed_host_reset(
     let machine_id: MachineId = convert_and_log_machine_id(req.machine_id.as_ref())?;
 
     // A reset tears down every attached DPU, so it is only expressible against the host.
-    if !machine_id.machine_type().is_host() {
+    if machine_id.machine_type().is_dpu() {
         return Err(CarbideError::InvalidArgument(format!(
             "{machine_id} is not a host machine; reset targets the host, not an individual DPU"
         ))
@@ -139,6 +150,7 @@ pub(crate) async fn trigger_managed_host_reset(
                 &mut txn,
                 req.initiator().as_str_name(),
                 &machine_id,
+                req.ignore_cleanup,
             )
             .await?
             {

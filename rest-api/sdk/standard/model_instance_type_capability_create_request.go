@@ -36,7 +36,7 @@ type InstanceTypeCapabilityCreateRequest struct {
 	Count NullableUint32 `json:"count,omitempty"`
 	// Indices of those devices that are inactive, only valid for InfiniBand Capability type
 	InactiveDevices []uint32 `json:"inactiveDevices,omitempty"`
-	// Device Type of the Capability component, if available
+	// Optional device type. `Network` accepts `DPU` or `SpectrumX`; `GPU` accepts `NVLink`; other capability types require omission or null. Omitted or null leaves device type unconstrained for every capability type. Empty strings are rejected
 	DeviceType NullableString `json:"deviceType,omitempty"`
 }
 

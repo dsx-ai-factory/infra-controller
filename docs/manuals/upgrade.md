@@ -1,6 +1,6 @@
-# Upgrading NICo <Badge intent="info">v2.1</Badge> <Badge intent="launch" minimal>New</Badge>
+# Upgrading NICo <Badge intent="info">v2.1</Badge>
 
-`setup.sh` is designed to be **idempotent** for supported deployment topologies: running it against an existing NICo installation upgrades each component in place. The same script and values files used for initial installation are the mechanism for upgrades — there is no separate upgrade script. For a predecessor Flow Deployment that bundles PSM or NSM, first choose whether to preserve it or follow the [manual Flow-only overwrite guidance](../../helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm).
+`setup.sh` is designed to be **idempotent** for supported deployment topologies: running it against an existing NICo installation upgrades each component in place. The same script and values files used for initial installation are the mechanism for upgrades — there is no separate upgrade script. For a predecessor Flow Deployment that bundles PSM or NSM, first choose whether to preserve it or follow the [manual Flow-only overwrite guidance](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm).
 
 This page documents how each component behaves when you re-run `setup.sh` against a live cluster, what to prepare before upgrading, and version-specific considerations for the 2.0-to-2.1 upgrade path.
 
@@ -14,7 +14,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 | **1b — postgres-operator** | `helmfile sync` issues `helm upgrade --install` — upgrades the release in place. Existing `PostgreSQL` CRs (including `nico-pg-cluster`) are untouched. |
 | **1c — MetalLB** | CRDs are applied server-side with `--force-conflicts`. Any Helm-owned CRDs from a prior install have their ownership labels stripped before sync, preventing deletion. `helmfile sync` upgrades the release. Existing `IPAddressPool`, `BGPPeer`, and `BGPAdvertisement` instances are preserved and re-applied (idempotent `kubectl apply`). Refer to [MetalLB CRD ownership](#20--21-metallb-crd-ownership-migration). |
 | **2 — cert-manager** | `helmfile sync` upgrades the release. Existing `ClusterIssuer`, `Certificate`, and `CertificateRequest` objects are untouched. The Vault TLS bootstrap certs are re-applied server-side; existing certs that are still valid are not reissued. |
-| **3 — Vault** | `helmfile sync` upgrades the release. The StatefulSet rolling-update leaves Vault pods running. |
+| **3 — Vault** | `helmfile sync` upgrades the release. The StatefulSet uses `updateStrategy: OnDelete`, so running Vault pods are left alone. A changed pod template, for example new probe settings, reaches a pod only when that pod is deleted, and `setup.sh` prints a warning naming such pods. |
 | **4 — Vault unseal** | `unseal_vault.sh` checks whether Vault is already initialized. If it is, it skips `vault operator init` and only unseals any pods that were restarted and became sealed again. The Vault cluster keys (`vault-cluster-keys` Secret) and root token (`vaultroottoken`) are preserved. |
 | **4 (SSH host key)** | `bootstrap_ssh_host_key.sh` detects an existing SSH host key Secret and skips re-generation. The cluster's SSH identity is preserved across upgrades. |
 | **5 — external-secrets + nico-prereqs** | `helmfile sync` upgrades both releases. Existing `ClusterSecretStore` and `ExternalSecret` objects are reconciled to their new definitions. The ESO controller re-syncs all secrets on the next poll cycle. |
@@ -28,7 +28,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 ### What is preserved across upgrades
 
 - **Vault cluster**: init state, unseal keys, PKI chain, AppRole credentials, all secrets. Vault is never re-initialized on an upgrade run.
-- **PostgreSQL data**: all NICo Core and NICo REST database state, including host records, machine state, and site config in `nico-pg-cluster`. Keycloak realm data and Temporal workflow history live in a **separate** plain `postgres` StatefulSet in the same namespace (created in phase 7c) and are also preserved.
+- **PostgreSQL data**: all NICo Core and NICo REST database state, including host records, machine state, and site config in `nico-pg-cluster`. Keycloak realm data and Temporal workflow history are preserved too. They stay on `nico-pg-cluster`, or on the deprecated standalone `postgres` StatefulSet in the same namespace for a Site that still uses it. Upgrading with `auto` never moves a deployed database from one to the other. Refer to [Standalone Temporal/Keycloak PostgreSQL deprecated](#23--24-standalone-temporalkeycloak-postgresql-deprecated).
 - **MetalLB site config**: `IPAddressPool`, `BGPPeer`, `BGPAdvertisement`, and `L2Advertisement` instances. These are re-applied on every run so any manual changes outside `setup.sh` are reconciled back to the values in `values/metallb-config.yaml`.
 - **SSH host key**: the cluster SSH identity is preserved so BMC consoles do not require known-host updates.
 - **Site UUID**: the REST site identity and site-agent registration are preserved — as long as `NICO_SITE_UUID` is unset or identical to the initial install; a different value deletes and re-creates the `site-registration` Secret.
@@ -46,7 +46,12 @@ After any required manual Flow overwrite, every installation phase is safe to re
 
 Complete every item before running `setup.sh`. Missing any of these can cause the upgrade to fail or leave the cluster in a partially upgraded state.
 
-If `flow/flow` or an active Flow Pod still contains a `psm` or `nsm` container, do not run setup yet. Preserve that release, or follow the [manual Flow-only overwrite guidance](../../helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm). Setup rejects that predecessor topology or an incomplete Flow-only rollout before making any cluster change.
+If you are upgrading to
+[asynchronous VPC peering deletion](#upgrades-that-introduce-asynchronous-peering-deletion)
+for the first time, plan an API maintenance window. You must stop the old API
+before starting the new one; the default rolling update does not do this.
+
+If `flow/flow` or an active Flow Pod still contains a `psm` or `nsm` container, do not run setup yet. Preserve that release, or follow the [manual Flow-only overwrite guidance](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#upgrading-deployments-that-bundled-psm-and-nsm). Setup rejects that predecessor topology or an incomplete Flow-only rollout before making any cluster change.
 
 <Steps toc={true}>
 
@@ -76,6 +81,8 @@ If the site keeps credentials in Postgres (as detailed in [Secrets Storage](../c
 
 With an Integrated provider, export every Secret that holds key material your `[secrets.kms]` providers reference, including keys that are no longer routed but are still needed for older rows or older dumps, and store them with the Vault unseal keys. Copy a key supplied from a file or an inline value from its source instead.
 
+With a KMIP provider, the KEK lives only in the KMIP server. Back it up through that product's key backup procedure, and keep every key that retained dumps still reference until those dumps age out.
+
 The following command exports one Secret; repeat it for each:
 
 ```bash
@@ -92,16 +99,17 @@ This file contains the plaintext KEK. Anyone holding it together with a database
 
 ### Back up the databases
 
-Take the backup **before** the upgrade — once the new version's migrations run, the prior image tags alone are no longer a working rollback. There are **two** PostgreSQL instances in the `postgres` namespace, and both need a dump:
+Take the backup **before** the upgrade. Once the new version's migrations run, the prior image tags alone are no longer a working rollback. Dump every PostgreSQL instance in the `postgres` namespace. There are **two** on a Site that still runs the deprecated standalone `postgres` StatefulSet:
 
 ```bash
 umask 077
-# nico-pg-cluster: nico_system_nico, nico_rest, flow, and any retained predecessor psm/nsm databases
+# nico-pg-cluster: nico_system_nico, nico_rest, flow, any retained predecessor psm/nsm databases,
+# and temporal, temporal_visibility, keycloak when they use nico-pg-cluster
 kubectl exec -n postgres \
     "$(kubectl get pods -n postgres -l application=spilo,spilo-role=master -o jsonpath='{.items[0].metadata.name}')" \
     -- su postgres -c "pg_dumpall" > nico_pg_pre_upgrade.sql
 
-# plain `postgres` StatefulSet: temporal, temporal_visibility, keycloak
+# standalone `postgres` StatefulSet (skip if the Site doesn't run it): temporal, temporal_visibility, keycloak
 kubectl exec -n postgres postgres-0 -- pg_dumpall -U postgres > nico_rest_pg_pre_upgrade.sql
 ```
 
@@ -167,7 +175,7 @@ git diff upstream/release/v2.0..upstream/release/v2.1 -- helm-prereqs/values.yam
 
 ### Update image tags
 
-Set the new image tags for the target release:
+Build and push images from the same repository revision as the target release checkout, then set their tags below. The chart and setup script must come from that revision too; refer to the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration) for more details.
 
 ```bash
 export NICO_IMAGE_REGISTRY=registry.example.com/nico   # your registry
@@ -256,7 +264,7 @@ credential rotation is tracked by
 [Credential Sources](../configuration/credential-sources.md#site-wide-bmc-root-version-0-ownership-policy).
 
 <Warning>
-`setup.sh -y` does **not** stop on preflight errors — with `-y` set, hard errors are printed and the run continues ("Things may fail"). The preflight gate is only enforced interactively, so genuinely resolve every error here rather than relying on the script to stop you.
+`setup.sh -y` does **not** stop on preflight errors. With `-y` set, hard errors are printed and the run continues ("Things may fail"). The preflight gate is only enforced interactively, so genuinely resolve every error here rather than relying on the script to stop you. The one exception is the database checks for Temporal and Keycloak. When a value would repoint either one away from its data, or can't be honored, setup stops even with `-y`. That covers a move off the standalone `postgres` StatefulSet without a valid migration receipt, and `false` on a database already on `nico-pg-cluster`. It also covers an invalid value, a database host `setup.sh` doesn't manage, a `KEYCLOAK_NS` that differs from `keycloak.namespace`, and cluster state preflight can't read.
 </Warning>
 
 </Steps>
@@ -285,6 +293,7 @@ If a phase fails, `setup.sh` prints `SETUP FAILED` and offers: `Run clean.sh to 
 | `--skip-rms` | Skip the Rack Management Service upgrade (Phase 5c). RMS installs **by default** (like DPF); `NICO_RMS_IMAGE_TAG` is required unless this flag is passed. Skipping leaves an existing RMS release untouched. |
 | `--skip-dpf` | Use **only** if DPF is not enabled at this site. This is not a pure skip: it clears `INSTALL_DPF`, which drops phase 5b and redeploys NICo Core with the `[dpf]` block disabled — on a DPF-enabled site that is a config change, not a skip. |
 | `--core-values <file>` | Use a per-site NICo Core values file (same as initial install). |
+| `--flow-values <file>` | Use a per-site NICo Flow values file (same as initial install). Flow overrides applied outside `setup.sh` are reset by the upgrade unless they are in this file. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest or kustomize dir (same as initial install). |
 
 ### Estimated upgrade time
@@ -292,7 +301,7 @@ If a phase fails, `setup.sh` prints `SETUP FAILED` and offers: `Run clean.sh to 
 | Phase | Typical duration |
 | ----- | ---------------- |
 | Phases 1–1c (storage, postgres-operator, MetalLB) | 2–5 min |
-| Phases 2–4 (cert-manager, Vault, unseal) | 1–3 min (Vault is already initialized; only rolling update time) |
+| Phases 2–4 (cert-manager, Vault, unseal) | 1–3 min (Vault is already initialized and its pods are not restarted) |
 | Phase 5 (ESO + nico-prereqs) | 1–3 min |
 | Phase 5b (DPF) | 3–10 min (depends on DPF version delta) |
 | Phase 5c (RMS - unless `--skip-rms`) | 1-3 min (certificate issuance + rollout) |
@@ -366,6 +375,75 @@ Once the writer is Postgres, the KEK backup above belongs in every pre-upgrade c
 
 ## Version-specific upgrade notes
 
+### Upgrades That Introduce Asynchronous Peering Deletion
+
+Follow these steps the first time you upgrade to the peering deletion behavior
+added in [#6917](https://github.com/dsx-ai-factory/infra-controller/pull/6917).
+You can upgrade directly; no intermediate release is required.
+
+The new API waits for DPUs to stop allowing a peering before deleting it. An
+old API can still tell those DPUs to allow the connection, making the new API
+mistakenly treat deletion as finished. Stop every old API before starting any
+new one. The Helm chart's default `RollingUpdate` can run both versions at once,
+even with just one replica.
+
+During your API maintenance window:
+
+1. Record the namespace, Deployment name, and desired replica count for every
+   `nico-api` Deployment serving the site. Pause any automation that would
+   restore the old replicas during the maintenance window.
+2. Scale those Deployments to zero. Wait for all old API pods and any API
+   processes outside those Deployments to exit and their requests to drain.
+3. Run the normal upgrade with the new image and desired replica count. With
+   `setup.sh`, set `nico-api.replicas` in the Core values file to that count.
+   Phase 6 runs the Core migration Job and starts the new API pods. Keep the
+   old processes stopped.
+4. Check the API pods in each namespace before restoring automation:
+
+   ```bash
+   kubectl get pods -n <namespace> -l app.kubernetes.io/name=nico-api \
+     -o 'custom-columns=NAME:.metadata.name,IMAGE:.spec.containers[*].image'
+   ```
+
+   Every expected API pod must be present, and its `nico-api` container must use
+   the new image. The selector uses the chart's default name; replace `nico-api`
+   if you set `nameOverride`. For API processes outside those Deployments,
+   check their container image or executable version through their service
+   manager, and confirm that every old process has stopped. Follow the
+   [peering deletion guide](vpc/vpc_peering_management.md#deleting-vpc-peering-connections)
+   to confirm any pending deletions finish.
+
+Do not roll back to an API that lacks this behavior. It deletes peerings without
+waiting for the DPUs, and restoring a database backup does not undo their network
+changes. For the network-version and migration details, refer to the
+[configuration reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#vpc-peering-deletion).
+
+### 2.4 → 2.5: Keycloak service account orgs are required
+
+**Impact:** A deployment with `keycloak.serviceAccount: true` fails to start unless it also lists `keycloak.serviceAccountOrgs`, with exactly one org in disconnected mode. The `helm-prereqs` values already list `ncx`. Before upgrading a deployment that uses its own values file, list each org whose client holds both `PROVIDER_ADMIN` and `TENANT_ADMIN`:
+
+```yaml
+nico-rest-api:
+  config:
+    keycloak:
+      serviceAccount: true
+      serviceAccountOrgs: [ncx]
+```
+
+Only a client in a listed org is a service account, and only for requests to that org. A client credentials token from any other client is now authorized by its roles in the requested org, like a user token. That includes `serviceAccount: false`, where it used to get `401`. A disconnected config with more than one `isServiceAccount: true` claim mapping across custom issuers also fails to start.
+
+In connected mode, `serviceAccountOrgs` can list more than one org. Custom issuer `isServiceAccount` mappings, which used to require disconnected mode, are now accepted in connected mode with no limit on their number.
+
+### 2.3 → 2.4: Standalone Temporal/Keycloak PostgreSQL deprecated
+
+<Warning>
+The standalone `postgres` StatefulSet for the Temporal and Keycloak databases is deprecated. Support for it will be removed in `2.5`. Sites still on it are highly encouraged to migrate to `nico-pg-cluster`, which already holds the NICo Core and REST databases. Follow the [migration guide](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#migrating-an-existing-sites-data) to move them.
+</Warning>
+
+Before 2.4, `temporal.useHaPostgres` and `keycloak.useHaPostgres` in `helm-prereqs/values.yaml` defaulted to `false`, so every new Site got the StatefulSet. They now default to `auto`. With `auto`, both databases are created in `nico-pg-cluster`, but their location is left unchanged for an existing Site. So an existing Site needs no changes for the upgrade, and a new Site only gets the StatefulSet when a value is set to `false`. With `postgresql.enabled: false`, `nico-pg-cluster` is an external or out-of-band PostgreSQL, so `auto` means `false` unless the databases are already there. Such a Site can move them with `true` once it provisions them, as [Using an external or out-of-band PostgreSQL](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#using-an-external-or-out-of-band-postgresql) describes. Copying existing data from the StatefulSet onto an external or out-of-band PostgreSQL isn't supported in 2.4. Support is tracked in [#7989](https://github.com/dsx-ai-factory/infra-controller/issues/7989). While either database stays on the StatefulSet, preflight warns that it's deprecated, and `setup.sh` repeats the warning at the end of the run.
+
+On an existing Site, the new `temporal`, `temporal_visibility`, and `keycloak` databases on `nico-pg-cluster` stay empty and unused until it migrates. To migrate, set `temporal.useHaPostgres`, `keycloak.useHaPostgres`, or both to `true`, because `auto` never moves an existing database. Then run the migration script with the matching `--db temporal`, `--db keycloak`, or `--db both`, as the [migration guide](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#migrating-an-existing-sites-data) describes. `setup.sh` won't move a database off the StatefulSet until the script has copied it. A values file copied from an earlier release may still set `false`. That keeps the databases on the StatefulSet and creates nothing on `nico-pg-cluster`. Once a database is on `nico-pg-cluster`, preflight refuses `false`, because there's no supported way back. After both have moved, `setup.sh` leaves the StatefulSet and its data in place, so remove them as [Removing the standalone StatefulSet](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#removing-the-standalone-statefulset) describes.
+
 ### 2.2 → 2.3: Core components are mandatory
 
 **Impact:** The core NICo subcharts (`nico-api`, `nico-bmc-proxy`, `nico-dhcp`, `nico-dns`, `nico-hardware-health`, `nico-pxe`, `nico-ssh-console-rs`) no longer have `<chart>.enabled` toggles - they are unconditional dependencies in `helm/Chart.yaml` and always install. A site values file (including one passed via `setup.sh --core-values`) that still sets a core `<chart>.enabled` key, whether `true` or `false`, keeps working: the key is ignored and the component installs. No values changes are required for the upgrade. If a site previously disabled a core component (for example, a DHCP or BMC proxy provided externally), plan for the in-cluster component to appear after the upgrade. Optional services (`nico-dsx-exchange-consumer`, `nico-ntp`, `unbound`) keep their toggles.
@@ -422,6 +500,43 @@ kubectl patch pvc postgres-data-postgres-0 -n postgres \
 
 NICo 2.3 raises the default `startupProbe.failureThreshold` from 20 to 120 (60 minutes), sized for a 250-rack site spread over ten pods ([issue 5968](https://github.com/dsx-ai-factory/infra-controller/issues/5968)). The threshold applies to each pod on its own, so size it for the pod that registers the most records. For larger sites, raise `startupProbe.failureThreshold` following the sizing rule in the chart's `values.yaml`, as `helm-prereqs/values/machine-a-tron-scale.yaml` does.
 
+### 2.2 → 2.3: Vault Probe Settings
+
+NICo 2.3 raises the Vault server probe `timeoutSeconds` from 3 to 10 and `failureThreshold` from 2 to 5 in `helm-prereqs/operators/values/vault.yaml`.
+
+For example, on a 250-rack site, the active node missed two 3-second liveness probes under load, was killed, came back sealed, and the standby nodes stayed leaderless.
+
+The Vault StatefulSet uses `updateStrategy: OnDelete`. This means that `helmfile sync` updates the pod template, but running pods keep the old probes until they are deleted. Phase 3 prints a warning naming the pods still running the previous revision. If the StatefulSet status cannot be read or has not caught up, the warning indicates that the revision could not be verified.
+
+After the upgrade finishes, find the active node, then roll the pods one at a time, standby nodes first, and the active node last. The active node is the pod whose `HA Mode` is `active`:
+
+```bash
+for pod in vault-0 vault-1 vault-2; do
+    echo -n "${pod}: "; kubectl exec -n vault "${pod}" -c vault -- vault status -tls-skip-verify | grep 'HA Mode'
+done
+```
+
+From the repository root, run the following commands for each standby in turn, and only then for the active node. Replace `<pod>` with the pod being rolled and `<active>` with the pod whose `HA Mode` is `active` at that point. A recreated pod starts sealed and is not Ready until it is unsealed, so the first wait is for `Running`:
+
+```bash
+kubectl delete pod -n vault <pod>
+kubectl wait pod/<pod> -n vault --for=jsonpath='{.status.phase}'=Running --timeout=300s
+helm-prereqs/unseal_vault.sh
+kubectl wait pod/<pod> -n vault --for=condition=Ready --timeout=300s
+kubectl -n vault get secret vaultroottoken -o jsonpath='{.data.token}' | base64 -d \
+    | kubectl exec -i -n vault <active> -c vault -- \
+        sh -c 'VAULT_TOKEN=$(cat) vault operator raft autopilot state -tls-skip-verify' \
+    | sed '/^Servers:/,$d'
+```
+
+The root token travels on standard input; it does not appear in the `kubectl exec` arguments that the API server records in audit events. The `sed` operation trims the output to the cluster summary: `Healthy`, `Failure Tolerance`, `Leader`, and `Voters`.
+
+`unseal_vault.sh` returns once `vault status` reports the pod unsealed. Unsealing only opens the pod's own storage, and does not show that the pod has rejoined the cluster as a healthy voter. Continue to the next pod only when `Healthy` is `true`, `Failure Tolerance` is `1` on a three-node cluster, and `<pod>` is listed under `Voters`.
+
+Right after the unseal, the summary can still show `Healthy` `false` and `Failure Tolerance` `0` until the leader hears from the pod. Rerun the check after a few seconds. A pod that comes back without its Raft data joins as a non-voter and appears under `Voters` only after autopilot promotes it. Deleting the next standby before the promotion can leave the three-node cluster below quorum. When the former active node is rolled, a standby has taken over; run the status loop again to find `<active>`.
+
+If `kubectl wait` reports the pod as not found, the StatefulSet has not recreated it yet. Run the wait again.
+
 ### 2.2 → 2.3: Kustomize deployment deprecated
 
 The Kustomize deployment under `deploy/` (`deploy/kustomization.yaml`,
@@ -434,22 +549,40 @@ described in the [quick start](../getting-started/quick-start.md) and retire the
 Kustomize overlays. The `rest-api/deploy/kustomize` bases that `setup.sh` uses
 for cert-manager, PostgreSQL, and Temporal are not affected.
 
+### 2.3 → 2.4: Kustomize deployment removed
+
+The Kustomize deployment under `deploy/` is removed in 2.4. Install and
+upgrade NICo Core with the Helm charts under `helm/`, either through
+`setup.sh` as described in the [quick start](../getting-started/quick-start.md)
+or directly as described in [`helm/README.md`](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md). Sites
+still running the Kustomize manifests must move to the Helm charts before
+upgrading to 2.4. The annotated site configuration example now lives at
+[`helm/examples/nico-api-site-config.toml`](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/examples/nico-api-site-config.toml),
+and the `.nico` service endpoint reference moved to
+[DNS Service Endpoints](../configuration/dns-service-endpoints.md). The
+`rest-api/deploy/kustomize` bases that `setup.sh` uses are not affected.
+
 ## Rollback
 
 <Warning>
-Downgrades are **not a supported version move**. The [release and QA process](../development/release_and_qa_process.md) tests forward upgrades only, and the supported recovery for a bad release is a forward-fix in the next patch. Treat the following procedure as disaster recovery for a failed upgrade, not as a routine operation.
+Downgrades are **not a supported version move**. The [release policy](../../RELEASE.md#upgrade-and-downgrade-support) tests forward upgrades only, and the supported recovery for a bad release is a forward-fix in the next patch. Treat the following procedure as disaster recovery for a failed upgrade, not as a routine operation.
 </Warning>
 
 `setup.sh` does not have a built-in rollback mechanism. Rollback consists of:
 
 1. Checking out the prior release branch or tag.
-1. Re-running `setup.sh` with the prior image tags.
+2. Re-running `setup.sh` with the prior image tags.
 
 For NICo Core and REST, the Helm release is rolled back in-place, and the database migration Jobs for the prior version run on startup. NICo's database migrations are designed to be forward-compatible; rolling back does not guarantee schema compatibility if the new version added non-nullable columns. This is why a pre-upgrade database backup is essential.
 
-The database dumps from the [pre-upgrade checklist](#back-up-the-databases) are the rollback foundation: `nico-pg-cluster` holds `nico_system_nico` (NICo Core), `nico_rest` (NICo REST), `flow`, and any retained `psm` or `nsm` databases from a predecessor bundled-manager deployment, while the plain `postgres` StatefulSet holds `temporal`, `temporal_visibility`, and `keycloak`. Restoring means replaying the SQL against a clean instance (`psql -f <dump>.sql`).
+The database dumps from the [pre-upgrade checklist](#back-up-the-databases) are the rollback foundation: `nico-pg-cluster` holds `nico_system_nico` (NICo Core), `nico_rest` (NICo REST), `flow`, and any retained `psm` or `nsm` databases from a predecessor bundled-manager deployment. The `temporal`, `temporal_visibility`, and `keycloak` databases are there too, unless the Site still runs the standalone `postgres` StatefulSet. Restoring means replaying the SQL against a clean instance (`psql -f <dump>.sql`).
 
 Re-running `setup.sh` with the prior image tags alone is **not** a complete rollback if the new version's migrations already ran. Restore the database dumps first, then deploy the prior version.
+
+If you have upgraded to
+[asynchronous peering deletion](#upgrades-that-introduce-asynchronous-peering-deletion),
+do not return to an API that lacks it, even after restoring the database. Fix
+the newer version instead.
 
 For DPF, rolling back to a prior DPF version is not supported by NVIDIA. If DPF fails to upgrade, reach out to NVIDIA support rather than attempting a downgrade.
 
@@ -470,7 +603,7 @@ You can narrow an upgrade to particular components with the `--skip-*` flags. `-
 
 The prerequisite phases therefore run on every invocation. That is by design and is cheap: each one is idempotent, and a phase whose inputs have not changed reconciles to the same state and exits quickly.
 
-For a single-Helm-chart upgrade (such as rotating the NICo Core image tag without going through the full script), run from the **repository root**, matching what `setup.sh` itself executes:
+To upgrade only the NICo Core release without running the prerequisite phases, use a chart and Core image built from the same repository revision, following the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration). Update both together when moving to a new revision. Run from the **repository root**, matching what `setup.sh` itself executes:
 
 ```bash
 helm upgrade --install nico ./helm \

@@ -4,7 +4,7 @@ This page covers the hardware requirements for both the NICo site controller and
 
 ## Site Controller
 
-The site controller runs the NICo control plane on a Kubernetes cluster. A minimum of 3 nodes is required for high availability; 5 nodes are recommended for large GB200-class sites.
+The site controller runs the NICo control plane on a Kubernetes cluster. A minimum of 3 nodes is required for high availability. For large GB200-class sites, plan 5 nodes or nodes with more cores than the minimum below. Refer to [Sizing and Scale Guidance](../sizing-and-scale.md) for the versioned scale table, the measured site controller load at each fleet size, and the ingestion settings that go with it.
 
 | Component | Requirement |
 |---|---|
@@ -24,7 +24,7 @@ The site controller runs the NICo control plane on a Kubernetes cluster. A minim
 
 ### DPUs on Site Controller
 
-DPUs are generally preferred in nodes hosting the NICo control plane components, but not strictly required. DPUs in these nodes are, however, the configuration that NICo QA regularly tests. If your site controller nodes are equipped with Bluefield-3 DPUs, ensure the following requirements are met:
+Data processing units (DPUs) are generally preferred in nodes hosting the NICo control plane components, but not strictly required. DPUs in these nodes are, however, the configuration that NICo QA regularly tests. If your site controller nodes are equipped with Bluefield-3 DPUs, ensure the following requirements are met:
 
 - You have the correct DPU power cable from the server vendor.
 - The Bluefield-3's operating mode is DPU mode.

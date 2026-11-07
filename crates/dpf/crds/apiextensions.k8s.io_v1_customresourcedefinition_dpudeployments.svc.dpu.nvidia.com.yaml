@@ -88,7 +88,7 @@ spec:
                             description: |-
                               MaxUnavailable is the maximum number of DPUs that can be unavailable during the update.
 
-                              Deprecated: This field is deprecated and will be removed with v26.7.0.
+                              Deprecated: This field is deprecated and will be removed with v31.0.0.
                             x-kubernetes-int-or-string: true
                         type: object
                       type:
@@ -225,7 +225,7 @@ spec:
                           description: |-
                             DPUSelector defines the DPUs that the DPUSet should target
 
-                            Deprecated: This field is deprecated and will be removed with v26.7.0. Use DPUDeviceSelector instead.
+                            Deprecated: This field is deprecated and will be removed with v31.0.0. Use DPUDeviceSelector instead.
                           type: object
                         nameSuffix:
                           description: NameSuffix is the suffix to be added to the
@@ -237,7 +237,7 @@ spec:
                           description: |-
                             NodeSelector defines the nodes that the DPUSet should target
 
-                            Deprecated: This field is deprecated and will be removed with v26.7.0. Use DPUNodeSelector instead.
+                            Deprecated: This field is deprecated and will be removed with v31.0.0. Use DPUNodeSelector instead.
                           properties:
                             matchExpressions:
                               description: matchExpressions is a list of label selector
@@ -290,7 +290,8 @@ spec:
                           end with dpu.nvidia.com
                         rule: '!(has(self.dpuAnnotations) && (self.dpuAnnotations.exists(key,
                           (key.contains(''dpu.nvidia.com/'') || key.endsWith(''dpu.nvidia.com''))
-                          && !key.startsWith(''noderesources.dpu.nvidia.com''))))'
+                          && !key.startsWith(''noderesources.dpu.nvidia.com'') &&
+                          key != ''provisioning.dpu.nvidia.com/force-fw-update'')))'
                       - message: only one of nodeSelector or dpuNodeSelector can be
                           specified
                         rule: '!(has(self.nodeSelector) && has(self.dpuNodeSelector))'
@@ -450,6 +451,23 @@ spec:
                                         maxProperties: 50
                                         minProperties: 1
                                         type: object
+                                      requiredIPFamilies:
+                                        description: |-
+                                          RequiredIPFamilies declares the address families that pools selected by MatchLabels must provide. When set,
+                                          MatchLabels must select exactly one pool for each requested family and no additional pools. For dual-stack
+                                          selection, both pools must use the same DPUServiceIPAM allocation mode: network or subnet. Order is not significant.
+                                          When omitted, backward-compatible pool selection is used.
+                                        items:
+                                          description: |-
+                                            IPFamily represents the IP Family (IPv4 or IPv6). This type is used
+                                            to express the family of an IP expressed by a type (e.g. service.spec.ipFamilies).
+                                          enum:
+                                          - IPv4
+                                          - IPv6
+                                          type: string
+                                        minItems: 1
+                                        type: array
+                                        x-kubernetes-list-type: set
                                       setDefaultRoute:
                                         description: SetDefaultRoute adds a default
                                           route to the routing table if true.
@@ -488,6 +506,23 @@ spec:
                                         maxProperties: 50
                                         minProperties: 1
                                         type: object
+                                      requiredIPFamilies:
+                                        description: |-
+                                          RequiredIPFamilies declares the address families that pools selected by MatchLabels must provide. When set,
+                                          MatchLabels must select exactly one pool for each requested family and no additional pools. For dual-stack
+                                          selection, both pools must use the same DPUServiceIPAM allocation mode: network or subnet. Order is not significant.
+                                          When omitted, backward-compatible pool selection is used.
+                                        items:
+                                          description: |-
+                                            IPFamily represents the IP Family (IPv4 or IPv6). This type is used
+                                            to express the family of an IP expressed by a type (e.g. service.spec.ipFamilies).
+                                          enum:
+                                          - IPv4
+                                          - IPv6
+                                          type: string
+                                        minItems: 1
+                                        type: array
+                                        x-kubernetes-list-type: set
                                       setDefaultRoute:
                                         description: SetDefaultRoute adds a default
                                           route to the routing table if true.

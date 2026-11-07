@@ -80,6 +80,7 @@ pub mod admission_retry;
 pub mod errors;
 pub mod forge_tls_client;
 pub mod libmlx;
+pub mod lldp_snapshot;
 pub mod measured_boot;
 pub mod network;
 pub mod node_jwt;
@@ -123,6 +124,12 @@ impl forge::BootInterfaceSelectionSource {
 // streaming interfaces are added, we just toss in type defs here, and
 // any users of DynForge don't need to worry about it.
 pub type DynForge = dyn forge::forge_server::Forge<
+        StreamConsoleLogsStream = Pin<
+            Box<
+                dyn Stream<Item = Result<protos::console_log::ConsoleLogLine, tonic::Status>>
+                    + Send,
+            >,
+        >,
         ScoutStreamStream = Pin<
             Box<
                 dyn Stream<Item = Result<forge::ScoutStreamScoutBoundMessage, tonic::Status>>
@@ -1070,6 +1077,7 @@ impl forge_agent_control_response::Action {
             Self::MachineValidation(_) => "MACHINE_VALIDATION",
             Self::MlxAction(_) => "MLX_ACTION",
             Self::FirmwareUpgrade(_) => "FIRMWARE_UPGRADE",
+            Self::MlxDeviceInfoReport(_) => "MLX_DEVICE_INFO_REPORT",
         }
     }
 }
@@ -1139,7 +1147,12 @@ mod tests {
 
         assert_eq!(
             service_names,
-            ["FmdsConfigService", "Forge", "NMX_Controller"]
+            [
+                "ConsoleLogService",
+                "FmdsConfigService",
+                "Forge",
+                "NMX_Controller",
+            ]
         );
     }
 
@@ -1207,6 +1220,8 @@ mod tests {
         let domain = Domain {
             id: Some(uuid),
             name: "MyDomain".to_string(),
+            default_ttl: None,
+            vpc_id: None,
             created: Some(ts.into()),
             updated: Some(ts2.into()),
             deleted: None,

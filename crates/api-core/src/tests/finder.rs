@@ -44,13 +44,6 @@ async fn test_ip_finder(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
         !status.interfaces.is_empty(),
         "status.interfaces must be populated for the host machine"
     );
-    #[allow(deprecated)]
-    {
-        assert_eq!(
-            host_machine.interfaces, status.interfaces,
-            "interfaces must equal status.interfaces"
-        );
-    }
 
     mh.instance_builer(&env)
         .single_interface_network_config(segment_id)
@@ -92,7 +85,7 @@ async fn test_ip_finder(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     // retains its auto-allocated BMC address as Static -- so the finder reports
     // it as StaticBmcIp rather than plain BmcIp.
     test_inner(
-        host_machine.bmc_info.as_ref().unwrap().ip(),
+        host_machine.bmc.as_ref().unwrap().ip(),
         IpType::StaticBmcIp,
         &env,
         "test_static_bmc_ip",

@@ -1,0 +1,62 @@
+#!/usr/bin/env -S bash -p
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Periodically crictl-execs into a named container to read one file and
+# writes it to a shared path. This is the only place in the punt-stats
+# pipeline that needs containerd-socket / crictl exec access, so the
+# general-purpose otelcol-contrib container (which reads PUNT_STATS_DST_PATH
+# directly, no exec) never needs it.
+set -euo pipefail
+
+: "${PUNT_STATS_CONTAINER_NAME:?PUNT_STATS_CONTAINER_NAME must be set}"
+: "${PUNT_STATS_SRC_PATH:?PUNT_STATS_SRC_PATH must be set}"
+: "${PUNT_STATS_DST_PATH:?PUNT_STATS_DST_PATH must be set}"
+: "${PUNT_STATS_INTERVAL_SECONDS:=60}"
+: "${PUNT_STATS_EXEC_TIMEOUT_SECONDS:=30}"
+
+while true; do
+  # Match on the JSON name field, not crictl ps --name (substring match), so
+  # a container whose name merely contains PUNT_STATS_CONTAINER_NAME isn't
+  # picked.
+  # A failed crictl/jq pipeline (pipefail) is distinct from a successful
+  # lookup that finds nothing; log it and retry after the usual interval.
+  if ! container_id=$(crictl ps -o json \
+      | jq -r --arg name "${PUNT_STATS_CONTAINER_NAME}" \
+          'first(.containers[] | select(.metadata.name == $name) | .id)'); then
+    echo "WARN: failed to look up container ${PUNT_STATS_CONTAINER_NAME}" >&2
+    # Drop the published snapshot so stale stats aren't served as current.
+    rm -f "${PUNT_STATS_DST_PATH}"
+    sleep "${PUNT_STATS_INTERVAL_SECONDS}"
+    continue
+  fi
+
+  if [[ -n "${container_id}" ]]; then
+    # timeout bounds the whole exec stream (crictl exec --timeout does not cover
+    # a stalled read); it sends TERM, then KILL 5s later if crictl lingers.
+    if timeout --kill-after=5 "${PUNT_STATS_EXEC_TIMEOUT_SECONDS}" \
+        crictl exec "${container_id}" cat "${PUNT_STATS_SRC_PATH}" > "${PUNT_STATS_DST_PATH}.tmp" 2>/dev/null; then
+      mv "${PUNT_STATS_DST_PATH}.tmp" "${PUNT_STATS_DST_PATH}"
+    else
+      echo "WARN: failed to read ${PUNT_STATS_SRC_PATH} from container ${PUNT_STATS_CONTAINER_NAME}" >&2
+      rm -f "${PUNT_STATS_DST_PATH}.tmp" "${PUNT_STATS_DST_PATH}"
+    fi
+  else
+    echo "WARN: container ${PUNT_STATS_CONTAINER_NAME} not found" >&2
+    rm -f "${PUNT_STATS_DST_PATH}"
+  fi
+
+  sleep "${PUNT_STATS_INTERVAL_SECONDS}"
+done

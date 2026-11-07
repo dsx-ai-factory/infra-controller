@@ -56,13 +56,13 @@ func (ascr APISiteCreateRequest) Validate() error {
 type APISiteCapabilitiesUpdateRequest struct {
 	NativeNetworking          *bool `json:"nativeNetworking"`
 	NetworkSecurityGroup      *bool `json:"networkSecurityGroup"`
-	NVLinkPartition           *bool `json:"nvLinkPartition"`
 	ImageBasedOperatingSystem *bool `json:"imageBasedOperatingSystem"`
 	DPSPowerManagement        *bool `json:"dpsPowerManagement"`
-	// Flow and VpcSlaac are accepted by the binder so update attempts can be rejected
-	// explicitly. Site config inventory is the only writer for these fields.
-	Flow     *bool `json:"flow"`
-	VpcSlaac *bool `json:"vpcSlaac"`
+	// Flow, VpcSlaac, and NVLinkPartition are accepted by the binder so update attempts can be
+	// rejected explicitly. Site config inventory is the only writer for these fields.
+	Flow            *bool `json:"flow"`
+	VpcSlaac        *bool `json:"vpcSlaac"`
+	NVLinkPartition *bool `json:"nvLinkPartition"`
 }
 
 func (ascur APISiteCapabilitiesUpdateRequest) ToSiteConfig(existing *cdbm.SiteConfig) *cdbm.SiteConfig {
@@ -77,10 +77,6 @@ func (ascur APISiteCapabilitiesUpdateRequest) ToSiteConfig(existing *cdbm.SiteCo
 
 	if ascur.NetworkSecurityGroup != nil {
 		cfg.NetworkSecurityGroup = *ascur.NetworkSecurityGroup
-	}
-
-	if ascur.NVLinkPartition != nil {
-		cfg.NVLinkPartition = *ascur.NVLinkPartition
 	}
 
 	if ascur.ImageBasedOperatingSystem != nil {
@@ -139,6 +135,7 @@ func (asur APISiteUpdateRequest) Validate(isProvider bool, isTenant bool) error 
 			err = validation.ValidateStruct(asur.Capabilities,
 				validation.Field(&asur.Capabilities.Flow, validation.Nil.Error(ErrMsgNotConfigurableByProvider)),
 				validation.Field(&asur.Capabilities.VpcSlaac, validation.Nil.Error(ErrMsgNotConfigurableByProvider)),
+				validation.Field(&asur.Capabilities.NVLinkPartition, validation.Nil.Error(ErrMsgNotConfigurableByProvider)),
 			)
 		}
 	} else {

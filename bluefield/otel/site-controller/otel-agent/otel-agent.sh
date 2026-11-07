@@ -139,12 +139,8 @@ fi
 
 mkdir -p "$STATE_DIR"
 
-CARBIDE_API_IP_ADDR=$(getent hosts "$CARBIDE_API" | awk '{print $1}') || true
-
-if [[ -z "$CARBIDE_API_IP_ADDR" ]]; then
-    echo "Failed to resolve $CARBIDE_API" >&2
-    exit 1
-fi
+# `getent hosts` can omit IPv4 answers for a dual-stack name.
+CARBIDE_API_IP_ADDR=$(python3 "${TEMPLATE%/*}/resolve_host.py" "$CARBIDE_API")
 
 BUILD_DIR=$(mktemp -d /tmp/otel-agent-build.XXXXXX)
 SAVED_IMAGE=$(mktemp /tmp/otel-agent-image.XXXXXX.tar)

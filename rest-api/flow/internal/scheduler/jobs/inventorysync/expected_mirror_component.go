@@ -505,7 +505,7 @@ func mirrorExpectedComponents(
 				}
 			}
 			// Mirror-managed columns only. external_id / power_state /
-			// firmware_version / status are owned by the actual-sync loop
+			// firmware_version / status / health are owned by the actual-sync loop
 			// and leak_status by the leak-detection loop; a full-model
 			// UPDATE would clobber them with the snapshot read
 			// at the top of this pass. WhereAllWithDeleted is required so a
@@ -812,7 +812,7 @@ func applyComponentChanges(existing, desired *model.Component, spec expectedComp
 // diffComponentFields returns the per-field deltas the mirror would apply.
 // Used both to decide whether an UPDATE is needed and to log what changed.
 // Fields the mirror doesn't manage (external_id / status / power_state /
-// firmware_version / timestamps) are deliberately omitted; comparing them
+// firmware_version / health / timestamps) are deliberately omitted; comparing them
 // would queue UPDATE rows for state owned by other loops. Fields named in
 // spec.preserveFields are also skipped so a malformed Core label can't
 // drive a spurious UPDATE that would clobber Flow's value with the

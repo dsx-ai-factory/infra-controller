@@ -1,0 +1,35 @@
+suite: deployment tests
+templates:
+  - templates/deployment.yaml
+tests:
+  - it: should render a singleton controller that never overlaps on rollout
+    set:
+      enabled: true
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 1
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+      - equal:
+          path: spec.strategy.rollingUpdate
+          value: null
+
+  - it: should keep per-device Services unless the granularity is set
+    set:
+      enabled: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --service-granularity=device
+
+  - it: should pass the configured service granularity to the controller
+    set:
+      enabled: true
+      config:
+        serviceGranularity: pod
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --service-granularity=pod

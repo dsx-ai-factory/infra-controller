@@ -43,7 +43,7 @@ This is a security benefit: the DPU enforces host isolation before the host rece
 
 ### NICo Metadata Service
 
-The NICo Metadata Service (MDS) exposes instance metadata to tenants from the DPU. It runs on the DPU rather than on the host, so its responses are trusted independently of the host OS. The integrated endpoint in `dpu-agent` and the standalone FMDS service expose the same metadata paths and status behavior.
+The NICo Metadata Service (MDS) exposes instance metadata to tenants from the DPU. It runs on the DPU rather than on the host, so its responses are trusted independently of the host OS. The embedded endpoint in `dpu-agent` and the standalone FMDS service expose the same metadata paths and status behavior.
 
 List the available categories at `/latest/meta-data` or `/latest/meta-data/`. The response contains these names:
 
@@ -58,13 +58,150 @@ List the available categories at `/latest/meta-data` or `/latest/meta-data/`. Th
 | `/latest/meta-data/public-ipv4` | Public IPv4 metadata. |
 | `/latest/meta-data/public-ipv6` | Public IPv6 metadata. |
 
-For example, from a tenant instance:
+The tenant HTTP listener depends on the deployment mode. The following table
+lists the defaults and their overrides:
+
+| Deployment | Default Listener | Override |
+|---|---|---|
+| Embedded DPU agent | `0.0.0.0:7777` | `[metadata-service] address` in the [explicitly loaded agent configuration](#embedded-dpu-agent) |
+| Standalone FMDS, including DPF | `0.0.0.0:80` | `--rest-address`; DPF chart value `restAddress` |
+
+For example, query standalone FMDS from a tenant instance at its default IPv4
+address and port:
 
 ```bash
-curl -fsS http://169.254.169.254/latest/meta-data/instance-name
+curl --noproxy '*' -fsS http://169.254.169.254/latest/meta-data/instance-name
 ```
 
-`instance-name` is independent of `hostname`; adding or changing the instance name does not change the hostname endpoint. If the instance metadata has no nonempty name, both the integrated and standalone services return HTTP 404 with `instance name not available`. The category remains present in the metadata index so clients can discover the supported contract.
+`instance-name` is independent of `hostname`; adding or changing the instance name does not change the hostname endpoint. If the instance metadata has no nonempty name, both the embedded and standalone services return HTTP 404 with `instance name not available`. The category remains present in the metadata index so clients can discover the supported contract.
+
+#### IPv6 Metadata Transport
+
+IPv6 metadata transport is an explicit opt-in. It adds the NICo endpoint
+`fd00:76b9::254` with Host-Based Networking (HBN) at `fd00:76b9::255` on the
+same `/127`. This is a unique local IPv6 address,
+not an IPv6 link-local address. Metadata paths and response semantics do not
+change. The IPv4 endpoint remains `169.254.169.254` unless you override its
+configuration.
+
+Deploy agent and FMDS versions that support
+[IPv6 metadata transport](https://github.com/dsx-ai-factory/infra-controller/issues/7176)
+before enabling it. The guest needs IPv6 connectivity to its local HBN gateway;
+enabling FMDS does not configure the guest's addresses or routes.
+
+The guest sends the request through its tenant-facing HBN gateway to the local
+metadata attachment. HBN forwards it to FMDS at `fd00:76b9::254`; FMDS sends
+the reply through the HBN peer at `fd00:76b9::255`. The embedded agent installs
+reply routes for the tenant prefixes provided by NICo. Standalone FMDS uses
+source-based policy routing for replies from its metadata address. The guest's
+source address must have a return path through HBN; an address outside the
+configured tenant prefixes is not covered by the embedded agent's reply routes.
+
+##### Embedded DPU Agent
+
+Merge the following sections into the configuration file supplied to the DPU
+agent. Retain any existing IPv4 address overrides in the list:
+
+```toml
+[metadata-service]
+address = "[::]:7777"
+
+[fmds-armos-networking.config]
+addresses = ["169.254.169.254/30", "fd00:76b9::254/127"]
+```
+
+The wildcard listener accepts both address families on the existing port 7777.
+An enabled IPv6 endpoint requires a listener on `[::]` or `[fd00:76b9::254]`.
+A literal IPv6 listener serves only IPv6, so use the wildcard to retain IPv4
+access through the embedded agent's single listener. For a literal bind, the
+agent waits until network reconciliation assigns the endpoint address and
+completes duplicate address detection (DAD) before starting the listener.
+An IPv4-only or loopback-only listener cannot serve the enabled IPv6 endpoint
+and fails startup. An unavailable IPv6 listener also fails startup rather than
+silently falling back to IPv4, except that a deferred literal bind is retried
+as part of network reconciliation.
+
+Omitting the FMDS networking section retains the IPv4-only default. When you
+supply the section, `addresses` is required and replaces the entire list;
+list order does not select a different IPv6 peer. An explicit empty list does
+not restore defaults or delete addresses already assigned to the interface.
+The fixed endpoint `fd00:76b9::254` requires `/127`. Other IPv6 addresses retain
+their address-assignment behavior but do not enable the HBN metadata peer or
+automatic IPv6 reply routes.
+
+Use an operator-managed configuration file, such as `/etc/forge/fmds-config.toml`.
+If you instead activate the PXE-generated `/etc/forge/config.toml`, review all
+its sections: loading it also activates its machine and system settings.
+
+Configure the managed agent to load the file. For the stock systemd service,
+create `/etc/systemd/system/forge-dpu-agent.service.d/fmds.conf` with the
+following contents. Preserve any additional arguments required by your
+deployment when replacing `ExecStart`:
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/bin/forge-dpu-agent --config-path=/etc/forge/fmds-config.toml run --enable-metadata-service
+```
+
+The global `--config-path` option precedes `run`. The stock systemd unit does
+not supply it, so creating the file alone does not activate these settings.
+As root on the DPU, run `systemctl daemon-reload`, then
+`systemctl restart forge-dpu-agent` to apply the configuration. Do not edit
+the packaged unit or start a second agent alongside it. Retain the configuration
+and drop-in in your provisioning system and reapply them after DPU reprovisioning.
+
+With the IPv6 metadata endpoint enabled, the agent applies HBN configuration
+before setting up the metadata address and reply routes, so metadata readiness
+does not block tenant or quarantine updates. An address, DAD, deferred-listener, or route failure reports
+`network_config_error` and leaves the desired network version pending for retry.
+It does not terminate the agent. Resolve persistent errors, including duplicate
+addresses, rather than bypassing DAD. Removing an address from the list does not
+remove it from the interface; disabling the feature requires configuration and
+service updates plus operator cleanup of any residual addresses.
+
+From the attached guest, query the enabled embedded endpoint with a bracketed
+IPv6 URL:
+
+```bash
+curl --noproxy '*' -fsS 'http://[fd00:76b9::254]:7777/latest/meta-data/hostname'
+```
+
+After successful network application, this request must return the instance's
+hostname. A running agent or an open listener alone does not prove guest reachability.
+
+##### Standalone FMDS and DPF
+
+For standalone FMDS, add `--interface-cidr-v6=fd00:76b9::254/127` and use
+`--rest-address='[::]:80'`. The additive address option also accepts the
+`FMDS_INTERFACE_CIDR_V6` environment variable; an explicit flag takes precedence.
+It is unset by default and requires an IPv6 listener on `[::]` or
+`[fd00:76b9::254]`. Other values of the additive IPv6 option fail validation.
+
+The existing `--interface-cidr` option, or its `FMDS_INTERFACE_CIDR` environment
+fallback, still defaults to `169.254.169.254/30`. Supplying IPv6 through that
+option replaces the configured IPv4 CIDR rather than adding a second family.
+Custom IPv6 addresses through that option require separately configured reply
+routing; they do not activate the fixed HBN peer. Use `--interface-cidr-v6` to
+add the fixed endpoint and its reply routing while retaining IPv4.
+
+`--compatibility-rest-address` remains an optional additional listener. Either
+listener can serve the IPv6 endpoint. A literal IPv6 listener does not serve
+IPv4; a separate IPv4 listener can retain IPv4 access. Bind addresses must not
+overlap: for example, `[::]:80` and `0.0.0.0:80` conflict. Invalid configuration,
+address or DAD failure, or failure to bind either listener prevents standalone
+FMDS startup. Termination of a running REST listener also terminates FMDS.
+Networking changes require a service restart; removing an address from the
+configuration does not remove an address already assigned to the interface.
+For the coordinated FMDS and HBN settings in DPF, refer to
+[IPv6 Metadata Transport](../manuals/dpf.md#ipv6-metadata-transport).
+
+The existing Ethernet Virtualizer (ETV) and Forge Native Networking (FNN)
+attachments remain in use. FNN's HBN export filters
+exclude the metadata IPv6 prefix from EVPN IP-prefix export and underlay
+leaking. This transport option does not enable an IPv6-only DPU underlay or
+establish firmware boot support. Validate the deployed HBN and guest path before
+production use; these configuration instructions are not hardware qualification.
 
 ### HBN and Containerized Cumulus
 
@@ -83,7 +220,7 @@ DPU OS installation happens as part of the managed host state machine after Site
 NICo uses two different BFB images. They are not interchangeable:
 
 - **NICo BFB**: The image installed during the managed host state machine and reprovisioning. It is built from the vanilla DOCA BFB and customized with NICo services: `dpu-agent`, the DPU DHCP server, MDS, HBN installer and configuration, NICo root CA, and scout. This is the image that makes the DPU a fully managed component. For build instructions, see [Building NICo Containers](../manuals/building_nico_containers.md#building-the-dpu-bfb).
-- **Preingestion BFB** (`preingestion.bfb`): The unmodified vanilla DOCA BFB, saved as-is during the build process before any NICo customization is applied. It does **not** contain `dpu-agent`, HBN, MDS, or any other NICo services. This image is used only for pre-ingestion recovery via rshim (`copy-bfb-to-dpu-rshim`) to return a DPU to a clean factory state so that NICo can discover and pair it. After the preingestion BFB is installed, the normal state machine installs the NICo BFB.
+- **Preingestion BFB** (`preingestion.bfb`): The unmodified vanilla DOCA BFB, saved as-is during the build process before any NICo customization is applied. It does **not** contain `dpu-agent`, HBN, MDS, or any other NICo services. This image is used for pre-ingestion recovery using rshim (`copy-bfb-to-dpu-rshim`) or [between-install decommissioning](../decommissioning/hosts.md) to return a DPU to a clean pre-ingestion state so that NICo can discover and pair it. After the preingestion BFB is installed, the normal state machine installs the NICo BFB.
 
 ### How NICo Chooses the Install Method
 

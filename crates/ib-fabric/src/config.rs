@@ -44,8 +44,8 @@ pub struct IBFabricConfig {
     #[serde(default)]
     pub allow_insecure: bool,
 
-    /// Maximum transmission unit for InfiniBand fabric
-    /// traffic.
+    /// Maximum transmission unit for InfiniBand fabric traffic: `2` (2 KiB)
+    /// or `4` (4 KiB, the default). Byte values such as `2048` are rejected.
     #[serde(
         default = "IBMtu::default",
         deserialize_with = "IBFabricConfig::deserialize_mtu"
@@ -154,14 +154,55 @@ pub struct IbFabricDefinition {
     /// Note that editing the pkey ranges will never shrink the currently defined
     /// ranges. It can only be used to expand the range
     pub pkeys: Vec<model::resource_pool::define::Range>,
+    /// Name from `resource_pool_backends` for this fabric's PKeys. Omission
+    /// uses Integrated; v2.4 rejects a selected gRPC backend at startup.
+    #[serde(default)]
+    pub backend: Option<String>,
+    /// Provider lookup name. Omission uses `ib_fabrics.<fabric>.pkey`;
+    /// Integrated also requires that logical name when supplied explicitly.
+    #[serde(default)]
+    pub remote_pool: Option<String>,
 }
 
 #[cfg(test)]
 mod test {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
     use figment::Figment;
     use figment::providers::{Format, Toml};
 
     use super::*;
+
+    #[test]
+    fn fabric_definition_preserves_pool_selectors_and_legacy_pkeys() {
+        scenarios!(
+            run = |selectors| {
+                let input = format!(
+                    "endpoints = [\"https://ufm.example\"]\npkeys = [{{ start = \"1\", end = \"100\" }}]\n{selectors}"
+                );
+                let config: IbFabricDefinition = Figment::new()
+                    .merge(Toml::string(&input))
+                    .extract()
+                    .map_err(drop)?;
+                assert_eq!(config.endpoints, vec!["https://ufm.example"]);
+                assert_eq!(config.pkeys, vec![model::resource_pool::define::Range {
+                    start: "1".to_string(),
+                    end: "100".to_string(),
+                    auto_assign: true,
+                }]);
+                Ok::<_, ()>((config.backend, config.remote_pool))
+            };
+            "legacy defaults" {
+                "" => Yields((None, None)),
+            }
+            "configured selection" {
+                "backend = \"shared\"\nremote_pool = \"provider-pkeys\"" => Yields((Some("shared".to_string()), Some("provider-pkeys".to_string()))),
+            }
+            "unknown selector" {
+                "bakend = \"shared\"" => Fails,
+            }
+        );
+    }
 
     #[test]
     fn parse_ib_fabric() {
@@ -189,6 +230,24 @@ max_partition_per_tenant = 3
         );
         assert!(ib_fabric_config.enabled);
         assert_eq!(ib_fabric_config.max_partition_per_tenant, 3);
+    }
+
+    #[test]
+    fn ib_config_validates_mtu_values() {
+        scenarios!(
+            run = |mtu| {
+                Figment::new()
+                    .merge(Toml::string(&format!("mtu = {mtu}")))
+                    .extract::<IBFabricConfig>()
+                    .map(|config| config.mtu)
+                    .map_err(drop)
+            };
+            "operator MTU codes are accepted and byte values are rejected" {
+                2 => Yields(IBMtu(2)),
+                2048 => Fails,
+                4096 => Fails,
+            }
+        );
     }
 
     #[test]

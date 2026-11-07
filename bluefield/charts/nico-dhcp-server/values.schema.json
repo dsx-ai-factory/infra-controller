@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "title": "DPUService Helm Chart Values",
-  "description": "Schema for validating values.yaml for DPUService Helm charts. Note: All Kubernetes resources must include {{ .Release.Name }} in their metadata.name to enable deployment of multiple instances of the service.",
+  "description": "Schema for validating values.yaml for the NICo DHCP DPUService chart. Workload resources include {{ .Release.Name }} in metadata.name. Only one release per namespace can enable the platform-owned service-VPC NAD and DHCP CNI daemon.",
   "type": "object",
   "required": ["serviceDaemonSet"],
   "properties": {
@@ -10,6 +10,11 @@
       "description": "Configuration for the service DaemonSet",
       "required": ["labels", "annotations", "updateStrategy", "resources"],
       "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render the DHCP DaemonSet and Service"
+        },
         "nodeSelector": {
           "oneOf": [
             {
@@ -155,6 +160,32 @@
           "description": "Custom labels for the Service resources to be discovered by the DPUService controller",
           "additionalProperties": {
             "type": "string"
+          }
+        }
+      }
+    },
+    "serviceVpcNetworks": {
+      "type": "object",
+      "description": "Platform-owned shared networks for service-VPC extension workloads",
+      "additionalProperties": false,
+      "properties": {
+        "ipv4": {
+          "type": "object",
+          "description": "Qualified IPv4 Open vSwitch (OVS) and DHCP CNI network",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Render the shared IPv4 service-VPC NAD and node-local DHCP CNI daemon"
+            },
+            "name": {
+              "type": "string",
+              "description": "Fixed NAD name referenced by Core consumers"
+            },
+            "mtu": {
+              "type": "integer",
+              "description": "Fixed maximum transmission unit (MTU) of 9,000 bytes shared with service-VPC chains and slot interfaces"
+            }
           }
         }
       }

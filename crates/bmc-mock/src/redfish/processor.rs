@@ -19,9 +19,10 @@ use std::borrow::Cow;
 
 use serde_json::json;
 
-use crate::json::{JsonExt, JsonPatch};
+use super::schema::resource::Uuid;
+use crate::json::JsonExt;
 use crate::redfish;
-use crate::redfish::Builder;
+use crate::redfish::ModelExt;
 
 pub(super) fn system_collection(system_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!("/redfish/v1/Systems/{system_id}/Processors");
@@ -36,7 +37,7 @@ pub(super) fn system_resource<'a>(system_id: &str, processor_id: &'a str) -> red
     let odata_id = format!("/redfish/v1/Systems/{system_id}/Processors/{processor_id}");
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#Processor.v1_20_0.Processor"),
+        odata_type: Cow::Borrowed(redfish::schema::processor::Processor::ODATA_TYPE),
         id: Cow::Borrowed(processor_id),
         name: Cow::Borrowed("Processor"),
     }
@@ -47,7 +48,7 @@ pub(super) fn metrics_resource(system_id: &str, processor_id: &str) -> redfish::
         format!("/redfish/v1/Systems/{system_id}/Processors/{processor_id}/ProcessorMetrics");
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#ProcessorMetrics.v1_6_1.ProcessorMetrics"),
+        odata_type: Cow::Borrowed(redfish::schema::processor_metrics::ProcessorMetrics::ODATA_TYPE),
         id: Cow::Borrowed("ProcessorMetrics"),
         name: Cow::Borrowed("Processor Metrics"),
     }
@@ -68,64 +69,25 @@ impl Processor {
     pub(crate) fn metrics_json(&self) -> serde_json::Value {
         self.metrics.clone()
     }
-}
 
-fn builder(resource: &redfish::Resource) -> ProcessorBuilder {
-    ProcessorBuilder {
-        id: Cow::Owned(resource.id.to_string()),
-        value: resource.json_patch(),
-    }
-}
-
-struct ProcessorBuilder {
-    id: Cow<'static, str>,
-    value: serde_json::Value,
-}
-
-impl Builder for ProcessorBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-            id: self.id,
-        }
-    }
-}
-
-impl ProcessorBuilder {
-    fn processor_type(self, value: &str) -> Self {
-        self.add_str_field("ProcessorType", value)
-    }
-
-    /// Device identity that survives a socket swap.
-    ///
-    /// On an NVIDIA GPU this matches the NVML GPU UUID without its `GPU-`
-    /// prefix, and the UUID the enclosing GPU chassis reports.
-    fn uuid(self, value: &str) -> Self {
-        self.add_str_field("UUID", value)
-    }
-
-    fn serial_number(self, value: &str) -> Self {
-        self.add_str_field("SerialNumber", value)
-    }
-
-    fn model(self, value: &str) -> Self {
-        self.add_str_field("Model", value)
-    }
-
-    fn metrics(self, metrics: &redfish::Resource<'_>) -> Self {
-        self.apply_patch(metrics.nav_property("Metrics"))
-    }
-
-    fn status(self, status: redfish::resource::Status) -> Self {
-        self.apply_patch(json!({ "Status": status.into_json() }))
-    }
-
-    fn build(self, metrics: serde_json::Value) -> Processor {
-        Processor {
-            id: self.id,
-            resource: self.value,
-            metrics,
-        }
+    /// Adds the Vera Rubin compute-tray position reported by an NVIDIA GPU.
+    pub(crate) fn with_mnnvlink_topology(
+        mut self,
+        tray_slot_number: i64,
+        tray_slot_index: i64,
+    ) -> Self {
+        use super::schema::nvidia_processor::{MnnvLinkTopology, NvidiaGpu};
+        let topology = NvidiaGpu::new().mnnv_link_topology(
+            MnnvLinkTopology::new()
+                .tray_slot_number(tray_slot_number)
+                .tray_slot_index(tray_slot_index),
+        );
+        self.resource = self
+            .resource
+            .patch(json!({"Oem": {"Nvidia": redfish::oem::object(
+                "#NvidiaProcessor.v1_4_0.NvidiaGPU", topology
+            )}}));
+        self
     }
 }
 
@@ -134,7 +96,7 @@ impl ProcessorBuilder {
 /// Real hardware reports the same values on the enclosing GPU chassis, so a
 /// fixture should keep the two in agreement.
 pub(crate) struct GpuIdentity<'a> {
-    pub(crate) uuid: &'a str,
+    pub(crate) uuid: Uuid,
     pub(crate) serial_number: &'a str,
     pub(crate) model: &'a str,
 }
@@ -147,14 +109,23 @@ pub(crate) fn gpu(
 ) -> Processor {
     let metrics = metrics_resource(system_id, processor_id);
     let metrics_json = nvidia_gpu_metrics(&metrics, processor_id, core_voltage_sensor_uri);
-    builder(&system_resource(system_id, processor_id))
-        .processor_type("GPU")
+    let resource = system_resource(system_id, processor_id);
+    Processor {
+        id: processor_id.to_string().into(),
+        resource: redfish::schema::processor::Processor::new(
+            resource.odata_id.as_ref(),
+            resource.id.as_ref(),
+            resource.name.as_ref(),
+        )
+        .processor_type(redfish::schema::processor::ProcessorType::Gpu)
         .uuid(identity.uuid)
         .serial_number(identity.serial_number)
         .model(identity.model)
-        .status(redfish::resource::Status::Ok)
-        .metrics(&metrics)
-        .build(metrics_json)
+        .status(redfish::resource::Status::Ok.into())
+        .metrics(metrics.odata_id.as_ref())
+        .into_json(),
+        metrics: metrics_json,
+    }
 }
 
 fn nvidia_gpu_metrics(
@@ -162,37 +133,48 @@ fn nvidia_gpu_metrics(
     processor_id: &str,
     core_voltage_sensor_uri: &str,
 ) -> serde_json::Value {
-    resource.json_patch().patch(json!({
-        "Name": format!("{processor_id} Processor Metrics"),
-        "BandwidthPercent": 0,
-        "OperatingSpeedMHz": 0,
-        "PowerLimitThrottleDuration": "PT0S",
-        "ThermalLimitThrottleDuration": "PT0S",
-        "CacheMetricsTotal": {
-            "LifeTime": {
-                "CorrectableECCErrorCount": 0,
-                "UncorrectableECCErrorCount": 0
-            }
-        },
-        "CoreVoltage": {
-            "DataSourceUri": core_voltage_sensor_uri,
-            "Reading": 0.8
-        },
-        "PCIeErrors": {
-            "CorrectableErrorCount": 2,
-            "FatalErrorCount": 0,
-            "L0ToRecoveryCount": 2,
-            "NAKReceivedCount": 0,
-            "NAKSentCount": 0,
-            "NonFatalErrorCount": 0,
-            "ReplayCount": 0,
-            "ReplayRolloverCount": 0,
-            "UnsupportedRequestCount": 0
-        },
-        "Oem": {
-            "Nvidia": nvidia_gpu_oem()
-        }
-    }))
+    use nv_redfish_server_core::FiniteF64;
+
+    use super::schema::pcie_device::PcieErrors;
+    use super::schema::processor_metrics::{CacheMetricsTotal, LifeTime, ProcessorMetrics};
+    use super::schema::sensor::SensorExcerptVoltage;
+    ProcessorMetrics::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        format!("{processor_id} Processor Metrics"),
+    )
+    .bandwidth_percent(FiniteF64::try_from(0.0).expect("finite bandwidth"))
+    .operating_speed_mhz(0)
+    .power_limit_throttle_duration("PT0S")
+    .thermal_limit_throttle_duration("PT0S")
+    .cache_metrics_total(
+        CacheMetricsTotal::new().life_time(
+            LifeTime::new()
+                .correctable_ecc_error_count(0)
+                .uncorrectable_ecc_error_count(0),
+        ),
+    )
+    .core_voltage(
+        SensorExcerptVoltage::new()
+            .data_source_uri(core_voltage_sensor_uri)
+            .reading(FiniteF64::try_from(0.8).expect("finite core voltage")),
+    )
+    .pcie_errors(
+        PcieErrors::new()
+            .correctable_error_count(2)
+            .fatal_error_count(0)
+            .l0to_recovery_count(2)
+            .nak_received_count(0)
+            .nak_sent_count(0)
+            .non_fatal_error_count(0)
+            .replay_count(0)
+            .replay_rollover_count(0)
+            .unsupported_request_count(0),
+    )
+    .oem(redfish::resource::oem(
+        [("Nvidia".to_string(), nvidia_gpu_oem())].into(),
+    ))
+    .into_json()
 }
 
 /// The NVIDIA OEM extension a GB-family GPU reports on its
@@ -204,55 +186,64 @@ fn nvidia_gpu_metrics(
 /// present, because firmware sends them together and consumers project
 /// them together.
 fn nvidia_gpu_oem() -> serde_json::Value {
-    json!({
-        "@odata.type": "#NvidiaProcessorMetrics.v1_4_0.NvidiaGPUProcessorMetrics",
+    use nv_redfish_server_core::FiniteF64;
 
-        // Shared base (v1_1_0) properties.
-        "SMActivityPercent": 62.5,
-        "SMOccupancyPercent": 44.0,
-        "GraphicsEngineActivityPercent": 71.0,
-        "TensorCoreActivityPercent": 18.25,
-        "FP64ActivityPercent": 4.0,
-        "FP32ActivityPercent": 9.5,
-        "FP16ActivityPercent": 12.0,
-        "NVDecUtilizationPercent": 0,
-        "NVJPGUtilizationPercent": 0,
-        "NVOfaUtilizationPercent": 0,
-        "DMMAUtilizationPercent": 3.0,
-        "HMMAUtilizationPercent": 6.0,
-        "IMMAUtilizationPercent": 1.5,
-        "PCIeRXBytes": 45388,
-        "PCIeTXBytes": 51108,
-        "PCIeRawTxBandwidthGbps": 12.0,
-        "PCIeRawRxBandwidthGbps": 11.5,
-        "NVLinkRawTxBandwidthGbps": 340.0,
-        "NVLinkRawRxBandwidthGbps": 338.5,
-        "NVLinkDataTxBandwidthGbps": 300.0,
-        "NVLinkDataRxBandwidthGbps": 298.0,
-        "HardwareViolationThrottleDuration": "PT0S",
-        "GlobalSoftwareViolationThrottleDuration": "PT0S",
-        "AccumulatedGPUContextUtilizationDuration": "PT10M",
-        "AccumulatedSMUtilizationDuration": "PT5M30S",
-        // Firmware spells "nothing is throttling" as this single-element
-        // list rather than an empty one.
-        "ThrottleReasons": ["NA"],
-
-        // GPU-shape-only properties.
-        "SMUtilizationPercent": 0,
-        "IntegerActivityUtilizationPercent": 2.0,
-        "NVEncUtilizationPercent": 0,
-        "HostMemoryCacheHitPercent": 88.0,
-        "HostMemoryCacheMissPercent": 12.0,
-        "PeerMemoryCacheHitPercent": 91.0,
-        "PeerMemoryCacheMissPercent": 9.0,
-        "DRAMMemoryCacheHitPercent": 96.5,
-        "DRAMMemoryCacheMissPercent": 3.5,
-        "C2CRawTxBandwidthGbps": 420.0,
-        "C2CRawRxBandwidthGbps": 418.0,
-        "C2CDataTxBandwidthGbps": 400.0,
-        "C2CDataRxBandwidthGbps": 398.0,
-        "SRAMECCErrorThresholdExceeded": false
-    })
+    use super::schema::nvidia_processor_metrics::NvidiaGpuProcessorMetrics;
+    let number = |value| FiniteF64::try_from(value).expect("finite simulated GPU metric");
+    let model = NvidiaGpuProcessorMetrics::new()
+        .sm_activity_percent(number(62.5))
+        .sm_occupancy_percent(number(44.0))
+        .graphics_engine_activity_percent(number(71.0))
+        .tensor_core_activity_percent(number(18.25))
+        .fp64activity_percent(number(4.0))
+        .fp32activity_percent(number(9.5))
+        .fp16activity_percent(number(12.0))
+        .nv_dec_utilization_percent(number(0.0))
+        .nv_jpg_utilization_percent(number(0.0))
+        .nv_ofa_utilization_percent(number(0.0))
+        .dmma_utilization_percent(number(3.0))
+        .hmma_utilization_percent(number(6.0))
+        .imma_utilization_percent(number(1.5))
+        .pcie_rx_bytes(45388)
+        .pcie_tx_bytes(51108)
+        .pcie_raw_tx_bandwidth_gbps(number(12.0))
+        .pcie_raw_rx_bandwidth_gbps(number(11.5))
+        .nv_link_raw_tx_bandwidth_gbps(number(340.0))
+        .nv_link_raw_rx_bandwidth_gbps(number(338.5))
+        .nv_link_data_tx_bandwidth_gbps(number(300.0))
+        .nv_link_data_rx_bandwidth_gbps(number(298.0))
+        .hardware_violation_throttle_duration("PT0S")
+        .global_software_violation_throttle_duration("PT0S")
+        .accumulated_gpu_context_utilization_duration("PT10M")
+        .accumulated_sm_utilization_duration("PT5M30S")
+        // Firmware reports this single-element list when no throttling is active.
+        .throttle_reasons(["NA"])
+        .sm_utilization_percent(number(0.0))
+        .integer_activity_utilization_percent(number(2.0))
+        .nv_enc_utilization_percent(number(0.0))
+        .host_memory_cache_hit_percent(number(88.0))
+        .host_memory_cache_miss_percent(number(12.0))
+        .peer_memory_cache_hit_percent(number(91.0))
+        .peer_memory_cache_miss_percent(number(9.0))
+        .dram_memory_cache_hit_percent(number(96.5))
+        .dram_memory_cache_miss_percent(number(3.5))
+        .c2c_raw_tx_bandwidth_gbps(number(420.0))
+        .c2c_raw_rx_bandwidth_gbps(number(418.0))
+        .c2c_data_tx_bandwidth_gbps(number(400.0))
+        .c2c_data_rx_bandwidth_gbps(number(398.0))
+        .sramecc_error_threshold_exceeded(false);
+    // Captured firmware advertises v1_4_0 while including later C2C/cache fields.
+    let mut document = redfish::oem::object(
+        "#NvidiaProcessorMetrics.v1_4_0.NvidiaGPUProcessorMetrics",
+        model,
+    );
+    // The capture capitalizes JPG, whereas CSDL spells this property NVJpg.
+    let fields = document.as_object_mut().expect("OEM model is an object");
+    let jpg = fields
+        .remove("NVJpgUtilizationPercent")
+        .expect("generated JPG metric");
+    fields.insert("NVJPGUtilizationPercent".to_string(), jpg);
+    document
 }
 
 #[cfg(test)]
@@ -261,7 +252,9 @@ mod tests {
 
     fn test_identity() -> GpuIdentity<'static> {
         GpuIdentity {
-            uuid: "beea8cdf-7b7d-035c-ed07-360e311fcbe1",
+            uuid: "beea8cdf-7b7d-035c-ed07-360e311fcbe1"
+                .parse()
+                .expect("fixture GPU UUID"),
             serial_number: "1655023015625",
             model: "H100 80GB HBM3",
         }
@@ -327,5 +320,27 @@ mod tests {
         assert_eq!(oem["SMActivityPercent"], 62.5);
         // ...and one that only the GPU shape declares.
         assert_eq!(oem["C2CDataTxBandwidthGbps"], 400.0);
+        // The firmware spelling must survive serialization through the CSDL model.
+        assert_eq!(oem["NVJPGUtilizationPercent"].as_f64(), Some(0.0));
+        assert!(oem.get("NVJpgUtilizationPercent").is_none());
+    }
+
+    #[test]
+    fn gpu_processor_can_report_mnnvlink_topology() {
+        let processor = gpu(
+            "HGX_Baseboard_0",
+            "GPU_0",
+            "/redfish/v1/Chassis/HGX_GPU_0/Sensors/Voltage_1",
+            &test_identity(),
+        )
+        .with_mnnvlink_topology(26, 16);
+
+        assert_eq!(
+            processor.to_json()["Oem"]["Nvidia"]["MNNVLinkTopology"],
+            serde_json::json!({
+                "TraySlotNumber": 26,
+                "TraySlotIndex": 16
+            })
+        );
     }
 }

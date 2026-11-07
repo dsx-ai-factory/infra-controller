@@ -159,9 +159,13 @@ type JwksConfig struct {
 
 	ClaimMappings []ClaimMapping // org/role mapping configuration
 
-	// ServiceAccount enables client credentials flow (Keycloak only).
-	// For custom issuers, use ClaimMapping.IsServiceAccount instead.
+	// ServiceAccount treats client credentials tokens holding every ServiceAccountRoles role in an
+	// org listed in ServiceAccountOrgs as service accounts for that org (Keycloak only). For custom
+	// issuers, use ClaimMapping.IsServiceAccount instead.
 	ServiceAccount bool
+
+	// ServiceAccountOrgs lists the only orgs whose clients can be service accounts (Keycloak only).
+	ServiceAccountOrgs []string
 
 	// ReservedOrgNames prevents dynamic org mappings from claiming statically-configured org names.
 	// Populated by nico-rest-api during initialization.
@@ -330,7 +334,9 @@ func (jcfg *JwksConfig) ValidateToken(authHeader string, claims jwt.Claims) (*jw
 		"EdDSA", // Ed25519/Ed448
 	}
 
-	jwtParser := jwt.NewParser(jwt.WithValidMethods(allCommonAlgorithms))
+	// Require exp, which golang-jwt treats as optional by default. A signed
+	// token without it would stay valid until its signing key is rotated out.
+	jwtParser := jwt.NewParser(jwt.WithValidMethods(allCommonAlgorithms), jwt.WithExpirationRequired())
 
 	token, err := jwtParser.ParseWithClaims(authHeader, claims, jcfg.getPublicKey)
 	if err != nil {
@@ -540,7 +546,7 @@ func (jcfg *JwksConfig) GetSubjectPrefix() string {
 
 // hasAnyAudience checks if the token has any of the configured audiences.
 func (jcfg *JwksConfig) hasAnyAudience(claims jwt.MapClaims, audiences []string) bool {
-	if audiences == nil || len(audiences) == 0 {
+	if len(audiences) == 0 {
 		return true
 	}
 

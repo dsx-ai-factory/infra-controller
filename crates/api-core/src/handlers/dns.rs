@@ -49,7 +49,8 @@ struct HeldAuthority {
 /// The candidates are the qname's own label suffixes, so `gpu.mysite.example.com`
 /// can only match `gpu.mysite.example.com`, `mysite.example.com`,
 /// `example.com`, or `com`, never `notmysite.example.com`. One query returns
-/// the longest live `domains` row among them. Returns `None` if none match.
+/// the longest live infrastructure domain among them, excluding VPC-owned
+/// rows. Returns `None` if no infrastructure domain matches.
 async fn find_site_authority(
     db: impl DbReader<'_>,
     qname: &Fqdn,

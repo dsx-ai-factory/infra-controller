@@ -28,8 +28,8 @@ import (
 // this interface.
 type InventoryTargetSource interface {
 	GetRackByIdentifier(ctx context.Context, identifier identifier.Identifier, withComponents bool) (*rack.Rack, error)
-	GetRacksForNVLDomain(ctx context.Context, domainIdentifier identifier.Identifier) ([]*rack.Rack, error)
-	GetListOfRacks(ctx context.Context, info dbquery.StringQueryInfo, manufacturerFilter *dbquery.StringQueryInfo, modelFilter *dbquery.StringQueryInfo, pagination *dbquery.Pagination, orderBy *dbquery.OrderBy, withComponents bool) ([]*rack.Rack, int32, error)
+	GetRacksForNVLDomain(ctx context.Context, domainIdentifier identifier.Identifier, withComponents bool) ([]*rack.Rack, error)
+	GetListOfRacks(ctx context.Context, info dbquery.StringQueryInfo, manufacturerFilter *dbquery.StringQueryInfo, modelFilter *dbquery.StringQueryInfo, pagination *dbquery.Pagination, orderBy *dbquery.OrderBy, withComponents, withExternalIDOnly bool) ([]*rack.Rack, int32, error)
 	GetComponentByID(ctx context.Context, id uuid.UUID) (*inventorycomponent.Component, error)
 	GetComponentByBMCMAC(ctx context.Context, macAddress string) (*inventorycomponent.Component, error)
 	GetComponentsByExternalIDs(ctx context.Context, externalIDs []string) ([]*inventorycomponent.Component, error)
@@ -90,6 +90,7 @@ func (l *InventoryTargetLookup) TargetsFromDefaultScope(
 			},
 			nil,
 			true,
+			false,
 		)
 		if err != nil {
 			return nil, err

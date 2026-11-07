@@ -143,15 +143,15 @@ The following invariants apply to every fabric.
   has applied the desired configuration before the instance is marked `Ready`.
   Tenants observe this as the `Configuring` tenant state, and the machine
   remains in `WaitingForNetworkConfig` until the DPU reports back.
-- **Termination blocks on isolation convergence.** During termination, the
-  state machine waits until every fabric reports that the host has been
-  removed from all tenant partitions before the instance is reported as
-  deleted. This guarantees a terminated instance cannot continue to exchange
-  traffic on any fabric.
-- **Force-delete still tears down fabric state.** Force-deleting a managed
-  host explicitly detaches it from every fabric through the same external
-  APIs the normal lifecycle uses, so external fabric managers do not retain
-  stale tenant references.
+- **Normal release waits for DPU confirmation.** The controller waits for the
+  DPUs to return to the admin network before deleting the instance record.
+  This is not confirmation from every fabric; refer to
+  [network cleanup](../operations/tenant-lifecycle-cleanup.md#network-cleanup-between-tenants).
+- **Force deletion does not wait for DPUs by default.** It requests external
+  fabric cleanup, including InfiniBand port unbinding. This does not confirm
+  that a DPU has stopped forwarding tenant traffic. Refer to the
+  [Force Delete playbook](../playbooks/force_delete.md#optional-dpu-acknowledgement-wait)
+  for the optional wait and its limits.
 - **External fabric reachability is monitored.** Each external fabric service
   (UFM and NMX-C) is monitored from NICo with request-success and latency
   metrics so that fabric-side outages can be distinguished from NICo-side

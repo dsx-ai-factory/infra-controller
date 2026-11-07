@@ -580,7 +580,6 @@ struct MachineAnalysis {
 }
 
 /// Helper function to get BMC IP and MAC address from machine_id
-#[allow(deprecated)]
 async fn get_bmc_ip_from_host_id(
     api_client: &ApiClient,
     host_id: &str,
@@ -593,26 +592,23 @@ async fn get_bmc_ip_from_host_id(
     // Get machine details from API
     let machine = api_client.get_machine(machine_id).await?;
 
-    // Extract BMC info
-    let bmc_info = machine.bmc_info.ok_or_else(|| {
+    // Extract the BMC endpoint
+    let endpoint = crate::bmc::endpoint(&machine).ok_or_else(|| {
         CarbideCliError::GenericError(format!(
-            "Machine {} does not have BMC info available",
+            "Machine {} does not have BMC endpoint available",
             host_id
         ))
     })?;
 
     // Extract BMC IP (required)
-    let bmc_ip = bmc_info.ip.ok_or_else(|| {
+    let bmc_ip = endpoint.ip.ok_or_else(|| {
         CarbideCliError::GenericError(format!(
             "Machine {} does not have BMC IP address available",
             host_id
         ))
     })?;
 
-    // Extract BMC MAC (optional)
-    let bmc_mac = bmc_info.mac;
-
-    Ok((bmc_ip, bmc_mac))
+    Ok((bmc_ip.to_owned(), endpoint.mac.map(str::to_owned)))
 }
 
 /// Fetch Site Controller Details (Redfish exploration + credentials)
@@ -620,7 +616,10 @@ async fn get_site_controller_analysis(
     api_client: &ApiClient,
     host_id: &str,
 ) -> CarbideCliResult<SiteControllerAnalysis> {
-    println!("   Fetching BMC information for machine {}...", host_id);
+    println!(
+        "   Fetching BMC endpoint details for machine {}...",
+        host_id
+    );
 
     // Step 1: Get BMC IP and MAC from machine_id
     let (bmc_ip, bmc_mac) = get_bmc_ip_from_host_id(api_client, host_id).await?;
@@ -1588,8 +1587,8 @@ impl<'a> ZipBundleCreator<'a> {
 
         let report = &analysis.exploration_report;
 
-        // Format BMC information
-        let bmc_info = json!({
+        // Format BMC endpoint details
+        let bmc_endpoint = json!({
             "ip": analysis.bmc_ip,
             "mac": analysis.bmc_mac,
         });
@@ -1683,7 +1682,7 @@ impl<'a> ZipBundleCreator<'a> {
         // Create final JSON structure
         let json_output = json!({
             "host_id": self.config.host_id,
-            "bmc": bmc_info,
+            "bmc": bmc_endpoint,
             "credentials": credentials_info,
             "redfish_exploration": redfish_exploration_info,
         });
@@ -1699,7 +1698,6 @@ impl<'a> ZipBundleCreator<'a> {
         Ok(())
     }
 
-    #[allow(deprecated)]
     fn add_machine_analysis_json(
         &self,
         zip: &mut ZipWriter<File>,
@@ -1711,6 +1709,7 @@ impl<'a> ZipBundleCreator<'a> {
         })?;
 
         let machine = &analysis.machine;
+        let status = machine.status.as_ref();
 
         // Format SLA information
         let sla_info = machine.state_sla.as_ref().map(|sla| {
@@ -1734,18 +1733,18 @@ impl<'a> ZipBundleCreator<'a> {
 
         // Format reboot information
         let reboot_info = json!({
-            "last_reboot_time": machine.last_reboot_time.as_ref().map(|ts| {
+            "last_reboot_time": status.and_then(|status| status.last_reboot_time.as_ref()).map(|ts| {
                 DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
                     .map(|dt| dt.to_rfc3339())
                     .unwrap_or_else(|| ts.seconds.to_string())
             }),
             "last_reboot_requested": {
-                "time": machine.last_reboot_requested_time.as_ref().map(|ts| {
+                "time": status.and_then(|status| status.last_reboot_requested_time.as_ref()).map(|ts| {
                     DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
                         .map(|dt| dt.to_rfc3339())
                         .unwrap_or_else(|| ts.seconds.to_string())
                 }),
-                "mode": &machine.last_reboot_requested_mode,
+                "mode": status.and_then(|status| status.last_reboot_requested_mode.as_ref()),
             }
         });
 
@@ -1786,7 +1785,7 @@ impl<'a> ZipBundleCreator<'a> {
             },
             "sla": sla_info,
             "controller_state": controller_state,
-            "failure_details": machine.failure_details,
+            "failure_details": status.and_then(|status| status.failure_details.as_ref()),
             "reboot_information": reboot_info,
             "validation_results": validation_info,
         });
@@ -1803,7 +1802,6 @@ impl<'a> ZipBundleCreator<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[allow(deprecated)]
     fn add_metadata(
         &self,
         zip: &mut ZipWriter<File>,
@@ -1962,7 +1960,12 @@ impl<'a> ZipBundleCreator<'a> {
             }
         }
 
-        if machine_analysis.machine.failure_details.is_some() {
+        if machine_analysis
+            .machine
+            .status
+            .as_ref()
+            .is_some_and(|status| status.failure_details.is_some())
+        {
             writeln!(zip, "  WARNING: Has Failure Details: Yes")?;
         }
 

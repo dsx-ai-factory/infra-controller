@@ -9,7 +9,6 @@ import (
 	"os"
 
 	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
-	"github.com/getsentry/sentry-go"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
@@ -23,9 +22,11 @@ const (
 type Options struct {
 	Addr         string
 	InsecureAddr string
-	DNSName      string
-	CABaseDNS    string
-	sentryDSN    string
+	// DNSNames are the hostnames the TLS listener's certificate must match.
+	// Every name clients dial has to appear here, because hostname
+	// verification only consults the certificate's SANs.
+	DNSNames  []string
+	CABaseDNS string
 }
 
 // Server defines a server
@@ -65,12 +66,6 @@ func NewServerWithIssuer(ctx context.Context, o Options, certIssuer CertificateI
 	insec.Path("/v1/pki/ca/pem").Handler(s.PKICACertificateHandler(ctx)).Methods("GET")
 	s.insecService = insec
 
-	if o.sentryDSN != "" {
-		sentry.Init(sentry.ClientOptions{
-			Dsn:   o.sentryDSN,
-			Debug: true,
-		})
-	}
 	return s, nil
 }
 
@@ -91,13 +86,26 @@ func (s *Server) Start(ctx context.Context) {
 	}
 }
 
+// Done returns a channel closed once both HTTP services have stopped serving.
+func (s *Server) Done() <-chan struct{} {
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		<-s.appService.Done()
+		<-s.insecService.Done()
+	}()
+
+	return done
+}
+
 // PKICACertificateHandler returns pkiCACertificateHandler
 func (s *Server) PKICACertificateHandler(_ context.Context) http.Handler {
 	h := &pkiCACertificateHandler{
 		certificateIssuer: s.certificateIssuer,
 	}
 
-	return s.withWraps(h, "ccm-get-ca")
+	return otelhttp.NewHandler(h, "ccm-get-ca")
 }
 
 // PKICloudCertificateHandler returns pkiCloudCertificateHandler
@@ -106,12 +114,12 @@ func (s *Server) PKICloudCertificateHandler(_ context.Context) http.Handler {
 		certificateIssuer: s.certificateIssuer,
 	}
 
-	return s.withWraps(h, "ccm-get-cert")
+	return otelhttp.NewHandler(h, "ccm-get-cert")
 }
 
 func (s *Server) tlsSetup(ctx context.Context) error {
 	i := s.certificateIssuer
-	cert, key, err := i.RawCertificate(ctx, s.DNSName, svcTTL)
+	cert, key, err := i.RawCertificate(ctx, s.DNSNames, svcTTL)
 	if err != nil {
 		return err
 	}
@@ -127,14 +135,4 @@ func (s *Server) tlsSetup(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-// withWraps applies the required wrappers to the handlers
-func (s *Server) withWraps(h http.Handler, oper string) http.Handler {
-	oh := otelhttp.NewHandler(h, oper)
-	if s.sentryDSN != "" {
-		return &sentryWrap{h: oh}
-	}
-
-	return oh
 }

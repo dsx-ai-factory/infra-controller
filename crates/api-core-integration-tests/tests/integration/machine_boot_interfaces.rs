@@ -66,7 +66,7 @@ async fn test_expected_machine_selection_source_survives_ingestion(
         .with_dpus(vec![dpu])
         .with_expected_machine_data(ExpectedMachineData {
             interfaces: vec![ExpectedInterface {
-                mac_address: declared_primary,
+                mac_address: Some(declared_primary),
                 primary: Some(true),
                 ..Default::default()
             }],
@@ -148,7 +148,7 @@ async fn test_get_machine_boot_interfaces_gathers_all_four_stores(
                 machine_id: &host_id,
                 mac_address: predicted_mac,
                 expected_network_segment_type: NetworkSegmentType::HostInband,
-                boot_interface_id: Some("NIC.Predicted.1-1-1".to_string()),
+                boot_interface_id: Some("NIC.Predicted.1-1-1"),
                 primary_interface: true,
             },
             txn.as_mut(),
