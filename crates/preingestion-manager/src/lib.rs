@@ -428,10 +428,28 @@ async fn one_endpoint(
         }
         // The work list returns this endpoint again only once the explorer has
         // written the refreshed report it asked for: decide on that report.
-        PreingestionState::FirmwareCheckRefreshWait => {
-            static_info
-                .check_firmware_versions_below_preingestion(db, endpoint, false)
-                .await?
+        PreingestionState::FirmwareCheckRefreshWait { requested_at } => {
+            if let Some(requested_at) = requested_at
+                && let Some(probe_started_at) = endpoint.report.probe_started_at
+                && probe_started_at < *requested_at
+            {
+                tracing::debug!(
+                    bmc_ip_address = %endpoint.address,
+                    %requested_at,
+                    %probe_started_at,
+                    "The report was probed before the firmware check asked for a refresh; waiting for a later probe"
+                );
+                db.with_txn(|txn| {
+                    db::explored_endpoints::set_waiting_for_explorer_refresh(endpoint.address, txn)
+                        .boxed()
+                })
+                .await??;
+                false
+            } else {
+                static_info
+                    .check_firmware_versions_below_preingestion(db, endpoint, false)
+                    .await?
+            }
         }
         PreingestionState::RecheckVersionsAfterFailure { .. } => {
             static_info

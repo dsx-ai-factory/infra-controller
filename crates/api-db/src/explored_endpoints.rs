@@ -811,7 +811,10 @@ pub async fn set_preingestion_firmware_check_refresh_wait(
     address: IpAddr,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
-    set_preingestion(address, PreingestionState::FirmwareCheckRefreshWait, txn).await
+    let state = PreingestionState::FirmwareCheckRefreshWait {
+        requested_at: Some(chrono::Utc::now()),
+    };
+    set_preingestion(address, state, txn).await
 }
 
 pub async fn set_preingestion_recheck_versions_reason(

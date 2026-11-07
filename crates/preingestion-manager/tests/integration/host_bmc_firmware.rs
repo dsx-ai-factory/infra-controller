@@ -198,11 +198,16 @@ async fn test_preingestion_defers_once_on_an_incomplete_report(
             txn.commit().await?;
             continue;
         }
-        assert_eq!(
-            deferred.preingestion_state,
-            PreingestionState::FirmwareCheckRefreshWait,
-            "{}: state after deferral",
-            case.scenario
+        assert!(
+            matches!(
+                deferred.preingestion_state,
+                PreingestionState::FirmwareCheckRefreshWait {
+                    requested_at: Some(_)
+                }
+            ),
+            "{}: state after deferral, got {:?}",
+            case.scenario,
+            deferred.preingestion_state
         );
         assert!(
             deferred.waiting_for_explorer_refresh,
@@ -275,6 +280,141 @@ async fn test_preingestion_defers_once_on_an_incomplete_report(
         }
         txn.commit().await?;
     }
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_preingestion_refresh_wait_ignores_a_report_probed_before_the_request(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let domain = env.test_domain().await;
+    let nc = env.network_controller();
+    let underlay_segment = nc.create_underlay_segment(&domain).await;
+    let config = default_config::get();
+
+    let mgr = PreingestionManager::new(
+        pool.clone(),
+        config.preingestion_manager(),
+        Arc::new(RedfishSim::default()),
+        env.test_meter.meter(),
+        None,
+        None,
+        None,
+        env.api().work_lock_manager_handle(),
+        config.ntp_servers.clone(),
+    );
+
+    let response = env
+        .api()
+        .discover_dhcp(
+            DhcpDiscovery::builder("b8:3f:d2:90:97:a8", underlay_segment.relay_address)
+                .vendor_string("iDRac")
+                .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let addr = response.address.as_str();
+    let address = IpAddr::from_str(addr)?;
+
+    let mut txn = pool.begin().await?;
+    db::explored_endpoints::delete(&mut txn, address).await?;
+    common::insert_endpoint_version(&mut txn, addr, "4.9", "1.13.2", false).await?;
+    let inserted = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+        .await?
+        .remove(0);
+    let mut report = inserted.report.clone();
+    report.service[0].inventories[0].version = None;
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            address,
+            inserted.report_version,
+            &report,
+            false,
+            &mut txn
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await?;
+
+    mgr.run_single_iteration().await?;
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await?;
+    let deferred = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+        .await?
+        .remove(0);
+    let PreingestionState::FirmwareCheckRefreshWait {
+        requested_at: Some(requested_at),
+    } = deferred.preingestion_state
+    else {
+        panic!(
+            "expected a refresh wait stamped with its request time, got {:?}",
+            deferred.preingestion_state
+        );
+    };
+
+    let mut stale = deferred.report.clone();
+    stale.probe_started_at = Some(requested_at - chrono::TimeDelta::seconds(30));
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            address,
+            deferred.report_version,
+            &stale,
+            false,
+            &mut txn
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await?;
+
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await?;
+    let still_waiting = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+        .await?
+        .remove(0);
+    assert_eq!(
+        still_waiting.preingestion_state,
+        PreingestionState::FirmwareCheckRefreshWait {
+            requested_at: Some(requested_at)
+        },
+        "a report probed before the request keeps the wait and its request time"
+    );
+    assert!(
+        still_waiting.waiting_for_explorer_refresh,
+        "the wait is raised again for a later probe"
+    );
+
+    let mut fresh = still_waiting.report.clone();
+    fresh.probe_started_at = Some(requested_at + chrono::TimeDelta::seconds(30));
+    assert_eq!(
+        db::explored_endpoints::try_update(
+            address,
+            still_waiting.report_version,
+            &fresh,
+            false,
+            &mut txn
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await?;
+
+    mgr.run_single_iteration().await?;
+
+    let mut txn = pool.begin().await?;
+    let after = db::explored_endpoints::find_all_by_ip(address, &mut txn)
+        .await?
+        .remove(0);
+    assert_eq!(
+        after.preingestion_state,
+        PreingestionState::Complete,
+        "a report probed after the request is decided on"
+    );
+    txn.commit().await?;
     Ok(())
 }
 

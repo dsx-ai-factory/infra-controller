@@ -188,6 +188,9 @@ pub struct EndpointExplorationReport {
     /// The time it took to explore the endpoint in the last site explorer run
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_exploration_latency: Option<std::time::Duration>,
+    /// When the Redfish probe that produced this report started
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_started_at: Option<DateTime<Utc>>,
     /// Vendor as reported by Redfish
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vendor: Option<bmc_vendor::BMCVendor>,
@@ -699,7 +702,10 @@ pub enum PreingestionState {
     /// model, or a listed component without an inventory entry or version)
     /// and asked the explorer for one refreshed report. The check runs again
     /// on that report and decides on it whatever it says.
-    FirmwareCheckRefreshWait,
+    FirmwareCheckRefreshWait {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested_at: Option<DateTime<Utc>>,
+    },
     TimeSyncReset {
         phase: TimeSyncResetPhase,
         last_time: DateTime<Utc>,
@@ -776,7 +782,7 @@ impl PreingestionState {
             self,
             Self::InitialBMCReset {
                 phase: InitialBmcResetPhase::WaitForExplorerRefresh,
-            } | Self::FirmwareCheckRefreshWait
+            } | Self::FirmwareCheckRefreshWait { .. }
                 | Self::RecheckVersions
                 | Self::NewFirmwareReportedWait { .. }
                 | Self::RecheckVersionsAfterFailure { .. }
@@ -4600,12 +4606,25 @@ mod tests {
     /// as the bare state tag like the other field-less states.
     #[test]
     fn firmware_check_refresh_wait_parks_and_round_trips() {
-        assert!(PreingestionState::FirmwareCheckRefreshWait.parks_for_explorer_refresh());
-        let stored = serde_json::to_string(&PreingestionState::FirmwareCheckRefreshWait).unwrap();
+        let bare = PreingestionState::FirmwareCheckRefreshWait { requested_at: None };
+        assert!(bare.parks_for_explorer_refresh());
+        let stored = serde_json::to_string(&bare).unwrap();
         assert_eq!(stored, r#"{"state":"firmwarecheckrefreshwait"}"#);
         assert_eq!(
             serde_json::from_str::<PreingestionState>(&stored).unwrap(),
-            PreingestionState::FirmwareCheckRefreshWait
+            bare
+        );
+
+        let requested_at = DateTime::parse_from_rfc3339("2026-10-21T02:38:12Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let stamped = PreingestionState::FirmwareCheckRefreshWait {
+            requested_at: Some(requested_at),
+        };
+        let stored = serde_json::to_string(&stamped).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PreingestionState>(&stored).unwrap(),
+            stamped
         );
     }
 
