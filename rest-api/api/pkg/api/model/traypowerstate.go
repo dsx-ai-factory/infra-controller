@@ -182,14 +182,15 @@ type APIPowerAction struct {
 	// Status is `Active` for admitted maintenance (not hardware dispatch), `Pending` for a distinct saved
 	// request without a promise of admission, or `Unknown` for an unrecognized service value.
 	Status APIPowerActionStatus `json:"status"`
-	// Operation is the recorded operation; `Reset` doesn't keep the original graceful, forced or AC-cycle choice.
+	// Operation is the recorded operation; `Reset` includes graceful host reboots and legacy resets.
 	Operation APIPowerActionOperation `json:"operation"`
 	// Requested is the saved submission time (not admission or start time), or nil for legacy admitted
 	// requests without metadata.
 	Requested *time.Time `json:"requested"`
 	// Initiator is the saved initiator, which can be an empty string, or nil when unavailable.
 	Initiator *string `json:"initiator"`
-	// Graceful is set for `PowerOff` only: true is graceful and false is forced.
+	// Graceful is set for `PowerOff` and explicit graceful host reboots (`Reset`, true).
+	// Legacy reset records leave it nil because the original restart mode is unknown.
 	Graceful *bool `json:"graceful"`
 	// ChassisID is the recorded Redfish chassis for `ChassisReset`, otherwise nil.
 	ChassisID *string `json:"chassisId"`

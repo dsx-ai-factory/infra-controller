@@ -41,8 +41,7 @@ use forge_tls::client_config::{
 use mac_address::MacAddress;
 use machine_a_tron::{
     BmcMockRegistry, ControlState, DeviceStatusConfig, DhcpClient, MachineATron, MachineATronArgs,
-    MachineATronConfig, MachineATronContext, SimulatorLifecycle, api_throttler,
-    append_control_routes,
+    MachineATronConfig, MachineATronContext, SimulatorLifecycle, append_control_routes,
 };
 use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use rpc::protos::forge_api_client::ForgeApiClient;
@@ -99,11 +98,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (dhcp_client, dhcp_service) =
         DhcpClient::start(&app_config, forge_api_client.clone().into()).await?;
 
-    let api_throttler = api_throttler::run(
-        tokio::time::interval(Duration::from_secs(2)),
-        forge_api_client.clone().into(),
-    );
-
     let desired_firmware_versions = forge_api_client
         .get_desired_firmware_versions()
         .await?
@@ -154,7 +148,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         forge_client_config,
         bmc_mock_certs_dir,
         bmc_registry,
-        api_throttler,
         desired_firmware_versions: std::sync::RwLock::new(desired_firmware_versions),
         forge_api_client,
         dhcp_client,

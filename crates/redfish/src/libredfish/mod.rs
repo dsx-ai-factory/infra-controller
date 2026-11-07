@@ -1299,6 +1299,7 @@ mod tests {
             RedfishVendor::Dell,
             RedfishVendor::Hpe,
             RedfishVendor::AMI,
+            RedfishVendor::GigaComputingAMI,
         ] {
             assert_eq!(
                 rotate_and_collect_client_vendors(vendor).await,

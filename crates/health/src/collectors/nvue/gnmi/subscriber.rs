@@ -58,6 +58,8 @@ use crate::endpoint::{BmcAddr, BmcCredentials, BmcEndpoint};
 use crate::metrics::CollectorRegistry;
 use crate::sink::{CollectorEvent, DataSink, EventContext};
 
+const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(2);
+
 // gRPC ConnectivityState values for `connection_state`. 0 (UNKNOWN) is the gauge default.
 const IDLE: i64 = 1;
 const CONNECTING: i64 = 2;
@@ -343,6 +345,7 @@ struct GnmiClientProvider {
     switch_connect_host: String,
     port: u16,
     request_timeout: Duration,
+    initial_retry_delay: Duration,
     dangerously_skip_tls_verification: bool,
 
     // Streaming subscriptions build a fresh gNMI client on reconnect, so
@@ -473,8 +476,10 @@ where
 /// before synchronization are processed without extending it. EOF records a
 /// clean server closure, while a timeout or error records a stream failure and
 /// refreshes rejected credentials. Every non-ready exit returns `None` so the
-/// caller can apply reconnect backoff. A returned guard keeps the synchronization
-/// gauge set until that stream ends.
+/// caller can apply reconnect backoff. The helper owns the connection guard
+/// during synchronization and releases it before credential refresh can block.
+/// Success returns the connection and synchronization guards for the caller to
+/// hold until that stream ends; every other exit releases the connection guard.
 async fn await_stream_synchronization<S, F>(
     cancel_token: &CancellationToken,
     responses: &mut SubscriptionResponses<S>,
@@ -483,11 +488,13 @@ async fn await_stream_synchronization<S, F>(
     stream_metrics: &GnmiStreamMetrics,
     diagnostics: StreamDiagnostics<'_>,
     mut process_response: F,
-) -> Option<StreamingConnectionGuard>
+) -> Option<(StreamingConnectionGuard, StreamingConnectionGuard)>
 where
     S: Stream<Item = Result<proto::SubscribeResponse, tonic::Status>> + Unpin,
     F: FnMut(&proto::SubscribeResponse) -> Result<(), tonic::Status>,
 {
+    let connection_guard = StreamingConnectionGuard::inc(stream_metrics.connected.clone());
+
     let receive_until_synchronized = async {
         loop {
             let Some(response) = responses.next().await.transpose()?.flatten() else {
@@ -523,8 +530,9 @@ where
     };
 
     match result {
-        Ok(true) => Some(StreamingConnectionGuard::inc(
-            stream_metrics.synchronized.clone(),
+        Ok(true) => Some((
+            connection_guard,
+            StreamingConnectionGuard::inc(stream_metrics.synchronized.clone()),
         )),
         Ok(false) => {
             stream_metrics.connection_state.set(IDLE);
@@ -535,6 +543,9 @@ where
             stream_metrics.connection_state.set(TRANSIENT_FAILURE);
             stream_metrics.stream_errors_total.inc();
             stream_metrics.reconnections_total.inc();
+
+            // Keep `connected` at zero while the failed stream refreshes credentials.
+            drop(connection_guard);
 
             cancel_token
                 .run_until_cancelled(
@@ -975,6 +986,39 @@ pub(crate) fn spawn_gnmi_collector(
     tls_config: Option<MtlsProfileConfig>,
     retained: &mut GnmiRetainedCache,
 ) -> Result<Collector, HealthError> {
+    spawn_gnmi_collector_with_settings(
+        endpoint,
+        GnmiCollectorSettings {
+            gnmi_config,
+            initial_retry_delay: INITIAL_RETRY_DELAY,
+        },
+        credential_provider,
+        collector_registry,
+        data_sink,
+        tls_config,
+        retained,
+    )
+}
+
+pub(super) struct GnmiCollectorSettings<'a> {
+    pub(super) gnmi_config: &'a NvueGnmiConfig,
+    pub(super) initial_retry_delay: Duration,
+}
+
+pub(super) fn spawn_gnmi_collector_with_settings(
+    endpoint: &BmcEndpoint,
+    settings: GnmiCollectorSettings<'_>,
+    credential_provider: Arc<dyn CredentialProvider>,
+    collector_registry: Arc<CollectorRegistry>,
+    data_sink: Option<Arc<dyn DataSink>>,
+    tls_config: Option<MtlsProfileConfig>,
+    retained: &mut GnmiRetainedCache,
+) -> Result<Collector, HealthError> {
+    let GnmiCollectorSettings {
+        gnmi_config,
+        initial_retry_delay,
+    } = settings;
+
     let switch_id = endpoint.log_identity().into_owned();
 
     let switch_connect_host = endpoint.switch_connect_host_for_uri().into_owned();
@@ -985,6 +1029,7 @@ pub(crate) fn spawn_gnmi_collector(
         switch_connect_host,
         port: gnmi_config.gnmi_port,
         request_timeout: gnmi_config.request_timeout,
+        initial_retry_delay,
         dangerously_skip_tls_verification: gnmi_config.dangerously_skip_tls_verification,
         tls_config,
         credentials: Arc::new(GnmiCredentialCache::new(
@@ -1253,7 +1298,7 @@ async fn gnmi_on_change_task(
 /// Runs opening, initial synchronization, telemetry delivery and reconnects.
 ///
 /// The opener applies each processor's per-attempt reset before telemetry resumes.
-/// Synchronized streams release the RPC and readiness guards before credential refresh.
+/// Connection and synchronization guards are released before credential refresh.
 /// Credential refresh observes cancellation so shutdown does not wait for its timeout.
 async fn run_subscription<S, F, Fut, P>(
     cancel_token: &CancellationToken,
@@ -1270,7 +1315,7 @@ async fn run_subscription<S, F, Fut, P>(
     P: FnMut(&proto::SubscribeResponse) -> Result<bool, tonic::Status>,
 {
     let mut backoff = ExponentialBackoff::new(&BackoffConfig {
-        initial: Duration::from_secs(2),
+        initial: client_provider.initial_retry_delay,
         max: Duration::from_secs(60),
     });
 
@@ -1312,10 +1357,7 @@ async fn run_subscription<S, F, Fut, P>(
                 stream_metrics.connection_state.set(READY);
                 stream_metrics.set_connection_established_timestamp(now_unix_secs());
 
-                let connection_guard =
-                    StreamingConnectionGuard::inc(stream_metrics.connected.clone());
-
-                let Some(synchronization_guard) = await_stream_synchronization(
+                let Some((connection_guard, synchronization_guard)) = await_stream_synchronization(
                     cancel_token,
                     &mut stream,
                     client_provider,
@@ -1508,7 +1550,7 @@ mod tests {
 
     enum ProviderResponse {
         Credentials(BmcCredentials),
-        CredentialsThenPending(BmcCredentials),
+        CredentialsThenPaused(BmcCredentials),
         Error(&'static str),
         Pending,
     }
@@ -1522,6 +1564,7 @@ mod tests {
         calls: AtomicUsize,
         observed_addrs: StdMutex<Vec<BmcAddr>>,
         response: ProviderResponse,
+        resume_refresh: tokio::sync::Notify,
     }
 
     impl RecordingProvider {
@@ -1534,6 +1577,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 observed_addrs: StdMutex::new(Vec::new()),
                 response,
+                resume_refresh: tokio::sync::Notify::new(),
             })
         }
     }
@@ -1548,9 +1592,12 @@ mod tests {
 
             let response = match &self.response {
                 ProviderResponse::Credentials(credentials) => Ok(credentials.clone()),
-                ProviderResponse::CredentialsThenPending(credentials) => {
+                ProviderResponse::CredentialsThenPaused(credentials) => {
                     if previous_calls > 0 {
-                        return Box::pin(std::future::pending());
+                        return Box::pin(async move {
+                            self.resume_refresh.notified().await;
+                            Ok(credentials.clone())
+                        });
                     }
 
                     Ok(credentials.clone())
@@ -1750,6 +1797,7 @@ mod tests {
             switch_connect_host: addr.ip.to_string(),
             port: 9339,
             request_timeout: Duration::from_secs(1),
+            initial_retry_delay: INITIAL_RETRY_DELAY,
             dangerously_skip_tls_verification: false,
             tls_config: None,
             credentials: Arc::new(GnmiCredentialCache::new(provider, addr)),
@@ -1993,7 +2041,13 @@ mod tests {
 
         assert!(result.is_some());
         assert_eq!(processed_updates, 1);
+        assert_eq!(metrics.connected.get(), 1);
         assert_eq!(metrics.synchronized.get(), 1);
+
+        drop(result);
+
+        assert_eq!(metrics.connected.get(), 0);
+        assert_eq!(metrics.synchronized.get(), 0);
     }
 
     #[tokio::test]
@@ -2028,6 +2082,7 @@ mod tests {
 
         assert!(result.is_none());
         assert_eq!(metrics.connection_state.get(), SHUTDOWN);
+        assert_eq!(metrics.connected.get(), 0);
         assert_eq!(metrics.synchronized.get(), 0);
         assert_eq!(metrics.stream_errors_total.get(), 0.0);
         assert_eq!(metrics.reconnections_total.get(), 0.0);
@@ -2260,12 +2315,51 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn startup_auth_refresh_cancels_without_waiting_for_provider_timeout() {
-        for (phase, opening_failure) in [("opening", true), ("pre-sync", false)] {
+    async fn startup_auth_refresh_releases_readiness_before_cancellation_or_recovery() {
+        struct Case {
+            phase: &'static str,
+            opening_failure: bool,
+            status: tonic::Code,
+            recover: bool,
+            expected_errors: f64,
+            expected_attempts: usize,
+            timeout: Duration,
+        }
+
+        for case in [
+            Case {
+                phase: "opening cancellation",
+                opening_failure: true,
+                status: tonic::Code::Unauthenticated,
+                recover: false,
+                expected_errors: 0.0,
+                expected_attempts: 1,
+                timeout: Duration::from_secs(1),
+            },
+            Case {
+                phase: "pre-sync cancellation",
+                opening_failure: false,
+                status: tonic::Code::Unauthenticated,
+                recover: false,
+                expected_errors: 1.0,
+                expected_attempts: 1,
+                timeout: Duration::from_secs(1),
+            },
+            Case {
+                phase: "pre-sync recovery",
+                opening_failure: false,
+                status: tonic::Code::PermissionDenied,
+                recover: true,
+                expected_errors: 1.0,
+                expected_attempts: 2,
+                timeout: Duration::from_secs(15),
+            },
+        ] {
+            let phase = case.phase;
             let cancel_token = CancellationToken::new();
 
             let provider = RecordingProvider::responding_with(
-                ProviderResponse::CredentialsThenPending(BmcCredentials::UsernamePassword {
+                ProviderResponse::CredentialsThenPaused(BmcCredentials::UsernamePassword {
                     username: "admin".to_string(),
                     password: None,
                 }),
@@ -2279,7 +2373,21 @@ mod tests {
                 .await
                 .expect("initial credentials");
 
-            let mut attempts = 0;
+            let attempts = AtomicUsize::new(0);
+            let status = tonic::Status::new(case.status, "expired credentials");
+
+            let (failed_tx, mut failed_stream) = if case.opening_failure {
+                (None, None)
+            } else {
+                let (failed_tx, failed_rx) = tokio::sync::mpsc::channel(1);
+                failed_tx
+                    .try_send(Err(status.clone()))
+                    .expect("initial failure");
+                let stream: TestStream =
+                    Box::pin(tokio_stream::wrappers::ReceiverStream::new(failed_rx));
+                (Some(failed_tx), Some(stream))
+            };
+            let (attempt_tx, mut attempt_rx) = tokio::sync::mpsc::channel(2);
 
             let run = run_subscription(
                 &cancel_token,
@@ -2293,18 +2401,34 @@ mod tests {
                 },
                 None,
                 || {
-                    attempts += 1;
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                    attempt_tx.try_send(()).expect("subscription attempt");
 
-                    let status = tonic::Status::unauthenticated("expired credentials");
+                    let result = if attempt > 1 {
+                        let (_, refreshed_generation) = client_provider
+                            .credentials
+                            .cached_credentials()
+                            .expect("credential cache lock")
+                            .expect("refreshed credentials");
+                        assert_eq!(refreshed_generation, generation + 1, "{phase}");
 
-                    let result = if opening_failure {
+                        let stream: TestStream = Box::pin(
+                            tokio_stream::once(Ok(proto::SubscribeResponse {
+                                response: Some(proto::subscribe_response::Response::SyncResponse(
+                                    true,
+                                )),
+                                ..Default::default()
+                            }))
+                            .chain(tokio_stream::pending()),
+                        );
+                        Ok((stream, refreshed_generation))
+                    } else if case.opening_failure {
                         Err(GnmiStreamOpenError {
-                            error: HealthError::GnmiStatus(status),
+                            error: HealthError::GnmiStatus(status.clone()),
                             credential_generation: Some(generation),
                         })
                     } else {
-                        let stream: TestStream = Box::pin(tokio_stream::once(Err(status)));
-                        Ok((stream, generation))
+                        Ok((failed_stream.take().expect("failed stream"), generation))
                     };
 
                     std::future::ready(result)
@@ -2312,23 +2436,72 @@ mod tests {
                 |_| Ok(false),
             );
 
-            let cancel_during_refresh = async {
+            let drive_refresh = async {
                 wait_for_stream_condition(|| provider.calls.load(Ordering::SeqCst) == 2).await;
+                attempt_rx.recv().await.expect("initial subscription");
+
+                if case.recover {
+                    // Cross the first 2–4s backoff while credentials remain blocked.
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+
+                assert!(
+                    matches!(
+                        attempt_rx.try_recv(),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    ),
+                    "{phase} must wait for credential refresh before reconnecting",
+                );
+                assert_eq!(attempts.load(Ordering::SeqCst), 1, "{phase} during refresh");
+
+                assert_eq!(metrics.connection_state.get(), TRANSIENT_FAILURE, "{phase}");
+                assert_eq!(metrics.connected.get(), 0, "{phase} during refresh");
+                assert_eq!(metrics.synchronized.get(), 0, "{phase} during refresh");
+                assert_eq!(metrics.reconnections_total.get(), 1.0, "{phase}");
+                assert_eq!(
+                    metrics.stream_errors_total.get(),
+                    case.expected_errors,
+                    "{phase}",
+                );
+
+                if let Some(failed_tx) = &failed_tx {
+                    assert!(failed_tx.is_closed(), "{phase} must release failed RPC");
+                }
+
+                if case.recover {
+                    provider.resume_refresh.notify_one();
+                    attempt_rx.recv().await.expect("replacement subscription");
+                    wait_for_stream_condition(|| metrics.synchronized.get() == 1).await;
+                    assert_eq!(metrics.connection_state.get(), READY, "{phase}");
+                    assert_eq!(metrics.connected.get(), 1, "{phase}");
+                    assert_eq!(metrics.reconnections_total.get(), 1.0, "{phase}");
+                    assert_eq!(
+                        metrics.stream_errors_total.get(),
+                        case.expected_errors,
+                        "{phase}",
+                    );
+                }
 
                 cancel_token.cancel();
             };
 
-            tokio::time::timeout(Duration::from_secs(1), async {
-                tokio::join!(run, cancel_during_refresh);
+            // Recovery covers 5s blocked refresh, a backoff under 4s, and observations.
+            // Cancellation rows must finish within 1s.
+            tokio::time::timeout(case.timeout, async {
+                tokio::join!(run, drive_refresh);
             })
             .await
-            .unwrap_or_else(|_| panic!("{phase} refresh must not delay shutdown"));
+            .unwrap_or_else(|_| panic!("{phase} refresh must permit recovery and prompt shutdown"));
 
             assert_eq!(metrics.connection_state.get(), SHUTDOWN, "{phase}");
             assert_eq!(metrics.connected.get(), 0, "{phase}");
             assert_eq!(metrics.synchronized.get(), 0, "{phase}");
             assert_eq!(provider.calls.load(Ordering::SeqCst), 2, "{phase}");
-            assert_eq!(attempts, 1, "no retry after cancelling {phase} refresh");
+            assert_eq!(
+                attempts.load(Ordering::SeqCst),
+                case.expected_attempts,
+                "{phase} attempts",
+            );
         }
     }
 
@@ -2344,7 +2517,7 @@ mod tests {
             let cancel_token = CancellationToken::new();
 
             let provider = RecordingProvider::responding_with(
-                ProviderResponse::CredentialsThenPending(BmcCredentials::UsernamePassword {
+                ProviderResponse::CredentialsThenPaused(BmcCredentials::UsernamePassword {
                     username: "nvos-admin".to_string(),
                     password: None,
                 }),
@@ -2458,7 +2631,15 @@ mod tests {
                 cancel_token.cancel();
             };
 
-            tokio::join!(run, observe);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::join!(run, observe);
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "post-sync {diagnostic_stream:?} failure {code:?} must permit retry or cancellation"
+                )
+            });
 
             assert_eq!(metrics.connection_state.get(), SHUTDOWN);
             assert_eq!(metrics.connected.get(), 0);
@@ -2547,7 +2728,11 @@ mod tests {
             cancel_token.cancel();
         };
 
-        tokio::join!(run_primary, run_leak, observe);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(run_primary, run_leak, observe);
+        })
+        .await
+        .expect("unsupported leak stream must retry and both streams must shut down");
 
         assert_eq!(primary_metrics.connection_state.get(), SHUTDOWN);
         assert_eq!(leak_metrics.connection_state.get(), SHUTDOWN);

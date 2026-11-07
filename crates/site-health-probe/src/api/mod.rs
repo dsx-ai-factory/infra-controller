@@ -347,8 +347,8 @@ fn parse_query<T: serde::de::DeserializeOwned>(query: &str) -> Result<T, ApiErro
 }
 
 /// Whether the snapshot can answer the filter's needs: REST totals only
-/// where they exist. No snapshot has allocatability or update eligibility
-/// until the probe reads the compact host read.
+/// where they exist, and allocatability and update eligibility only from
+/// hosts read with the compact host read, when every host has the answer.
 fn check_needs(needs: &[Need], snap: &dyn AnySnapshot) -> Result<(), ApiError> {
     for need in needs {
         match need {
@@ -371,7 +371,18 @@ fn check_needs(needs: &[Need], snap: &dyn AnySnapshot) -> Result<(), ApiError> {
                 }
             }
             Need::CompactHostRead(field) => {
-                return Err(FilterError::compact_host_read(field).into());
+                let Some(data) = units_of(snap).filter(|data| data.compact_host_read) else {
+                    return Err(FilterError::compact_host_read(field).into());
+                };
+                // Snapshot-wide, as `host_predicates_known` publishes it,
+                // also for a query that names hosts.
+                if !data.host_predicate_known(field) {
+                    return Err(ApiError::unprocessable(
+                        ErrorCode::FieldUnavailable,
+                        Some(field),
+                        format!("{field} is unknown for a host: nico-api sent it no answer"),
+                    ));
+                }
             }
         }
     }

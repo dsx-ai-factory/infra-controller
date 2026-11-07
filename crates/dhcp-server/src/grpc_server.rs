@@ -22,9 +22,9 @@ use carbide_rpc_utils::dhcp::{
     DhcpConfig as ModelDhcpConfig, DhcpTimestamps, DhcpTimestampsFilePath,
     HostConfig as ModelHostConfig, InterfaceInfo as ModelInterfaceInfo,
     InterfaceInfoV6 as ModelInterfaceInfoV6, ServiceConfig as ModelServiceConfig,
-    ServiceInterfaceReservations as ModelServiceInterfaceReservations,
-    ServiceLink as ModelServiceLink, ServiceLinkV4 as ModelServiceLinkV4,
-    ServiceLinkV6 as ModelServiceLinkV6, ServiceReservation as ModelServiceReservation,
+    ServiceDhcpInterfaceReservations as ModelServiceDhcpInterfaceReservations,
+    ServiceDhcpReservation as ModelServiceDhcpReservation, ServiceLink as ModelServiceLink,
+    ServiceLinkV4 as ModelServiceLinkV4, ServiceLinkV6 as ModelServiceLinkV6,
 };
 use carbide_uuid::machine::MachineInterfaceId;
 use tokio::sync::{mpsc, oneshot};
@@ -235,7 +235,7 @@ impl TryFrom<proto::ServiceLinkV6> for ModelServiceLinkV6 {
     }
 }
 
-impl TryFrom<proto::ServiceReservation> for ModelServiceReservation {
+impl TryFrom<proto::ServiceReservation> for ModelServiceDhcpReservation {
     type Error = DhcpError;
 
     /// Converts stable service identity and requires one explicit address-family link so incomplete
@@ -282,7 +282,7 @@ impl TryFrom<proto::ServiceConfig> for ModelServiceConfig {
             .interfaces
             .into_iter()
             .map(|group| {
-                Ok(ModelServiceInterfaceReservations {
+                Ok(ModelServiceDhcpInterfaceReservations {
                     receiving_interface: group.receiving_interface,
                     reservations: group
                         .reservations

@@ -28,10 +28,12 @@ use std::time::{Duration, Instant};
 use carbide_instrument::{Event, LabelValue, MetricFamily, emit};
 use eyre::{Report, WrapErr, eyre};
 use futures_util::StreamExt;
+use model::firmware::loggable_url;
 use reqwest_middleware::ClientWithMiddleware as Client;
 use reqwest_tracing::ReqwestOtelSpanBackend;
 use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing::instrument::WithSubscriber;
 
@@ -100,7 +102,8 @@ pub(crate) enum DownloadOutcome {
     /// The server answered, but with a non-success HTTP status.
     Status,
     /// The response body failed, exceeded its byte limit, or reached a read or
-    /// whole-request deadline. Local copy failures also use this existing label.
+    /// whole-request deadline. Local copy failures and managed-cache cancellation
+    /// also use this existing label.
     Transfer,
     /// The downloaded artifact failed SHA-256 verification.
     Checksum,
@@ -218,19 +221,6 @@ pub(crate) enum DownloadFinished {
     },
 }
 
-/// `loggable_url` removes userinfo, query parameters, and fragments from
-/// artifact URLs before they reach logs or operator-visible errors.
-pub(crate) fn loggable_url(url: &str) -> String {
-    let Ok(url) = url::Url::parse(url) else {
-        return "<invalid firmware URL>".to_string();
-    };
-    format!(
-        "{}{}",
-        &url[..url::Position::BeforeUsername],
-        &url[url::Position::BeforeHost..url::Position::AfterPath],
-    )
-}
-
 /// `redacted_error_chain` formats diagnostic sources without changing the typed
 /// errors or exposing the credentials in their URLs.
 fn redacted_error_chain(error: &(dyn Error + 'static)) -> String {
@@ -302,6 +292,44 @@ fn download_client(client: reqwest::Client) -> Client {
     reqwest_middleware::ClientBuilder::new(client)
         .with(reqwest_tracing::TracingMiddleware::<
             FirmwareDownloadSpanBackend,
+        >::new())
+        .build()
+}
+
+struct ManagedFirmwareDownloadSpanBackend;
+impl ReqwestOtelSpanBackend for ManagedFirmwareDownloadSpanBackend {
+    fn on_request_start(
+        request: &reqwest::Request,
+        extensions: &mut http::Extensions,
+    ) -> tracing::Span {
+        reqwest_tracing::DefaultSpanBackend::on_request_start(request, extensions)
+    }
+    fn on_request_end(
+        span: &tracing::Span,
+        result: &reqwest_middleware::Result<reqwest::Response>,
+        _: &mut http::Extensions,
+    ) {
+        match result {
+            Ok(response) => reqwest_tracing::default_on_request_success(span, response),
+            Err(_) => {
+                span.record(reqwest_tracing::OTEL_STATUS_CODE, "ERROR");
+                span.record(
+                    reqwest_tracing::ERROR_MESSAGE,
+                    "managed firmware source request failed",
+                );
+                span.record(
+                    reqwest_tracing::ERROR_CAUSE_CHAIN,
+                    "managed firmware source request failed",
+                );
+            }
+        }
+    }
+}
+
+fn managed_download_client(client: reqwest::Client) -> Client {
+    reqwest_middleware::ClientBuilder::new(client)
+        .with(reqwest_tracing::TracingMiddleware::<
+            ManagedFirmwareDownloadSpanBackend,
         >::new())
         .build()
 }
@@ -416,13 +444,25 @@ impl FirmwareDownloadConfig {
 
     /// Uses reqwest's transport deadlines, including its initial response timer.
     fn client(&self) -> eyre::Result<Client> {
+        self.client_builder()
+            .build()
+            .map(download_client)
+            .wrap_err("unable to initialize firmware download client")
+    }
+
+    fn managed_client(&self) -> eyre::Result<Client> {
+        self.client_builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map(managed_download_client)
+            .wrap_err("unable to initialize managed firmware download client")
+    }
+
+    fn client_builder(&self) -> reqwest::ClientBuilder {
         reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(self.connect_timeout_seconds))
             .read_timeout(Duration::from_secs(self.read_timeout_seconds))
             .timeout(Duration::from_secs(self.request_timeout_seconds))
-            .build()
-            .map(download_client)
-            .wrap_err("unable to initialize firmware download client")
     }
 }
 
@@ -459,6 +499,7 @@ struct FirmwareDownloaderActual {
     // Error of the last failed attempt per file, kept until one caller is told about it.
     failures: HashMap<PathBuf, String>,
     client: Option<Client>,
+    managed_client: Option<Client>,
 }
 
 /// Holds one destination's registration until all filesystem work stops.
@@ -468,6 +509,9 @@ struct DownloadAttempt {
     span: tracing::Span,
     dispatch: tracing::Dispatch,
     max_download_bytes: u64,
+    // The last physical resource reference signals the supervised parent;
+    // that parent still owns joined cleanup and cache accounting settlement.
+    managed: Option<Arc<dyn ManagedDownloadResource>>,
     // Released after destination registration and staged-file cleanup, including
     // blocking work that outlives a cancelled awaiting future.
     _capacity: Arc<OwnedSemaphorePermit>,
@@ -476,7 +520,21 @@ struct DownloadAttempt {
 impl DownloadAttempt {
     /// Restores the initiating context during blocking work and deferred cleanup.
     fn in_scope<T>(&self, operation: impl FnOnce() -> T) -> T {
+        let _panic = PhysicalPanic(self);
         tracing::dispatcher::with_default(&self.dispatch, || self.span.in_scope(operation))
+    }
+}
+
+// A canceled await can no longer observe its blocking JoinError. Record
+// physical unwinding before the last attempt signals completion to its owner.
+struct PhysicalPanic<'a>(&'a DownloadAttempt);
+impl Drop for PhysicalPanic<'_> {
+    fn drop(&mut self) {
+        if std::thread::panicking()
+            && let Some(resource) = &self.0.managed
+        {
+            resource.panicked();
+        }
     }
 }
 
@@ -501,7 +559,9 @@ struct StagedDownload {
 
 impl Drop for StagedDownload {
     fn drop(&mut self) {
-        if self.published {
+        if self.published || self.attempt.managed.is_some() {
+            // Managed cleanup is explicit blocking work joined by the cache
+            // owner, after every physical attempt reference has disappeared.
             return;
         }
         // `attempt` stays alive until after cleanup. A new attempt must not
@@ -526,10 +586,18 @@ impl StagedDownload {
         self,
         mut file: File,
         contents: impl AsRef<[u8]> + Send + 'static,
-    ) -> Result<(Self, File), DownloadError> {
+    ) -> Result<(File, Self), DownloadError> {
         let context = self.attempt.clone();
-        tokio::task::spawn_blocking(move || {
+        let managed = self.attempt.managed.is_some();
+        #[cfg(test)]
+        let resource = self.attempt.managed.clone();
+        let worker = tokio::task::spawn_blocking(move || {
             context.in_scope(|| {
+                #[cfg(test)]
+                if let Some(resource) = &self.attempt.managed {
+                    resource.before_write();
+                }
+
                 // `tokio::fs::File::write_all` can return with a blocking write
                 // still pending. Owning the file and guard here prevents a
                 // cancelled await from releasing capacity before that write ends.
@@ -541,12 +609,20 @@ impl StagedDownload {
                         )
                     })
                     .map_err(fail(DownloadOutcome::Io))?;
-                Ok((self, file))
+                // A cancelled join drops tuple fields in order: close the
+                // descriptor before unlinking and settling cache accounting.
+                Ok((file, self))
             })
-        })
-        .await
-        .wrap_err("firmware write worker failed")
-        .map_err(fail(DownloadOutcome::Io))?
+        });
+        #[cfg(test)]
+        if let Some(resource) = resource {
+            resource.write_queued();
+        }
+        worker
+            .await
+            .map_err(|error| blocking_failure(error, managed))
+            .wrap_err("firmware write worker failed")
+            .map_err(fail(DownloadOutcome::Io))?
     }
 
     /// Transfers cleanup to the checksum worker until its verified file is returned.
@@ -555,6 +631,7 @@ impl StagedDownload {
         // worker owns cleanup and destination registration until verification finishes;
         // only the awaiting owner is allowed to publish the verified file.
         let context = self.attempt.clone();
+        let managed = self.attempt.managed.is_some();
         tokio::task::spawn_blocking(move || {
             context.in_scope(|| {
                 verify_sha256(&self.path, &checksum).map_err(fail(DownloadOutcome::Checksum))?;
@@ -562,6 +639,7 @@ impl StagedDownload {
             })
         })
         .await
+        .map_err(|error| blocking_failure(error, managed))
         .wrap_err("firmware checksum worker failed")
         .map_err(fail(DownloadOutcome::Io))?
     }
@@ -578,24 +656,34 @@ impl FirmwareDownloader {
     /// Clone this value to share its limits. HTTP client initialization is
     /// deferred until needed; initialization failure is reported by `available`.
     pub fn new() -> FirmwareDownloader {
-        Self::from_config(FirmwareDownloadConfig::default(), None)
+        Self::from_config(FirmwareDownloadConfig::default(), None, None)
     }
 
-    /// Validates limits and initializes the HTTP client before any work can be
-    /// admitted. Invalid settings or client initialization errors are returned
+    /// Validates limits and initializes legacy and no-redirect managed clients
+    /// before work is admitted. Invalid settings or initialization errors are returned
     /// to the caller, so service startup can fail before accepting work.
     pub fn with_config(config: FirmwareDownloadConfig) -> eyre::Result<Self> {
         config.validate()?;
         let client = config.client()?;
-        Ok(Self::from_config(config, Some(client)))
+        let managed_client = config.managed_client()?;
+        Ok(Self::from_config(
+            config,
+            Some(client),
+            Some(managed_client),
+        ))
     }
 
-    fn from_config(config: FirmwareDownloadConfig, client: Option<Client>) -> Self {
+    fn from_config(
+        config: FirmwareDownloadConfig,
+        client: Option<Client>,
+        managed_client: Option<Client>,
+    ) -> Self {
         FirmwareDownloader {
             actual: Arc::new(Mutex::new(FirmwareDownloaderActual {
                 downloading: HashSet::new(),
                 failures: HashMap::new(),
                 client,
+                managed_client,
             })),
             capacity: Arc::new(Semaphore::new(config.max_concurrent_downloads)),
             config,
@@ -640,6 +728,7 @@ impl FirmwareDownloader {
                     span: span.clone(),
                     dispatch: dispatch.clone(),
                     max_download_bytes: self.config.max_download_bytes,
+                    managed: None,
                     _capacity: capacity.clone(),
                 }))
             } else {
@@ -735,62 +824,8 @@ impl FirmwareDownloader {
                 let started = Instant::now();
                 let result =
                     download_and_publish(attempt.clone(), &source_url, &client, &sha256).await;
-                let failure = result.err().map(|failure| {
-                    (
-                        failure.outcome,
-                        redacted_error_chain(failure.report.as_ref()),
-                    )
-                });
-                let (took, url, filename) = (
-                    started.elapsed(),
-                    loggable_url(&source_url),
-                    attempt.filename.display().to_string(),
-                );
-                emit(match &failure {
-                    None => DownloadFinished::Ok {
-                        took,
-                        url,
-                        filename,
-                    },
-                    Some((outcome, error)) => {
-                        let error = error.clone();
-                        match outcome {
-                            DownloadOutcome::Ok | DownloadOutcome::Fetch => {
-                                DownloadFinished::Fetch {
-                                    took,
-                                    url,
-                                    filename,
-                                    error,
-                                }
-                            }
-                            DownloadOutcome::Status => DownloadFinished::Status {
-                                took,
-                                url,
-                                filename,
-                                error,
-                            },
-                            DownloadOutcome::Transfer => DownloadFinished::Transfer {
-                                took,
-                                url,
-                                filename,
-                                error,
-                            },
-                            DownloadOutcome::Checksum => DownloadFinished::Checksum {
-                                took,
-                                url,
-                                filename,
-                                error,
-                            },
-                            DownloadOutcome::Io => DownloadFinished::Io {
-                                took,
-                                url,
-                                filename,
-                                error,
-                            },
-                        }
-                    }
-                });
-                if let Some((_, error)) = failure {
+                let failure = record_download_result(&attempt, &source_url, started, result);
+                if let Some(error) = failure {
                     // Record the failure before dropping the registration so
                     // the next caller sees it before starting a retry.
                     attempt
@@ -808,6 +843,183 @@ impl FirmwareDownloader {
     }
 }
 
+/// The last physical reference signals the cache owner to join settlement.
+/// Unwinding is recorded separately because cancellation can drop an awaiting
+/// future before it can observe its blocking worker's JoinError.
+pub(crate) trait ManagedDownloadResource: Send + Sync {
+    fn panicked(&self);
+    #[cfg(test)]
+    fn write_queued(&self) {}
+    #[cfg(test)]
+    fn before_write(&self) {}
+}
+
+/// All owners required to admit one managed physical transfer.
+pub(crate) struct ManagedDownload {
+    pub(crate) filename: PathBuf,
+    pub(crate) source_url: String,
+    pub(crate) checksum: String,
+    pub(crate) capacity: Arc<OwnedSemaphorePermit>,
+    pub(crate) resource: Arc<dyn ManagedDownloadResource>,
+    pub(crate) cancel: CancellationToken,
+}
+
+impl FirmwareDownloader {
+    pub(crate) fn max_download_bytes(&self) -> u64 {
+        self.config.max_download_bytes
+    }
+
+    pub(crate) fn try_capacity(&self) -> Option<OwnedSemaphorePermit> {
+        self.capacity.clone().try_acquire_owned().ok()
+    }
+
+    /// Runs one managed transfer inside the cache's supervised parent. Its
+    /// physical references signal completion separately; the parent retains the
+    /// pool permit through joined blocking cleanup and accounting settlement.
+    pub(crate) async fn managed(&self, download: ManagedDownload) -> Result<(), String> {
+        let ManagedDownload {
+            filename,
+            source_url,
+            checksum,
+            capacity,
+            resource,
+            cancel,
+        } = download;
+        // Managed sources never follow redirects. The legacy client's redirect
+        // policy stays intact; both paths still share the admission semaphore.
+        let (client, attempt) = {
+            let mut state = self
+                .actual
+                .lock()
+                .expect("firmware downloader state mutex poisoned");
+            let client = match &state.managed_client {
+                Some(client) => client.clone(),
+                None => {
+                    let client = self
+                        .config
+                        .managed_client()
+                        .map_err(|error| redacted_error_chain(error.as_ref()))?;
+                    state.managed_client = Some(client.clone());
+                    client
+                }
+            };
+            if !state.downloading.insert(filename.clone()) {
+                return Err("managed firmware destination already has a physical owner".to_owned());
+            }
+            let attempt = Arc::new(DownloadAttempt {
+                actual: self.actual.clone(),
+                filename,
+                span: tracing::Span::current(),
+                dispatch: tracing::dispatcher::get_default(Clone::clone),
+                max_download_bytes: self.config.max_download_bytes,
+                managed: Some(resource),
+                _capacity: capacity,
+            });
+            (client, attempt)
+        };
+        let started = Instant::now();
+        let result = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                Err(fail(DownloadOutcome::Transfer)(eyre!("managed firmware cache cancelled")))
+            },
+            result = download_and_publish(attempt.clone(), &source_url, &client, &checksum) => result,
+        };
+        match record_download_result(&attempt, &source_url, started, result) {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+fn record_download_result(
+    attempt: &DownloadAttempt,
+    source_url: &str,
+    started: Instant,
+    result: Result<(), DownloadError>,
+) -> Option<String> {
+    let failure = result.err().map(|failure| {
+        (
+            failure.outcome,
+            if attempt.managed.is_some() && !matches!(failure.outcome, DownloadOutcome::Io) {
+                managed_failure_category(failure.outcome).to_owned()
+            } else {
+                redacted_error_chain(failure.report.as_ref())
+            },
+        )
+    });
+    let (took, url, filename) = (
+        started.elapsed(),
+        if attempt.managed.is_some() {
+            "managed firmware source".to_owned()
+        } else {
+            loggable_url(source_url)
+        },
+        attempt.filename.display().to_string(),
+    );
+    emit(match &failure {
+        None => DownloadFinished::Ok {
+            took,
+            url,
+            filename,
+        },
+        Some((outcome, error)) => {
+            let error = error.clone();
+            match outcome {
+                DownloadOutcome::Ok | DownloadOutcome::Fetch => DownloadFinished::Fetch {
+                    took,
+                    url,
+                    filename,
+                    error,
+                },
+                DownloadOutcome::Status => DownloadFinished::Status {
+                    took,
+                    url,
+                    filename,
+                    error,
+                },
+                DownloadOutcome::Transfer => DownloadFinished::Transfer {
+                    took,
+                    url,
+                    filename,
+                    error,
+                },
+                DownloadOutcome::Checksum => DownloadFinished::Checksum {
+                    took,
+                    url,
+                    filename,
+                    error,
+                },
+                DownloadOutcome::Io => DownloadFinished::Io {
+                    took,
+                    url,
+                    filename,
+                    error,
+                },
+            }
+        }
+    });
+    failure.map(|(_, error)| error)
+}
+
+fn managed_failure_category(outcome: DownloadOutcome) -> &'static str {
+    match outcome {
+        DownloadOutcome::Ok => "firmware transfer completed",
+        DownloadOutcome::Fetch => "firmware source connection failed",
+        DownloadOutcome::Status => "firmware source returned an unsuccessful HTTP status",
+        DownloadOutcome::Transfer => "firmware body transfer failed or was cancelled",
+        DownloadOutcome::Checksum => "firmware SHA-256 verification failed",
+        DownloadOutcome::Io => "firmware local I/O failed",
+    }
+}
+
+fn blocking_failure(error: tokio::task::JoinError, managed: bool) -> Report {
+    if managed && error.is_panic() {
+        std::panic::resume_unwind(error.into_panic());
+    }
+    Report::new(error)
+}
+
 /// Downloads to the staging file, verifies the artifact against the expected
 /// checksum, and renames it into place. Failures come back tagged with the
 /// bounded cause the metric label uses.
@@ -818,10 +1030,11 @@ async fn download_and_publish(
     sha256: &str,
 ) -> Result<(), DownloadError> {
     let max_download_bytes = attempt.max_download_bytes;
+    let managed = attempt.managed.is_some();
     // File creation and its cleanup guard share one blocking operation. Cancelling
     // the await cannot leave a late-created file behind after cleanup has run.
     let context = attempt.clone();
-    let (staged, file) = tokio::task::spawn_blocking(move || {
+    let (file, staged) = tokio::task::spawn_blocking(move || {
         context.in_scope(|| {
             let dirname = attempt.filename.parent().ok_or_else(|| {
                 fail(DownloadOutcome::Io)(eyre!("firmware destination has no parent directory"))
@@ -839,10 +1052,11 @@ async fn download_and_publish(
             let file = File::create(&staged.path)
                 .wrap_err_with(|| format!("unable to create file {}", staged.path.display()))
                 .map_err(fail(DownloadOutcome::Io))?;
-            Ok::<_, DownloadError>((staged, file))
+            Ok::<_, DownloadError>((file, staged))
         })
     })
     .await
+    .map_err(|error| blocking_failure(error, managed))
     .wrap_err("firmware staging worker failed")
     .map_err(fail(DownloadOutcome::Io))??;
     let staged = download(url, client, staged, file, max_download_bytes).await?;
@@ -968,7 +1182,7 @@ async fn download(
             )));
         }
         downloaded_bytes += segment.len() as u64;
-        (staged, dst_file) = staged.write(dst_file, segment).await?;
+        (dst_file, staged) = staged.write(dst_file, segment).await?;
     }
 
     // Every physical write has completed before verification can open the file.
@@ -976,9 +1190,8 @@ async fn download(
     Ok(staged)
 }
 
-/// Checks if the given filename uses the given checksum. This is not meant to be security,
-/// it's to check against download corruption or retrieving the wrong thing (such as if the vendor changed the URL).
-/// We expect the hardware vendor to have done their own signing to ensure that firmware is not compromised.
+/// Checks content identity when an optional legacy checksum is supplied.
+/// Whitespace and case normalization preserve the legacy configuration contract.
 fn verify_sha256(filename: &Path, checksum: &str) -> Result<(), Report> {
     let checksum = checksum.trim().to_ascii_lowercase();
     if checksum.is_empty() {
@@ -986,11 +1199,17 @@ fn verify_sha256(filename: &Path, checksum: &str) -> Result<(), Report> {
     }
 
     let mut file = std::fs::File::open(filename)?;
+    verify_sha256_file(&mut file, &checksum)
+}
 
+/// Binds bytes to their expected SHA-256 identity and detects corruption. This
+/// is not publisher authentication or a substitute for firmware signatures.
+/// Reads from the file's current position and leaves its cursor at EOF.
+pub(crate) fn verify_sha256_file(file: &mut File, checksum: &str) -> Result<(), Report> {
     let mut context = Sha256::new();
     let mut buffer = [0; 8192];
     loop {
-        let read = std::io::Read::read(&mut file, &mut buffer)?;
+        let read = std::io::Read::read(file, &mut buffer)?;
         if read == 0 {
             break;
         }
@@ -1107,6 +1326,7 @@ mod lifecycle_tests {
             span: tracing::Span::current(),
             dispatch: tracing::dispatcher::get_default(Clone::clone),
             max_download_bytes: downloader.config.max_download_bytes,
+            managed: None,
             _capacity: Arc::new(downloader.capacity.clone().try_acquire_owned().unwrap()),
         })
     }

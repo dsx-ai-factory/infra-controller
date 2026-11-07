@@ -325,10 +325,11 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 	// Get all available Machines for the Instance Type
 	// Since this query is occurring outside of a lock, we will have to double check availability of Machines
 	filterInput := cdbm.MachineFilterInput{
-		InstanceTypeIDs: []uuid.UUID{instanceType.ID},
-		IsAssigned:      cutil.GetPtr(false),
-		Statuses:        []string{cdbm.MachineStatusReady},
-		Labels:          machineLabelSelector,
+		InstanceTypeIDs:               []uuid.UUID{instanceType.ID},
+		IsAssigned:                    cutil.GetPtr(false),
+		Statuses:                      []string{cdbm.MachineStatusReady},
+		Labels:                        machineLabelSelector,
+		ExcludeForceDeletionRequested: true,
 	}
 	machines, _, err := mcDAO.GetAll(ctx, tx, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 	if err != nil {
@@ -436,7 +437,7 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 					return ErrMachineUnavailable
 				}
 
-				if umc.IsAssigned {
+				if umc.IsAssigned || umc.IsForceDeletionQuarantined() {
 					return ErrMachineUnavailable
 				}
 
@@ -483,10 +484,10 @@ func GetUnallocatedMachineForInstanceType(ctx context.Context, logger zerolog.Lo
 }
 
 // GetCountOfMachinesForInstanceType is a utility function to return count of
-// machines for instance type
+// machines for instance type, excluding recorded force-deletion attempts.
 func GetCountOfMachinesForInstanceType(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, instanceTypeID uuid.UUID) (int, error) {
 	mitDAO := cdbm.NewMachineInstanceTypeDAO(dbSession)
-	_, tot, err := mitDAO.GetAll(ctx, tx, cdbm.MachineInstanceTypeFilterInput{InstanceTypeIDs: []uuid.UUID{instanceTypeID}}, cdbp.PageInput{Limit: cutil.GetPtr(0)}, nil)
+	_, tot, err := mitDAO.GetAll(ctx, tx, cdbm.MachineInstanceTypeFilterInput{InstanceTypeIDs: []uuid.UUID{instanceTypeID}, ExcludeForceDeletionRequested: true}, cdbp.PageInput{Limit: cutil.GetPtr(0)}, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -747,14 +748,6 @@ func GetAllAllocationConstraintsForInstanceType(ctx context.Context, tx *cdb.Tx,
 	return acs, tot, nil
 }
 
-// RollbackTx is called deferred in functions that create a transaction
-// if transaction was committed, this will do nothing
-func RollbackTx(ctx context.Context, tx *cdb.Tx, committed *bool) {
-	if committed != nil && !*committed {
-		tx.Rollback()
-	}
-}
-
 // HandleTxError translates an error returned by cdb.WithTx / cdb.WithTxResult
 // into an Echo API response. The lookups happen in this order:
 //  1. If the error wraps a *cutil.APIError (the closure chose its own
@@ -886,8 +879,13 @@ func GetAllInstanceTypeAllocationStats(ctx context.Context, dbSession *cdb.Sessi
 	// instanceTypeIDToMachinesMap is used to keep track of the number of machines assigned to each instance type
 	// This would be the number of potential instances that could be created.
 	instanceTypeIDToMachinesMap := make(map[uuid.UUID]int)
+	allocationCapacityByInstanceType := make(map[uuid.UUID]int)
 	for _, machine := range machines {
 		instanceTypeIDToMachinesMap[*machine.InstanceTypeID]++
+		if machine.IsForceDeletionQuarantined() {
+			continue
+		}
+		allocationCapacityByInstanceType[*machine.InstanceTypeID]++
 
 		// If no instance was found for the machine, then it's unused.
 		// If it's in a Ready state, then record it as unused-but-usable.
@@ -917,12 +915,8 @@ func GetAllInstanceTypeAllocationStats(ctx context.Context, dbSession *cdb.Sessi
 		}
 
 		if tenantID == nil {
-			mtotal := instanceTypeIDToMachinesMap[instanceTypeID]
-			if aas.Total <= mtotal {
-				aas.MaxAllocatable = cutil.GetPtr(mtotal - aas.Total)
-			} else {
-				logger.Error().Int("Total Allocation Count", aas.Total).Int("Total Machines", mtotal).Msg("total Allocation count exceeds Machines assigned to Instance Type")
-			}
+			// Retained owner rows remain Assigned, but cannot back another Allocation.
+			aas.MaxAllocatable = cutil.GetPtr(max(0, allocationCapacityByInstanceType[instanceTypeID]-aas.Total))
 		}
 
 		allocAPIStatsMap[instanceTypeID] = aas

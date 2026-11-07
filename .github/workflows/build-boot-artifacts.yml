@@ -386,15 +386,16 @@ jobs:
       # cold one recompiles the whole Rust tree on the bfb critical path. One
       # restore here and one save on main replace a cache request per
       # compilation, which held the repository at the cache API rate limit.
-      # Cargo.lock keys the entry, and the prefix lets a lockfile bump start
-      # from the previous entry.
+      # Cargo.lock and rust-toolchain.toml key the entry, so a toolchain bump
+      # saves a fresh one instead of keeping an entry that can no longer hit.
+      # The prefix lets a lockfile bump start from the previous entry.
       - name: Restore sccache
         id: sccache
         if: inputs.use_container == true
         uses: actions/cache/restore@v4
         with:
           path: cache/sccache
-          key: sccache-${{ inputs.cargo_make_task }}-${{ hashFiles('Cargo.lock') }}
+          key: sccache-${{ inputs.cargo_make_task }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: sccache-${{ inputs.cargo_make_task }}-
 
       # Run build in container mode (for boot artifacts)

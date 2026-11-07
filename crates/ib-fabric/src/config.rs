@@ -44,8 +44,8 @@ pub struct IBFabricConfig {
     #[serde(default)]
     pub allow_insecure: bool,
 
-    /// Maximum transmission unit for InfiniBand fabric
-    /// traffic.
+    /// Maximum transmission unit for InfiniBand fabric traffic: `2` (2 KiB)
+    /// or `4` (4 KiB, the default). Byte values such as `2048` are rejected.
     #[serde(
         default = "IBMtu::default",
         deserialize_with = "IBFabricConfig::deserialize_mtu"
@@ -230,6 +230,24 @@ max_partition_per_tenant = 3
         );
         assert!(ib_fabric_config.enabled);
         assert_eq!(ib_fabric_config.max_partition_per_tenant, 3);
+    }
+
+    #[test]
+    fn ib_config_validates_mtu_values() {
+        scenarios!(
+            run = |mtu| {
+                Figment::new()
+                    .merge(Toml::string(&format!("mtu = {mtu}")))
+                    .extract::<IBFabricConfig>()
+                    .map(|config| config.mtu)
+                    .map_err(drop)
+            };
+            "operator MTU codes are accepted and byte values are rejected" {
+                2 => Yields(IBMtu(2)),
+                2048 => Fails,
+                4096 => Fails,
+            }
+        );
     }
 
     #[test]

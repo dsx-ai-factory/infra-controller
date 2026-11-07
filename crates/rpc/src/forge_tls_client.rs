@@ -31,6 +31,7 @@ use hyper_util::rt::TokioTimer;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore};
 use tonic::body::Body;
+use tonic::codegen::http::uri::PathAndQuery;
 use tonic::transport::Uri;
 use tower::ServiceExt;
 use tower::util::BoxCloneService;
@@ -105,7 +106,48 @@ pub type NmxCClientT = NmxControllerClient<
 pub type ForgeClientT =
     ForgeClient<BoxCloneService<hyper::Request<Body>, hyper::Response<Incoming>, TransportError>>;
 
-/// Default ceiling on connection acquisition + time-to-response-headers for a single gRPC
+/// HTTP/2 GETs confined to one configured Core origin.
+///
+/// `get` accepts only a path and query, so a firmware source cannot redirect
+/// the client's certificate or node-auth token to a different authority.
+/// Responses are returned unchanged, including redirects; callers must bound
+/// response-body consumption separately from the transport's header deadline.
+pub struct ForgeHttpClient {
+    origin: Uri,
+    service: BoxCloneService<hyper::Request<Body>, hyper::Response<Incoming>, TransportError>,
+}
+
+impl ForgeHttpClient {
+    /// Sends one GET to the configured scheme and authority without following
+    /// redirects. The supplied path cannot replace that authenticated origin.
+    pub async fn get(
+        &mut self,
+        path: PathAndQuery,
+    ) -> Result<hyper::Response<Incoming>, TransportError> {
+        let uri = Uri::builder()
+            .scheme(
+                self.origin
+                    .scheme()
+                    .cloned()
+                    .ok_or_else(|| TransportError("core HTTP origin has no scheme".into()))?,
+            )
+            .authority(
+                self.origin
+                    .authority()
+                    .cloned()
+                    .ok_or_else(|| TransportError("core HTTP origin has no authority".into()))?,
+            )
+            .path_and_query(path)
+            .build()
+            .map_err(|error| TransportError(error.into()))?;
+        let request = hyper::Request::get(uri)
+            .body(Body::empty())
+            .map_err(|error| TransportError(error.into()))?;
+        self.service.clone().oneshot(request).await
+    }
+}
+
+/// Default ceiling on connection acquisition + time-to-response-headers for a Core HTTP/2
 /// request, applied at the transport layer so a connection that's accepted but never answered
 /// can't block a caller (and its admission-retry budget) forever. Overridable via
 /// [`ForgeClientConfig::request_timeout`] for callers that need to exceed it (e.g. a
@@ -598,6 +640,23 @@ impl<'a> ForgeTlsClient<'a> {
     /// However using a fresh client could avoid getting a stale connection from
     /// a pool.
     pub async fn build<S: AsRef<str>>(&self, url: S) -> ForgeTlsClientResult<ForgeClientT> {
+        let ForgeHttpClient { origin, service } = self.build_http(url).await?;
+        let mut forge_client = ForgeClient::with_origin(service, origin);
+
+        if let Some(max_decoding_message_size) = self.forge_client_config.max_decoding_message_size
+        {
+            forge_client = forge_client.max_decoding_message_size(max_decoding_message_size);
+        }
+
+        Ok(forge_client)
+    }
+
+    /// Builds the HTTP/2 transport shared by gRPC and Core artifact GETs.
+    ///
+    /// Each build rereads configured certificate and root files. TLS, node-auth,
+    /// resolver, VRF, proxy, tracing and request-header deadlines follow the same
+    /// configuration as `build`. No connection is made until the first request.
+    pub async fn build_http<S: AsRef<str>>(&self, url: S) -> ForgeTlsClientResult<ForgeHttpClient> {
         let uri = Uri::from_str(url.as_ref()).map_err(|e| ConfigurationError::InvalidUri {
             uri_string: url.as_ref().to_string(),
             error: e,
@@ -668,14 +727,10 @@ impl<'a> ForgeTlsClient<'a> {
             .map_err(TransportError)
             .boxed_clone();
 
-        let mut forge_client = ForgeClient::with_origin(hyper_client, uri);
-
-        if let Some(max_decoding_message_size) = self.forge_client_config.max_decoding_message_size
-        {
-            forge_client = forge_client.max_decoding_message_size(max_decoding_message_size);
-        }
-
-        Ok(forge_client)
+        Ok(ForgeHttpClient {
+            origin: uri,
+            service: hyper_client,
+        })
     }
 
     pub async fn build_https_client<S: AsRef<str>>(
@@ -1022,6 +1077,40 @@ mod tests {
     use tracing::Instrument as _;
 
     use super::*;
+
+    /// A network-path reference must not replace the authority whose client
+    /// certificate and bearer token the transport will use.
+    #[tokio::test]
+    async fn http_get_keeps_the_configured_origin() {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let requests = captured.clone();
+        let service = tower::service_fn(move |request: hyper::Request<Body>| {
+            *requests.lock().unwrap() = Some((request.method().clone(), request.uri().clone()));
+            std::future::ready(Err::<hyper::Response<Incoming>, _>(TransportError(
+                "request captured".into(),
+            )))
+        });
+        let mut client = ForgeHttpClient {
+            origin: "https://core.example.test:1079".parse().unwrap(),
+            service: service.boxed_clone(),
+        };
+        for (scenario, path) in [
+            (
+                "artifact query",
+                "/firmware/nic/abcd/image?operation_id=op%2F1",
+            ),
+            ("network-path reference", "//other.example.test/firmware"),
+        ] {
+            assert!(client.get(path.parse().unwrap()).await.is_err());
+            let (method, uri) = captured.lock().unwrap().take().unwrap();
+            assert_eq!(method, hyper::Method::GET, "{scenario}");
+            assert_eq!(
+                uri.to_string(),
+                format!("https://core.example.test:1079{path}"),
+                "{scenario}"
+            );
+        }
+    }
 
     /// Writes a self-signed root CA and client cert pair into `dir` and returns
     /// a config that points at them.

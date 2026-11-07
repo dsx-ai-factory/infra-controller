@@ -1576,8 +1576,8 @@ mod test {
     use carbide_dhcp_server::modes::dpu::Dpu;
     use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
     use carbide_rpc_utils::dhcp::{
-        DhcpTimestamps, DhcpTimestampsFilePath, ServiceConfig, ServiceInterfaceReservations,
-        ServiceLink, ServiceLinkV4, ServiceReservation,
+        DhcpTimestamps, DhcpTimestampsFilePath, ServiceConfig, ServiceDhcpInterfaceReservations,
+        ServiceDhcpReservation, ServiceLink, ServiceLinkV4,
     };
     use carbide_test_support::value_scenarios;
     use chrono::{DateTime, Utc};
@@ -2723,9 +2723,9 @@ mod test {
         let old_cancel = CancellationToken::new();
         let mut token = Some(old_cancel.clone());
         let mut active_service_config =
-            ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+            ServiceConfig::try_new(vec![ServiceDhcpInterfaceReservations {
                 receiving_interface: "lo".to_string(),
-                reservations: vec![ServiceReservation {
+                reservations: vec![ServiceDhcpReservation {
                     attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
                     interface_ordinal: 0,
                     internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
@@ -2935,7 +2935,7 @@ mod test {
         let old_cancel = CancellationToken::new();
         let mut token = Some(old_cancel.clone());
         // The first reservation is removed and therefore drives the retirement assertion.
-        let removed = ServiceReservation {
+        let removed = ServiceDhcpReservation {
             attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
             interface_ordinal: 0,
             internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
@@ -2947,7 +2947,7 @@ mod test {
             }),
         };
         // The adjacent reservation survives to prove replacement does not clear the whole slot.
-        let survivor = ServiceReservation {
+        let survivor = ServiceDhcpReservation {
             attachment_id: "33333333-3333-3333-3333-333333333333".parse().unwrap(),
             interface_ordinal: 0,
             internal_uuid: "44444444-4444-4444-4444-444444444444".parse().unwrap(),
@@ -2959,12 +2959,12 @@ mod test {
             }),
         };
         let mut active_service_config =
-            ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+            ServiceConfig::try_new(vec![ServiceDhcpInterfaceReservations {
                 receiving_interface: "lo".to_string(),
                 reservations: vec![removed.clone(), survivor.clone()],
             }])
             .unwrap();
-        let replacement = ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+        let replacement = ServiceConfig::try_new(vec![ServiceDhcpInterfaceReservations {
             receiving_interface: "lo".to_string(),
             reservations: vec![survivor.clone()],
         }])
@@ -3110,9 +3110,9 @@ mod test {
     #[tokio::test]
     async fn packet_task_drain_joins_prepared_service_response() {
         // The exact MAC and IPv4 link drive packet selection; the remaining identities only satisfy validation.
-        let service_config = ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+        let service_config = ServiceConfig::try_new(vec![ServiceDhcpInterfaceReservations {
             receiving_interface: "vlan200".to_string(),
-            reservations: vec![ServiceReservation {
+            reservations: vec![ServiceDhcpReservation {
                 attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
                 interface_ordinal: 0,
                 internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
@@ -4010,9 +4010,9 @@ mod test {
     #[tokio::test]
     async fn service_packets_do_not_record_host_activity() {
         // Attach a service reservation to an existing host interface so an erroneous timestamp update is observable.
-        let service_config = ServiceConfig::try_new(vec![ServiceInterfaceReservations {
+        let service_config = ServiceConfig::try_new(vec![ServiceDhcpInterfaceReservations {
             receiving_interface: "vlan200".to_string(),
-            reservations: vec![ServiceReservation {
+            reservations: vec![ServiceDhcpReservation {
                 attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
                 interface_ordinal: 0,
                 internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),

@@ -17,7 +17,7 @@
 
 //! Admitted NIC firmware operation fixtures, without physical hardware qualification.
 
-use carbide_libmlx_model::firmware::FirmwareSpec;
+use carbide_libmlx_model::firmware::{FirmwareDeliveryMode, FirmwareSpec};
 use config_version::ConfigVersion;
 use mac_address::MacAddress;
 
@@ -61,6 +61,7 @@ pub fn target() -> NicFirmwareTarget {
         supervisor_instance_id: None,
         receipt: None,
         diagnostic: None,
+        delivery_error_code: None,
     }
 }
 
@@ -69,6 +70,7 @@ pub fn target() -> NicFirmwareTarget {
 pub fn operation() -> NicFirmwareOperation {
     NicFirmwareOperation {
         operation_id: "nic-workflow".to_string(),
+        delivery_mode: FirmwareDeliveryMode::Direct,
         purpose: NicFirmwarePurpose::Baseline {
             continuation: NicFirmwareBaselineContinuation::Ready,
         },

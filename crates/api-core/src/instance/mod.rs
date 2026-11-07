@@ -502,10 +502,24 @@ fn normalize_created_power_profile(power_profile: Option<String>) -> Option<Stri
     power_profile.filter(|profile| !profile.is_empty())
 }
 
+/// Rejects request-bound allocation before legacy hydration or persistence while
+/// the external-validation allocation contract is not implemented.
+pub(crate) fn reject_unsupported_external_validation_binding(
+    request: &rpc::InstanceAllocationRequest,
+) -> CarbideResult<()> {
+    if request.external_validation_request_id.is_some() {
+        return Err(CarbideError::FailedPrecondition(
+            "request-bound external validation allocation is not implemented".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl TryFrom<rpc::InstanceAllocationRequest> for InstanceAllocationRequest {
     type Error = CarbideError;
 
     fn try_from(request: rpc::InstanceAllocationRequest) -> Result<Self, Self::Error> {
+        reject_unsupported_external_validation_binding(&request)?;
         let machine_id = request
             .machine_id
             .ok_or(RpcDataConversionError::MissingArgument("machine_id"))?;
@@ -2883,7 +2897,11 @@ pub(crate) async fn batch_validate_spx_partition_ownership(
     Ok(())
 }
 
-/// Batch validate IB partition ownership for multiple (partition_id, tenant_id) pairs
+/// Uses `db::ib_partition::find_active_for_share` to lock active partitions and
+/// validate every requested reference. Missing or deleted partitions return
+/// "IB partition {id} is not created"; a tenant mismatch returns
+/// "IB partition {id} is not owned by the tenant {tenant}".
+/// The caller must persist the Instance configuration before committing `txn`.
 pub(crate) async fn batch_validate_ib_partition_ownership(
     txn: &mut PgConnection,
     validations: &[(IBPartitionId, &TenantOrganizationId)],
@@ -2892,19 +2910,9 @@ pub(crate) async fn batch_validate_ib_partition_ownership(
         return Ok(());
     }
 
-    // Batch query all unique partitions
-    let unique_partition_ids: Vec<_> = validations
-        .iter()
-        .map(|(id, _)| *id)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+    let partition_ids: Vec<_> = validations.iter().map(|(id, _)| *id).collect();
 
-    let partitions = db::ib_partition::find_by(
-        txn,
-        ObjectColumnFilter::List(ib_partition::IdColumn, &unique_partition_ids),
-    )
-    .await?;
+    let partitions = db::ib_partition::find_active_for_share(txn, &partition_ids).await?;
 
     let partition_map: HashMap<_, _> = partitions.into_iter().map(|p| (p.id, p)).collect();
 
@@ -2925,7 +2933,11 @@ pub(crate) async fn batch_validate_ib_partition_ownership(
     Ok(())
 }
 
-/// Check whether the tenant of instance is consistent with the tenant of the ib partition
+/// Applies `batch_validate_ib_partition_ownership` to every requested interface.
+/// An IB change retaining a deleted partition is rejected, even when another
+/// interface is the one being changed. Removing the deleted reference remains
+/// allowed because only requested references are validated. Keep `txn` open
+/// through the Instance write, as required by the batch contract.
 pub(crate) async fn validate_ib_partition_ownership(
     txn: &mut PgConnection,
     instance_tenant: &TenantOrganizationId,
@@ -3260,6 +3272,35 @@ mod tests {
             assert_eq!(target.mac_address, interface.mac_address);
             assert_eq!(target.pci_name, interface.pci_name);
         }
+    }
+
+    /// A present binding must fail conversion even when defaulted or otherwise valid.
+    #[test]
+    fn external_validation_binding_is_rejected_before_allocation() {
+        use carbide_uuid::external_validation::ExternalValidationRequestId;
+
+        check_values(
+            [
+                Check {
+                    scenario: "present default binding is unsupported",
+                    input: ExternalValidationRequestId::default(),
+                    expect: tonic::Code::FailedPrecondition,
+                },
+                Check {
+                    scenario: "request UUID is unsupported before binding implementation",
+                    input: ExternalValidationRequestId::new(),
+                    expect: tonic::Code::FailedPrecondition,
+                },
+            ],
+            |request_id| {
+                let request = rpc::InstanceAllocationRequest {
+                    external_validation_request_id: Some(request_id),
+                    ..Default::default()
+                };
+                let error = InstanceAllocationRequest::try_from(request).unwrap_err();
+                tonic::Status::from(error).code()
+            },
+        );
     }
 
     /// Verifies request conversion retains service-VPC selections and assigns an attachment ID

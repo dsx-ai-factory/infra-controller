@@ -43,7 +43,8 @@ struct FirmwareDownloadFailed {
 }
 
 /// `FirmwareStaging` keeps checked inputs alive until their consumer finishes.
-/// Dropping it removes successful and partial downloads together.
+/// Dropping it removes successful and partial downloads together unless the
+/// consumer explicitly retains them for reconciliation with `retain_on_drop`.
 pub(super) struct FirmwareStaging {
     work_dir: tempfile::TempDir,
     download_dir: PathBuf,
@@ -79,11 +80,18 @@ impl FirmwareStaging {
         &self.download_dir
     }
 
+    /// Preserve checked and partial inputs across cancellation or process loss.
+    /// The consumer becomes responsible for explicit removal when it is safe.
+    pub(super) fn retain_on_drop(&mut self) {
+        self.work_dir.disable_cleanup(true);
+    }
+
     /// `stage` returns a path only after its SHA-256 matches.
     ///
     /// The deadline covers requests, response bodies, and retry backoffs;
     /// hashing follows the download and is not part of that deadline. Errors
-    /// and cancellation leave files owned by this directory until it is dropped.
+    /// and cancellation leave files owned by this directory until it is dropped,
+    /// unless the consumer has enabled retention with `retain_on_drop`.
     /// Each input keeps its URL basename, but a collision gets its own directory
     /// so later inputs cannot overwrite bytes an earlier caller has checked.
     /// The mutable borrow keeps destination reservations and downloads ordered.
@@ -249,6 +257,22 @@ impl LoggableFirmwareUrl {
         let mut redacted = text.to_string();
         for form in &self.task_forms {
             redacted = redacted.replace(form, &self.value);
+        }
+        // A bounded output stream can end inside a known task URL after its
+        // credentials. Replace that exact trailing prefix too; unrelated URLs
+        // remain untouched. Lossy UTF-8 may add one replacement at the cutoff.
+        for form in &self.task_forms {
+            let Some(scheme_end) = form.find("://") else {
+                continue;
+            };
+            let Some(start) = redacted.rfind(&form[..scheme_end + 3]) else {
+                continue;
+            };
+            let suffix = redacted[start..].trim_end_matches('\u{fffd}');
+            if form.starts_with(suffix) {
+                redacted.truncate(start);
+                redacted.push_str(&self.value);
+            }
         }
         redacted
     }
@@ -567,8 +591,11 @@ printf 'first=%s second=%s' "$(cat "$1")" "$(cat "$2")"
             ],
         };
 
-        let result =
-            crate::firmware_upgrade::handle_firmware_upgrade(&reqwest::Client::new(), &task).await;
+        let result = crate::firmware_upgrade::handle_firmware_upgrade_for_test(
+            &reqwest::Client::new(),
+            &task,
+        )
+        .await;
 
         assert!(result.success, "upgrade failed: {}", result.error);
         assert_eq!(result.stdout, "first=first-image second=second-image");

@@ -27,13 +27,13 @@ var _ MappedNullable = &PowerAction{}
 type PowerAction struct {
 	// `Active` means admitted maintenance, not hardware dispatch. `Pending` is a distinct saved request, without a promise of admission. `Unknown` represents an unrecognized service value.
 	Status string `json:"status"`
-	// Recorded operation. `Reset` does not preserve the original graceful/forced/AC-cycle distinction.
+	// Recorded operation. For `Reset`, graceful=true identifies an explicit graceful host reboot; legacy records do not preserve the original restart mode.
 	Operation string `json:"operation"`
 	// Saved submission time, not admission/start time; null for legacy admitted requests without metadata.
 	Requested NullableTime `json:"requested"`
 	// Saved initiator, including an explicitly empty string; null when unavailable.
 	Initiator NullableString `json:"initiator"`
-	// Present for `PowerOff` only: true is graceful, false is forced. Null for other operations.
+	// For `PowerOff`, true is graceful and false is forced. For an explicit graceful host reboot, operation is `Reset` and graceful is true. Null for legacy Reset records and other operations.
 	Graceful NullableBool `json:"graceful"`
 	// Recorded Redfish chassis identifier for `ChassisReset`, otherwise null.
 	ChassisId NullableString `json:"chassisId"`

@@ -43,7 +43,7 @@ use rpc::forge::{
     DpuInfo, FlatInterfaceNetworkSecurityGroupConfig, InterfaceAssociationType, InterfaceType,
 };
 use rpc::{Timestamp, common as rpc_common};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use crate::tests::common;
 use crate::util::compare_lines;
@@ -58,10 +58,18 @@ struct State {
     virtualization_type: VpcVirtualizationType,
     loopback_ip_override: Option<&'static str>,
     last_network_status: Option<rpc::forge::DpuNetworkStatus>,
+    network_status_gate: Option<Arc<Notify>>,
+    network_status_gate_armed: bool,
+    deny_prefix_override: Option<&'static str>,
     reject_next_network_status: bool,
     network_status_reports: Vec<(Instant, bool)>,
+    accepted_lldp_snapshot_fingerprint: Option<Vec<u8>>,
     reject_dhcp_update: bool,
     dhcp_updates: Vec<(bool, Bytes)>,
+    // Enables the fixed listener and reservation only in the DHCP retry scenario.
+    include_service_vpc: bool,
+    // Changes one reservation field without changing any explicit network version.
+    service_mac_address: &'static str,
     include_ipv6_tenant: bool,
     quarantine_host: bool,
     post_config_wait_seen: bool,
@@ -96,10 +104,13 @@ async fn test_fnn_l3() -> eyre::Result<()> {
     test_nvue_generic(VpcVirtualizationType::Fnn, expected).await
 }
 
-/// A transient DHCP rejection must leave the desired version pending, then
-/// retry the identical request after the endpoint recovers.
+/// Verifies the agent leaves Tenant configuration pending and preserves the NVUE startup file
+/// during a transient service-reservation submission failure when the DPU's primary loopback is
+/// IPv6, then retries the complete replacement.
+/// Later unchanged and MAC-only responses must still reach the control transport so sidecar
+/// restart repair and service MAC changes do not depend on version bumps.
 #[tokio::test(flavor = "multi_thread")]
-async fn dhcp_unavailability_retries_the_same_ipv6_network_configuration() -> eyre::Result<()> {
+async fn service_dhcp_unavailability_retries_the_same_network_configuration() -> eyre::Result<()> {
     network_update_retries_the_same_configuration(false).await
 }
 
@@ -109,6 +120,310 @@ async fn dhcp_unavailability_retries_the_same_ipv6_network_configuration() -> ey
 async fn fmds_failure_applies_quarantine_and_retries_the_same_network_configuration()
 -> eyre::Result<()> {
     network_update_retries_the_same_configuration(true).await
+}
+
+/// A failed live NVUE apply must leave the desired configuration pending, retry the same YAML,
+/// and acknowledge its network versions only after that YAML is applied.
+/// Changing `deny_prefixes` during the retry must withhold both acknowledgements until HBN
+/// applies the new YAML, even when both network version strings are unchanged.
+/// The obsolete apply must retain its post-config health wait so a changed HBN
+/// network is not reported as stable.
+#[tokio::test(flavor = "multi_thread")]
+async fn hbn_apply_failure_retries_the_same_network_configuration_before_acknowledging()
+-> eyre::Result<()> {
+    let repo_root = std::env::var("REPO_ROOT")
+        .or_else(|_| std::env::var("CONTAINER_REPO_ROOT"))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    eyre::ensure!(
+        repo_root.join("dev/bin/crictl").is_file(),
+        "HBN recovery test requires repository fixtures; set REPO_ROOT to the checkout"
+    );
+    if std::env::var_os("HBN_APPLY_RECOVERY_TEST_CHILD").is_none() {
+        // Keep the command override in a child process so its PATH and failure
+        // marker cannot affect other tests in the parent process.
+        let fake_hbn = hbn_apply_failure_commands()?;
+        let inherited_path =
+            std::env::var_os("PATH").ok_or_else(|| eyre::eyre!("missing test PATH"))?;
+        let path = std::env::join_paths(
+            std::iter::once(fake_hbn.path().to_path_buf())
+                .chain(std::iter::once(repo_root.join("dev/bin")))
+                .chain(std::env::split_paths(&inherited_path)),
+        )?;
+        let mut command = tokio::process::Command::new(std::env::current_exe()?);
+        command
+            .args([
+                "--exact",
+                "tests::full::hbn_apply_failure_retries_the_same_network_configuration_before_acknowledging",
+                "--nocapture",
+            ])
+            .env("HBN_APPLY_RECOVERY_TEST_CHILD", "true")
+            .env("HBN_APPLY_TEST_COMMAND_DIR", fake_hbn.path())
+            .env(
+                "HBN_APPLY_TEST_FALLBACK_CRICTL",
+                repo_root.join("dev/bin/crictl"),
+            )
+            .env("DISABLE_TLS_ENFORCEMENT", "true")
+            .env("IGNORE_MGMT_VRF", "true")
+            .env("NO_DPU_CONTAINERS", "true")
+            .env("PATH", path)
+            .kill_on_drop(true);
+        // All three reports allow 60 seconds; also allow the apply and fetch
+        // waits, startup, and cleanup without leaving a stuck child behind.
+        let output = tokio::time::timeout(Duration::from_secs(300), command.output()).await??;
+        eyre::ensure!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"),
+            "HBN recovery test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return Ok(());
+    }
+
+    // Keep reports pending after the first network error so another iteration
+    // cannot replace the startup and error files while they are inspected.
+    let status_gate = Arc::new(Notify::new());
+    // Serve one unchanged FNN response until the successful retry enters NVUE.
+    let state = Arc::new(Mutex::new(State {
+        virtualization_type: VpcVirtualizationType::Fnn,
+        loopback_ip_override: Some("2001:db8::1"), // Keep both version strings fixed while `deny_prefixes` changes.
+        network_status_gate: Some(status_gate.clone()), // Hold reports after HBN first fails.
+        ..Default::default()
+    }));
+    let (addr, server) = common::run_grpc_server(mock_core(state.clone())).await?;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let dhcp_addr = listener.local_addr()?;
+    let dhcp_app = Router::new()
+        .route(
+            "/dhcp_server_control.DhcpServerControl/UpdateAndReloadConfig",
+            post(handle_dhcp_update),
+        )
+        .route(
+            "/dhcp_server_control.DhcpServerControl/GetDhcpTimestamps",
+            post(|| async { common::respond(()) }),
+        )
+        .with_state(state.clone());
+    let dhcp_server = tokio::spawn(async move { axum::serve(listener, dhcp_app).await });
+
+    // The nested block saves errors until the agent and mock servers have been
+    // stopped and joined; an early `?` must not skip fixture cleanup.
+    let result = async {
+        let directory = tempfile::tempdir()?;
+        let command_directory =
+            std::path::PathBuf::from(std::env::var("HBN_APPLY_TEST_COMMAND_DIR")?);
+        // Give the fake container command access to the agent's isolated HBN filesystem.
+        fs::write(
+            command_directory.join("hbn-root"),
+            directory.path().display().to_string(),
+        )?;
+        let config_file = tempfile::NamedTempFile::new()?;
+        let mut options =
+            common::setup_agent_run_options(&addr, &directory, &config_file, false, &repo_root)?;
+        let Some(crate::AgentCommand::Run(run)) = options.cmd.as_mut() else {
+            eyre::bail!("test fixture did not configure an agent run");
+        };
+        // Route DHCP to the mock so the IPv6-only update can reach NVUE.
+        run.dhcp_grpc_server = Some(format!("http://{dhcp_addr}"));
+        // Enable live NVUE application because the normal full-agent fixture only saves YAML.
+        let config = fs::read_to_string(config_file.path())?
+            .replace("skip-reload = true", "skip-reload = false");
+        fs::write(config_file.path(), config)?;
+        fs::create_dir_all(directory.path().join("var/support/forge-dhcp/conf"))?;
+        let startup_path = directory.path().join(crate::nvue::PATH);
+        const PREVIOUS_NETWORK: &str = "previous network configuration\n";
+        // Seed both saved and live state so the failed attempt must preserve the prior network.
+        fs::write(&startup_path, PREVIOUS_NETWORK)?;
+        fs::write(command_directory.join("applied.yaml"), PREVIOUS_NETWORK)?;
+
+        let agent = tokio::spawn(crate::start(options));
+        let result = async {
+            // The failed report proves the real main loop observed the NVUE
+            // command error without advancing either acknowledged version.
+            let rejected = wait_for_network_status(&state, |status| {
+                status
+                    .network_config_error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("injected NVUE apply failure"))
+            })
+            .await?;
+            eyre::ensure!(
+                rejected.network_config_version.is_none()
+                    && rejected.instance_network_config_version.is_none(),
+                "failed HBN configuration was acknowledged: {rejected:?}"
+            );
+            // Verify the failed apply preserved both the saved startup file and simulated live YAML.
+            eyre::ensure!(
+                fs::read_to_string(&startup_path)? == PREVIOUS_NETWORK,
+                "failed HBN configuration replaced the prior startup file"
+            );
+            eyre::ensure!(
+                fs::read_to_string(command_directory.join("applied.yaml"))? == PREVIOUS_NETWORK,
+                "fake NVUE recorded a failed configuration as applied"
+            );
+            // Check that rejected YAML and the command trace preserve evidence of the attempted apply.
+            let mut error_path = startup_path.clone();
+            error_path.set_extension("error");
+            let rejected_yaml = fs::read_to_string(error_path)?;
+            serde_yaml::from_str::<Vec<serde_yaml::Value>>(&rejected_yaml)?;
+            let attempts = fs::read_to_string(command_directory.join("attempts"))?;
+            eyre::ensure!(
+                attempts.lines().any(|attempt| attempt == "apply-failed"),
+                "NVUE apply was not attempted: {attempts}"
+            );
+            eyre::ensure!(
+                !agent.is_finished(),
+                "agent exited on a transient HBN error"
+            );
+
+            // Retry the identical desired YAML, holding NVUE apply before it completes.
+            fs::write(command_directory.join("hold-apply"), "")?;
+            fs::remove_file(command_directory.join("reject"))?;
+            status_gate.notify_one();
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while !command_directory.join("apply-started").exists() {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await?;
+            // Verify the retry reached NVUE with the YAML rejected by the first attempt.
+            assert_eq!(
+                fs::read_to_string(command_directory.join("pending.yaml"))?,
+                rejected_yaml,
+                "retry reached NVUE with a different desired configuration"
+            );
+
+            // Change an HBN input without changing either version while the retry is in flight.
+            let fetches_before_change = {
+                let mut state = state.lock().await;
+                state.deny_prefix_override = Some("192.0.2.0/24");
+                state.num_netconf_fetches.load(Ordering::SeqCst)
+            };
+            // The fetcher stores each response before starting its next fetch, so two
+            // later fetch starts prove the changed response has entered its cache.
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while state
+                    .lock()
+                    .await
+                    .num_netconf_fetches
+                    .load(Ordering::SeqCst)
+                    < fetches_before_change + 2
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await?;
+
+            // Complete the older apply and hold its report before another apply can run.
+            fs::remove_file(command_directory.join("hold-apply"))?;
+            let obsolete =
+                wait_for_network_status(&state, |status| status.network_config_error.is_none())
+                    .await?;
+            eyre::ensure!(
+                obsolete.network_config_version.is_none()
+                    && obsolete.instance_network_config_version.is_none(),
+                "obsolete HBN completion acknowledged the changed payload: {obsolete:?}"
+            );
+            // Retain the post-config health wait because NVUE changed while acknowledgement is withheld.
+            assert!(
+                obsolete.dpu_health.as_ref().is_some_and(|health| {
+                    health
+                        .alerts
+                        .iter()
+                        .any(|alert| alert.id == "PostConfigCheckWait")
+                }),
+                "obsolete HBN completion omitted the post-config health wait: {obsolete:?}"
+            );
+            // Verify the obsolete retry saved and applied the initially rejected YAML
+            // before the changed response is applied.
+            assert_eq!(
+                fs::read_to_string(&startup_path)?,
+                rejected_yaml,
+                "retry changed the desired NVUE YAML before the newer payload was applied"
+            );
+            assert_eq!(
+                fs::read_to_string(command_directory.join("applied.yaml"))?,
+                rejected_yaml,
+                "retry did not apply the same YAML rejected by the first attempt"
+            );
+
+            // Allow the latest cached response's YAML to apply before either unchanged
+            // version is acknowledged.
+            status_gate.notify_one();
+            let applied = wait_for_network_status(&state, |status| {
+                status.network_config_version.as_deref() == Some(DHCP_GATE_CONFIG_VERSION)
+                    && status.instance_network_config_version.as_deref()
+                        == Some(DHCP_GATE_CONFIG_VERSION)
+            })
+            .await?;
+            eyre::ensure!(
+                applied.network_config_error.is_none(),
+                "acknowledged HBN configuration still reports an error: {applied:?}"
+            );
+            let applied_yaml = fs::read_to_string(&startup_path)?;
+            assert_ne!(
+                applied_yaml, rejected_yaml,
+                "the changed HBN input was ignored"
+            );
+            assert!(applied_yaml.contains("dest-ip: 192.0.2.0/24"));
+            assert!(!applied_yaml.contains("dest-ip: 1.1.1.1/32"));
+            assert_eq!(
+                fs::read_to_string(command_directory.join("applied.yaml"))?,
+                applied_yaml,
+                "acknowledgement preceded the live NVUE apply"
+            );
+            // Count the obsolete retry and latest apply, including each required nl2doca restart.
+            let attempts = fs::read_to_string(command_directory.join("attempts"))?;
+            assert!(
+                attempts
+                    .lines()
+                    .filter(|attempt| *attempt == "apply-failed")
+                    .count()
+                    >= 1
+            );
+            assert_eq!(
+                attempts
+                    .lines()
+                    .filter(|attempt| *attempt == "apply-succeeded")
+                    .count(),
+                2,
+                "unexpected successful apply sequence: {attempts}"
+            );
+            assert_eq!(
+                attempts
+                    .lines()
+                    .filter(|attempt| *attempt == "restart-nl2doca")
+                    .count(),
+                2,
+                "successful retry did not complete the NVUE post-apply action: {attempts}"
+            );
+            Ok::<_, eyre::Report>(())
+        }
+        .await;
+        agent.abort();
+        match agent.await {
+            Ok(Err(error)) => {
+                return Err(error).wrap_err("agent exited before HBN recovery completed");
+            }
+            Err(error) if !error.is_cancelled() => return Err(error).wrap_err("agent task failed"),
+            _ => {}
+        }
+        result
+    }
+    .await;
+    dhcp_server.abort();
+    server.abort();
+    match dhcp_server.await {
+        Ok(result) => result.wrap_err("mock DHCP control server exited")?,
+        Err(error) if !error.is_cancelled() => return Err(error).wrap_err("mock DHCP task failed"),
+        _ => {}
+    }
+    if let Err(error) = server.await
+        && !error.is_cancelled()
+    {
+        return Err(error).wrap_err("mock core task failed");
+    }
+    result
 }
 
 /// An actual Weave failure must reach Core without withholding successful
@@ -320,8 +635,10 @@ async fn astra_failure_reports_without_blocking_network_configuration_and_recove
     result
 }
 
-/// Exercise both network failure boundaries through the real agent and Core
-/// status RPCs, with child-local environment overrides instead of global writes.
+/// Exercises DHCP rejection or FMDS readiness and route failures through the real agent and Core
+/// status RPCs with child-local environment overrides instead of global writes.
+/// The DHCP case also verifies unchanged-request resubmission for sidecar restart repair and
+/// same-version service MAC replacements received by the DHCP control mock.
 async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) -> eyre::Result<()> {
     let repo_root = std::env::var("REPO_ROOT")
         .or_else(|_| std::env::var("CONTAINER_REPO_ROOT"))
@@ -355,7 +672,7 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
                 if fail_fmds_route {
                     "tests::full::fmds_failure_applies_quarantine_and_retries_the_same_network_configuration"
                 } else {
-                    "tests::full::dhcp_unavailability_retries_the_same_ipv6_network_configuration"
+                    "tests::full::service_dhcp_unavailability_retries_the_same_network_configuration"
                 },
                 "--nocapture",
             ])
@@ -386,11 +703,20 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
     }
 
     let state = Arc::new(Mutex::new(State {
-        virtualization_type: VpcVirtualizationType::EthernetVirtualizer,
+        // Fetched service interfaces require FNN in the DHCP retry scenario.
+        virtualization_type: if fail_fmds_route {
+            VpcVirtualizationType::EthernetVirtualizer
+        } else {
+            VpcVirtualizationType::Fnn
+        },
+        // Keep both scenarios IPv6-primary to exercise the DHCP-before-NVUE acceptance check.
         loopback_ip_override: Some("2001:db8::1"),
         reject_next_network_status: true,
         reject_dhcp_update: !fail_fmds_route,
-        include_ipv6_tenant: fail_fmds_route,
+        // Only the DHCP failure branch carries the service replacement under retry.
+        include_service_vpc: !fail_fmds_route,
+        service_mac_address: "02:00:00:00:00:01", // Seed the later MAC-only replacement.
+        include_ipv6_tenant: true,
         quarantine_host: fail_fmds_route,
         ..Default::default()
     }));
@@ -429,6 +755,7 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
         }
         fs::create_dir_all(directory.path().join("var/support/forge-dhcp/conf"))?;
         let startup_path = directory.path().join(crate::nvue::PATH);
+        // Seed an existing startup file to observe whether a failed update replaces it.
         const PREVIOUS_NETWORK: &str = "previous network configuration\n";
         fs::write(&startup_path, PREVIOUS_NETWORK)?;
 
@@ -444,8 +771,8 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
             }
         });
         let result = async {
-            // DHCP rejection still gates NVUE. FMDS readiness failure must leave
-            // the version pending without withholding the quarantine update.
+            // IPv6-primary DHCP rejection withholds NVUE and acknowledgment. FMDS readiness failure
+            // leaves the version pending without withholding the quarantine update.
             let expected_error = if fail_fmds_route {
                 "duplicate address detection failed for fd00:76b9::254"
             } else {
@@ -485,11 +812,15 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
                 assert!(config["interface"]["pf0hpf_if"]["acl"][quarantine_acl]["outbound"].is_mapping(),
                     "quarantine ACL is not attached: {:#?}", config["interface"]);
                 let directory = std::path::PathBuf::from(std::env::var("FMDS_TEST_COMMAND_DIR")?);
+                // Verify that quarantine applies its required OVS restart while FMDS is failing.
                 assert_eq!(fs::read_to_string(directory.join("ovs-restarts"))?, "restart ovs-vswitchd.service\n");
+                // Verify that applying NVUE still starts the post-config health wait.
                 assert!(state.lock().await.post_config_wait_seen,
                     "an applied NVUE update must retain the post-config health wait after FMDS failure");
+                // Verify that failed DAD prevents route application.
                 assert!(!directory.join("attempts").exists(), "DAD failure must precede route application");
             } else {
+                // DHCP acceptance must precede replacing the existing IPv6-primary network.
                 eyre::ensure!(
                     fs::read_to_string(&startup_path)? == PREVIOUS_NETWORK,
                     "DHCP rejection overwrote the existing network configuration"
@@ -558,16 +889,20 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
             } else {
                 state.lock().await.reject_dhcp_update = false;
             }
+            // Wait for a later iteration to acknowledge the same desired versions after recovery.
             let applied = wait_for_network_status(&state, |status| {
                 status.network_config_version.as_deref() == Some(DHCP_GATE_CONFIG_VERSION)
                     && status.instance_network_config_version.as_deref()
                         == Some(DHCP_GATE_CONFIG_VERSION)
             })
             .await?;
+            // Verify that the recovered acknowledgment no longer reports a network error.
             eyre::ensure!(
                 applied.network_config_error.is_none(),
                 "acknowledged configuration still reports an error: {applied:?}"
             );
+            // Verify that recovery replaced the startup file with parseable YAML instead of only
+            // reporting versions.
             let startup = fs::read_to_string(&startup_path)?;
             eyre::ensure!(
                 startup != PREVIOUS_NETWORK,
@@ -594,18 +929,85 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
                 assert_eq!(fs::read_to_string(directory.join("ovs-restarts"))?, "restart ovs-vswitchd.service\n",
                     "retrying FMDS must not repeat an already-completed OVS transition");
             } else {
-                let state = state.lock().await;
-                let rejected_request = state
-                    .dhcp_updates
-                    .iter()
-                    .find(|(rejected, _)| *rejected)
-                    .expect("DHCP received a rejected update");
-                let accepted_request = state
-                    .dhcp_updates
-                    .iter()
-                    .find(|(rejected, _)| !rejected)
-                    .expect("DHCP received an accepted retry");
-                assert_eq!(rejected_request.1, accepted_request.1);
+                // The recovery must resubmit the byte-identical complete service replacement,
+                // including its fixed listener and reservation rather than only host state.
+                let (accepted_request, accepted_update_count) = {
+                    let state = state.lock().await;
+                    let rejected_request = state
+                        .dhcp_updates
+                        .iter()
+                        .find(|(rejected, _)| *rejected)
+                        .expect("DHCP received a rejected update");
+                    let accepted_request = state
+                        .dhcp_updates
+                        .iter()
+                        .find(|(rejected, _)| !rejected)
+                        .expect("DHCP received an accepted retry");
+                    assert_eq!(rejected_request.1, accepted_request.1);
+                    (accepted_request.1.clone(), state.dhcp_updates.len())
+                };
+                assert!(
+                    accepted_request
+                        .windows(b"iface_svc_0".len())
+                        .any(|window| window == b"iface_svc_0"),
+                    "retried DHCP request omitted the fixed service listener"
+                );
+                assert!(
+                    accepted_request
+                        .windows(b"02:00:00:00:00:01".len())
+                        .any(|window| window == b"02:00:00:00:00:01"),
+                    "retried DHCP request omitted the service reservation"
+                );
+
+                // An unchanged later tick must resubmit the same complete state for sidecar restart repair.
+                let unchanged_request = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let state = state.lock().await;
+                        if let Some((_, request)) =
+                            state.dhcp_updates.get(accepted_update_count)
+                        {
+                            break request.clone();
+                        }
+                        drop(state);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                })
+                .await?;
+                assert_eq!(unchanged_request, accepted_request);
+
+                // Change only the service MAC while retaining every explicit response version.
+                let changed_update_count = {
+                    let mut state = state.lock().await;
+                    state.service_mac_address = "02:00:00:00:00:03";
+                    state.dhcp_updates.len()
+                };
+                // Wait for the MAC-only response to reach the DHCP control transport.
+                let changed_request = tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let state = state.lock().await;
+                        if let Some((_, request)) = state.dhcp_updates[changed_update_count..]
+                            .iter()
+                            .find(|(_, request)| {
+                                request
+                                    .windows(b"02:00:00:00:00:03".len())
+                                    .any(|window| window == b"02:00:00:00:00:03")
+                            })
+                        {
+                            break request.clone();
+                        }
+                        drop(state);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                })
+                .await?;
+                // Verify that the changed replacement removes the previous reservation MAC.
+                assert_ne!(changed_request, accepted_request);
+                assert!(
+                    !changed_request
+                        .windows(b"02:00:00:00:00:01".len())
+                        .any(|window| window == b"02:00:00:00:00:01"),
+                    "MAC-only replacement retained the previous reservation"
+                );
             }
             Ok::<_, eyre::Report>(())
         }
@@ -634,6 +1036,72 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
         return Err(error).wrap_err("mock core task failed");
     }
     result
+}
+
+/// Builds a child-local `crictl` that keeps NVUE apply failing while a marker exists,
+/// so the full-agent test can distinguish saved desired YAML from simulated applied YAML.
+/// It can also hold a successful apply while a newer desired response is fetched.
+fn hbn_apply_failure_commands() -> eyre::Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir()?;
+    let script = directory.path().join("crictl");
+    // Simulate NVUE commands while keeping pending YAML separate from applied YAML.
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+command_dir="$HBN_APPLY_TEST_COMMAND_DIR"
+if [ "$#" -ge 5 ] && [ "$1" = exec ] && [ "$3" = nv ] && [ "$4" = config ]; then
+    case "$5" in
+        replace)
+            [ "$#" -eq 6 ] || exit 2
+            root=$(cat "$command_dir/hbn-root")
+            cp "$root$6" "$command_dir/pending.yaml"
+            ;;
+        diff)
+            [ "$#" -eq 5 ] || exit 2
+            if ! cmp -s "$command_dir/pending.yaml" "$command_dir/applied.yaml"; then
+                printf '%s\n' 'configuration changed'
+            fi
+            ;;
+        apply)
+            [ "$#" -eq 6 ] && [ "$6" = -y ] || exit 2
+            if [ -f "$command_dir/reject" ]; then
+                printf '%s\n' apply-failed >> "$command_dir/attempts"
+                printf '%s\n' 'injected NVUE apply failure' >&2
+                exit 1
+            fi
+            if [ -f "$command_dir/hold-apply" ]; then
+                : > "$command_dir/apply-started"
+                while [ -f "$command_dir/hold-apply" ]; do sleep 0.05; done
+            fi
+            cp "$command_dir/pending.yaml" "$command_dir/applied.yaml"
+            printf '%s\n' apply-succeeded >> "$command_dir/attempts"
+            ;;
+        detach)
+            [ "$#" -eq 5 ] || exit 2
+            rm -f "$command_dir/pending.yaml"
+            ;;
+        *) exit 2 ;;
+    esac
+    exit 0
+fi
+if [ "$#" -eq 5 ] && [ "$1" = exec ] && [ "$3" = supervisorctl ] \
+    && [ "$4" = restart ] && [ "$5" = nl2doca ]; then
+    printf '%s\n' restart-nl2doca >> "$command_dir/attempts"
+    exit 0
+fi
+exec "$HBN_APPLY_TEST_FALLBACK_CRICTL" "$@"
+"#,
+    )?;
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
+    // Reject the initial apply until the test removes this marker for the retry.
+    fs::write(
+        directory.path().join("reject"),
+        "reject NVUE apply until the recovery phase\n",
+    )?;
+    Ok(directory)
 }
 
 /// Keep networking and service commands child-local while exposing DAD failure,
@@ -745,7 +1213,7 @@ async fn handle_dhcp_update(
     common::respond(()).into_response()
 }
 
-/// Waits for a matching report accepted by the Core mock. A timeout includes
+/// Waits for a matching report received by the Core mock. A timeout includes
 /// the last report so a missing transition can be diagnosed from the failure.
 async fn wait_for_network_status(
     state: &Arc<Mutex<State>>,
@@ -1110,19 +1578,18 @@ async fn handle_discover(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl
 }
 
 async fn handle_version() -> impl IntoResponse {
-    let mut resp = rpc::forge::BuildInfo::default();
-
-    let rc = rpc::forge::RuntimeConfig {
-        sitename: Some("testsite".to_string()),
+    common::respond(rpc::forge::BuildInfo {
+        capabilities: vec![],
+        runtime_config: Some(rpc::forge::RuntimeConfig {
+            sitename: Some("testsite".to_string()),
+            ..Default::default()
+        }),
         ..Default::default()
-    };
-
-    resp.runtime_config = Some(rc);
-
-    common::respond(resp)
+    })
 }
 
-// This mock omits `addresses` to exercise the rolling-upgrade fallback for older Core versions.
+// This mock omits `addresses` by default to exercise the rolling-upgrade fallback for older Core
+// versions. IPv6 tenant fixtures populate `addresses`.
 #[allow(deprecated)]
 async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl IntoResponse {
     {
@@ -1137,7 +1604,11 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         loopback_ip_override,
         include_ipv6_tenant,
         quarantine_host,
+        accepted_lldp_snapshot_fingerprint,
         astra_config,
+        deny_prefix_override,
+        include_service_vpc,
+        service_mac_address,
     ) = {
         let state = state.lock().await;
         (
@@ -1145,7 +1616,11 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
             state.loopback_ip_override,
             state.include_ipv6_tenant,
             state.quarantine_host,
+            state.accepted_lldp_snapshot_fingerprint.clone(),
             state.astra_config.clone(),
+            state.deny_prefix_override,
+            state.include_service_vpc,
+            state.service_mac_address,
         )
     };
     let config_version = if loopback_ip_override.is_some() {
@@ -1224,9 +1699,9 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         vpc_peer_vnis,
         prefix: Some("192.168.1.1/32".to_string()),
         fqdn: "host1".to_string(),
-        // The quarantined tenant needs the same explicit IPv6 boot URL as the
-        // admin fixture; its IPv4-only service discovery cannot generate one.
-        booturl: quarantine_host.then(|| "http://[2001:db8::80]/boot.efi".to_string()),
+        // IPv6-primary tenants need the same explicit IPv6 boot URL as the admin fixture;
+        // their IPv4-only service discovery cannot generate one.
+        booturl: loopback_ip_override.map(|_| "http://[2001:db8::80]/boot.efi".to_string()),
         svi_ip: get_svi_ip(&Some(svi_ip), virtualization_type, false, 28)
             .unwrap()
             .map(|ip| ip.to_string()),
@@ -1382,8 +1857,8 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
     };
 
     if include_ipv6_tenant {
-        // Keep the existing IPv4 projection while giving FMDS a real canonical
-        // IPv6 tenant prefix to route. Only the FMDS retry case needs this input.
+        // Preserve the IPv4 fields when populating `tenant_interface.addresses` and add the
+        // canonical IPv6 tenant prefix for FMDS to route in both retry scenarios.
         tenant_interface.addresses = vec![
             rpc::forge::InterfaceAddressConfig {
                 address_family: rpc::forge::AddressFamily::V4.into(),
@@ -1622,9 +2097,50 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
         nvlink_config_version: "V1-T1748645613333260".to_string(),
     };
 
+    // The DHCP retry scenario adds one endpoint and its fixed slot; the remaining fields provide
+    // the shared complete network response used by both failure branches.
     let netconf = rpc::forge::ManagedHostNetworkConfigResponse {
-        service_interfaces: vec![],
-        service_vpc_slot_inventory: None,
+        service_interfaces: include_service_vpc
+            .then(|| rpc::forge::ManagedHostServiceInterfaceConfig {
+                service_id: "10000000-0000-0000-0000-000000000001".to_string(),
+                // Keep attachment identity stable while the test changes only the client MAC.
+                attachment_id: Some(rpc_common::Uuid {
+                    value: "11111111-1111-1111-1111-111111111111".to_string(),
+                }),
+                interface_ordinal: 0,
+                // Bind the endpoint to the only fixed listener in this response.
+                slot_index: 0,
+                vpc_id: Some(
+                    "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+                        .parse()
+                        .expect("service VPC ID"),
+                ),
+                // Supply a separate service VPC and its required routing fields for fetch validation.
+                vpc_vni: 1_500_001,
+                vpc_prefixes: vec!["2001:db8::/64".to_string()],
+                vpc_routing_profile: Some(rpc::forge::RoutingProfile::default()),
+                mtu: Some(9_000),
+                // Use an IPv6 `/127` so this IPv6-primary DPU can submit the reservation without
+                // a DHCPv4 server identity.
+                link_prefix: "2001:db8::10/127".to_string(),
+                mac_address: service_mac_address.to_string(), // Varies without a version change.
+                // Retain the server-side correlation identity across the MAC-only replacement.
+                internal_uuid: Some(rpc_common::Uuid {
+                    value: "22222222-2222-2222-2222-222222222222".to_string(),
+                }),
+                ..Default::default()
+            })
+            .into_iter()
+            .collect(),
+        service_vpc_slot_inventory: include_service_vpc.then(|| {
+            rpc::forge::ServiceVpcSlotInventory {
+                slots: vec![rpc::forge::ServiceVpcSlot {
+                    slot_index: 0,
+                    hbn_interface_name: "iface_svc_0".to_string(),
+                }],
+            }
+        }),
+        accepted_lldp_snapshot_fingerprint,
         bgp_leaf_session_password: Some("this_is_not_a_real_password".to_string()),
         site_global_vpc_vni: None,
         asn: 65535,
@@ -1673,7 +2189,8 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
             }),
         }),
         managed_host_config_version: config_version.clone(),
-        use_admin_network: !quarantine_host,
+        // Primary service endpoints are supplied only after switching from Admin to Tenant.
+        use_admin_network: !(quarantine_host || include_service_vpc),
         admin_interface: Some(admin_interface),
         tenant_interfaces: vec![tenant_interface],
         network_security_policy_overrides,
@@ -1688,7 +2205,7 @@ async fn handle_netconf(AxumState(state): AxumState<Arc<Mutex<State>>>) -> impl 
             .map(|_| "test-dpu")
             .unwrap_or_default()
             .to_string(),
-        deny_prefixes: vec!["1.1.1.1/32".to_string()],
+        deny_prefixes: vec![deny_prefix_override.unwrap_or("1.1.1.1/32").to_string()],
         site_fabric_prefixes: vec!["2.2.2.2/32".to_string()],
         site_fabric_null_routes: None,
         vpc_peer_vnis_authoritative: true,
@@ -1716,9 +2233,31 @@ async fn handle_record_netstat(
     AxumState(state): AxumState<Arc<Mutex<State>>>,
     body: Bytes,
 ) -> Result<axum::response::Response, StatusCode> {
+    let result = record_network_status_request(&state, body).await?;
+    tracing::trace!(
+        lldp_attached = result.lldp_attached,
+        rejected = result.rejected,
+        "mock recorded network status"
+    );
+    if result.rejected {
+        return Ok(rejected_network_status_response());
+    }
+    Ok(common::respond(()).into_response())
+}
+
+struct RecordedNetworkStatusRequest {
+    rejected: bool,
+    lldp_attached: bool,
+}
+
+async fn record_network_status_request(
+    state: &Arc<Mutex<State>>,
+    body: Bytes,
+) -> Result<RecordedNetworkStatusRequest, StatusCode> {
     let payload = body.get(5..).ok_or(StatusCode::BAD_REQUEST)?;
     let status =
         rpc::forge::DpuNetworkStatus::decode(payload).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let lldp_attached = status.lldp.is_some();
     let mut state = state.lock().await;
     state.num_health_reports.fetch_add(1, Ordering::SeqCst);
     state.post_config_wait_seen |= status.dpu_health.as_ref().is_some_and(|health| {
@@ -1732,18 +2271,48 @@ async fn handle_record_netstat(
         .network_status_reports
         .push((Instant::now(), rejected));
     if rejected {
-        return Ok((
-            [
-                ("content-type", "application/grpc"),
-                ("grpc-status", "14"),
-                ("grpc-message", "injected%20status%20rejection"),
-            ],
-            "",
-        )
-            .into_response());
+        return Ok(RecordedNetworkStatusRequest {
+            rejected: true,
+            lldp_attached,
+        });
     }
+    if let Some(report) = status.lldp.as_ref()
+        && report.result == rpc::forge::LldpReportResult::Updated as i32
+    {
+        let computed = ::rpc::lldp_snapshot::fingerprint(&report.interfaces);
+        if status.lldp_snapshot_fingerprint.as_deref() != Some(computed.as_slice()) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        state.accepted_lldp_snapshot_fingerprint = Some(computed);
+    }
+    // Allow the startup health report through, then pause retries after the
+    // first network error so file observations belong to the report being checked.
+    state.network_status_gate_armed |= status.network_config_error.is_some();
+    let status_gate = state
+        .network_status_gate
+        .clone()
+        .filter(|_| state.network_status_gate_armed);
     state.last_network_status = Some(status);
-    Ok(common::respond(()).into_response())
+    drop(state);
+    if let Some(gate) = status_gate {
+        gate.notified().await;
+    }
+    Ok(RecordedNetworkStatusRequest {
+        rejected: false,
+        lldp_attached,
+    })
+}
+
+fn rejected_network_status_response() -> axum::response::Response {
+    (
+        [
+            ("content-type", "application/grpc"),
+            ("grpc-status", "14"),
+            ("grpc-message", "injected%20status%20rejection"),
+        ],
+        "",
+    )
+        .into_response()
 }
 
 async fn handle_dpu_agent_upgrade_check(

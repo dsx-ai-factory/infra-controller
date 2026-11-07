@@ -28,6 +28,24 @@ pub(crate) struct GenericAmi<'a> {
 }
 
 impl GenericAmi<'_> {
+    pub(crate) fn ami_service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Ami,
+            product: Some("AMI Redfish Server"),
+            redfish_version: "1.17.0",
+            advertises_computer_systems: true,
+        }
+    }
+
+    pub(crate) fn supermicro_service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Supermicro,
+            product: Some("Super Server"),
+            redfish_version: "1.17.0",
+            advertises_computer_systems: true,
+        }
+    }
+
     pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
         Some(crate::EventServiceConfig::default())
     }
@@ -87,7 +105,7 @@ impl GenericAmi<'_> {
             })
             .collect::<Vec<_>>();
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed(system_id),
                 manufacturer: None,
                 model: None,
@@ -115,7 +133,7 @@ impl GenericAmi<'_> {
                 ),
                 serial_console: None,
                 secure_boot_available: false,
-            }],
+            }]),
         }
     }
 

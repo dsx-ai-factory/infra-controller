@@ -18,7 +18,7 @@ use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::Router;
 use bmc_mock::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
@@ -28,8 +28,12 @@ use bmc_mock::{
     ActionError, Callbacks, DeviceEffect, HostMachineInfo, HostnameQuerying, MachineInfo,
     NvueState, POWER_CYCLE_DELAY, ResourceResetType,
 };
+#[cfg(test)]
+use eyre::WrapErr;
 use nv_redfish::schema::resource::PowerState;
 use tokio::task::JoinHandle;
+// The actor executor waits on Tokio time; create its alarm deadlines on that clock too.
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::bmc_mock_wrapper::{BmcCommand, BmcDhcpRecovery, BmcMockWrapper, BmcMockWrapperHandle};
@@ -192,6 +196,7 @@ impl SwitchActor {
             ..HostMachineInfo::new(config.hw_type, Vec::new(), mac_pool, hw_mac_addr_pool)
         };
         let bmc_injection = Arc::new(InjectionStore::new());
+        let bmc_recovery = app_context.bmc_dhcp_recovery(Duration::ZERO);
         Self {
             mat_id: Uuid::new_v4(),
             machine_config_section,
@@ -205,7 +210,7 @@ impl SwitchActor {
             _bmc_mock: None,
             bmc_state: None,
             bmc_dhcp_info: None,
-            bmc_recovery: Default::default(),
+            bmc_recovery,
             fsm,
             actions: actions.into_iter().collect(),
             first_run_delay,
@@ -254,6 +259,7 @@ impl SwitchActor {
                 "Persisted NVOS credentials name a user the switch's NVOS does not have",
             );
         }
+        let bmc_recovery = app_context.bmc_dhcp_recovery(Duration::ZERO);
         Self {
             mat_id: persisted.mat_id,
             machine_config_section,
@@ -267,7 +273,7 @@ impl SwitchActor {
             _bmc_mock: None,
             bmc_state: None,
             bmc_dhcp_info: None,
-            bmc_recovery: Default::default(),
+            bmc_recovery,
             fsm,
             actions: actions.into_iter().collect(),
             first_run_delay,
@@ -396,7 +402,10 @@ impl SwitchActor {
                         mailbox
                             .replace_alarm(
                                 self.dhcp_retry_alarm.take(),
-                                saturating_add_duration_to_instant(Instant::now(), delay),
+                                saturating_add_duration_to_instant(
+                                    Instant::now().into_std(),
+                                    delay,
+                                ),
                                 SwitchMessage::DhcpRetryExpired,
                             )
                             .expect("running actor mailbox must be open"),
@@ -431,7 +440,7 @@ impl SwitchActor {
                         mailbox
                             .replace_alarm(
                                 self.power_cycle_alarm.take(),
-                                Instant::now() + POWER_CYCLE_DELAY,
+                                (Instant::now() + POWER_CYCLE_DELAY).into_std(),
                                 SwitchMessage::PowerCycleExpired,
                             )
                             .expect("running actor mailbox must be open"),
@@ -455,7 +464,7 @@ impl SwitchActor {
             mailbox
                 .replace_alarm(
                     self.run_alarm.take(),
-                    saturating_add_duration_to_instant(Instant::now(), duration),
+                    saturating_add_duration_to_instant(Instant::now().into_std(), duration),
                     SwitchMessage::Run,
                 )
                 .expect("running actor mailbox must be open"),
@@ -653,6 +662,8 @@ enum SwitchMessage {
     PowerCycleExpired,
     DhcpRetryExpired,
     SetPaused(bool),
+    #[cfg(test)]
+    InboxBarrier(tokio::sync::oneshot::Sender<()>),
     Bmc(BmcCommand),
     Stop,
 }
@@ -676,6 +687,10 @@ impl ActorCallbacks<SwitchMessage> for SwitchActor {
             SwitchMessage::Stop => return ActorResult::Stop,
             SwitchMessage::SetPaused(paused) => {
                 self.fsm_event(if paused { Event::Pause } else { Event::Resume })
+            }
+            #[cfg(test)]
+            SwitchMessage::InboxBarrier(reply) => {
+                let _ = reply.send(());
             }
             SwitchMessage::Bmc(BmcCommand::SetSystemPower { request, reply }) => {
                 let result = self.set_system_power(request);
@@ -808,6 +823,18 @@ impl SwitchHandle {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(super) async fn pause_and_wait(&self, timeout: Duration) -> eyre::Result<()> {
+        self.pause()?;
+        let (reply, acknowledged) = tokio::sync::oneshot::channel();
+        self.0.mailbox.send(SwitchMessage::InboxBarrier(reply))?;
+        tokio::time::timeout(timeout, acknowledged)
+            .await
+            .wrap_err("timed out waiting for switch pause")?
+            .wrap_err("switch stopped before acknowledging pause")?;
+        Ok(())
+    }
+
     pub(crate) fn resume(&self) -> eyre::Result<()> {
         self.0.mailbox.send(SwitchMessage::SetPaused(false))?;
         Ok(())
@@ -830,7 +857,6 @@ impl SwitchHandle {
             machine_id: None,
             hardware_type: Some(self.0.host_info.hw_type),
             mat_state: Some(state.state.to_string()),
-            api_state: "Unknown".to_string(),
             power_state: state.power_state,
             machine_ip: None,
             nvos_ip: state.nvos_ip.map(|ip| ip.to_string()),
@@ -1158,6 +1184,11 @@ mod tests {
                 router.clone().oneshot(reset()).await.unwrap().status(),
                 StatusCode::BAD_REQUEST
             );
+            // The power drop and route removal are visible. Advance the restart
+            // timer, then resume real time before polling for completion.
+            tokio::time::pause();
+            tokio::time::advance(POWER_CYCLE_DELAY).await;
+            tokio::time::resume();
             tokio::time::timeout(POWER_CYCLE_DELAY + Duration::from_secs(2), async {
                 loop {
                     if live.read().unwrap().power_state == PowerState::On {

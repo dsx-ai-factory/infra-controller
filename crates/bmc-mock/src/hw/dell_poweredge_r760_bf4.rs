@@ -32,6 +32,15 @@ pub(crate) struct DellPowerEdgeR760Bf4<'a> {
 const BF4_SLOT: hw::nic::SlotNumber = 2;
 
 impl DellPowerEdgeR760Bf4<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Dell,
+            product: Some("Integrated Dell Remote Access Controller"),
+            redfish_version: "1.18.0",
+            advertises_computer_systems: true,
+        }
+    }
+
     fn sensor_layout() -> redfish::sensor::Layout {
         // R760 BF4 System.Embedded.1 dump contains 38 sensors total. The
         // generic mock layout currently models Temperature, Fan, Power,
@@ -110,7 +119,7 @@ impl DellPowerEdgeR760Bf4<'_> {
         ];
 
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed(system_id),
                 manufacturer: Some("Dell Inc.".into()),
                 model: Some("PowerEdge R760".into()),
@@ -155,7 +164,7 @@ impl DellPowerEdgeR760Bf4<'_> {
                         "SystemManufacturer": "Dell Inc.",
                         "SystemModelName": "PowerEdge R760",
                     }))),
-            }],
+            }]),
         }
     }
 

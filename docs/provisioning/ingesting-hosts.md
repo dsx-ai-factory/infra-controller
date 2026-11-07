@@ -244,7 +244,8 @@ per-host fields and compatibility controls. It reads a snake_case
   See [Configure Expected Machine Interfaces](expected-machine-interfaces.md).
 - **`bmc_ip_address`** (string, optional): Compatibility top-level Host BMC
   address. With the top-level `Auto` policy, its presence infers Fixed
-  allocation.
+  allocation. NICo rejects an unspecified, multicast, or IPv4
+  limited-broadcast address, including the IPv4-mapped IPv6 form of each.
 - **`bmc_ip_allocation`** (`"Unspecified"` | `"Auto"` | `"Dynamic"` |
   `"Fixed"` | `"Retained"`, default `"Auto"`): Compatibility Host BMC policy
   in the whole-table JSON consumed by `em replace-all`. For the top-level
@@ -372,6 +373,10 @@ This command copies the NICo BFB image directly to the DPU via rshim (SSH to the
 <Note>
 The `--host-bmc-ip` flag is required. NICo uses it to power-cycle the host after the BFB copy completes. Use `--pre-copy-powercycle` if the host needs to release rshim control to the DPU BMC before the copy can start.
 </Note>
+
+The DPU BMC IP must belong to a known machine interface. Optionally pass `--mac` to require that interface to match the expected DPU BMC MAC; this option does not override credential lookup. NICo saves the resolved MAC even when `--mac` is omitted. An invalid or mismatching MAC rejects the request without queuing recovery or changing the host's remediation pause.
+
+Before copying the BFB or powering off the host, NICo checks the saved DPU identity again. A missing or changed IP-to-interface mapping fails recovery and releases the host's remediation pause. Recovery states without a saved MAC also require a new request before another copy or power-off. Verify the DPU BMC IP and MAC, then rerun the command to retry. A recovery in the host power-on phase restores host power before checking the DPU identity again.
 
 For additional DPU-specific troubleshooting including Secure Boot configuration, BMC password resets, and firmware version checks, see [Adding New Machines to an Existing Site](../playbooks/stuck_objects/adding_new_machines.md).
 

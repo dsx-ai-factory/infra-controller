@@ -96,6 +96,8 @@ func testDpuExtensionServiceSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	require.NoError(t, err)
 }
 
+// TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB verifies inventory
+// advances cached lifecycle state while preserving placement and newer local intent.
 func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) {
 	ctx := context.Background()
 	obsName := "service-metrics"
@@ -288,6 +290,21 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 		dpuExtensionServiceInventory *corev1.DpuExtensionServiceInventory
 	}
 
+	// Isolate baseline lifecycle updates from the other sites' missing-inventory checks.
+	baselineSite := util.TestBuildSite(t, dbSession, ip, "baseline-inventory-site", cdbm.SiteStatusRegistered, nil, user)
+	baselineService, err := dpuExtensionServiceDAO.Create(ctx, nil, cdbm.DpuExtensionServiceCreateInput{
+		Name:           "baseline-inventory-service",
+		ServiceType:    cdbm.DpuExtensionServiceServiceTypeDpfHelmChart,
+		DeploymentType: cdbm.DpuExtensionServiceDeploymentTypeBaseline,
+		SiteID:         baselineSite.ID,
+		TenantID:       tenant.ID,
+		Status:         cdbm.DpuExtensionServiceStatusPending,
+		CreatedBy:      user.ID,
+	})
+	require.NoError(t, err)
+	_, err = dbSession.DB.Exec("UPDATE dpu_extension_service SET updated = ? WHERE id = ?", time.Now().Add(-cutil.DefaultInventoryReceiptInterval*2), baselineService.ID)
+	require.NoError(t, err)
+
 	tests := []struct {
 		name                        string
 		fields                      fields
@@ -299,8 +316,56 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 		expectTimestampParseError   bool
 		expectLifecycleError        bool
 		wantErr                     bool
+		prepare                     func(t *testing.T)
 		check                       func(t *testing.T)
 	}{
+		// Baseline services must advance through Core's lifecycle despite having no placement target.
+		{
+			name:   "baseline inventory advances readiness without adding a target",
+			fields: fields{dbSession: dbSession, siteClientPool: tSiteClientPool, env: env},
+			args: args{ctx: ctx, siteID: baselineSite.ID, dpuExtensionServiceInventory: &corev1.DpuExtensionServiceInventory{
+				InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				DpuExtensionServices: []*corev1.DpuExtensionService{{
+					ServiceId: baselineService.ID.String(), ServiceType: corev1.DpuExtensionServiceType_DPF_HELM_CHART,
+					DeploymentType:  corev1.DpuExtensionServiceDeploymentType_DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_BASELINE,
+					LifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"ready"}`},
+				}},
+			}},
+			check: func(t *testing.T) {
+				// Reload durable state to prove the lifecycle branch actually reconciled this registration.
+				stored, getErr := dpuExtensionServiceDAO.GetByID(ctx, nil, baselineService.ID, nil)
+				require.NoError(t, getErr)
+				assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, stored.Status)
+				assert.Equal(t, cdbm.DpuExtensionServiceDeploymentTypeBaseline, stored.DeploymentType)
+				assert.Nil(t, stored.DpuTarget)
+			},
+		},
+		// Conflicting placement must not overwrite lifecycle state from a valid baseline registration.
+		{
+			name:   "inventory cannot change immutable baseline placement",
+			fields: fields{dbSession: dbSession, siteClientPool: tSiteClientPool, env: env},
+			prepare: func(t *testing.T) {
+				// Age a Ready row so the staleness guard cannot hide a missing policy check.
+				_, err := dbSession.DB.Exec("UPDATE dpu_extension_service SET status = ?, updated = ? WHERE id = ?",
+					cdbm.DpuExtensionServiceStatusReady, time.Now().Add(-cutil.DefaultInventoryReceiptInterval*2), baselineService.ID)
+				require.NoError(t, err)
+			},
+			args: args{ctx: ctx, siteID: baselineSite.ID, dpuExtensionServiceInventory: &corev1.DpuExtensionServiceInventory{
+				InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				DpuExtensionServices: []*corev1.DpuExtensionService{{
+					ServiceId: baselineService.ID.String(), ServiceType: corev1.DpuExtensionServiceType_DPF_HELM_CHART,
+					LifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"failed"}`},
+				}},
+			}},
+			check: func(t *testing.T) {
+				// The conflicting snapshot would set Error if the policy check were bypassed.
+				stored, getErr := dpuExtensionServiceDAO.GetByID(ctx, nil, baselineService.ID, nil)
+				require.NoError(t, getErr)
+				assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, stored.Status)
+				assert.Equal(t, cdbm.DpuExtensionServiceDeploymentTypeBaseline, stored.DeploymentType)
+				assert.Nil(t, stored.DpuTarget)
+			},
+		},
 		{
 			name: "test DPU Extension Service inventory processing error, non-existent Site",
 			fields: fields{
@@ -858,6 +923,10 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 				siteClientPool: tt.fields.siteClientPool,
 			}
 
+			if tt.prepare != nil {
+				tt.prepare(t)
+			}
+
 			err := mde.UpdateDpuExtensionServicesInDB(tt.args.ctx, tt.args.siteID, tt.args.dpuExtensionServiceInventory)
 			assert.Equal(t, tt.wantErr, err != nil)
 			assert.Equal(t, tt.expectTimestampParseError, bytes.Contains(logOutput.Bytes(), []byte("failed to parse timestamp for version info")))
@@ -894,7 +963,8 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 						assert.Equal(t, controllerDes.LatestVersionInfo.Data, updatedDpuExtService.VersionInfo.Data)
 						assert.Equal(t, controllerDes.LatestVersionInfo.HasCredential, updatedDpuExtService.VersionInfo.HasCredentials)
 						if expectedCreated, ok := tt.expectedCreated[updatedDpuExtService.ID]; ok {
-							assert.Equal(t, expectedCreated, updatedDpuExtService.VersionInfo.Created)
+							// Database timestamps may use a different location while preserving the same instant.
+							assert.Equal(t, expectedCreated.UTC(), updatedDpuExtService.VersionInfo.Created.UTC())
 						} else {
 							assert.Equal(t, controllerDes.LatestVersionInfo.Created, updatedDpuExtService.VersionInfo.Created.Format(DpuExtensionServiceTimeFormat))
 						}
@@ -919,8 +989,102 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 			}
 		})
 	}
+
+	t.Run("recent updates during deletion reconciliation", func(t *testing.T) {
+		cases := []struct {
+			name        string
+			status      string
+			failed      bool
+			page        *corev1.InventoryPage
+			reportID    bool
+			wantDeleted bool
+		}{
+			{
+				name:        "missing deleting service is removed despite repeated updates",
+				status:      cdbm.DpuExtensionServiceStatusDeleting,
+				page:        &corev1.InventoryPage{CurrentPage: 1, TotalPages: 0, TotalItems: 0},
+				wantDeleted: true,
+			},
+			{
+				name:     "service reported on another page is retained",
+				status:   cdbm.DpuExtensionServiceStatusDeleting,
+				page:     &corev1.InventoryPage{CurrentPage: 2, TotalPages: 2, TotalItems: 1},
+				reportID: true,
+			},
+			{
+				name:   "non-final page retains missing deleting service",
+				status: cdbm.DpuExtensionServiceStatusDeleting,
+				page:   &corev1.InventoryPage{CurrentPage: 1, TotalPages: 2, TotalItems: 1},
+			},
+			{
+				name:   "failed inventory retains missing deleting service",
+				status: cdbm.DpuExtensionServiceStatusDeleting,
+				failed: true,
+			},
+			{
+				name:   "recent active service is not marked missing",
+				status: cdbm.DpuExtensionServiceStatusReady,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				site := util.TestBuildSite(t, dbSession, ip, uuid.NewString(), cdbm.SiteStatusRegistered, nil, user)
+				service := util.TestBuildDpuExtensionService(t, dbSession, uuid.NewString(), site, tenant,
+					cdbm.DpuExtensionServiceServiceTypeDpfHelmChart, nil, nil, nil, tc.status, user)
+				for range 2 {
+					var updateErr error
+					service, updateErr = dpuExtensionServiceDAO.Update(ctx, nil, cdbm.DpuExtensionServiceUpdateInput{
+						DpuExtensionServiceID: service.ID,
+						Status:                &tc.status,
+					})
+					require.NoError(t, updateErr)
+				}
+				require.True(t, site.IsTimeWithinStaleInventoryThreshold(service.Updated))
+
+				inventory := &corev1.DpuExtensionServiceInventory{
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+					InventoryPage:   tc.page,
+				}
+				if tc.failed {
+					inventory.InventoryStatus = corev1.InventoryStatus_INVENTORY_STATUS_FAILED
+				}
+				if tc.reportID {
+					inventory.InventoryPage.ItemIds = []string{service.ID.String()}
+				}
+
+				manager := NewManageDpuExtensionService(dbSession, tSiteClientPool)
+				updateErr := manager.UpdateDpuExtensionServicesInDB(ctx, site.ID, inventory)
+				if tc.failed {
+					require.Error(t, updateErr)
+				} else {
+					require.NoError(t, updateErr)
+				}
+				stored, getErr := dpuExtensionServiceDAO.GetByID(ctx, nil, service.ID, nil)
+				if tc.wantDeleted {
+					require.ErrorIs(t, getErr, cdb.ErrDoesNotExist)
+					rows, _, listErr := dpuExtensionServiceDAO.GetAll(ctx, nil, cdbm.DpuExtensionServiceFilterInput{
+						DpuExtensionServiceIDs: []uuid.UUID{service.ID},
+						IncludeDeleted:         true,
+					}, cdbp.PageInput{}, nil)
+					require.NoError(t, listErr)
+					require.Len(t, rows, 1)
+					assert.NotNil(t, rows[0].Deleted)
+
+					return
+				}
+				require.NoError(t, getErr)
+				assert.Nil(t, stored.Deleted)
+				assert.Equal(t, tc.status, stored.Status)
+				assert.False(t, stored.IsMissingOnSite)
+				assert.True(t, service.Updated.Equal(stored.Updated))
+			})
+		}
+	})
 }
 
+// TestManageDpuExtensionService_CreateOrUpdateDpuExtensionServiceFromSite verifies
+// inventory recovery preserves service identity and placement so recovered services remain safe to use.
+//
 //nolint:contextcheck,funlen,maintidx,paralleltest,thelper // DB-backed table cases share schema and builder context.
 func TestManageDpuExtensionService_CreateOrUpdateDpuExtensionServiceFromSite(t *testing.T) {
 	ctx := context.Background()
@@ -965,6 +1129,50 @@ func TestManageDpuExtensionService_CreateOrUpdateDpuExtensionServiceFromSite(t *
 		wantNil bool
 		check   func(t *testing.T, state *recoveryState, got *cdbm.DpuExtensionService)
 	}{
+		// Site-only baseline services have no target and must retain that policy after recovery.
+		{
+			name: "recovers baseline Helm placement without a target",
+			setup: func(t *testing.T, state *recoveryState) {
+				state.controllerService.ServiceType = corev1.DpuExtensionServiceType_DPF_HELM_CHART
+				state.controllerService.DeploymentType = corev1.DpuExtensionServiceDeploymentType_DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_BASELINE
+				state.controllerService.LifecycleStatus = &corev1.LifecycleStatus{State: `{"state":"ready"}`}
+			},
+			check: func(t *testing.T, state *recoveryState, got *cdbm.DpuExtensionService) {
+				// Reload independently to prove placement survives the recovery transaction.
+				require.NotNil(t, got)
+				stored, err := state.dpuExtensionServiceDAO.GetByID(ctx, nil, got.ID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, cdbm.DpuExtensionServiceDeploymentTypeBaseline, stored.DeploymentType)
+				assert.Nil(t, stored.DpuTarget)
+				assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, stored.Status)
+			},
+		},
+		// A baseline declaration cannot be recovered as a Pod service, which has no all-DPU delivery.
+		{
+			name: "rejects baseline Pod inventory",
+			setup: func(t *testing.T, state *recoveryState) {
+				state.controllerService.DeploymentType = corev1.DpuExtensionServiceDeploymentType_DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_BASELINE
+			},
+			wantNil: true,
+		},
+		// A host-scoped target conflicts with baseline placement even if Core reports both.
+		{
+			name: "rejects baseline inventory with target",
+			setup: func(t *testing.T, state *recoveryState) {
+				state.controllerService.ServiceType = corev1.DpuExtensionServiceType_DPF_HELM_CHART
+				state.controllerService.DeploymentType = corev1.DpuExtensionServiceDeploymentType_DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_BASELINE
+				state.controllerService.DpuTarget = cutil.GetPtr(corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL)
+			},
+			wantNil: true,
+		},
+		// Future policies must not be recovered as demand-driven services that permit attachments.
+		{
+			name: "rejects unknown inventory deployment type",
+			setup: func(t *testing.T, state *recoveryState) {
+				state.controllerService.DeploymentType = corev1.DpuExtensionServiceDeploymentType(99)
+			},
+			wantNil: true,
+		},
 		{
 			name: "selects another recovered suffix when candidate name is also used",
 			setup: func(t *testing.T, state *recoveryState) {

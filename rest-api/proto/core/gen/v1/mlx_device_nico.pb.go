@@ -144,6 +144,56 @@ func (MatchMode) EnumDescriptor() ([]byte, []int) {
 	return file_mlx_device_nico_proto_rawDescGZIP(), []int{1}
 }
 
+// Transport selected once for a checked NIC firmware operation. Original
+// sources and expected digests stay immutable in either mode.
+type FirmwareDeliveryMode int32
+
+const (
+	// Compatibility default: anonymous HTTP(S) from the saved original source.
+	FirmwareDeliveryMode_FIRMWARE_DELIVERY_MODE_DIRECT FirmwareDeliveryMode = 0
+	// Authenticated Core artifact GETs; errors never permit an origin fallback.
+	FirmwareDeliveryMode_FIRMWARE_DELIVERY_MODE_SITE_CACHE FirmwareDeliveryMode = 1
+)
+
+// Enum value maps for FirmwareDeliveryMode.
+var (
+	FirmwareDeliveryMode_name = map[int32]string{
+		0: "FIRMWARE_DELIVERY_MODE_DIRECT",
+		1: "FIRMWARE_DELIVERY_MODE_SITE_CACHE",
+	}
+	FirmwareDeliveryMode_value = map[string]int32{
+		"FIRMWARE_DELIVERY_MODE_DIRECT":     0,
+		"FIRMWARE_DELIVERY_MODE_SITE_CACHE": 1,
+	}
+)
+
+func (x FirmwareDeliveryMode) Enum() *FirmwareDeliveryMode {
+	p := new(FirmwareDeliveryMode)
+	*p = x
+	return p
+}
+
+func (x FirmwareDeliveryMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (FirmwareDeliveryMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_mlx_device_nico_proto_enumTypes[2].Descriptor()
+}
+
+func (FirmwareDeliveryMode) Type() protoreflect.EnumType {
+	return &file_mlx_device_nico_proto_enumTypes[2]
+}
+
+func (x FirmwareDeliveryMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use FirmwareDeliveryMode.Descriptor instead.
+func (FirmwareDeliveryMode) EnumDescriptor() ([]byte, []int) {
+	return file_mlx_device_nico_proto_rawDescGZIP(), []int{2}
+}
+
 // Execution state of one submitted firmware operation. No state authorizes
 // replay of an uncertain mutation under a different operation ID.
 type FirmwareOperationState int32
@@ -206,11 +256,11 @@ func (x FirmwareOperationState) String() string {
 }
 
 func (FirmwareOperationState) Descriptor() protoreflect.EnumDescriptor {
-	return file_mlx_device_nico_proto_enumTypes[2].Descriptor()
+	return file_mlx_device_nico_proto_enumTypes[3].Descriptor()
 }
 
 func (FirmwareOperationState) Type() protoreflect.EnumType {
-	return &file_mlx_device_nico_proto_enumTypes[2]
+	return &file_mlx_device_nico_proto_enumTypes[3]
 }
 
 func (x FirmwareOperationState) Number() protoreflect.EnumNumber {
@@ -219,7 +269,7 @@ func (x FirmwareOperationState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use FirmwareOperationState.Descriptor instead.
 func (FirmwareOperationState) EnumDescriptor() ([]byte, []int) {
-	return file_mlx_device_nico_proto_rawDescGZIP(), []int{2}
+	return file_mlx_device_nico_proto_rawDescGZIP(), []int{3}
 }
 
 // The last step selected by a firmware operation.
@@ -279,11 +329,11 @@ func (x FirmwareOperationPhase) String() string {
 }
 
 func (FirmwareOperationPhase) Descriptor() protoreflect.EnumDescriptor {
-	return file_mlx_device_nico_proto_enumTypes[3].Descriptor()
+	return file_mlx_device_nico_proto_enumTypes[4].Descriptor()
 }
 
 func (FirmwareOperationPhase) Type() protoreflect.EnumType {
-	return &file_mlx_device_nico_proto_enumTypes[3]
+	return &file_mlx_device_nico_proto_enumTypes[4]
 }
 
 func (x FirmwareOperationPhase) Number() protoreflect.EnumNumber {
@@ -292,7 +342,7 @@ func (x FirmwareOperationPhase) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use FirmwareOperationPhase.Descriptor instead.
 func (FirmwareOperationPhase) EnumDescriptor() ([]byte, []int) {
-	return file_mlx_device_nico_proto_rawDescGZIP(), []int{3}
+	return file_mlx_device_nico_proto_rawDescGZIP(), []int{4}
 }
 
 // A request failure is not a durable firmware execution receipt. It cannot
@@ -341,11 +391,11 @@ func (x MlxDeviceUpdateFirmwareErrorCode) String() string {
 }
 
 func (MlxDeviceUpdateFirmwareErrorCode) Descriptor() protoreflect.EnumDescriptor {
-	return file_mlx_device_nico_proto_enumTypes[4].Descriptor()
+	return file_mlx_device_nico_proto_enumTypes[5].Descriptor()
 }
 
 func (MlxDeviceUpdateFirmwareErrorCode) Type() protoreflect.EnumType {
-	return &file_mlx_device_nico_proto_enumTypes[4]
+	return &file_mlx_device_nico_proto_enumTypes[5]
 }
 
 func (x MlxDeviceUpdateFirmwareErrorCode) Number() protoreflect.EnumNumber {
@@ -354,7 +404,7 @@ func (x MlxDeviceUpdateFirmwareErrorCode) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use MlxDeviceUpdateFirmwareErrorCode.Descriptor instead.
 func (MlxDeviceUpdateFirmwareErrorCode) EnumDescriptor() ([]byte, []int) {
-	return file_mlx_device_nico_proto_rawDescGZIP(), []int{4}
+	return file_mlx_device_nico_proto_rawDescGZIP(), []int{5}
 }
 
 // MlxDeviceStreamErrorStatus is an internal code to set to help
@@ -386,11 +436,11 @@ func (x MlxDeviceStreamErrorStatus) String() string {
 }
 
 func (MlxDeviceStreamErrorStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_mlx_device_nico_proto_enumTypes[5].Descriptor()
+	return file_mlx_device_nico_proto_enumTypes[6].Descriptor()
 }
 
 func (MlxDeviceStreamErrorStatus) Type() protoreflect.EnumType {
-	return &file_mlx_device_nico_proto_enumTypes[5]
+	return &file_mlx_device_nico_proto_enumTypes[6]
 }
 
 func (x MlxDeviceStreamErrorStatus) Number() protoreflect.EnumNumber {
@@ -399,7 +449,7 @@ func (x MlxDeviceStreamErrorStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use MlxDeviceStreamErrorStatus.Descriptor instead.
 func (MlxDeviceStreamErrorStatus) EnumDescriptor() ([]byte, []int) {
-	return file_mlx_device_nico_proto_rawDescGZIP(), []int{5}
+	return file_mlx_device_nico_proto_rawDescGZIP(), []int{6}
 }
 
 // LockStatus represents the current lock status of a device.
@@ -436,11 +486,11 @@ func (x LockStatus) String() string {
 }
 
 func (LockStatus) Descriptor() protoreflect.EnumDescriptor {
-	return file_mlx_device_nico_proto_enumTypes[6].Descriptor()
+	return file_mlx_device_nico_proto_enumTypes[7].Descriptor()
 }
 
 func (LockStatus) Type() protoreflect.EnumType {
-	return &file_mlx_device_nico_proto_enumTypes[6]
+	return &file_mlx_device_nico_proto_enumTypes[7]
 }
 
 func (x LockStatus) Number() protoreflect.EnumNumber {
@@ -449,7 +499,7 @@ func (x LockStatus) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use LockStatus.Descriptor instead.
 func (LockStatus) EnumDescriptor() ([]byte, []int) {
-	return file_mlx_device_nico_proto_rawDescGZIP(), []int{6}
+	return file_mlx_device_nico_proto_rawDescGZIP(), []int{7}
 }
 
 // MlxVariableRegistry represents a registry of mlxconfig variables
@@ -1828,9 +1878,13 @@ type MlxDeviceInfo struct {
 	// status is the status string returned by mlxfwmanager.
 	Status string `protobuf:"bytes,12,opt,name=status,proto3" json:"status,omitempty"`
 	// base_guid is the base GUID reported by MFT, if available.
-	BaseGuid      *string `protobuf:"bytes,13,opt,name=base_guid,json=baseGuid,proto3,oneof" json:"base_guid,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	BaseGuid *string `protobuf:"bytes,13,opt,name=base_guid,json=baseGuid,proto3,oneof" json:"base_guid,omitempty"`
+	// Firmware version reported by the Linux RDMA driver for this PCI device.
+	// Absent when the driver fact is unavailable or ambiguous. An installed
+	// version alone does not substitute for this post-activation observation.
+	FwVersionRunning *string `protobuf:"bytes,14,opt,name=fw_version_running,json=fwVersionRunning,proto3,oneof" json:"fw_version_running,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *MlxDeviceInfo) Reset() {
@@ -1950,6 +2004,13 @@ func (x *MlxDeviceInfo) GetStatus() string {
 func (x *MlxDeviceInfo) GetBaseGuid() string {
 	if x != nil && x.BaseGuid != nil {
 		return *x.BaseGuid
+	}
+	return ""
+}
+
+func (x *MlxDeviceInfo) GetFwVersionRunning() string {
+	if x != nil && x.FwVersionRunning != nil {
+		return *x.FwVersionRunning
 	}
 	return ""
 }
@@ -8712,7 +8773,7 @@ const file_mlx_device_nico_proto_rawDesc = "" +
 	"\bbase_mac\x18\x01 \x01(\tH\x00R\abaseMac\x12\x1d\n" +
 	"\tbase_guid\x18\x02 \x01(\tH\x00R\bbaseGuidB\n" +
 	"\n" +
-	"\bidentity\"\xae\x04\n" +
+	"\bidentity\"\xf8\x04\n" +
 	"\rMlxDeviceInfo\x12\x19\n" +
 	"\bpci_name\x18\x01 \x01(\tR\apciName\x12\x1f\n" +
 	"\vdevice_type\x18\x02 \x01(\tR\n" +
@@ -8729,9 +8790,11 @@ const file_mlx_device_nico_proto_rawDesc = "" +
 	" \x01(\tR\x1buefiVersionVirtioNetCurrent\x12\x19\n" +
 	"\bbase_mac\x18\v \x01(\tR\abaseMac\x12\x16\n" +
 	"\x06status\x18\f \x01(\tR\x06status\x12 \n" +
-	"\tbase_guid\x18\r \x01(\tH\x00R\bbaseGuid\x88\x01\x01B\f\n" +
+	"\tbase_guid\x18\r \x01(\tH\x00R\bbaseGuid\x88\x01\x01\x121\n" +
+	"\x12fw_version_running\x18\x0e \x01(\tH\x01R\x10fwVersionRunning\x88\x01\x01B\f\n" +
 	"\n" +
-	"_base_guid\"E\n" +
+	"_base_guidB\x15\n" +
+	"\x13_fw_version_running\"E\n" +
 	"\x0fDeviceFilterSet\x122\n" +
 	"\afilters\x18\x01 \x03(\v2\x18.mlx_device.DeviceFilterR\afilters\"\x8b\x01\n" +
 	"\fDeviceFilter\x12-\n" +
@@ -9114,7 +9177,10 @@ const file_mlx_device_nico_proto_rawDesc = "" +
 	"\x16MATCH_MODE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10MATCH_MODE_REGEX\x10\x01\x12\x14\n" +
 	"\x10MATCH_MODE_EXACT\x10\x02\x12\x15\n" +
-	"\x11MATCH_MODE_PREFIX\x10\x03*\x8d\x03\n" +
+	"\x11MATCH_MODE_PREFIX\x10\x03*`\n" +
+	"\x14FirmwareDeliveryMode\x12!\n" +
+	"\x1dFIRMWARE_DELIVERY_MODE_DIRECT\x10\x00\x12%\n" +
+	"!FIRMWARE_DELIVERY_MODE_SITE_CACHE\x10\x01*\x8d\x03\n" +
 	"\x16FirmwareOperationState\x12(\n" +
 	"$FIRMWARE_OPERATION_STATE_UNSPECIFIED\x10\x00\x12%\n" +
 	"!FIRMWARE_OPERATION_STATE_ACCEPTED\x10\x01\x12$\n" +
@@ -9160,292 +9226,293 @@ func file_mlx_device_nico_proto_rawDescGZIP() []byte {
 	return file_mlx_device_nico_proto_rawDescData
 }
 
-var file_mlx_device_nico_proto_enumTypes = make([]protoimpl.EnumInfo, 7)
+var file_mlx_device_nico_proto_enumTypes = make([]protoimpl.EnumInfo, 8)
 var file_mlx_device_nico_proto_msgTypes = make([]protoimpl.MessageInfo, 128)
 var file_mlx_device_nico_proto_goTypes = []any{
 	(DeviceField)(0),                            // 0: mlx_device.DeviceField
 	(MatchMode)(0),                              // 1: mlx_device.MatchMode
-	(FirmwareOperationState)(0),                 // 2: mlx_device.FirmwareOperationState
-	(FirmwareOperationPhase)(0),                 // 3: mlx_device.FirmwareOperationPhase
-	(MlxDeviceUpdateFirmwareErrorCode)(0),       // 4: mlx_device.MlxDeviceUpdateFirmwareErrorCode
-	(MlxDeviceStreamErrorStatus)(0),             // 5: mlx_device.MlxDeviceStreamErrorStatus
-	(LockStatus)(0),                             // 6: mlx_device.LockStatus
-	(*MlxVariableRegistry)(nil),                 // 7: mlx_device.MlxVariableRegistry
-	(*MlxVariableSpec)(nil),                     // 8: mlx_device.MlxVariableSpec
-	(*MlxConfigVariable)(nil),                   // 9: mlx_device.MlxConfigVariable
-	(*MlxValueType)(nil),                        // 10: mlx_device.MlxValueType
-	(*MlxConfigValue)(nil),                      // 11: mlx_device.MlxConfigValue
-	(*QueriedDeviceInfo)(nil),                   // 12: mlx_device.QueriedDeviceInfo
-	(*QueriedVariable)(nil),                     // 13: mlx_device.QueriedVariable
-	(*QueryResult)(nil),                         // 14: mlx_device.QueryResult
-	(*PlannedChange)(nil),                       // 15: mlx_device.PlannedChange
-	(*VariableChange)(nil),                      // 16: mlx_device.VariableChange
-	(*ComparisonResult)(nil),                    // 17: mlx_device.ComparisonResult
-	(*SyncResult)(nil),                          // 18: mlx_device.SyncResult
-	(*MlxDeviceReport)(nil),                     // 19: mlx_device.MlxDeviceReport
-	(*MlxDeviceSelector)(nil),                   // 20: mlx_device.MlxDeviceSelector
-	(*MlxDeviceInfo)(nil),                       // 21: mlx_device.MlxDeviceInfo
-	(*DeviceFilterSet)(nil),                     // 22: mlx_device.DeviceFilterSet
-	(*DeviceFilter)(nil),                        // 23: mlx_device.DeviceFilter
-	(*ProfileTargetConstraints)(nil),            // 24: mlx_device.ProfileTargetConstraints
-	(*PublishMlxDeviceReportRequest)(nil),       // 25: mlx_device.PublishMlxDeviceReportRequest
-	(*PublishMlxDeviceReportResponse)(nil),      // 26: mlx_device.PublishMlxDeviceReportResponse
-	(*SerializableMlxConfigProfile)(nil),        // 27: mlx_device.SerializableMlxConfigProfile
-	(*FirmwareCredentials)(nil),                 // 28: mlx_device.FirmwareCredentials
-	(*BearerTokenCredentials)(nil),              // 29: mlx_device.BearerTokenCredentials
-	(*BasicAuthCredentials)(nil),                // 30: mlx_device.BasicAuthCredentials
-	(*HeaderCredentials)(nil),                   // 31: mlx_device.HeaderCredentials
-	(*SshKeyCredentials)(nil),                   // 32: mlx_device.SshKeyCredentials
-	(*SshAgentCredentials)(nil),                 // 33: mlx_device.SshAgentCredentials
-	(*FirmwareSpec)(nil),                        // 34: mlx_device.FirmwareSpec
-	(*FlashSpec)(nil),                           // 35: mlx_device.FlashSpec
-	(*FlashOptions)(nil),                        // 36: mlx_device.FlashOptions
-	(*FirmwareFlasherProfile)(nil),              // 37: mlx_device.FirmwareFlasherProfile
-	(*FirmwareArtifactDigests)(nil),             // 38: mlx_device.FirmwareArtifactDigests
-	(*MlxObservationReport)(nil),                // 39: mlx_device.MlxObservationReport
-	(*FirmwareFlashReport)(nil),                 // 40: mlx_device.FirmwareFlashReport
-	(*FirmwareOperation)(nil),                   // 41: mlx_device.FirmwareOperation
-	(*MlxDeviceUpdateFirmwareError)(nil),        // 42: mlx_device.MlxDeviceUpdateFirmwareError
-	(*FirmwareOperationMissingReceipt)(nil),     // 43: mlx_device.FirmwareOperationMissingReceipt
-	(*MlxDeviceUpdateFirmwareResult)(nil),       // 44: mlx_device.MlxDeviceUpdateFirmwareResult
-	(*MlxDeviceLockdownResult)(nil),             // 45: mlx_device.MlxDeviceLockdownResult
-	(*MlxObservation)(nil),                      // 46: mlx_device.MlxObservation
-	(*PublishMlxObservationReportRequest)(nil),  // 47: mlx_device.PublishMlxObservationReportRequest
-	(*PublishMlxObservationReportResponse)(nil), // 48: mlx_device.PublishMlxObservationReportResponse
-	(*MlxAdminProfileSyncRequest)(nil),          // 49: mlx_device.MlxAdminProfileSyncRequest
-	(*MlxAdminProfileSyncResponse)(nil),         // 50: mlx_device.MlxAdminProfileSyncResponse
-	(*MlxDeviceProfileSyncRequest)(nil),         // 51: mlx_device.MlxDeviceProfileSyncRequest
-	(*MlxDeviceProfileSyncResponse)(nil),        // 52: mlx_device.MlxDeviceProfileSyncResponse
-	(*MlxAdminProfileCompareRequest)(nil),       // 53: mlx_device.MlxAdminProfileCompareRequest
-	(*MlxAdminProfileCompareResponse)(nil),      // 54: mlx_device.MlxAdminProfileCompareResponse
-	(*MlxDeviceProfileCompareRequest)(nil),      // 55: mlx_device.MlxDeviceProfileCompareRequest
-	(*MlxDeviceProfileCompareResponse)(nil),     // 56: mlx_device.MlxDeviceProfileCompareResponse
-	(*MlxAdminLockdownLockRequest)(nil),         // 57: mlx_device.MlxAdminLockdownLockRequest
-	(*MlxAdminLockdownLockResponse)(nil),        // 58: mlx_device.MlxAdminLockdownLockResponse
-	(*MlxAdminLockdownUnlockRequest)(nil),       // 59: mlx_device.MlxAdminLockdownUnlockRequest
-	(*MlxAdminLockdownUnlockResponse)(nil),      // 60: mlx_device.MlxAdminLockdownUnlockResponse
-	(*MlxAdminLockdownStatusRequest)(nil),       // 61: mlx_device.MlxAdminLockdownStatusRequest
-	(*MlxAdminLockdownStatusResponse)(nil),      // 62: mlx_device.MlxAdminLockdownStatusResponse
-	(*MlxDeviceLockdownLockRequest)(nil),        // 63: mlx_device.MlxDeviceLockdownLockRequest
-	(*MlxDeviceLockdownUnlockRequest)(nil),      // 64: mlx_device.MlxDeviceLockdownUnlockRequest
-	(*MlxDeviceLockdownStatusRequest)(nil),      // 65: mlx_device.MlxDeviceLockdownStatusRequest
-	(*MlxDeviceLockdownResponse)(nil),           // 66: mlx_device.MlxDeviceLockdownResponse
-	(*MlxDeviceInfoDeviceRequest)(nil),          // 67: mlx_device.MlxDeviceInfoDeviceRequest
-	(*MlxDeviceInfoDeviceResponse)(nil),         // 68: mlx_device.MlxDeviceInfoDeviceResponse
-	(*MlxDeviceInfoReportRequest)(nil),          // 69: mlx_device.MlxDeviceInfoReportRequest
-	(*MlxDeviceInfoReportResponse)(nil),         // 70: mlx_device.MlxDeviceInfoReportResponse
-	(*MlxAdminRegistryListRequest)(nil),         // 71: mlx_device.MlxAdminRegistryListRequest
-	(*MlxAdminRegistryListResponse)(nil),        // 72: mlx_device.MlxAdminRegistryListResponse
-	(*MlxDeviceRegistryListRequest)(nil),        // 73: mlx_device.MlxDeviceRegistryListRequest
-	(*MlxDeviceRegistryListResponse)(nil),       // 74: mlx_device.MlxDeviceRegistryListResponse
-	(*RegistryListing)(nil),                     // 75: mlx_device.RegistryListing
-	(*MlxAdminRegistryShowRequest)(nil),         // 76: mlx_device.MlxAdminRegistryShowRequest
-	(*MlxAdminRegistryShowResponse)(nil),        // 77: mlx_device.MlxAdminRegistryShowResponse
-	(*MlxDeviceRegistryShowRequest)(nil),        // 78: mlx_device.MlxDeviceRegistryShowRequest
-	(*MlxDeviceRegistryShowResponse)(nil),       // 79: mlx_device.MlxDeviceRegistryShowResponse
-	(*MlxAdminConfigSyncRequest)(nil),           // 80: mlx_device.MlxAdminConfigSyncRequest
-	(*MlxAdminConfigSyncResponse)(nil),          // 81: mlx_device.MlxAdminConfigSyncResponse
-	(*MlxDeviceConfigSyncRequest)(nil),          // 82: mlx_device.MlxDeviceConfigSyncRequest
-	(*MlxDeviceConfigSyncResponse)(nil),         // 83: mlx_device.MlxDeviceConfigSyncResponse
-	(*MlxAdminConfigQueryRequest)(nil),          // 84: mlx_device.MlxAdminConfigQueryRequest
-	(*MlxAdminConfigQueryResponse)(nil),         // 85: mlx_device.MlxAdminConfigQueryResponse
-	(*MlxDeviceConfigQueryRequest)(nil),         // 86: mlx_device.MlxDeviceConfigQueryRequest
-	(*MlxDeviceConfigQueryResponse)(nil),        // 87: mlx_device.MlxDeviceConfigQueryResponse
-	(*MlxAdminConfigSetRequest)(nil),            // 88: mlx_device.MlxAdminConfigSetRequest
-	(*MlxAdminConfigSetResponse)(nil),           // 89: mlx_device.MlxAdminConfigSetResponse
-	(*MlxDeviceConfigSetRequest)(nil),           // 90: mlx_device.MlxDeviceConfigSetRequest
-	(*MlxDeviceConfigSetResponse)(nil),          // 91: mlx_device.MlxDeviceConfigSetResponse
-	(*MlxAdminConfigCompareRequest)(nil),        // 92: mlx_device.MlxAdminConfigCompareRequest
-	(*MlxAdminConfigCompareResponse)(nil),       // 93: mlx_device.MlxAdminConfigCompareResponse
-	(*MlxDeviceConfigCompareRequest)(nil),       // 94: mlx_device.MlxDeviceConfigCompareRequest
-	(*MlxDeviceConfigCompareResponse)(nil),      // 95: mlx_device.MlxDeviceConfigCompareResponse
-	(*MlxAdminProfileShowRequest)(nil),          // 96: mlx_device.MlxAdminProfileShowRequest
-	(*MlxAdminProfileShowResponse)(nil),         // 97: mlx_device.MlxAdminProfileShowResponse
-	(*MlxAdminProfileListRequest)(nil),          // 98: mlx_device.MlxAdminProfileListRequest
-	(*MlxAdminProfileListResponse)(nil),         // 99: mlx_device.MlxAdminProfileListResponse
-	(*MlxAdminDeviceInfoRequest)(nil),           // 100: mlx_device.MlxAdminDeviceInfoRequest
-	(*MlxAdminDeviceInfoResponse)(nil),          // 101: mlx_device.MlxAdminDeviceInfoResponse
-	(*MlxAdminDeviceReportRequest)(nil),         // 102: mlx_device.MlxAdminDeviceReportRequest
-	(*MlxAdminDeviceReportResponse)(nil),        // 103: mlx_device.MlxAdminDeviceReportResponse
-	(*MlxDeviceIdentity)(nil),                   // 104: mlx_device.MlxDeviceIdentity
-	(*MlxDeviceIdentityReport)(nil),             // 105: mlx_device.MlxDeviceIdentityReport
-	(*MlxAdminDeviceIdentitiesRequest)(nil),     // 106: mlx_device.MlxAdminDeviceIdentitiesRequest
-	(*MlxAdminDeviceIdentitiesResponse)(nil),    // 107: mlx_device.MlxAdminDeviceIdentitiesResponse
-	(*ProfileSummary)(nil),                      // 108: mlx_device.ProfileSummary
-	(*VariableAssignment)(nil),                  // 109: mlx_device.VariableAssignment
-	(*MlxDeviceStreamError)(nil),                // 110: mlx_device.MlxDeviceStreamError
-	(*StatusReport)(nil),                        // 111: mlx_device.StatusReport
-	(*MlxVariableSpec_BooleanSpec)(nil),         // 112: mlx_device.MlxVariableSpec.BooleanSpec
-	(*MlxVariableSpec_IntegerSpec)(nil),         // 113: mlx_device.MlxVariableSpec.IntegerSpec
-	(*MlxVariableSpec_StringSpec)(nil),          // 114: mlx_device.MlxVariableSpec.StringSpec
-	(*MlxVariableSpec_BinarySpec)(nil),          // 115: mlx_device.MlxVariableSpec.BinarySpec
-	(*MlxVariableSpec_BytesSpec)(nil),           // 116: mlx_device.MlxVariableSpec.BytesSpec
-	(*MlxVariableSpec_ArraySpec)(nil),           // 117: mlx_device.MlxVariableSpec.ArraySpec
-	(*MlxVariableSpec_OpaqueSpec)(nil),          // 118: mlx_device.MlxVariableSpec.OpaqueSpec
-	(*MlxVariableSpec_EnumSpec)(nil),            // 119: mlx_device.MlxVariableSpec.EnumSpec
-	(*MlxVariableSpec_PresetSpec)(nil),          // 120: mlx_device.MlxVariableSpec.PresetSpec
-	(*MlxVariableSpec_BooleanArraySpec)(nil),    // 121: mlx_device.MlxVariableSpec.BooleanArraySpec
-	(*MlxVariableSpec_IntegerArraySpec)(nil),    // 122: mlx_device.MlxVariableSpec.IntegerArraySpec
-	(*MlxVariableSpec_EnumArraySpec)(nil),       // 123: mlx_device.MlxVariableSpec.EnumArraySpec
-	(*MlxVariableSpec_BinaryArraySpec)(nil),     // 124: mlx_device.MlxVariableSpec.BinaryArraySpec
-	(*MlxValueType_StringArray)(nil),            // 125: mlx_device.MlxValueType.StringArray
-	(*MlxValueType_BooleanArray)(nil),           // 126: mlx_device.MlxValueType.BooleanArray
-	(*MlxValueType_IntegerArray)(nil),           // 127: mlx_device.MlxValueType.IntegerArray
-	(*MlxValueType_BytesArray)(nil),             // 128: mlx_device.MlxValueType.BytesArray
-	(*MlxValueType_OptionalBool)(nil),           // 129: mlx_device.MlxValueType.OptionalBool
-	(*MlxValueType_OptionalInt64)(nil),          // 130: mlx_device.MlxValueType.OptionalInt64
-	(*MlxValueType_OptionalString)(nil),         // 131: mlx_device.MlxValueType.OptionalString
-	(*MlxValueType_OptionalBytes)(nil),          // 132: mlx_device.MlxValueType.OptionalBytes
-	nil,                                         // 133: mlx_device.SerializableMlxConfigProfile.ConfigEntry
-	(*MlxDeviceLockdownResult_Changed)(nil),     // 134: mlx_device.MlxDeviceLockdownResult.Changed
-	(*timestamppb.Timestamp)(nil),               // 135: google.protobuf.Timestamp
-	(*MachineId)(nil),                           // 136: common.MachineId
+	(FirmwareDeliveryMode)(0),                   // 2: mlx_device.FirmwareDeliveryMode
+	(FirmwareOperationState)(0),                 // 3: mlx_device.FirmwareOperationState
+	(FirmwareOperationPhase)(0),                 // 4: mlx_device.FirmwareOperationPhase
+	(MlxDeviceUpdateFirmwareErrorCode)(0),       // 5: mlx_device.MlxDeviceUpdateFirmwareErrorCode
+	(MlxDeviceStreamErrorStatus)(0),             // 6: mlx_device.MlxDeviceStreamErrorStatus
+	(LockStatus)(0),                             // 7: mlx_device.LockStatus
+	(*MlxVariableRegistry)(nil),                 // 8: mlx_device.MlxVariableRegistry
+	(*MlxVariableSpec)(nil),                     // 9: mlx_device.MlxVariableSpec
+	(*MlxConfigVariable)(nil),                   // 10: mlx_device.MlxConfigVariable
+	(*MlxValueType)(nil),                        // 11: mlx_device.MlxValueType
+	(*MlxConfigValue)(nil),                      // 12: mlx_device.MlxConfigValue
+	(*QueriedDeviceInfo)(nil),                   // 13: mlx_device.QueriedDeviceInfo
+	(*QueriedVariable)(nil),                     // 14: mlx_device.QueriedVariable
+	(*QueryResult)(nil),                         // 15: mlx_device.QueryResult
+	(*PlannedChange)(nil),                       // 16: mlx_device.PlannedChange
+	(*VariableChange)(nil),                      // 17: mlx_device.VariableChange
+	(*ComparisonResult)(nil),                    // 18: mlx_device.ComparisonResult
+	(*SyncResult)(nil),                          // 19: mlx_device.SyncResult
+	(*MlxDeviceReport)(nil),                     // 20: mlx_device.MlxDeviceReport
+	(*MlxDeviceSelector)(nil),                   // 21: mlx_device.MlxDeviceSelector
+	(*MlxDeviceInfo)(nil),                       // 22: mlx_device.MlxDeviceInfo
+	(*DeviceFilterSet)(nil),                     // 23: mlx_device.DeviceFilterSet
+	(*DeviceFilter)(nil),                        // 24: mlx_device.DeviceFilter
+	(*ProfileTargetConstraints)(nil),            // 25: mlx_device.ProfileTargetConstraints
+	(*PublishMlxDeviceReportRequest)(nil),       // 26: mlx_device.PublishMlxDeviceReportRequest
+	(*PublishMlxDeviceReportResponse)(nil),      // 27: mlx_device.PublishMlxDeviceReportResponse
+	(*SerializableMlxConfigProfile)(nil),        // 28: mlx_device.SerializableMlxConfigProfile
+	(*FirmwareCredentials)(nil),                 // 29: mlx_device.FirmwareCredentials
+	(*BearerTokenCredentials)(nil),              // 30: mlx_device.BearerTokenCredentials
+	(*BasicAuthCredentials)(nil),                // 31: mlx_device.BasicAuthCredentials
+	(*HeaderCredentials)(nil),                   // 32: mlx_device.HeaderCredentials
+	(*SshKeyCredentials)(nil),                   // 33: mlx_device.SshKeyCredentials
+	(*SshAgentCredentials)(nil),                 // 34: mlx_device.SshAgentCredentials
+	(*FirmwareSpec)(nil),                        // 35: mlx_device.FirmwareSpec
+	(*FlashSpec)(nil),                           // 36: mlx_device.FlashSpec
+	(*FlashOptions)(nil),                        // 37: mlx_device.FlashOptions
+	(*FirmwareFlasherProfile)(nil),              // 38: mlx_device.FirmwareFlasherProfile
+	(*FirmwareArtifactDigests)(nil),             // 39: mlx_device.FirmwareArtifactDigests
+	(*MlxObservationReport)(nil),                // 40: mlx_device.MlxObservationReport
+	(*FirmwareFlashReport)(nil),                 // 41: mlx_device.FirmwareFlashReport
+	(*FirmwareOperation)(nil),                   // 42: mlx_device.FirmwareOperation
+	(*MlxDeviceUpdateFirmwareError)(nil),        // 43: mlx_device.MlxDeviceUpdateFirmwareError
+	(*FirmwareOperationMissingReceipt)(nil),     // 44: mlx_device.FirmwareOperationMissingReceipt
+	(*MlxDeviceUpdateFirmwareResult)(nil),       // 45: mlx_device.MlxDeviceUpdateFirmwareResult
+	(*MlxDeviceLockdownResult)(nil),             // 46: mlx_device.MlxDeviceLockdownResult
+	(*MlxObservation)(nil),                      // 47: mlx_device.MlxObservation
+	(*PublishMlxObservationReportRequest)(nil),  // 48: mlx_device.PublishMlxObservationReportRequest
+	(*PublishMlxObservationReportResponse)(nil), // 49: mlx_device.PublishMlxObservationReportResponse
+	(*MlxAdminProfileSyncRequest)(nil),          // 50: mlx_device.MlxAdminProfileSyncRequest
+	(*MlxAdminProfileSyncResponse)(nil),         // 51: mlx_device.MlxAdminProfileSyncResponse
+	(*MlxDeviceProfileSyncRequest)(nil),         // 52: mlx_device.MlxDeviceProfileSyncRequest
+	(*MlxDeviceProfileSyncResponse)(nil),        // 53: mlx_device.MlxDeviceProfileSyncResponse
+	(*MlxAdminProfileCompareRequest)(nil),       // 54: mlx_device.MlxAdminProfileCompareRequest
+	(*MlxAdminProfileCompareResponse)(nil),      // 55: mlx_device.MlxAdminProfileCompareResponse
+	(*MlxDeviceProfileCompareRequest)(nil),      // 56: mlx_device.MlxDeviceProfileCompareRequest
+	(*MlxDeviceProfileCompareResponse)(nil),     // 57: mlx_device.MlxDeviceProfileCompareResponse
+	(*MlxAdminLockdownLockRequest)(nil),         // 58: mlx_device.MlxAdminLockdownLockRequest
+	(*MlxAdminLockdownLockResponse)(nil),        // 59: mlx_device.MlxAdminLockdownLockResponse
+	(*MlxAdminLockdownUnlockRequest)(nil),       // 60: mlx_device.MlxAdminLockdownUnlockRequest
+	(*MlxAdminLockdownUnlockResponse)(nil),      // 61: mlx_device.MlxAdminLockdownUnlockResponse
+	(*MlxAdminLockdownStatusRequest)(nil),       // 62: mlx_device.MlxAdminLockdownStatusRequest
+	(*MlxAdminLockdownStatusResponse)(nil),      // 63: mlx_device.MlxAdminLockdownStatusResponse
+	(*MlxDeviceLockdownLockRequest)(nil),        // 64: mlx_device.MlxDeviceLockdownLockRequest
+	(*MlxDeviceLockdownUnlockRequest)(nil),      // 65: mlx_device.MlxDeviceLockdownUnlockRequest
+	(*MlxDeviceLockdownStatusRequest)(nil),      // 66: mlx_device.MlxDeviceLockdownStatusRequest
+	(*MlxDeviceLockdownResponse)(nil),           // 67: mlx_device.MlxDeviceLockdownResponse
+	(*MlxDeviceInfoDeviceRequest)(nil),          // 68: mlx_device.MlxDeviceInfoDeviceRequest
+	(*MlxDeviceInfoDeviceResponse)(nil),         // 69: mlx_device.MlxDeviceInfoDeviceResponse
+	(*MlxDeviceInfoReportRequest)(nil),          // 70: mlx_device.MlxDeviceInfoReportRequest
+	(*MlxDeviceInfoReportResponse)(nil),         // 71: mlx_device.MlxDeviceInfoReportResponse
+	(*MlxAdminRegistryListRequest)(nil),         // 72: mlx_device.MlxAdminRegistryListRequest
+	(*MlxAdminRegistryListResponse)(nil),        // 73: mlx_device.MlxAdminRegistryListResponse
+	(*MlxDeviceRegistryListRequest)(nil),        // 74: mlx_device.MlxDeviceRegistryListRequest
+	(*MlxDeviceRegistryListResponse)(nil),       // 75: mlx_device.MlxDeviceRegistryListResponse
+	(*RegistryListing)(nil),                     // 76: mlx_device.RegistryListing
+	(*MlxAdminRegistryShowRequest)(nil),         // 77: mlx_device.MlxAdminRegistryShowRequest
+	(*MlxAdminRegistryShowResponse)(nil),        // 78: mlx_device.MlxAdminRegistryShowResponse
+	(*MlxDeviceRegistryShowRequest)(nil),        // 79: mlx_device.MlxDeviceRegistryShowRequest
+	(*MlxDeviceRegistryShowResponse)(nil),       // 80: mlx_device.MlxDeviceRegistryShowResponse
+	(*MlxAdminConfigSyncRequest)(nil),           // 81: mlx_device.MlxAdminConfigSyncRequest
+	(*MlxAdminConfigSyncResponse)(nil),          // 82: mlx_device.MlxAdminConfigSyncResponse
+	(*MlxDeviceConfigSyncRequest)(nil),          // 83: mlx_device.MlxDeviceConfigSyncRequest
+	(*MlxDeviceConfigSyncResponse)(nil),         // 84: mlx_device.MlxDeviceConfigSyncResponse
+	(*MlxAdminConfigQueryRequest)(nil),          // 85: mlx_device.MlxAdminConfigQueryRequest
+	(*MlxAdminConfigQueryResponse)(nil),         // 86: mlx_device.MlxAdminConfigQueryResponse
+	(*MlxDeviceConfigQueryRequest)(nil),         // 87: mlx_device.MlxDeviceConfigQueryRequest
+	(*MlxDeviceConfigQueryResponse)(nil),        // 88: mlx_device.MlxDeviceConfigQueryResponse
+	(*MlxAdminConfigSetRequest)(nil),            // 89: mlx_device.MlxAdminConfigSetRequest
+	(*MlxAdminConfigSetResponse)(nil),           // 90: mlx_device.MlxAdminConfigSetResponse
+	(*MlxDeviceConfigSetRequest)(nil),           // 91: mlx_device.MlxDeviceConfigSetRequest
+	(*MlxDeviceConfigSetResponse)(nil),          // 92: mlx_device.MlxDeviceConfigSetResponse
+	(*MlxAdminConfigCompareRequest)(nil),        // 93: mlx_device.MlxAdminConfigCompareRequest
+	(*MlxAdminConfigCompareResponse)(nil),       // 94: mlx_device.MlxAdminConfigCompareResponse
+	(*MlxDeviceConfigCompareRequest)(nil),       // 95: mlx_device.MlxDeviceConfigCompareRequest
+	(*MlxDeviceConfigCompareResponse)(nil),      // 96: mlx_device.MlxDeviceConfigCompareResponse
+	(*MlxAdminProfileShowRequest)(nil),          // 97: mlx_device.MlxAdminProfileShowRequest
+	(*MlxAdminProfileShowResponse)(nil),         // 98: mlx_device.MlxAdminProfileShowResponse
+	(*MlxAdminProfileListRequest)(nil),          // 99: mlx_device.MlxAdminProfileListRequest
+	(*MlxAdminProfileListResponse)(nil),         // 100: mlx_device.MlxAdminProfileListResponse
+	(*MlxAdminDeviceInfoRequest)(nil),           // 101: mlx_device.MlxAdminDeviceInfoRequest
+	(*MlxAdminDeviceInfoResponse)(nil),          // 102: mlx_device.MlxAdminDeviceInfoResponse
+	(*MlxAdminDeviceReportRequest)(nil),         // 103: mlx_device.MlxAdminDeviceReportRequest
+	(*MlxAdminDeviceReportResponse)(nil),        // 104: mlx_device.MlxAdminDeviceReportResponse
+	(*MlxDeviceIdentity)(nil),                   // 105: mlx_device.MlxDeviceIdentity
+	(*MlxDeviceIdentityReport)(nil),             // 106: mlx_device.MlxDeviceIdentityReport
+	(*MlxAdminDeviceIdentitiesRequest)(nil),     // 107: mlx_device.MlxAdminDeviceIdentitiesRequest
+	(*MlxAdminDeviceIdentitiesResponse)(nil),    // 108: mlx_device.MlxAdminDeviceIdentitiesResponse
+	(*ProfileSummary)(nil),                      // 109: mlx_device.ProfileSummary
+	(*VariableAssignment)(nil),                  // 110: mlx_device.VariableAssignment
+	(*MlxDeviceStreamError)(nil),                // 111: mlx_device.MlxDeviceStreamError
+	(*StatusReport)(nil),                        // 112: mlx_device.StatusReport
+	(*MlxVariableSpec_BooleanSpec)(nil),         // 113: mlx_device.MlxVariableSpec.BooleanSpec
+	(*MlxVariableSpec_IntegerSpec)(nil),         // 114: mlx_device.MlxVariableSpec.IntegerSpec
+	(*MlxVariableSpec_StringSpec)(nil),          // 115: mlx_device.MlxVariableSpec.StringSpec
+	(*MlxVariableSpec_BinarySpec)(nil),          // 116: mlx_device.MlxVariableSpec.BinarySpec
+	(*MlxVariableSpec_BytesSpec)(nil),           // 117: mlx_device.MlxVariableSpec.BytesSpec
+	(*MlxVariableSpec_ArraySpec)(nil),           // 118: mlx_device.MlxVariableSpec.ArraySpec
+	(*MlxVariableSpec_OpaqueSpec)(nil),          // 119: mlx_device.MlxVariableSpec.OpaqueSpec
+	(*MlxVariableSpec_EnumSpec)(nil),            // 120: mlx_device.MlxVariableSpec.EnumSpec
+	(*MlxVariableSpec_PresetSpec)(nil),          // 121: mlx_device.MlxVariableSpec.PresetSpec
+	(*MlxVariableSpec_BooleanArraySpec)(nil),    // 122: mlx_device.MlxVariableSpec.BooleanArraySpec
+	(*MlxVariableSpec_IntegerArraySpec)(nil),    // 123: mlx_device.MlxVariableSpec.IntegerArraySpec
+	(*MlxVariableSpec_EnumArraySpec)(nil),       // 124: mlx_device.MlxVariableSpec.EnumArraySpec
+	(*MlxVariableSpec_BinaryArraySpec)(nil),     // 125: mlx_device.MlxVariableSpec.BinaryArraySpec
+	(*MlxValueType_StringArray)(nil),            // 126: mlx_device.MlxValueType.StringArray
+	(*MlxValueType_BooleanArray)(nil),           // 127: mlx_device.MlxValueType.BooleanArray
+	(*MlxValueType_IntegerArray)(nil),           // 128: mlx_device.MlxValueType.IntegerArray
+	(*MlxValueType_BytesArray)(nil),             // 129: mlx_device.MlxValueType.BytesArray
+	(*MlxValueType_OptionalBool)(nil),           // 130: mlx_device.MlxValueType.OptionalBool
+	(*MlxValueType_OptionalInt64)(nil),          // 131: mlx_device.MlxValueType.OptionalInt64
+	(*MlxValueType_OptionalString)(nil),         // 132: mlx_device.MlxValueType.OptionalString
+	(*MlxValueType_OptionalBytes)(nil),          // 133: mlx_device.MlxValueType.OptionalBytes
+	nil,                                         // 134: mlx_device.SerializableMlxConfigProfile.ConfigEntry
+	(*MlxDeviceLockdownResult_Changed)(nil),     // 135: mlx_device.MlxDeviceLockdownResult.Changed
+	(*timestamppb.Timestamp)(nil),               // 136: google.protobuf.Timestamp
+	(*MachineId)(nil),                           // 137: common.MachineId
 }
 var file_mlx_device_nico_proto_depIdxs = []int32{
-	9,   // 0: mlx_device.MlxVariableRegistry.variables:type_name -> mlx_device.MlxConfigVariable
-	22,  // 1: mlx_device.MlxVariableRegistry.filters:type_name -> mlx_device.DeviceFilterSet
-	112, // 2: mlx_device.MlxVariableSpec.boolean:type_name -> mlx_device.MlxVariableSpec.BooleanSpec
-	113, // 3: mlx_device.MlxVariableSpec.integer:type_name -> mlx_device.MlxVariableSpec.IntegerSpec
-	114, // 4: mlx_device.MlxVariableSpec.string:type_name -> mlx_device.MlxVariableSpec.StringSpec
-	115, // 5: mlx_device.MlxVariableSpec.binary:type_name -> mlx_device.MlxVariableSpec.BinarySpec
-	116, // 6: mlx_device.MlxVariableSpec.bytes:type_name -> mlx_device.MlxVariableSpec.BytesSpec
-	117, // 7: mlx_device.MlxVariableSpec.array:type_name -> mlx_device.MlxVariableSpec.ArraySpec
-	119, // 8: mlx_device.MlxVariableSpec.enum_type:type_name -> mlx_device.MlxVariableSpec.EnumSpec
-	120, // 9: mlx_device.MlxVariableSpec.preset:type_name -> mlx_device.MlxVariableSpec.PresetSpec
-	121, // 10: mlx_device.MlxVariableSpec.boolean_array:type_name -> mlx_device.MlxVariableSpec.BooleanArraySpec
-	122, // 11: mlx_device.MlxVariableSpec.integer_array:type_name -> mlx_device.MlxVariableSpec.IntegerArraySpec
-	123, // 12: mlx_device.MlxVariableSpec.enum_array:type_name -> mlx_device.MlxVariableSpec.EnumArraySpec
-	124, // 13: mlx_device.MlxVariableSpec.binary_array:type_name -> mlx_device.MlxVariableSpec.BinaryArraySpec
-	118, // 14: mlx_device.MlxVariableSpec.opaque:type_name -> mlx_device.MlxVariableSpec.OpaqueSpec
-	8,   // 15: mlx_device.MlxConfigVariable.spec:type_name -> mlx_device.MlxVariableSpec
-	125, // 16: mlx_device.MlxValueType.array:type_name -> mlx_device.MlxValueType.StringArray
-	126, // 17: mlx_device.MlxValueType.boolean_array:type_name -> mlx_device.MlxValueType.BooleanArray
-	127, // 18: mlx_device.MlxValueType.integer_array:type_name -> mlx_device.MlxValueType.IntegerArray
-	125, // 19: mlx_device.MlxValueType.enum_array:type_name -> mlx_device.MlxValueType.StringArray
-	128, // 20: mlx_device.MlxValueType.binary_array:type_name -> mlx_device.MlxValueType.BytesArray
-	9,   // 21: mlx_device.MlxConfigValue.variable:type_name -> mlx_device.MlxConfigVariable
-	10,  // 22: mlx_device.MlxConfigValue.value:type_name -> mlx_device.MlxValueType
-	9,   // 23: mlx_device.QueriedVariable.variable:type_name -> mlx_device.MlxConfigVariable
-	11,  // 24: mlx_device.QueriedVariable.current_value:type_name -> mlx_device.MlxConfigValue
-	11,  // 25: mlx_device.QueriedVariable.default_value:type_name -> mlx_device.MlxConfigValue
-	11,  // 26: mlx_device.QueriedVariable.next_value:type_name -> mlx_device.MlxConfigValue
-	12,  // 27: mlx_device.QueryResult.device_info:type_name -> mlx_device.QueriedDeviceInfo
-	13,  // 28: mlx_device.QueryResult.variables:type_name -> mlx_device.QueriedVariable
-	11,  // 29: mlx_device.PlannedChange.current_value:type_name -> mlx_device.MlxConfigValue
-	11,  // 30: mlx_device.PlannedChange.desired_value:type_name -> mlx_device.MlxConfigValue
-	11,  // 31: mlx_device.VariableChange.old_value:type_name -> mlx_device.MlxConfigValue
-	11,  // 32: mlx_device.VariableChange.new_value:type_name -> mlx_device.MlxConfigValue
-	15,  // 33: mlx_device.ComparisonResult.planned_changes:type_name -> mlx_device.PlannedChange
-	14,  // 34: mlx_device.ComparisonResult.query_result:type_name -> mlx_device.QueryResult
-	16,  // 35: mlx_device.SyncResult.changes_applied:type_name -> mlx_device.VariableChange
-	14,  // 36: mlx_device.SyncResult.query_result:type_name -> mlx_device.QueryResult
-	135, // 37: mlx_device.MlxDeviceReport.timestamp:type_name -> google.protobuf.Timestamp
-	21,  // 38: mlx_device.MlxDeviceReport.devices:type_name -> mlx_device.MlxDeviceInfo
-	22,  // 39: mlx_device.MlxDeviceReport.filters:type_name -> mlx_device.DeviceFilterSet
-	136, // 40: mlx_device.MlxDeviceReport.machine_id:type_name -> common.MachineId
-	23,  // 41: mlx_device.DeviceFilterSet.filters:type_name -> mlx_device.DeviceFilter
+	10,  // 0: mlx_device.MlxVariableRegistry.variables:type_name -> mlx_device.MlxConfigVariable
+	23,  // 1: mlx_device.MlxVariableRegistry.filters:type_name -> mlx_device.DeviceFilterSet
+	113, // 2: mlx_device.MlxVariableSpec.boolean:type_name -> mlx_device.MlxVariableSpec.BooleanSpec
+	114, // 3: mlx_device.MlxVariableSpec.integer:type_name -> mlx_device.MlxVariableSpec.IntegerSpec
+	115, // 4: mlx_device.MlxVariableSpec.string:type_name -> mlx_device.MlxVariableSpec.StringSpec
+	116, // 5: mlx_device.MlxVariableSpec.binary:type_name -> mlx_device.MlxVariableSpec.BinarySpec
+	117, // 6: mlx_device.MlxVariableSpec.bytes:type_name -> mlx_device.MlxVariableSpec.BytesSpec
+	118, // 7: mlx_device.MlxVariableSpec.array:type_name -> mlx_device.MlxVariableSpec.ArraySpec
+	120, // 8: mlx_device.MlxVariableSpec.enum_type:type_name -> mlx_device.MlxVariableSpec.EnumSpec
+	121, // 9: mlx_device.MlxVariableSpec.preset:type_name -> mlx_device.MlxVariableSpec.PresetSpec
+	122, // 10: mlx_device.MlxVariableSpec.boolean_array:type_name -> mlx_device.MlxVariableSpec.BooleanArraySpec
+	123, // 11: mlx_device.MlxVariableSpec.integer_array:type_name -> mlx_device.MlxVariableSpec.IntegerArraySpec
+	124, // 12: mlx_device.MlxVariableSpec.enum_array:type_name -> mlx_device.MlxVariableSpec.EnumArraySpec
+	125, // 13: mlx_device.MlxVariableSpec.binary_array:type_name -> mlx_device.MlxVariableSpec.BinaryArraySpec
+	119, // 14: mlx_device.MlxVariableSpec.opaque:type_name -> mlx_device.MlxVariableSpec.OpaqueSpec
+	9,   // 15: mlx_device.MlxConfigVariable.spec:type_name -> mlx_device.MlxVariableSpec
+	126, // 16: mlx_device.MlxValueType.array:type_name -> mlx_device.MlxValueType.StringArray
+	127, // 17: mlx_device.MlxValueType.boolean_array:type_name -> mlx_device.MlxValueType.BooleanArray
+	128, // 18: mlx_device.MlxValueType.integer_array:type_name -> mlx_device.MlxValueType.IntegerArray
+	126, // 19: mlx_device.MlxValueType.enum_array:type_name -> mlx_device.MlxValueType.StringArray
+	129, // 20: mlx_device.MlxValueType.binary_array:type_name -> mlx_device.MlxValueType.BytesArray
+	10,  // 21: mlx_device.MlxConfigValue.variable:type_name -> mlx_device.MlxConfigVariable
+	11,  // 22: mlx_device.MlxConfigValue.value:type_name -> mlx_device.MlxValueType
+	10,  // 23: mlx_device.QueriedVariable.variable:type_name -> mlx_device.MlxConfigVariable
+	12,  // 24: mlx_device.QueriedVariable.current_value:type_name -> mlx_device.MlxConfigValue
+	12,  // 25: mlx_device.QueriedVariable.default_value:type_name -> mlx_device.MlxConfigValue
+	12,  // 26: mlx_device.QueriedVariable.next_value:type_name -> mlx_device.MlxConfigValue
+	13,  // 27: mlx_device.QueryResult.device_info:type_name -> mlx_device.QueriedDeviceInfo
+	14,  // 28: mlx_device.QueryResult.variables:type_name -> mlx_device.QueriedVariable
+	12,  // 29: mlx_device.PlannedChange.current_value:type_name -> mlx_device.MlxConfigValue
+	12,  // 30: mlx_device.PlannedChange.desired_value:type_name -> mlx_device.MlxConfigValue
+	12,  // 31: mlx_device.VariableChange.old_value:type_name -> mlx_device.MlxConfigValue
+	12,  // 32: mlx_device.VariableChange.new_value:type_name -> mlx_device.MlxConfigValue
+	16,  // 33: mlx_device.ComparisonResult.planned_changes:type_name -> mlx_device.PlannedChange
+	15,  // 34: mlx_device.ComparisonResult.query_result:type_name -> mlx_device.QueryResult
+	17,  // 35: mlx_device.SyncResult.changes_applied:type_name -> mlx_device.VariableChange
+	15,  // 36: mlx_device.SyncResult.query_result:type_name -> mlx_device.QueryResult
+	136, // 37: mlx_device.MlxDeviceReport.timestamp:type_name -> google.protobuf.Timestamp
+	22,  // 38: mlx_device.MlxDeviceReport.devices:type_name -> mlx_device.MlxDeviceInfo
+	23,  // 39: mlx_device.MlxDeviceReport.filters:type_name -> mlx_device.DeviceFilterSet
+	137, // 40: mlx_device.MlxDeviceReport.machine_id:type_name -> common.MachineId
+	24,  // 41: mlx_device.DeviceFilterSet.filters:type_name -> mlx_device.DeviceFilter
 	0,   // 42: mlx_device.DeviceFilter.field:type_name -> mlx_device.DeviceField
 	1,   // 43: mlx_device.DeviceFilter.match_mode:type_name -> mlx_device.MatchMode
-	19,  // 44: mlx_device.PublishMlxDeviceReportRequest.report:type_name -> mlx_device.MlxDeviceReport
-	133, // 45: mlx_device.SerializableMlxConfigProfile.config:type_name -> mlx_device.SerializableMlxConfigProfile.ConfigEntry
-	29,  // 46: mlx_device.FirmwareCredentials.bearer_token:type_name -> mlx_device.BearerTokenCredentials
-	30,  // 47: mlx_device.FirmwareCredentials.basic_auth:type_name -> mlx_device.BasicAuthCredentials
-	31,  // 48: mlx_device.FirmwareCredentials.header:type_name -> mlx_device.HeaderCredentials
-	32,  // 49: mlx_device.FirmwareCredentials.ssh_key:type_name -> mlx_device.SshKeyCredentials
-	33,  // 50: mlx_device.FirmwareCredentials.ssh_agent:type_name -> mlx_device.SshAgentCredentials
-	28,  // 51: mlx_device.FlashSpec.firmware_credentials:type_name -> mlx_device.FirmwareCredentials
-	28,  // 52: mlx_device.FlashSpec.device_conf_credentials:type_name -> mlx_device.FirmwareCredentials
-	34,  // 53: mlx_device.FirmwareFlasherProfile.firmware_spec:type_name -> mlx_device.FirmwareSpec
-	35,  // 54: mlx_device.FirmwareFlasherProfile.flash_spec:type_name -> mlx_device.FlashSpec
-	36,  // 55: mlx_device.FirmwareFlasherProfile.flash_options:type_name -> mlx_device.FlashOptions
-	136, // 56: mlx_device.MlxObservationReport.machine_id:type_name -> common.MachineId
-	135, // 57: mlx_device.MlxObservationReport.timestamp:type_name -> google.protobuf.Timestamp
-	46,  // 58: mlx_device.MlxObservationReport.observations:type_name -> mlx_device.MlxObservation
-	2,   // 59: mlx_device.FirmwareOperation.state:type_name -> mlx_device.FirmwareOperationState
-	3,   // 60: mlx_device.FirmwareOperation.phase:type_name -> mlx_device.FirmwareOperationPhase
-	40,  // 61: mlx_device.FirmwareOperation.report:type_name -> mlx_device.FirmwareFlashReport
-	4,   // 62: mlx_device.MlxDeviceUpdateFirmwareError.code:type_name -> mlx_device.MlxDeviceUpdateFirmwareErrorCode
-	41,  // 63: mlx_device.MlxDeviceUpdateFirmwareResult.receipt:type_name -> mlx_device.FirmwareOperation
-	42,  // 64: mlx_device.MlxDeviceUpdateFirmwareResult.error:type_name -> mlx_device.MlxDeviceUpdateFirmwareError
-	43,  // 65: mlx_device.MlxDeviceUpdateFirmwareResult.missing_receipt:type_name -> mlx_device.FirmwareOperationMissingReceipt
-	20,  // 66: mlx_device.MlxDeviceLockdownResult.expected_device:type_name -> mlx_device.MlxDeviceSelector
-	111, // 67: mlx_device.MlxDeviceLockdownResult.status_report:type_name -> mlx_device.StatusReport
-	134, // 68: mlx_device.MlxDeviceLockdownResult.changed:type_name -> mlx_device.MlxDeviceLockdownResult.Changed
-	21,  // 69: mlx_device.MlxObservation.device_info:type_name -> mlx_device.MlxDeviceInfo
-	6,   // 70: mlx_device.MlxObservation.lock_status:type_name -> mlx_device.LockStatus
-	40,  // 71: mlx_device.MlxObservation.firmware_report:type_name -> mlx_device.FirmwareFlashReport
-	41,  // 72: mlx_device.MlxObservation.firmware_operation:type_name -> mlx_device.FirmwareOperation
-	44,  // 73: mlx_device.MlxObservation.firmware_update_result:type_name -> mlx_device.MlxDeviceUpdateFirmwareResult
-	45,  // 74: mlx_device.MlxObservation.lockdown_result:type_name -> mlx_device.MlxDeviceLockdownResult
-	39,  // 75: mlx_device.PublishMlxObservationReportRequest.report:type_name -> mlx_device.MlxObservationReport
-	136, // 76: mlx_device.MlxAdminProfileSyncRequest.machine_id:type_name -> common.MachineId
-	18,  // 77: mlx_device.MlxAdminProfileSyncResponse.sync_result:type_name -> mlx_device.SyncResult
-	27,  // 78: mlx_device.MlxDeviceProfileSyncRequest.serializable_profile:type_name -> mlx_device.SerializableMlxConfigProfile
-	18,  // 79: mlx_device.MlxDeviceProfileSyncResponse.sync_result:type_name -> mlx_device.SyncResult
-	110, // 80: mlx_device.MlxDeviceProfileSyncResponse.error:type_name -> mlx_device.MlxDeviceStreamError
-	136, // 81: mlx_device.MlxAdminProfileCompareRequest.machine_id:type_name -> common.MachineId
-	17,  // 82: mlx_device.MlxAdminProfileCompareResponse.comparison_result:type_name -> mlx_device.ComparisonResult
-	27,  // 83: mlx_device.MlxDeviceProfileCompareRequest.serializable_profile:type_name -> mlx_device.SerializableMlxConfigProfile
-	17,  // 84: mlx_device.MlxDeviceProfileCompareResponse.comparison_result:type_name -> mlx_device.ComparisonResult
-	110, // 85: mlx_device.MlxDeviceProfileCompareResponse.error:type_name -> mlx_device.MlxDeviceStreamError
-	136, // 86: mlx_device.MlxAdminLockdownLockRequest.machine_id:type_name -> common.MachineId
-	111, // 87: mlx_device.MlxAdminLockdownLockResponse.status_report:type_name -> mlx_device.StatusReport
-	136, // 88: mlx_device.MlxAdminLockdownUnlockRequest.machine_id:type_name -> common.MachineId
-	111, // 89: mlx_device.MlxAdminLockdownUnlockResponse.status_report:type_name -> mlx_device.StatusReport
-	136, // 90: mlx_device.MlxAdminLockdownStatusRequest.machine_id:type_name -> common.MachineId
-	111, // 91: mlx_device.MlxAdminLockdownStatusResponse.status_report:type_name -> mlx_device.StatusReport
-	111, // 92: mlx_device.MlxDeviceLockdownResponse.status_report:type_name -> mlx_device.StatusReport
-	110, // 93: mlx_device.MlxDeviceLockdownResponse.error:type_name -> mlx_device.MlxDeviceStreamError
-	21,  // 94: mlx_device.MlxDeviceInfoDeviceResponse.device_info:type_name -> mlx_device.MlxDeviceInfo
-	110, // 95: mlx_device.MlxDeviceInfoDeviceResponse.error:type_name -> mlx_device.MlxDeviceStreamError
-	22,  // 96: mlx_device.MlxDeviceInfoReportRequest.filters:type_name -> mlx_device.DeviceFilterSet
-	19,  // 97: mlx_device.MlxDeviceInfoReportResponse.device_report:type_name -> mlx_device.MlxDeviceReport
-	110, // 98: mlx_device.MlxDeviceInfoReportResponse.error:type_name -> mlx_device.MlxDeviceStreamError
-	136, // 99: mlx_device.MlxAdminRegistryListRequest.machine_id:type_name -> common.MachineId
-	75,  // 100: mlx_device.MlxAdminRegistryListResponse.registry_listing:type_name -> mlx_device.RegistryListing
-	75,  // 101: mlx_device.MlxDeviceRegistryListResponse.registry_listing:type_name -> mlx_device.RegistryListing
-	110, // 102: mlx_device.MlxDeviceRegistryListResponse.error:type_name -> mlx_device.MlxDeviceStreamError
-	136, // 103: mlx_device.MlxAdminRegistryShowRequest.machine_id:type_name -> common.MachineId
-	7,   // 104: mlx_device.MlxAdminRegistryShowResponse.variable_registry:type_name -> mlx_device.MlxVariableRegistry
-	7,   // 105: mlx_device.MlxDeviceRegistryShowResponse.variable_registry:type_name -> mlx_device.MlxVariableRegistry
-	110, // 106: mlx_device.MlxDeviceRegistryShowResponse.error:type_name -> mlx_device.MlxDeviceStreamError
-	136, // 107: mlx_device.MlxAdminConfigSyncRequest.machine_id:type_name -> common.MachineId
-	109, // 108: mlx_device.MlxAdminConfigSyncRequest.assignments:type_name -> mlx_device.VariableAssignment
-	18,  // 109: mlx_device.MlxAdminConfigSyncResponse.sync_result:type_name -> mlx_device.SyncResult
-	109, // 110: mlx_device.MlxDeviceConfigSyncRequest.assignments:type_name -> mlx_device.VariableAssignment
-	18,  // 111: mlx_device.MlxDeviceConfigSyncResponse.sync_result:type_name -> mlx_device.SyncResult
-	110, // 112: mlx_device.MlxDeviceConfigSyncResponse.error:type_name -> mlx_device.MlxDeviceStreamError
-	136, // 113: mlx_device.MlxAdminConfigQueryRequest.machine_id:type_name -> common.MachineId
-	14,  // 114: mlx_device.MlxAdminConfigQueryResponse.query_result:type_name -> mlx_device.QueryResult
-	14,  // 115: mlx_device.MlxDeviceConfigQueryResponse.query_result:type_name -> mlx_device.QueryResult
-	110, // 116: mlx_device.MlxDeviceConfigQueryResponse.error:type_name -> mlx_device.MlxDeviceStreamError
-	136, // 117: mlx_device.MlxAdminConfigSetRequest.machine_id:type_name -> common.MachineId
-	109, // 118: mlx_device.MlxAdminConfigSetRequest.assignments:type_name -> mlx_device.VariableAssignment
-	109, // 119: mlx_device.MlxDeviceConfigSetRequest.assignments:type_name -> mlx_device.VariableAssignment
-	110, // 120: mlx_device.MlxDeviceConfigSetResponse.error:type_name -> mlx_device.MlxDeviceStreamError
-	136, // 121: mlx_device.MlxAdminConfigCompareRequest.machine_id:type_name -> common.MachineId
-	109, // 122: mlx_device.MlxAdminConfigCompareRequest.assignments:type_name -> mlx_device.VariableAssignment
-	17,  // 123: mlx_device.MlxAdminConfigCompareResponse.comparison_result:type_name -> mlx_device.ComparisonResult
-	109, // 124: mlx_device.MlxDeviceConfigCompareRequest.assignments:type_name -> mlx_device.VariableAssignment
-	17,  // 125: mlx_device.MlxDeviceConfigCompareResponse.comparison_result:type_name -> mlx_device.ComparisonResult
-	110, // 126: mlx_device.MlxDeviceConfigCompareResponse.error:type_name -> mlx_device.MlxDeviceStreamError
-	27,  // 127: mlx_device.MlxAdminProfileShowResponse.serializable_profile:type_name -> mlx_device.SerializableMlxConfigProfile
-	108, // 128: mlx_device.MlxAdminProfileListResponse.profiles:type_name -> mlx_device.ProfileSummary
-	136, // 129: mlx_device.MlxAdminDeviceInfoRequest.machine_id:type_name -> common.MachineId
-	21,  // 130: mlx_device.MlxAdminDeviceInfoResponse.device_info:type_name -> mlx_device.MlxDeviceInfo
-	136, // 131: mlx_device.MlxAdminDeviceReportRequest.machine_id:type_name -> common.MachineId
-	19,  // 132: mlx_device.MlxAdminDeviceReportResponse.device_report:type_name -> mlx_device.MlxDeviceReport
-	21,  // 133: mlx_device.MlxDeviceIdentity.device_info:type_name -> mlx_device.MlxDeviceInfo
-	136, // 134: mlx_device.MlxDeviceIdentity.managed_dpu_machine_ids:type_name -> common.MachineId
-	135, // 135: mlx_device.MlxDeviceIdentityReport.observed_at:type_name -> google.protobuf.Timestamp
-	104, // 136: mlx_device.MlxDeviceIdentityReport.devices:type_name -> mlx_device.MlxDeviceIdentity
-	136, // 137: mlx_device.MlxAdminDeviceIdentitiesRequest.machine_id:type_name -> common.MachineId
-	105, // 138: mlx_device.MlxAdminDeviceIdentitiesResponse.report:type_name -> mlx_device.MlxDeviceIdentityReport
-	5,   // 139: mlx_device.MlxDeviceStreamError.status:type_name -> mlx_device.MlxDeviceStreamErrorStatus
-	6,   // 140: mlx_device.StatusReport.status:type_name -> mlx_device.LockStatus
-	129, // 141: mlx_device.MlxValueType.BooleanArray.values:type_name -> mlx_device.MlxValueType.OptionalBool
-	130, // 142: mlx_device.MlxValueType.IntegerArray.values:type_name -> mlx_device.MlxValueType.OptionalInt64
-	132, // 143: mlx_device.MlxValueType.BytesArray.values:type_name -> mlx_device.MlxValueType.OptionalBytes
+	20,  // 44: mlx_device.PublishMlxDeviceReportRequest.report:type_name -> mlx_device.MlxDeviceReport
+	134, // 45: mlx_device.SerializableMlxConfigProfile.config:type_name -> mlx_device.SerializableMlxConfigProfile.ConfigEntry
+	30,  // 46: mlx_device.FirmwareCredentials.bearer_token:type_name -> mlx_device.BearerTokenCredentials
+	31,  // 47: mlx_device.FirmwareCredentials.basic_auth:type_name -> mlx_device.BasicAuthCredentials
+	32,  // 48: mlx_device.FirmwareCredentials.header:type_name -> mlx_device.HeaderCredentials
+	33,  // 49: mlx_device.FirmwareCredentials.ssh_key:type_name -> mlx_device.SshKeyCredentials
+	34,  // 50: mlx_device.FirmwareCredentials.ssh_agent:type_name -> mlx_device.SshAgentCredentials
+	29,  // 51: mlx_device.FlashSpec.firmware_credentials:type_name -> mlx_device.FirmwareCredentials
+	29,  // 52: mlx_device.FlashSpec.device_conf_credentials:type_name -> mlx_device.FirmwareCredentials
+	35,  // 53: mlx_device.FirmwareFlasherProfile.firmware_spec:type_name -> mlx_device.FirmwareSpec
+	36,  // 54: mlx_device.FirmwareFlasherProfile.flash_spec:type_name -> mlx_device.FlashSpec
+	37,  // 55: mlx_device.FirmwareFlasherProfile.flash_options:type_name -> mlx_device.FlashOptions
+	137, // 56: mlx_device.MlxObservationReport.machine_id:type_name -> common.MachineId
+	136, // 57: mlx_device.MlxObservationReport.timestamp:type_name -> google.protobuf.Timestamp
+	47,  // 58: mlx_device.MlxObservationReport.observations:type_name -> mlx_device.MlxObservation
+	3,   // 59: mlx_device.FirmwareOperation.state:type_name -> mlx_device.FirmwareOperationState
+	4,   // 60: mlx_device.FirmwareOperation.phase:type_name -> mlx_device.FirmwareOperationPhase
+	41,  // 61: mlx_device.FirmwareOperation.report:type_name -> mlx_device.FirmwareFlashReport
+	5,   // 62: mlx_device.MlxDeviceUpdateFirmwareError.code:type_name -> mlx_device.MlxDeviceUpdateFirmwareErrorCode
+	42,  // 63: mlx_device.MlxDeviceUpdateFirmwareResult.receipt:type_name -> mlx_device.FirmwareOperation
+	43,  // 64: mlx_device.MlxDeviceUpdateFirmwareResult.error:type_name -> mlx_device.MlxDeviceUpdateFirmwareError
+	44,  // 65: mlx_device.MlxDeviceUpdateFirmwareResult.missing_receipt:type_name -> mlx_device.FirmwareOperationMissingReceipt
+	21,  // 66: mlx_device.MlxDeviceLockdownResult.expected_device:type_name -> mlx_device.MlxDeviceSelector
+	112, // 67: mlx_device.MlxDeviceLockdownResult.status_report:type_name -> mlx_device.StatusReport
+	135, // 68: mlx_device.MlxDeviceLockdownResult.changed:type_name -> mlx_device.MlxDeviceLockdownResult.Changed
+	22,  // 69: mlx_device.MlxObservation.device_info:type_name -> mlx_device.MlxDeviceInfo
+	7,   // 70: mlx_device.MlxObservation.lock_status:type_name -> mlx_device.LockStatus
+	41,  // 71: mlx_device.MlxObservation.firmware_report:type_name -> mlx_device.FirmwareFlashReport
+	42,  // 72: mlx_device.MlxObservation.firmware_operation:type_name -> mlx_device.FirmwareOperation
+	45,  // 73: mlx_device.MlxObservation.firmware_update_result:type_name -> mlx_device.MlxDeviceUpdateFirmwareResult
+	46,  // 74: mlx_device.MlxObservation.lockdown_result:type_name -> mlx_device.MlxDeviceLockdownResult
+	40,  // 75: mlx_device.PublishMlxObservationReportRequest.report:type_name -> mlx_device.MlxObservationReport
+	137, // 76: mlx_device.MlxAdminProfileSyncRequest.machine_id:type_name -> common.MachineId
+	19,  // 77: mlx_device.MlxAdminProfileSyncResponse.sync_result:type_name -> mlx_device.SyncResult
+	28,  // 78: mlx_device.MlxDeviceProfileSyncRequest.serializable_profile:type_name -> mlx_device.SerializableMlxConfigProfile
+	19,  // 79: mlx_device.MlxDeviceProfileSyncResponse.sync_result:type_name -> mlx_device.SyncResult
+	111, // 80: mlx_device.MlxDeviceProfileSyncResponse.error:type_name -> mlx_device.MlxDeviceStreamError
+	137, // 81: mlx_device.MlxAdminProfileCompareRequest.machine_id:type_name -> common.MachineId
+	18,  // 82: mlx_device.MlxAdminProfileCompareResponse.comparison_result:type_name -> mlx_device.ComparisonResult
+	28,  // 83: mlx_device.MlxDeviceProfileCompareRequest.serializable_profile:type_name -> mlx_device.SerializableMlxConfigProfile
+	18,  // 84: mlx_device.MlxDeviceProfileCompareResponse.comparison_result:type_name -> mlx_device.ComparisonResult
+	111, // 85: mlx_device.MlxDeviceProfileCompareResponse.error:type_name -> mlx_device.MlxDeviceStreamError
+	137, // 86: mlx_device.MlxAdminLockdownLockRequest.machine_id:type_name -> common.MachineId
+	112, // 87: mlx_device.MlxAdminLockdownLockResponse.status_report:type_name -> mlx_device.StatusReport
+	137, // 88: mlx_device.MlxAdminLockdownUnlockRequest.machine_id:type_name -> common.MachineId
+	112, // 89: mlx_device.MlxAdminLockdownUnlockResponse.status_report:type_name -> mlx_device.StatusReport
+	137, // 90: mlx_device.MlxAdminLockdownStatusRequest.machine_id:type_name -> common.MachineId
+	112, // 91: mlx_device.MlxAdminLockdownStatusResponse.status_report:type_name -> mlx_device.StatusReport
+	112, // 92: mlx_device.MlxDeviceLockdownResponse.status_report:type_name -> mlx_device.StatusReport
+	111, // 93: mlx_device.MlxDeviceLockdownResponse.error:type_name -> mlx_device.MlxDeviceStreamError
+	22,  // 94: mlx_device.MlxDeviceInfoDeviceResponse.device_info:type_name -> mlx_device.MlxDeviceInfo
+	111, // 95: mlx_device.MlxDeviceInfoDeviceResponse.error:type_name -> mlx_device.MlxDeviceStreamError
+	23,  // 96: mlx_device.MlxDeviceInfoReportRequest.filters:type_name -> mlx_device.DeviceFilterSet
+	20,  // 97: mlx_device.MlxDeviceInfoReportResponse.device_report:type_name -> mlx_device.MlxDeviceReport
+	111, // 98: mlx_device.MlxDeviceInfoReportResponse.error:type_name -> mlx_device.MlxDeviceStreamError
+	137, // 99: mlx_device.MlxAdminRegistryListRequest.machine_id:type_name -> common.MachineId
+	76,  // 100: mlx_device.MlxAdminRegistryListResponse.registry_listing:type_name -> mlx_device.RegistryListing
+	76,  // 101: mlx_device.MlxDeviceRegistryListResponse.registry_listing:type_name -> mlx_device.RegistryListing
+	111, // 102: mlx_device.MlxDeviceRegistryListResponse.error:type_name -> mlx_device.MlxDeviceStreamError
+	137, // 103: mlx_device.MlxAdminRegistryShowRequest.machine_id:type_name -> common.MachineId
+	8,   // 104: mlx_device.MlxAdminRegistryShowResponse.variable_registry:type_name -> mlx_device.MlxVariableRegistry
+	8,   // 105: mlx_device.MlxDeviceRegistryShowResponse.variable_registry:type_name -> mlx_device.MlxVariableRegistry
+	111, // 106: mlx_device.MlxDeviceRegistryShowResponse.error:type_name -> mlx_device.MlxDeviceStreamError
+	137, // 107: mlx_device.MlxAdminConfigSyncRequest.machine_id:type_name -> common.MachineId
+	110, // 108: mlx_device.MlxAdminConfigSyncRequest.assignments:type_name -> mlx_device.VariableAssignment
+	19,  // 109: mlx_device.MlxAdminConfigSyncResponse.sync_result:type_name -> mlx_device.SyncResult
+	110, // 110: mlx_device.MlxDeviceConfigSyncRequest.assignments:type_name -> mlx_device.VariableAssignment
+	19,  // 111: mlx_device.MlxDeviceConfigSyncResponse.sync_result:type_name -> mlx_device.SyncResult
+	111, // 112: mlx_device.MlxDeviceConfigSyncResponse.error:type_name -> mlx_device.MlxDeviceStreamError
+	137, // 113: mlx_device.MlxAdminConfigQueryRequest.machine_id:type_name -> common.MachineId
+	15,  // 114: mlx_device.MlxAdminConfigQueryResponse.query_result:type_name -> mlx_device.QueryResult
+	15,  // 115: mlx_device.MlxDeviceConfigQueryResponse.query_result:type_name -> mlx_device.QueryResult
+	111, // 116: mlx_device.MlxDeviceConfigQueryResponse.error:type_name -> mlx_device.MlxDeviceStreamError
+	137, // 117: mlx_device.MlxAdminConfigSetRequest.machine_id:type_name -> common.MachineId
+	110, // 118: mlx_device.MlxAdminConfigSetRequest.assignments:type_name -> mlx_device.VariableAssignment
+	110, // 119: mlx_device.MlxDeviceConfigSetRequest.assignments:type_name -> mlx_device.VariableAssignment
+	111, // 120: mlx_device.MlxDeviceConfigSetResponse.error:type_name -> mlx_device.MlxDeviceStreamError
+	137, // 121: mlx_device.MlxAdminConfigCompareRequest.machine_id:type_name -> common.MachineId
+	110, // 122: mlx_device.MlxAdminConfigCompareRequest.assignments:type_name -> mlx_device.VariableAssignment
+	18,  // 123: mlx_device.MlxAdminConfigCompareResponse.comparison_result:type_name -> mlx_device.ComparisonResult
+	110, // 124: mlx_device.MlxDeviceConfigCompareRequest.assignments:type_name -> mlx_device.VariableAssignment
+	18,  // 125: mlx_device.MlxDeviceConfigCompareResponse.comparison_result:type_name -> mlx_device.ComparisonResult
+	111, // 126: mlx_device.MlxDeviceConfigCompareResponse.error:type_name -> mlx_device.MlxDeviceStreamError
+	28,  // 127: mlx_device.MlxAdminProfileShowResponse.serializable_profile:type_name -> mlx_device.SerializableMlxConfigProfile
+	109, // 128: mlx_device.MlxAdminProfileListResponse.profiles:type_name -> mlx_device.ProfileSummary
+	137, // 129: mlx_device.MlxAdminDeviceInfoRequest.machine_id:type_name -> common.MachineId
+	22,  // 130: mlx_device.MlxAdminDeviceInfoResponse.device_info:type_name -> mlx_device.MlxDeviceInfo
+	137, // 131: mlx_device.MlxAdminDeviceReportRequest.machine_id:type_name -> common.MachineId
+	20,  // 132: mlx_device.MlxAdminDeviceReportResponse.device_report:type_name -> mlx_device.MlxDeviceReport
+	22,  // 133: mlx_device.MlxDeviceIdentity.device_info:type_name -> mlx_device.MlxDeviceInfo
+	137, // 134: mlx_device.MlxDeviceIdentity.managed_dpu_machine_ids:type_name -> common.MachineId
+	136, // 135: mlx_device.MlxDeviceIdentityReport.observed_at:type_name -> google.protobuf.Timestamp
+	105, // 136: mlx_device.MlxDeviceIdentityReport.devices:type_name -> mlx_device.MlxDeviceIdentity
+	137, // 137: mlx_device.MlxAdminDeviceIdentitiesRequest.machine_id:type_name -> common.MachineId
+	106, // 138: mlx_device.MlxAdminDeviceIdentitiesResponse.report:type_name -> mlx_device.MlxDeviceIdentityReport
+	6,   // 139: mlx_device.MlxDeviceStreamError.status:type_name -> mlx_device.MlxDeviceStreamErrorStatus
+	7,   // 140: mlx_device.StatusReport.status:type_name -> mlx_device.LockStatus
+	130, // 141: mlx_device.MlxValueType.BooleanArray.values:type_name -> mlx_device.MlxValueType.OptionalBool
+	131, // 142: mlx_device.MlxValueType.IntegerArray.values:type_name -> mlx_device.MlxValueType.OptionalInt64
+	133, // 143: mlx_device.MlxValueType.BytesArray.values:type_name -> mlx_device.MlxValueType.OptionalBytes
 	144, // [144:144] is the sub-list for method output_type
 	144, // [144:144] is the sub-list for method input_type
 	144, // [144:144] is the sub-list for extension type_name
@@ -9574,7 +9641,7 @@ func file_mlx_device_nico_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_mlx_device_nico_proto_rawDesc), len(file_mlx_device_nico_proto_rawDesc)),
-			NumEnums:      7,
+			NumEnums:      8,
 			NumMessages:   128,
 			NumExtensions: 0,
 			NumServices:   0,

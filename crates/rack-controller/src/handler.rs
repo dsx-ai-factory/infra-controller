@@ -152,7 +152,9 @@ impl RackStateHandler {
 
         match controller_state {
             RackState::Created => handle_created(id, capabilities, component_counts),
-            RackState::Discovering => handle_discovering(id, rack_profile_id.as_ref(), ctx).await,
+            RackState::Discovering => {
+                handle_discovering(id, state, rack_profile_id.as_ref(), ctx).await
+            }
             RackState::Maintenance { maintenance_state } => {
                 handle_maintenance(id, state, rack_profile_id.as_ref(), maintenance_state, ctx)
                     .await

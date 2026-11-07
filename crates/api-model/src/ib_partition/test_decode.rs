@@ -17,12 +17,14 @@
 
 use std::num::TryFromIntError;
 
+use carbide_instrument::testing::{MetricsCapture, capture_logs};
 use carbide_uuid::infiniband::IBPartitionId;
 use sqlx::FromRow;
 use sqlx::error::BoxDynError;
 
 use super::{IBPartition, InvalidPartitionKeyError};
 use crate::errors::ModelError;
+use crate::ib::IBMtu;
 
 #[crate::sqlx_test]
 async fn ib_partition_rejects_invalid_stored_integers(pool: sqlx::PgPool) {
@@ -37,9 +39,11 @@ async fn ib_partition_rejects_invalid_stored_integers(pool: sqlx::PgPool) {
         config: StoredConfig,
         column: &'static str,
         check_source: fn(&BoxDynError) -> bool,
+        fallback_count: f64,
     }
 
-    // Change one stored integer at a time. Both out-of-range PKeys would
+    // The rate-limit case also proves MTU fallback preserves later validation.
+    // Both out-of-range PKeys would
     // become the valid key 42 if narrowed with `as u16` before validation.
     let valid = StoredConfig {
         pkey: 42,
@@ -56,6 +60,7 @@ async fn ib_partition_rejects_invalid_stored_integers(pool: sqlx::PgPool) {
             },
             column: "pkey",
             check_source: |source| source.is::<TryFromIntError>(),
+            fallback_count: 0.0,
         },
         Case {
             scenario: "negative PKey",
@@ -65,6 +70,7 @@ async fn ib_partition_rejects_invalid_stored_integers(pool: sqlx::PgPool) {
             },
             column: "pkey",
             check_source: |source| source.is::<TryFromIntError>(),
+            fallback_count: 0.0,
         },
         Case {
             scenario: "PKey exceeds 0x7fff",
@@ -74,21 +80,18 @@ async fn ib_partition_rejects_invalid_stored_integers(pool: sqlx::PgPool) {
             },
             column: "pkey",
             check_source: |source| source.is::<InvalidPartitionKeyError>(),
+            fallback_count: 0.0,
         },
         Case {
-            scenario: "invalid MTU",
-            config: StoredConfig { mtu: 3, ..valid },
-            column: "mtu",
-            check_source: |source| source.is::<ModelError>(),
-        },
-        Case {
-            scenario: "invalid rate limit",
+            scenario: "invalid rate limit after MTU fallback",
             config: StoredConfig {
+                mtu: 3,
                 rate_limit: 7,
                 ..valid
             },
             column: "rate_limit",
             check_source: |source| source.is::<ModelError>(),
+            fallback_count: 1.0,
         },
         Case {
             scenario: "invalid service level",
@@ -98,6 +101,7 @@ async fn ib_partition_rejects_invalid_stored_integers(pool: sqlx::PgPool) {
             },
             column: "service_level",
             check_source: |source| source.is::<ModelError>(),
+            fallback_count: 0.0,
         },
     ];
 
@@ -122,6 +126,7 @@ async fn ib_partition_rejects_invalid_stored_integers(pool: sqlx::PgPool) {
         .await
         .expect("fetch projected IB partition");
 
+        let metrics = MetricsCapture::start();
         let error = IBPartition::from_row(&row).expect_err(case.scenario);
         let sqlx::Error::ColumnDecode { index, source } = error else {
             panic!("{}: expected ColumnDecode, got {error:?}", case.scenario);
@@ -132,5 +137,109 @@ async fn ib_partition_rejects_invalid_stored_integers(pool: sqlx::PgPool) {
             "{}: {source:?}",
             case.scenario
         );
+        assert_eq!(
+            metrics.counter_delta("carbide_ib_partition_mtu_fallback_total", &[]),
+            case.fallback_count,
+            "{}",
+            case.scenario,
+        );
+    }
+}
+
+#[crate::sqlx_test]
+async fn ib_partition_decodes_byte_mtu_and_reports_unknown_values(pool: sqlx::PgPool) {
+    struct Case {
+        scenario: &'static str,
+        stored_mtu: i32,
+        expected_mtu: IBMtu,
+        fallback_count: f64,
+    }
+    let cases = [
+        Case {
+            scenario: "canonical 2 KiB",
+            stored_mtu: 2,
+            expected_mtu: IBMtu(2),
+            fallback_count: 0.0,
+        },
+        Case {
+            scenario: "canonical 4 KiB",
+            stored_mtu: 4,
+            expected_mtu: IBMtu(4),
+            fallback_count: 0.0,
+        },
+        Case {
+            scenario: "2048 bytes",
+            stored_mtu: 2048,
+            expected_mtu: IBMtu(2),
+            fallback_count: 0.0,
+        },
+        Case {
+            scenario: "4096 bytes",
+            stored_mtu: 4096,
+            expected_mtu: IBMtu(4),
+            fallback_count: 0.0,
+        },
+        Case {
+            scenario: "unrecognized stored MTU",
+            stored_mtu: 3,
+            expected_mtu: IBMtu(4),
+            fallback_count: 1.0,
+        },
+        Case {
+            scenario: "unrecognized value above the byte aliases",
+            stored_mtu: 4097,
+            expected_mtu: IBMtu(4),
+            fallback_count: 1.0,
+        },
+    ];
+
+    for case in cases {
+        let id = IBPartitionId::new();
+        let row = sqlx::query(
+            r#"SELECT $1::uuid AS id, 'V1-T0'::text AS config_version,
+                'decode-partition'::text AS name, '{}'::jsonb AS labels,
+                ''::text AS description, 'decode-tenant'::text AS organization_id,
+                '{"state":"provisioning"}'::jsonb AS controller_state,
+                'V1-T0'::text AS controller_state_version,
+                NULL::jsonb AS controller_state_outcome, NULL::jsonb AS status,
+                NULL::timestamptz AS deleted, 42::integer AS pkey,
+                $2::integer AS mtu, 200::integer AS rate_limit,
+                0::integer AS service_level"#,
+        )
+        .bind(id)
+        .bind(case.stored_mtu)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch projected IB partition");
+
+        let metrics = MetricsCapture::start();
+        let logs = capture_logs(|| {
+            let partition = IBPartition::from_row(&row).expect(case.scenario);
+            assert_eq!(
+                partition.config.mtu,
+                Some(case.expected_mtu),
+                "{}",
+                case.scenario,
+            );
+        });
+        assert_eq!(
+            metrics.counter_delta("carbide_ib_partition_mtu_fallback_total", &[]),
+            case.fallback_count,
+            "{}",
+            case.scenario,
+        );
+        if case.fallback_count == 0.0 {
+            assert!(logs.is_empty(), "{}: {logs:?}", case.scenario);
+        } else {
+            assert_eq!(logs.len(), 1, "{}", case.scenario);
+            let log = &logs[0];
+            assert_eq!(log.level, tracing::Level::ERROR);
+            assert_eq!(log.metadata_name, "ib_partition_mtu_fallback");
+            assert_eq!(log.field("ib_partition_id"), Some(id.to_string().as_str()));
+            assert_eq!(
+                log.field("raw_mtu"),
+                Some(case.stored_mtu.to_string().as_str())
+            );
+        }
     }
 }
