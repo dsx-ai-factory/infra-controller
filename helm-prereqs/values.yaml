@@ -46,6 +46,9 @@ vault:
     enabled: true
     vaultImage: "hashicorp/vault:1.17"
     kubectlImage: "bitnami/kubectl:latest"
+    ## Secret in namespace with a ca.crt key for Vault HTTPS verification.
+    ## Empty preserves the existing skip-verification bootstrap behavior.
+    caSecretName: ""
   tls:
     create: true
   pkiMount: "nicoca"
