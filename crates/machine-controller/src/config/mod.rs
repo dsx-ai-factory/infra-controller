@@ -15,9 +15,9 @@
  * limitations under the License.
  */
 
-#[cfg(any(test, feature = "test-support"))]
 use std::collections::HashMap;
 
+use libredfish::model::service_root::RedfishVendor;
 use model::machine::HostHealthConfig;
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +43,7 @@ pub struct MachineStateHandlerSiteConfig {
 
     pub selected_profile: libredfish::BiosProfileType,
     pub bios_profiles: libredfish::BiosProfileVendor,
+    pub named_bios_profiles: HashMap<String, NamedBiosProfile>,
     pub oem_manager_profiles: libredfish::BiosProfileVendor,
 
     pub ewethers_enabled: bool,
@@ -95,6 +96,7 @@ impl MachineStateHandlerSiteConfig {
             rack_profiles: model::rack_type::RackProfileConfig::default(),
             selected_profile: libredfish::BiosProfileType::Performance,
             bios_profiles: HashMap::new(),
+            named_bios_profiles: HashMap::new(),
             oem_manager_profiles: HashMap::new(),
             ewethers_enabled: true,
             astra_enabled: false,
@@ -109,6 +111,14 @@ impl MachineStateHandlerSiteConfig {
             restart_ovs_on_use_admin_network_change: false,
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct NamedBiosProfile {
+    pub vendor: RedfishVendor,
+    pub model: String,
+    pub attributes: HashMap<String, serde_json::Value>,
 }
 
 /// A UTC time window defined by a start and end timestamp.
