@@ -1143,6 +1143,7 @@ func TestManagerImpl_CreateAndExecuteIdempotentTask(t *testing.T) {
 			Status:         taskcommon.TaskStatusPending,
 			IdempotencyKey: idempotencyKey,
 			Attributes: taskcommon.TaskAttributes{
+				TraceID: "1234567890abcdef1234567890abcdef",
 				ComponentsByType: map[devicetypes.ComponentType][]uuid.UUID{
 					devicetypes.ComponentTypeCompute: {componentID},
 				},
@@ -1173,6 +1174,7 @@ func TestManagerImpl_CreateAndExecuteIdempotentTask(t *testing.T) {
 		require.Equal(t, taskID, gotTaskID)
 		require.Equal(t, 1, executor.executeCalls)
 		require.Equal(t, taskID, executor.lastRequest.Info.TaskID)
+		require.Equal(t, existingTask.Attributes.TraceID, executor.lastRequest.Info.TraceID)
 		require.Equal(t, 1, store.updateScheduledCalls)
 		require.Equal(t, executor.executionID, store.updatedScheduledTask.ExecutionID)
 		require.Zero(t, store.listActiveCalls)

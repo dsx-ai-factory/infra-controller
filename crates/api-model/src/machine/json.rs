@@ -95,6 +95,8 @@ pub struct MachineSnapshotPgJson {
     #[serde(default)]
     pub spx_multiplane: Option<MachineSpxMultiplane>,
     #[serde(default)]
+    pub maintenance_action_id: Option<uuid::Uuid>,
+    #[serde(default)]
     pub decommission_requested: bool,
     #[serde(default)]
     pub bmc_credential_rotation_requested: bool,
@@ -270,7 +272,10 @@ fn decode_boot_interface_status_observation(
 
 impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
     type Error = sqlx::Error;
-    fn try_from(value: MachineSnapshotPgJson) -> Result<Self, Self::Error> {
+    fn try_from(mut value: MachineSnapshotPgJson) -> Result<Self, Self::Error> {
+        if let Some(pending) = value.machine_maintenance_requested.as_mut() {
+            pending.action_id = value.maintenance_action_id;
+        }
         let hardware_info = value
             .topology
             .into_iter()

@@ -506,6 +506,8 @@ type PhaseAdvancePolicy struct {
 // the concrete task operation info, while the surrounding fields capture
 // operation-run-only scheduling and scoping metadata.
 type Operation struct {
+	// TraceID is restored from the owning run's metadata, outside its template.
+	TraceID      string                `json:"-"`
 	Type         common.TaskType       `json:"type"`
 	Code         string                `json:"code,omitempty"`
 	TargetSpec   *operation.TargetSpec `json:"target_spec,omitempty"`

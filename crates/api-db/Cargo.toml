@@ -30,6 +30,7 @@ name = "db"
 test-support = []
 
 [dependencies]
+trace-propagation = { path = "../trace-propagation" }
 # [local-dependencies]
 # DO NOT PUT DEPENDENCIES OTHER THAN LOCAL DEPS HERE, THEY SHOULD ALL HAVE 'path =' IN THEM.
 config-version = { path = "../config-version", features = ["sqlx"] }
