@@ -264,7 +264,16 @@ credential rotation is tracked by
 [Credential Sources](../configuration/credential-sources.md#site-wide-bmc-root-version-0-ownership-policy).
 
 <Warning>
-`setup.sh -y` does **not** stop on preflight errors. With `-y` set, hard errors are printed and the run continues ("Things may fail"). The preflight gate is only enforced interactively, so genuinely resolve every error here rather than relying on the script to stop you. The one exception is the database checks for Temporal and Keycloak. When a value would repoint either one away from its data, or can't be honored, setup stops even with `-y`. That covers a move off the standalone `postgres` StatefulSet without a valid migration receipt, and `false` on a database already on `nico-pg-cluster`. It also covers an invalid value, a database host `setup.sh` doesn't manage, a `KEYCLOAK_NS` that differs from `keycloak.namespace`, and cluster state preflight can't read.
+`setup.sh -y` accepts routine prompts and preflight warnings, but stops on
+preflight errors with exit code `1`. Fix the reported errors before upgrading.
+The separate `--ignore-preflight-errors` option permits continuation despite
+ordinary errors reported in the preflight summary and prints an explicit
+continuation message. Temporal and Keycloak database safety errors still stop
+setup with that override. These include a move off the standalone `postgres`
+StatefulSet without a valid migration receipt, `false` on a database already on
+`nico-pg-cluster`, an invalid value, a database host `setup.sh` doesn't manage, a
+`KEYCLOAK_NS` that differs from `keycloak.namespace`, and cluster state preflight
+can't read.
 </Warning>
 
 </Steps>
