@@ -4020,6 +4020,12 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
 async fn test_ingestion_reopens_firmware_for_compute_arriving_during_later_maintenance(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    Box::pin(ingestion_reopens_firmware_workflow(pool)).await
+}
+
+async fn ingestion_reopens_firmware_workflow(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut config = config_with_rack_profiles();
     config
         .rack_profiles
