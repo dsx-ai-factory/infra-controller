@@ -27,13 +27,10 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "nico-rest-site-manager.name" . }}
-      # 1000 is the `nvs` user the image declares. The image names it rather
-      # than giving a UID, which the kubelet cannot verify, so runAsNonRoot
-      # needs the number spelled out here.
+      {{- with .Values.podSecurityContext }}
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        fsGroup: 1000
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: site-manager
           image: "{{ include "nico-rest-site-manager.image" . }}"

@@ -1,0 +1,160 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Red Hat, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# =============================================================================
+# OpenShift overlay for the Core nico umbrella chart.
+#
+# Layer on top of the vanilla site values:
+#   helm upgrade --install -n nico-system nico-core helm/ \
+#     -f helm-prereqs/values/nico-core.yaml \
+#     -f helm-prereqs/values/nico-core-openshift.yaml \
+#     --set global.image.repository=<your-registry> \
+#     --set global.image.tag=<tag>
+# (setup.sh passes the image flags; a manual install must supply them — the
+# vanilla values leave global.image empty on purpose.)
+#
+# Values below are picked from Red Hat's tested OpenShift deployment
+# (github.com/rh-ecosystem-edge/dsx-ai-factory, charts/values/nico-core.yaml),
+# adjusted to this chart's value paths.
+#
+# Requires Helm >= 3.17.0: nulling a subchart value from the umbrella only
+# erases the subchart's own default from 3.17.0 (helm/helm#12879), and even
+# then Helm's null-cleaning is unreliable when a values file mixes null and
+# non-null subchart sections (helm/helm#31919 family). This overlay therefore
+# prefers version-stable forms: explicit capabilities.add: [] (list
+# replacement) to drop capabilities, and explicit maps with nested nulls to
+# drop fixed UIDs/GIDs. Check with `helm version`.
+# Every service except nico-dhcp (see its section) and nico-pxe with
+# bootArtifactContainers (see the nico-pxe section) runs under the
+# restricted-v2 SCC with no custom SCC: the pod/container security
+# contexts are nulled so the SCC assigns namespace-range UIDs/GIDs, and
+# listeners move off privileged ports instead of relying on
+# CAP_NET_BIND_SERVICE (which this cluster's runtime does not propagate to
+# the ambient set for non-root exec).
+# =============================================================================
+
+nico-api:
+  # Drop the chart's default SYS_PTRACE capability (debug backtraces only)
+  # with a non-null empty list — list replacement is version-stable, unlike
+  # top-level nulls (see the Helm note above). The always-applied
+  # allowPrivilegeEscalation: false baseline survives.
+  containerSecurityContext:
+    capabilities:
+      add: []
+  env:
+    # Short backtraces (production-safe) instead of the chart default "full",
+    # which SYS_PTRACE was only ever needed to enrich.
+    RUST_BACKTRACE: "1"
+  migrationJob:
+    # Poll pg_isready before running migrations (operator-managed PostgreSQL
+    # takes time to bootstrap).
+    waitForPostgres:
+      enabled: true
+  envFrom:
+    databaseCredentials:
+      # EDIT: your database credentials Secret.
+      secretName: nico-site-pg-migration-creds
+      # Crunchy PGO emits 'user' not 'username' (the chart default, Zalando).
+      usernameKey: user
+
+nico-bmc-proxy:
+  containerSecurityContext: null
+  envFrom:
+    databaseCredentials:
+      # EDIT: Crunchy pguser Secret for bmc-proxy.
+      secretName: nico-site-pg-pguser-nico
+      usernameKey: user
+
+nico-dhcp:
+  # The ONE Core service that cannot run on restricted-v2: Kea must bind UDP
+  # port 67 (privileged) and cannot move ports the way nico-dns does. It needs
+  # NET_BIND_SERVICE, and on modern CRI-O an added capability reaches CapEff
+  # only for uid 0 (it is no longer promoted to the ambient set), so it runs
+  # as root with every other capability dropped. This is the documented
+  # exception to the "values-driven, no custom SCC" rule; it pairs with a
+  # permissive-enough SCC for the nico-dhcp service account.
+  containerSecurityContext:
+    runAsUser: 0
+    capabilities:
+      drop: [ALL]
+      add: [NET_BIND_SERVICE]
+
+nico-dns:
+  # Drop SYS_PTRACE (see nico-api) and move the listener off port 53:
+  # the Services keep 53 externally and route to the unprivileged 5353.
+  containerSecurityContext:
+    capabilities:
+      add: []
+  listenAddress: "[::]:5353"
+  service:
+    targetPort: 5353
+
+nico-dsx-exchange-consumer:
+  containerSecurityContext:
+    capabilities:
+      add: []
+
+nico-hardware-health:
+  containerSecurityContext:
+    capabilities:
+      add: []
+
+nico-pxe:
+  # The chart default pins UID/GID/fsGroup 10001. Null the fixed IDs inside
+  # explicit maps (more robust than top-level nulls under Helm's coalescing)
+  # so the SCC assigns them from the namespace range.
+  containerSecurityContext:
+    runAsNonRoot: true
+    runAsUser: null
+    runAsGroup: null
+  podSecurityContext:
+    fsGroup: null
+  # NOTE: when bootArtifactContainers is non-empty, the chart appends a
+  # root permissions init container (UID 0 + chown capabilities), which
+  # restricted-v2 rejects. Bundled-artifact PXE images or a compatible SCC
+  # are required for that configuration — see the chart's values.yaml.
+
+nico-ssh-console-rs:
+  # Drop the chart's default IPC_LOCK capability (see nico-api). Port 22 is
+  # privileged: move the listener — the packaged config, containerPort,
+  # probes, and external Service targetPort all follow service.port.
+  containerSecurityContext:
+    capabilities:
+      add: []
+  service:
+    port: 2222
+
+nico-ntp:
+  # Disabled in the reference deployment: the chrony image's entrypoint
+  # chowns /run/chrony, which fails under OpenShift's arbitrary non-root UID.
+  # Use a site-local NTP service and override the DHCP-advertised
+  # ntpServer accordingly.
+  enabled: false
+
+unbound:
+  # EDIT: a stock unbound image (the example uses the Red Hat catalog build;
+  # the NVIDIA nvforge image also works without the command/args below).
+  image:
+    repository: registry.redhat.io/hi/unbound
+    tag: "1.26.1"
+  # Bind an unprivileged port (no CAP_NET_BIND_SERVICE needed under
+  # restricted-v2); the Services keep 53 externally.
+  containerPort: 5353
+  exporter:
+    # The Red Hat unbound image has no remote-control setup for the exporter.
+    enabled: false
+  # Stock UBI unbound images have no shell and no nvforge entrypoint wrapper:
+  # run the binary directly against a full config injected via mainConfig.
+  command: ["/usr/sbin/unbound"]
+  args: ["-d", "-c", "/etc/unbound/local.conf.d/unbound.cfg"]
+  unbound:
+    mainConfig: |
+      server:
+        interface: 0.0.0.0@5353
+        interface: ::0@5353
+        access-control: 0.0.0.0/0 allow
+        access-control: ::0/0 allow
+        chroot: ""
+        pidfile: "/tmp/unbound.pid"
+        username: ""
+      include: "/etc/unbound/local.conf.d/*.conf"

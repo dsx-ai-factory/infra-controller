@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 Red Hat, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# =============================================================================
+# OpenShift overlay for the nico-rest umbrella chart.
+#
+# Layer on top of the vanilla site values:
+#   helm upgrade --install -n nico-rest nico-rest helm/rest/nico-rest \
+#     -f helm-prereqs/values/nico-rest.yaml \
+#     -f helm-prereqs/values/nico-rest-openshift.yaml \
+#     --set global.image.repository=<your-registry> \
+#     --set global.image.tag=<tag>
+# (setup.sh passes the image flags; a manual install must supply them — the
+# vanilla values leave global.image empty on purpose.)
+#
+# Values below are picked from Red Hat's tested OpenShift deployment
+# (github.com/rh-ecosystem-edge/dsx-ai-factory, charts/values/nico-rest.yaml).
+#
+# Requires Helm >= 3.17.0 (see the note in nico-core-openshift.yaml); the
+# nested-null map form is used because it is more robust than top-level
+# nulls under Helm's subchart value coalescing.
+# The REST container security contexts are already restricted-v2-safe
+# (drop ALL, allowPrivilegeEscalation: false, readOnlyRootFilesystem); only
+# the pod security contexts carry fixed UIDs/GIDs, so nulling them lets the
+# SCC assign namespace-range IDs and every workload runs on restricted-v2.
+# =============================================================================
+
+nico-rest-api:
+  # Explicit map with nested nulls: drops the subcharts' fixed UID/GID
+  # (more robust under Helm's coalescing than a top-level null) while the
+  # SCC assigns namespace-range IDs.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: null
+    fsGroup: null
+
+nico-rest-workflow:
+  # Applies to both the cloud-worker and site-worker Deployments.
+  # Explicit map with nested nulls: drops the subcharts' fixed UID/GID
+  # (more robust under Helm's coalescing than a top-level null) while the
+  # SCC assigns namespace-range IDs.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: null
+    fsGroup: null
+
+nico-rest-site-manager:
+  # Explicit map with nested nulls: drops the subcharts' fixed UID/GID
+  # (more robust under Helm's coalescing than a top-level null) while the
+  # SCC assigns namespace-range IDs.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: null
+    fsGroup: null
+
+nico-rest-cert-manager:
+  # Explicit map with nested nulls: drops the subcharts' fixed UID/GID
+  # (more robust under Helm's coalescing than a top-level null) while the
+  # SCC assigns namespace-range IDs.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: null
+    fsGroup: null
+
+nico-rest-db:
+  # The migration Job's pod security context, same rationale as above.
+  # Explicit map with nested nulls: drops the subcharts' fixed UID/GID
+  # (more robust under Helm's coalescing than a top-level null) while the
+  # SCC assigns namespace-range IDs.
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: null
+    fsGroup: null
+  waitForPostgres:
+    # EDIT: a PostgreSQL client image reachable from your registry; used only
+    # for the pg_isready init container.
+    image: registry.redhat.io/rhel10/postgresql-18:latest

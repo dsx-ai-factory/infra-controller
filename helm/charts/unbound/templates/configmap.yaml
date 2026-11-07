@@ -32,6 +32,10 @@ data:
 {{ index .Values.localConfig "nico_local_unknowndomain.conf" | indent 4 }}
   forwarders.conf: |
 {{ index .Values.localConfig "forwarders.conf" | indent 4 }}
+  {{- if .Values.unbound.mainConfig }}
+  unbound.cfg: |
+{{ .Values.unbound.mainConfig | indent 4 }}
+  {{- end }}
   {{- if .Values.localData }}
   local_data.conf: |
     server:

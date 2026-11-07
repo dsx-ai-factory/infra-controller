@@ -11,6 +11,17 @@ image:
 
 replicaCount: 1
 
+## Pod-level security context. Override for OpenShift, where the restricted
+## SCC assigns UIDs from the namespace range and rejects fixed numeric UIDs:
+##   podSecurityContext:
+##     runAsNonRoot: true
+##     runAsUser: null
+##     fsGroup: null
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  fsGroup: 65534
+
 config:
   caCommonName: "NICo Local Dev CA"
   caOrganization: "NVIDIA"

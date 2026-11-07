@@ -26,13 +26,10 @@ spec:
         {{- toYaml .Values.global.imagePullSecrets | nindent 8 }}
       serviceAccountName: nico-rest-cert-manager
       terminationGracePeriodSeconds: 5
-      # 1000 is the `nvs` user the image declares. The image states it by name,
-      # which the kubelet cannot verify, so runAsNonRoot needs the numeric UID
-      # spelled out here. fsGroup makes the tmp volume below writable.
+      {{- with .Values.podSecurityContext }}
       securityContext:
-        runAsNonRoot: true
-        runAsUser: 1000
-        fsGroup: 1000
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: cert-manager
           image: "{{ include "nico-rest-cert-manager.image" . }}"
