@@ -36,7 +36,7 @@ type Tray struct {
 	Model *string `json:"model,omitempty"`
 	// Serial number of the tray
 	SerialNumber *string `json:"serialNumber,omitempty"`
-	// Description of the tray
+	// Description of the tray.
 	Description *string `json:"description,omitempty"`
 	// Firmware version of the tray
 	FirmwareVersion *string `json:"firmwareVersion,omitempty"`
@@ -51,6 +51,8 @@ type Tray struct {
 	Position *TrayPosition `json:"position,omitempty"`
 	// BMC (Baseboard Management Controller) entries for the tray
 	Bmcs []BMCInfo `json:"bmcs,omitempty"`
+	// Observed NVOS management ports for NVSwitch trays, including ports without addresses. Empty when no port data is available; null for other tray types.
+	NvosPorts []SwitchNvosPortInfo `json:"nvosPorts"`
 	// ID of the Rack this Tray belongs to
 	RackId *string `json:"rackId,omitempty"`
 	// Domain external ID (rack group ID) containing this Tray's Rack. Null when no rack-group Domain is assigned.
@@ -66,8 +68,9 @@ type _Tray Tray
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTray(nvLinkDomainId NullableString, taskStats TaskStats, health NullableAggregateHealth) *Tray {
+func NewTray(nvosPorts []SwitchNvosPortInfo, nvLinkDomainId NullableString, taskStats TaskStats, health NullableAggregateHealth) *Tray {
 	this := Tray{}
+	this.NvosPorts = nvosPorts
 	this.NvLinkDomainId = nvLinkDomainId
 	this.TaskStats = taskStats
 	this.Health = health
@@ -530,6 +533,31 @@ func (o *Tray) SetBmcs(v []BMCInfo) {
 	o.Bmcs = v
 }
 
+// GetNvosPorts returns the NvosPorts field value
+// If the value is explicit nil, the zero value for []SwitchNvosPortInfo will be returned
+func (o *Tray) GetNvosPorts() []SwitchNvosPortInfo {
+	if o == nil {
+		var ret []SwitchNvosPortInfo
+		return ret
+	}
+
+	return o.NvosPorts
+}
+
+// GetNvosPortsOk returns a tuple with the NvosPorts field value
+// and a boolean to check if the value has been set.
+func (o *Tray) GetNvosPortsOk() ([]SwitchNvosPortInfo, bool) {
+	if o == nil || IsNil(o.NvosPorts) {
+		return nil, false
+	}
+	return o.NvosPorts, true
+}
+
+// SetNvosPorts sets field value
+func (o *Tray) SetNvosPorts(v []SwitchNvosPortInfo) {
+	o.NvosPorts = v
+}
+
 // GetRackId returns the RackId field value if set, zero value otherwise.
 func (o *Tray) GetRackId() string {
 	if o == nil || IsNil(o.RackId) {
@@ -690,6 +718,7 @@ func (o Tray) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.Bmcs) {
 		toSerialize["bmcs"] = o.Bmcs
 	}
+	toSerialize["nvosPorts"] = o.NvosPorts
 	if !IsNil(o.RackId) {
 		toSerialize["rackId"] = o.RackId
 	}
@@ -704,6 +733,7 @@ func (o *Tray) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
+		"nvosPorts",
 		"nvLinkDomainId",
 		"taskStats",
 		"health",
@@ -717,8 +747,12 @@ func (o *Tray) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
+	nullableRequiredProperties := map[string]struct{}{
+		"nvosPorts": {},
+	}
 	for _, requiredProperty := range requiredProperties {
-		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+		_, nullable := nullableRequiredProperties[requiredProperty]
+		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

@@ -1,5 +1,5 @@
-{{- if dig "inventory" "enabled" false .Values.suites }}
-{{- $ns := required "inventory.namespace is required when the inventory suite is enabled" .Values.inventory.namespace }}
+{{- if or (dig "inventory" "enabled" false .Values.suites) (dig "fleetup" "enabled" false .Values.suites) }}
+{{- $ns := required "inventory.namespace is required when the inventory or fleetup suite is enabled" .Values.inventory.namespace }}
 {{/* The Role lives in the MAT namespace, so its name hashes the full runner
      identity (namespace and release name) under a bounded display prefix, so
      two releases sharing a prefix or namespace do not collide there. */}}

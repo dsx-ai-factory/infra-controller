@@ -130,6 +130,33 @@ pub struct InstanceNetworkConfig {
     /// Server-owned service interfaces that never appear as tenant OS interfaces.
     #[serde(default)]
     pub service_interfaces: Vec<InstanceServiceInterfaceConfig>,
+
+    /// Server-owned VPC-local interfaces: one per VPC-local service and VPC on
+    /// each DPU that serves the instance, never a tenant OS interface.
+    #[serde(default)]
+    pub vpc_local_interfaces: Vec<InstanceVpcLocalInterfaceConfig>,
+}
+
+/// Stored record of one VPC-local service interface: the attachment's pod on
+/// one DPU, plugged into the slot the VPC occupies in its own VRF. Unlike a
+/// service interface it allocates no prefix; the pod holds the fixed resolver
+/// addresses and HBN holds their on-link peers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceVpcLocalInterfaceConfig {
+    /// Attachment associated with this record.
+    pub attachment_id: uuid::Uuid,
+    /// Zero-based position in the service's interface requirements.
+    pub interface_ordinal: u32,
+    /// DPU on which this interface is configured.
+    pub dpu_id: DpuMachineId,
+    /// Slot the VPC occupies on that DPU, shared with the VPC's other services.
+    pub slot_index: u32,
+    /// VPC whose VRF the interface joins.
+    pub vpc_id: VpcId,
+    /// Service-scoped MAC reused for this interface on every DPU.
+    pub mac_address: MacAddress,
+    /// Stable ID used to correlate this interface across reconciliation.
+    pub internal_uuid: uuid::Uuid,
 }
 
 /// Stored DPU-local service-interface record for one attachment and fixed slot.
@@ -246,6 +273,7 @@ impl InstanceNetworkConfig {
                 }],
                 auto_config: None,
                 service_interfaces: vec![],
+                vpc_local_interfaces: vec![],
             }
         } else {
             Self {
@@ -273,6 +301,7 @@ impl InstanceNetworkConfig {
                     .collect(),
                 auto_config: None,
                 service_interfaces: vec![],
+                vpc_local_interfaces: vec![],
             }
         }
     }
@@ -298,6 +327,7 @@ impl InstanceNetworkConfig {
             }],
             auto_config: None,
             service_interfaces: vec![],
+            vpc_local_interfaces: vec![],
         }
     }
 
@@ -323,6 +353,7 @@ impl InstanceNetworkConfig {
             },
             auto_config: self.auto_config,
             service_interfaces: vec![],
+            vpc_local_interfaces: vec![],
         }
     }
 
@@ -492,6 +523,8 @@ impl InstanceNetworkConfig {
         let mut new_config = new_config.clone();
         current.service_interfaces.clear();
         new_config.service_interfaces.clear();
+        current.vpc_local_interfaces.clear();
+        new_config.vpc_local_interfaces.clear();
         for iface in &mut current.interfaces {
             iface.ip_addrs.clear();
             iface.interface_prefixes.clear();
@@ -1127,8 +1160,25 @@ mod tests {
         assert!(service_interface("192.0.2.1/31").validate().is_err());
     }
 
-    /// Verifies external views omit service endpoints in both host modes, because
-    /// callers own only explicit host interfaces or automatic networking intent.
+    /// A stored VPC-local interface record for one attachment on the test DPU,
+    /// with a fresh VPC and identity each call.
+    fn vpc_local_interface() -> InstanceVpcLocalInterfaceConfig {
+        InstanceVpcLocalInterfaceConfig {
+            attachment_id: uuid::Uuid::new_v4(),
+            interface_ordinal: 0,
+            dpu_id: "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+                .parse()
+                .expect("valid DPU machine ID"),
+            slot_index: 0,
+            vpc_id: VpcId::new(),
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 2]),
+            internal_uuid: uuid::Uuid::new_v4(),
+        }
+    }
+
+    /// Verifies external views omit service endpoints and VPC-local records in
+    /// both host modes, because callers own only explicit host interfaces or
+    /// automatic networking intent.
     #[test]
     fn external_view_filters_service_interfaces() {
         // Hidden endpoints are the variable under test; the host and allocation fields
@@ -1153,6 +1203,7 @@ mod tests {
             mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
             internal_uuid: uuid::Uuid::new_v4(),
         }];
+        config.vpc_local_interfaces = vec![vpc_local_interface()];
         let auto_config = Some(InstanceNetworkAutoConfig {
             vpc_id: VpcId::new(),
         });
@@ -1165,9 +1216,10 @@ mod tests {
                 config.into_external_view()
             };
             "explicit host networking" {
-                // Explicit host interfaces remain visible while service endpoints are hidden.
+                // Explicit host interfaces remain visible while server-owned records are hidden.
                 None => InstanceNetworkConfig {
                     service_interfaces: vec![],
+                    vpc_local_interfaces: vec![],
                     ..config.clone()
                 },
             }
@@ -1302,6 +1354,7 @@ mod tests {
             interfaces,
             auto_config: None,
             service_interfaces: vec![],
+            vpc_local_interfaces: vec![],
         }
     }
 
@@ -1534,8 +1587,8 @@ mod tests {
         );
     }
 
-    /// Update comparison ignores generated automatic resolution, but still
-    /// detects every caller-controlled selection change.
+    /// Update comparison ignores generated automatic resolution and server-owned
+    /// records, but still detects every caller-controlled selection change.
     #[test]
     fn network_update_detection_compares_vpc_selection_intent() {
         let selection = InstanceInterfaceVpcSelection {
@@ -1570,6 +1623,10 @@ mod tests {
             vpc_id: VpcId::new(),
             ..selection
         });
+
+        // nico-api holds server-owned records on the live configuration that no
+        // caller request carries; they must not turn a repetition into an update.
+        current.vpc_local_interfaces = vec![vpc_local_interface()];
 
         value_scenarios!(
             run = |requested| current.is_network_config_update_requested(&requested);
@@ -1917,6 +1974,7 @@ mod tests {
                 vpc_id: VpcId::new(),
             }),
             service_interfaces: vec![],
+            vpc_local_interfaces: vec![],
         }
     }
 

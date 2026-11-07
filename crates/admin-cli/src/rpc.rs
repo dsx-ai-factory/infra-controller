@@ -202,7 +202,7 @@ fn legacy_bmc_patch_fields(
 }
 
 // Benchmarks showed 4 had better overall performance while still overlapping page fetch latency.
-const PAGED_LIST_FETCH_CONCURRENCY: usize = 4;
+pub(crate) const PAGED_LIST_FETCH_CONCURRENCY: usize = 4;
 
 /// Attempt cap for retrying a single `RESOURCE_EXHAUSTED`-rejected call inside
 /// [`ApiClient::get_all_instances`]'s paged fetch (the id listing and each id

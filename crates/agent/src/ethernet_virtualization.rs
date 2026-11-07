@@ -480,19 +480,19 @@ fn ipv6_segment_prefix(interface: &FlatInterfaceConfig, legacy_fallback: &str) -
     normalized_ipv6_segment_prefix(address).map(|prefix| prefix.to_string())
 }
 
-/// Builds stateful RA inputs for the existing primary-DPU admin VLAN SVI.
+/// Builds stateful RA inputs from an admin host `/128` and its containing segment.
 ///
+/// Callers must select admin ports only on the primary DPU.
 /// The canonical address entry keeps the host `/128` distinct from the
 /// containing segment so the host route cannot become the advertised prefix.
 fn admin_ipv6_router_advertisement(
     virtualization_type: VpcVirtualizationType,
-    interface: &FlatInterfaceConfig,
     address: &rpc::InterfaceAddressConfig,
     rdnss_servers: &[Ipv6Addr],
 ) -> Option<nvue::Ipv6RouterAdvertisementConfig> {
     // The caller supplies admin ports only on the primary DPU. Keep the
-    // render-side guard for the FNN L2 SVI that can actually emit RA.
-    if virtualization_type != VpcVirtualizationType::Fnn || !interface.is_l2_segment {
+    // render-side FNN guard for both the VLAN SVI and the routed PF.
+    if virtualization_type != VpcVirtualizationType::Fnn {
         return None;
     }
 
@@ -644,7 +644,6 @@ pub(super) async fn update_nvue(
                     svi_ip: ipv6.svi_ip.clone(),
                     router_advertisement: admin_ipv6_router_advertisement(
                         vpc_virtualization_type,
-                        admin_interface,
                         ipv6,
                         &rdnss_servers,
                     ),
@@ -1882,12 +1881,21 @@ fn prepare_dhcp_server_config(
     hbn_device_names: &HBNDeviceNames,
 ) -> eyre::Result<PreparedDhcpServerConfig> {
     let interfaces = if nc.use_admin_network {
-        let vlan_intf = nc
+        let interface_name = nc
             .admin_interface
             .as_ref()
-            .map(|x| format!("vlan{}", x.vlan_id))
+            .map(|interface| {
+                // Routed admin ports have no VLAN SVI for the DHCP listener.
+                if nc.network_virtualization_type() == ::rpc::forge::VpcVirtualizationType::Fnn
+                    && !interface.is_l2_segment
+                {
+                    hbn_device_names.reps[0].to_string()
+                } else {
+                    format!("vlan{}", interface.vlan_id)
+                }
+            })
             .ok_or_else(|| eyre::eyre!("admin interface missing on admin network"))?;
-        vec![vlan_intf]
+        vec![interface_name]
     } else {
         let mut interfaces = Vec::with_capacity(nc.tenant_interfaces.len());
         for interface in &nc.tenant_interfaces {
@@ -5679,6 +5687,163 @@ esac
         Ok(())
     }
 
+    /// Verifies routed admin renders existing gateway prefixes, PF DHCP/RA, and host routes
+    /// without a host-facing bridge or SVI, so enabling it preserves the client addressing contract.
+    /// Secondary admin service ports must retain link-prefix leaks because they use separate addressing.
+    #[tokio::test]
+    async fn routed_admin_preserves_subnet_addressing() -> eyre::Result<()> {
+        // Retain matching canonical and legacy addresses while selecting routed admin and host leaks.
+        let mut config = netconf(
+            VpcVirtualizationType::Fnn,
+            32,
+            24,
+            false,
+            None,
+            false,
+            false,
+        );
+        config.use_admin_network = true;
+        config.network_virtualization_type = Some(rpc::VpcVirtualizationType::Fnn.into());
+        let mut admin_interface = dual_stack_admin_interface();
+        admin_interface.is_l2_segment = false; // Route the existing /26 and /64 on the PF.
+        admin_interface.vpc_routing_profile = Some(rpc::RoutingProfile {
+            leak_tenant_host_routes_to_underlay: true, // Preserve the admin host-export policy.
+            ..Default::default()
+        });
+        config.admin_interface = Some(admin_interface);
+
+        // Render the complete response through the same startup-file path used by DPU OS agents.
+        let output = render_startup_yaml(&config).await?;
+        let documents: serde_yaml::Value = serde_yaml::from_str(&output)?;
+        let set = &documents.as_sequence().expect("two YAML documents")[1]["set"];
+        let host_port = &set["interface"]["pf0hpf_if"];
+
+        // Keep the existing gateway prefixes on the PF and remove the admin L2 attachment.
+        assert!(set.get("bridge").is_none());
+        assert!(set["interface"].get("vlan123").is_none());
+        assert!(host_port.get("bridge").is_none());
+        assert!(host_port["ip"].get("vrr").is_none());
+        assert_eq!(host_port["ip"]["vrf"].as_str(), Some("vpc_7777"));
+        assert_eq!(
+            host_port["ip"]["address"],
+            serde_yaml::from_str::<serde_yaml::Value>(
+                "10.217.4.65/26: {}\n2001:db8:100::/64: {}\n"
+            )?
+        );
+        assert!(set["vrf"]["vpc_7777"]["evpn"]["vni"]["7777"].is_mapping());
+
+        // Originate each host route through its local PF while preserving both EVPN exports.
+        let router = &set["vrf"]["vpc_7777"]["router"];
+        for (prefix, family) in [
+            // IPv4 must advertise the individual host rather than rely on the shared /26.
+            ("10.217.4.70/32", "ipv4-unicast"),
+            // IPv6 must retain a host /128 independently of the /64 advertised by RA.
+            ("2001:db8:100::70/128", "ipv6-unicast"),
+        ] {
+            assert_eq!(
+                router["static"][prefix],
+                serde_yaml::from_str::<serde_yaml::Value>(&format!(
+                    "address-family: {family}\nvia:\n  pf0hpf_if:\n    type: interface\n"
+                ))?
+            );
+            assert_eq!(
+                router["bgp"]["address-family"][family]["network"],
+                serde_yaml::from_str::<serde_yaml::Value>(&format!("{prefix}: {{}}\n"))?
+            );
+            assert_eq!(
+                router["bgp"]["address-family"][family]["route-export"]["to-evpn"]["enable"]
+                    .as_str(),
+                Some("on")
+            );
+        }
+
+        // Preserve the existing per-host IPv6 underlay leak instead of exporting the shared /64.
+        let prefix_lists = &set["router"]["policy"]["prefix-list"];
+        assert_eq!(
+            prefix_lists["ALLOW_TO_UNDERLAY_PREFIX_LIST_IPV6"]["rule"]["65002"]["match"],
+            serde_yaml::from_str::<serde_yaml::Value>("2001:db8:100::70/128: {}\n")?
+        );
+
+        // Emit stateful RA on the PF using the retained admin /64 rather than a /127 linknet.
+        let snippet = set["system"]["config"]["snippet"]["frr.conf"]
+            .as_str()
+            .expect("routed admin RA");
+        assert!(snippet.contains("interface pf0hpf_if vrf vpc_7777"));
+        assert!(!snippet.contains("interface vlan123 vrf vpc_7777"));
+        assert!(snippet.contains("ipv6 nd prefix 2001:db8:100::/64 no-autoconfig"));
+        assert!(
+            snippet
+                .lines()
+                .any(|line| line.trim() == "ipv6 nd managed-config-flag")
+        );
+
+        // Match the file-based DHCP listener and reservation to the PF without changing client masks.
+        let prepared = prepare_dhcp_server_config(
+            &config,
+            &test_service_addresses(),
+            &HBNDeviceNames::hbn_23(),
+        )?;
+        assert!(prepared.supervisor.contains("--interfaces pf0hpf_if "));
+        assert!(!prepared.supervisor.contains("--interfaces vlan123 "));
+        let host_config: HostConfig = serde_yaml::from_str(&prepared.host)?;
+        assert_eq!(host_config.host_ip_addresses.len(), 1);
+        let host_binding = host_config
+            .host_ip_addresses
+            .get("pf0hpf_if")
+            .expect("admin PF binding");
+        assert_eq!(
+            (
+                host_binding.address,
+                host_binding.gateway,
+                host_binding.prefix.as_deref()
+            ),
+            (
+                Some("10.217.4.70".parse()?),
+                Some("10.217.4.65".parse()?),
+                Some("10.217.4.64/26")
+            )
+        );
+        let ipv6_binding = host_binding
+            .ipv6
+            .as_ref()
+            .expect("stateful admin IPv6 binding");
+        assert_eq!(ipv6_binding.address, Some("2001:db8:100::70".parse()?));
+        assert_eq!(ipv6_binding.prefix, "2001:db8:100::70/128");
+
+        // Preserve the DPF DHCP control path's host PF listener for the same routed response.
+        let control_update = prepare_dhcp_grpc_update(
+            &config,
+            &test_service_addresses(),
+            HBNDeviceNames::hbn_23(),
+            None,
+        )?
+        .expect("primary admin DHCP update");
+        assert_eq!(control_update.interfaces, vec!["pf0hpf_if".to_string()]);
+
+        // Retain a service on a secondary Admin DPU, where the host PF is not rendered.
+        config.is_primary_dpu = false;
+        add_service_slot(&mut config, &["2001:db8:100:1::10/127"], None, None, false);
+        config.service_interfaces[0]
+            .vpc_routing_profile
+            .as_mut()
+            .expect("service routing profile")
+            .leak_tenant_host_routes_to_underlay = true;
+
+        // Render the secondary response and verify its service keeps the routed link-prefix leak.
+        let secondary_output = render_startup_yaml(&config).await?;
+        let secondary_documents: serde_yaml::Value = serde_yaml::from_str(&secondary_output)?;
+        let secondary_set = &secondary_documents
+            .as_sequence()
+            .expect("two YAML documents")[1]["set"];
+        assert!(secondary_set["interface"].get("pf0hpf_if").is_none());
+        assert_eq!(
+            secondary_set["router"]["policy"]["prefix-list"]["ALLOW_TO_UNDERLAY_PREFIX_LIST_IPV6"]
+                ["rule"]["65002"]["match"],
+            serde_yaml::from_str::<serde_yaml::Value>("2001:db8:100:1::10/127: {}\n")?
+        );
+        Ok(())
+    }
+
     /// Verifies a realistic dual-stack admin response drives the existing SVI,
     /// explicit RA target, resolver changes, and complete IPv6 withdrawal.
     /// Host routes must be originated and withdrawn with that state so routed reachability follows it.
@@ -6908,6 +7073,7 @@ esac
             dpu_extension_services: vec![],
             astra_config: None,
             use_admin_network_changed: None,
+            accepted_lldp_snapshot_fingerprint: None,
         }
     }
 
@@ -7341,7 +7507,8 @@ esac
         );
     }
 
-    /// Verifies admin RA accepts only an FNN VLAN with a contained host `/128`.
+    /// Verifies admin RA requires FNN and a contained host `/128`, so the
+    /// containing segment is advertised without requiring a tenant `/127`.
     /// Primary-DPU/admin-mode gating remains at its sole production call site.
     #[test]
     #[allow(deprecated)]
@@ -7349,8 +7516,10 @@ esac
         use carbide_test_support::value_scenarios;
 
         let valid = dual_stack_admin_interface();
+        // Retain complete canonical IPv6 while omitting its deprecated sidecar.
         let mut canonical_only = valid.clone();
         canonical_only.ipv6_interface_config = None;
+        // Replace the individual host route with the shared segment to exercise validation.
         let mut invalid_host_route = valid.clone();
         invalid_host_route
             .addresses
@@ -7358,6 +7527,7 @@ esac
             .find(|address| address.address_family == i32::from(rpc::AddressFamily::V6))
             .expect("fixture should contain canonical IPv6")
             .interface_prefix = "2001:db8:100::/64".to_string();
+        // Keep the host address while replacing its containing segment with an unrelated prefix.
         let mut outside_segment = valid.clone();
         outside_segment
             .addresses
@@ -7372,7 +7542,6 @@ esac
                     .expect("test interface should contain canonical IPv6");
                 admin_ipv6_router_advertisement(
                     virtualization_type,
-                    &interface,
                     address,
                     &resolvers,
                 )
@@ -7391,7 +7560,7 @@ esac
                 )),
             }
             "non-FNN admin interface" {
-                // ETV has no supported admin VPC SVI RA path.
+                // ETV has no supported admin VPC RA path.
                 (VpcVirtualizationType::EthernetVirtualizer, valid) => None,
             }
             "non-host interface prefix" {
@@ -7715,6 +7884,7 @@ esac
             dpu_extension_services: vec![],
             astra_config: None,
             use_admin_network_changed: None,
+            accepted_lldp_snapshot_fingerprint: None,
         };
 
         // Include sibling backup files in the fixture's cleanup on every exit.
@@ -7957,6 +8127,7 @@ esac
             dpu_extension_services: vec![],
             astra_config: None,
             use_admin_network_changed: None,
+            accepted_lldp_snapshot_fingerprint: None,
         };
 
         let directory = tempfile::tempdir()?;

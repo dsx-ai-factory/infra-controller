@@ -142,6 +142,7 @@ const (
 	Forge_FindIpAddress_FullMethodName                                      = "/forge.Forge/FindIpAddress"
 	Forge_FindMachineIds_FullMethodName                                     = "/forge.Forge/FindMachineIds"
 	Forge_FindMachinesByIds_FullMethodName                                  = "/forge.Forge/FindMachinesByIds"
+	Forge_FindMachineStatesByIds_FullMethodName                             = "/forge.Forge/FindMachineStatesByIds"
 	Forge_FindHostStatesByIds_FullMethodName                                = "/forge.Forge/FindHostStatesByIds"
 	Forge_FindMachineStateHistories_FullMethodName                          = "/forge.Forge/FindMachineStateHistories"
 	Forge_FindMachineHealthHistories_FullMethodName                         = "/forge.Forge/FindMachineHealthHistories"
@@ -185,6 +186,7 @@ const (
 	Forge_ClearSiteExplorationError_FullMethodName                          = "/forge.Forge/ClearSiteExplorationError"
 	Forge_IsBmcInManagedHost_FullMethodName                                 = "/forge.Forge/IsBmcInManagedHost"
 	Forge_BmcCredentialStatus_FullMethodName                                = "/forge.Forge/BmcCredentialStatus"
+	Forge_FindBmcDriverSelection_FullMethodName                             = "/forge.Forge/FindBmcDriverSelection"
 	Forge_Explore_FullMethodName                                            = "/forge.Forge/Explore"
 	Forge_ReExploreEndpoint_FullMethodName                                  = "/forge.Forge/ReExploreEndpoint"
 	Forge_RefreshEndpointReport_FullMethodName                              = "/forge.Forge/RefreshEndpointReport"
@@ -498,9 +500,11 @@ const (
 	Forge_GetDpuExtensionServiceVersionsInfo_FullMethodName                 = "/forge.Forge/GetDpuExtensionServiceVersionsInfo"
 	Forge_FindInstancesByDpuExtensionService_FullMethodName                 = "/forge.Forge/FindInstancesByDpuExtensionService"
 	Forge_TriggerMachineAttestation_FullMethodName                          = "/forge.Forge/TriggerMachineAttestation"
-	Forge_CancelMachineAttestation_FullMethodName                           = "/forge.Forge/CancelMachineAttestation"
-	Forge_ListAttestationMachines_FullMethodName                            = "/forge.Forge/ListAttestationMachines"
-	Forge_GetAttestationMachine_FullMethodName                              = "/forge.Forge/GetAttestationMachine"
+	Forge_WaiveAttestation_FullMethodName                                   = "/forge.Forge/WaiveAttestation"
+	Forge_FailAttestation_FullMethodName                                    = "/forge.Forge/FailAttestation"
+	Forge_ListAttestation_FullMethodName                                    = "/forge.Forge/ListAttestation"
+	Forge_GetAttestation_FullMethodName                                     = "/forge.Forge/GetAttestation"
+	Forge_ListMachineAttestationStatuses_FullMethodName                     = "/forge.Forge/ListMachineAttestationStatuses"
 	Forge_CreateAttestationProfile_FullMethodName                           = "/forge.Forge/CreateAttestationProfile"
 	Forge_UpdateAttestationProfile_FullMethodName                           = "/forge.Forge/UpdateAttestationProfile"
 	Forge_DeleteAttestationProfile_FullMethodName                           = "/forge.Forge/DeleteAttestationProfile"
@@ -826,6 +830,9 @@ type ForgeClient interface {
 	FindIpAddress(ctx context.Context, in *FindIpAddressRequest, opts ...grpc.CallOption) (*FindIpAddressResponse, error)
 	FindMachineIds(ctx context.Context, in *MachineSearchConfig, opts ...grpc.CallOption) (*MachineIdList, error)
 	FindMachinesByIds(ctx context.Context, in *MachinesByIdsRequest, opts ...grpc.CallOption) (*MachineList, error)
+	// Current host and DPU lifecycle states without full machine records.
+	// Query or state-decoding errors fail the entire request with INTERNAL.
+	FindMachineStatesByIds(ctx context.Context, in *MachineStatesByIdsRequest, opts ...grpc.CallOption) (*MachineStateList, error)
 	// Compact per-host state for monitoring: allocatability, update eligibility
 	// and the explored firmware report, read from one database snapshot.
 	FindHostStatesByIds(ctx context.Context, in *HostStatesByIdsRequest, opts ...grpc.CallOption) (*HostStateList, error)
@@ -882,6 +889,9 @@ type ForgeClient interface {
 	IsBmcInManagedHost(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*IsBmcInManagedHostResponse, error)
 	// BmcCredentialStatus returns true if site explorer has the credentials to login to this BMC
 	BmcCredentialStatus(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*BmcCredentialStatusResponse, error)
+	// Returns the drivers this API server's rules select for a BMC from its
+	// latest exploration report, and the identity they were selected from
+	FindBmcDriverSelection(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*BmcDriverSelection, error)
 	// Explore an individual BMC and show the report
 	// The results of this exploration call will not be persisted in the database
 	Explore(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*EndpointExplorationReport, error)
@@ -1505,9 +1515,16 @@ type ForgeClient interface {
 	FindInstancesByDpuExtensionService(ctx context.Context, in *FindInstancesByDpuExtensionServiceRequest, opts ...grpc.CallOption) (*FindInstancesByDpuExtensionServiceResponse, error)
 	// SPDM attestation APIs start
 	TriggerMachineAttestation(ctx context.Context, in *SpdmMachineAttestationTriggerRequest, opts ...grpc.CallOption) (*SpdmMachineAttestationTriggerResponse, error)
-	CancelMachineAttestation(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	ListAttestationMachines(ctx context.Context, in *SpdmListAttestationMachinesRequest, opts ...grpc.CallOption) (*SpdmListAttestationMachinesResponse, error)
-	GetAttestationMachine(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*SpdmGetAttestationMachineResponse, error)
+	// Records the latest waiver target, including for terminal jobs. Unfinished devices
+	// finish BMC cleanup before the override takes effect. Later fail or waive calls replace
+	// this request. Returns NOT_FOUND for an unknown job and INVALID_ARGUMENT for an invalid UUID.
+	WaiveAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	// Records the latest failure target with the same cleanup and replacement semantics.
+	FailAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	ListAttestation(ctx context.Context, in *SpdmListAttestationRequest, opts ...grpc.CallOption) (*SpdmListAttestationResponse, error)
+	GetAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*SpdmGetAttestationResponse, error)
+	// Lists fleet predictions in pages or assesses one machine using current attesters.
+	ListMachineAttestationStatuses(ctx context.Context, in *ListMachineAttestationStatusesRequest, opts ...grpc.CallOption) (*ListMachineAttestationStatusesResponse, error)
 	// Attestation profiles APIs
 	CreateAttestationProfile(ctx context.Context, in *CreateAttestationProfileRequest, opts ...grpc.CallOption) (*AttestationProfile, error)
 	UpdateAttestationProfile(ctx context.Context, in *UpdateAttestationProfileRequest, opts ...grpc.CallOption) (*AttestationProfile, error)
@@ -1677,9 +1694,11 @@ type ForgeClient interface {
 	GetComponentPowerDetails(ctx context.Context, in *GetComponentPowerDetailsRequest, opts ...grpc.CallOption) (*GetComponentPowerDetailsResponse, error)
 	// Dispatch a reset directly, without scheduling state-controller maintenance.
 	// Valid devices proceed even when other targets cannot be resolved or accepted.
-	// Only SDN factory reset is implemented; it disrupts fabric traffic and restores
-	// SDN defaults without reinstalling NVOS. SUCCESS means accepted and tracked,
-	// not completed. A submission error may follow dispatch: do not automatically resubmit.
+	// The RMS backend supports SDN and NVOS factory reset on switches. SDN reset
+	// disrupts fabric traffic and restores SDN defaults without reinstalling NVOS.
+	// NVOS reset erases operating-system configuration and reboots the switch.
+	// SUCCESS means accepted and tracked, not completed. A submission error may
+	// follow dispatch: do not automatically resubmit.
 	ComponentReset(ctx context.Context, in *ComponentResetRequest, opts ...grpc.CallOption) (*ComponentResetResponse, error)
 	// Observe the latest successfully recorded accepted reset for each device/action.
 	// A failed or unknown submission attempt may leave an earlier reference in place.
@@ -2960,6 +2979,16 @@ func (c *forgeClient) FindMachinesByIds(ctx context.Context, in *MachinesByIdsRe
 	return out, nil
 }
 
+func (c *forgeClient) FindMachineStatesByIds(ctx context.Context, in *MachineStatesByIdsRequest, opts ...grpc.CallOption) (*MachineStateList, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(MachineStateList)
+	err := c.cc.Invoke(ctx, Forge_FindMachineStatesByIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) FindHostStatesByIds(ctx context.Context, in *HostStatesByIdsRequest, opts ...grpc.CallOption) (*HostStateList, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(HostStateList)
@@ -3384,6 +3413,16 @@ func (c *forgeClient) BmcCredentialStatus(ctx context.Context, in *BmcEndpointRe
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(BmcCredentialStatusResponse)
 	err := c.cc.Invoke(ctx, Forge_BmcCredentialStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) FindBmcDriverSelection(ctx context.Context, in *BmcEndpointRequest, opts ...grpc.CallOption) (*BmcDriverSelection, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BmcDriverSelection)
+	err := c.cc.Invoke(ctx, Forge_FindBmcDriverSelection_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -6520,30 +6559,50 @@ func (c *forgeClient) TriggerMachineAttestation(ctx context.Context, in *SpdmMac
 	return out, nil
 }
 
-func (c *forgeClient) CancelMachineAttestation(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *forgeClient) WaiveAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, Forge_CancelMachineAttestation_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, Forge_WaiveAttestation_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *forgeClient) ListAttestationMachines(ctx context.Context, in *SpdmListAttestationMachinesRequest, opts ...grpc.CallOption) (*SpdmListAttestationMachinesResponse, error) {
+func (c *forgeClient) FailAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*emptypb.Empty, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SpdmListAttestationMachinesResponse)
-	err := c.cc.Invoke(ctx, Forge_ListAttestationMachines_FullMethodName, in, out, cOpts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, Forge_FailAttestation_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (c *forgeClient) GetAttestationMachine(ctx context.Context, in *MachineId, opts ...grpc.CallOption) (*SpdmGetAttestationMachineResponse, error) {
+func (c *forgeClient) ListAttestation(ctx context.Context, in *SpdmListAttestationRequest, opts ...grpc.CallOption) (*SpdmListAttestationResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SpdmGetAttestationMachineResponse)
-	err := c.cc.Invoke(ctx, Forge_GetAttestationMachine_FullMethodName, in, out, cOpts...)
+	out := new(SpdmListAttestationResponse)
+	err := c.cc.Invoke(ctx, Forge_ListAttestation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) GetAttestation(ctx context.Context, in *UUID, opts ...grpc.CallOption) (*SpdmGetAttestationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SpdmGetAttestationResponse)
+	err := c.cc.Invoke(ctx, Forge_GetAttestation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) ListMachineAttestationStatuses(ctx context.Context, in *ListMachineAttestationStatusesRequest, opts ...grpc.CallOption) (*ListMachineAttestationStatusesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListMachineAttestationStatusesResponse)
+	err := c.cc.Invoke(ctx, Forge_ListMachineAttestationStatuses_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7605,6 +7664,9 @@ type ForgeServer interface {
 	FindIpAddress(context.Context, *FindIpAddressRequest) (*FindIpAddressResponse, error)
 	FindMachineIds(context.Context, *MachineSearchConfig) (*MachineIdList, error)
 	FindMachinesByIds(context.Context, *MachinesByIdsRequest) (*MachineList, error)
+	// Current host and DPU lifecycle states without full machine records.
+	// Query or state-decoding errors fail the entire request with INTERNAL.
+	FindMachineStatesByIds(context.Context, *MachineStatesByIdsRequest) (*MachineStateList, error)
 	// Compact per-host state for monitoring: allocatability, update eligibility
 	// and the explored firmware report, read from one database snapshot.
 	FindHostStatesByIds(context.Context, *HostStatesByIdsRequest) (*HostStateList, error)
@@ -7661,6 +7723,9 @@ type ForgeServer interface {
 	IsBmcInManagedHost(context.Context, *BmcEndpointRequest) (*IsBmcInManagedHostResponse, error)
 	// BmcCredentialStatus returns true if site explorer has the credentials to login to this BMC
 	BmcCredentialStatus(context.Context, *BmcEndpointRequest) (*BmcCredentialStatusResponse, error)
+	// Returns the drivers this API server's rules select for a BMC from its
+	// latest exploration report, and the identity they were selected from
+	FindBmcDriverSelection(context.Context, *BmcEndpointRequest) (*BmcDriverSelection, error)
 	// Explore an individual BMC and show the report
 	// The results of this exploration call will not be persisted in the database
 	Explore(context.Context, *BmcEndpointRequest) (*EndpointExplorationReport, error)
@@ -8284,9 +8349,16 @@ type ForgeServer interface {
 	FindInstancesByDpuExtensionService(context.Context, *FindInstancesByDpuExtensionServiceRequest) (*FindInstancesByDpuExtensionServiceResponse, error)
 	// SPDM attestation APIs start
 	TriggerMachineAttestation(context.Context, *SpdmMachineAttestationTriggerRequest) (*SpdmMachineAttestationTriggerResponse, error)
-	CancelMachineAttestation(context.Context, *MachineId) (*emptypb.Empty, error)
-	ListAttestationMachines(context.Context, *SpdmListAttestationMachinesRequest) (*SpdmListAttestationMachinesResponse, error)
-	GetAttestationMachine(context.Context, *MachineId) (*SpdmGetAttestationMachineResponse, error)
+	// Records the latest waiver target, including for terminal jobs. Unfinished devices
+	// finish BMC cleanup before the override takes effect. Later fail or waive calls replace
+	// this request. Returns NOT_FOUND for an unknown job and INVALID_ARGUMENT for an invalid UUID.
+	WaiveAttestation(context.Context, *UUID) (*emptypb.Empty, error)
+	// Records the latest failure target with the same cleanup and replacement semantics.
+	FailAttestation(context.Context, *UUID) (*emptypb.Empty, error)
+	ListAttestation(context.Context, *SpdmListAttestationRequest) (*SpdmListAttestationResponse, error)
+	GetAttestation(context.Context, *UUID) (*SpdmGetAttestationResponse, error)
+	// Lists fleet predictions in pages or assesses one machine using current attesters.
+	ListMachineAttestationStatuses(context.Context, *ListMachineAttestationStatusesRequest) (*ListMachineAttestationStatusesResponse, error)
 	// Attestation profiles APIs
 	CreateAttestationProfile(context.Context, *CreateAttestationProfileRequest) (*AttestationProfile, error)
 	UpdateAttestationProfile(context.Context, *UpdateAttestationProfileRequest) (*AttestationProfile, error)
@@ -8456,9 +8528,11 @@ type ForgeServer interface {
 	GetComponentPowerDetails(context.Context, *GetComponentPowerDetailsRequest) (*GetComponentPowerDetailsResponse, error)
 	// Dispatch a reset directly, without scheduling state-controller maintenance.
 	// Valid devices proceed even when other targets cannot be resolved or accepted.
-	// Only SDN factory reset is implemented; it disrupts fabric traffic and restores
-	// SDN defaults without reinstalling NVOS. SUCCESS means accepted and tracked,
-	// not completed. A submission error may follow dispatch: do not automatically resubmit.
+	// The RMS backend supports SDN and NVOS factory reset on switches. SDN reset
+	// disrupts fabric traffic and restores SDN defaults without reinstalling NVOS.
+	// NVOS reset erases operating-system configuration and reboots the switch.
+	// SUCCESS means accepted and tracked, not completed. A submission error may
+	// follow dispatch: do not automatically resubmit.
 	ComponentReset(context.Context, *ComponentResetRequest) (*ComponentResetResponse, error)
 	// Observe the latest successfully recorded accepted reset for each device/action.
 	// A failed or unknown submission attempt may leave an earlier reference in place.
@@ -8889,6 +8963,9 @@ func (UnimplementedForgeServer) FindMachineIds(context.Context, *MachineSearchCo
 func (UnimplementedForgeServer) FindMachinesByIds(context.Context, *MachinesByIdsRequest) (*MachineList, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindMachinesByIds not implemented")
 }
+func (UnimplementedForgeServer) FindMachineStatesByIds(context.Context, *MachineStatesByIdsRequest) (*MachineStateList, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindMachineStatesByIds not implemented")
+}
 func (UnimplementedForgeServer) FindHostStatesByIds(context.Context, *HostStatesByIdsRequest) (*HostStateList, error) {
 	return nil, status.Error(codes.Unimplemented, "method FindHostStatesByIds not implemented")
 }
@@ -9017,6 +9094,9 @@ func (UnimplementedForgeServer) IsBmcInManagedHost(context.Context, *BmcEndpoint
 }
 func (UnimplementedForgeServer) BmcCredentialStatus(context.Context, *BmcEndpointRequest) (*BmcCredentialStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method BmcCredentialStatus not implemented")
+}
+func (UnimplementedForgeServer) FindBmcDriverSelection(context.Context, *BmcEndpointRequest) (*BmcDriverSelection, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindBmcDriverSelection not implemented")
 }
 func (UnimplementedForgeServer) Explore(context.Context, *BmcEndpointRequest) (*EndpointExplorationReport, error) {
 	return nil, status.Error(codes.Unimplemented, "method Explore not implemented")
@@ -9957,14 +10037,20 @@ func (UnimplementedForgeServer) FindInstancesByDpuExtensionService(context.Conte
 func (UnimplementedForgeServer) TriggerMachineAttestation(context.Context, *SpdmMachineAttestationTriggerRequest) (*SpdmMachineAttestationTriggerResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method TriggerMachineAttestation not implemented")
 }
-func (UnimplementedForgeServer) CancelMachineAttestation(context.Context, *MachineId) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "method CancelMachineAttestation not implemented")
+func (UnimplementedForgeServer) WaiveAttestation(context.Context, *UUID) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method WaiveAttestation not implemented")
 }
-func (UnimplementedForgeServer) ListAttestationMachines(context.Context, *SpdmListAttestationMachinesRequest) (*SpdmListAttestationMachinesResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method ListAttestationMachines not implemented")
+func (UnimplementedForgeServer) FailAttestation(context.Context, *UUID) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method FailAttestation not implemented")
 }
-func (UnimplementedForgeServer) GetAttestationMachine(context.Context, *MachineId) (*SpdmGetAttestationMachineResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetAttestationMachine not implemented")
+func (UnimplementedForgeServer) ListAttestation(context.Context, *SpdmListAttestationRequest) (*SpdmListAttestationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListAttestation not implemented")
+}
+func (UnimplementedForgeServer) GetAttestation(context.Context, *UUID) (*SpdmGetAttestationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetAttestation not implemented")
+}
+func (UnimplementedForgeServer) ListMachineAttestationStatuses(context.Context, *ListMachineAttestationStatusesRequest) (*ListMachineAttestationStatusesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListMachineAttestationStatuses not implemented")
 }
 func (UnimplementedForgeServer) CreateAttestationProfile(context.Context, *CreateAttestationProfileRequest) (*AttestationProfile, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateAttestationProfile not implemented")
@@ -12364,6 +12450,24 @@ func _Forge_FindMachinesByIds_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_FindMachineStatesByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(MachineStatesByIdsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindMachineStatesByIds(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindMachineStatesByIds_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindMachineStatesByIds(ctx, req.(*MachineStatesByIdsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_FindHostStatesByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(HostStatesByIdsRequest)
 	if err := dec(in); err != nil {
@@ -13134,6 +13238,24 @@ func _Forge_BmcCredentialStatus_Handler(srv interface{}, ctx context.Context, de
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).BmcCredentialStatus(ctx, req.(*BmcEndpointRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_FindBmcDriverSelection_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BmcEndpointRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindBmcDriverSelection(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindBmcDriverSelection_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindBmcDriverSelection(ctx, req.(*BmcEndpointRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -18772,56 +18894,92 @@ func _Forge_TriggerMachineAttestation_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_CancelMachineAttestation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(MachineId)
+func _Forge_WaiveAttestation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UUID)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).CancelMachineAttestation(ctx, in)
+		return srv.(ForgeServer).WaiveAttestation(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_CancelMachineAttestation_FullMethodName,
+		FullMethod: Forge_WaiveAttestation_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).CancelMachineAttestation(ctx, req.(*MachineId))
+		return srv.(ForgeServer).WaiveAttestation(ctx, req.(*UUID))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_ListAttestationMachines_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SpdmListAttestationMachinesRequest)
+func _Forge_FailAttestation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UUID)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).ListAttestationMachines(ctx, in)
+		return srv.(ForgeServer).FailAttestation(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_ListAttestationMachines_FullMethodName,
+		FullMethod: Forge_FailAttestation_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).ListAttestationMachines(ctx, req.(*SpdmListAttestationMachinesRequest))
+		return srv.(ForgeServer).FailAttestation(ctx, req.(*UUID))
 	}
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Forge_GetAttestationMachine_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(MachineId)
+func _Forge_ListAttestation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SpdmListAttestationRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ForgeServer).GetAttestationMachine(ctx, in)
+		return srv.(ForgeServer).ListAttestation(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Forge_GetAttestationMachine_FullMethodName,
+		FullMethod: Forge_ListAttestation_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ForgeServer).GetAttestationMachine(ctx, req.(*MachineId))
+		return srv.(ForgeServer).ListAttestation(ctx, req.(*SpdmListAttestationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_GetAttestation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UUID)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetAttestation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetAttestation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetAttestation(ctx, req.(*UUID))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_ListMachineAttestationStatuses_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListMachineAttestationStatusesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).ListMachineAttestationStatuses(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_ListMachineAttestationStatuses_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).ListMachineAttestationStatuses(ctx, req.(*ListMachineAttestationStatusesRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -20753,6 +20911,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_FindMachinesByIds_Handler,
 		},
 		{
+			MethodName: "FindMachineStatesByIds",
+			Handler:    _Forge_FindMachineStatesByIds_Handler,
+		},
+		{
 			MethodName: "FindHostStatesByIds",
 			Handler:    _Forge_FindHostStatesByIds_Handler,
 		},
@@ -20923,6 +21085,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "BmcCredentialStatus",
 			Handler:    _Forge_BmcCredentialStatus_Handler,
+		},
+		{
+			MethodName: "FindBmcDriverSelection",
+			Handler:    _Forge_FindBmcDriverSelection_Handler,
 		},
 		{
 			MethodName: "Explore",
@@ -22177,16 +22343,24 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_TriggerMachineAttestation_Handler,
 		},
 		{
-			MethodName: "CancelMachineAttestation",
-			Handler:    _Forge_CancelMachineAttestation_Handler,
+			MethodName: "WaiveAttestation",
+			Handler:    _Forge_WaiveAttestation_Handler,
 		},
 		{
-			MethodName: "ListAttestationMachines",
-			Handler:    _Forge_ListAttestationMachines_Handler,
+			MethodName: "FailAttestation",
+			Handler:    _Forge_FailAttestation_Handler,
 		},
 		{
-			MethodName: "GetAttestationMachine",
-			Handler:    _Forge_GetAttestationMachine_Handler,
+			MethodName: "ListAttestation",
+			Handler:    _Forge_ListAttestation_Handler,
+		},
+		{
+			MethodName: "GetAttestation",
+			Handler:    _Forge_GetAttestation_Handler,
+		},
+		{
+			MethodName: "ListMachineAttestationStatuses",
+			Handler:    _Forge_ListMachineAttestationStatuses_Handler,
 		},
 		{
 			MethodName: "CreateAttestationProfile",

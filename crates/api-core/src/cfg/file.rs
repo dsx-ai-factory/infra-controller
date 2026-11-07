@@ -21,6 +21,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
+use bmc_drivers::{Drivers, Rule, Rules};
 use bmc_vendor::BMCVendor;
 use carbide_authn::config::{AllowedCertCriteria, TrustConfig};
 use carbide_dpf::types::{DpfProxyDetails, DpuDeploymentType};
@@ -507,6 +508,12 @@ pub struct CarbideConfig {
     /// SiteExplorer related configuration
     #[serde(default)]
     pub site_explorer: SiteExplorerConfig,
+
+    /// BMC driver selection rules layered over the compiled ones. Each
+    /// outranks every compiled rule, so a site can fix hardware that
+    /// misbehaves before a release adds a rule for it.
+    #[serde(default)]
+    pub bmc_driver_rules: Vec<Rule>,
 
     /// Deprecated compatibility key. This setting no longer affects runtime
     /// behavior; keep accepting it temporarily so existing site files can be
@@ -1419,6 +1426,14 @@ impl Default for TracingConfig {
 }
 
 impl CarbideConfig {
+    /// The compiled BMC driver rules with `bmc_driver_rules` layered over
+    /// them, checked against the compiled drivers.
+    pub fn driver_rules(&self) -> eyre::Result<Rules> {
+        let rules = bmc_drivers::rules_with_overrides(self.bmc_driver_rules.clone())?;
+        Drivers::validate_rules(&rules)?;
+        Ok(rules)
+    }
+
     /// Returns the configured FNN site-fabric null routes, including the legacy fallback.
     pub fn effective_site_fabric_null_routes(&self) -> &[IpNetwork] {
         self.site_fabric_null_routes
@@ -2206,7 +2221,7 @@ impl DpfConfig {
 }
 
 fn default_dpf_bfb_url() -> String {
-    "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.4.1-12_26.04_ubuntu-24.04_64k_prod.bfb".to_string()
+    "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.5.0-89_26.07_ubuntu-24.04_64k_prod.bfb".to_string()
 }
 
 fn default_dpf_deployment_name() -> String {
@@ -3542,6 +3557,11 @@ pub struct AdminFnnConfig {
     /// Whether FNN should be applied to the admin network as well.
     pub enabled: bool,
 
+    /// Routes the admin host link without an L2VNI or VLAN SVI when admin FNN is enabled.
+    /// Defaults to false and preserves existing host addresses and subnet masks.
+    #[serde(default)]
+    pub l3_only: bool,
+
     /// VNI for the admin network VPC. When enabled, will create a VPC with this VNI
     /// and attach it to the admin network segment. Panics if a conflicting VPC/segment exists.
     #[serde(default)]
@@ -4138,12 +4158,52 @@ impl SwitchStateControllerConfig {
 }
 
 /// SpdmStateController related config
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct SpdmStateControllerConfig {
     /// Common state controller configs
     #[serde(default = "StateControllerConfig::default")]
     pub controller: StateControllerConfig,
+    /// Maximum wait from the persisted start of cancellation cleanup before releasing an
+    /// evidence collection lock without BMC confirmation. Accepts positive
+    /// durations up to five minutes (e.g. "30s", "5m"); defaults to "2m".
+    /// Covers operator failure, waivers, and automatic recovery.
+    /// The first cleanup start is persisted independently of the latest operator request.
+    /// Repeating or switching targets cannot extend cleanup already in progress.
+    /// Requires an API restart; controller retries do not reset the deadline.
+    #[serde(
+        deserialize_with = "SpdmStateControllerConfig::deserialize_cancellation_timeout",
+        serialize_with = "as_duration"
+    )]
+    pub cancellation_timeout: chrono::Duration,
+}
+
+impl SpdmStateControllerConfig {
+    // Bound how long an unresponsive BMC can hold a job's collection lock during cleanup.
+    const MAX_CANCELLATION_TIMEOUT: Duration = Duration::minutes(5);
+
+    fn deserialize_cancellation_timeout<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let timeout = deserialize_duration_chrono(deserializer)?;
+        if timeout <= Duration::zero() || timeout > Self::MAX_CANCELLATION_TIMEOUT {
+            return Err(serde::de::Error::custom(
+                "spdm_state_controller.cancellation_timeout must be greater than 0s and at most 5m",
+            ));
+        }
+        Ok(timeout)
+    }
+}
+
+impl Default for SpdmStateControllerConfig {
+    fn default() -> Self {
+        // Preserve the cancellation grace period when the section or field is omitted.
+        Self {
+            controller: StateControllerConfig::default(),
+            cancellation_timeout: Duration::minutes(2),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -5753,6 +5813,25 @@ path = "credentials.yaml"
         );
     }
 
+    /// Verifies omitted L3-only configuration parses as false and explicit true is retained,
+    /// so existing site configuration cannot opt into routed admin during deserialization.
+    #[test]
+    fn admin_fnn_l3_only_requires_explicit_opt_in() {
+        // Parse the attachment choice while retaining the required admin FNN enablement.
+        scenarios!(run = |source| {
+            toml::from_str::<AdminFnnConfig>(source).map(|config| config.l3_only).map_err(drop)
+        };
+            "existing site configuration" {
+                // Omission preserves the shared admin segment after an upgrade.
+                "enabled = true" => Yields(false),
+            }
+            "routed admin opt-in" {
+                // Explicit opt-in must survive parsing so Core can select the routed attachment.
+                "enabled = true\nl3_only = true" => Yields(true),
+            }
+        );
+    }
+
     /// Verifies admission checks the resolved profile: configured targets prevent
     /// prefix reuse, while an explicit empty override clears inherited targets.
     #[test]
@@ -5928,6 +6007,7 @@ path = "credentials.yaml"
                 FnnConfig {
                     admin_vpc: Some(AdminFnnConfig {
                         enabled: true,
+                        l3_only: false,
                         vpc_vni: None,
                         routing_profile: FnnRoutingProfileConfig {
                             route_targets_on_exports: Some(vec![symbolic_target.clone()]),
@@ -6371,6 +6451,7 @@ path = "credentials.yaml"
                 metric_emission_interval: std::time::Duration::from_secs(60),
                 metric_hold_time: std::time::Duration::from_secs(5 * 60),
             },
+            spdm_attester_selection_timeout: std::time::Duration::from_secs(45),
             dpu_wait_time: Duration::minutes(20),
             power_down_wait: Duration::seconds(10),
             failure_retry_time: Duration::minutes(90),
@@ -6403,6 +6484,7 @@ path = "credentials.yaml"
         let config = r#"{"dpu_wait_time": "20m","power_down_wait":"10s",
         "failure_retry_time":"1h30m", "dpu_up_threshold": "1w",
         "boot_interface_observation_interval": "2h",
+        "spdm_attester_selection_timeout": "3m",
         "controller": {"iteration_time": "33s", "max_object_handling_time": "63s", "max_concurrency": 13}}"#;
         let config: MachineStateControllerConfig = serde_json::from_str(config).unwrap();
 
@@ -6420,6 +6502,7 @@ path = "credentials.yaml"
                         metric_hold_time: std::time::Duration::from_secs(5 * 60),
                     }
                 },
+                spdm_attester_selection_timeout: std::time::Duration::from_secs(180),
                 dpu_wait_time: Duration::minutes(20),
                 power_down_wait: Duration::seconds(10),
                 failure_retry_time: Duration::minutes(90),
@@ -6445,6 +6528,7 @@ path = "credentials.yaml"
             config,
             MachineStateControllerConfig {
                 controller: StateControllerConfig::default(),
+                spdm_attester_selection_timeout: std::time::Duration::from_secs(30),
                 dpu_wait_time: Duration::minutes(5),
                 power_down_wait: Duration::seconds(10),
                 failure_retry_time: Duration::minutes(90),
@@ -6480,6 +6564,30 @@ path = "credentials.yaml"
                 "boot_interface_observation_interval={invalid_interval} must be rejected",
             );
         }
+    }
+
+    #[test]
+    fn reject_invalid_spdm_attester_selection_timeouts() {
+        use carbide_test_support::Outcome::Fails;
+        use carbide_test_support::scenarios;
+
+        // These values must fail configuration loading before any selection can run.
+        scenarios!(
+            run = |timeout: &str| {
+                let config_json = format!(r#"{{"spdm_attester_selection_timeout":"{timeout}"}}"#);
+                serde_json::from_str::<MachineStateControllerConfig>(&config_json).map_err(drop)
+            };
+            "a timeout must be positive" {
+                "0s" => Fails,
+                "-1s" => Fails,
+            }
+            "a timeout must stay within the hard maximum" {
+                "180001ms" => Fails,
+            }
+            "a timeout must be a duration" {
+                "invalid" => Fails,
+            }
+        );
     }
 
     #[test]
