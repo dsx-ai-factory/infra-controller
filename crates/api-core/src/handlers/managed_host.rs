@@ -284,7 +284,18 @@ pub(crate) async fn set_maintenance(
             )
             .await
             {
-                Ok(_) => (),
+                Ok(_) => {
+                    if crate::handlers::bmc_endpoint_explorer::reverify_host_boot_configuration(
+                        api, machine_id,
+                    )
+                    .await?
+                    {
+                        tracing::info!(
+                            %machine_id,
+                            "Maintenance ended; re-verifying the host BIOS and boot configuration before it is allocated"
+                        );
+                    }
+                }
                 Err(status) if status.code() == tonic::Code::NotFound => (),
                 Err(status) => return Err(status),
             };

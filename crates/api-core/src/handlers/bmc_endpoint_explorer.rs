@@ -678,6 +678,30 @@ pub(crate) async fn is_infinite_boot_enabled(
     }))
 }
 
+pub(crate) async fn reverify_host_boot_configuration(
+    api: &Api,
+    machine_id: HostMachineId,
+) -> Result<bool, Status> {
+    let mut txn = api.txn_begin().await?;
+    let Some(desired) = desired_boot_interface_target(&mut txn, Some(machine_id.into())).await?
+    else {
+        txn.commit().await?;
+        return Ok(false);
+    };
+    let reconciliation_eligible =
+        boot_interface_reconciliation_eligible(&mut txn, Some(machine_id)).await?;
+    db::machine_desired_boot_interface::force_reconcile(
+        &mut txn,
+        &machine_id,
+        &desired,
+        BootInterfaceSelectionAuthority::Existing,
+    )
+    .await?;
+    txn.commit().await?;
+    enqueue_boot_interface_reconciliation(api, machine_id, reconciliation_eligible).await;
+    Ok(true)
+}
+
 pub(crate) async fn machine_setup(
     api: &Api,
     request: Request<rpc::MachineSetupRequest>,
