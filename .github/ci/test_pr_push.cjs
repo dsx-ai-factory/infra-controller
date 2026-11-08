@@ -173,6 +173,49 @@ function runWorkflowScript(t, { workflow, section, field, indent, environment, p
   return { ...result, output: readFileSync(output, "utf8") };
 }
 
+test("RC6 canary pins both architectures without changing ordinary build arguments", async (t) => {
+  for (const publish of ["true", "false"]) {
+    await t.test(`PR_PUBLISH=${publish}`, (t) => {
+      const result = runWorkflowScript(t, {
+        workflow: "ci.yaml",
+        section: "      - name: Prepare release container build args",
+        field: "run",
+        indent: 10,
+        environment: {
+          PR_PUBLISH: publish,
+          BUILD_REF: "example/build:x86",
+          RUNTIME_REF: "example/runtime:x86",
+          BUILD_REF_AARCH64: "example/build:arm",
+          RUNTIME_REF_AARCH64: "example/runtime:arm",
+          VERSION: "v2.4.0-rc.6-pr.123.gabcdef0",
+          SHORT_SHA: "abcdef0",
+          COMMIT_TIMESTAMP: "2026-01-01T00:00:00Z",
+          HELM_VERSION: "2.4.0-rc.6-pr.123.gabcdef0",
+        },
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const args = Object.fromEntries(result.output.trim().split("\n").map((line) => {
+        const split = line.indexOf("=");
+        return [line.slice(0, split), JSON.parse(line.slice(split + 1))];
+      }));
+      const actual = [args.build_args.CONTAINER_BUILD_X86_64, args.build_args.CONTAINER_RUNTIME_X86_64,
+        args.build_args_aarch64.CONTAINER_BUILD_AARCH64, args.build_args_aarch64.CONTAINER_RUNTIME_AARCH64];
+      if (publish === "true") {
+        assert.deepEqual(actual.map((ref) => ref.split("@sha256:")[1]), [
+          "13c0e618b39732b85036ddbdc22ab6e6f642d7f2d4a8cddf432a4462efa5355f",
+          "8a23b53ae40676626d320c6ad1b3ae614923c4def2bda4a084d39d2110f235c2",
+          "a507e26a64f4fdc49f0d98b6c011c1e570a4b173ac632943bd5807ec1443c426",
+          "2a6ba21266a1177f216643f2ea745d83b6bb5c999f6a39d3770fafd74b8c1f96",
+        ]);
+      } else {
+        assert.deepEqual(actual, ["example/build:x86", "example/runtime:x86", "example/build:arm", "example/runtime:arm"]);
+      }
+      assert.equal(args.build_args.CI_COMMIT_SHORT_SHA, "abcdef0");
+      assert.equal(args.build_args_aarch64.VERSION, "v2.4.0-rc.6-pr.123.gabcdef0");
+    });
+  }
+});
+
 /**
  * Accept a numeric short SHA beginning with zero during PR version calculation
  * so an admitted revision can reach the image builds.

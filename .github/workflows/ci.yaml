@@ -691,6 +691,7 @@ jobs:
       - name: Prepare release container build args
         id: release-metadata
         env:
+          PR_PUBLISH: ${{ github.event_name == 'workflow_dispatch' }}
           BUILD_REF: ${{ steps.base-container-gate.outputs.build_container_x86_64_ref }}
           RUNTIME_REF: ${{ steps.base-container-gate.outputs.runtime_container_x86_64_ref }}
           BUILD_REF_AARCH64: ${{ steps.base-container-gate.outputs.build_container_aarch64_ref }}
@@ -705,6 +706,15 @@ jobs:
           RUNTIME_VERSION_AARCH64: ${{ steps.base-container-gate.outputs.runtime_container_aarch64_version }}
         run: |
           set -euo pipefail
+
+          # RC.6 canary bases from Actions run 41945934468, not mutable latest aliases.
+          # Keep this pin separate from the upstream serial fix before merging.
+          if [[ "${PR_PUBLISH}" == "true" ]]; then
+            BUILD_REF="nvcr.io/0837451325059433/carbide-dev/build-container-x86_64@sha256:13c0e618b39732b85036ddbdc22ab6e6f642d7f2d4a8cddf432a4462efa5355f"
+            RUNTIME_REF="nvcr.io/0837451325059433/carbide-dev/runtime-container-x86_64@sha256:8a23b53ae40676626d320c6ad1b3ae614923c4def2bda4a084d39d2110f235c2"
+            BUILD_REF_AARCH64="nvcr.io/0837451325059433/carbide-dev/build-container-aarch64@sha256:a507e26a64f4fdc49f0d98b6c011c1e570a4b173ac632943bd5807ec1443c426"
+            RUNTIME_REF_AARCH64="nvcr.io/0837451325059433/carbide-dev/runtime-container-aarch64@sha256:2a6ba21266a1177f216643f2ea745d83b6bb5c999f6a39d3770fafd74b8c1f96"
+          fi
 
           # x86_64 build args
 
