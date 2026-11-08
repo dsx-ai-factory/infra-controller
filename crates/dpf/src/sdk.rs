@@ -3384,15 +3384,10 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
         let cr_name = dpu_device_cr_name(&info.device_id);
         let expected_machine = astra_provisioning_inputs.map(|(machine, _)| machine);
         let placement = expected_machine
-            .map(|machine| {
-                crate::astra_placement::AstraHardwarePlacement::for_dpu(
-                    machine,
-                    &info.serial_number,
-                )
-            })
+            .map(|machine| crate::astra_placement::ports_for_dpu(machine, &info.serial_number))
             .transpose()?
             .flatten()
-            .map(|placement| serde_json::to_value(placement.ports))
+            .map(serde_json::to_value)
             .transpose()?;
         let astra_underlay_inputs = astra_provisioning_inputs.map(|(machine, prefixes)| {
             let nics = crate::astra_placement::interfaces_for_dpu(machine, &info.serial_number);

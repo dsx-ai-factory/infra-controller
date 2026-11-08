@@ -394,16 +394,14 @@ impl AstraPortPlacement {
         {
             return Err("Astra placement requires an existing group and hardware plane 0..3");
         }
-        let b = self.pci_address.as_bytes();
-        if b.len() != 12
-            || b[4] != b':'
-            || b[7] != b':'
-            || b[10] != b'.'
-            || !b.iter().enumerate().all(|(i, c)| {
-                matches!(i, 4 | 7 | 10) || c.is_ascii_digit() || (b'a'..=b'f').contains(c)
-            })
-            || u8::from_str_radix(&self.pci_address[8..10], 16).map_or(true, |device| device > 31)
-            || !(b'0'..=b'7').contains(&b[11])
+        if !matches!(
+            self.pci_address.as_bytes(),
+            [_, _, _, _, b':', _, _, b':', _, _, b'.', _]
+        ) || !self
+            .pci_address
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f' | b':' | b'.'))
+            || crate::pci::PciBdfOrderingKey::from_bdf(&self.pci_address).is_err()
         {
             return Err(
                 "Astra PCI address must be canonical dddd:bb:dd.f with device <= 1f and function <= 7",

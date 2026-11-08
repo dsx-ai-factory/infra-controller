@@ -919,13 +919,9 @@ Per-deployment field reference:
 
 ##### Per-machine Astra hardware placement
 
-Expected-machine registration accepts an optional `astra_placement` object on each
-CX9 entry in `host_nics` (called `interfaces` in the internal inventory model).
-This declares a PCI address in the **DPU's** PCI namespace. The DPU serial selects
-which DPU in the host owns the declaration; host PCI addresses are not used.
-The existing expected-machine create, replace, update, and field-mask patch paths
-carry this object with the interface list. Reading the expected machine returns
-it, and the interface JSON stored in the database retains it.
+Each CX9 `host_nics` entry in expected-machine registration can declare
+`astra_placement`: a PCI address in the selected DPU's namespace, not the host's.
+Create, update, replace, read, and field-mask patch paths retain this object.
 
 For example, this is **one interface entry**, not a complete registration:
 
@@ -970,26 +966,21 @@ uses only its 32 placed declarations; other DPUs retain the unplaced CX9 entries
 Partial mappings, empty objects, unsafe names, and contradictory logical rail
 identities are rejected.
 
-NICo passes the validated mapping in `DPUDevice.spec.values.astra_hardware_placement`.
-The configured shared `DPUFlavorTemplate` renders its CSV, OVS ports, and underlay
-lookup from those device values. DPF creates the concrete flavor for each DPU and
-selects it for that device. The existing Astra deployment and ServiceInterfaces
-provide device selection and rail attachments. Netdevs are found through BDF and
-`phys_port_name`; their Linux names need not encode group identity.
+NICo sets `DPUDevice.spec.values.astra_hardware_placement`. The shared
+`DPUFlavorTemplate` renders the CSV, OVS ports, and underlay lookup; DPF creates
+and selects each device's flavor. Existing deployment selection, ServiceInterfaces,
+and Cerebro underlay branch selection still apply. BDF and `phys_port_name`
+resolve netdevs independently of Linux interface names.
 
-Omitting placement preserves the existing fixed mapping and rendered default
-flavor specification. Adding placement support changes the shared template body
-and its hash once; it does not preserve the old template resource name. The Astra
-deployment retains its `OnDelete` strategy. Existing DPUs require the supported
-reprovisioning lifecycle to consume a changed template or changed device values;
-an API restart alone does not prove the new configuration was applied. Existing
-Cerebro underlay rows continue to select the rendering branch.
+Omission preserves the fixed mapping and rendered default flavor specification.
+The shared template body and hash change once to add placement support. The
+`OnDelete` strategy requires the supported reprovisioning lifecycle to consume
+changed templates or values; restarting the API alone does not apply them.
 
-Placement is provisioning input. Replacing `host_nics` also replaces its placement
-objects; omitting `host_nics` from a field-mask patch preserves the stored list.
-Changing or removing placement for an existing `DPUDevice` is rejected during
-registration. Decommission and re-ingest through the supported lifecycle to apply
-that change. Declare the correct DPU serial and all 32 ports before ingestion.
+Declare all 32 ports before ingestion. Replacing `host_nics` replaces placement;
+a field-mask patch that omits `host_nics` preserves it. Registration rejects
+changing or removing placement on an existing `DPUDevice`: decommission and
+re-ingest to apply the change.
 
 ##### Service VPC and additional SF capacity
 
