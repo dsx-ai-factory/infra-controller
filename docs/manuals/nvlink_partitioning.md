@@ -325,6 +325,14 @@ nmx_c_tls_authority        = "nmxc.example.internal"
 nmx_c_endpoint_port        = 9370
 
 allow_insecure = false
+
+# TCP reachability checks of ready switches, raising the SwitchUnreachable
+# (NVOS, every switch) and NmxtUnreachable (NMX-T, primary switches) switch
+# health alerts after consecutive failures. They run whenever `enabled` is
+# true above; set `enabled` here to run or stop them independently.
+[nvlink_config.switch_reachability]
+run_interval = "60s"
+unreachable_alert_after = 3
 ```
 
 | Field | Purpose |
