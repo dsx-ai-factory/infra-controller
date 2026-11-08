@@ -19,7 +19,8 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
-func TestResetMachineBMCHandlerProxiesRequest(t *testing.T) {
+func checkResetMachineBMCHandlerProxiesRequest(t *testing.T) {
+	t.Helper()
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, &corev1.AdminBmcResetResponse{})
 	handler := NewResetMachineBMCHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
 
@@ -38,7 +39,8 @@ func TestResetMachineBMCHandlerProxiesRequest(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "password")
 }
 
-func TestResetMachineBMCHandlerDefaultsUseIpmiTool(t *testing.T) {
+func checkResetMachineBMCHandlerDefaultsUseIpmiTool(t *testing.T) {
+	t.Helper()
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
 	handler := NewResetMachineBMCHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
 
@@ -51,7 +53,8 @@ func TestResetMachineBMCHandlerDefaultsUseIpmiTool(t *testing.T) {
 	assert.False(t, coreReq.GetUseIpmitool())
 }
 
-func TestResetMachineBMCHandlerRejectsMachineWithInstanceNoAcknowledgement(t *testing.T) {
+func checkResetMachineBMCHandlerRejectsMachineWithInstanceNoAcknowledgement(t *testing.T) {
+	t.Helper()
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
 	handler := NewResetMachineBMCHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
 	isAssigned := true
@@ -66,7 +69,8 @@ func TestResetMachineBMCHandlerRejectsMachineWithInstanceNoAcknowledgement(t *te
 	assert.Empty(t, fixture.ProxiedReq.FullMethod)
 }
 
-func TestResetMachineBMCHandlerAllowsMachineWithInstanceAcknowledgement(t *testing.T) {
+func checkResetMachineBMCHandlerAllowsMachineWithInstanceAcknowledgement(t *testing.T) {
+	t.Helper()
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
 	handler := NewResetMachineBMCHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
 	isAssigned := true
@@ -83,4 +87,21 @@ func TestResetMachineBMCHandlerAllowsMachineWithInstanceAcknowledgement(t *testi
 	}, "")
 	assert.Equal(t, http.StatusAccepted, rec.Code)
 	assert.Equal(t, corev1.Forge_AdminBmcReset_FullMethodName, fixture.ProxiedReq.FullMethod)
+}
+
+func TestResetMachineBMCHandler_Handle(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "ProxiesRequest", run: checkResetMachineBMCHandlerProxiesRequest},
+		{name: "DefaultsUseIpmiTool", run: checkResetMachineBMCHandlerDefaultsUseIpmiTool},
+		{name: "RejectsMachineWithInstanceNoAcknowledgement", run: checkResetMachineBMCHandlerRejectsMachineWithInstanceNoAcknowledgement},
+		{name: "AllowsMachineWithInstanceAcknowledgement", run: checkResetMachineBMCHandlerAllowsMachineWithInstanceAcknowledgement},
+		{name: "membership precedes request and resource validation", run: func(t *testing.T) {
+			checkMachineMembershipGate(t, (ResetMachineBMCHandler{}).Handle)
+		}},
+	} {
+		t.Run(tc.name, tc.run)
+	}
 }

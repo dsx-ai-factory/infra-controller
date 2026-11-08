@@ -193,14 +193,9 @@ func (gamh GetAllMachineHandler) Handle(c echo.Context) error {
 	}
 
 	// Validate org
-	ok, err := auth.ValidateOrgMembership(dbUser, org)
-	if !ok {
-		if err != nil {
-			logger.Error().Err(err).Msg("error validating org membership for User in request")
-		} else {
-			logger.Warn().Msg("could not validate org membership for user, access denied")
-		}
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
+	membership, apiError := common.ValidateOrgMembership(logger, org, dbUser)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	// Validate role: Provider Admins or Viewers, or Tenant Admins. We do not
@@ -209,14 +204,14 @@ func (gamh GetAllMachineHandler) Handle(c echo.Context) error {
 	// reject site-privileged tenants (or those whose privilege is per-site)
 	// before siteId is known. Privileged Tenant access is resolved below via
 	// GetPrivilegedAccessSiteIDsForTenant, which honors per-site overrides.
-	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, gamh.dbSession, org, dbUser, true, nil)
+	infrastructureProvider, tenant, apiError := membership.IsProviderOrTenant(ctx, logger, gamh.dbSession, true, nil)
 	if apiError != nil {
 		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	// Validate pagination request
 	pageRequest := pagination.PageRequest{}
-	err = c.Bind(&pageRequest)
+	err := c.Bind(&pageRequest)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error binding pagination request data into API model")
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request pagination data", nil)
@@ -558,18 +553,13 @@ func (gmh GetMachineHandler) Handle(c echo.Context) error {
 	}
 
 	// Validate org
-	ok, err := auth.ValidateOrgMembership(dbUser, org)
-	if !ok {
-		if err != nil {
-			logger.Error().Err(err).Msg("error validating org membership for User in request")
-		} else {
-			logger.Warn().Msg("could not validate org membership for user, access denied")
-		}
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
+	membership, apiError := common.ValidateOrgMembership(logger, org, dbUser)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	// Validate role: Provider Admins or Viewers, or Tenant Admins (association with the Machine is enforced below: privileged tenant account, or Instance on this Machine).
-	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, gmh.dbSession, org, dbUser, true, nil)
+	infrastructureProvider, tenant, apiError := membership.IsProviderOrTenant(ctx, logger, gmh.dbSession, true, nil)
 	if apiError != nil {
 		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
@@ -585,6 +575,7 @@ func (gmh GetMachineHandler) Handle(c echo.Context) error {
 	// Check `includeMetadata` in query
 	includeMetadata := false
 	qim := c.QueryParam("includeMetadata")
+	var err error
 	if qim != "" {
 		includeMetadata, err = strconv.ParseBool(qim)
 		if err != nil {
@@ -705,14 +696,9 @@ func (umh UpdateMachineHandler) Handle(c echo.Context) error {
 	}
 
 	// Validate org
-	ok, err := auth.ValidateOrgMembership(dbUser, org)
-	if !ok {
-		if err != nil {
-			logger.Error().Err(err).Msg("error validating org membership for User in request")
-		} else {
-			logger.Warn().Msg("could not validate org membership for user, access denied")
-		}
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
+	membership, apiError := common.ValidateOrgMembership(logger, org, dbUser)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	// Get machine ID from URL param
@@ -736,7 +722,7 @@ func (umh UpdateMachineHandler) Handle(c echo.Context) error {
 	}
 
 	// Scope tenant privilege to the Machine's Site before evaluating ownership.
-	infrastructureProvider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, umh.dbSession, org, dbUser, false, &common.TenantPrivilegeScope{SiteID: &machine.SiteID})
+	infrastructureProvider, tenant, apiError := membership.IsProviderOrTenant(ctx, logger, umh.dbSession, false, &common.TenantPrivilegeScope{SiteID: &machine.SiteID})
 	if apiError != nil {
 		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
@@ -2260,14 +2246,9 @@ func (gadmh GetAllDpuMachineHandler) Handle(c echo.Context) error {
 	}
 
 	// Validate org
-	ok, err := auth.ValidateOrgMembership(dbUser, org)
-	if !ok {
-		if err != nil {
-			logger.Error().Err(err).Msg("error validating org membership for User in request")
-		} else {
-			logger.Warn().Msg("could not validate org membership for user, access denied")
-		}
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
+	membership, apiError := common.ValidateOrgMembership(logger, org, dbUser)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	mID := c.Param("id")
@@ -2292,7 +2273,7 @@ func (gadmh GetAllDpuMachineHandler) Handle(c echo.Context) error {
 
 	// Validate role: Provider Admins, or privileged Tenant Admins. Scope DPU
 	// access to the Machine's Site so capability/ownership rules are enforced.
-	provider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, gadmh.dbSession, org, dbUser, false, &common.TenantPrivilegeScope{SiteID: &site.ID})
+	provider, tenant, apiError := membership.IsProviderOrTenant(ctx, logger, gadmh.dbSession, false, &common.TenantPrivilegeScope{SiteID: &site.ID})
 	if apiError != nil {
 		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
@@ -2449,14 +2430,9 @@ func (h DecommissionMachineHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
-	ok, err := auth.ValidateOrgMembership(dbUser, org)
-	if !ok {
-		if err != nil {
-			logger.Error().Err(err).Msg("Error validating org membership for User in request")
-		} else {
-			logger.Warn().Msg("Could not validate org membership for user, access denied")
-		}
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
+	membership, apiError := common.ValidateOrgMembership(logger, org, dbUser)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	machineID := c.Param("id")
@@ -2465,7 +2441,7 @@ func (h DecommissionMachineHandler) Handle(c echo.Context) error {
 	}
 
 	// Decommissioning is an Infrastructure Provider administrative operation.
-	provider, _, apiError := common.IsProviderOrTenant(ctx, logger, h.dbSession, org, dbUser, false, nil)
+	provider, _, apiError := membership.IsProviderOrTenant(ctx, logger, h.dbSession, false, nil)
 	if apiError != nil {
 		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}

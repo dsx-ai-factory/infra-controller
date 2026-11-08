@@ -19,7 +19,8 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
-func TestGetAllMachineHealthReportHandlerProxiesRequest(t *testing.T) {
+func checkGetAllMachineHealthReportHandlerProxiesRequest(t *testing.T) {
+	t.Helper()
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, &corev1.ListHealthReportResponse{
 		HealthReportEntries: []*corev1.HealthReportEntry{
 			{
@@ -45,7 +46,8 @@ func TestGetAllMachineHealthReportHandlerProxiesRequest(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "password")
 }
 
-func TestGetAllMachineHealthReportHandlerAllowsPrivilegedTenant(t *testing.T) {
+func checkGetAllMachineHealthReportHandlerAllowsPrivilegedTenant(t *testing.T) {
+	t.Helper()
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, &corev1.ListHealthReportResponse{
 		HealthReportEntries: []*corev1.HealthReportEntry{
 			{
@@ -69,7 +71,8 @@ func TestGetAllMachineHealthReportHandlerAllowsPrivilegedTenant(t *testing.T) {
 	assert.Equal(t, fixture.MachineID, coreReq.GetId())
 }
 
-func TestCreateOrUpdateMachineHealthReportHandlerProxiesRequest(t *testing.T) {
+func checkCreateOrUpdateMachineHealthReportHandlerProxiesRequest(t *testing.T) {
+	t.Helper()
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
 	handler := NewCreateOrUpdateMachineHealthReportHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
 	req := model.APIMachineHealthReportEntryRequest{
@@ -90,7 +93,8 @@ func TestCreateOrUpdateMachineHealthReportHandlerProxiesRequest(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "password")
 }
 
-func TestCreateOrUpdateMachineHealthReportHandlerAllowsPrivilegedTenant(t *testing.T) {
+func checkCreateOrUpdateMachineHealthReportHandlerAllowsPrivilegedTenant(t *testing.T) {
+	t.Helper()
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
 	handler := NewCreateOrUpdateMachineHealthReportHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
 	configureMachineHealthFixtureForPrivilegedTenant(t, &fixture)
@@ -110,7 +114,8 @@ func TestCreateOrUpdateMachineHealthReportHandlerAllowsPrivilegedTenant(t *testi
 	assert.Equal(t, "overrides.sre", coreReq.GetHealthReportEntry().GetReport().GetSource())
 }
 
-func TestCreateOrUpdateMachineHealthReportHandlerRejectsInvalidRequest(t *testing.T) {
+func checkCreateOrUpdateMachineHealthReportHandlerRejectsInvalidRequest(t *testing.T) {
+	t.Helper()
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
 	handler := NewCreateOrUpdateMachineHealthReportHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
 
@@ -119,7 +124,8 @@ func TestCreateOrUpdateMachineHealthReportHandlerRejectsInvalidRequest(t *testin
 	assert.Empty(t, fixture.ProxiedReq.FullMethod)
 }
 
-func TestDeleteMachineHealthReportHandlerProxiesRequest(t *testing.T) {
+func checkDeleteMachineHealthReportHandlerProxiesRequest(t *testing.T) {
+	t.Helper()
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
 	handler := NewDeleteMachineHealthReportHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
 
@@ -135,7 +141,8 @@ func TestDeleteMachineHealthReportHandlerProxiesRequest(t *testing.T) {
 	assert.Empty(t, rec.Body.String())
 }
 
-func TestDeleteMachineHealthReportHandlerAllowsPrivilegedTenant(t *testing.T) {
+func checkDeleteMachineHealthReportHandlerAllowsPrivilegedTenant(t *testing.T) {
+	t.Helper()
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
 	handler := NewDeleteMachineHealthReportHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
 	configureMachineHealthFixtureForPrivilegedTenant(t, &fixture)
@@ -166,4 +173,50 @@ func configureMachineHealthFixtureForPrivilegedTenant(t *testing.T, fixture *com
 
 	fixture.Org = tenantOrg
 	fixture.User = tenantUser
+}
+
+func TestGetAllMachineHealthReportHandler_Handle(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "ProxiesRequest", run: checkGetAllMachineHealthReportHandlerProxiesRequest},
+		{name: "AllowsPrivilegedTenant", run: checkGetAllMachineHealthReportHandlerAllowsPrivilegedTenant},
+		{name: "membership precedes request and resource validation", run: func(t *testing.T) {
+			checkMachineMembershipGate(t, (GetAllMachineHealthReportHandler{}).Handle)
+		}},
+	} {
+		t.Run(tc.name, tc.run)
+	}
+}
+
+func TestCreateOrUpdateMachineHealthReportHandler_Handle(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "ProxiesRequest", run: checkCreateOrUpdateMachineHealthReportHandlerProxiesRequest},
+		{name: "AllowsPrivilegedTenant", run: checkCreateOrUpdateMachineHealthReportHandlerAllowsPrivilegedTenant},
+		{name: "RejectsInvalidRequest", run: checkCreateOrUpdateMachineHealthReportHandlerRejectsInvalidRequest},
+		{name: "membership precedes request and resource validation", run: func(t *testing.T) {
+			checkMachineMembershipGate(t, (CreateOrUpdateMachineHealthReportHandler{}).Handle)
+		}},
+	} {
+		t.Run(tc.name, tc.run)
+	}
+}
+
+func TestDeleteMachineHealthReportHandler_Handle(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "ProxiesRequest", run: checkDeleteMachineHealthReportHandlerProxiesRequest},
+		{name: "AllowsPrivilegedTenant", run: checkDeleteMachineHealthReportHandlerAllowsPrivilegedTenant},
+		{name: "membership precedes request and resource validation", run: func(t *testing.T) {
+			checkMachineMembershipGate(t, (DeleteMachineHealthReportHandler{}).Handle)
+		}},
+	} {
+		t.Run(tc.name, tc.run)
+	}
 }

@@ -20,7 +20,8 @@ import (
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
-func TestReprovisionMachineDpuHandlerProxiesRequest(t *testing.T) {
+func checkReprovisionMachineDpuHandlerProxiesRequest(t *testing.T) {
+	t.Helper()
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
 	handler := NewReprovisionMachineDpuHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
 
@@ -40,7 +41,8 @@ func TestReprovisionMachineDpuHandlerProxiesRequest(t *testing.T) {
 	assert.Equal(t, "DPU reprovisioning request was accepted", resp.Message)
 }
 
-func TestReprovisionMachineDpuHandlerAllowsPrivilegedTenant(t *testing.T) {
+func checkReprovisionMachineDpuHandlerAllowsPrivilegedTenant(t *testing.T) {
+	t.Helper()
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
 	handler := NewReprovisionMachineDpuHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
 	ctx := context.Background()
@@ -68,7 +70,8 @@ func TestReprovisionMachineDpuHandlerAllowsPrivilegedTenant(t *testing.T) {
 	assert.True(t, coreReq.GetUpdateFirmware())
 }
 
-func TestReprovisionMachineDpuHandlerRejectsMachineWithInstanceNoAcknowledgement(t *testing.T) {
+func checkReprovisionMachineDpuHandlerRejectsMachineWithInstanceNoAcknowledgement(t *testing.T) {
+	t.Helper()
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
 	handler := NewReprovisionMachineDpuHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
 	isAssigned := true
@@ -83,7 +86,8 @@ func TestReprovisionMachineDpuHandlerRejectsMachineWithInstanceNoAcknowledgement
 	assert.Empty(t, fixture.ProxiedReq.FullMethod)
 }
 
-func TestReprovisionMachineDpuHandlerAllowsMachineWithInstanceAcknowledgement(t *testing.T) {
+func checkReprovisionMachineDpuHandlerAllowsMachineWithInstanceAcknowledgement(t *testing.T) {
+	t.Helper()
 	fixture := common.NewTestSetupProviderMachineHandlerFixture(t, nil)
 	handler := NewReprovisionMachineDpuHandler(fixture.DBSession, fixture.SiteClientPool, fixture.Config)
 	isAssigned := true
@@ -100,4 +104,21 @@ func TestReprovisionMachineDpuHandlerAllowsMachineWithInstanceAcknowledgement(t 
 	}, "")
 	assert.Equal(t, http.StatusAccepted, rec.Code)
 	assert.Equal(t, corev1.Forge_TriggerDpuReprovisioning_FullMethodName, fixture.ProxiedReq.FullMethod)
+}
+
+func TestReprovisionMachineDpuHandler_Handle(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "ProxiesRequest", run: checkReprovisionMachineDpuHandlerProxiesRequest},
+		{name: "AllowsPrivilegedTenant", run: checkReprovisionMachineDpuHandlerAllowsPrivilegedTenant},
+		{name: "RejectsMachineWithInstanceNoAcknowledgement", run: checkReprovisionMachineDpuHandlerRejectsMachineWithInstanceNoAcknowledgement},
+		{name: "AllowsMachineWithInstanceAcknowledgement", run: checkReprovisionMachineDpuHandlerAllowsMachineWithInstanceAcknowledgement},
+		{name: "membership precedes request and resource validation", run: func(t *testing.T) {
+			checkMachineMembershipGate(t, (ReprovisionMachineDpuHandler{}).Handle)
+		}},
+	} {
+		t.Run(tc.name, tc.run)
+	}
 }

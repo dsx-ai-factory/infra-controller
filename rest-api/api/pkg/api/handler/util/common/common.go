@@ -1727,17 +1727,24 @@ func GetPrivilegedAccessSiteIDsForTenant(ctx context.Context, tx *cdb.Tx, dbSess
 // capability to be effective within that scope (see TenantPrivilegeScope). It
 // only affects the Tenant path — Provider authorization is unaffected.
 func IsProviderOrTenant(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session, org string, user *cdbm.User, allowViewerRole bool, requirePrivilegedScope *TenantPrivilegeScope) (infrastructureProvider *cdbm.InfrastructureProvider, tenant *cdbm.Tenant, apiError *cutil.APIError) {
-	// Validate that user belongs to org
-	ok, err := auth.ValidateOrgMembership(user, org)
-	if !ok {
-		if err != nil {
-			logger.Error().Err(err).Msg("error validating org membership for User in request")
-		} else {
-			logger.Warn().Msg("could not validate org membership for user, access denied")
-		}
-
+	membership, apiError := ValidateOrgMembership(logger, org, user)
+	if apiError != nil {
+		// Preserve the combined helper's existing membership-denial response.
 		return nil, nil, cutil.NewAPIError(http.StatusForbidden, "Failed to validate membership for org", nil)
 	}
+	return membership.IsProviderOrTenant(ctx, logger, dbSession, allowViewerRole, requirePrivilegedScope)
+}
+
+// IsProviderOrTenant resolves roles for this validated membership without
+// repeating the membership lookup. Call it after request/resource validation
+// when the required Tenant privilege scope depends on the target Site.
+// A zero-value membership is denied; use ValidateOrgMembership to obtain one.
+func (m OrgMembership) IsProviderOrTenant(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session, allowViewerRole bool, requirePrivilegedScope *TenantPrivilegeScope) (infrastructureProvider *cdbm.InfrastructureProvider, tenant *cdbm.Tenant, apiError *cutil.APIError) {
+	if m.org == nil {
+		return nil, nil, cutil.NewAPIError(http.StatusForbidden, "Failed to validate membership for org", nil)
+	}
+	org := m.orgName
+	var err error
 
 	// Check if user has Provider role
 	targetRoles := []string{auth.ProviderAdminRole}
@@ -1746,7 +1753,7 @@ func IsProviderOrTenant(ctx context.Context, logger zerolog.Logger, dbSession *c
 	}
 
 	providerNotFound := false
-	isProvider := auth.ValidateUserRoles(user, org, nil, targetRoles...)
+	isProvider := auth.ValidateUserRolesInOrg(*m.org, nil, targetRoles...)
 
 	if isProvider {
 		infrastructureProvider, err = GetInfrastructureProviderForOrg(ctx, nil, dbSession, org)
@@ -1761,7 +1768,7 @@ func IsProviderOrTenant(ctx context.Context, logger zerolog.Logger, dbSession *c
 	}
 
 	tenantNotFound := false
-	isTenant := auth.ValidateUserRoles(user, org, nil, auth.TenantAdminRole)
+	isTenant := auth.ValidateUserRolesInOrg(*m.org, nil, auth.TenantAdminRole)
 
 	if isTenant {
 		tenant, err = GetTenantForOrg(ctx, nil, dbSession, org)

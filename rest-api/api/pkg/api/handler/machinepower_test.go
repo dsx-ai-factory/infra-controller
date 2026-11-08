@@ -121,7 +121,8 @@ func (f machinePowerHandlerFixture) request(t *testing.T, method, target string,
 	return rec
 }
 
-func TestMachinePowerControlHandlerProxiesRequest(t *testing.T) {
+func checkMachinePowerControlHandlerProxiesRequest(t *testing.T) {
+	t.Helper()
 	msg := "power control accepted"
 	fixture := newMachinePowerHandlerFixture(t, &corev1.AdminPowerControlResponse{Msg: &msg})
 
@@ -141,7 +142,8 @@ func TestMachinePowerControlHandlerProxiesRequest(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "password")
 }
 
-func TestMachinePowerControlHandlerRejectsInvalidAction(t *testing.T) {
+func checkMachinePowerControlHandlerRejectsInvalidAction(t *testing.T) {
+	t.Helper()
 	fixture := newMachinePowerHandlerFixture(t, nil)
 
 	rec := fixture.request(t, http.MethodPatch, "/", model.APIMachinePowerControlRequest{Action: "forcecycle"})
@@ -149,7 +151,8 @@ func TestMachinePowerControlHandlerRejectsInvalidAction(t *testing.T) {
 	assert.Empty(t, fixture.proxiedReq.FullMethod)
 }
 
-func TestMachinePowerControlHandlerRequiresProviderAdmin(t *testing.T) {
+func checkMachinePowerControlHandlerRequiresProviderAdmin(t *testing.T) {
+	t.Helper()
 	fixture := newMachinePowerHandlerFixture(t, nil)
 	fixture.user = &cdbm.User{OrgData: cdbm.OrgData{fixture.org: cdbm.Org{Name: fixture.org}}}
 
@@ -158,7 +161,8 @@ func TestMachinePowerControlHandlerRequiresProviderAdmin(t *testing.T) {
 	assert.Empty(t, fixture.proxiedReq.FullMethod)
 }
 
-func TestMachinePowerControlHandlerRejectsProviderViewer(t *testing.T) {
+func checkMachinePowerControlHandlerRejectsProviderViewer(t *testing.T) {
+	t.Helper()
 	fixture := newMachinePowerHandlerFixture(t, nil)
 	fixture.user = &cdbm.User{OrgData: cdbm.OrgData{fixture.org: cdbm.Org{
 		Name:  fixture.org,
@@ -170,7 +174,8 @@ func TestMachinePowerControlHandlerRejectsProviderViewer(t *testing.T) {
 	assert.Empty(t, fixture.proxiedReq.FullMethod)
 }
 
-func TestMachinePowerControlHandlerRejectsUnknownMachine(t *testing.T) {
+func checkMachinePowerControlHandlerRejectsUnknownMachine(t *testing.T) {
+	t.Helper()
 	fixture := newMachinePowerHandlerFixture(t, nil)
 	fixture.machineID = "missing-machine"
 
@@ -179,7 +184,8 @@ func TestMachinePowerControlHandlerRejectsUnknownMachine(t *testing.T) {
 	assert.Empty(t, fixture.proxiedReq.FullMethod)
 }
 
-func TestMachinePowerControlHandlerHidesForeignMachine(t *testing.T) {
+func checkMachinePowerControlHandlerHidesForeignMachine(t *testing.T) {
+	t.Helper()
 	fixture := newMachinePowerHandlerFixture(t, nil)
 	otherOrg := "other-org"
 	otherUser := common.TestBuildUser(t, fixture.dbSession, "other-starfleet-id", otherOrg, []string{authz.ProviderAdminRole})
@@ -194,7 +200,8 @@ func TestMachinePowerControlHandlerHidesForeignMachine(t *testing.T) {
 	assert.Empty(t, fixture.proxiedReq.FullMethod)
 }
 
-func TestMachinePowerControlHandlerRejectsMachineWithInstanceNoAcknowledgement(t *testing.T) {
+func checkMachinePowerControlHandlerRejectsMachineWithInstanceNoAcknowledgement(t *testing.T) {
+	t.Helper()
 	fixture := newMachinePowerHandlerFixture(t, nil)
 	_, err := cdbm.NewMachineDAO(fixture.dbSession).Update(context.Background(), nil, cdbm.MachineUpdateInput{
 		MachineID:  fixture.machineID,
@@ -207,7 +214,8 @@ func TestMachinePowerControlHandlerRejectsMachineWithInstanceNoAcknowledgement(t
 	assert.Empty(t, fixture.proxiedReq.FullMethod)
 }
 
-func TestMachinePowerControlHandlerRejectsMachineWithInstanceWithAcknowledgement(t *testing.T) {
+func checkMachinePowerControlHandlerRejectsMachineWithInstanceWithAcknowledgement(t *testing.T) {
+	t.Helper()
 	fixture := newMachinePowerHandlerFixture(t, nil)
 	_, err := cdbm.NewMachineDAO(fixture.dbSession).Update(context.Background(), nil, cdbm.MachineUpdateInput{
 		MachineID:  fixture.machineID,
@@ -220,11 +228,34 @@ func TestMachinePowerControlHandlerRejectsMachineWithInstanceWithAcknowledgement
 	assert.Equal(t, corev1.Forge_AdminPowerControl_FullMethodName, fixture.proxiedReq.FullMethod)
 }
 
-func TestMachinePowerControlHandlerRejectsEmptyMachineID(t *testing.T) {
+func checkMachinePowerControlHandlerRejectsEmptyMachineID(t *testing.T) {
+	t.Helper()
 	fixture := newMachinePowerHandlerFixture(t, nil)
 	fixture.machineID = ""
 
 	rec := fixture.request(t, http.MethodPatch, "/", model.APIMachinePowerControlRequest{Action: model.MachinePowerActionOn})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Empty(t, fixture.proxiedReq.FullMethod)
+}
+
+func TestMachinePowerControlHandler_Handle(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "ProxiesRequest", run: checkMachinePowerControlHandlerProxiesRequest},
+		{name: "RejectsInvalidAction", run: checkMachinePowerControlHandlerRejectsInvalidAction},
+		{name: "RequiresProviderAdmin", run: checkMachinePowerControlHandlerRequiresProviderAdmin},
+		{name: "RejectsProviderViewer", run: checkMachinePowerControlHandlerRejectsProviderViewer},
+		{name: "RejectsUnknownMachine", run: checkMachinePowerControlHandlerRejectsUnknownMachine},
+		{name: "HidesForeignMachine", run: checkMachinePowerControlHandlerHidesForeignMachine},
+		{name: "RejectsMachineWithInstanceNoAcknowledgement", run: checkMachinePowerControlHandlerRejectsMachineWithInstanceNoAcknowledgement},
+		{name: "RejectsMachineWithInstanceWithAcknowledgement", run: checkMachinePowerControlHandlerRejectsMachineWithInstanceWithAcknowledgement},
+		{name: "RejectsEmptyMachineID", run: checkMachinePowerControlHandlerRejectsEmptyMachineID},
+		{name: "membership precedes request and resource validation", run: func(t *testing.T) {
+			checkMachineMembershipGate(t, (MachinePowerControlHandler{}).Handle)
+		}},
+	} {
+		t.Run(tc.name, tc.run)
+	}
 }

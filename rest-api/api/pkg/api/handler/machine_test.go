@@ -314,7 +314,11 @@ func testMachineBuildOperatingSystem(t *testing.T, dbSession *cdb.Session, name 
 	return operatingSystem
 }
 
-func TestMachineHandler_Get(t *testing.T) {
+func TestGetMachineHandler_Handle(t *testing.T) {
+	t.Run("membership precedes request and resource validation", func(t *testing.T) {
+		checkMachineMembershipGate(t, (GetMachineHandler{}).Handle)
+	})
+
 	ctx := context.Background()
 	dbSession := testMachineInitDB(t)
 	defer dbSession.Close()
@@ -709,7 +713,11 @@ func TestMachineHandler_Get(t *testing.T) {
 
 }
 
-func TestMachineHandler_GetAll(t *testing.T) {
+func TestGetAllMachineHandler_Handle(t *testing.T) {
+	t.Run("membership precedes request and resource validation", func(t *testing.T) {
+		checkMachineMembershipGate(t, (GetAllMachineHandler{}).Handle)
+	})
+
 	ctx := context.Background()
 	dbSession := testMachineInitDB(t)
 	defer dbSession.Close()
@@ -1660,7 +1668,11 @@ func TestMachineHandler_GetAll(t *testing.T) {
 	}
 }
 
-func TestMachineHandler_Update(t *testing.T) {
+func TestUpdateMachineHandler_Handle(t *testing.T) {
+	t.Run("membership precedes request and resource validation", func(t *testing.T) {
+		checkMachineMembershipGate(t, (UpdateMachineHandler{}).Handle)
+	})
+
 	ctx := context.Background()
 	dbSession := testMachineInitDB(t)
 	defer dbSession.Close()
@@ -3989,7 +4001,11 @@ func TestGetDpuMachinesLegacyTemporalPayload(t *testing.T) {
 	require.Equal(t, legacyDpuMachines, decodedLegacyResult)
 }
 
-func TestMachineHandler_GetDpuMachines(t *testing.T) {
+func TestGetAllDpuMachineHandler_Handle(t *testing.T) {
+	t.Run("membership precedes request and resource validation", func(t *testing.T) {
+		checkMachineMembershipGate(t, (GetAllDpuMachineHandler{}).Handle)
+	})
+
 	ctx := context.Background()
 	dbSession := testMachineInitDB(t)
 	defer dbSession.Close()

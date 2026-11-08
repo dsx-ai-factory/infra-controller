@@ -99,7 +99,8 @@ func (f decommissionMachineFixture) request(t *testing.T, method string, handler
 	return recorder
 }
 
-func TestDecommissionMachineHandlerProxiesRequest(t *testing.T) {
+func checkDecommissionMachineHandlerProxiesRequest(t *testing.T) {
+	t.Helper()
 	fixture := newDecommissionMachineFixture(t)
 
 	recorder := fixture.request(t, http.MethodPost, fixture.handler)
@@ -115,7 +116,8 @@ func TestDecommissionMachineHandlerProxiesRequest(t *testing.T) {
 	assert.Equal(t, "Machine decommissioning request was accepted", response.Message)
 }
 
-func TestDecommissionMachineHandlerRejectsProviderViewer(t *testing.T) {
+func checkDecommissionMachineHandlerRejectsProviderViewer(t *testing.T) {
+	t.Helper()
 	fixture := newDecommissionMachineFixture(t)
 	fixture.user = &cdbm.User{OrgData: cdbm.OrgData{fixture.org: cdbm.Org{
 		Name:  fixture.org,
@@ -127,7 +129,8 @@ func TestDecommissionMachineHandlerRejectsProviderViewer(t *testing.T) {
 	assert.Empty(t, fixture.proxiedReq.FullMethod)
 }
 
-func TestDecommissionMachineHandlerRejectsUnknownMachine(t *testing.T) {
+func checkDecommissionMachineHandlerRejectsUnknownMachine(t *testing.T) {
+	t.Helper()
 	fixture := newDecommissionMachineFixture(t)
 	fixture.machineID = "missing-machine"
 
@@ -136,7 +139,8 @@ func TestDecommissionMachineHandlerRejectsUnknownMachine(t *testing.T) {
 	assert.Empty(t, fixture.proxiedReq.FullMethod)
 }
 
-func TestDecommissionMachineHandlerRejectsMissingMachine(t *testing.T) {
+func checkDecommissionMachineHandlerRejectsMissingMachine(t *testing.T) {
+	t.Helper()
 	fixture := newDecommissionMachineFixture(t)
 	_, err := cdbm.NewMachineDAO(fixture.dbSession).Update(context.Background(), nil, cdbm.MachineUpdateInput{
 		MachineID:       fixture.machineID,
@@ -147,4 +151,21 @@ func TestDecommissionMachineHandlerRejectsMissingMachine(t *testing.T) {
 	recorder := fixture.request(t, http.MethodPost, fixture.handler)
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
 	assert.Empty(t, fixture.proxiedReq.FullMethod)
+}
+
+func TestDecommissionMachineHandler_Handle(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "ProxiesRequest", run: checkDecommissionMachineHandlerProxiesRequest},
+		{name: "RejectsProviderViewer", run: checkDecommissionMachineHandlerRejectsProviderViewer},
+		{name: "RejectsUnknownMachine", run: checkDecommissionMachineHandlerRejectsUnknownMachine},
+		{name: "RejectsMissingMachine", run: checkDecommissionMachineHandlerRejectsMissingMachine},
+		{name: "membership precedes request and resource validation", run: func(t *testing.T) {
+			checkMachineMembershipGate(t, (DecommissionMachineHandler{}).Handle)
+		}},
+	} {
+		t.Run(tc.name, tc.run)
+	}
 }

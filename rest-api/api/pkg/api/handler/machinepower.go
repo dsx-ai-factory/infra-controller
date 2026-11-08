@@ -5,7 +5,6 @@ package handler
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
@@ -15,7 +14,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -61,14 +59,9 @@ func (h MachinePowerControlHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
-	ok, err := auth.ValidateOrgMembership(dbUser, org)
-	if !ok {
-		if err != nil {
-			logger.Error().Err(err).Msg("Error validating org membership for User in request")
-		} else {
-			logger.Warn().Msg("Could not validate org membership for user, access denied")
-		}
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
+	membership, apiError := common.ValidateOrgMembership(logger, org, dbUser)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	machineID := c.Param("id")
@@ -77,7 +70,7 @@ func (h MachinePowerControlHandler) Handle(c echo.Context) error {
 	}
 
 	var apiReq model.APIMachinePowerControlRequest
-	err = c.Bind(&apiReq)
+	err := c.Bind(&apiReq)
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
 	}
@@ -89,7 +82,7 @@ func (h MachinePowerControlHandler) Handle(c echo.Context) error {
 
 	// Machine power control is restricted to Provider Admins: disable viewer
 	// access and pass a nil scope so no Tenant capability is resolved.
-	provider, _, apiError := common.IsProviderOrTenant(ctx, logger, h.dbSession, org, dbUser, false, nil)
+	provider, _, apiError := membership.IsProviderOrTenant(ctx, logger, h.dbSession, false, nil)
 	if apiError != nil {
 		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}

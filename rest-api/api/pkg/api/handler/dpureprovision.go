@@ -5,7 +5,6 @@ package handler
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -15,7 +14,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
-	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -60,14 +58,9 @@ func (h ReprovisionMachineDpuHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current user", nil)
 	}
 
-	ok, err := auth.ValidateOrgMembership(dbUser, org)
-	if !ok {
-		if err != nil {
-			logger.Error().Err(err).Msg("Error validating org membership for User in request")
-		} else {
-			logger.Warn().Msg("Could not validate org membership for user, access denied")
-		}
-		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
+	membership, apiError := common.ValidateOrgMembership(logger, org, dbUser)
+	if apiError != nil {
+		return cutil.NewAPIErrorResponse(c, apiError.Code, apiError.Message, apiError.Data)
 	}
 
 	machineID := c.Param("id")
@@ -76,7 +69,7 @@ func (h ReprovisionMachineDpuHandler) Handle(c echo.Context) error {
 	}
 
 	var apiReq model.APIMachineDpuReprovisionRequest
-	err = c.Bind(&apiReq)
+	err := c.Bind(&apiReq)
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data, potentially invalid structure", nil)
 	}
@@ -98,7 +91,7 @@ func (h ReprovisionMachineDpuHandler) Handle(c echo.Context) error {
 	// Scope the Tenant TargetedInstanceCreation capability check to the target
 	// Machine's Provider and Site so privilege is verified where the operation
 	// lands, not against some unrelated Site the Tenant happens to be privileged on.
-	provider, tenant, apiError := common.IsProviderOrTenant(ctx, logger, h.dbSession, org, dbUser, false, &common.TenantPrivilegeScope{
+	provider, tenant, apiError := membership.IsProviderOrTenant(ctx, logger, h.dbSession, false, &common.TenantPrivilegeScope{
 		SiteID: &machine.SiteID,
 	})
 	if apiError != nil {
