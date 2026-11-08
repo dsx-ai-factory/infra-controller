@@ -293,16 +293,22 @@ func mirrorExpectedComponents(
 		}
 	}
 
-	type plan struct {
-		toInsert             []model.Component
-		toInsertBMCs         []model.BMC // parallel to toInsert; component_id filled after insert
-		toInsertReleasesSlot []bool      // parallel to toInsert
-		toUpdate             []model.Component
-		toUpdateBMCs         []bmcOps // one per toUpdate entry (any/all of insert/update/deletes may be set)
-		toUpdateReleasesSlot []bool   // parallel to toUpdate
-		toDelete             []model.Component
+	type componentMirrorInsert struct {
+		component          model.Component
+		bmc                model.BMC
+		releasesNaturalKey bool
 	}
-	var p plan
+	type componentMirrorUpdate struct {
+		component          model.Component
+		bmcs               bmcOps
+		releasesNaturalKey bool
+	}
+	type componentMirrorPlan struct {
+		toInsert []componentMirrorInsert
+		toUpdate []componentMirrorUpdate
+		toDelete []model.Component
+	}
+	var p componentMirrorPlan
 
 	// seenMACs / seenNaturalKeys: every host BMC MAC and every complete
 	// (manufacturer, serial) pair Core is still reporting this cycle, recorded
@@ -421,21 +427,23 @@ func mirrorExpectedComponents(
 
 			bmcOps := planBMCReconciliation(&candidate, s.BMC)
 			if needUpdate || bmcOps.insert != nil || bmcOps.update != nil || len(bmcOps.deletes) > 0 {
-				p.toUpdate = append(p.toUpdate, candidate)
-				p.toUpdateBMCs = append(p.toUpdateBMCs, bmcOps)
-				p.toUpdateReleasesSlot = append(p.toUpdateReleasesSlot,
-					componentChassisSlotOwnedByOther(flowNaturalKeyOwners, &candidate))
+				p.toUpdate = append(p.toUpdate, componentMirrorUpdate{
+					component:          candidate,
+					bmcs:               bmcOps,
+					releasesNaturalKey: componentNaturalKeyOwnedByOther(flowNaturalKeyOwners, &candidate),
+				})
 			}
 			continue
 		}
 
-		p.toInsert = append(p.toInsert, desired)
-		p.toInsertReleasesSlot = append(p.toInsertReleasesSlot,
-			componentChassisSlotOwnedByOther(flowNaturalKeyOwners, &desired))
-		p.toInsertBMCs = append(p.toInsertBMCs, model.BMC{
-			MacAddress: s.BMC.MACAddress,
-			Type:       devicetypes.BMCTypeToString(devicetypes.BMCTypeHost),
-			IPAddress:  optionalString(s.BMC.IPAddress),
+		p.toInsert = append(p.toInsert, componentMirrorInsert{
+			component: desired,
+			bmc: model.BMC{
+				MacAddress: s.BMC.MACAddress,
+				Type:       devicetypes.BMCTypeToString(devicetypes.BMCTypeHost),
+				IPAddress:  optionalString(s.BMC.IPAddress),
+			},
+			releasesNaturalKey: componentNaturalKeyOwnedByOther(flowNaturalKeyOwners, &desired),
 		})
 		log.Info().
 			Str("type", componentType).
@@ -479,28 +487,34 @@ func mirrorExpectedComponents(
 	softDeleted := 0
 	if err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
 		for i := range p.toInsert {
-			if p.toInsertReleasesSlot[i] {
-				if err := releaseComponentChassisSlot(ctx, tx, &p.toInsert[i], now); err != nil {
+			entry := &p.toInsert[i]
+			if entry.releasesNaturalKey {
+				err := releaseComponentNaturalKey(ctx, tx, &entry.component, now)
+				if err != nil {
 					return err
 				}
 			}
-			if _, err := tx.NewInsert().Model(&p.toInsert[i]).Exec(ctx); err != nil {
-				return fmt.Errorf("insert component %q: %w", p.toInsert[i].SerialNumber, err)
+			_, err := tx.NewInsert().Model(&entry.component).Exec(ctx)
+			if err != nil {
+				return fmt.Errorf("insert component %q: %w", entry.component.SerialNumber, err)
 			}
-			p.toInsertBMCs[i].ComponentID = p.toInsert[i].ID
-			proceed, err := evictHostBMCOrphanForInsert(ctx, tx, p.toInsertBMCs[i].MacAddress, p.toInsert[i].ID)
+			entry.bmc.ComponentID = entry.component.ID
+			proceed, err := evictHostBMCOrphanForInsert(ctx, tx, entry.bmc.MacAddress, entry.component.ID)
 			if err != nil {
 				return err
 			}
 			if proceed {
-				if _, err := tx.NewInsert().Model(&p.toInsertBMCs[i]).Exec(ctx); err != nil {
-					return fmt.Errorf("insert BMC for component %q: %w", p.toInsert[i].SerialNumber, err)
+				_, err := tx.NewInsert().Model(&entry.bmc).Exec(ctx)
+				if err != nil {
+					return fmt.Errorf("insert BMC for component %q: %w", entry.component.SerialNumber, err)
 				}
 			}
 		}
 		for i := range p.toUpdate {
-			if p.toUpdateReleasesSlot[i] {
-				if err := releaseComponentChassisSlot(ctx, tx, &p.toUpdate[i], now); err != nil {
+			entry := &p.toUpdate[i]
+			if entry.releasesNaturalKey {
+				err := releaseComponentNaturalKey(ctx, tx, &entry.component, now)
+				if err != nil {
 					return err
 				}
 			}
@@ -512,26 +526,27 @@ func mirrorExpectedComponents(
 			// resurrection (deleted_at cleared in Go) actually matches the
 			// tombstone row — bun otherwise appends "deleted_at IS NULL" to
 			// the UPDATE and the resurrect would silently match zero rows.
-			p.toUpdate[i].UpdatedAt = now
-			expectedDescription, _ := p.toUpdate[i].Description[expectedDescriptionKey].(string)
-			if err := updateMirroredComponent(ctx, tx, &p.toUpdate[i], expectedDescription); err != nil {
-				return fmt.Errorf("update component %q: %w", p.toUpdate[i].SerialNumber, err)
+			entry.component.UpdatedAt = now
+			expectedDescription, _ := entry.component.Description[expectedDescriptionKey].(string)
+			err := updateMirroredComponent(ctx, tx, &entry.component, expectedDescription)
+			if err != nil {
+				return fmt.Errorf("update component %q: %w", entry.component.SerialNumber, err)
 			}
-			ops := p.toUpdateBMCs[i]
+			ops := entry.bmcs
 			for j := range ops.deletes {
 				if _, err := tx.NewDelete().Model(&ops.deletes[j]).Where("mac_address = ?", ops.deletes[j].MacAddress).ForceDelete().Exec(ctx); err != nil {
 					return fmt.Errorf("delete BMC %q: %w", ops.deletes[j].MacAddress, err)
 				}
 			}
 			if ops.insert != nil {
-				ops.insert.ComponentID = p.toUpdate[i].ID
-				proceed, err := evictHostBMCOrphanForInsert(ctx, tx, ops.insert.MacAddress, p.toUpdate[i].ID)
+				ops.insert.ComponentID = entry.component.ID
+				proceed, err := evictHostBMCOrphanForInsert(ctx, tx, ops.insert.MacAddress, entry.component.ID)
 				if err != nil {
 					return err
 				}
 				if proceed {
 					if _, err := tx.NewInsert().Model(ops.insert).Exec(ctx); err != nil {
-						return fmt.Errorf("insert BMC for component %q: %w", p.toUpdate[i].SerialNumber, err)
+						return fmt.Errorf("insert BMC for component %q: %w", entry.component.SerialNumber, err)
 					}
 				}
 			}
@@ -653,12 +668,12 @@ func stillReportedByCore(macs []string, naturalKey string, seenMACs, seenNatural
 	return ok
 }
 
-// componentChassisSlotOwnedByOther reports whether the initial Flow snapshot
-// contains another row holding the desired chassis pair. The transaction must
+// componentNaturalKeyOwnedByOther reports whether the initial Flow snapshot
+// contains another row holding the desired (manufacturer, serial_number) pair. The transaction must
 // release that row before applying Core's authoritative labels. Using the
 // initial snapshot keeps this true for both sides of a swap regardless of spec
 // order.
-func componentChassisSlotOwnedByOther(
+func componentNaturalKeyOwnedByOther(
 	flowByNaturalKey map[string]*model.Component,
 	desired *model.Component,
 ) bool {
@@ -670,13 +685,14 @@ func componentChassisSlotOwnedByOther(
 	return owner != nil && owner.ID != desired.ID
 }
 
-// releaseComponentChassisSlot clears a desired chassis pair from any other
+// releaseComponentNaturalKey clears a desired (manufacturer, serial_number)
+// pair from any other
 // Flow component before an INSERT or UPDATE claims it. Host BMC MAC is the
 // authoritative component identity, so a stale natural-key holder must not
 // prevent a label correction. Clearing first also permits transfers and swaps
 // to converge within one transaction. The unique index guarantees that at
 // most one other row can be changed.
-func releaseComponentChassisSlot(
+func releaseComponentNaturalKey(
 	ctx context.Context,
 	tx bun.Tx,
 	desired *model.Component,
@@ -700,21 +716,21 @@ func releaseComponentChassisSlot(
 
 	updateResult, err := query.Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("release chassis slot for component %q: %w", desired.Name, err)
+		return fmt.Errorf("release natural key for component %q: %w", desired.Name, err)
 	}
 	rowsAffected, err := updateResult.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("count released chassis slots for component %q: %w", desired.Name, err)
+		return fmt.Errorf("count released natural keys for component %q: %w", desired.Name, err)
 	}
 	if rowsAffected > 1 {
-		return fmt.Errorf("release chassis slot for component %q affected %d rows, expected at most 1", desired.Name, rowsAffected)
+		return fmt.Errorf("release natural key for component %q affected %d rows, expected at most 1", desired.Name, rowsAffected)
 	}
 	if rowsAffected == 1 {
 		log.Info().
 			Str("component_id", desired.ID.String()).
 			Str("manufacturer", desired.Manufacturer).
 			Str("serial", desired.SerialNumber).
-			Msg("Expected-inventory mirror: released occupied chassis slot for authoritative component update")
+			Msg("Expected-inventory mirror: released occupied natural key for authoritative component update")
 	}
 	return nil
 }
