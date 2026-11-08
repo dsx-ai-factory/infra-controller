@@ -79,15 +79,21 @@ async fn gb300_assembly_serial_reaches_report_and_ambiguity_fails() {
             "Id": "Assembly", "Name": "Chassis assembly",
             "Assemblies": [
                 {
+                    "@odata.id": format!("{ASSEMBLY}#/Assemblies/0"),
+                    "@odata.type": "#Assembly.v1_3_0.AssemblyData",
                     "MemberId": "0", "Name": "Tray FRU",
                     "Model": "GB300 Titania-Bianca Compute Tray",
                     "SerialNumber": "9990000000001", "PartNumber": "675-20000-0000-TEST"
                 },
                 {
+                    "@odata.id": format!("{ASSEMBLY}#/Assemblies/1"),
+                    "@odata.type": "#Assembly.v1_3_0.AssemblyData",
                     "MemberId": "1", "Name": "Board FRU", "Model": "P5859 B03",
                     "SerialNumber": "9990000000002", "PartNumber": "699-20000-0000-TEST"
                 },
                 {
+                    "@odata.id": format!("{ASSEMBLY}#/Assemblies/2"),
+                    "@odata.type": "#Assembly.v1_3_0.AssemblyData",
                     "MemberId": "2", "Name": "Secondary tray FRU",
                     "Model": "GB300 Titania-Bianca Compute Tray",
                     "SerialNumber": second_serial, "PartNumber": "965-XXXXX-XXXX-XXX"
