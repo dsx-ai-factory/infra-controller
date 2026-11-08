@@ -39,15 +39,15 @@ use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use carbide_utils::HostPortPair;
 use libredfish::Redfish;
 use libredfish::model::service_root::RedfishVendor;
-use model::machine::{MachineState, ManagedHostState};
+use model::machine::{BiosConfigInfo, BiosConfigState, MachineState, ManagedHostState};
 use model::test_support::ManagedHostConfig;
 use serde_json::{Value, json};
 
 use crate::env::Env;
 
-const HANDLING_TIME: Duration = Duration::from_secs(4);
+const HANDLING_TIME: Duration = Duration::from_secs(5);
 const MACHINE_SETUP_TIME: Duration = Duration::from_secs(3);
-const RESET_ANSWER_TIME: Duration = Duration::from_secs(2);
+const RESET_ANSWER_TIME: Duration = Duration::from_secs(3);
 
 async fn as_json(mut response: Response) -> Response {
     response.headers_mut().insert(
@@ -134,6 +134,18 @@ impl RedfishClientPool for HostBmcPool {
     }
 }
 
+fn restarting_host() -> ManagedHostState {
+    ManagedHostState::HostInit {
+        machine_state: MachineState::WaitingForBiosJob {
+            bios_config_info: BiosConfigInfo {
+                bios_job_id: None,
+                bios_config_state: BiosConfigState::RebootHost,
+                retry_count: 0,
+            },
+        },
+    }
+}
+
 fn polling_bios_setup() -> ManagedHostState {
     ManagedHostState::HostInit {
         machine_state: MachineState::PollingBiosSetup { retry_count: 0 },
@@ -141,10 +153,10 @@ fn polling_bios_setup() -> ManagedHostState {
 }
 
 #[test]
-fn configure_bios_restarts_the_host_once_when_the_handler_times_out() {
+fn configure_bios_restarts_the_host_in_its_own_step() {
     let mut args = sqlx::testing::TestArgs::new(concat!(
         module_path!(),
-        "::configure_bios_restarts_the_host_once_when_the_handler_times_out"
+        "::configure_bios_restarts_the_host_in_its_own_step"
     ));
     args.fixtures(Box::leak(Box::new(vec![])));
     let test_fn: fn(PgPool) -> _ = configure_bios_against_a_slow_bmc;
@@ -245,12 +257,11 @@ async fn configure_bios_against_a_slow_bmc(pool: PgPool) {
         remaining: Some(1),
     });
 
-    for _ in 0..3 {
-        env.run_single_iteration().await;
-        if mh.host.machine().await.state.value == polling_bios_setup() {
-            break;
-        }
-    }
+    env.run_single_iteration().await;
+    assert_eq!(mh.host.machine().await.state.value, restarting_host());
+    assert!(resets.lock().unwrap().is_empty());
+
+    env.run_single_iteration().await;
     assert_eq!(mh.host.machine().await.state.value, polling_bios_setup());
     assert_eq!(*resets.lock().unwrap(), ["ForceRestart"]);
 }

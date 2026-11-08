@@ -6895,7 +6895,7 @@ async fn test_legacy_http_boot_wait_migrates_to_shared_bios_repair(pool: sqlx::P
 
     // Plant the host mid-wait with the window already expired (backdated past
     // the 10-minute apply window). Pass 1 migrates its persisted state; pass 2
-    // runs machine_setup through the common BIOS driver.
+    // runs machine_setup through the common BIOS driver; pass 3 restarts the host.
     set_host_controller_state_stuck_in(&env, host_id, &stuck_waiting(0), 11).await;
     let checkpoint = env.redfish_sim.timepoint();
     env.run_machine_state_controller_iteration().await;
