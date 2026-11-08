@@ -25,37 +25,97 @@ use crate::common;
 
 #[test]
 async fn gb300_assembly_serial_reaches_report_and_ambiguity_fails() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::{Json, Router, routing::get};
     use bmc_mock::injection::{Action, Rule, Selector};
+    use bmc_mock::test_support::axum_http_client::AxumRouterHttpClient;
+    use bmc_mock::{DpuMachineInfo, DpuSettings, HardwareType, HostMachineInfo, MachineInfo};
+    use nv_redfish::bmc_http::{BmcCredentials, CacheSettings, HttpBmc};
+
+    const ASSEMBLY: &str = "/redfish/v1/Chassis/Chassis_0/Assembly";
 
     for (scenario, second_serial, ambiguous) in [
         ("unprogrammed second tray FRU", "999XXXXXXXXXX", false),
         ("conflicting second tray FRU", "9990000000003", true),
     ] {
-        let h = test_support::dgx_gb300_bmc().await;
-        h.state.injection.upsert(Rule {
-            id: "gb300-tray-assemblies".into(),
-            selector: Selector::OdataId("/redfish/v1/Chassis/Chassis_0/Assembly".into()),
+        let machine_info = {
+            let mut pool = test_support::TEST_MAC_POOL.lock().unwrap();
+            let ranges = pool.allocate_range_config().unwrap();
+            let dpu = DpuMachineInfo::new(
+                HardwareType::NvidiaDgxGb300,
+                &mut pool,
+                DpuSettings::default(),
+            );
+            MachineInfo::Host(HostMachineInfo::new(
+                HardwareType::NvidiaDgxGb300,
+                vec![dpu],
+                &mut pool,
+                ranges,
+            ))
+        };
+        let (router, state) = bmc_mock::machine_router(
+            &machine_info,
+            Arc::new(test_support::TestCallbacks::default()),
+            "test-host-id".into(),
+            false,
+            Default::default(),
+        );
+        // This profile has no assembly inventory. Add both its advertised link
+        // and a successful endpoint; JSON injection cannot replace its 404.
+        state.injection.upsert(Rule {
+            id: "gb300-tray-assembly-link".into(),
+            selector: Selector::OdataId("/redfish/v1/Chassis/Chassis_0".into()),
             action: Action::JsonMerge(serde_json::json!({
-                "Assemblies": [
-                    {
-                        "MemberId": "0", "Name": "Tray FRU",
-                        "Model": "GB300 Titania-Bianca Compute Tray",
-                        "SerialNumber": "9990000000001", "PartNumber": "675-20000-0000-TEST"
-                    },
-                    {
-                        "MemberId": "1", "Name": "Board FRU", "Model": "P5859 B03",
-                        "SerialNumber": "9990000000002", "PartNumber": "699-20000-0000-TEST"
-                    },
-                    {
-                        "MemberId": "2", "Name": "Secondary tray FRU",
-                        "Model": "GB300 Titania-Bianca Compute Tray",
-                        "SerialNumber": second_serial, "PartNumber": "965-XXXXX-XXXX-XXX"
-                    }
-                ]
+                "Assembly": {"@odata.id": ASSEMBLY}
             })),
             remaining: Some(1),
         });
-        let root = h.service_root.as_ref().clone().restrict_expand().into();
+        let assembly = serde_json::json!({
+            "@odata.id": ASSEMBLY,
+            "@odata.type": "#Assembly.v1_3_0.Assembly",
+            "Id": "Assembly", "Name": "Chassis assembly",
+            "Assemblies": [
+                {
+                    "MemberId": "0", "Name": "Tray FRU",
+                    "Model": "GB300 Titania-Bianca Compute Tray",
+                    "SerialNumber": "9990000000001", "PartNumber": "675-20000-0000-TEST"
+                },
+                {
+                    "MemberId": "1", "Name": "Board FRU", "Model": "P5859 B03",
+                    "SerialNumber": "9990000000002", "PartNumber": "699-20000-0000-TEST"
+                },
+                {
+                    "MemberId": "2", "Name": "Secondary tray FRU",
+                    "Model": "GB300 Titania-Bianca Compute Tray",
+                    "SerialNumber": second_serial, "PartNumber": "965-XXXXX-XXXX-XXX"
+                }
+            ]
+        });
+        let assembly_requests = Arc::new(AtomicUsize::new(0));
+        let requests = assembly_requests.clone();
+        let router = Router::new()
+            .route(
+                ASSEMBLY,
+                get(move || {
+                    requests.fetch_add(1, Ordering::Relaxed);
+                    let assembly = assembly.clone();
+                    async move { Json(assembly) }
+                }),
+            )
+            .fallback_service(router);
+        let bmc = Arc::new(HttpBmc::new(
+            AxumRouterHttpClient::new(router),
+            "https://bmc.example".parse().unwrap(),
+            BmcCredentials::new("root".into(), "password".into()),
+            CacheSettings::with_capacity(32),
+        ));
+        let root = nv_redfish::ServiceRoot::new(bmc)
+            .await
+            .unwrap()
+            .restrict_expand()
+            .into();
         let report = nv_generate_exploration_report(root, &common::explorer_config()).await;
         if ambiguous {
             assert!(
@@ -77,7 +137,11 @@ async fn gb300_assembly_serial_reaches_report_and_ambiguity_fails() {
                 "{scenario}"
             );
         }
-        assert!(h.state.injection.list().is_empty(), "{scenario}");
+        assert!(
+            state.injection.list().is_empty(),
+            "{scenario}: assembly link"
+        );
+        assert_eq!(assembly_requests.load(Ordering::Relaxed), 1, "{scenario}");
     }
 }
 
