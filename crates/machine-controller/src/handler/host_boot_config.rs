@@ -40,7 +40,8 @@ use state_controller::state_handler::{StateHandlerContext, StateHandlerError};
 
 use super::bios_config::{
     BiosConfigJobAdvanceOutcome, BiosConfigOutcome, PollingBiosSetupOutcome,
-    advance_bios_config_job, advance_polling_bios_setup, configure_host_bios,
+    advance_bios_config_job, advance_polling_bios_setup, bios_profile_needs_reapply,
+    configure_host_bios, verify_bios_profile_after_reboot,
 };
 use super::{
     ReachabilityParams, RequiredBootInterface, SetBootOrderOutcome,
@@ -207,7 +208,14 @@ pub(super) async fn check_host_boot_config(
     log_host_config(redfish_client, mh_snapshot).await;
 
     let inspection = inspect_host_boot_config(redfish_client, mh_snapshot, &boot_interface).await?;
-    let decision = decide_host_boot_config(inspection);
+    let decision = match decide_host_boot_config(inspection) {
+        HostBootConfigDecision::Complete
+            if bios_profile_needs_reapply(redfish_client, mh_snapshot, ctx).await =>
+        {
+            HostBootConfigDecision::ConfigureBios
+        }
+        decision => decision,
+    };
     let vendor = mh_snapshot.host_snapshot.bmc_vendor();
 
     match &decision {
@@ -321,6 +329,7 @@ pub(super) async fn run_host_boot_config_stage(
             .await?
             {
                 PollingBiosSetupOutcome::Verified => {
+                    verify_bios_profile_after_reboot(redfish_client, mh_snapshot, ctx).await;
                     if should_skip_boot_order_remediation(mh_snapshot) {
                         Ok(HostBootConfigOutcome::Complete)
                     } else {
@@ -483,7 +492,8 @@ mod tests {
     };
     use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
     use carbide_secrets::test_support::credentials::TestCredentialManager;
-    use carbide_test_support::value_scenarios;
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::{Case, check_cases_async, value_scenarios};
     use libredfish::BiosProfileType;
     use libredfish::model::service_root::RedfishVendor;
     use model::machine_boot_interface::MachineBootInterface;
@@ -771,6 +781,117 @@ mod tests {
             })
             .collect();
         assert_eq!(applied, vec![profiles_with("Disabled")]);
+    }
+
+    #[tokio::test]
+    async fn boot_config_check_reapplies_a_drifted_named_bios_profile() {
+        let redfish_sim = Arc::new(RedfishSim::default());
+        let redfish_client = redfish_sim
+            .create_client("drifted-bios-profile", None, RedfishAuth::Anonymous, None)
+            .await
+            .unwrap();
+        redfish_sim.set_service_root_vendor(Some("Lenovo".to_string()));
+        redfish_sim.set_system_model("ThinkSystem SR680a V3");
+        let explicit_target = BootInterfaceTarget::Pair(MachineBootInterface {
+            mac_address: "10:00:00:00:00:01".parse().unwrap(),
+            interface_id: "NIC.Slot.5-1".to_string(),
+        });
+        let mut mh_snapshot = managed_host_state_snapshot();
+        mh_snapshot
+            .host_snapshot
+            .metadata
+            .labels
+            .insert("bios-profile".to_string(), "lenovo-h200".to_string());
+        let site_config = || {
+            let mut site_config = MachineStateHandlerSiteConfig::test_default();
+            site_config.named_bios_profiles = HashMap::from([(
+                "lenovo-h200".to_string(),
+                NamedBiosProfile {
+                    vendor: RedfishVendor::Lenovo,
+                    model: "ThinkSystem_SR680a_V3".to_string(),
+                    attributes: HashMap::from([("VTd".to_string(), serde_json::json!("Disabled"))]),
+                },
+            )]);
+            site_config
+        };
+        let (redfish_sim, redfish_client, mh_snapshot, explicit_target, site_config) = (
+            &redfish_sim,
+            redfish_client.as_ref(),
+            &mh_snapshot,
+            &explicit_target,
+            &site_config,
+        );
+
+        check_cases_async(
+            [
+                Case {
+                    scenario: "a host that matches its recipe is complete",
+                    input: ("Disabled", false),
+                    expect: Yields(HostBootConfigDecision::Complete),
+                },
+                Case {
+                    scenario: "a drifted recipe is re-applied",
+                    input: ("Enabled", false),
+                    expect: Yields(HostBootConfigDecision::ConfigureBios),
+                },
+                Case {
+                    scenario: "drift that survived a re-apply and reboot is not re-applied again",
+                    input: ("Enabled", true),
+                    expect: Yields(HostBootConfigDecision::Complete),
+                },
+            ],
+            move |(vtd, persistent): (&str, bool)| {
+                redfish_sim.set_bios_attributes(HashMap::from([(
+                    "Attributes".to_string(),
+                    serde_json::json!({ "VTd": vtd }),
+                )]));
+                let mut mh_snapshot = mh_snapshot.clone();
+                if persistent {
+                    mh_snapshot.host_snapshot.health_reports.merges.insert(
+                        "bios-profile-drift".to_string(),
+                        health_report::HealthReport {
+                            source: "bios-profile-drift".to_string(),
+                            triggered_by: None,
+                            observed_at: Some(chrono::Utc::now()),
+                            alerts: vec![health_report::HealthProbeAlert {
+                                id: "BiosProfileDriftPersistent".parse().unwrap(),
+                                target: Some("lenovo-h200".to_string()),
+                                in_alert_since: Some(chrono::Utc::now()),
+                                message: String::new(),
+                                tenant_message: None,
+                                classifications: vec![],
+                            }],
+                            successes: vec![],
+                        },
+                    );
+                }
+                let mut services = test_services(redfish_sim.clone(), site_config());
+                async move {
+                    let mut metrics = MachineMetrics::default();
+                    let mut pending_db_writes = DbWriteBatch::new();
+                    let mut ctx = StateHandlerContext {
+                        services: &mut services,
+                        metrics: &mut metrics,
+                        pending_db_writes: &mut pending_db_writes,
+                    };
+                    match check_host_boot_config(
+                        redfish_client,
+                        &mh_snapshot,
+                        &reachability_params(),
+                        HostBootConfigDpuFreshness::AlreadyValidated,
+                        Some(explicit_target),
+                        &mut ctx,
+                    )
+                    .await
+                    {
+                        Ok(HostBootConfigCheckOutcome::Ready(decision)) => Ok(decision),
+                        Ok(HostBootConfigCheckOutcome::Wait(reason)) => Err(reason),
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
+            },
+        )
+        .await;
     }
 
     #[tokio::test]

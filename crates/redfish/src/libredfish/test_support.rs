@@ -155,6 +155,7 @@ struct RedfishSimState {
     /// is otherwise unimplemented. Lets unit tests drive the default
     /// `BmcCredentialOps::uefi_setup` DPU body past its attribute probe.
     bios_attributes: Option<HashMap<String, serde_json::Value>>,
+    pending_bios_attributes: HashMap<String, serde_json::Value>,
     /// Optional ComputerSystem identifier used to drive platform classification.
     system_id: Option<String>,
     system_model: Option<String>,
@@ -603,6 +604,10 @@ impl RedfishSim {
     /// which is otherwise unimplemented.
     pub fn set_bios_attributes(&self, attributes: HashMap<String, serde_json::Value>) {
         self.state.lock().unwrap().bios_attributes = Some(attributes);
+    }
+
+    pub fn set_pending_bios_attributes(&self, attributes: HashMap<String, serde_json::Value>) {
+        self.state.lock().unwrap().pending_bios_attributes = attributes;
     }
 
     /// Override the `Vendor` reported by `get_service_root`. Set it to an
@@ -1128,7 +1133,7 @@ impl Redfish for RedfishSimClient {
         &'a self,
     ) -> libredfish::RedfishFuture<'a, Result<HashMap<String, serde_json::Value>, RedfishError>>
     {
-        Box::pin(async move { todo!() })
+        Box::pin(async move { Ok(self.state.lock().unwrap().pending_bios_attributes.clone()) })
     }
 
     fn clear_pending<'a>(&'a self) -> libredfish::RedfishFuture<'a, Result<(), RedfishError>> {
