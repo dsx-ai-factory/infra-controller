@@ -28,7 +28,8 @@ async fn gb300_assembly_serial_reaches_report_and_ambiguity_fails() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use axum::{Json, Router, routing::get};
+    use axum::routing::get;
+    use axum::{Json, Router};
     use bmc_mock::injection::{Action, Rule, Selector};
     use bmc_mock::test_support::axum_http_client::AxumRouterHttpClient;
     use bmc_mock::{DpuMachineInfo, DpuSettings, HardwareType, HostMachineInfo, MachineInfo};
