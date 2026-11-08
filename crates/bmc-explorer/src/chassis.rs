@@ -24,21 +24,20 @@ use mac_address::MacAddress;
 use model::site_explorer::{
     Chassis, ComputerSystem as ModelComputerSystem, PowerState as ModelPowerState,
 };
-use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::chassis::{Chassis as NvChassis, PowerSupply as NvPowerSupply};
 use nv_redfish::core::ODataId;
 use nv_redfish::hardware_id::{Manufacturer, Model};
 use nv_redfish::pcie_device::PcieDevice;
 use nv_redfish::{Bmc, ServiceRoot};
 
+use crate::hw::chassis_assembly::select_serial_number;
 use crate::network_adapter::ExploredNetworkAdapterCollection;
 use crate::{Error, network_adapter};
 
-type AssemblyModelFilterFn = fn(Option<AssemblyModel<&str>>) -> bool;
 const BF4_NDF0_TO_BASE_MAC_OFFSET: u64 = 0x10;
 pub(crate) struct Config {
     pub(crate) network_adapter: network_adapter::Config,
-    pub(crate) need_assembly_sn: fn(&str) -> Option<AssemblyModelFilterFn>,
+    pub(crate) need_assembly_sn: fn(&str) -> bool,
     pub(crate) lazy_fetch: Option<fn(&ODataId) -> bool>,
 }
 
@@ -351,18 +350,22 @@ impl<B: Bmc> ExploredChassis<B> {
         let network_adapters =
             ExploredNetworkAdapterCollection::explore(&chassis, &config.network_adapter).await?;
         let chassis_raw = chassis.raw();
-        let assembly_sn = if let Some(model_check_fn) = (config.need_assembly_sn)(&chassis_raw.id) {
+        let assembly_sn = if (config.need_assembly_sn)(&chassis_raw.id) {
             match chassis.assembly().await {
                 Ok(Some(assembly)) => {
                     let assembly_data = assembly
                         .assemblies()
                         .await
                         .map_err(Error::nv_redfish("chassis assemblies"))?;
-                    assembly_data
-                        .iter()
-                        .find(|asm| model_check_fn(asm.hardware_id().model))
-                        .and_then(|asm| asm.hardware_id().serial_number)
-                        .map(|v| v.to_string())
+                    select_serial_number(assembly_data.iter().map(|asm| {
+                        let hw_id = asm.hardware_id();
+                        (
+                            hw_id.model.map(|v| v.into_inner()),
+                            hw_id.serial_number.map(|v| v.into_inner()),
+                        )
+                    }))
+                    .map_err(|err| Error::InvalidValue(err.to_string()))?
+                    .map(str::to_string)
                 }
                 Ok(None) => None,
                 Err(err) => {

@@ -23,6 +23,64 @@ use tokio::test;
 
 use crate::common;
 
+#[test]
+async fn gb300_assembly_serial_reaches_report_and_ambiguity_fails() {
+    use bmc_mock::injection::{Action, Rule, Selector};
+
+    for (scenario, second_serial, ambiguous) in [
+        ("unprogrammed second tray FRU", "999XXXXXXXXXX", false),
+        ("conflicting second tray FRU", "9990000000003", true),
+    ] {
+        let h = test_support::dgx_gb300_bmc().await;
+        h.state.injection.upsert(Rule {
+            id: "gb300-tray-assemblies".into(),
+            selector: Selector::OdataId("/redfish/v1/Chassis/Chassis_0/Assembly".into()),
+            action: Action::JsonMerge(serde_json::json!({
+                "Assemblies": [
+                    {
+                        "MemberId": "0", "Name": "Tray FRU",
+                        "Model": "GB300 Titania-Bianca Compute Tray",
+                        "SerialNumber": "9990000000001", "PartNumber": "675-20000-0000-TEST"
+                    },
+                    {
+                        "MemberId": "1", "Name": "Board FRU", "Model": "P5859 B03",
+                        "SerialNumber": "9990000000002", "PartNumber": "699-20000-0000-TEST"
+                    },
+                    {
+                        "MemberId": "2", "Name": "Secondary tray FRU",
+                        "Model": "GB300 Titania-Bianca Compute Tray",
+                        "SerialNumber": second_serial, "PartNumber": "965-XXXXX-XXXX-XXX"
+                    }
+                ]
+            })),
+            remaining: Some(1),
+        });
+        let root = h.service_root.as_ref().clone().restrict_expand().into();
+        let report = nv_generate_exploration_report(root, &common::explorer_config()).await;
+        if ambiguous {
+            assert!(
+                matches!(report, Err(bmc_explorer::Error::InvalidValue(ref error))
+                    if error == "multiple distinct GB300 tray assembly serial numbers"),
+                "{scenario}: {report:?}"
+            );
+        } else {
+            let report = report.unwrap();
+            assert_eq!(
+                report
+                    .chassis
+                    .iter()
+                    .find(|chassis| chassis.id == "Chassis_0")
+                    .unwrap()
+                    .serial_number
+                    .as_deref(),
+                Some("9990000000001"),
+                "{scenario}"
+            );
+        }
+        assert!(h.state.injection.list().is_empty(), "{scenario}");
+    }
+}
+
 /// A DGX GB300 runs the NVIDIA "GB BMC" -- the same ServiceRoot signature as a
 /// Wiwynn GB200 (`Vendor: NVIDIA`, `Product: GB BMC`). It must classify as the
 /// GB300 platform (resolved from the NVIDIA GB300 GPU chassis ahead of the GB200
