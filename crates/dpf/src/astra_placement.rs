@@ -15,17 +15,15 @@
  * limitations under the License.
  */
 
-//! Validated DPU-local Astra placement, canonicalized independently of machine identity.
+//! Validated per-device Astra placement values for DPF template rendering.
 
 use model::expected_machine::{ExpectedInterface, ExpectedMachine, validate_astra_placements};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde::Serialize;
 
 use crate::DpfError;
 
-/// Internal rendering input. The DPU serial chooses the mapping but is excluded from its identity.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Rendering row containing concrete device values or shared template substitutions.
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct PlacedPort {
     pub(crate) group_id: String,
     pub(crate) hw_plane: u32,
@@ -69,41 +67,6 @@ impl AstraHardwarePlacement {
         }
         ports.sort_by(|a, b| (&a.group_id, a.hw_plane).cmp(&(&b.group_id, b.hw_plane)));
         Ok(Some(Self { ports }))
-    }
-
-    /// Restores persisted canonical placement while applying the same request validation.
-    pub(crate) fn from_ports(mut ports: Vec<PlacedPort>) -> Result<Self, DpfError> {
-        let interfaces = ports
-            .iter()
-            .map(|port| ExpectedInterface {
-                physical_ifname: Some(port.cerebro_ifname.clone()),
-                logical_ifname: Some(port.logical_ifname.clone()),
-                nic_type: Some("CX9".to_string()),
-                astra_placement: Some(model::expected_machine::AstraPortPlacement {
-                    dpu_serial_number: "placement".to_string(),
-                    group_id: port.group_id.clone(),
-                    hw_plane: port.hw_plane,
-                    pci_address: port.pci_address.clone(),
-                    phys_port_name: port.phys_port_name.clone(),
-                }),
-                ..Default::default()
-            })
-            .collect::<Vec<_>>();
-        if ports.is_empty() {
-            return Err(DpfError::ConfigError(
-                "persisted Astra placement must not be empty".to_string(),
-            ));
-        }
-        validate_astra_placements(&interfaces)
-            .map_err(|message| DpfError::ConfigError(message.to_string()))?;
-        ports.sort_by(|a, b| (&a.group_id, a.hw_plane).cmp(&(&b.group_id, b.hw_plane)));
-        Ok(Self { ports })
-    }
-
-    pub(crate) fn id(&self) -> Result<String, DpfError> {
-        Ok(hex::encode(
-            &Sha256::digest(serde_json::to_vec(&self.ports)?)[..8],
-        ))
     }
 }
 
@@ -270,23 +233,25 @@ mod tests {
     }
 
     #[test]
-    fn canonical_placement_excludes_machine_identity_and_input_order() {
+    fn placement_values_preserve_order_and_dpu_scoping() {
         let first = test_machine("dpu-one", 3);
         let mut second = test_machine("dpu-two", 3);
         second.data.server_name = Some("another-host".to_string());
         second.data.interfaces.reverse();
         second.data.interfaces[0].fixed_ip = Some("100.96.0.10".parse().unwrap());
-        let id = |machine: &ExpectedMachine, serial| {
-            AstraHardwarePlacement::for_dpu(machine, serial)
-                .unwrap()
-                .unwrap()
-                .id()
-                .unwrap()
+        let ports = |machine: &ExpectedMachine, serial| {
+            serde_json::to_value(
+                AstraHardwarePlacement::for_dpu(machine, serial)
+                    .unwrap()
+                    .unwrap()
+                    .ports,
+            )
+            .unwrap()
         };
-        assert_eq!(id(&first, "dpu-one"), id(&second, "dpu-two"));
+        assert_eq!(ports(&first, "dpu-one"), ports(&second, "dpu-two"));
         assert_ne!(
-            id(&first, "dpu-one"),
-            id(&test_machine("dpu-one", 20), "dpu-one")
+            ports(&first, "dpu-one"),
+            ports(&test_machine("dpu-one", 20), "dpu-one")
         );
         let mut both = first;
         both.data.interfaces.extend(second.data.interfaces);

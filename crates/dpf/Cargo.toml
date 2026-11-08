@@ -65,6 +65,7 @@ tracing-subscriber = { workspace = true, features = [
 libredfish = { workspace = true, optional = true }
 
 [dev-dependencies]
+gtmpl = { workspace = true }
 carbide-test-support = { path = "../test-support" }
 dashmap = { workspace = true }
 tower-test = { workspace = true }

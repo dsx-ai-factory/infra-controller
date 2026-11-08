@@ -1781,11 +1781,7 @@ async fn scoped_bf3_gb200_bf4_and_astra_initialization_coexists() {
     assert!(astra_template.spec.template.starts_with("spec:\n"));
     let astra_flavor = DPUFlavor {
         metadata: Default::default(),
-        spec: {
-            let body: serde_yaml::Value =
-                serde_yaml::from_str(&astra_template.spec.template).unwrap();
-            serde_yaml::from_value(body["spec"].clone()).unwrap()
-        },
+        spec: { crate::flavor::tests::flavor_spec_from_template(&astra_template) },
     };
     assert!(
         astra_flavor.spec.nvconfig.as_ref().unwrap()[0]

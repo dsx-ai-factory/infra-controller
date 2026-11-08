@@ -785,7 +785,7 @@ pub(crate) fn flavor_bf4_astra_with_topology(
         },
         spec: flavor_spec,
     };
-    flavor_template_from_flavor(&flavor)
+    astra_template_with_device_placement(&flavor_template_from_flavor(&flavor)?)
 }
 
 /// Default grub kernel parameters for the BF4 flavor.
@@ -1686,11 +1686,9 @@ fn dhcp_acl_rules(interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>) 
     rules
 }
 
-// Fixed interface mappings for VR200
-/// Specializes the shared Astra template without modifying default rendering or its hash.
-pub(crate) fn astra_template_with_placement(
+/// Adds optional per-device placement to the shared template; DPF owns concrete flavor creation.
+fn astra_template_with_device_placement(
     base: &DPUFlavorTemplate,
-    placement: &crate::astra_placement::AstraHardwarePlacement,
 ) -> Result<DPUFlavorTemplate, crate::DpfError> {
     #[derive(serde::Deserialize, serde::Serialize)]
     struct Body {
@@ -1698,9 +1696,27 @@ pub(crate) fn astra_template_with_placement(
     }
     let mut body: Body = serde_yaml::from_str(&base.spec.template)
         .map_err(|e| crate::DpfError::ConfigError(format!("invalid base Astra template: {e}")))?;
+    // Match the canonical group/plane ordering emitted by AstraHardwarePlacement::for_dpu.
+    // Every substitution is a validated single-line value, so YAML block indentation is retained.
+    let mut ports = Vec::new();
+    for group in ["A13", "A16", "A3", "A43", "A46", "A53", "A56", "A6"] {
+        for plane in 0..4 {
+            let index = ports.len();
+            let field =
+                |name| format!("{{{{ (index .astra_hardware_placement {index}).{name} }}}}");
+            ports.push(crate::astra_placement::PlacedPort {
+                group_id: group.to_string(),
+                hw_plane: plane,
+                pci_address: field("pci_address"),
+                phys_port_name: field("phys_port_name"),
+                cerebro_ifname: field("cerebro_ifname"),
+                logical_ifname: field("logical_ifname"),
+            });
+        }
+    }
     let mut csv = String::from("pci_address,phys_port_name,cerebro_interface_name\n");
     let mut rows = String::from("ASTRA_PORT_ROWS=(\n");
-    for p in &placement.ports {
+    for p in &ports {
         csv.push_str(&format!(
             "{},{},{}\n",
             p.pci_address, p.phys_port_name, p.cerebro_ifname
@@ -1749,7 +1765,7 @@ pub(crate) fn astra_template_with_placement(
     "#});
     let mut ovs_rows = String::from("XPLANE_ROWS=(\n");
     let mut pci_rows = String::from("PCI_BRIDGE_ROWS=(\n");
-    for p in placement.ports.iter().filter(|p| p.hw_plane == 0) {
+    for p in ports.iter().filter(|p| p.hw_plane == 0) {
         ovs_rows.push_str(&format!(
             "    \"{}|{}|brcx-{}|{}\"\n",
             p.group_id, p.pci_address, p.group_id, p.group_id
@@ -1845,7 +1861,12 @@ pub(crate) fn astra_template_with_placement(
         let file = files.iter_mut().find(|f| f.path == path).ok_or_else(|| {
             crate::DpfError::ConfigError(format!("Astra template is missing {path}"))
         })?;
-        file.raw = Some(raw);
+        let default = file.raw.as_deref().ok_or_else(|| {
+            crate::DpfError::ConfigError(format!("Astra config file {path} has no inline body"))
+        })?;
+        file.raw = Some(format!(
+            "{{{{ if index . \"astra_hardware_placement\" }}}}{raw}{{{{ else }}}}{{{{/* default Astra placement */}}}}{default}{{{{ end }}}}\n"
+        ));
     }
     let mut template = base.clone();
     template.metadata = ObjectMeta {
@@ -2697,7 +2718,7 @@ fn xplane_cerebro_network_script_raw() -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::process::{Command, Output};
@@ -2735,9 +2756,21 @@ mod tests {
         flavor_spec_from_template(&template)
     }
 
-    fn flavor_spec_from_template(template: &DPUFlavorTemplate) -> DpuFlavorSpec {
+    pub(crate) fn flavor_spec_from_template(template: &DPUFlavorTemplate) -> DpuFlavorSpec {
         let body: serde_yaml::Value = serde_yaml::from_str(&template.spec.template).unwrap();
-        serde_yaml::from_value(body["spec"].clone()).unwrap()
+        let mut spec: DpuFlavorSpec = serde_yaml::from_value(body["spec"].clone()).unwrap();
+        default_placement_files(&mut spec);
+        spec
+    }
+
+    fn default_placement_files(spec: &mut DpuFlavorSpec) {
+        for file in spec.config_files.iter_mut().flatten() {
+            if let Some(raw) = &mut file.raw
+                && let Some((_, default)) = raw.split_once("{{/* default Astra placement */}}")
+            {
+                *raw = default.strip_suffix("{{ end }}\n").unwrap().to_string();
+            }
+        }
     }
 
     /// The `raw` body of the trailing (proxy) config file built by `default_flavor`.
@@ -2963,6 +2996,60 @@ export -f run_stage ovs-vsctl
     /// Verifies the topology-backed Astra bootstrap orders prerequisites before dependent setup and
     /// preserves strict versus best-effort failures, so required failures stop later stages without
     /// making a tolerated representor attachment block completion.
+    fn render_template(source: &str, values: &serde_json::Value) -> String {
+        fn value(json: &serde_json::Value) -> gtmpl::Value {
+            match json {
+                serde_json::Value::Null => gtmpl::Value::Nil,
+                serde_json::Value::Bool(b) => (*b).into(),
+                serde_json::Value::Number(n) => n.as_u64().unwrap().into(),
+                serde_json::Value::String(s) => s.clone().into(),
+                serde_json::Value::Array(a) => a.iter().map(value).collect::<Vec<_>>().into(),
+                serde_json::Value::Object(o) => o
+                    .iter()
+                    .map(|(k, v)| (k.clone(), value(v)))
+                    .collect::<std::collections::HashMap<_, _>>()
+                    .into(),
+            }
+        }
+        let mut template = gtmpl::Template::default();
+        // These fixtures use empty server names; existing script tests cover hostname escaping.
+        template.add_func("js", |_| {
+            unreachable!("render fixtures have empty server_name")
+        });
+        template.parse(source).unwrap();
+        template
+            .render(&gtmpl::Context::from(value(values)))
+            .unwrap()
+    }
+
+    #[test]
+    fn optional_placement_preserves_rendered_default_spec() {
+        let template = flavor_bf4_astra("test", &None, 64, &[], false).unwrap();
+        let default = flavor_spec_from_template(&template);
+        let baseline = flavor_template_from_flavor(&DPUFlavor {
+            metadata: Default::default(),
+            spec: default,
+        })
+        .unwrap();
+        let machine = crate::astra_placement::test_machine("test-dpu", 3);
+        let rows = machine.data.interfaces.iter().map(|nic| serde_json::json!({
+            "cerebro_ifname": nic.physical_ifname, "logical_ifname": nic.logical_ifname,
+            "mac_address": "", "ip": "", "gateway": "", "rail_route": "", "sw_plane_route": "",
+        })).collect::<Vec<_>>();
+        for values in [
+            serde_json::json!({"server_name": "", "dpu_device_underlay_rows": [{"cerebro_ifname": "", "ip": ""}]}),
+            serde_json::json!({"server_name": "", "dpu_device_underlay_rows": rows}),
+        ] {
+            let rendered = render_template(&template.spec.template, &values);
+            let original = render_template(&baseline.spec.template, &values);
+            assert!(
+                serde_yaml::from_str::<serde_yaml::Value>(&rendered).unwrap()
+                    == serde_yaml::from_str::<serde_yaml::Value>(&original).unwrap(),
+                "omitted placement must preserve every default flavor field in both rendering branches"
+            );
+        }
+    }
+
     #[test]
     fn astra_placement_scripts_resolve_remapped_sysfs_and_preserve_group_identity() {
         use crate::astra_placement::{AstraHardwarePlacement, test_machine};
@@ -2971,17 +3058,12 @@ export -f run_stage ovs-vsctl
             .unwrap()
             .unwrap();
         let base = flavor_bf4_astra("test", &None, 64, &[], false).unwrap();
-        let original = base.spec.template.clone();
-        let placed = astra_template_with_placement(&base, &placement).unwrap();
-        assert_eq!(
-            base.spec.template, original,
-            "specialization must not mutate default template"
-        );
-        assert_ne!(
-            base.unique_name("flavor").unwrap(),
-            placed.unique_name("flavor").unwrap()
-        );
-        let body: serde_yaml::Value = serde_yaml::from_str(&placed.spec.template).unwrap();
+        let rows = placement.ports.iter().map(|p| serde_json::json!({
+            "cerebro_ifname": p.cerebro_ifname, "mac_address": "", "ip": "", "gateway": "", "rail_route": "", "sw_plane_route": "", "logical_ifname": p.logical_ifname,
+        })).collect::<Vec<_>>();
+        let values = serde_json::json!({ "astra_hardware_placement": placement.ports, "dpu_device_underlay_rows": rows, "server_name": "" });
+        let rendered = render_template(&base.spec.template, &values);
+        let body: serde_yaml::Value = serde_yaml::from_str(&rendered).unwrap();
         let files = body["spec"]["configFiles"].as_sequence().unwrap();
         let raw = |path: &str| {
             files
@@ -3010,12 +3092,18 @@ export -f run_stage ovs-vsctl
             .unwrap();
         }
         let ovs = raw("/etc/mellanox/ovs-script.sh");
-        let legacy = ovs
-            .split("{{ else }}")
-            .nth(1)
+        let mut legacy_values = values.clone();
+        legacy_values["dpu_device_underlay_rows"] =
+            serde_json::json!([{"cerebro_ifname": "", "ip": ""}]);
+        let legacy_rendered = render_template(&base.spec.template, &legacy_values);
+        let legacy_body: serde_yaml::Value = serde_yaml::from_str(&legacy_rendered).unwrap();
+        let legacy = legacy_body["spec"]["configFiles"]
+            .as_sequence()
             .unwrap()
-            .split("{{ end }}")
-            .next()
+            .iter()
+            .find(|f| f["path"].as_str() == Some("/etc/mellanox/ovs-script.sh"))
+            .unwrap()["raw"]
+            .as_str()
             .unwrap();
         let stubs = "_ovs-vsctl() { printf '%s\\n' \"$*\"; }; ovs-vsctl() { :; }; ovs-appctl() { :; }; systemctl() { return 1; }; mst() { :; }; export -f _ovs-vsctl ovs-vsctl ovs-appctl systemctl mst; ";
         let run = || {
@@ -3036,45 +3124,41 @@ export -f run_stage ovs-vsctl
         assert!(stdout.contains("add-port br-xplane labnic0"));
         assert!(stdout.contains("external_ids:xplane-group-id=A13"));
         assert!(!stdout.contains("add-port br-xplane A13p0"));
+        for (index, port) in placement.ports.iter().enumerate() {
+            assert!(stdout.contains(&format!(
+                "set Interface labnic{index} external_ids:xplane-group-id={}",
+                port.group_id
+            )));
+            assert!(stdout.contains(&format!(
+                "set Interface labnic{index} external_ids:xplane-plane-id={}",
+                port.hw_plane
+            )));
+        }
         let network = raw("/usr/local/sbin/configure-xplane-network.sh");
         assert!(network.contains("group_id=\"$(astra_group_for_logical \"$interface_name\")\""));
         // Exercise the selected Cerebro branch as DPF would render it, against all 32 remapped ports.
-        let render_cerebro_branch = |script: &str| {
-            format!(
-                "#!/bin/bash{}",
-                script
-                    .split_once("#!/bin/bash")
-                    .unwrap()
-                    .1
-                    .split("{{ else }}")
-                    .next()
-                    .unwrap()
-            )
-        };
+        let render_cerebro_branch = |script: &str| script.to_string();
         let ovs_file = temp.join("ovs.sh");
         fs::write(&ovs_file, render_cerebro_branch(ovs)).unwrap();
         let mapping_file = temp.join("mapping.csv");
         fs::write(&mapping_file, csv).unwrap();
-        let mut rendered_network = render_cerebro_branch(network);
-        let start = rendered_network
-            .find("{{- range .dpu_device_underlay_rows }}")
-            .unwrap();
-        let end =
-            start + rendered_network[start..].find("{{- end }}").unwrap() + "{{- end }}".len();
-        let underlay_rows = placement
-            .ports
+        let mut network_values = values;
+        network_values["dpu_device_underlay_rows"][0]["ip"] = serde_json::json!("100.96.0.0/31");
+        network_values["dpu_device_underlay_rows"][0]["gateway"] = serde_json::json!("100.96.0.1");
+        network_values["dpu_device_underlay_rows"][0]["rail_route"] =
+            serde_json::json!("100.96.0.0/16");
+        network_values["dpu_device_underlay_rows"][0]["sw_plane_route"] =
+            serde_json::json!("100.96.0.0/13");
+        let network_rendered = render_template(&base.spec.template, &network_values);
+        let network_body: serde_yaml::Value = serde_yaml::from_str(&network_rendered).unwrap();
+        let rendered_network = network_body["spec"]["configFiles"]
+            .as_sequence()
+            .unwrap()
             .iter()
-            .enumerate()
-            .map(|(index, port)| {
-                let address = if index == 0 { "100.96.0.0/31" } else { "" };
-                format!(
-                    "\"{}||{address}|100.96.0.1|100.96.0.0/16|100.96.0.0/13|{}\"",
-                    port.cerebro_ifname, port.logical_ifname
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        rendered_network.replace_range(start..end, &underlay_rows);
+            .find(|f| f["path"].as_str() == Some("/usr/local/sbin/configure-xplane-network.sh"))
+            .unwrap()["raw"]
+            .as_str()
+            .unwrap();
         let ip_stub = indoc::indoc! {r#"
             ip() {
                 if [ "$1" = -o ]; then

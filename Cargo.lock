@@ -2027,6 +2027,7 @@ dependencies = [
  "derive_builder",
  "eyre",
  "futures",
+ "gtmpl",
  "hex",
  "http",
  "hyper",
