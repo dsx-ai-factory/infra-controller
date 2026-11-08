@@ -275,30 +275,31 @@ pub(crate) async fn set_maintenance(
                 }
             }
 
-            match crate::handlers::health::remove_machine_health_report(
-                api,
-                Request::new(rpc::RemoveMachineHealthReportRequest {
-                    machine_id: req.host_id,
-                    source: "maintenance".to_string(),
-                }),
+            let mut txn = api.txn_begin().await?;
+            match crate::handlers::health::remove_by_source(
+                &mut txn,
+                machine_id.into(),
+                "maintenance".to_string(),
             )
             .await
             {
-                Ok(_) => {
-                    if crate::handlers::bmc_endpoint_explorer::reverify_host_boot_configuration(
-                        api, machine_id,
-                    )
-                    .await?
-                    {
-                        tracing::info!(
-                            %machine_id,
-                            "Maintenance ended; re-verifying the host BIOS and boot configuration before it is allocated"
-                        );
-                    }
-                }
-                Err(status) if status.code() == tonic::Code::NotFound => (),
-                Err(status) => return Err(status),
+                Ok(()) => (),
+                Err(CarbideError::NotFoundError { .. }) => return Ok(Response::new(())),
+                Err(err) => return Err(err.into()),
             };
+            let reconciliation =
+                crate::handlers::bmc_endpoint_explorer::reverify_host_boot_configuration(
+                    &mut txn, machine_id,
+                )
+                .await?;
+            txn.commit().await?;
+            if let Some(eligible) = reconciliation {
+                tracing::info!(
+                    %machine_id,
+                    "Maintenance ended; re-verifying the host BIOS and boot configuration before it is allocated"
+                );
+                enqueue_boot_interface_reconciliation(api, machine_id, eligible).await;
+            }
         }
     };
 
