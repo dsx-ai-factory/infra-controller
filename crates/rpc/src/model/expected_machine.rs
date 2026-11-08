@@ -250,6 +250,15 @@ impl From<ExpectedInterface> for rpc::forge::ExpectedInterface {
             mac_address: expected_interface.mac_address.map(|mac| mac.to_string()),
             physical_ifname: expected_interface.physical_ifname,
             logical_ifname: expected_interface.logical_ifname,
+            astra_placement: expected_interface.astra_placement.map(|p| {
+                rpc::forge::AstraPortPlacement {
+                    dpu_serial_number: p.dpu_serial_number,
+                    group_id: p.group_id,
+                    hw_plane: p.hw_plane,
+                    pci_address: p.pci_address,
+                    phys_port_name: p.phys_port_name,
+                }
+            }),
             nic_type: expected_interface.nic_type,
             fixed_ip: expected_interface.fixed_ip.map(|ip| ip.to_string()),
             fixed_mask: expected_interface.fixed_mask,
@@ -282,6 +291,15 @@ impl TryFrom<rpc::forge::ExpectedInterface> for ExpectedInterface {
             mac_address,
             physical_ifname: expected_interface.physical_ifname,
             logical_ifname: expected_interface.logical_ifname,
+            astra_placement: expected_interface.astra_placement.map(|p| {
+                model::expected_machine::AstraPortPlacement {
+                    dpu_serial_number: p.dpu_serial_number,
+                    group_id: p.group_id,
+                    hw_plane: p.hw_plane,
+                    pci_address: p.pci_address,
+                    phys_port_name: p.phys_port_name,
+                }
+            }),
             nic_type: expected_interface.nic_type,
             fixed_ip: match expected_interface.fixed_ip.as_deref() {
                 None | Some("") => None,
@@ -547,6 +565,30 @@ mod tests {
     use prost::Message;
 
     use super::*;
+
+    #[test]
+    fn astra_placement_survives_rpc_and_inventory_json_round_trip() {
+        let interface = ExpectedInterface {
+            physical_ifname: Some("C1-1-L1".to_string()),
+            logical_ifname: Some("eth_r0_p0".to_string()),
+            nic_type: Some("CX9".to_string()),
+            astra_placement: Some(model::expected_machine::AstraPortPlacement {
+                dpu_serial_number: "dpu-one".to_string(),
+                group_id: "A53".to_string(),
+                hw_plane: 0,
+                pci_address: "0000:03:00.0".to_string(),
+                phys_port_name: "p0".to_string(),
+            }),
+            ..Default::default()
+        };
+        let rpc: rpc::forge::ExpectedInterface = interface.clone().into();
+        assert_eq!(ExpectedInterface::try_from(rpc).unwrap(), interface);
+        let stored = serde_json::to_value(&interface).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ExpectedInterface>(stored).unwrap(),
+            interface
+        );
+    }
 
     /// The stable protobuf boundary maps directly onto the internal policy.
     #[test]

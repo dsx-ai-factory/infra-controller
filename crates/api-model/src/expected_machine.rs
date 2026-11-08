@@ -358,6 +358,138 @@ impl ExpectedInterfaceIpAllocation {
     }
 }
 
+/// DPU-local placement of one of Astra's eight groups and four hardware planes.
+/// Attached to a CX9 expected interface; all 32 ports must be declared for each DPU serial.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AstraPortPlacement {
+    /// Serial of the DPU whose PCI namespace contains this function.
+    pub dpu_serial_number: String,
+    /// Existing Xplane group identity, such as `A53`.
+    pub group_id: String,
+    /// Hardware plane within the group, from zero through three.
+    pub hw_plane: u32,
+    /// DPU-visible PCI address in canonical lowercase `dddd:bb:dd.f` form.
+    pub pci_address: String,
+    /// Exact `phys_port_name` reported by the function's netdev in sysfs.
+    pub phys_port_name: String,
+}
+
+impl AstraPortPlacement {
+    /// Rejects unsupported identities, malformed PCI addresses and shell/path-unsafe input.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.dpu_serial_number.is_empty()
+            || self.dpu_serial_number.len() > 64
+            || !self
+                .dpu_serial_number
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(
+                "Astra placement requires a DPU serial containing letters, digits, '_' or '-'",
+            );
+        }
+        if !["A56", "A53", "A43", "A46", "A6", "A3", "A13", "A16"].contains(&self.group_id.as_str())
+            || self.hw_plane > 3
+        {
+            return Err("Astra placement requires an existing group and hardware plane 0..3");
+        }
+        let b = self.pci_address.as_bytes();
+        if b.len() != 12
+            || b[4] != b':'
+            || b[7] != b':'
+            || b[10] != b'.'
+            || !b.iter().enumerate().all(|(i, c)| {
+                matches!(i, 4 | 7 | 10) || c.is_ascii_digit() || (b'a'..=b'f').contains(c)
+            })
+            || u8::from_str_radix(&self.pci_address[8..10], 16).map_or(true, |device| device > 31)
+            || !(b'0'..=b'7').contains(&b[11])
+        {
+            return Err(
+                "Astra PCI address must be canonical dddd:bb:dd.f with device <= 1f and function <= 7",
+            );
+        }
+        if self.phys_port_name.is_empty()
+            || self.phys_port_name.len() > 127
+            || !self
+                .phys_port_name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err("Astra phys_port_name must contain 1..127 letters, digits, '_' or '-'");
+        }
+        Ok(())
+    }
+}
+
+/// Validates complete per-DPU placements without changing legacy inventory semantics.
+pub fn validate_astra_placements(interfaces: &[ExpectedInterface]) -> Result<(), &'static str> {
+    let mut dpus = std::collections::BTreeMap::<&str, Vec<&ExpectedInterface>>::new();
+    for interface in interfaces {
+        if let Some(placement) = &interface.astra_placement {
+            placement.validate()?;
+            interface.validate_ifnames()?;
+            if interface.nic_type.as_deref() != Some("CX9")
+                || interface
+                    .physical_ifname
+                    .as_deref()
+                    .is_none_or(str::is_empty)
+                || interface
+                    .logical_ifname
+                    .as_deref()
+                    .is_none_or(str::is_empty)
+            {
+                return Err(
+                    "Astra placement requires a CX9 interface with physical_ifname and logical_ifname",
+                );
+            }
+            let (rail, sw_plane) = match placement.group_id.as_str() {
+                "A53" => (0, 0),
+                "A56" => (0, 1),
+                "A43" => (1, 0),
+                "A46" => (1, 1),
+                "A13" => (2, 0),
+                "A16" => (2, 1),
+                "A3" => (3, 0),
+                "A6" => (3, 1),
+                _ => unreachable!("validated Astra group"),
+            };
+            if interface.logical_ifname.as_deref()
+                != Some(format!("eth_r{rail}_p{}", sw_plane * 4 + placement.hw_plane).as_str())
+            {
+                return Err(
+                    "Astra placement must retain the group's logical rail and plane identity",
+                );
+            }
+            dpus.entry(&placement.dpu_serial_number)
+                .or_default()
+                .push(interface);
+        }
+    }
+    for ports in dpus.values() {
+        if ports.len() != 32 {
+            return Err("Astra placement requires all eight groups with four planes per DPU");
+        }
+        let mut identities = std::collections::BTreeSet::new();
+        let mut bdfs = std::collections::BTreeSet::new();
+        let mut physical = std::collections::BTreeSet::new();
+        let mut logical = std::collections::BTreeSet::new();
+        for interface in ports {
+            let p = interface.astra_placement.as_ref().unwrap();
+            if !identities.insert((&p.group_id, p.hw_plane))
+                || !bdfs.insert(&p.pci_address)
+                || !physical.insert(&interface.physical_ifname)
+                || !logical.insert(&interface.logical_ifname)
+            {
+                return Err(
+                    "Astra placement has duplicate group/plane, PCI address, or interface identity within a DPU",
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Configures one interface that NICo may encounter while ingesting an
 /// `ExpectedMachine`.
 ///
@@ -376,6 +508,10 @@ pub struct ExpectedInterface {
     /// Optional logical interface name for consumers of the expected inventory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_ifname: Option<String>,
+    /// Optional DPU-local Astra placement. Omission preserves the fixed hardware mapping.
+    /// Interface-list replacement also replaces this value; omit it to restore default placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub astra_placement: Option<AstraPortPlacement>,
     /// Which machine endpoint owns this interface. Missing values retain the
     /// legacy host-interface behavior.
     #[serde(default, skip_serializing_if = "ExpectedInterfaceRole::is_host")]
@@ -428,6 +564,7 @@ impl<'de> Deserialize<'de> for ExpectedInterface {
             mac_address: Option<MacAddress>,
             physical_ifname: Option<String>,
             logical_ifname: Option<String>,
+            astra_placement: Option<AstraPortPlacement>,
             #[serde(default)]
             role: ExpectedInterfaceRole,
             ip_allocation: Option<ExpectedInterfaceIpAllocation>,
@@ -460,6 +597,9 @@ impl ExpectedInterface {
     }
 
     pub fn validate_identity(&self) -> Result<(), &'static str> {
+        if let Some(placement) = &self.astra_placement {
+            placement.validate()?;
+        }
         if self
             .physical_ifname
             .as_ref()

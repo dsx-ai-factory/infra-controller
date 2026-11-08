@@ -826,6 +826,11 @@ impl DpfOperations for DpfSdkOps {
             .as_ref()
             .filter(|_| deployment_type == DpuDeploymentType::Bf4Astra)
             .map(|machine| (machine, self.astra_route_prefixes));
+        if let Some((machine, _)) = astra_provisioning_inputs {
+            self.sdk
+                .prepare_astra_placement(machine, &info.serial_number)
+                .await?;
+        }
         self.sdk
             .register_dpu_device(info, astra_provisioning_inputs)
             .await

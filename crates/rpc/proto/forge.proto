@@ -7957,6 +7957,22 @@ message IpxeTemplateList {
 }
 
 
+// DPU-local location of a CX9 port. All 32 group/plane pairs must be declared
+// for each DPU serial. PCI domains may be zero or nonzero.
+message AstraPortPlacement {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
+  string dpu_serial_number = 1;
+  // One of A56, A53, A43, A46, A6, A3, A13, A16.
+  string group_id = 2;
+  // Hardware plane 0 through 3.
+  uint32 hw_plane = 3;
+  // Canonical lowercase dddd:bb:dd.f; device <= 1f, function <= 7.
+  string pci_address = 4;
+  // Exact sysfs phys_port_name; 1..127 ASCII letters, digits, '_' or '-'.
+  string phys_port_name = 5;
+}
+
 message ExpectedHostNic {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
@@ -8010,6 +8026,11 @@ message ExpectedHostNic {
   optional string physical_ifname = 10;
   // Optional logical interface name; stored for inventory consumers.
   optional string logical_ifname = 11;
+  // Optional placement on the named DPU. Requires nic_type=CX9, physical_ifname,
+  // and logical_ifname. Omission preserves the legacy mapping. This is part of
+  // host_nics replacement, including field-mask patches of host_nics; removing
+  // placements restores defaults on the next supported reprovisioning workflow.
+  AstraPortPlacement astra_placement = 12;
 }
 
 // Forge RPC representation of the per-host policy for how NICo treats DPU

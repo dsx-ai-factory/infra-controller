@@ -917,6 +917,87 @@ Per-deployment field reference:
 | `extra_services` | no | none | Optional deployment-local field overrides for extra services. Only extras supported by this deployment type are used. |
 | `enable_delay_host_init` | no | `false` | When enabled, delay host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true. |
 
+##### Per-machine Astra hardware placement
+
+Expected-machine registration accepts an optional `astra_placement` object on each
+CX9 entry in `host_nics` (called `interfaces` in the internal inventory model).
+This declares a PCI address in the **DPU's** PCI namespace. The DPU serial selects
+which DPU in the host owns the declaration; host PCI addresses are not used.
+The existing expected-machine create, replace, update, and field-mask patch paths
+carry this object with the interface list. Reading the expected machine returns
+it, and the interface JSON stored in the database retains it.
+
+For example, this is **one interface entry**, not a complete registration:
+
+```json
+{
+  "nic_type": "CX9",
+  "physical_ifname": "C1-1-L1",
+  "logical_ifname": "eth_r0_p0",
+  "astra_placement": {
+    "dpu_serial_number": "EXAMPLE-DPU-1",
+    "group_id": "A53",
+    "hw_plane": 0,
+    "pci_address": "0000:03:00.0",
+    "phys_port_name": "p0"
+  }
+}
+```
+
+For every DPU serial with explicit placement, declare all eight groups with four
+hardware planes each: 32 entries. `hw_plane` is zero through three. Group-to-logical
+interface relationships remain fixed:
+
+| Group | Logical interfaces |
+| --- | --- |
+| `A53` | `eth_r0_p0` through `eth_r0_p3` |
+| `A56` | `eth_r0_p4` through `eth_r0_p7` |
+| `A43` | `eth_r1_p0` through `eth_r1_p3` |
+| `A46` | `eth_r1_p4` through `eth_r1_p7` |
+| `A13` | `eth_r2_p0` through `eth_r2_p3` |
+| `A16` | `eth_r2_p4` through `eth_r2_p7` |
+| `A3` | `eth_r3_p0` through `eth_r3_p3` |
+| `A6` | `eth_r3_p4` through `eth_r3_p7` |
+
+The PCI address must use lowercase `dddd:bb:dd.f`, with device at most `1f` and
+function at most `7`. Both domain zero and nonzero domains are accepted.
+`phys_port_name` must match the port's actual sysfs readback and contain 1–127
+ASCII letters, digits, underscores, or hyphens. DPU serials contain 1–64 ASCII
+letters, digits, underscores, or hyphens. PCI addresses, group/plane pairs,
+physical interface identifiers, and logical interface names must be unique
+within each DPU. They may repeat on another DPU. A DPU with explicit placement
+uses only its 32 placed declarations; other DPUs retain the unplaced CX9 entries.
+Partial mappings, empty objects,
+unsafe names, and contradictory logical rail identities are rejected.
+
+NICo specializes the configured base Astra flavor template for each distinct
+placement and creates a placement-selected `DPUDeployment` and scoped
+`DPUServiceInterface` resources. The default Astra deployment excludes devices
+carrying the placement label. Matching placements share their specialized
+template and deployment regardless of machine name, DPU serial, underlay IPs,
+or interface-list order. DPF renders concrete per-device flavors using underlay
+values, so two machines with the same placement can still have different concrete
+flavors. At API initialization, NICo refreshes existing placement deployments from
+the configured base Astra template, services, and provisioning source. Canonical
+placement is retained in an annotation on each placement deployment and validated
+again before refresh. The CSV, OVS ports, and underlay bridge lookup use the same validated
+placement. Netdevs are found through BDF and `phys_port_name`; Linux interface
+names need not encode the group identity.
+
+Omitting placement retains the existing fixed mapping and the default flavor
+template bytes and hash. Explicit placement requires BF4 Astra, deployment-scoped
+ServiceInterfaces, and an initialized base Astra deployment. Existing Cerebro
+underlay rows continue to select the rendering branch; placement does not replace
+their logical identities or change that selection.
+
+Placement is provisioning input. Replacing `host_nics` also replaces its placement
+objects; omitting `host_nics` from a field-mask patch preserves the stored list.
+Changing or removing the placement for an existing `DPUDevice` is rejected during
+registration. Decommission and re-ingest through the supported lifecycle to apply
+that change; editing expected inventory or restarting the API does not by itself
+reprovision an existing device. Specialized resources are retained for reuse;
+this path does not garbage-collect unused placement deployments or templates.
+
 ##### Service VPC and additional SF capacity
 
 Two global `[dpu_config]` fields reserve SFs for BF3 and generic BF4:

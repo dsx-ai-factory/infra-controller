@@ -57,6 +57,7 @@
 #![warn(clippy::all)]
 #![deny(warnings, unsafe_code)]
 
+mod astra_placement;
 pub mod crds;
 pub mod error;
 pub mod flavor;

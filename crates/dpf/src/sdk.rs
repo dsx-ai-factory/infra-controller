@@ -155,6 +155,9 @@ fn dpu_cluster_node_selector(namespace: &str, deployment_name: &str) -> BTreeMap
     )])
 }
 
+/// DPUDevice selector separating explicit placements from the default Astra deployment.
+const ASTRA_PLACEMENT_LABEL: &str = "nico.nvidia.com/astra-placement";
+
 pub(crate) const RESTART_ANNOTATION: &str =
     "provisioning.dpu.nvidia.com/dpunode-external-reboot-required";
 pub(crate) const HOLD_ANNOTATION: &str = "provisioning.dpu.nvidia.com/wait-for-external-nodeeffect";
@@ -1304,7 +1307,13 @@ pub fn build_deployment(
                         match_labels: Some(node_labels),
                     }),
                     dpu_cluster_selector: None,
-                    dpu_device_selector: None,
+                    dpu_device_selector: matches!(deployment_type, DpuDeploymentType::Bf4Astra)
+                        .then(|| {
+                            serde_json::from_value(json!({"matchExpressions": [{
+                                "key": ASTRA_PLACEMENT_LABEL, "operator": "DoesNotExist"
+                            }]}))
+                            .expect("constant Kubernetes label selector")
+                        }),
                     node_selector: None,
                 }]),
                 flavor: (!matches!(deployment_type, DpuDeploymentType::Bf4Astra))
@@ -2717,6 +2726,9 @@ impl<
             &resolved,
         )
         .await?;
+        if config.deployment_type == DpuDeploymentType::Bf4Astra {
+            refresh_astra_placements(self.repo.as_ref(), &self.namespace).await?;
+        }
 
         Ok(())
     }
@@ -3299,6 +3311,231 @@ fn detached_node_selector(
     }
 }
 
+impl<R, L> DpfSdk<R, L>
+where
+    R: DpuDeviceRepository
+        + DpuDeploymentRepository
+        + DpuFlavorTemplateRepository
+        + DpuServiceInterfaceRepository,
+    L: ResourceLabeler,
+{
+    /// Creates or refreshes the shared flavor template, deployment and scoped interfaces for
+    /// this DPU's placement before registration. Default placement creates no additional resources.
+    /// Devices with explicit placements are excluded from the default Astra deployment.
+    /// Device-local underlay IPs remain DPF template values and do not enter the placement key.
+    pub async fn prepare_astra_placement(
+        &self,
+        machine: &ExpectedMachine,
+        dpu_serial: &str,
+    ) -> Result<(), DpfError> {
+        let Some(placement) =
+            crate::astra_placement::AstraHardwarePlacement::for_dpu(machine, dpu_serial)?
+        else {
+            return Ok(());
+        };
+        let placement_id = placement.id()?;
+        for device in DpuDeviceRepository::list(&*self.repo, &self.namespace).await? {
+            if device.spec.serial_number == dpu_serial
+                && device
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|labels| labels.get(ASTRA_PLACEMENT_LABEL))
+                    != Some(&placement_id)
+            {
+                return Err(DpfError::InvalidState("Astra placement changed for an existing DPUDevice; decommission and re-ingest through the supported lifecycle before changing placement".to_string()));
+            }
+        }
+        apply_astra_placement(self.repo.as_ref(), &self.namespace, &placement).await
+    }
+}
+
+async fn apply_astra_placement<
+    R: DpuDeploymentRepository + DpuFlavorTemplateRepository + DpuServiceInterfaceRepository,
+>(
+    repo: &R,
+    namespace: &str,
+    placement: &crate::astra_placement::AstraHardwarePlacement,
+) -> Result<(), DpfError> {
+    let placement_id = placement.id()?;
+    let deployments = DpuDeploymentRepository::list(repo, namespace).await?;
+    let bases = deployments
+        .iter()
+        .filter(|deployment| {
+            deployment.spec.dpus.astra_enabled == Some(true)
+                && deployment
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .is_none_or(|labels| !labels.contains_key(ASTRA_PLACEMENT_LABEL))
+        })
+        .collect::<Vec<_>>();
+    let [base] = bases.as_slice() else {
+        return Err(DpfError::ConfigError(
+            "explicit Astra placement requires exactly one initialized base Astra deployment"
+                .to_string(),
+        ));
+    };
+    let base_name =
+        base.metadata.name.as_deref().ok_or_else(|| {
+            DpfError::ConfigError("base Astra deployment has no name".to_string())
+        })?;
+    let template_name = base.spec.dpus.flavor_template.as_deref().ok_or_else(|| {
+        DpfError::ConfigError("base Astra deployment has no flavor template".to_string())
+    })?;
+    let base_template = DpuFlavorTemplateRepository::get(repo, template_name, namespace)
+        .await?
+        .ok_or_else(|| DpfError::not_found("DPUFlavorTemplate", template_name))?;
+    let mut template = crate::flavor::astra_template_with_placement(&base_template, placement)?;
+    let name = template.unique_name("astra-placement")?;
+    template.metadata.name = Some(name.clone());
+    match DpuFlavorTemplateRepository::create(repo, &template).await {
+        Ok(_) => (),
+        Err(DpfError::KubeError(kube::Error::Api(ref e)))
+            if e.is_already_exists() || e.is_conflict() =>
+        {
+            let existing = DpuFlavorTemplateRepository::get(repo, &name, namespace).await?;
+            let existing = existing.ok_or_else(|| {
+                DpfError::InvalidState(
+                    "placed Astra template disappeared after creation conflict".to_string(),
+                )
+            })?;
+            if existing.metadata.deletion_timestamp.is_some()
+                || serde_json::to_value(&existing.spec)? != serde_json::to_value(&template.spec)?
+            {
+                return Err(DpfError::InvalidState(
+                    "placed Astra template is missing, deleting, or differs from its content hash"
+                        .to_string(),
+                ));
+            }
+        }
+        Err(e) => return Err(e),
+    }
+    // The owner label includes the namespace and must fit Kubernetes' 63-character limit.
+    let suffix = format!("-p-{placement_id}");
+    let prefix_len = 63usize.saturating_sub(namespace.len() + 1 + suffix.len());
+    if prefix_len == 0 {
+        return Err(DpfError::ConfigError(
+            "DPF namespace is too long for placement deployment owner labels".to_string(),
+        ));
+    }
+    let deployment_name = format!(
+        "{}{}",
+        &base_name[..base_name.len().min(prefix_len)],
+        suffix
+    );
+    let base_selector = dpu_cluster_node_selector(namespace, base_name);
+    let placed_selector = dpu_cluster_node_selector(namespace, &deployment_name);
+    let interfaces = DpuServiceInterfaceRepository::list(repo, namespace, None).await?;
+    let mut count = 0;
+    for mut interface in interfaces {
+        if interface
+            .spec
+            .template
+            .spec
+            .node_selector
+            .as_ref()
+            .and_then(|s| s.match_labels.as_ref())
+            != Some(&base_selector)
+        {
+            continue;
+        }
+        let base_interface_name = interface.metadata.name.as_deref().ok_or_else(|| {
+            DpfError::ConfigError("base Astra ServiceInterface has no name".to_string())
+        })?;
+        let interface_name = format!(
+            "{}-p-{placement_id}",
+            &base_interface_name[..base_interface_name.len().min(43)]
+        );
+        interface.metadata = ObjectMeta {
+            name: Some(interface_name),
+            namespace: Some(namespace.to_string()),
+            ..Default::default()
+        };
+        interface.status = None;
+        if let Some(selector) = &mut interface.spec.template.spec.node_selector {
+            selector.match_labels = Some(placed_selector.clone());
+        }
+        DpuServiceInterfaceRepository::apply(repo, &interface).await?;
+        count += 1;
+    }
+    if count == 0 {
+        return Err(DpfError::InvalidState(
+            "base Astra scoped ServiceInterfaces are not initialized".to_string(),
+        ));
+    }
+    let mut deployment = (*base).clone();
+    deployment.metadata = ObjectMeta {
+        name: Some(deployment_name),
+        namespace: Some(namespace.to_string()),
+        annotations: {
+            let mut annotations = base.metadata.annotations.clone().unwrap_or_default();
+            annotations.insert(
+                ASTRA_PLACEMENT_LABEL.to_string(),
+                serde_json::to_string(&placement.ports)?,
+            );
+            Some(annotations)
+        },
+        labels: Some(BTreeMap::from([(
+            ASTRA_PLACEMENT_LABEL.to_string(),
+            placement_id.clone(),
+        )])),
+        ..Default::default()
+    };
+    deployment.status = None;
+    deployment.spec.dpus.flavor_template = Some(name);
+    let sets = deployment.spec.dpus.dpu_sets.as_mut().ok_or_else(|| {
+        DpfError::ConfigError("base Astra deployment has no DPU sets".to_string())
+    })?;
+    for set in sets {
+        set.dpu_device_selector = Some(serde_json::from_value(
+            json!({"matchLabels": {ASTRA_PLACEMENT_LABEL: placement_id}}),
+        )?);
+    }
+    DpuDeploymentRepository::apply(repo, &deployment).await?;
+    Ok(())
+}
+
+/// Rebuilds placement-specific resources from the current site settings after base initialization.
+async fn refresh_astra_placements<
+    R: DpuDeploymentRepository + DpuFlavorTemplateRepository + DpuServiceInterfaceRepository,
+>(
+    repo: &R,
+    namespace: &str,
+) -> Result<(), DpfError> {
+    for deployment in DpuDeploymentRepository::list(repo, namespace).await? {
+        let Some(id) = deployment
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(ASTRA_PLACEMENT_LABEL))
+        else {
+            continue;
+        };
+        let serialized = deployment
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get(ASTRA_PLACEMENT_LABEL))
+            .ok_or_else(|| {
+                DpfError::InvalidState(
+                    "placed Astra deployment has no canonical placement annotation".to_string(),
+                )
+            })?;
+        let placement = crate::astra_placement::AstraHardwarePlacement::from_ports(
+            serde_json::from_str(serialized)?,
+        )?;
+        if placement.id()? != *id {
+            return Err(DpfError::InvalidState(
+                "placed Astra deployment annotation does not match its placement selector"
+                    .to_string(),
+            ));
+        }
+        apply_astra_placement(repo, namespace, &placement).await?;
+    }
+    Ok(())
+}
+
 impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
     /// Merge changes into a DPUDevice's DPU-cluster node labels.
     ///
@@ -3382,13 +3619,19 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
     ) -> Result<(), DpfError> {
         let cr_name = dpu_device_cr_name(&info.device_id);
         let expected_machine = astra_provisioning_inputs.map(|(machine, _)| machine);
+        let placement_id = expected_machine
+            .map(|machine| {
+                crate::astra_placement::AstraHardwarePlacement::for_dpu(
+                    machine,
+                    &info.serial_number,
+                )
+            })
+            .transpose()?
+            .flatten()
+            .map(|placement| placement.id())
+            .transpose()?;
         let astra_underlay_inputs = astra_provisioning_inputs.map(|(machine, prefixes)| {
-            let nics = machine
-                .data
-                .interfaces
-                .iter()
-                .filter(|nic| nic.nic_type.as_deref() == Some("CX9"))
-                .collect::<Vec<_>>();
+            let nics = crate::astra_placement::interfaces_for_dpu(machine, &info.serial_number);
             (nics, prefixes)
         });
 
@@ -3398,6 +3641,16 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
         if let Some(existing) =
             DpuDeviceRepository::get(&*self.repo, &cr_name, &self.namespace).await?
         {
+            let existing_placement = existing
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|labels| labels.get(ASTRA_PLACEMENT_LABEL));
+            if existing_placement.map(String::as_str) != placement_id.as_deref() {
+                return Err(DpfError::InvalidState(
+                    "Astra placement changed for an existing DPUDevice; decommission and re-ingest through the supported lifecycle before changing placement".to_string()
+                ));
+            }
             bmc_credentials::check_registration_credential(
                 &existing,
                 credential_secret_name.as_deref(),
@@ -3459,7 +3712,10 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
                 name: Some(cr_name.clone()),
                 namespace: Some(self.namespace.clone()),
                 labels: {
-                    let labels = self.labeler.device_labels(&info);
+                    let mut labels = self.labeler.device_labels(&info);
+                    if let Some(id) = &placement_id {
+                        labels.insert(ASTRA_PLACEMENT_LABEL.to_string(), id.clone());
+                    }
                     if labels.is_empty() {
                         None
                     } else {
@@ -6512,6 +6768,7 @@ mod tests {
         dpus: Arc<RwLock<BTreeMap<String, DPU>>>,
         flavors: Arc<RwLock<BTreeMap<String, DPUFlavor>>>,
         flavor_templates: Arc<RwLock<BTreeMap<String, DPUFlavorTemplate>>>,
+        deployments: Arc<RwLock<BTreeMap<String, DPUDeployment>>>,
         services: Arc<RwLock<BTreeMap<String, DPUService>>>,
         service_interfaces: Arc<RwLock<BTreeMap<String, DPUServiceInterface>>>,
         service_chains: Arc<RwLock<BTreeMap<String, DPUServiceChain>>>,
@@ -7100,6 +7357,243 @@ mod tests {
 
         async fn patch(&self, _: &str, _: &str, _: serde_json::Value) -> Result<(), DpfError> {
             Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl DpuDeploymentRepository for SdkMock {
+        async fn get(&self, name: &str, ns: &str) -> Result<Option<DPUDeployment>, DpfError> {
+            Ok(self
+                .deployments
+                .read()
+                .unwrap()
+                .get(&Self::ns_key(ns, name))
+                .cloned())
+        }
+        async fn list(&self, ns: &str) -> Result<Vec<DPUDeployment>, DpfError> {
+            Ok(self
+                .deployments
+                .read()
+                .unwrap()
+                .values()
+                .filter(|d| d.metadata.namespace.as_deref() == Some(ns))
+                .cloned()
+                .collect())
+        }
+        async fn apply(&self, deployment: &DPUDeployment) -> Result<DPUDeployment, DpfError> {
+            self.deployments
+                .write()
+                .unwrap()
+                .insert(Self::key(deployment), deployment.clone());
+            Ok(deployment.clone())
+        }
+        async fn patch(&self, _: &str, _: &str, _: serde_json::Value) -> Result<(), DpfError> {
+            panic!("placement preparation must not patch an unrelated deployment")
+        }
+        async fn delete(&self, _: &str, _: &str) -> Result<(), DpfError> {
+            panic!("placement preparation must not delete deployments")
+        }
+    }
+
+    #[tokio::test]
+    async fn astra_placement_registration_shares_templates_and_selects_only_matching_devices() {
+        use crate::astra_placement::test_machine;
+        let mock = SdkMock::new();
+        let mut base_template =
+            crate::flavor::flavor_bf4_astra(TEST_NAMESPACE, &None, 64, &[], false).unwrap();
+        let name = base_template.unique_name("astra").unwrap();
+        base_template.metadata.name = Some(name.clone());
+        DpuFlavorTemplateRepository::create(&mock, &base_template)
+            .await
+            .unwrap();
+        let base = build_deployment(
+            &[],
+            "base-astra",
+            &DpuProvisioningSource::BlueFieldSoftware("software".to_string()),
+            &name,
+            TEST_NAMESPACE,
+            &[],
+            BTreeMap::from([("class".to_string(), "astra".to_string())]),
+            DpuDeploymentType::Bf4Astra,
+        );
+        DpuDeploymentRepository::apply(&mock, &base).await.unwrap();
+        let inventory = build_astra_patch_dpu_interfaces_vec();
+        apply_service_interface_templates_with_scope(
+            &mock,
+            TEST_NAMESPACE,
+            &inventory,
+            "astra",
+            Some(&dpu_cluster_node_selector(TEST_NAMESPACE, "base-astra")),
+        )
+        .await
+        .unwrap();
+        let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, String::new())
+            .build_without_resources()
+            .await
+            .unwrap();
+        let prefixes = AstraRoutePrefixes {
+            rail_route_prefix_len: 16,
+            software_plane_route_prefix_len: 13,
+        };
+        for (serial, offset, expected_templates) in
+            [("dpu-one", 3, 2), ("dpu-two", 3, 2), ("dpu-three", 20, 3)]
+        {
+            let machine = test_machine(serial, offset);
+            sdk.prepare_astra_placement(&machine, serial).await.unwrap();
+            let mut info = test_dpu_device_info();
+            info.device_id = serial.to_string();
+            info.serial_number = serial.to_string();
+            sdk.register_dpu_device(info.clone(), Some((&machine, prefixes)))
+                .await
+                .unwrap();
+            // Retried registration and preparation reuse the same immutable template/resources.
+            sdk.prepare_astra_placement(&machine, serial).await.unwrap();
+            sdk.register_dpu_device(info, Some((&machine, prefixes)))
+                .await
+                .unwrap();
+            assert_eq!(
+                mock.flavor_templates.read().unwrap().len(),
+                expected_templates
+            );
+        }
+        let devices = DpuDeviceRepository::list(&mock, TEST_NAMESPACE)
+            .await
+            .unwrap();
+        assert_eq!(devices.len(), 3);
+        let ids = devices
+            .iter()
+            .map(|d| d.metadata.labels.as_ref().unwrap()[ASTRA_PLACEMENT_LABEL].clone())
+            .collect::<Vec<_>>();
+        assert_ne!(ids[0], ids[1]); // BTreeMap order: one, three, two.
+        assert_eq!(ids[0], ids[2]);
+        let deployments = DpuDeploymentRepository::list(&mock, TEST_NAMESPACE)
+            .await
+            .unwrap();
+        assert_eq!(deployments.len(), 3);
+        for deployment in deployments
+            .iter()
+            .filter(|d| d.metadata.name.as_deref() != Some("base-astra"))
+        {
+            let id = &deployment.metadata.labels.as_ref().unwrap()[ASTRA_PLACEMENT_LABEL];
+            let sets = deployment.spec.dpus.dpu_sets.as_ref().unwrap();
+            assert_eq!(
+                serde_json::to_value(&sets[0].dpu_device_selector).unwrap(),
+                json!({"matchLabels": {ASTRA_PLACEMENT_LABEL: id}})
+            );
+            let scope = dpu_cluster_node_selector(
+                TEST_NAMESPACE,
+                deployment.metadata.name.as_deref().unwrap(),
+            );
+            let scoped = mock
+                .service_interfaces
+                .read()
+                .unwrap()
+                .values()
+                .filter(|i| {
+                    i.spec
+                        .template
+                        .spec
+                        .node_selector
+                        .as_ref()
+                        .and_then(|s| s.match_labels.as_ref())
+                        == Some(&scope)
+                })
+                .count();
+            assert_eq!(scoped, inventory.len());
+        }
+        let saved_base = DpuDeploymentRepository::get(&mock, "base-astra", TEST_NAMESPACE)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&saved_base.spec).unwrap(),
+            serde_json::to_value(&base.spec).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&base.spec.dpus.dpu_sets.as_ref().unwrap()[0].dpu_device_selector)
+                .unwrap(),
+            json!({"matchExpressions": [{"key": ASTRA_PLACEMENT_LABEL, "operator": "DoesNotExist"}]})
+        );
+        let changed = test_machine("dpu-one", 30);
+        assert!(
+            sdk.prepare_astra_placement(&changed, "dpu-one")
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            mock.flavor_templates.read().unwrap().len(),
+            3,
+            "rejected live change must not create resources"
+        );
+        let default_machine = ExpectedMachine {
+            data: Default::default(),
+            ..test_machine("unplaced", 3)
+        };
+        sdk.prepare_astra_placement(&default_machine, "unplaced")
+            .await
+            .unwrap();
+        let mut info = test_dpu_device_info();
+        info.device_id = "unplaced".to_string();
+        info.serial_number = "unplaced".to_string();
+        sdk.register_dpu_device(info, None).await.unwrap();
+        let default =
+            DpuDeviceRepository::get(&mock, &dpu_device_cr_name("unplaced"), TEST_NAMESPACE)
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(
+            default
+                .metadata
+                .labels
+                .as_ref()
+                .is_none_or(|l| !l.contains_key(ASTRA_PLACEMENT_LABEL))
+        );
+        assert_eq!(mock.flavor_templates.read().unwrap().len(), 3);
+        let mut updated_template = crate::flavor::flavor_bf4_astra(
+            TEST_NAMESPACE,
+            &None,
+            64,
+            &["PLACEMENT_REFRESH=1".to_string()],
+            false,
+        )
+        .unwrap();
+        let updated_name = updated_template.unique_name("astra").unwrap();
+        updated_template.metadata.name = Some(updated_name.clone());
+        DpuFlavorTemplateRepository::create(&mock, &updated_template)
+            .await
+            .unwrap();
+        let mut updated_base = base;
+        updated_base.spec.dpus.flavor_template = Some(updated_name);
+        updated_base.spec.dpus.blue_field_software = Some("updated-software".to_string());
+        DpuDeploymentRepository::apply(&mock, &updated_base)
+            .await
+            .unwrap();
+        refresh_astra_placements(&mock, TEST_NAMESPACE)
+            .await
+            .unwrap();
+        let refreshed = DpuDeploymentRepository::list(&mock, TEST_NAMESPACE)
+            .await
+            .unwrap();
+        assert_eq!(refreshed.len(), 3);
+        for deployment in refreshed.iter().filter(|d| {
+            d.metadata
+                .labels
+                .as_ref()
+                .is_some_and(|l| l.contains_key(ASTRA_PLACEMENT_LABEL))
+        }) {
+            assert_eq!(
+                deployment.spec.dpus.blue_field_software.as_deref(),
+                Some("updated-software")
+            );
+            let template = DpuFlavorTemplateRepository::get(
+                &mock,
+                deployment.spec.dpus.flavor_template.as_deref().unwrap(),
+                TEST_NAMESPACE,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(template.spec.template.contains("PLACEMENT_REFRESH=1"));
         }
     }
 

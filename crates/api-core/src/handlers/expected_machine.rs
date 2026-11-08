@@ -743,8 +743,8 @@ fn validate_expected_interfaces(interfaces: &[ExpectedInterface]) -> Result<(), 
     validate_at_most_one_primary_interface(interfaces)
 }
 
-/// `validate_expected_interface_role_and_allocation` checks only the role and
-/// allocation fields added to expected interfaces.
+/// `validate_expected_interface_role_and_allocation` checks role, allocation,
+/// and explicit Astra placement declarations.
 ///
 /// Batch update historically did not apply the older Expected Machine
 /// validators, so it uses this narrower check to avoid changing legacy batch
@@ -752,6 +752,8 @@ fn validate_expected_interfaces(interfaces: &[ExpectedInterface]) -> Result<(), 
 fn validate_expected_interface_role_and_allocation(
     interfaces: &[ExpectedInterface],
 ) -> Result<(), CarbideError> {
+    model::expected_machine::validate_astra_placements(interfaces)
+        .map_err(|message| CarbideError::InvalidArgument(message.to_string()))?;
     let mut roles_by_mac = HashMap::new();
     for interface in interfaces {
         interface
