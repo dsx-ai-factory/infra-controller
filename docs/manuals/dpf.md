@@ -917,6 +917,20 @@ Per-deployment field reference:
 | `extra_services` | no | none | Optional deployment-local field overrides for extra services. Only extras supported by this deployment type are used. |
 | `enable_delay_host_init` | no | `false` | When enabled, delay host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true. |
 
+##### BF4 host representor selection
+
+For BF4 generic and Astra deployments with typed intercept bridging, set each
+entry's `dpf_interface` to the controller/PF/VF identity reported by the BF4's
+`phys_port_name`. For example, `c1pf0` requires
+`dpf_interface = { controller_id = 1, pf_id = 0 }`; a VF entry on that parent
+also includes its `vf_id`. This is a site setting, not a global controller default.
+
+The generated preflight matches only netdevs owned by NVIDIA BlueField-4 PCI
+devices (vendor `0x15b3`, device `0xa2df`). CX9 representors can report the same
+`c1pf0` identity and are excluded. Missing PCI identity, no BF4 match, or multiple
+BF4 matches fail before OVS changes. Linux interface names and PCI bus numbers
+are not hardcoded, and BF3 selection is unchanged.
+
 ##### Per-machine Astra hardware placement
 
 Each CX9 `host_nics` entry in expected-machine registration can declare

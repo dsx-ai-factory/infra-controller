@@ -343,10 +343,15 @@ fn render_bf4_pf_preflight(topology: &DpfInterceptBridging) -> String {
     let mut script = String::from(concat!(
         "sys_class_net=${NICO_SYS_CLASS_NET:-/sys/class/net}\n",
         "resolve_dpf_pf() {\n",
-        "    local semantic_name=$1 result_variable=$2 phys_port_name netdev\n",
+        "    local semantic_name=$1 result_variable=$2 phys_port_name netdev pci_device\n",
         "    local -a matches=()\n",
         "    for phys_port_name in \"$sys_class_net\"/*/phys_port_name; do\n",
         "        [[ -r \"$phys_port_name\" ]] || continue\n",
+        // Representor identities are local to an adapter. CX9 exposes the same cNpfM
+        // names as BF4, so require the BF4 N/S PCI identity before counting matches.
+        "        pci_device=${phys_port_name%/phys_port_name}/device\n",
+        "        [[ -r \"$pci_device/vendor\" && -r \"$pci_device/device\" ]] || continue\n",
+        "        [[ \"$(<\"$pci_device/vendor\")\" == 0x15b3 && \"$(<\"$pci_device/device\")\" == 0xa2df ]] || continue\n",
         "        if [[ \"$(<\"$phys_port_name\")\" == \"$semantic_name\" ]]; then\n",
         "            netdev=$(basename \"${phys_port_name%/phys_port_name}\")\n",
         "            matches+=(\"$netdev\")\n",
@@ -2712,7 +2717,9 @@ pub(crate) mod tests {
         // Materialize only the semantic sysfs surface consumed by provisioning.
         for (netdev, phys_port_name) in phys_port_names {
             let netdev_dir = fixture.join(netdev);
-            fs::create_dir_all(&netdev_dir).expect("synthetic netdev directory must be created");
+            fs::create_dir_all(netdev_dir.join("device")).unwrap();
+            fs::write(netdev_dir.join("device/vendor"), "0x15b3\n").unwrap();
+            fs::write(netdev_dir.join("device/device"), "0xa2df\n").unwrap();
             fs::write(netdev_dir.join("phys_port_name"), phys_port_name)
                 .expect("synthetic phys_port_name must be written");
         }
@@ -2736,7 +2743,9 @@ pub(crate) mod tests {
         ));
         // Map the semantic PF to a different runtime name so command checks prove resolution.
         let netdev = fixture.join("sys-class-net/en8f2");
-        fs::create_dir_all(&netdev).expect("synthetic Astra netdev directory must be created");
+        fs::create_dir_all(netdev.join("device")).unwrap();
+        fs::write(netdev.join("device/vendor"), "0x15b3\n").unwrap();
+        fs::write(netdev.join("device/device"), "0xa2df\n").unwrap();
         fs::write(netdev.join("phys_port_name"), "c2pf3")
             .expect("synthetic Astra phys_port_name must be written");
 
@@ -3897,6 +3906,32 @@ done
         assert!(script.contains("host_representor=\"${dpf_c2p3_netdev}vf4\""));
         assert!(script.contains("external_ids='{}' || true"));
         assert!(!script.contains("phys_port_name 'c2pf3vf4'"));
+    }
+
+    /// Identical CX9 representor identities must not make the BF4 selection ambiguous.
+    #[test]
+    fn bf4_intercept_bridging_preflight_excludes_other_adapters() {
+        let topology = intercept_bridging();
+        let mut ports = vec![("bf4", "c2pf3")];
+        let cx_names: Vec<_> = (0..8).map(|i| format!("cx{i}")).collect();
+        ports.extend(cx_names.iter().map(|name| (name.as_str(), "c2pf3")));
+        ports.push(("other_vendor", "c2pf3"));
+        ports.push(("missing_identity", "c2pf3"));
+        let prefix = r#"
+            for i in {0..7}; do
+                printf '0x1025\n' > "$NICO_SYS_CLASS_NET/cx$i/device/device"
+            done
+            printf '0x8086\n' > "$NICO_SYS_CLASS_NET/other_vendor/device/vendor"
+            rm "$NICO_SYS_CLASS_NET/missing_identity/device/vendor"
+        "#;
+        let output = run_bf4_preflight(
+            &topology,
+            &ports,
+            prefix,
+            "printf '%s' \"$dpf_c2p3_netdev\"",
+        );
+        assert!(output.status.success(), "preflight failed: {output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "bf4");
     }
 
     /// Verifies generic-BF4 preflight fails before OVS mutation for missing or ambiguous PFs.
