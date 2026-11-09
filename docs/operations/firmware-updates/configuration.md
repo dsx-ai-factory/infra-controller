@@ -582,7 +582,7 @@ selected by the rack or component backend. Refer to
 
 A rack profile can specify one firmware-object JSON document to use as the
 default input for automatic rack firmware and switch NVOS updates. Follow the
-[canary-to-production rollout](rack-component-firmware.md#roll-out-a-sot-from-canary-to-production)
+[canary-to-production rollout](rack-component-firmware.md#roll-out-an-sot-from-canary-to-production)
 when promoting this default alongside on-demand updates of existing racks.
 
 For example, configure a rack profile as follows:
