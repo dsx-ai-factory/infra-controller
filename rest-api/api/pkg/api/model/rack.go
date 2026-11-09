@@ -116,14 +116,16 @@ func (r *APIRackGetRequest) Validate() error {
 
 // ========== Rack Filter (for batch operations) ==========
 
-// RackFilter specifies which racks to target in a batch operation.
-// If nil or empty, the operation targets all racks in the site.
+// RackFilter selects explicitly named racks for a batch operation.
+// A valid request requires a nonempty Names list. Flow rejects omitted
+// or empty filters before creating tasks.
 type RackFilter struct {
 	Names []string `json:"names,omitempty"`
 }
 
-// ToTargetSpec converts the filter to an Flow OperationTargetSpec.
-// Handles nil receiver gracefully (targets all racks).
+// ToTargetSpec converts the filter to a Flow OperationTargetSpec.
+// A nil receiver or empty Names list produces an identifier-less target,
+// which Flow rejects during task submission.
 func (f *RackFilter) ToTargetSpec() *flowv1.OperationTargetSpec {
 	var rackTargets []*flowv1.RackTarget
 

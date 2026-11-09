@@ -197,7 +197,9 @@ func (r ApiBringupRacksRequest) Execute() (*BringUpRackResponse, *http.Response,
 /*
 BringupRacks Bring up Racks
 
-Bring up Racks with optional name filter. If no filter is specified, targets all racks in the Site.
+Bring up explicitly named Racks. Provide a nonempty `filter.names` list.
+An omitted, null, or empty filter, including an empty names list, is rejected before task creation.
+For a site-wide operation, list every intended rack.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -841,7 +843,9 @@ func (r ApiFirmwareUpdateRacksRequest) Execute() (*FirmwareUpdateResponse, *http
 /*
 FirmwareUpdateRacks Firmware update Racks
 
-Update firmware on Racks with optional name filter. If no filter is specified, targets all racks in the Site.
+Update firmware on explicitly named Racks. Provide a nonempty `filter.names` list.
+An omitted, null, or empty filter, including an empty names list, is rejected before task creation.
+For a site-wide update, list every intended rack.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -1906,7 +1910,9 @@ func (r ApiPowerControlRacksRequest) Execute() (*UpdatePowerStateResponse, *http
 /*
 PowerControlRacks Power control Racks
 
-Power control Racks with optional filters. If no filter is specified, targets all racks in the Site.
+Power control explicitly named Racks. Provide a nonempty `filter.names` list.
+An omitted, null, or empty filter, including an empty names list, is rejected before task creation.
+For a site-wide operation, list every intended rack.
 
 Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
 Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.

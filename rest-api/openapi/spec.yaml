@@ -14070,7 +14070,9 @@ paths:
       summary: Power control Racks
       operationId: power-control-racks
       description: |-
-        Power control Racks with optional filters. If no filter is specified, targets all racks in the Site.
+        Power control explicitly named Racks. Provide a nonempty `filter.names` list.
+        An omitted, null, or empty filter, including an empty names list, is rejected before task creation.
+        For a site-wide operation, list every intended rack.
 
         Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
         Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
@@ -14083,9 +14085,13 @@ paths:
             schema:
               $ref: '#/components/schemas/BatchUpdateRackPowerStateRequest'
             examples:
-              power-off-all:
+              power-off-racks:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
+                  filter:
+                    names:
+                      - Rack-001
+                      - Rack-002
                   state: 'Off'
               power-on-filtered:
                 value:
@@ -14195,7 +14201,9 @@ paths:
       summary: Firmware update Racks
       operationId: firmware-update-racks
       description: |-
-        Update firmware on Racks with optional name filter. If no filter is specified, targets all racks in the Site.
+        Update firmware on explicitly named Racks. Provide a nonempty `filter.names` list.
+        An omitted, null, or empty filter, including an empty names list, is rejected before task creation.
+        For a site-wide update, list every intended rack.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -14299,7 +14307,9 @@ paths:
       summary: Bring up Racks
       operationId: bringup-racks
       description: |-
-        Bring up Racks with optional name filter. If no filter is specified, targets all racks in the Site.
+        Bring up explicitly named Racks. Provide a nonempty `filter.names` list.
+        An omitted, null, or empty filter, including an empty names list, is rejected before task creation.
+        For a site-wide operation, list every intended rack.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -14309,9 +14319,13 @@ paths:
             schema:
               $ref: '#/components/schemas/BatchBringUpRackRequest'
             examples:
-              all-racks:
+              named-racks:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
+                  filter:
+                    names:
+                      - Rack-001
+                      - Rack-002
               filtered:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
@@ -27664,13 +27678,17 @@ components:
     RackFilter:
       title: RackFilter
       type: object
-      description: Filter criteria for selecting racks in batch operations. If omitted or empty, all racks in the site are targeted.
+      description: |-
+        Select racks by name for batch power, firmware, and bring-up operations.
+        Provide a nonempty `names` list. Omitted, null, or empty filters, including
+        an empty names list, are rejected before task creation. To target every
+        rack in a site, list every intended rack name.
       properties:
         names:
           type: array
           items:
             type: string
-          description: Filter racks by name
+          description: Names of the racks to target. Provide at least one rack name.
     TrayFilter:
       title: TrayFilter
       type: object
