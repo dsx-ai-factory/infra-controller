@@ -163,8 +163,9 @@ func submitPowerOffTask(
 	componentType devicetypes.ComponentType,
 ) error {
 	info := &operations.PowerControlTaskInfo{
-		Operation: operations.PowerOperationForcePowerOff,
-		Forced:    true,
+		Operation:              operations.PowerOperationForcePowerOff,
+		Forced:                 true,
+		OverrideReadinessCheck: true,
 	}
 
 	raw, err := info.Marshal()
