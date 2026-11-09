@@ -496,8 +496,10 @@ func (isd InstanceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, 
 
 	query := db.GetIDB(tx, isd.dbSession).NewSelect().Model(i).Where("i.id = ?", id)
 
+	// Lock only the Instance row. Relations load through LEFT JOINs, and
+	// Postgres rejects FOR UPDATE on the nullable side of an outer join.
 	if forUpdate {
-		query = query.For("UPDATE")
+		query = query.For("UPDATE OF i")
 	}
 
 	for _, relation := range includeRelations {
