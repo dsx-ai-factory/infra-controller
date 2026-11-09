@@ -30,8 +30,13 @@ type FirmwareUpdateRequest struct {
 	Version NullableString `json:"version,omitempty"`
 	// Optional subset of firmware targets to update within the targeted tray. Names are lowercase and select sub-parts of the tray (BMC, BIOS, etc.). The accepted set per tray type comes from the Flow service's NICo proto bindings (which mirror Core's per-tray-type enums in `NICo-core/crates/rpc/proto/forge.proto`), so the supported values track Core as new sub-parts are added:   - switch trays (NvSwitchComponent): currently bmc, cpld, bios, nvos   - powershelf trays (PowerShelfComponent): currently pmc, psu   - compute trays (ComputeTrayComponent): currently bmc, bios  The default `nico` compute component manager forwards BMC and BIOS selections through `UpdateComponentFirmware`. The opt-in `nicolegacy` manager schedules the whole configured host firmware bundle; it does not honor BMC or BIOS sub-target selection. Omitted or empty means \"update everything in the bundle\" (the historical default) for compute-tray-internal targets. Unknown names are rejected. The special target `dpu`, valid only on compute trays, requests DPU reprovisioning on the matched host. Unlike the other targets, `dpu` is NOT covered by the \"omitted/empty means everything\" default — it must be listed explicitly. `version` is ignored on the `dpu` branch; the target firmware version comes from site configuration.
 	Targets []string `json:"targets,omitempty"`
-	// Optional, write-only authentication data for firmware downloads. Not supported for DPU-only updates or by the legacy NICo compute firmware controller.
+	// Deprecated alias of firmwareDownloadAuth. Supply at most one non-null alias. Retained for existing clients.
+	// Deprecated
 	AuthenticationData NullableFirmwareAuthenticationData `json:"authenticationData,omitempty"`
+	// Optional authentication for downloading firmware files, independent of device login credentials. Mutually exclusive with a non-null authenticationData. Omitted or null means no download authentication. Not supported for DPU-only updates or by the legacy NICo compute firmware controller.
+	FirmwareDownloadAuth NullableFirmwareAuthenticationData `json:"firmwareDownloadAuth,omitempty"`
+	// Optional device logins shared by all directly dispatched tray targets. Requires overrideReadinessCheck=true. Omitted or null preserves configured credential lookup. Unsupported for rack firmware endpoints, standalone compute reprovisioning, DPU updates and legacy compute controllers. NVOS logins are supported only for switches. Credentials remain encrypted in task storage and workflow payloads; backend registration may persist them in its own credential store. Supported targets must already exist in the site's Flow inventory.
+	DeviceCredentialOverrides NullableDeviceCredentialOverrides `json:"deviceCredentialOverrides,omitempty"`
 	// Optional Operation Rule UUID. When set, pins this firmware update to the named rule and overrides Flow's default rule resolution.
 	RuleId *string `json:"ruleId,omitempty"`
 	// When true, request that the selected component backend override firmware version-based checks when deciding whether to apply the update. This permits same-version reapplication and downgrade when supported. It does not bypass readiness checks or state-controller routing.
@@ -168,6 +173,7 @@ func (o *FirmwareUpdateRequest) SetTargets(v []string) {
 }
 
 // GetAuthenticationData returns the AuthenticationData field value if set, zero value otherwise (both if not set or set to explicit null).
+// Deprecated
 func (o *FirmwareUpdateRequest) GetAuthenticationData() FirmwareAuthenticationData {
 	if o == nil || IsNil(o.AuthenticationData.Get()) {
 		var ret FirmwareAuthenticationData
@@ -179,6 +185,7 @@ func (o *FirmwareUpdateRequest) GetAuthenticationData() FirmwareAuthenticationDa
 // GetAuthenticationDataOk returns a tuple with the AuthenticationData field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
+// Deprecated
 func (o *FirmwareUpdateRequest) GetAuthenticationDataOk() (*FirmwareAuthenticationData, bool) {
 	if o == nil {
 		return nil, false
@@ -196,6 +203,7 @@ func (o *FirmwareUpdateRequest) HasAuthenticationData() bool {
 }
 
 // SetAuthenticationData gets a reference to the given NullableFirmwareAuthenticationData and assigns it to the AuthenticationData field.
+// Deprecated
 func (o *FirmwareUpdateRequest) SetAuthenticationData(v FirmwareAuthenticationData) {
 	o.AuthenticationData.Set(&v)
 }
@@ -208,6 +216,92 @@ func (o *FirmwareUpdateRequest) SetAuthenticationDataNil() {
 // UnsetAuthenticationData ensures that no value is present for AuthenticationData, not even an explicit nil
 func (o *FirmwareUpdateRequest) UnsetAuthenticationData() {
 	o.AuthenticationData.Unset()
+}
+
+// GetFirmwareDownloadAuth returns the FirmwareDownloadAuth field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *FirmwareUpdateRequest) GetFirmwareDownloadAuth() FirmwareAuthenticationData {
+	if o == nil || IsNil(o.FirmwareDownloadAuth.Get()) {
+		var ret FirmwareAuthenticationData
+		return ret
+	}
+	return *o.FirmwareDownloadAuth.Get()
+}
+
+// GetFirmwareDownloadAuthOk returns a tuple with the FirmwareDownloadAuth field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *FirmwareUpdateRequest) GetFirmwareDownloadAuthOk() (*FirmwareAuthenticationData, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.FirmwareDownloadAuth.Get(), o.FirmwareDownloadAuth.IsSet()
+}
+
+// HasFirmwareDownloadAuth returns a boolean if a field has been set.
+func (o *FirmwareUpdateRequest) HasFirmwareDownloadAuth() bool {
+	if o != nil && o.FirmwareDownloadAuth.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetFirmwareDownloadAuth gets a reference to the given NullableFirmwareAuthenticationData and assigns it to the FirmwareDownloadAuth field.
+func (o *FirmwareUpdateRequest) SetFirmwareDownloadAuth(v FirmwareAuthenticationData) {
+	o.FirmwareDownloadAuth.Set(&v)
+}
+
+// SetFirmwareDownloadAuthNil sets the value for FirmwareDownloadAuth to be an explicit nil
+func (o *FirmwareUpdateRequest) SetFirmwareDownloadAuthNil() {
+	o.FirmwareDownloadAuth.Set(nil)
+}
+
+// UnsetFirmwareDownloadAuth ensures that no value is present for FirmwareDownloadAuth, not even an explicit nil
+func (o *FirmwareUpdateRequest) UnsetFirmwareDownloadAuth() {
+	o.FirmwareDownloadAuth.Unset()
+}
+
+// GetDeviceCredentialOverrides returns the DeviceCredentialOverrides field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *FirmwareUpdateRequest) GetDeviceCredentialOverrides() DeviceCredentialOverrides {
+	if o == nil || IsNil(o.DeviceCredentialOverrides.Get()) {
+		var ret DeviceCredentialOverrides
+		return ret
+	}
+	return *o.DeviceCredentialOverrides.Get()
+}
+
+// GetDeviceCredentialOverridesOk returns a tuple with the DeviceCredentialOverrides field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *FirmwareUpdateRequest) GetDeviceCredentialOverridesOk() (*DeviceCredentialOverrides, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DeviceCredentialOverrides.Get(), o.DeviceCredentialOverrides.IsSet()
+}
+
+// HasDeviceCredentialOverrides returns a boolean if a field has been set.
+func (o *FirmwareUpdateRequest) HasDeviceCredentialOverrides() bool {
+	if o != nil && o.DeviceCredentialOverrides.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDeviceCredentialOverrides gets a reference to the given NullableDeviceCredentialOverrides and assigns it to the DeviceCredentialOverrides field.
+func (o *FirmwareUpdateRequest) SetDeviceCredentialOverrides(v DeviceCredentialOverrides) {
+	o.DeviceCredentialOverrides.Set(&v)
+}
+
+// SetDeviceCredentialOverridesNil sets the value for DeviceCredentialOverrides to be an explicit nil
+func (o *FirmwareUpdateRequest) SetDeviceCredentialOverridesNil() {
+	o.DeviceCredentialOverrides.Set(nil)
+}
+
+// UnsetDeviceCredentialOverrides ensures that no value is present for DeviceCredentialOverrides, not even an explicit nil
+func (o *FirmwareUpdateRequest) UnsetDeviceCredentialOverrides() {
+	o.DeviceCredentialOverrides.Unset()
 }
 
 // GetRuleId returns the RuleId field value if set, zero value otherwise.
@@ -325,6 +419,12 @@ func (o FirmwareUpdateRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if o.AuthenticationData.IsSet() {
 		toSerialize["authenticationData"] = o.AuthenticationData.Get()
+	}
+	if o.FirmwareDownloadAuth.IsSet() {
+		toSerialize["firmwareDownloadAuth"] = o.FirmwareDownloadAuth.Get()
+	}
+	if o.DeviceCredentialOverrides.IsSet() {
+		toSerialize["deviceCredentialOverrides"] = o.DeviceCredentialOverrides.Get()
 	}
 	if !IsNil(o.RuleId) {
 		toSerialize["ruleId"] = o.RuleId

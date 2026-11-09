@@ -66,17 +66,19 @@ func AuditLog(dbSession *cdb.Session) echo.MiddlewareFunc {
 
 // obfuscateFields contains lowercase field names that should be obfuscated when recording request bodies.
 var obfuscateFields = map[string]struct{}{
-	"ipxescript":         {},
-	"userdata":           {},
-	"publickey":          {},
-	"defaultbmcusername": {},
-	"defaultbmcpassword": {},
-	"authenticationdata": {},
-	"authtoken":          {},
-	"clientsecret":       {},
-	"imageauthtoken":     {},
-	"password":           {},
-	"nvospassword":       {},
+	"ipxescript":                {},
+	"userdata":                  {},
+	"publickey":                 {},
+	"defaultbmcusername":        {},
+	"defaultbmcpassword":        {},
+	"authenticationdata":        {},
+	"firmwaredownloadauth":      {},
+	"devicecredentialoverrides": {},
+	"authtoken":                 {},
+	"clientsecret":              {},
+	"imageauthtoken":            {},
+	"password":                  {},
+	"nvospassword":              {},
 }
 
 const (

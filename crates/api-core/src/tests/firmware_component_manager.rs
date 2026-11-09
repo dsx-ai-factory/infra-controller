@@ -137,6 +137,10 @@ impl ComputeTrayManager for RecordingComputeTrayManager {
         &self,
         endpoints: &[ComputeTrayEndpoint],
     ) -> Result<Vec<ComputeTrayFirmwareUpdateStatus>, ComponentManagerError> {
+        self.submitted_credentials
+            .lock()
+            .unwrap()
+            .extend(endpoints.iter().map(|ep| ep.bmc_credentials.clone()));
         self.inner.get_firmware_status(endpoints).await
     }
 
@@ -203,6 +207,11 @@ impl NvSwitchManager for RecordingNvSwitchManager {
         &self,
         endpoints: &[SwitchEndpoint],
     ) -> Result<Vec<SwitchFirmwareUpdateStatus>, ComponentManagerError> {
+        self.submitted_credentials.lock().unwrap().extend(
+            endpoints
+                .iter()
+                .flat_map(|ep| [ep.bmc_credentials.clone(), ep.nvos_credentials.clone()]),
+        );
         self.inner.get_firmware_status(endpoints).await
     }
 
@@ -300,6 +309,10 @@ impl PowerShelfManager for RecordingPowerShelfManager {
         &self,
         endpoints: &[PowerShelfEndpoint],
     ) -> Result<Vec<PowerShelfFirmwareUpdateStatus>, ComponentManagerError> {
+        self.submitted_credentials
+            .lock()
+            .unwrap()
+            .extend(endpoints.iter().map(|ep| ep.pmc_credentials.clone()));
         self.inner.get_firmware_status(endpoints).await
     }
 
@@ -1249,6 +1262,17 @@ async fn direct_dispatch_credential_overrides_reach_power_and_firmware_backends(
                 FirmwareTarget::Racks(_) => unreachable!(),
             };
             firmware.credential_overrides = Some(request_credentials(true));
+            use rpc::get_component_firmware_status_request::Target as StatusTarget;
+            let status_target = match &power_target {
+                PowerTarget::MachineIds(ids) => StatusTarget::MachineIds(ids.clone()),
+                PowerTarget::SwitchIds(ids) => StatusTarget::SwitchIds(ids.clone()),
+                PowerTarget::PowerShelfIds(ids) => StatusTarget::PowerShelfIds(ids.clone()),
+                PowerTarget::ComputeBmcMacs(macs) => StatusTarget::ComputeBmcMacs(macs.clone()),
+                PowerTarget::SwitchBmcMacs(macs) => StatusTarget::SwitchBmcMacs(macs.clone()),
+                PowerTarget::PowerShelfPmcMacs(macs) => {
+                    StatusTarget::PowerShelfPmcMacs(macs.clone())
+                }
+            };
             let power = rpc::ComponentPowerControlRequest {
                 target: Some(power_target),
                 action: ::rpc::common::SystemPowerControl::On as i32,
@@ -1279,6 +1303,27 @@ async fn direct_dispatch_credential_overrides_reach_power_and_firmware_backends(
                     "{results:?}"
                 );
             }
+            let statuses = crate::handlers::component_manager::get_component_firmware_status(
+                &fixture.env.api,
+                Request::new(rpc::GetComponentFirmwareStatusRequest {
+                    target: Some(status_target),
+                    credential_overrides: Some(request_credentials(true)),
+                }),
+            )
+            .await?
+            .into_inner()
+            .statuses;
+            assert!(!statuses.is_empty(), "{mac}, ingested={ingested}");
+            assert!(
+                statuses
+                    .iter()
+                    .all(|status| status
+                        .result
+                        .as_ref()
+                        .is_some_and(|result| result.status
+                            == rpc::ComponentManagerStatusCode::Success as i32)),
+                "{statuses:?}"
+            );
             let expected: Vec<_> = [expected.bmc, expected.nvos]
                 .into_iter()
                 .flatten()
@@ -1286,7 +1331,7 @@ async fn direct_dispatch_credential_overrides_reach_power_and_firmware_backends(
                 .collect();
             assert_eq!(
                 *recorded.lock().unwrap(),
-                [expected.clone(), expected].concat(),
+                [expected.clone(), expected.clone(), expected].concat(),
                 "{mac}, ingested={ingested}"
             );
             recorded.lock().unwrap().clear();
@@ -1445,7 +1490,7 @@ async fn credential_overrides_only_apply_to_direct_targets_in_mixed_batches(
 }
 
 #[crate::sqlx_test]
-async fn credential_overrides_are_ignored_for_rack_updates_and_standalone_reprovisioning(
+async fn credential_overrides_are_rejected_for_rack_updates_and_standalone_reprovisioning(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let fixture = create_firmware_object_fixture(pool.clone()).await?;
@@ -1455,6 +1500,9 @@ async fn credential_overrides_are_ignored_for_rack_updates_and_standalone_reprov
     )
     .await;
     let host_id: HostMachineId = host.id.into();
+    let before = db::machine::find_one(&pool, &host_id, Default::default())
+        .await?
+        .unwrap();
     for mut request in [
         compute_request(host_id, true).into_inner(),
         rpc::UpdateComponentFirmwareRequest {
@@ -1470,23 +1518,27 @@ async fn credential_overrides_are_ignored_for_rack_updates_and_standalone_reprov
         },
     ] {
         request.credential_overrides = Some(request_credentials(true));
-        let response = crate::handlers::component_manager::update_component_firmware(
+        let error = crate::handlers::component_manager::update_component_firmware(
             &fixture.env.api,
             Request::new(request),
         )
-        .await?
-        .into_inner();
-        assert_eq!(response.results.len(), 1);
-        assert_eq!(
-            response.results[0].status,
-            rpc::ComponentManagerStatusCode::Success as i32
-        );
+        .await
+        .expect_err("unsupported credential overrides must be rejected");
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
     }
     let after = db::machine::find_one(&pool, &host_id, Default::default())
         .await?
         .unwrap();
-    assert_eq!(after.config.firmware_autoupdate, Some(true));
-    assert_rack_activity_version(&fixture).await?;
+    assert_eq!(
+        after.config.firmware_autoupdate,
+        before.config.firmware_autoupdate
+    );
+    let racks = db::rack::find_by(
+        &mut *pool.acquire().await?,
+        db::ObjectColumnFilter::One(db::rack::IdColumn, &fixture.rack_id),
+    )
+    .await?;
+    assert!(racks[0].config.maintenance_requested.is_none());
     assert!(
         fixture
             .compute_tray_manager

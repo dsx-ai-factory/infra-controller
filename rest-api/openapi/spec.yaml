@@ -28626,10 +28626,31 @@ components:
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
+          deprecated: true
           description: |-
-            Optional, write-only authentication data for firmware downloads.
+            Deprecated alias of firmwareDownloadAuth. Supply at most one
+            non-null alias. Retained for existing clients.
+        firmwareDownloadAuth:
+          $ref: '#/components/schemas/FirmwareAuthenticationData'
+          writeOnly: true
+          description: |-
+            Optional authentication for downloading firmware files, independent
+            of device login credentials. Mutually exclusive with a non-null
+            authenticationData. Omitted or null means no download authentication.
             Not supported for DPU-only updates or by the legacy NICo compute
             firmware controller.
+        deviceCredentialOverrides:
+          $ref: '#/components/schemas/DeviceCredentialOverrides'
+          writeOnly: true
+          description: |-
+            Optional device logins shared by all directly dispatched tray targets.
+            Requires overrideReadinessCheck=true. Omitted or null preserves
+            configured credential lookup. Unsupported for rack firmware endpoints,
+            standalone compute reprovisioning, DPU updates and legacy compute
+            controllers. NVOS logins are supported only for switches.
+            Credentials remain encrypted in task storage and workflow payloads;
+            backend registration may persist them in its own credential store.
+            Supported targets must already exist in the site's Flow inventory.
         ruleId:
           type: string
           format: uuid
@@ -29912,10 +29933,31 @@ components:
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
+          deprecated: true
           description: |-
-            Optional, write-only authentication data for firmware downloads.
+            Deprecated alias of firmwareDownloadAuth. Supply at most one
+            non-null alias. Retained for existing clients.
+        firmwareDownloadAuth:
+          $ref: '#/components/schemas/FirmwareAuthenticationData'
+          writeOnly: true
+          description: |-
+            Optional authentication for downloading firmware files, independent
+            of device login credentials. Mutually exclusive with a non-null
+            authenticationData. Omitted or null means no download authentication.
             Not supported for DPU-only updates or by the legacy NICo compute
             firmware controller.
+        deviceCredentialOverrides:
+          $ref: '#/components/schemas/DeviceCredentialOverrides'
+          writeOnly: true
+          description: |-
+            Optional device logins shared by all directly dispatched tray targets.
+            Requires overrideReadinessCheck=true. Omitted or null preserves
+            configured credential lookup. Unsupported for rack firmware endpoints,
+            standalone compute reprovisioning, DPU updates and legacy compute
+            controllers. NVOS logins are supported only for switches.
+            Credentials remain encrypted in task storage and workflow payloads;
+            backend registration may persist them in its own credential store.
+            Supported targets must already exist in the site's Flow inventory.
         ruleId:
           type: string
           format: uuid
@@ -30018,6 +30060,54 @@ components:
       examples:
         - taskIds:
             - 550e8400-e29b-41d4-a716-446655440000
+    DeviceCredentialOverrides:
+      title: DeviceCredentialOverrides
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      description: |-
+        Device login overrides, separate from firmware file-download authentication.
+        At least one non-null pair is required. Supplied pairs take precedence over
+        stored credentials; authentication failures do not fall back. Omitted pairs
+        retain configured lookup. Used for both dispatch and status polling.
+        Values are write-only and never returned by task reads.
+      properties:
+        bmc:
+          $ref: '#/components/schemas/DeviceLogin'
+          description: Compute or switch BMC, or power-shelf PMC login.
+        nvos:
+          $ref: '#/components/schemas/DeviceLogin'
+          description: Switch NVOS login; unsupported for other tray types.
+      anyOf:
+        - required: [bmc]
+        - required: [nvos]
+      example:
+        bmc:
+          username: admin
+          password: example-bmc-password
+        nvos:
+          username: admin
+          password: example-nvos-password
+    DeviceLogin:
+      title: DeviceLogin
+      type: object
+      additionalProperties: false
+      description: Complete write-only username/password pair for device access.
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: Nonempty device username.
+        password:
+          type: string
+          minLength: 1
+          writeOnly: true
+          description: Nonempty device password.
+      example:
+        username: admin
+        password: example-device-password
     FirmwareAuthenticationData:
       title: FirmwareAuthenticationData
       type: object
@@ -30158,10 +30248,31 @@ components:
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
+          deprecated: true
           description: |-
-            Optional, write-only authentication data for firmware downloads.
+            Deprecated alias of firmwareDownloadAuth. Supply at most one
+            non-null alias. Retained for existing clients.
+        firmwareDownloadAuth:
+          $ref: '#/components/schemas/FirmwareAuthenticationData'
+          writeOnly: true
+          description: |-
+            Optional authentication for downloading firmware files, independent
+            of device login credentials. Mutually exclusive with a non-null
+            authenticationData. Omitted or null means no download authentication.
             Not supported for DPU-only updates or by the legacy NICo compute
             firmware controller.
+        deviceCredentialOverrides:
+          $ref: '#/components/schemas/DeviceCredentialOverrides'
+          writeOnly: true
+          description: |-
+            Optional device logins shared by all directly dispatched tray targets.
+            Requires overrideReadinessCheck=true. Omitted or null preserves
+            configured credential lookup. Unsupported for rack firmware endpoints,
+            standalone compute reprovisioning, DPU updates and legacy compute
+            controllers. NVOS logins are supported only for switches.
+            Credentials remain encrypted in task storage and workflow payloads;
+            backend registration may persist them in its own credential store.
+            Supported targets must already exist in the site's Flow inventory.
         ruleId:
           type: string
           format: uuid

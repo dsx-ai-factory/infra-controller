@@ -367,7 +367,15 @@
                 </li>
 
                 <li>
+                  <a href="#v1.DeviceCredentialOverrides"><span class="badge">M</span>DeviceCredentialOverrides</a>
+                </li>
+
+                <li>
                   <a href="#v1.DeviceInfo"><span class="badge">M</span>DeviceInfo</a>
+                </li>
+
+                <li>
+                  <a href="#v1.DeviceLogin"><span class="badge">M</span>DeviceLogin</a>
                 </li>
 
                 <li>
@@ -935,6 +943,10 @@
                 </li>
 
                 <li>
+                  <a href="#v1.RackOperationStatusDetails"><span class="badge">M</span>RackOperationStatusDetails</a>
+                </li>
+
+                <li>
                   <a href="#v1.RackPosition"><span class="badge">M</span>RackPosition</a>
                 </li>
 
@@ -1036,6 +1048,14 @@
 
                 <li>
                   <a href="#v1.TrayPowerDetails"><span class="badge">M</span>TrayPowerDetails</a>
+                </li>
+
+                <li>
+                  <a href="#v1.TrayStatusCounts"><span class="badge">M</span>TrayStatusCounts</a>
+                </li>
+
+                <li>
+                  <a href="#v1.TrayStatusCountsByType"><span class="badge">M</span>TrayStatusCountsByType</a>
                 </li>
 
                 <li>
@@ -2761,6 +2781,37 @@ registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. </p></td>
 
 
 
+        <h3 id="v1.DeviceCredentialOverrides">DeviceCredentialOverrides</h3>
+        <p>DeviceCredentialOverrides selects credentials for device access, independently</p><p>of firmware download authentication. At least one complete pair is required.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>bmc</td>
+                  <td><a href="#v1.DeviceLogin">DeviceLogin</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>nvos</td>
+                  <td><a href="#v1.DeviceLogin">DeviceLogin</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.DeviceInfo">DeviceInfo</h3>
         <p></p>
 
@@ -2810,6 +2861,37 @@ registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. </p></td>
                   <td>description</td>
                   <td><a href="#string">string</a></td>
                   <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.DeviceLogin">DeviceLogin</h3>
+        <p>DeviceLogin contains a nonempty username and password for device access.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>username</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>password</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
                   <td><p> </p></td>
                 </tr>
 
@@ -7848,6 +7930,13 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
                   <td><p>Public rack-group domain identities. </p></td>
                 </tr>
 
+                <tr>
+                  <td>operation_status_details</td>
+                  <td><a href="#v1.RackOperationStatusDetails">RackOperationStatusDetails</a></td>
+                  <td></td>
+                  <td><p>Output only. Absent on older servers; ignored on inventory writes. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -7893,6 +7982,33 @@ inventory member has a managed Core identity. </p></td>
                   <td><a href="#v1.PowerActionDetails">PowerActionDetails</a></td>
                   <td></td>
                   <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.RackOperationStatusDetails">RackOperationStatusDetails</h3>
+        <p>RackOperationStatusDetails explains operation_status, not operation admission.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>tray_counts_by_type</td>
+                  <td><a href="#v1.TrayStatusCountsByType">TrayStatusCountsByType</a></td>
+                  <td></td>
+                  <td><p>Counts of active Compute, NVSwitch and PowerShelf inventory records from
+the same snapshot used for operation_status, independent of expansion.
+Undiscovered records and other component types are excluded. No freshness
+or expected-inventory completeness guarantee is implied. </p></td>
                 </tr>
 
             </tbody>
@@ -9135,6 +9251,103 @@ read; older services or proxies also omit it. Never uses the Flow UUID. </p></td
 
 
 
+        <h3 id="v1.TrayStatusCounts">TrayStatusCounts</h3>
+        <p>TrayStatusCounts partitions participating trays by their operation phase.</p><p>An empty rack has all zero counts and operation_status Unknown. A missing or</p><p>unrecognized status on an existing participating tray increments unknown.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>ready</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays in Ready. </p></td>
+                </tr>
+
+                <tr>
+                  <td>in_use</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays in InUse. </p></td>
+                </tr>
+
+                <tr>
+                  <td>initializing</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays in Initializing. </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays in Error. </p></td>
+                </tr>
+
+                <tr>
+                  <td>deleting</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays in Deleting. </p></td>
+                </tr>
+
+                <tr>
+                  <td>unknown</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays with unknown, missing or unrecognized status. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.TrayStatusCountsByType">TrayStatusCountsByType</h3>
+        <p>TrayStatusCountsByType always includes all three types, with zero counts for</p><p>types without participating records. Empty types do not affect rack phase.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>compute</td>
+                  <td><a href="#v1.TrayStatusCounts">TrayStatusCounts</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>nv_switch</td>
+                  <td><a href="#v1.TrayStatusCounts">TrayStatusCounts</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>power_shelf</td>
+                  <td><a href="#v1.TrayStatusCounts">TrayStatusCounts</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.TriggerTaskScheduleRequest">TriggerTaskScheduleRequest</h3>
         <p>TriggerTaskScheduleRequest fires a TaskSchedule immediately, regardless of</p><p>next_run_at or enabled state. The overlap policy is not consulted — all</p><p>scopes are submitted unconditionally. Returns an error for a one-time</p><p>schedule that has already fired.</p>
 
@@ -9484,6 +9697,15 @@ firmware controller. </p></td>
 the update. This allows same-version reapplication and downgrade when
 the selected component backend supports those operations. It does not
 bypass readiness checks or state-controller routing. </p></td>
+                </tr>
+
+                <tr>
+                  <td>device_credential_overrides</td>
+                  <td><a href="#v1.DeviceCredentialOverrides">DeviceCredentialOverrides</a></td>
+                  <td></td>
+                  <td><p>Write-only device login overrides for direct firmware dispatch. Requires
+override_readiness_check. Unsupported for DPU updates and
+legacy compute controllers. Omitted pairs retain configured lookup. </p></td>
                 </tr>
 
             </tbody>

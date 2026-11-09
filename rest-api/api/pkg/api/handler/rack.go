@@ -1001,6 +1001,10 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate firmware update request data", verr)
 	}
 
+	if apiRequest.DeviceCredentialOverrides != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Rack firmware updates do not support deviceCredentialOverrides", nil)
+	}
+
 	// Validate the site
 	site, err := common.GetSiteFromIDString(ctx, nil, apiRequest.SiteID, furh.dbSession)
 	if err != nil {
@@ -1039,7 +1043,7 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	}
 
 	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, apiRequest.Version,
-		nil, apiRequest.AuthenticationData.ToProto(), apiRequest.SiteID, apiRequest.RuleID,
+		nil, apiRequest.DownloadAuth(), apiRequest.DeviceCredentialOverrides.ToProto(), apiRequest.SiteID, apiRequest.RuleID,
 		apiRequest.OverrideReadinessCheck, apiRequest.OverrideVersionCheck,
 		fmt.Sprintf("rack-firmware-update-%s", rackStrID), "Rack")
 	if proxyErr != nil {
@@ -1130,6 +1134,10 @@ func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to retrieve Infrastructure Provider for org", nil)
 	}
 
+	if request.DeviceCredentialOverrides != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Rack firmware updates do not support deviceCredentialOverrides", nil)
+	}
+
 	// Validate the site
 	site, err := common.GetSiteFromIDString(ctx, nil, request.SiteID, furbh.dbSession)
 	if err != nil {
@@ -1159,7 +1167,7 @@ func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	targetSpec := request.Filter.ToTargetSpec()
 
 	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, request.Version,
-		nil, request.AuthenticationData.ToProto(), request.SiteID, request.RuleID,
+		nil, request.DownloadAuth(), request.DeviceCredentialOverrides.ToProto(), request.SiteID, request.RuleID,
 		request.OverrideReadinessCheck, request.OverrideVersionCheck,
 		fmt.Sprintf("rack-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Rack")
 	if proxyErr != nil {

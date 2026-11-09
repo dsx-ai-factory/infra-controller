@@ -11413,10 +11413,10 @@ message UpdateComponentFirmwareRequest {
   // Not supported for rack-level firmware updates.
   bool bypass_state_controller = 8;
   // Used only for directly dispatched targets; ignored for state-controller
-  // operations, rack updates, and standalone compute reprovisioning.
+  // operations. Rack updates and standalone compute reprovisioning reject overrides.
   // Does not change routing. Use bypass_state_controller for
   // ingested component targets that support direct firmware dispatch.
-  // Status/version requests use their existing credential lookup.
+  // Status requests accept their own overrides; version requests retain stored lookup.
   optional ComponentCredentialOverrides credential_overrides = 9;
 }
 
@@ -11434,6 +11434,12 @@ message GetComponentFirmwareStatusRequest {
     MacAddressList switch_bmc_macs = 6;
     MacAddressList power_shelf_pmc_macs = 7;
   }
+  // Device login overrides for backend status queries after direct dispatch.
+  // Omitted pairs retain stored lookup. Unsupported for rack targets.
+  // Supplied overrides select backend polling for ingested components instead of
+  // controller status. Standalone compute targets are unsupported. Core does not
+  // persist these credentials.
+  ComponentCredentialOverrides credential_overrides = 8;
 }
 
 message GetComponentFirmwareStatusResponse {

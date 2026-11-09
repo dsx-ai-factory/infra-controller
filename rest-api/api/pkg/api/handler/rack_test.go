@@ -1460,6 +1460,14 @@ func TestUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusPreconditionFailed,
 		},
 		{
+			name:           "failure - device overrides unsupported on rack endpoint",
+			reqOrg:         org,
+			user:           providerUser,
+			rackID:         rackID,
+			body:           fmt.Sprintf(`{"siteId":"%s","overrideReadinessCheck":true,"deviceCredentialOverrides":{"bmc":{"username":"operator","password":"device-value"}}}`, site.ID.String()),
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
 			name:           "success - firmware update with authentication data",
 			reqOrg:         org,
 			user:           providerUser,
@@ -1879,6 +1887,13 @@ func TestBatchUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			body:           fmt.Sprintf(`{"siteId":"%s"}`, site.ID.String()),
 			mockResultErr:  tp.NewNonRetryableApplicationError("operation rejected", swe.ErrTypeNICoFailedPrecondition, nil),
 			expectedStatus: http.StatusPreconditionFailed,
+		},
+		{
+			name:           "failure - device overrides unsupported on rack endpoint",
+			reqOrg:         org,
+			user:           providerUser,
+			body:           fmt.Sprintf(`{"siteId":"%s","overrideReadinessCheck":true,"deviceCredentialOverrides":{"bmc":{"username":"operator","password":"device-value"}}}`, site.ID.String()),
+			expectedStatus: http.StatusBadRequest,
 		},
 		{
 			name:           "success - firmware update all racks with authentication data",

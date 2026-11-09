@@ -19,9 +19,14 @@ import (
 
 // APIUpdateFirmwareRequest is the request body for firmware update operations
 type APIUpdateFirmwareRequest struct {
-	SiteID             string                         `json:"siteId"`
-	Version            *string                        `json:"version"`
+	SiteID  string  `json:"siteId"`
+	Version *string `json:"version"`
+	// AuthenticationData is the deprecated alias of FirmwareDownloadAuth.
 	AuthenticationData *APIFirmwareAuthenticationData `json:"authenticationData"`
+	// FirmwareDownloadAuth authenticates artifact downloads; it is mutually exclusive with AuthenticationData.
+	FirmwareDownloadAuth *APIFirmwareAuthenticationData `json:"firmwareDownloadAuth"`
+	// DeviceCredentialOverrides supplies device logins for direct tray firmware dispatch.
+	DeviceCredentialOverrides *APIDeviceCredentialOverrides `json:"deviceCredentialOverrides"`
 	// Targets, when non-empty, restricts the update to a subset of
 	// firmware sub-parts within the targeted tray (e.g. ["bmc", "nvos"]
 	// for switch trays). Names are lowercase. The authoritative supported
@@ -63,7 +68,9 @@ func (r *APIUpdateFirmwareRequest) Validate() error {
 	err := validation.ValidateStruct(r,
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
-		validation.Field(&r.AuthenticationData),
+		validation.Field(&r.AuthenticationData, validation.By(r.validateFirmwareAuth)),
+		validation.Field(&r.FirmwareDownloadAuth),
+		validation.Field(&r.DeviceCredentialOverrides),
 	)
 	if err != nil {
 		return err
@@ -228,10 +235,15 @@ func NewAPIUpdateFirmwareResponse(resp *flowv1.SubmitTaskResponse) *APIUpdateFir
 
 // APIBatchRackFirmwareUpdateRequest is the JSON body for batch rack firmware update.
 type APIBatchRackFirmwareUpdateRequest struct {
-	SiteID             string                         `json:"siteId"`
-	Filter             *RackFilter                    `json:"filter"`
-	Version            *string                        `json:"version"`
+	SiteID  string      `json:"siteId"`
+	Filter  *RackFilter `json:"filter"`
+	Version *string     `json:"version"`
+	// AuthenticationData is the deprecated alias of FirmwareDownloadAuth.
 	AuthenticationData *APIFirmwareAuthenticationData `json:"authenticationData"`
+	// FirmwareDownloadAuth authenticates artifact downloads; it is mutually exclusive with AuthenticationData.
+	FirmwareDownloadAuth *APIFirmwareAuthenticationData `json:"firmwareDownloadAuth"`
+	// DeviceCredentialOverrides supplies device logins for direct tray firmware dispatch.
+	DeviceCredentialOverrides *APIDeviceCredentialOverrides `json:"deviceCredentialOverrides"`
 	// RuleID, when set, pins every task spawned by this batch to the named
 	// Operation Rule.
 	RuleID *string `json:"ruleId"`
@@ -248,7 +260,9 @@ func (r *APIBatchRackFirmwareUpdateRequest) Validate() error {
 	return validation.ValidateStruct(r,
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
-		validation.Field(&r.AuthenticationData),
+		validation.Field(&r.AuthenticationData, validation.By(r.validateFirmwareAuth)),
+		validation.Field(&r.FirmwareDownloadAuth),
+		validation.Field(&r.DeviceCredentialOverrides),
 	)
 }
 
@@ -256,10 +270,15 @@ func (r *APIBatchRackFirmwareUpdateRequest) Validate() error {
 
 // APIBatchTrayFirmwareUpdateRequest is the JSON body for batch tray firmware update.
 type APIBatchTrayFirmwareUpdateRequest struct {
-	SiteID             string                         `json:"siteId"`
-	Filter             *TrayFilter                    `json:"filter"`
-	Version            *string                        `json:"version"`
+	SiteID  string      `json:"siteId"`
+	Filter  *TrayFilter `json:"filter"`
+	Version *string     `json:"version"`
+	// AuthenticationData is the deprecated alias of FirmwareDownloadAuth.
 	AuthenticationData *APIFirmwareAuthenticationData `json:"authenticationData"`
+	// FirmwareDownloadAuth authenticates artifact downloads; it is mutually exclusive with AuthenticationData.
+	FirmwareDownloadAuth *APIFirmwareAuthenticationData `json:"firmwareDownloadAuth"`
+	// DeviceCredentialOverrides supplies device logins for direct tray firmware dispatch.
+	DeviceCredentialOverrides *APIDeviceCredentialOverrides `json:"deviceCredentialOverrides"`
 	// Targets, when non-empty, restricts the update to a subset of
 	// firmware sub-parts within each matched tray. Same semantics as the
 	// single-tray variant.
@@ -280,7 +299,9 @@ func (r *APIBatchTrayFirmwareUpdateRequest) Validate() error {
 	err := validation.ValidateStruct(r,
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
-		validation.Field(&r.AuthenticationData),
+		validation.Field(&r.AuthenticationData, validation.By(r.validateFirmwareAuth)),
+		validation.Field(&r.FirmwareDownloadAuth),
+		validation.Field(&r.DeviceCredentialOverrides),
 	)
 	if err != nil {
 		return err
@@ -306,4 +327,125 @@ func validateFirmwareTargets(targets []string) error {
 		}
 	}
 	return nil
+}
+
+// APIDeviceCredentialOverrides supplies complete BMC and/or NVOS login pairs.
+// Omitted pairs retain the configured credential lookup.
+type APIDeviceCredentialOverrides struct {
+	BMC  *APIDeviceLogin `json:"bmc"`
+	NVOS *APIDeviceLogin `json:"nvos"`
+}
+
+// APIDeviceLogin is a write-only device username/password pair.
+type APIDeviceLogin struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// Validate requires both nonempty login fields without including their values in errors.
+func (a APIDeviceLogin) Validate() error {
+	return validation.ValidateStruct(&a,
+		validation.Field(&a.Username, validation.Required),
+		validation.Field(&a.Password, validation.Required))
+}
+
+// Validate requires at least one complete device login pair.
+func (a APIDeviceCredentialOverrides) Validate() error {
+	err := validation.ValidateStruct(&a, validation.Field(&a.BMC), validation.Field(&a.NVOS))
+	if err != nil {
+		return err
+	}
+	if a.BMC == nil && a.NVOS == nil {
+		return validation.Errors{"bmc": fmt.Errorf("bmc or nvos is required")}
+	}
+	return nil
+}
+
+// ToProto preserves which device login pairs were explicitly supplied.
+func (a *APIDeviceCredentialOverrides) ToProto() *flowv1.DeviceCredentialOverrides {
+	if a == nil {
+		return nil
+	}
+	out := &flowv1.DeviceCredentialOverrides{}
+	if a.BMC != nil {
+		out.Bmc = &flowv1.DeviceLogin{Username: a.BMC.Username, Password: a.BMC.Password}
+	}
+	if a.NVOS != nil {
+		out.Nvos = &flowv1.DeviceLogin{Username: a.NVOS.Username, Password: a.NVOS.Password}
+	}
+	return out
+}
+
+func (r *APIUpdateFirmwareRequest) validateFirmwareAuth(_ interface{}) error {
+	if r.AuthenticationData != nil && r.FirmwareDownloadAuth != nil {
+		return fmt.Errorf("authenticationData and firmwareDownloadAuth are mutually exclusive")
+	}
+	if r.DeviceCredentialOverrides != nil && !r.OverrideReadinessCheck {
+		return fmt.Errorf("deviceCredentialOverrides requires overrideReadinessCheck")
+	}
+	return nil
+}
+
+// DownloadAuth returns the supplied download authentication after alias validation.
+func (r *APIUpdateFirmwareRequest) DownloadAuth() *flowv1.FirmwareAuthenticationData {
+	if r.FirmwareDownloadAuth != nil {
+		return r.FirmwareDownloadAuth.ToProto()
+	}
+	return r.AuthenticationData.ToProto()
+}
+
+func (r *APIBatchRackFirmwareUpdateRequest) validateFirmwareAuth(_ interface{}) error {
+	if r.AuthenticationData != nil && r.FirmwareDownloadAuth != nil {
+		return fmt.Errorf("authenticationData and firmwareDownloadAuth are mutually exclusive")
+	}
+	if r.DeviceCredentialOverrides != nil && !r.OverrideReadinessCheck {
+		return fmt.Errorf("deviceCredentialOverrides requires overrideReadinessCheck")
+	}
+	return nil
+}
+
+// DownloadAuth returns the supplied download authentication after alias validation.
+func (r *APIBatchRackFirmwareUpdateRequest) DownloadAuth() *flowv1.FirmwareAuthenticationData {
+	if r.FirmwareDownloadAuth != nil {
+		return r.FirmwareDownloadAuth.ToProto()
+	}
+	return r.AuthenticationData.ToProto()
+}
+
+func (r *APIBatchTrayFirmwareUpdateRequest) validateFirmwareAuth(_ interface{}) error {
+	if r.AuthenticationData != nil && r.FirmwareDownloadAuth != nil {
+		return fmt.Errorf("authenticationData and firmwareDownloadAuth are mutually exclusive")
+	}
+	if r.DeviceCredentialOverrides != nil && !r.OverrideReadinessCheck {
+		return fmt.Errorf("deviceCredentialOverrides requires overrideReadinessCheck")
+	}
+	return nil
+}
+
+// DownloadAuth returns the supplied download authentication after alias validation.
+func (r *APIBatchTrayFirmwareUpdateRequest) DownloadAuth() *flowv1.FirmwareAuthenticationData {
+	if r.FirmwareDownloadAuth != nil {
+		return r.FirmwareDownloadAuth.ToProto()
+	}
+	return r.AuthenticationData.ToProto()
+}
+
+// UnmarshalJSON rejects unsupported device credential fields.
+func (a *APIDeviceCredentialOverrides) UnmarshalJSON(data []byte) error {
+	err := rejectUnknownFirmwareAuthenticationFields(data, "deviceCredentialOverrides", "bmc", "nvos")
+	if err != nil {
+		return err
+	}
+	type plain APIDeviceCredentialOverrides
+	return json.Unmarshal(data, (*plain)(a))
+}
+
+// UnmarshalJSON rejects fields outside the explicit device login contract.
+func (a *APIDeviceLogin) UnmarshalJSON(data []byte) error {
+	err := rejectUnknownFirmwareAuthenticationFields(data, "device login", "username", "password")
+	if err != nil {
+		return err
+	}
+	type plain APIDeviceLogin
+	return json.Unmarshal(data, (*plain)(a))
 }

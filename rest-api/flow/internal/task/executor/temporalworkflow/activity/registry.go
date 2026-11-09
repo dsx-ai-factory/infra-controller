@@ -43,17 +43,19 @@ func New(
 // from other Activities instances.
 func (a *Activities) All() map[string]any {
 	return map[string]any{
-		NameInjectExpectation:         a.InjectExpectation,
-		NamePowerControl:              a.PowerControl,
-		NameGetPowerStatus:            a.GetPowerStatus,
-		NameUpdateTaskStatus:          a.UpdateTaskStatus,
-		NameUpdateTaskReport:          a.UpdateTaskReport,
-		NameFirmwareControl:           a.FirmwareControl,
-		NameGetFirmwareStatus:         a.GetFirmwareStatus,
-		NameBringUpControl:            a.BringUpControl,
-		NameGetBringUpStatus:          a.GetBringUpStatus,
-		NameVerifyFirmwareConsistency: a.VerifyFirmwareConsistency,
-		NameDecommissionControl:       a.DecommissionControl,
-		NameGetDecommissionStatus:     a.GetDecommissionStatus,
+		NameInjectExpectation:                a.InjectExpectation,
+		NamePowerControl:                     a.PowerControl,
+		NameGetPowerStatus:                   a.GetPowerStatus,
+		NameUpdateTaskStatus:                 a.UpdateTaskStatus,
+		NameUpdateTaskReport:                 a.UpdateTaskReport,
+		NameFirmwareControlWithCredentials:   a.FirmwareControl,
+		NameFirmwareControl:                  a.FirmwareControl,
+		NameGetFirmwareStatus:                a.GetFirmwareStatus,
+		NameGetFirmwareStatusWithCredentials: a.GetFirmwareStatusWithCredentials,
+		NameBringUpControl:                   a.BringUpControl,
+		NameGetBringUpStatus:                 a.GetBringUpStatus,
+		NameVerifyFirmwareConsistency:        a.VerifyFirmwareConsistency,
+		NameDecommissionControl:              a.DecommissionControl,
+		NameGetDecommissionStatus:            a.GetDecommissionStatus,
 	}
 }

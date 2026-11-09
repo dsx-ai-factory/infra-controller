@@ -24,6 +24,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
 func TestActivitiesReturnErrorWhenComponentManagerRegistryIsMissing(t *testing.T) {
@@ -466,5 +467,44 @@ func newActivityTestTarget() common.Target {
 	return common.Target{
 		Type:        devicetypes.ComponentTypeCompute,
 		Identifiers: []string{"machine-1"},
+	}
+}
+
+func (m *capabilityTestManager) GetFirmwareStatusWithCredentials(_ context.Context, _ common.Target, credentials *corev1.ComponentCredentialOverrides) (map[string]operations.FirmwareUpdateStatus, error) {
+	m.called = true
+	m.firmwareInfo.CredentialOverrides = credentials
+	return nil, nil
+}
+
+func TestActivities_DeviceCredentialLifecycle(t *testing.T) {
+	cipher := newActivityTestCipher(t)
+	encrypted, err := firmwareauth.EncryptDeviceCredentials(cipher, &pb.DeviceCredentialOverrides{Bmc: &pb.DeviceLogin{Username: "operator", Password: "device-value"}})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name     string
+		cipher   *secret.Cipher
+		wantCall bool
+	}{
+		{"decrypt at execution", cipher, true}, {"missing key blocks execution", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			acts, manager := newCapabilityTestActivities(t, capability.CapabilityFirmwareControl, capability.CapabilityFirmwareStatus)
+			acts.dataCipher = tc.cipher
+			info := operations.FirmwareControlTaskInfo{Operation: operations.FirmwareOperationUpgrade, DeviceCredentials: encrypted, OverrideReadinessCheck: true}
+			err := acts.FirmwareControl(context.Background(), newActivityTestTarget(), info)
+			require.Equal(t, tc.wantCall, manager.called)
+			if !tc.wantCall {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, "device-value", manager.firmwareInfo.CredentialOverrides.GetBmc().GetPassword())
+			manager.called = false
+			_, err = acts.GetFirmwareStatusWithCredentials(context.Background(), newActivityTestTarget(), encrypted)
+			require.NoError(t, err)
+			require.True(t, manager.called)
+			require.Equal(t, "device-value", manager.firmwareInfo.CredentialOverrides.GetBmc().GetPassword())
+			require.Nil(t, info.CredentialOverrides)
+		})
 	}
 }

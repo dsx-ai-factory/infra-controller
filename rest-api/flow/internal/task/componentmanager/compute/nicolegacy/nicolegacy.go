@@ -427,6 +427,9 @@ func (m *Manager) FirmwareControl(ctx context.Context, target common.Target, inf
 // ValidateFirmwareControl rejects options that the legacy machine-centric
 // firmware APIs cannot enforce. It performs no readiness checks or RPCs.
 func (m *Manager) ValidateFirmwareControl(info operations.FirmwareControlTaskInfo) error {
+	if info.DeviceCredentials != nil || info.CredentialOverrides != nil {
+		return fmt.Errorf("device credential overrides are not supported by the nicolegacy compute manager")
+	}
 	computeTraySubs, _ := firmwarecomponents.SplitNICoComputeTraySubTargets(info.SubTargets)
 	if len(computeTraySubs) > 0 {
 		return fmt.Errorf("compute firmware sub-target selection is not supported by the nicolegacy compute manager")

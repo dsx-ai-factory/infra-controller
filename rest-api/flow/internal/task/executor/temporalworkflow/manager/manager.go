@@ -310,6 +310,11 @@ func validateOperationOptions(
 		if err != nil {
 			return err
 		}
+		if firmwareInfo.DeviceCredentials != nil {
+			if _, ok := manager.(componentmanager.FirmwareCredentialStatusReader); !ok {
+				return fmt.Errorf("component manager does not support device credential overrides")
+			}
+		}
 		validator, ok := manager.(componentmanager.FirmwareControlValidator)
 		if !ok {
 			continue
