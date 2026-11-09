@@ -708,13 +708,17 @@ directly. It doesn't follow redirects or use proxy environment variables.
 #### Trust and certificate lifetimes
 
 The client certificate issuer must match REST Cert Manager's trusted client
-CA. For a dedicated client CA, set `clientCertificate.issuerRef` and either the
-client CA Secret or an already mounted PEM bundle above. When the signing CA is
+CA. With Helm, set `nico-rest-site-manager.clientCertificate.issuerRef` and
+either the client CA Secret or an already mounted PEM bundle above. When the signing CA is
 external, such as Vault, use these client CA settings to trust the client issuer
 independently of the signing CA. A missing Secret or `ca.crt` key prevents the
 pod from starting. Restart REST Cert Manager after changing its
 client CA bundle, and Site Manager after changing its server CA bundle. Follow
 the CA rotation procedure above before dropping an old CA.
+
+With Kustomize, change `spec.issuerRef` in
+`base/site-manager/client-certificate.yaml`. In `base/cert-manager/deployment.yaml`,
+mount the client CA bundle and set `CERT_AUTH_CLIENT_CA_FILE` to its path.
 
 The default cert-manager.io installation auto-approves requests to the
 `nico-rest-ca-issuer` ClusterIssuer, so anyone able to request certificates from

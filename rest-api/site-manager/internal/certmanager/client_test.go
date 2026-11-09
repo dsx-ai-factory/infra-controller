@@ -143,6 +143,14 @@ func TestNewClient(t *testing.T) {
 		ca = append(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("invalid DER")})...)
 		require.NoError(t, os.WriteFile(caPath, ca, 0600))
 		certPath := writePEM(t, srv.Certificate().Raw)
+		stderr, err := os.Create(filepath.Join(t.TempDir(), "stderr.log"))
+		require.NoError(t, err)
+		originalStderr := os.Stderr
+		os.Stderr = stderr
+		t.Cleanup(func() {
+			os.Stderr = originalStderr
+			assert.NoError(t, stderr.Close())
+		})
 		// Identity loading fails synchronously after the CA diagnostic, so no poller starts.
 		_, err = NewClient(t.Context(), Options{URL: srv.URL, CAPath: caPath, ClientCertPath: certPath, ClientKeyPath: filepath.Join(t.TempDir(), "missing.key")})
 		require.Error(t, err)
@@ -152,6 +160,10 @@ func TestNewClient(t *testing.T) {
 		assert.Contains(t, record[zerolog.MessageFieldName], "using parseable certificates")
 		assert.Equal(t, "site-manager", record["component"])
 		assert.Equal(t, caPath, record["path"])
+		os.Stderr = originalStderr
+		textLogs, err := os.ReadFile(stderr.Name())
+		require.NoError(t, err)
+		assert.Empty(t, string(textLogs), "TLS diagnostics must not also emit text records")
 	})
 	for _, tc := range []struct {
 		name             string
