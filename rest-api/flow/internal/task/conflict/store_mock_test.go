@@ -84,7 +84,7 @@ func (m *mockStore) CreateTask(_ context.Context, _ *taskdef.Task) error {
 }
 
 func (m *mockStore) LockRack(_ context.Context, _ uuid.UUID) error {
-	panic("mockStore.LockRack: not implemented")
+	return nil
 }
 
 func (m *mockStore) LockIdempotencyKey(_ context.Context, _ string) error {

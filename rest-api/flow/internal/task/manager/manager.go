@@ -204,7 +204,8 @@ func (m *ManagerImpl) Stop(ctx context.Context) {
 
 // SubmitTask submits a task to the task manager.
 // The TargetSpec is resolved to racks via inventory; one Task is created per
-// rack. Returns the IDs of all created tasks.
+// rack. ConflictStrategy selects rejection, queueing, or trusted internal
+// preemption with runtime SubmitOptions. Returns the admitted task IDs.
 func (m *ManagerImpl) SubmitTask(
 	ctx context.Context,
 	req *operation.Request,
@@ -215,6 +216,12 @@ func (m *ManagerImpl) SubmitTask(
 
 	if err := req.Validate(); err != nil {
 		return nil, err
+	}
+
+	preempt := req.ConflictStrategy == operation.ConflictStrategyPreempt
+	create := m.createAndExecuteTask
+	if preempt {
+		create = m.createAndExecutePreemptingTask
 	}
 
 	// A caller may retry after task submission succeeded but persisting the
@@ -230,7 +237,7 @@ func (m *ManagerImpl) SubmitTask(
 			return nil, err
 		}
 		if existing != nil && (existing.IsScheduled() ||
-			existing.Status == taskcommon.TaskStatusWaiting) {
+			existing.Status.IsFinished() || (!preempt && existing.Status == taskcommon.TaskStatusWaiting)) {
 			return []uuid.UUID{existing.ID}, nil
 		}
 	}
@@ -243,7 +250,7 @@ func (m *ManagerImpl) SubmitTask(
 	// Create and execute task for each rack.
 	var taskIDs []uuid.UUID
 	for _, targetRack := range rackMap {
-		taskID, err := m.createAndExecuteTask(ctx, req, targetRack)
+		taskID, err := create(ctx, req, targetRack)
 		if err != nil {
 			log.Error().
 				Err(err).
@@ -648,6 +655,9 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 				}
 			}
 
+			if task.Status.IsFinished() {
+				return nil
+			}
 			if task.IsScheduled() {
 				log.Info().
 					Str("task_id", task.ID.String()).

@@ -12,6 +12,7 @@ import (
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/leakage"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskmanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/manager"
@@ -21,7 +22,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
 
-// Query core to get IDs of leaking racks and submit power-off tasks for each.
 func runLeakDetectionOneRack(
 	ctx context.Context,
 	nicoClient nicoapi.Client,
@@ -219,7 +219,8 @@ func submitPowerOffTask(
 			},
 		},
 		Description:      fmt.Sprintf("Leak detection: force power-off component %s of type %s", componentExternalId, componentType.String()),
-		ConflictStrategy: operation.ConflictStrategyQueue,
+		ConflictStrategy: operation.ConflictStrategyPreempt,
+		SubmitOptions:    operation.SubmitOptions{PreserveConflictingTask: leakage.PreserveShutdownTask},
 	}
 
 	taskIDs, err := taskMgr.SubmitTask(ctx, req)
@@ -268,7 +269,8 @@ func submitRackPowerOffTask(
 			}},
 		},
 		Description:      fmt.Sprintf("Leak detection: force power-off rack %s", rackExternalID),
-		ConflictStrategy: operation.ConflictStrategyQueue,
+		ConflictStrategy: operation.ConflictStrategyPreempt,
+		SubmitOptions:    operation.SubmitOptions{PreserveConflictingTask: leakage.PreserveShutdownTask},
 	}
 
 	taskIDs, err := taskMgr.SubmitTask(ctx, req)
