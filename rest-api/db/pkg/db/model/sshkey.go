@@ -396,6 +396,12 @@ func (sksd SSHKeySQLDAO) Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) (r
 	return nil
 }
 
+// SSHKeyTenantLockID returns the Tenant-scoped advisory lock that serializes
+// SSH Key Group recovery from Site inventory with SSH Key create and delete.
+func SSHKeyTenantLockID(tenantID uuid.UUID) uint64 {
+	return db.GetAdvisoryLockIDFromString("ssh-key-group-recovery-" + tenantID.String())
+}
+
 // NewSSHKeyDAO returns a new SSHKeyDAO
 func NewSSHKeyDAO(dbSession *db.Session) SSHKeyDAO {
 	return &SSHKeySQLDAO{

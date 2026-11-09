@@ -588,11 +588,18 @@ func (mskg ManageSSHKeyGroup) createOrUpdateSSHKeyGroupFromSite(
 		}
 		tenant := &tenants[0]
 
-		lockErr := tx.TryAcquireAdvisoryLock(
-			ctx,
-			cdb.GetAdvisoryLockIDFromString("ssh-key-group-recovery-"+tenant.ID.String()),
-			nil,
-		)
+		// The API rejects a Site association the Tenant has no access to, so
+		// recovery must not create one either.
+		hasSiteAccess, accessErr := cdbm.TenantHasSiteAccess(ctx, tx, mskg.dbSession, tenant, site.ID)
+		if accessErr != nil {
+			return nil, fmt.Errorf("unable to recover SSH Key Group: failed to check Tenant Site access, DB error: %w", accessErr)
+		}
+		if !hasSiteAccess {
+			logger.Warn().Msg("unable to recover SSH Key Group: Tenant does not have access to Site")
+			return nil, nil
+		}
+
+		lockErr := tx.TryAcquireAdvisoryLock(ctx, cdbm.SSHKeyTenantLockID(tenant.ID), nil)
 		if lockErr != nil {
 			return nil, fmt.Errorf("unable to recover SSH Key Group: failed to acquire Tenant recovery lock, DB error: %w", lockErr)
 		}

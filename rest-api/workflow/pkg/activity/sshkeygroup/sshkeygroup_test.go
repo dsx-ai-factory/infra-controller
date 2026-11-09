@@ -934,6 +934,7 @@ func TestManageSSHKeyGroup_createOrUpdateSSHKeyGroupFromSite(t *testing.T) {
 		site       *cdbm.Site
 		tenant     *cdbm.Tenant
 		tenantUser *cdbm.User
+		allocation *cdbm.Allocation
 		manager    ManageSSHKeyGroup
 	}
 	type expectedState struct {
@@ -960,12 +961,14 @@ func TestManageSSHKeyGroup_createOrUpdateSSHKeyGroupFromSite(t *testing.T) {
 		tenantUser := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{tenantOrg}, []string{"FORGE_TENANT_ADMIN"})
 		tenant := util.TestBuildTenant(t, dbSession, "SSH Key Recovery Tenant", tenantOrg, nil, tenantUser)
 		site := util.TestBuildSite(t, dbSession, provider, "ssh-key-recovery-site", cdbm.SiteStatusRegistered, nil, providerUser)
+		allocation := util.TestBuildAllocation(t, dbSession, provider, tenant, site, "ssh-key-recovery-allocation")
 
 		return &fixture{
 			dbSession:  dbSession,
 			site:       site,
 			tenant:     tenant,
 			tenantUser: tenantUser,
+			allocation: allocation,
 			manager:    ManageSSHKeyGroup{dbSession: dbSession},
 		}
 	}
@@ -1264,6 +1267,15 @@ func TestManageSSHKeyGroup_createOrUpdateSSHKeyGroupFromSite(t *testing.T) {
 			},
 		},
 		{
+			name:       "rejects Tenant without Site access",
+			publicKeys: []string{testRecoveredED25519Key},
+			prepare: func(t *testing.T, f *fixture, groupID uuid.UUID) expectedState {
+				require.NoError(t, cdbm.NewAllocationDAO(f.dbSession).Delete(context.Background(), nil, f.allocation.ID))
+				return expectedState{groupID: groupID}
+			},
+			check: checkGroupNotCreated,
+		},
+		{
 			name:       "rejects Group owned by another Tenant",
 			publicKeys: []string{testRecoveredED25519Key},
 			prepare: func(t *testing.T, f *fixture, groupID uuid.UUID) expectedState {
@@ -1351,6 +1363,9 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 
 	st := util.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, nil, ipu)
 	st2 := util.TestBuildSite(t, dbSession, ip, "test-site2", cdbm.SiteStatusRegistered, nil, ipu)
+	// Recovery only adopts keysets for a Tenant with access to the Site.
+	util.TestBuildAllocation(t, dbSession, ip, tn, st, "test-allocation")
+	util.TestBuildAllocation(t, dbSession, ip, tn, st2, "test-allocation-2")
 
 	// Build SSHKeyGroup1
 	skg1 := util.TestBuildSSHKeyGroup(t, dbSession, "test-sshkeygroup-1", tnOrg, cutil.GetPtr("test1"), tn.ID, cutil.GetPtr("122345"), cdbm.SSHKeyGroupStatusSyncing, tnu.ID)

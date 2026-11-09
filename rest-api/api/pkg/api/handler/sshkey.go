@@ -182,35 +182,40 @@ func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
 	// the fingerprint is prefixed by "SHA256:", remove that prefix
 	fingerprint = fingerprint[7:]
 
-	// Check for uniqueness of fingerprint
-	sks, tot, err = skDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.SSHKeyFilterInput{
-			TenantIDs:    []uuid.UUID{tenant.ID},
-			Fingerprints: []string{fingerprint},
-		},
-		cdbp.PageInput{},
-		nil,
-	)
-	if err != nil {
-		logger.Error().Err(err).Msg("db error checking for name uniqueness of tenant SSHKey")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "SSH Key create failed due to data store error", nil)
-	}
-	if tot > 0 {
-		logger.Warn().Str("tenantId", tenant.ID.String()).Msg("SSH Key with same fingerprint already exists for tenant")
-		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "An SSH Key with same fingerprint already exists for Tenant", validation.Errors{
-			"id": errors.New(sks[0].ID.String()),
-		})
-	}
-
 	var dbsk *cdbm.SSHKey
 	var skgsas []cdbm.SSHKeyGroupSiteAssociation
 
 	err = cdb.WithTx(ctx, cskh.dbSession, func(tx *cdb.Tx) error {
+		// Check fingerprint uniqueness under the Tenant lock that inventory
+		// recovery also holds, so the two cannot insert the same key.
+		derr := tx.TryAcquireAdvisoryLock(ctx, cdbm.SSHKeyTenantLockID(tenant.ID), nil)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("failed to acquire Tenant SSH Key lock")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SSH Key, could not acquire data store lock", nil)
+		}
+		lockedMatches, _, derr := skDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.SSHKeyFilterInput{
+				TenantIDs:    []uuid.UUID{tenant.ID},
+				Fingerprints: []string{fingerprint},
+			},
+			cdbp.PageInput{},
+			nil,
+		)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("db error checking for fingerprint uniqueness of tenant SSHKey")
+			return cutil.NewAPIError(http.StatusInternalServerError, "SSH Key create failed due to data store error", nil)
+		}
+		if len(lockedMatches) > 0 {
+			logger.Warn().Str("tenantId", tenant.ID.String()).Msg("SSH Key with same fingerprint already exists for tenant")
+			return cutil.NewAPIError(http.StatusConflict, "An SSH Key with same fingerprint already exists for Tenant", validation.Errors{
+				"id": errors.New(lockedMatches[0].ID.String()),
+			})
+		}
+
 		// create the ssh key
 		// NOTE: Remove `expires` from DB model
-		var derr error
 		dbsk, derr = skDAO.Create(
 			ctx,
 			tx,
@@ -896,13 +901,9 @@ func (dskh DeleteSSHKeyHandler) Handle(c echo.Context) error {
 		// Inventory recovery uses this Tenant-scoped lock before adopting Site
 		// keysets. Hold it before discovering associations so recovery cannot add
 		// an association after this deletion's snapshot.
-		derr := tx.TryAcquireAdvisoryLock(
-			ctx,
-			cdb.GetAdvisoryLockIDFromString("ssh-key-group-recovery-"+tenant.ID.String()),
-			nil,
-		)
+		derr := tx.TryAcquireAdvisoryLock(ctx, cdbm.SSHKeyTenantLockID(tenant.ID), nil)
 		if derr != nil {
-			logger.Error().Err(derr).Msg("failed to acquire Tenant SSH Key recovery lock")
+			logger.Error().Err(derr).Msg("failed to acquire Tenant SSH Key lock")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete SSH Key, could not acquire data store lock", nil)
 		}
 
