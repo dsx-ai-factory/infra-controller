@@ -240,6 +240,10 @@ func (m *ManagerImpl) SubmitTask(
 		return nil, err
 	}
 
+	if req.Operation.Type == taskcommon.TaskTypeComponentReset {
+		return m.createResetTasks(ctx, req, rackMap)
+	}
+
 	// Create and execute task for each rack.
 	var taskIDs []uuid.UUID
 	for _, targetRack := range rackMap {
@@ -311,6 +315,9 @@ func (m *ManagerImpl) validateTask(
 	}
 
 	if len(rackMap) == 0 {
+		if req.Operation.Type == taskcommon.TaskTypeComponentReset {
+			return nil, flowerrors.GRPCErrorInvalidArgument("no valid racks found for request")
+		}
 		return nil, fmt.Errorf("no valid racks found for request")
 	}
 
@@ -457,10 +464,10 @@ func validateRuleTargetApplicability(
 
 // requiresRuleTargetApplicability reports whether the resolved operation rule
 // must contain a step for at least one targeted component type. The
-// InjectExpectation workflow executes directly without consuming rule steps.
+// InjectExpectation and ComponentReset execute directly without consuming rule steps.
 func requiresRuleTargetApplicability(taskType taskcommon.TaskType) bool {
 	switch taskType {
-	case taskcommon.TaskTypeInjectExpectation:
+	case taskcommon.TaskTypeInjectExpectation, taskcommon.TaskTypeComponentReset:
 		return false
 	default:
 		return true
@@ -495,6 +502,9 @@ func validateResolvedRackTargets(
 			continue
 		}
 		for _, comp := range resolvedRack.Components {
+			if op.Type == taskcommon.TaskTypeComponentReset && comp.Type != devicetypes.ComponentTypeNVSwitch {
+				return flowerrors.GRPCErrorInvalidArgument("NVOS factory reset requires switch targets")
+			}
 			if comp.ComponentID == "" &&
 				(!macTargetSupported || comp.ManagementMAC() == "") {
 				unlinkedComponents = append(
@@ -512,6 +522,9 @@ func validateResolvedRackTargets(
 
 	if len(emptyRacks) > 0 {
 		slices.Sort(emptyRacks)
+		if op.Type == taskcommon.TaskTypeComponentReset {
+			return flowerrors.GRPCErrorInvalidArgument("racks have no selected components: " + strings.Join(emptyRacks, ", "))
+		}
 		return fmt.Errorf(
 			"racks have no selected components: %s",
 			strings.Join(emptyRacks, ", "),
@@ -519,7 +532,12 @@ func validateResolvedRackTargets(
 	}
 	if len(unlinkedComponents) > 0 {
 		slices.Sort(unlinkedComponents)
-		return &unlinkedTargetsError{components: unlinkedComponents}
+		err := &unlinkedTargetsError{components: unlinkedComponents}
+		if op.Type == taskcommon.TaskTypeComponentReset {
+			// Keep the typed cause available to deferred-task relinking.
+			return fmt.Errorf("%w: %w", flowerrors.GRPCErrorPreconditionFailed("reset requires ingested switches"), err)
+		}
+		return err
 	}
 
 	return nil
@@ -863,7 +881,15 @@ func (m *ManagerImpl) resolveAndExecuteTaskWithTransaction(
 		if deferred {
 			return deferErr
 		}
-		if uerr := m.taskStore.UpdateTaskStatus(ctx, &taskdef.TaskStatusUpdate{
+		statusCtx := ctx
+		if !transactionActive {
+			// A dispatch timeout must not also prevent recording its failure.
+			// Transactional callers retain their transaction-owned context.
+			var cancel context.CancelFunc
+			statusCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), schedulingCleanupTimeout)
+			defer cancel()
+		}
+		if uerr := m.taskStore.UpdateTaskStatus(statusCtx, &taskdef.TaskStatusUpdate{
 			ID:      task.ID,
 			Status:  taskcommon.TaskStatusFailed,
 			Message: message.ForFailure(err),
@@ -1050,6 +1076,11 @@ func (m *ManagerImpl) resolveOperationRule(
 	op operation.Wrapper,
 	rackID uuid.UUID,
 ) (*operationrules.OperationRule, error) {
+	// Reset has fixed execution semantics; user rules must not add retries or
+	// unrelated actions around this destructive operation.
+	if op.Type == taskcommon.TaskTypeComponentReset {
+		return &operationrules.OperationRule{Name: "Fixed NVOS factory reset", OperationType: op.Type, OperationCode: op.Code, RuleDefinition: operationrules.RuleDefinition{Version: operationrules.CurrentRuleDefinitionVersion}}, nil
+	}
 	ruleID, err := operations.ExtractRuleID(op.Info)
 	if err != nil {
 		return nil, fmt.Errorf("extract operation rule ID: %w", err)

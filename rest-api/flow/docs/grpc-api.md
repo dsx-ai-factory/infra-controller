@@ -69,6 +69,7 @@
   - [EventRuleSendAlertAction](#v1-EventRuleSendAlertAction)
   - [EventRuleSubmitTaskAction](#v1-EventRuleSubmitTaskAction)
   - [ExternalRef](#v1-ExternalRef)
+  - [FactoryResetSwitchesRequest](#v1-FactoryResetSwitchesRequest)
   - [FieldDiff](#v1-FieldDiff)
   - [Filter](#v1-Filter)
   - [FirmwareAuthenticationData](#v1-FirmwareAuthenticationData)
@@ -194,6 +195,7 @@
   - [QueueOptions](#v1-QueueOptions)
   - [Rack](#v1-Rack)
   - [RackMemberPowerActions](#v1-RackMemberPowerActions)
+  - [RackOperationStatusDetails](#v1-RackOperationStatusDetails)
   - [RackPosition](#v1-RackPosition)
   - [RackPowerCoverage](#v1-RackPowerCoverage)
   - [RackPowerDetails](#v1-RackPowerDetails)
@@ -220,6 +222,8 @@
   - [TaskScheduleScope](#v1-TaskScheduleScope)
   - [TaskStats](#v1-TaskStats)
   - [TrayPowerDetails](#v1-TrayPowerDetails)
+  - [TrayStatusCounts](#v1-TrayStatusCounts)
+  - [TrayStatusCountsByType](#v1-TrayStatusCountsByType)
   - [TriggerTaskScheduleRequest](#v1-TriggerTaskScheduleRequest)
   - [UUID](#v1-UUID)
   - [UpdateEventRuleRequest](#v1-UpdateEventRuleRequest)
@@ -936,6 +940,18 @@ ExternalRef identifies a component by its external identifier and optional type.
 | ----- | ---- | ----- | ----------- |
 | type | [ComponentType](#v1-ComponentType) |  | UNKNOWN requires an unambiguous ID. |
 | id | [string](#string) |  |  |
+
+<a name="v1-FactoryResetSwitchesRequest"></a>
+
+### FactoryResetSwitchesRequest
+
+Targets must resolve exclusively to ingested switches. Domain selectors must
+include the NVSwitch component filter. Existing rack conflict handling applies.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) |  |  |
+| description | [string](#string) |  |  |
 
 <a name="v1-FieldDiff"></a>
 
@@ -2260,6 +2276,7 @@ QueueOptions controls how a task behaves when a conflict is detected.
 | health | [HealthReport](#v1-HealthReport) |  | Latest Core aggregate health snapshot mirrored by inventory sync. |
 | rack_profile_id | [string](#string) | optional | Core rack profile mirrored by expected inventory sync. |
 | nvl_domain_external_ids | [string](#string) | repeated | Public rack-group domain identities. |
+| operation_status_details | [RackOperationStatusDetails](#v1-RackOperationStatusDetails) |  | Output only. Absent on older servers; ignored on inventory writes. |
 
 <a name="v1-RackMemberPowerActions"></a>
 
@@ -2274,6 +2291,16 @@ list. Individual Core actions retain their order: Active before Pending.
 | component_id | [string](#string) | optional | External inventory ID, matching Component.component_id. Absent until the inventory member has a managed Core identity. |
 | component_type | [ComponentType](#v1-ComponentType) |  |  |
 | details | [PowerActionDetails](#v1-PowerActionDetails) |  |  |
+
+<a name="v1-RackOperationStatusDetails"></a>
+
+### RackOperationStatusDetails
+
+RackOperationStatusDetails explains operation_status, not operation admission.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| tray_counts_by_type | [TrayStatusCountsByType](#v1-TrayStatusCountsByType) |  | Counts of active Compute, NVSwitch and PowerShelf inventory records from the same snapshot used for operation_status, independent of expansion. Undiscovered records and other component types are excluded. No freshness or expected-inventory completeness guarantee is implied. |
 
 <a name="v1-RackPosition"></a>
 
@@ -2647,6 +2674,36 @@ limit, the RPC returns ResourceExhausted. No task targets are truncated.
 | desired | [PowerDesiredDetails](#v1-PowerDesiredDetails) |  |  |
 | operations | [PowerOperations](#v1-PowerOperations) |  |  |
 | rack_external_id | [string](#string) | optional | The inventory rack identifier used by REST rack and tray resources. Includes retained soft-deleted racks. Absent when no rack identity can be read; older services or proxies also omit it. Never uses the Flow UUID. |
+
+<a name="v1-TrayStatusCounts"></a>
+
+### TrayStatusCounts
+
+TrayStatusCounts partitions participating trays by their operation phase.
+An empty rack has all zero counts and operation_status Unknown. A missing or
+unrecognized status on an existing participating tray increments unknown.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| ready | [uint32](#uint32) |  | Trays in Ready. |
+| in_use | [uint32](#uint32) |  | Trays in InUse. |
+| initializing | [uint32](#uint32) |  | Trays in Initializing. |
+| error | [uint32](#uint32) |  | Trays in Error. |
+| deleting | [uint32](#uint32) |  | Trays in Deleting. |
+| unknown | [uint32](#uint32) |  | Trays with unknown, missing or unrecognized status. |
+
+<a name="v1-TrayStatusCountsByType"></a>
+
+### TrayStatusCountsByType
+
+TrayStatusCountsByType always includes all three types, with zero counts for
+types without participating records. Empty types do not affect rack phase.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| compute | [TrayStatusCounts](#v1-TrayStatusCounts) |  |  |
+| nv_switch | [TrayStatusCounts](#v1-TrayStatusCounts) |  |  |
+| power_shelf | [TrayStatusCounts](#v1-TrayStatusCounts) |  |  |
 
 <a name="v1-TriggerTaskScheduleRequest"></a>
 
@@ -3202,6 +3259,7 @@ Task kinds include rack lifecycle work not represented by OperationType.
 | TASK_KIND_BRING_UP | 3 | Rack bring-up work. |
 | TASK_KIND_DECOMMISSION | 4 | Rack decommissioning work. |
 | TASK_KIND_INJECT_EXPECTATION | 5 | Installing expected inventory for a rack. |
+| TASK_KIND_COMPONENT_RESET | 6 |  |
 
 <a name="v1-TaskStatus"></a>
 
@@ -3252,6 +3310,7 @@ Task kinds include rack lifecycle work not represented by OperationType.
 | PowerOffRack | [PowerOffRackRequest](#v1-PowerOffRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | PowerResetRack | [PowerResetRackRequest](#v1-PowerResetRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | ACPowerCycleRack | [ACPowerCycleRackRequest](#v1-ACPowerCycleRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
+| FactoryResetSwitches | [FactoryResetSwitchesRequest](#v1-FactoryResetSwitchesRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) | Restores NVOS configuration defaults on switches. Accepted work is polled; uncertain submissions are never automatically repeated. No reprovisioning. |
 | GetComponentInfoByID | [GetComponentInfoByIDRequest](#v1-GetComponentInfoByIDRequest) | [GetComponentInfoResponse](#v1-GetComponentInfoResponse) | Component CRUD |
 | GetComponentInfoBySerial | [GetComponentInfoBySerialRequest](#v1-GetComponentInfoBySerialRequest) | [GetComponentInfoResponse](#v1-GetComponentInfoResponse) |  |
 | GetComponents | [GetComponentsRequest](#v1-GetComponentsRequest) | [GetComponentsResponse](#v1-GetComponentsResponse) |  |

@@ -435,6 +435,10 @@
                 </li>
 
                 <li>
+                  <a href="#v1.FactoryResetSwitchesRequest"><span class="badge">M</span>FactoryResetSwitchesRequest</a>
+                </li>
+
+                <li>
                   <a href="#v1.FieldDiff"><span class="badge">M</span>FieldDiff</a>
                 </li>
 
@@ -935,6 +939,10 @@
                 </li>
 
                 <li>
+                  <a href="#v1.RackOperationStatusDetails"><span class="badge">M</span>RackOperationStatusDetails</a>
+                </li>
+
+                <li>
                   <a href="#v1.RackPosition"><span class="badge">M</span>RackPosition</a>
                 </li>
 
@@ -1036,6 +1044,14 @@
 
                 <li>
                   <a href="#v1.TrayPowerDetails"><span class="badge">M</span>TrayPowerDetails</a>
+                </li>
+
+                <li>
+                  <a href="#v1.TrayStatusCounts"><span class="badge">M</span>TrayStatusCounts</a>
+                </li>
+
+                <li>
+                  <a href="#v1.TrayStatusCountsByType"><span class="badge">M</span>TrayStatusCountsByType</a>
                 </li>
 
                 <li>
@@ -3380,6 +3396,37 @@ this operation. </p></td>
 
                 <tr>
                   <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.FactoryResetSwitchesRequest">FactoryResetSwitchesRequest</h3>
+        <p>Targets must resolve exclusively to ingested switches. Domain selectors must</p><p>include the NVSwitch component filter. Existing rack conflict handling applies.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>target_spec</td>
+                  <td><a href="#v1.OperationTargetSpec">OperationTargetSpec</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>description</td>
                   <td><a href="#string">string</a></td>
                   <td></td>
                   <td><p> </p></td>
@@ -7848,6 +7895,13 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
                   <td><p>Public rack-group domain identities. </p></td>
                 </tr>
 
+                <tr>
+                  <td>operation_status_details</td>
+                  <td><a href="#v1.RackOperationStatusDetails">RackOperationStatusDetails</a></td>
+                  <td></td>
+                  <td><p>Output only. Absent on older servers; ignored on inventory writes. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -7893,6 +7947,33 @@ inventory member has a managed Core identity. </p></td>
                   <td><a href="#v1.PowerActionDetails">PowerActionDetails</a></td>
                   <td></td>
                   <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.RackOperationStatusDetails">RackOperationStatusDetails</h3>
+        <p>RackOperationStatusDetails explains operation_status, not operation admission.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>tray_counts_by_type</td>
+                  <td><a href="#v1.TrayStatusCountsByType">TrayStatusCountsByType</a></td>
+                  <td></td>
+                  <td><p>Counts of active Compute, NVSwitch and PowerShelf inventory records from
+the same snapshot used for operation_status, independent of expansion.
+Undiscovered records and other component types are excluded. No freshness
+or expected-inventory completeness guarantee is implied. </p></td>
                 </tr>
 
             </tbody>
@@ -9126,6 +9207,103 @@ Absent until the inventory member has a managed Core identity. </p></td>
                   <td><p>The inventory rack identifier used by REST rack and tray resources.
 Includes retained soft-deleted racks. Absent when no rack identity can be
 read; older services or proxies also omit it. Never uses the Flow UUID. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.TrayStatusCounts">TrayStatusCounts</h3>
+        <p>TrayStatusCounts partitions participating trays by their operation phase.</p><p>An empty rack has all zero counts and operation_status Unknown. A missing or</p><p>unrecognized status on an existing participating tray increments unknown.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>ready</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays in Ready. </p></td>
+                </tr>
+
+                <tr>
+                  <td>in_use</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays in InUse. </p></td>
+                </tr>
+
+                <tr>
+                  <td>initializing</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays in Initializing. </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays in Error. </p></td>
+                </tr>
+
+                <tr>
+                  <td>deleting</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays in Deleting. </p></td>
+                </tr>
+
+                <tr>
+                  <td>unknown</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays with unknown, missing or unrecognized status. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.TrayStatusCountsByType">TrayStatusCountsByType</h3>
+        <p>TrayStatusCountsByType always includes all three types, with zero counts for</p><p>types without participating records. Empty types do not affect rack phase.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>compute</td>
+                  <td><a href="#v1.TrayStatusCounts">TrayStatusCounts</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>nv_switch</td>
+                  <td><a href="#v1.TrayStatusCounts">TrayStatusCounts</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>power_shelf</td>
+                  <td><a href="#v1.TrayStatusCounts">TrayStatusCounts</a></td>
+                  <td></td>
+                  <td><p> </p></td>
                 </tr>
 
             </tbody>
@@ -10907,6 +11085,12 @@ Known disagreement takes precedence and reports Mixed instead.</p></td>
                 <td><p>Installing expected inventory for a rack.</p></td>
               </tr>
 
+              <tr>
+                <td>TASK_KIND_COMPONENT_RESET</td>
+                <td>6</td>
+                <td><p></p></td>
+              </tr>
+
           </tbody>
         </table>
 
@@ -11178,6 +11362,14 @@ becomes available, or can be cancelled explicitly via CancelTask.</p></td>
                 <td><a href="#v1.ACPowerCycleRackRequest">ACPowerCycleRackRequest</a></td>
                 <td><a href="#v1.SubmitTaskResponse">SubmitTaskResponse</a></td>
                 <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>FactoryResetSwitches</td>
+                <td><a href="#v1.FactoryResetSwitchesRequest">FactoryResetSwitchesRequest</a></td>
+                <td><a href="#v1.SubmitTaskResponse">SubmitTaskResponse</a></td>
+                <td><p>Restores NVOS configuration defaults on switches. Accepted work is polled;
+uncertain submissions are never automatically repeated. No reprovisioning.</p></td>
               </tr>
 
               <tr>

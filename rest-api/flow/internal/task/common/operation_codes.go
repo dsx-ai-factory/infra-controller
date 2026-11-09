@@ -9,6 +9,9 @@ import "fmt"
 // meaningful together with their task type.
 type OperationCode string
 
+// Reset operation codes.
+const OpCodeNVOSFactoryReset = "nvos_factory_reset"
+
 // Inject-expectation operation codes.
 const OpCodeInjectExpectation = "inject_expectation"
 
@@ -55,6 +58,10 @@ func (c OperationCode) String() string {
 // ValidateFor checks that the operation code belongs to the given task type.
 func (c OperationCode) ValidateFor(taskType TaskType) error {
 	switch taskType {
+	case TaskTypeComponentReset:
+		if c == OpCodeNVOSFactoryReset {
+			return nil
+		}
 	case TaskTypeInjectExpectation:
 		if c == OpCodeInjectExpectation {
 			return nil
