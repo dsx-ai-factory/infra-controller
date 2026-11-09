@@ -44,15 +44,14 @@ pub(super) async fn erase_boot_controller(cx: &CheckCx<'_>) -> Step {
     )
     .await?;
     cx.trace(format!("decommission_controller: {}", how(&outcome)));
-    cx.driven()
-        .read_back(&outcome, Effect::Immediate, async || {
-            match volume_names(cx, &controller).await {
-                Ok(names) if names.is_empty() => Attempt::Done(()),
-                Ok(names) => Attempt::NotYet(format!("{controller} lists {}", names.join(", "))),
-                Err(error) => Attempt::NotYet(describe("reading volumes", &error)),
-            }
-        })
-        .await?;
+    cx.read_back(&outcome, Effect::Immediate, async || {
+        match volume_names(cx, &controller).await {
+            Ok(names) if names.is_empty() => Attempt::Done(()),
+            Ok(names) => Attempt::NotYet(format!("{controller} lists {}", names.join(", "))),
+            Err(error) => Attempt::NotYet(describe("reading volumes", &error)),
+        }
+    })
+    .await?;
     Ok(format!(
         "{controller} erased ({}); it lists no volume",
         how(&outcome)
@@ -76,18 +75,17 @@ pub(super) async fn create_boot_volume(cx: &CheckCx<'_>) -> Step {
     )
     .await?;
     cx.trace(format!("create_volume: {}", how(&outcome)));
-    cx.driven()
-        .read_back(&outcome, Effect::OnRestart, async || {
-            match volume_names(cx, &controller).await {
-                Ok(names) if names.iter().any(|name| name == BOOT_VOLUME) => Attempt::Done(()),
-                Ok(names) if names.is_empty() => {
-                    Attempt::NotYet(format!("{controller} lists no volume"))
-                }
-                Ok(names) => Attempt::NotYet(format!("{controller} lists {}", names.join(", "))),
-                Err(error) => Attempt::NotYet(describe("reading volumes", &error)),
+    cx.read_back(&outcome, Effect::OnRestart, async || {
+        match volume_names(cx, &controller).await {
+            Ok(names) if names.iter().any(|name| name == BOOT_VOLUME) => Attempt::Done(()),
+            Ok(names) if names.is_empty() => {
+                Attempt::NotYet(format!("{controller} lists no volume"))
             }
-        })
-        .await?;
+            Ok(names) => Attempt::NotYet(format!("{controller} lists {}", names.join(", "))),
+            Err(error) => Attempt::NotYet(describe("reading volumes", &error)),
+        }
+    })
+    .await?;
     Ok(format!(
         "{BOOT_VOLUME} created on {controller} ({}) and listed after a host restart",
         how(&outcome)

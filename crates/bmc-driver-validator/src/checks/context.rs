@@ -26,7 +26,6 @@ use bmc_runtime::ConnectedBmc;
 use carbide_redfish::nv_redfish::RedfishBmc;
 
 use super::model::{CheckId, Inputs, Outcome};
-use super::ops::Driven;
 use super::runner::CheckResult;
 use crate::connect::Target;
 use crate::selection::Selection;
@@ -119,12 +118,6 @@ impl<'a> CheckCx<'a> {
     /// it was taken from across a reconnect.
     pub(super) fn bmc(&self) -> Arc<ConnectedBmc<RedfishBmc>> {
         self.ctx.bmc.load_full()
-    }
-
-    /// The BMC under test, driven through the current connection. Take one
-    /// again after a reconnect, which replaces the connection.
-    pub(super) fn driven(&'a self) -> Driven<'a> {
-        Driven::new(self, self.bmc())
     }
 
     pub(super) fn selection(&self) -> &'a Selection {

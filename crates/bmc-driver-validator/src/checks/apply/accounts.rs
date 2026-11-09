@@ -81,7 +81,7 @@ async fn verify_new_account(
     username: &str,
     temporary: &Target,
 ) -> Step {
-    cx.driven().wait_for_operations(outcome).await?;
+    cx.wait_for_operations(outcome).await?;
     if !listed(cx, username).await? {
         return Err(Outcome::Fail(format!(
             "created {username}, but it is not listed"
@@ -107,7 +107,7 @@ async fn verify_account_gone(
     username: &str,
     temporary: &Target,
 ) -> Step {
-    cx.driven().wait_for_operations(outcome).await?;
+    cx.wait_for_operations(outcome).await?;
     if listed(cx, username).await? {
         return Err(Outcome::Fail(format!(
             "deleted {username}, but it is still listed"

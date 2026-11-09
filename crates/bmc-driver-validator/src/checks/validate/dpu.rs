@@ -17,7 +17,6 @@
 
 //! DPU discovery and initialization, with the DPU's own restarts.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use bmc_platform::{
@@ -35,7 +34,7 @@ use crate::checks::context::CheckCx;
 use crate::checks::errors::{describe, failed};
 use crate::checks::model::{Check, CheckId, Needs, Outcome, Sequenced, Step};
 use crate::checks::ops::{
-    self, Attempt, Driven, Effect, SETTLE_POLL_INTERVAL, SETTLE_TIMEOUT, how, poll, requested, took,
+    self, Attempt, Effect, SETTLE_POLL_INTERVAL, SETTLE_TIMEOUT, how, poll, requested, took,
 };
 use crate::checks::text::reported;
 use crate::connect::Target;
@@ -80,17 +79,16 @@ async fn bmc_rshim(cx: &CheckCx<'_>) -> Step {
     let bmc = cx.bmc();
     let dpu = bmc.dpu()?;
     let outcome = requested(cx, "enable_bmc_rshim", dpu.enable_bmc_rshim()).await?;
-    cx.driven()
-        .read_back(&outcome, Effect::Immediate, async || {
-            match dpu.status().await {
-                Ok(status) if status.bmc_rshim == Some(RshimState::Enabled) => Attempt::Done(()),
-                Ok(status) => {
-                    Attempt::NotYet(format!("BMC rshim reads {}", reported(&status.bmc_rshim)))
-                }
-                Err(error) => Attempt::NotYet(describe("status", &error)),
+    cx.read_back(&outcome, Effect::Immediate, async || {
+        match dpu.status().await {
+            Ok(status) if status.bmc_rshim == Some(RshimState::Enabled) => Attempt::Done(()),
+            Ok(status) => {
+                Attempt::NotYet(format!("BMC rshim reads {}", reported(&status.bmc_rshim)))
             }
-        })
-        .await?;
+            Err(error) => Attempt::NotYet(describe("status", &error)),
+        }
+    })
+    .await?;
     Ok(format!("BMC rshim reads Enabled ({})", how(&outcome)))
 }
 
@@ -134,11 +132,11 @@ async fn switch_nic_mode(cx: &CheckCx<'_>, host: &Target, mode: NicMode) -> Step
     let started = Instant::now();
     let bmc = cx.bmc();
     let outcome = requested(cx, "set_nic_mode", bmc.dpu()?.set_nic_mode(mode)).await?;
-    cx.driven().settle(&outcome).await?;
-    let host = Driven::new(cx, Arc::new(connect_host(host).await?));
+    cx.settle(&outcome).await?;
+    let host = connect_host(host).await?;
     cx.trace("power-cycling the host through its BMC");
-    host.set_power(ResetType::ForceOff).await?;
-    host.set_power(ResetType::On).await?;
+    ops::set_power(cx, &host, ResetType::ForceOff).await?;
+    ops::set_power(cx, &host, ResetType::On).await?;
     ops::wait_for_bmc_up(cx).await?;
     let bmc = cx.bmc();
     let dpu = bmc.dpu()?;
@@ -190,7 +188,7 @@ async fn host_privilege(cx: &CheckCx<'_>) -> Step {
     let outcome = match set().await {
         Err(PlatformError::NotReady { message }) => {
             cx.trace(format!("{message}; restarting the DPU"));
-            cx.driven().restart_host().await?;
+            cx.restart_host().await?;
             poll(
                 cx,
                 SETTLE_TIMEOUT,
@@ -206,20 +204,19 @@ async fn host_privilege(cx: &CheckCx<'_>) -> Step {
         result => result.map_err(failed("set_host_privilege_level"))?,
     };
     cx.trace(format!("set_host_privilege_level: {}", how(&outcome)));
-    cx.driven()
-        .read_back(&outcome, Effect::OnRestart, async || {
-            match dpu.status().await {
-                Ok(status) if status.host_privilege == Some(HostPrivilegeLevel::Restricted) => {
-                    Attempt::Done(())
-                }
-                Ok(status) => Attempt::NotYet(format!(
-                    "host privilege reads {}",
-                    reported(&status.host_privilege)
-                )),
-                Err(error) => Attempt::NotYet(describe("status", &error)),
+    cx.read_back(&outcome, Effect::OnRestart, async || {
+        match dpu.status().await {
+            Ok(status) if status.host_privilege == Some(HostPrivilegeLevel::Restricted) => {
+                Attempt::Done(())
             }
-        })
-        .await?;
+            Ok(status) => Attempt::NotYet(format!(
+                "host privilege reads {}",
+                reported(&status.host_privilege)
+            )),
+            Err(error) => Attempt::NotYet(describe("status", &error)),
+        }
+    })
+    .await?;
     Ok(format!(
         "host privilege reads Restricted after a DPU restart ({})",
         how(&outcome)
@@ -245,21 +242,24 @@ async fn secure_boot(cx: &CheckCx<'_>) -> Step {
             .merge(requested(cx, "add_platform_key", secure_boot.add_platform_key(key)).await?);
     }
     let want_key = platform_key.is_some();
-    cx.driven()
-        .read_back(&outcome, Effect::OnRestart, async || {
-            let status = secure_boot.status().await;
-            let key = secure_boot.has_platform_key().await;
-            match (status, key) {
-                (Ok(SecureBootStatus::Enabled), Ok(key)) if key || !want_key => Attempt::Done(()),
-                (Ok(status), Ok(key)) => Attempt::NotYet(format!(
-                    "secure boot reads {status:?}; platform key enrolled: {key}"
-                )),
-                (Err(error), _) | (_, Err(error)) => {
-                    Attempt::NotYet(describe("secure boot status", &error))
-                }
-            }
-        })
-        .await?;
+    cx.read_back(&outcome, Effect::OnRestart, async || {
+        match secure_boot.status().await {
+            Ok(SecureBootStatus::Enabled) => {}
+            Ok(status) => return Attempt::NotYet(format!("secure boot reads {status:?}")),
+            Err(error) => return Attempt::NotYet(describe("secure boot status", &error)),
+        }
+        if !want_key {
+            return Attempt::Done(());
+        }
+        match secure_boot.has_platform_key().await {
+            Ok(true) => Attempt::Done(()),
+            Ok(false) => Attempt::NotYet(
+                "secure boot reads Enabled; no platform key is enrolled".to_string(),
+            ),
+            Err(error) => Attempt::NotYet(describe("has_platform_key", &error)),
+        }
+    })
+    .await?;
     Ok(format!(
         "Enabled{} after a DPU restart ({})",
         if want_key {
@@ -309,20 +309,19 @@ async fn http_boot_once(cx: &CheckCx<'_>) -> Step {
         ),
     )
     .await?;
-    cx.driven()
-        .read_back(&outcome, Effect::Immediate, async || {
-            match boot_override(cx).await {
-                Ok(set) if set == http_once => Attempt::Done(()),
-                Ok((target, enabled)) => Attempt::NotYet(format!(
-                    "the override reads {} {}",
-                    reported(&target),
-                    reported(&enabled)
-                )),
-                Err(error) => Attempt::NotYet(describe("reading ComputerSystem.Boot", &error)),
-            }
-        })
-        .await?;
-    cx.driven().restart_host().await?;
+    cx.read_back(&outcome, Effect::Immediate, async || {
+        match boot_override(cx).await {
+            Ok(set) if set == http_once => Attempt::Done(()),
+            Ok((target, enabled)) => Attempt::NotYet(format!(
+                "the override reads {} {}",
+                reported(&target),
+                reported(&enabled)
+            )),
+            Err(error) => Attempt::NotYet(describe("reading ComputerSystem.Boot", &error)),
+        }
+    })
+    .await?;
+    cx.restart_host().await?;
     poll(
         cx,
         SETTLE_TIMEOUT,
@@ -351,16 +350,15 @@ async fn host_rshim(cx: &CheckCx<'_>) -> Step {
         dpu.set_host_rshim(RshimState::Enabled),
     )
     .await?;
-    cx.driven()
-        .read_back(&outcome, Effect::Immediate, async || {
-            match dpu.status().await {
-                Ok(status) if status.host_rshim == Some(RshimState::Enabled) => Attempt::Done(()),
-                Ok(status) => {
-                    Attempt::NotYet(format!("host rshim reads {}", reported(&status.host_rshim)))
-                }
-                Err(error) => Attempt::NotYet(describe("status", &error)),
+    cx.read_back(&outcome, Effect::Immediate, async || {
+        match dpu.status().await {
+            Ok(status) if status.host_rshim == Some(RshimState::Enabled) => Attempt::Done(()),
+            Ok(status) => {
+                Attempt::NotYet(format!("host rshim reads {}", reported(&status.host_rshim)))
             }
-        })
-        .await?;
+            Err(error) => Attempt::NotYet(describe("status", &error)),
+        }
+    })
+    .await?;
     Ok(format!("host rshim Enabled ({})", how(&outcome)))
 }

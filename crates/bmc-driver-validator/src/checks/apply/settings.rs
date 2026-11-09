@@ -75,7 +75,7 @@ pub(super) async fn bios_apply(cx: &CheckCx<'_>) -> Step {
     restart_unless_bios_reported(
         |step| cx.trace(step),
         status,
-        async || cx.driven().restart_host().await,
+        async || cx.restart_host().await,
     )
     .await?;
     apply_until_in_effect(
@@ -214,7 +214,7 @@ async fn apply_until_in_effect(
     let started = Instant::now();
     let outcome = until_answered(trace, async || apply().await).await?;
     cx.trace(format!("apply: {}", how(&outcome)));
-    cx.driven().take_effect(&outcome).await?;
+    cx.take_effect(&outcome).await?;
     let mut applied = format!("applying ({}) and a host restart", how(&outcome));
     if let Some(rest) = wait_in_effect(trace, &pending, Some(&before.settings)).await? {
         let took_effect = before
@@ -230,7 +230,7 @@ async fn apply_until_in_effect(
         ));
         let again = until_answered(trace, async || apply().await).await?;
         cx.trace(format!("apply again: {}", how(&again)));
-        cx.driven().take_effect(&again).await?;
+        cx.take_effect(&again).await?;
         wait_in_effect(trace, &pending, None).await?;
         applied.push_str(&format!(
             ", then applying again ({}) and a second restart",

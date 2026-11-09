@@ -24,41 +24,18 @@ mod poll;
 mod power;
 mod work;
 
-use std::sync::Arc;
 use std::time::Instant;
 
 pub(in crate::checks) use bmc::{
     reset_bmc, settle_after_ac_cycle, wait_for_ac_cycle_down, wait_for_bmc_down, wait_for_bmc_up,
 };
 use bmc_platform::DriverOutcome;
-use bmc_runtime::ConnectedBmc;
-use carbide_redfish::nv_redfish::RedfishBmc;
 pub(in crate::checks) use poll::{
     Attempt, IMMEDIATE_TIMEOUT, QUICK_POLL_INTERVAL, RETRY_INTERVAL, SETTLE_POLL_INTERVAL,
     SETTLE_TIMEOUT, UNREACHABLE_TIMEOUT, poll, poll_traced, until_answered,
 };
+pub(in crate::checks) use power::set_power;
 pub(in crate::checks) use work::{Effect, requested, sent_or_dropped, sent_when_ready};
-
-use super::context::CheckCx;
-
-/// A BMC whose drivers a check drives, with the check it reports for. Host
-/// power and the work a driver starts are operations on one, so each names
-/// the BMC it acts on: the BMC under test, from [`CheckCx::driven`], or
-/// another the run reaches, such as a DPU's host BMC.
-pub(in crate::checks) struct Driven<'a> {
-    cx: &'a CheckCx<'a>,
-    bmc: Arc<ConnectedBmc<RedfishBmc>>,
-}
-
-impl<'a> Driven<'a> {
-    pub(in crate::checks) fn new(cx: &'a CheckCx<'a>, bmc: Arc<ConnectedBmc<RedfishBmc>>) -> Self {
-        Self { cx, bmc }
-    }
-
-    pub(in crate::checks) fn bmc(&self) -> &ConnectedBmc<RedfishBmc> {
-        &self.bmc
-    }
-}
 
 /// How the driver says a request completed: at once, or by starting work.
 pub(in crate::checks) fn how(outcome: &DriverOutcome) -> String {

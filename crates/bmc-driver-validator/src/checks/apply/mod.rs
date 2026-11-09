@@ -24,9 +24,7 @@ mod lockdown;
 mod settings;
 mod storage;
 
-use std::fmt::Debug;
-
-use bmc_platform::{Capability, PlatformError};
+use bmc_platform::Capability;
 pub(in crate::checks) use lockdown::{enable_lockdown, lift_lockdown};
 use nv_redfish::resource::{PowerState, ResetType};
 
@@ -63,10 +61,10 @@ pub(super) fn checks() -> Vec<Check> {
     ]
 }
 
-/// Cycles host power away from its current state and back.
+/// Cycles host power away from its current state and back, then records
+/// the change as not restored unless the host reads its original state.
 async fn cycle_power(cx: &CheckCx<'_>) -> Step {
-    let driven = cx.driven();
-    let Some(original) = driven.power_state().await.map_err(failed("state"))? else {
+    let Some(original) = cx.power_state().await.map_err(failed("state"))? else {
         return Err(Outcome::Skipped(
             "the platform reports no single power state".to_string(),
         ));
@@ -80,34 +78,12 @@ async fn cycle_power(cx: &CheckCx<'_>) -> Step {
         PowerState::Off => (ResetType::On, ResetType::ForceOff),
         _ => (ResetType::ForceOff, ResetType::On),
     };
-    there_and_back(
-        cx,
-        "host power",
-        Some(original),
-        driven.set_power(away),
-        driven.set_power(back),
-        driven.power_state(),
-    )
-    .await
-}
-
-/// Changes a setting away from `original` and back, then records the change
-/// as not restored unless `read` finds `original` again. Ends with both
-/// changes' reports, or the first failure.
-async fn there_and_back<S: PartialEq + Debug>(
-    cx: &CheckCx<'_>,
-    setting: &str,
-    original: S,
-    away: impl Future<Output = Step>,
-    back: impl Future<Output = Step>,
-    read: impl Future<Output = Result<S, PlatformError>>,
-) -> Step {
-    let away = away.await;
-    let back = back.await;
-    match read.await {
-        Ok(current) if current == original => {}
+    let away = cx.set_power(away).await;
+    let back = cx.set_power(back).await;
+    match cx.power_state().await {
+        Ok(Some(current)) if current == original => {}
         current => cx.not_restored(format!(
-            "{setting} was {original:?}; it now reads {current:?}"
+            "host power was {original:?}; it now reads {current:?}"
         )),
     }
     Ok(format!("{}; {}", away?, back?))

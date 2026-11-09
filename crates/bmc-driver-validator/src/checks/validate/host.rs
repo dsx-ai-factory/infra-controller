@@ -93,15 +93,14 @@ async fn ipmi_over_lan(cx: &CheckCx<'_>) -> Step {
         return Ok("already enabled".to_string());
     }
     let outcome = requested(cx, "set_ipmi_over_lan", control.set_ipmi_over_lan(true)).await?;
-    cx.driven()
-        .read_back(&outcome, Effect::Immediate, async || {
-            match control.ipmi_over_lan_enabled().await {
-                Ok(true) => Attempt::Done(()),
-                Ok(false) => Attempt::NotYet("IPMI over LAN reads disabled".to_string()),
-                Err(error) => Attempt::NotYet(describe("ipmi_over_lan_enabled", &error)),
-            }
-        })
-        .await?;
+    cx.read_back(&outcome, Effect::Immediate, async || {
+        match control.ipmi_over_lan_enabled().await {
+            Ok(true) => Attempt::Done(()),
+            Ok(false) => Attempt::NotYet("IPMI over LAN reads disabled".to_string()),
+            Err(error) => Attempt::NotYet(describe("ipmi_over_lan_enabled", &error)),
+        }
+    })
+    .await?;
     Ok(format!(
         "enabled ({}); IPMI over LAN reads enabled",
         how(&outcome)
@@ -118,7 +117,6 @@ async fn manager_settings(cx: &CheckCx<'_>) -> Checked {
     )
     .await?;
     let status = cx
-        .driven()
         .read_back(&outcome, Effect::Immediate, async || {
             match control.settings_status().await {
                 Ok(status) if status.is_applied => Attempt::Done(status),
@@ -179,7 +177,7 @@ async fn ac_cycle(cx: &CheckCx<'_>) -> Step {
     } else {
         ops::settle_after_ac_cycle(cx, &outcome).await
     };
-    cx.driven().power_on().await?;
+    cx.power_on().await?;
     let gone = gone?;
     let unknown = if gone.is_empty() {
         String::new()
@@ -210,7 +208,7 @@ async fn enable_east_west(cx: &CheckCx<'_>) -> Step {
             super_nic.set_east_west_control(index, true),
         )
         .await?;
-        cx.driven().wait_for_operations(&outcome).await?;
+        cx.wait_for_operations(&outcome).await?;
         requests.push(format!("{index}: {}", how(&outcome)));
     }
     Ok(format!(

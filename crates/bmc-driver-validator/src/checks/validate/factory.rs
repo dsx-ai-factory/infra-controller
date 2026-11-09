@@ -130,7 +130,7 @@ async fn clear_uefi_password(cx: &CheckCx<'_>) -> Step {
         cx.bmc().bios()?.clear_uefi_password(&password.new),
     )
     .await?;
-    cx.driven().take_effect(&outcome).await?;
+    cx.take_effect(&outcome).await?;
     Ok(format!("cleared ({}) and restarted", how(&outcome)))
 }
 
@@ -145,7 +145,6 @@ async fn reset_bios(cx: &CheckCx<'_>) -> Step {
     let inputs = cx.inputs();
     let boot_interface = inputs.boot_interface();
     let status = cx
-        .driven()
         .read_back(&outcome, Effect::OnRestart, async || {
             match bios
                 .status(&inputs.bios_profile, boot_interface.as_ref())

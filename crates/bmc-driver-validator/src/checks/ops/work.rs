@@ -21,12 +21,14 @@
 use std::time::Duration;
 
 use bmc_platform::{DriverOutcome, OperationReference, OperationStatus, PlatformError};
+use bmc_runtime::ConnectedBmc;
+use carbide_redfish::nv_redfish::RedfishBmc;
 
+use super::how;
 use super::poll::{
     Attempt, IMMEDIATE_TIMEOUT, QUICK_POLL_INTERVAL, SETTLE_POLL_INTERVAL, SETTLE_TIMEOUT, poll,
     poll_traced,
 };
-use super::{Driven, how};
 use crate::checks::context::CheckCx;
 use crate::checks::errors::{describe, failed};
 use crate::checks::model::Outcome;
@@ -109,7 +111,7 @@ pub(in crate::checks) async fn sent_when_ready(
     sent_or_dropped(cx, operation, async { result }).await
 }
 
-impl Driven<'_> {
+impl CheckCx<'_> {
     /// Waits for the change that produced `outcome` to take `effect`, then
     /// polls `read` until it shows the change, returning what it saw.
     pub(in crate::checks) async fn read_back<T>(
@@ -128,7 +130,7 @@ impl Driven<'_> {
                 (SETTLE_TIMEOUT, SETTLE_POLL_INTERVAL)
             }
         };
-        poll(self.cx, timeout, interval, read).await
+        poll(self, timeout, interval, read).await
     }
 
     /// Polls `reached` briefly, then, unless a restart already happened,
@@ -141,23 +143,20 @@ impl Driven<'_> {
         reached: impl AsyncFn() -> Attempt<T>,
     ) -> Result<(T, bool), Outcome> {
         if !restarted {
-            match poll(
-                self.cx,
-                IMMEDIATE_TIMEOUT,
-                QUICK_POLL_INTERVAL,
-                async || reached().await,
-            )
+            match poll(self, IMMEDIATE_TIMEOUT, QUICK_POLL_INTERVAL, async || {
+                reached().await
+            })
             .await
             {
                 Ok(value) => return Ok((value, false)),
-                Err(Outcome::Fail(reason)) => self.cx.trace(format!(
+                Err(Outcome::Fail(reason)) => self.trace(format!(
                     "{reason}; restarting the host in case it applies on reset"
                 )),
                 Err(other) => return Err(other),
             }
             self.restart_host().await?;
         }
-        let value = poll(self.cx, SETTLE_TIMEOUT, SETTLE_POLL_INTERVAL, async || {
+        let value = poll(self, SETTLE_TIMEOUT, SETTLE_POLL_INTERVAL, async || {
             reached().await
         })
         .await?;
@@ -171,8 +170,7 @@ impl Driven<'_> {
         outcome: &DriverOutcome,
     ) -> Result<(), Outcome> {
         if !self.settle(outcome).await? {
-            self.cx
-                .trace("restarting the host so the change takes effect");
+            self.trace("restarting the host so the change takes effect");
             self.restart_host().await?;
         }
         Ok(())
@@ -184,12 +182,11 @@ impl Driven<'_> {
         let mut awaiting_reset = false;
         for reference in outcome.references() {
             let seen = self.poll_operation(reference, true, async || false).await?;
-            self.cx.trace(format!("{}: {seen:?}", reference.uri()));
+            self.trace(format!("{}: {seen:?}", reference.uri()));
             awaiting_reset |= seen == Seen::AwaitingReset;
         }
         if awaiting_reset {
-            self.cx
-                .trace("work runs on the next host reset; restarting the host");
+            self.trace("work runs on the next host reset; restarting the host");
             self.restart_host().await?;
             self.wait_for_operations(outcome).await?;
         }
@@ -201,15 +198,10 @@ impl Driven<'_> {
         &self,
         outcome: &DriverOutcome,
     ) -> Result<(), Outcome> {
-        for reference in outcome.references() {
-            self.poll_operation(reference, false, async || false)
-                .await?;
-            self.cx.trace(format!("{}: Completed", reference.uri()));
-        }
-        Ok(())
+        wait_for_operations(self, &self.bmc(), outcome).await
     }
 
-    /// [`poll_operation`] on this BMC.
+    /// [`poll_operation`] on the BMC under test.
     pub(super) async fn poll_operation(
         &self,
         reference: &OperationReference,
@@ -217,7 +209,7 @@ impl Driven<'_> {
         stop: impl AsyncFn() -> bool,
     ) -> Result<Seen, Outcome> {
         poll_operation(
-            |step| self.cx.trace(step),
+            |step| self.trace(step),
             reference,
             async || self.bmc().operation_status(reference).await,
             reset_ends,
@@ -225,6 +217,26 @@ impl Driven<'_> {
         )
         .await
     }
+}
+
+/// Waits until every reference in `outcome` completes on `bmc`.
+pub(super) async fn wait_for_operations(
+    cx: &CheckCx<'_>,
+    bmc: &ConnectedBmc<RedfishBmc>,
+    outcome: &DriverOutcome,
+) -> Result<(), Outcome> {
+    for reference in outcome.references() {
+        poll_operation(
+            |step| cx.trace(step),
+            reference,
+            async || bmc.operation_status(reference).await,
+            false,
+            async || false,
+        )
+        .await?;
+        cx.trace(format!("{}: Completed", reference.uri()));
+    }
+    Ok(())
 }
 
 /// How [`poll_operation`] last saw the work at a reference.

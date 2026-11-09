@@ -89,9 +89,8 @@ async fn set_lockdown(cx: &CheckCx<'_>, desired: LockdownDesiredState) -> Step {
             took(started)
         ),
     };
-    let driven = cx.driven();
-    let restarted = driven.settle(&outcome).await?;
-    let (status, restarted) = driven
+    let restarted = cx.settle(&outcome).await?;
+    let (status, restarted) = cx
         .converge(restarted, async || match lockdown.status().await {
             Ok(status) if reached(&status) => Attempt::Done(status),
             Ok(status) => Attempt::NotYet(format!("lockdown reads {}", halves(&status))),

@@ -90,12 +90,12 @@ pub(in crate::checks) async fn wait_for_ac_cycle_down(
     cx: &CheckCx<'_>,
     outcome: &DriverOutcome,
 ) -> Result<bool, Outcome> {
-    let bmc = cx.driven();
+    let bmc = cx.bmc();
     for reference in outcome.references() {
         let went_down = work_or_bmc_down(
             |step| cx.trace(step),
             reference,
-            async || bmc.bmc().operation_status(reference).await,
+            async || bmc.operation_status(reference).await,
             async || answers(cx).await,
         )
         .await?;
@@ -116,10 +116,9 @@ pub(in crate::checks) async fn settle_after_ac_cycle(
     cx: &CheckCx<'_>,
     outcome: &DriverOutcome,
 ) -> Result<Vec<String>, Outcome> {
-    let bmc = cx.driven();
     let mut gone = Vec::new();
     for reference in outcome.references() {
-        match bmc
+        match cx
             .poll_operation(reference, false, async || answers(cx).await)
             .await?
         {

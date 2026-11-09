@@ -110,7 +110,7 @@ async fn account_policy(cx: &CheckCx<'_>) -> Checked {
             .apply_default_policy(target.username(), target.password()),
     )
     .await?;
-    cx.driven().wait_for_operations(&outcome).await?;
+    cx.wait_for_operations(&outcome).await?;
     let service = async {
         cx.target()
             .fresh_connection()
@@ -189,7 +189,6 @@ async fn ntp(cx: &CheckCx<'_>) -> Step {
     let control = bmc.bmc_control()?;
     let outcome = requested(cx, "set_ntp_servers", control.set_ntp_servers(servers)).await?;
     let listed = cx
-        .driven()
         .read_back(&outcome, Effect::Immediate, async || {
             match control.time_status().await {
                 Ok(status) if lists_ntp_servers(&status, servers) => {
@@ -252,7 +251,6 @@ async fn utc(cx: &CheckCx<'_>) -> Step {
     let control = bmc.bmc_control()?;
     let outcome = requested(cx, "set_utc_timezone", control.set_utc_timezone()).await?;
     let offset = cx
-        .driven()
         .read_back(&outcome, Effect::Immediate, async || {
             match control.time_status().await.map(|status| status.utc_offset) {
                 Ok(None) => Attempt::Done(None),
@@ -286,8 +284,7 @@ async fn set_uefi_password(cx: &CheckCx<'_>) -> Step {
             .change_uefi_password(&password.current, &password.new),
     )
     .await?;
-    cx.driven()
-        .take_effect(&outcome)
+    cx.take_effect(&outcome)
         .await
         .map_err(|outcome| match outcome {
             Outcome::Fail(reason) | Outcome::Unreachable(reason) => Outcome::Unconfirmed(format!(

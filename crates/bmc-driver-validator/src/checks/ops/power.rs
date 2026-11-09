@@ -21,64 +21,30 @@
 use std::time::{Duration, Instant};
 
 use bmc_platform::PlatformError;
+use bmc_runtime::ConnectedBmc;
+use carbide_redfish::nv_redfish::RedfishBmc;
 use nv_redfish::resource::{PowerState, ResetType};
 
 use super::poll::{Attempt, QUICK_POLL_INTERVAL, poll};
-use super::{Driven, how, took};
+use super::work::wait_for_operations;
+use super::{how, took};
+use crate::checks::context::CheckCx;
 use crate::checks::errors::{describe, failed};
 use crate::checks::model::{Outcome, Step};
 
 /// How long a power transition may take to show in the reported state.
 const POWER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-impl Driven<'_> {
+impl CheckCx<'_> {
     /// The host power state through the power driver, read afresh.
     pub(in crate::checks) async fn power_state(&self) -> Result<Option<PowerState>, PlatformError> {
-        self.bmc()
-            .power()
-            .map_err(|_| PlatformError::Unsupported)?
-            .state()
-            .await
+        power_state(&self.bmc()).await
     }
 
     /// Requests `reset` through the power driver and waits for the state it
     /// leads to.
     pub(in crate::checks) async fn set_power(&self, reset: ResetType) -> Step {
-        let target = match reset {
-            ResetType::ForceOff | ResetType::GracefulShutdown => PowerState::Off,
-            _ => PowerState::On,
-        };
-        let started = Instant::now();
-        let outcome = self
-            .bmc()
-            .power()?
-            .set(reset)
-            .await
-            .map_err(failed("set"))?;
-        self.cx.trace(format!("power {reset:?}: {}", how(&outcome)));
-        self.wait_for_operations(&outcome).await?;
-        self.wait_for_power(target).await?;
-        self.cx.trace(format!("power reads {target:?}"));
-        Ok(format!("{reset:?} reached {target:?} in {}", took(started)))
-    }
-
-    pub(in crate::checks) async fn wait_for_power(
-        &self,
-        target: PowerState,
-    ) -> Result<(), Outcome> {
-        poll(
-            self.cx,
-            POWER_TIMEOUT,
-            QUICK_POLL_INTERVAL,
-            async || match self.power_state().await {
-                Ok(Some(state)) if state == target => Attempt::Done(()),
-                Ok(state) => {
-                    Attempt::NotYet(format!("host reports power {state:?}, not {target:?}"))
-                }
-                Err(error) => Attempt::NotYet(describe("power state", &error)),
-            },
-        )
-        .await
+        set_power(self, &self.bmc(), reset).await
     }
 
     /// Restarts the host, or powers it on when it is off, and waits until it
@@ -95,7 +61,7 @@ impl Driven<'_> {
     /// for on. Reads are retried while the BMC is still coming back.
     pub(in crate::checks) async fn power_on(&self) -> Result<(), Outcome> {
         let state = poll(
-            self.cx,
+            self,
             POWER_TIMEOUT,
             QUICK_POLL_INTERVAL,
             async || match self.power_state().await {
@@ -106,7 +72,53 @@ impl Driven<'_> {
         .await?;
         match state {
             Some(PowerState::Off) => self.set_power(ResetType::On).await.map(drop),
-            _ => self.wait_for_power(PowerState::On).await,
+            _ => wait_for_power(self, &self.bmc(), PowerState::On).await,
         }
     }
+}
+
+/// Requests `reset` through `bmc`'s power driver and waits for the state it
+/// leads to: on the BMC under test, or another the run reaches, such as a
+/// DPU's host BMC.
+pub(in crate::checks) async fn set_power(
+    cx: &CheckCx<'_>,
+    bmc: &ConnectedBmc<RedfishBmc>,
+    reset: ResetType,
+) -> Step {
+    let target = match reset {
+        ResetType::ForceOff | ResetType::GracefulShutdown => PowerState::Off,
+        _ => PowerState::On,
+    };
+    let started = Instant::now();
+    let outcome = bmc.power()?.set(reset).await.map_err(failed("set"))?;
+    cx.trace(format!("power {reset:?}: {}", how(&outcome)));
+    wait_for_operations(cx, bmc, &outcome).await?;
+    wait_for_power(cx, bmc, target).await?;
+    cx.trace(format!("power reads {target:?}"));
+    Ok(format!("{reset:?} reached {target:?} in {}", took(started)))
+}
+
+async fn power_state(bmc: &ConnectedBmc<RedfishBmc>) -> Result<Option<PowerState>, PlatformError> {
+    bmc.power()
+        .map_err(|_| PlatformError::Unsupported)?
+        .state()
+        .await
+}
+
+async fn wait_for_power(
+    cx: &CheckCx<'_>,
+    bmc: &ConnectedBmc<RedfishBmc>,
+    target: PowerState,
+) -> Result<(), Outcome> {
+    poll(
+        cx,
+        POWER_TIMEOUT,
+        QUICK_POLL_INTERVAL,
+        async || match power_state(bmc).await {
+            Ok(Some(state)) if state == target => Attempt::Done(()),
+            Ok(state) => Attempt::NotYet(format!("host reports power {state:?}, not {target:?}")),
+            Err(error) => Attempt::NotYet(describe("power state", &error)),
+        },
+    )
+    .await
 }
