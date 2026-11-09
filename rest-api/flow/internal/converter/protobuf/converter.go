@@ -902,13 +902,14 @@ func RackTo(r *rack.Rack) *pb.Rack {
 	}
 
 	result := &pb.Rack{
-		Info:            DeviceInfoTo(&r.Info),
-		ExternalId:      r.ExternalID,
-		RackProfileId:   r.RackProfileID,
-		Location:        LocationTo(&r.Loc),
-		Components:      components,
-		OperationStatus: PhaseTo(r.OperationStatus),
-		Health:          HealthReportTo(r.Health),
+		Info:                   DeviceInfoTo(&r.Info),
+		ExternalId:             r.ExternalID,
+		RackProfileId:          r.RackProfileID,
+		Location:               LocationTo(&r.Loc),
+		Components:             components,
+		OperationStatus:        PhaseTo(r.OperationStatus),
+		OperationStatusDetails: r.OperationStatusDetails.ToProto(),
+		Health:                 HealthReportTo(r.Health),
 	}
 	if r.NVLDomainID != uuid.Nil {
 		result.NvlDomainIds = UUIDsTo([]uuid.UUID{r.NVLDomainID})

@@ -1370,6 +1370,14 @@ async fn test_network_segment_metrics(
         );
     }
 
+    // A dropped lock only queues its release. Drain that release through the
+    // same manager and await the final unlock before shutting the manager down.
+    env.api
+        .work_lock_manager_handle
+        .try_acquire_lock("lock_iteration::network_segments_controller_iteration_ids".into())
+        .await?
+        .release()
+        .await?;
     drop(env);
 
     let env = create_test_env_with_overrides(pool.clone(), overrides).await;

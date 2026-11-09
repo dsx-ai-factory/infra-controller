@@ -2289,6 +2289,7 @@ dependencies = [
  "criterion",
  "dashmap",
  "figment",
+ "flate2",
  "futures",
  "http",
  "http-body-util",

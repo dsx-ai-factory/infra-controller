@@ -99,6 +99,9 @@ impl ColumnInfo<'_> for IdColumn {
     }
 }
 
+mod collection;
+pub use collection::MachineInterfaces;
+
 mod host_address_candidates;
 
 #[cfg(test)]

@@ -25,6 +25,10 @@ func rackFromProto(r *pb.Rack) *types.Rack {
 		NVLDomainIDs:    uuidsFromProto(r.GetNvlDomainIds()),
 		OperationStatus: phaseFromProto(r.GetOperationStatus()),
 	}
+	if r.GetOperationStatusDetails().GetTrayCountsByType() != nil {
+		rack.OperationStatusDetails = &types.RackOperationStatusDetails{}
+		rack.OperationStatusDetails.FromProto(r.GetOperationStatusDetails())
+	}
 
 	if len(r.GetComponents()) > 0 {
 		rack.Components = make([]types.Component, 0, len(r.GetComponents()))
@@ -297,7 +301,7 @@ func rackToProto(r *types.Rack) *pb.Rack {
 		Info:     deviceInfoToProto(&r.Info),
 		Location: locationToProto(&r.Location),
 	}
-	// OperationStatus is deliberately omitted: this conversion builds a
+	// OperationStatus and its details are deliberately omitted: this conversion builds a
 	// CreateExpectedRack request, while Flow owns the derived response field.
 	rack.NvlDomainIds = uuidsToProto(r.NVLDomainIDs)
 

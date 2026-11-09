@@ -49,6 +49,19 @@ sequenceDiagram
 
 ## DPU LLDP Collection
 
+The agent attaches LLDP reports to `RecordDpuNetworkStatus`. Core processes
+LLDP in a savepoint so a rejected report does not discard valid operational
+status. On rejection, Core retains the last accepted neighbors and fingerprint;
+these describe the last recorded observation, which may no longer reflect
+current topology.
+
+Core returns the accepted fingerprint through `GetManagedHostNetworkConfig`.
+The agent sends `UNCHANGED` only when it matches the current snapshot;
+otherwise, a successful collection is sent in full. Omitting LLDP leaves
+acceptance unchanged. Older Core versions omit the fingerprint, so newer agents
+continue sending full snapshots. For older agents without fingerprints, Core
+commits operational status before returning an LLDP rejection error.
+
 NICo uses LLDP-MED data from each DPU to associate its physical uplinks with
 top-of-rack switch ports. The collection path depends on how `dpu-agent` is
 deployed:

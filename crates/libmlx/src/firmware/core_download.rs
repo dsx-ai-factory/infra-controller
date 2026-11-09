@@ -17,10 +17,9 @@ use tokio::time::{Instant, timeout_at};
 use tonic::codegen::http::uri::PathAndQuery;
 use tonic::codegen::http::{StatusCode, header};
 
-use super::artifact_writer::{ArtifactWriter, MAX_ARTIFACT_BYTES};
+use super::artifact_writer::ArtifactWriter;
 use super::config::FirmwareArtifactDigests;
 use super::error::{CoreTransferFailure, FirmwareError, FirmwareResult};
-use super::source::SOURCE_TRANSFER_TIMEOUT;
 
 const MAX_TRANSFER_RETRIES: u32 = 3;
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -254,6 +253,7 @@ pub(super) struct CoreFirmwareDelivery {
 
 impl CoreFirmwareDelivery {
     /// Bind runtime credentials to one admitted identity and approved artifact set.
+    #[cfg(any(target_os = "linux", test))]
     pub(super) fn new(
         config: CoreFirmwareDownloadConfig,
         operation_id: String,
@@ -265,8 +265,8 @@ impl CoreFirmwareDelivery {
             operation_id,
             digests,
             limits: DownloadLimits {
-                timeout: SOURCE_TRANSFER_TIMEOUT,
-                max_bytes: MAX_ARTIFACT_BYTES,
+                timeout: super::source::SOURCE_TRANSFER_TIMEOUT,
+                max_bytes: super::artifact_writer::MAX_ARTIFACT_BYTES,
                 retry_delay: Duration::from_secs(1),
             },
         })
