@@ -518,8 +518,11 @@ fi
 
 # DPF requirements. DPF installs by default; these apply unless --skip-dpf
 # (NICO_SKIP_DPF=true / NICO_INSTALL_DPF=false), which clears INSTALL_DPF.
+# NICO_DPF_EXTERNAL keeps DPF enabled in Core while reusing a platform installed
+# by another automation, so platform-source and VIP checks are not applicable.
 if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
-    [[ -n "${NICO_DPF_SRC:-}" ]] || \
+    if [[ "${INSTALL_DPF_PLATFORM:-true}" == "true" ]]; then
+        [[ -n "${NICO_DPF_SRC:-}" ]] || \
         _check_pinned_submodule DPF doca-platform 'NICO_DPF_SRC=<clone>' --skip-dpf
     if [[ -n "${NICO_DPF_SRC:-}" && ! -d "${NICO_DPF_SRC}/deploy/charts/dpf-operator" ]]; then
         ERRORS+=("NICO_DPF_SRC='${NICO_DPF_SRC}' has no deploy/charts/dpf-operator - point it at a NVIDIA/doca-platform checkout")
@@ -535,6 +538,7 @@ if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
     fi
     if [[ "${NICO_MANAGE_DEFAULT_STORAGE_CLASS:-true}" == "false" ]]; then
         WARNINGS+=("DPF (default) with NICO_MANAGE_DEFAULT_STORAGE_CLASS=false — Kamaji's etcd PVCs use the local-path StorageClass; ensure a usable StorageClass exists")
+    fi
     fi
     # Validate the site config actually enables [dpf] *before* setup.sh installs
     # the whole DPF prereq stack. Without this, a --core-values file with a
