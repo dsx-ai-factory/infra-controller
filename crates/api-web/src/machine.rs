@@ -827,6 +827,36 @@ pub(super) struct ValidationRun {
     pub(super) start_time: String,
     pub(super) end_time: String,
     pub(super) machine_id: String,
+    pub(super) progress: String,
+    pub(super) current_tests: String,
+    pub(super) current_attempts: String,
+}
+
+impl From<forgerpc::MachineValidationRun> for ValidationRun {
+    fn from(run: forgerpc::MachineValidationRun) -> Self {
+        Self {
+            machine_id: run.machine_id.map(|id| id.to_string()).unwrap_or_default(),
+            status: run
+                .status
+                .as_ref()
+                .and_then(|status| status.machine_validation_state.as_ref())
+                .map(|state| format!("{state:?}"))
+                .unwrap_or_else(|| "Unknown".to_string()),
+            progress: run
+                .status
+                .as_ref()
+                .map(|status| format!("{}/{}", status.completed_tests, status.total))
+                .unwrap_or_default(),
+            context: run.context.unwrap_or_default(),
+            validation_id: run.validation_id.unwrap_or_default().to_string(),
+            start_time: run.start_time.unwrap_or_default().to_string(),
+            end_time: run
+                .end_time
+                .map_or_else(|| "N/A".to_string(), |time| time.to_string()),
+            current_tests: String::new(),
+            current_attempts: String::new(),
+        }
+    }
 }
 
 impl From<forgerpc::Machine> for MachineDetail<'_> {
@@ -1223,23 +1253,43 @@ pub(super) async fn detail(
         .await
         .map(|response| response.into_inner())
     {
-        Ok(results) => results
-            .runs
-            .into_iter()
-            .rev() // Show the most recent run first
-            .map(|vr| ValidationRun {
-                machine_id: vr.machine_id.map(|id| id.to_string()).unwrap_or_default(),
-                status:format!("{:?}", vr.status.unwrap_or_default().machine_validation_state.unwrap_or(
-                    rpc::forge::machine_validation_status::MachineValidationState::Completed(
-                        rpc::forge::machine_validation_status::MachineValidationCompleted::Success.into(),
-                    ),
-                )),
-                context: vr.context.unwrap_or_default(),
-                validation_id: vr.validation_id.unwrap_or_default().to_string(),
-                start_time: vr.start_time.unwrap_or_default().to_string(),
-                end_time: vr.end_time.map_or_else(|| "N/A".to_string(), |time| time.to_string()),
-            })
-            .collect(),
+        Ok(results) => {
+            let mut runs = Vec::new();
+            for vr in results.runs.into_iter().rev() {
+                let active_id = vr.validation_id.filter(|_| vr.end_time.is_none());
+                let mut run = ValidationRun::from(vr);
+                if let Some(validation_id) = active_id {
+                    // Only the host's current runs need item lookups, never the fleet list.
+                    match db::machine_validation_execution::find_run_items_by_run_id(
+                        &mut state.db_reader(),
+                        &validation_id,
+                    )
+                    .await
+                    {
+                        Ok(items) => {
+                            let (tests, attempts): (Vec<_>, Vec<_>) = items.into_iter()
+                                .filter(|item| item.state == model::machine_validation::MachineValidationRunItemState::Running)
+                                .map(|item| {
+                                    let attempt = match item.current_attempt_id {
+                                        Some(id) => format!("{} ({id})", item.attempt),
+                                        None => item.attempt.to_string(),
+                                    };
+                                    (item.test_id, attempt)
+                                }).unzip();
+                            run.current_tests = tests.join(", ");
+                            run.current_attempts = attempts.join(", ");
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, %machine_id, %validation_id, "Failed to load current validation work");
+                            run.current_tests = "Unavailable".to_string();
+                            run.current_attempts = "Unavailable".to_string();
+                        }
+                    }
+                }
+                runs.push(run);
+            }
+            runs
+        }
         Err(err) => {
             tracing::warn!(error = %err, %machine_id, "get_machine_validation_runs failed");
             Vec::new() // Empty validation results on error
