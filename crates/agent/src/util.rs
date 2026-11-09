@@ -311,15 +311,12 @@ pub async fn get_periodic_dpu_config(
         dpu_machine_id: Some(DpuMachineId::try_from(*dpu_machine_id)?),
     });
 
-    let resp = match client.get_managed_host_network_config(request).await {
-        Ok(response) => response,
-        Err(err) => {
-            return Err(eyre::eyre!(
-                "error while executing the GetManagedHostNetworkConfig gRPC call: {}",
-                err.to_string()
-            ));
-        }
-    };
+    // Wrap rather than stringify: callers downcast to `tonic::Status` to tell a
+    // `NotFound`, which means the DPU was deleted, from every other failure.
+    let resp = client
+        .get_managed_host_network_config(request)
+        .await
+        .wrap_err("error while executing the GetManagedHostNetworkConfig gRPC call")?;
 
     Ok(resp.into_inner())
 }

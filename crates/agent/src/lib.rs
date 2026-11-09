@@ -63,6 +63,7 @@ mod fmds_client;
 
 pub mod duppet;
 mod hbn;
+mod hbn_config_retention;
 mod health;
 mod host_machine_id;
 mod instance_metadata_endpoint;

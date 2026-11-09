@@ -1,5 +1,5 @@
 ---
-tags: ["unreleased", "deployment", "dpu", "nvlink", "provisioning", "rack-level-administration", "rest-api", "security"]
+tags: ["unreleased", "deployment", "dpu", "networking", "nvlink", "provisioning", "rack-level-administration", "rest-api", "security"]
 ---
 
 ## NVIDIA Infra Controller v2.4 — unreleased
@@ -180,3 +180,22 @@ On a site that runs Vault, the flag is a configuration change that requires the 
 | `helm-prereqs` `certManager.siteIssuer.create` | New, `true` by default. The `site-issuer` ClusterIssuer moved from `templates/vault-tls-certs.yaml` to `templates/site-issuer.yaml` with the same hook annotations, so an upgrade recreates it as before. On a Vault site it renders only while `vault.tls.create` is also `true`, as before; with `vault.enabled: false` it renders regardless of `vault.tls.create`. |
 | nico-api chart `vault.enabled` | New, `true` by default. Setting it to `false` removes the `VAULT_*` environment variables from the `nico-api` Deployment, and the chart rejects a non-empty `vaultClusterInfo`. |
 | `health-check.sh` | Detects the NICo namespace from the `nico-system-nico-database-config` ConfigMap. Checks Vault health while the `vault` StatefulSet exists, and fails when only its namespace exists or when the StatefulSet is absent while NICo is still integrated with Vault. NICo counts as integrated while any Deployment in the NICo namespace references `VAULT_ADDR` or any cert-manager Certificate in any namespace is issued by `vault-nico-issuer` (the installer's consumer rule, so a partially migrated site keeps its Vault checks), or, before Core is installed, while `vault-cluster-info` exists; otherwise the Vault integration checks (`vault-pki-config`, `vault-nico-issuer`, the two Vault Secrets, and the ConfigMap keys) are reported as skipped with `not configured (--skip-vault was used)`, and a Vault site missing the ConfigMap fails those checks. Warns when Vault still runs on a site switched to `--skip-vault`. |
+
+### DPU keeps its HBN configuration while Core is unreachable
+
+The DPU agent used to blank its networking whenever it had no network configuration to apply. It could not tell a deleted DPU from a `nico-api` it simply could not reach, so a DPU that restarted during an outage deleted its own HBN startup configuration and stopped serving DHCP. A host behind that DPU could not then boot without NICo, which is what `host_lifecycle_profile.retain_hbn_config_on_boot` exists to allow. The agent now acts on the answer `nico-api` gave rather than on the absence of one:
+
+| Result | What the agent does |
+| --- | --- |
+| `nico-api` answers `NotFound` | Blanks the DPU networking on the second consecutive answer, for every DPU |
+| `nico-api` does not answer | A DPU whose host sets `retain_hbn_config_on_boot` keeps its configuration; any other DPU blanks it as before |
+
+The agent records the flag on the DPU on every successful fetch, so a DPU that restarts during an outage still knows it. A DPU that has never reached `nico-api` reads as unset. See [DPU networking while NICo is unreachable](../../docs/provisioning/ip-and-network-configuration.md#dpu-networking-while-nico-is-unreachable).
+
+<Note title="A retained DPU deleted during an outage keeps running">
+Blanking is what keeps a deleted machine off the network, and a DPU with this flag no longer blanks while `nico-api` is unreachable. A DPU deleted during an outage therefore keeps serving its old configuration until `nico-api` answers again and reports it as `NotFound`. There is no time limit on this retention.
+</Note>
+
+<Note title="A deleted DPU is now cleaned up without an agent restart">
+`NotFound` previously reached the agent as an opaque error, so a deleted DPU kept its configuration until the agent process restarted. It is now recognized, and a DPU without the flag is blanked on the second consecutive `NotFound`, as the existing behavior always intended.
+</Note>

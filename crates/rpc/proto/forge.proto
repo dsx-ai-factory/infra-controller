@@ -6006,6 +6006,16 @@ message ManagedHostNetworkConfigResponse {
   // Fingerprint of the last LLDP snapshot committed by Core. Agents send
   // UNCHANGED only when this matches their current snapshot.
   optional bytes accepted_lldp_snapshot_fingerprint = 123;
+
+  // Mirrors the `retain_hbn_config_on_boot` setting of the receiving DPU's
+  // host. Such a DPU keeps its HBN and DPU-local DHCP configuration while Core
+  // is unreachable, so the host can boot to its last known state while NICo's
+  // DHCP and gRPC services are unavailable. The agent records the value on
+  // persistent DPU storage, because a cold start during an outage must apply
+  // the rule before it reaches Core. Older Core versions do not send this
+  // field, so a DPU reads it as unset and keeps the unconditional reset
+  // behavior.
+  bool retain_hbn_config_on_boot = 124;
 }
 
 // Resolved network state for one service interface on the receiving DPU.

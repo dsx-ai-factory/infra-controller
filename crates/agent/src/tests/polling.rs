@@ -42,6 +42,9 @@ struct FetchState {
     requests: mpsc::Sender<Instant>,
     request_count: AtomicUsize,
     failed_requests: Vec<usize>,
+    /// Requests answered with `NotFound`, which means the DPU was deleted, as
+    /// opposed to `failed_requests`, which never reach Core's answer.
+    not_found_requests: Vec<usize>,
     invalid_metadata_requests: Vec<usize>,
     invalid_service_requests: Vec<usize>,
     include_service_networking: bool,
@@ -65,6 +68,7 @@ fn config_fetch_waits_after_success_failure_and_slow_response() {
                 requests,
                 request_count: AtomicUsize::new(0),
                 failed_requests: vec![2],
+                not_found_requests: vec![],
                 invalid_metadata_requests: vec![],
                 invalid_service_requests: vec![],
                 include_service_networking: false,
@@ -156,6 +160,7 @@ async fn malformed_service_response_preserves_last_accepted_configuration() {
         requests,
         request_count: AtomicUsize::new(0),
         failed_requests: vec![],
+        not_found_requests: vec![],
         invalid_metadata_requests: vec![],
         invalid_service_requests: vec![2], // Corrupt only the second response's service link.
         include_service_networking: true,
@@ -202,6 +207,7 @@ async fn dropping_config_fetcher_releases_state_before_next_interval() {
         requests,
         request_count: AtomicUsize::new(0),
         failed_requests: vec![],
+        not_found_requests: vec![],
         invalid_metadata_requests: vec![],
         invalid_service_requests: vec![],
         include_service_networking: false,
@@ -234,6 +240,7 @@ async fn failed_initial_fetch_retries_before_host_id_lookup_expires() {
         requests,
         request_count: AtomicUsize::new(0),
         failed_requests: vec![1],
+        not_found_requests: vec![],
         invalid_metadata_requests: vec![],
         invalid_service_requests: vec![],
         include_service_networking: false,
@@ -282,6 +289,7 @@ async fn failed_startup_retry_returns_to_periodic_waits() {
         requests,
         request_count: AtomicUsize::new(0),
         failed_requests: vec![1, 2],
+        not_found_requests: vec![],
         invalid_metadata_requests: vec![],
         invalid_service_requests: vec![],
         include_service_networking: false,
@@ -316,6 +324,7 @@ fn failed_initial_metadata_conversion_retries_once_before_periodic_waits() {
                 requests,
                 request_count: AtomicUsize::new(0),
                 failed_requests: vec![],
+                not_found_requests: vec![],
                 invalid_metadata_requests: vec![1, 2],
                 invalid_service_requests: vec![],
                 include_service_networking: false,
@@ -373,6 +382,91 @@ fn failed_initial_metadata_conversion_retries_once_before_periodic_waits() {
     assert!(failure_gap.unwrap().as_secs_f64() >= delay);
 }
 
+/// A DPU that cannot reach Core and a DPU that Core has deleted both leave the
+/// fetcher with no configuration to hand out. Only the second is evidence the
+/// DPU is gone, so the fetcher has to keep them apart: a DPU that retains its
+/// HBN configuration holds it through the first and not through the second.
+#[tokio::test]
+async fn an_unreachable_core_is_not_reported_as_a_deleted_dpu() {
+    struct Case {
+        failed_requests: Vec<usize>,
+        not_found_requests: Vec<usize>,
+        expected: &'static str,
+    }
+
+    fn observed(state: &crate::periodic_config_fetcher::NetworkConfigState) -> &'static str {
+        use crate::periodic_config_fetcher::NetworkConfigState;
+        match state {
+            NetworkConfigState::Known(_) => "known",
+            NetworkConfigState::Absent => "absent",
+            NetworkConfigState::Unknown => "unknown",
+        }
+    }
+
+    let cases = [
+        (
+            "a cold start that never reaches Core knows nothing",
+            Case {
+                failed_requests: vec![1, 2, 3],
+                not_found_requests: vec![],
+                expected: "unknown",
+            },
+        ),
+        (
+            "a configuration survives Core becoming unreachable",
+            Case {
+                failed_requests: vec![2, 3],
+                not_found_requests: vec![],
+                expected: "known",
+            },
+        ),
+        (
+            "NotFound on a cold start means the DPU is gone",
+            Case {
+                failed_requests: vec![],
+                not_found_requests: vec![1, 2, 3],
+                expected: "absent",
+            },
+        ),
+        (
+            "NotFound replaces a configuration Core already sent",
+            Case {
+                failed_requests: vec![],
+                not_found_requests: vec![2, 3],
+                expected: "absent",
+            },
+        ),
+    ];
+
+    for (name, case) in cases {
+        let (requests, mut request_times) = mpsc::channel(4);
+        let state = Arc::new(FetchState {
+            requests,
+            request_count: AtomicUsize::new(0),
+            failed_requests: case.failed_requests,
+            not_found_requests: case.not_found_requests,
+            invalid_metadata_requests: vec![],
+            invalid_service_requests: vec![],
+            include_service_networking: false,
+            third_response_gate: None,
+        });
+        let (address, server) = run_server(state).await;
+        let fetcher = PeriodicConfigFetcher::new(fetcher_config(address, FETCH_INTERVAL)).await;
+        let reader = fetcher.reader();
+        request_times.try_recv().expect("initial request completed");
+        next_request(&mut request_times).await;
+        // The third request cannot begin until the second was processed, which
+        // is what makes the observation below stable rather than a race.
+        next_request(&mut request_times).await;
+
+        assert_eq!(observed(&reader.net_conf_state()), case.expected, "{name}");
+
+        drop(fetcher);
+        server.abort();
+        server.await.expect_err("mock server was aborted");
+    }
+}
+
 async fn next_request(requests: &mut mpsc::Receiver<Instant>) -> Instant {
     tokio::time::timeout(Duration::from_secs(10), requests.recv())
         .await
@@ -425,6 +519,17 @@ fn fetcher_config(address: SocketAddr, interval: Duration) -> PeriodicConfigFetc
 async fn fetch_config(State(state): State<Arc<FetchState>>) -> axum::response::Response {
     let count = state.request_count.fetch_add(1, Ordering::Relaxed) + 1;
     state.requests.send(Instant::now()).await.unwrap();
+    if state.not_found_requests.contains(&count) {
+        return (
+            [
+                ("content-type", "application/grpc"),
+                ("grpc-status", "5"),
+                ("grpc-message", "machine%20not%20found"),
+            ],
+            "",
+        )
+            .into_response();
+    }
     if state.failed_requests.contains(&count) {
         return (
             [
