@@ -293,15 +293,17 @@ func mirrorExpectedComponents(
 		}
 	}
 
+	// Expected inventory supplies only the Host BMC here; associated DPU BMCs
+	// are reconciled from actual Core inventory by reconcileDpuBMCs.
 	type componentMirrorInsert struct {
-		component          model.Component
-		bmc                model.BMC
-		releasesNaturalKey bool
+		component                    model.Component
+		hostBMC                      model.BMC
+		releaseConflictingNaturalKey bool
 	}
 	type componentMirrorUpdate struct {
-		component          model.Component
-		bmcs               bmcOps
-		releasesNaturalKey bool
+		component                    model.Component
+		hostBMCOps                   bmcOps
+		releaseConflictingNaturalKey bool
 	}
 	type componentMirrorPlan struct {
 		toInsert []componentMirrorInsert
@@ -428,9 +430,9 @@ func mirrorExpectedComponents(
 			bmcOps := planBMCReconciliation(&candidate, s.BMC)
 			if needUpdate || bmcOps.insert != nil || bmcOps.update != nil || len(bmcOps.deletes) > 0 {
 				p.toUpdate = append(p.toUpdate, componentMirrorUpdate{
-					component:          candidate,
-					bmcs:               bmcOps,
-					releasesNaturalKey: componentNaturalKeyOwnedByOther(flowNaturalKeyOwners, &candidate),
+					component:                    candidate,
+					hostBMCOps:                   bmcOps,
+					releaseConflictingNaturalKey: componentNaturalKeyOwnedByOther(flowNaturalKeyOwners, &candidate),
 				})
 			}
 			continue
@@ -438,12 +440,12 @@ func mirrorExpectedComponents(
 
 		p.toInsert = append(p.toInsert, componentMirrorInsert{
 			component: desired,
-			bmc: model.BMC{
+			hostBMC: model.BMC{
 				MacAddress: s.BMC.MACAddress,
 				Type:       devicetypes.BMCTypeToString(devicetypes.BMCTypeHost),
 				IPAddress:  optionalString(s.BMC.IPAddress),
 			},
-			releasesNaturalKey: componentNaturalKeyOwnedByOther(flowNaturalKeyOwners, &desired),
+			releaseConflictingNaturalKey: componentNaturalKeyOwnedByOther(flowNaturalKeyOwners, &desired),
 		})
 		log.Info().
 			Str("type", componentType).
@@ -488,7 +490,7 @@ func mirrorExpectedComponents(
 	if err := pool.RunInTx(ctx, func(ctx context.Context, tx bun.Tx) error {
 		for i := range p.toInsert {
 			entry := &p.toInsert[i]
-			if entry.releasesNaturalKey {
+			if entry.releaseConflictingNaturalKey {
 				err := releaseComponentNaturalKey(ctx, tx, &entry.component, now)
 				if err != nil {
 					return err
@@ -498,13 +500,13 @@ func mirrorExpectedComponents(
 			if err != nil {
 				return fmt.Errorf("insert component %q: %w", entry.component.SerialNumber, err)
 			}
-			entry.bmc.ComponentID = entry.component.ID
-			proceed, err := evictHostBMCOrphanForInsert(ctx, tx, entry.bmc.MacAddress, entry.component.ID)
+			entry.hostBMC.ComponentID = entry.component.ID
+			proceed, err := evictHostBMCOrphanForInsert(ctx, tx, entry.hostBMC.MacAddress, entry.component.ID)
 			if err != nil {
 				return err
 			}
 			if proceed {
-				_, err := tx.NewInsert().Model(&entry.bmc).Exec(ctx)
+				_, err := tx.NewInsert().Model(&entry.hostBMC).Exec(ctx)
 				if err != nil {
 					return fmt.Errorf("insert BMC for component %q: %w", entry.component.SerialNumber, err)
 				}
@@ -512,7 +514,7 @@ func mirrorExpectedComponents(
 		}
 		for i := range p.toUpdate {
 			entry := &p.toUpdate[i]
-			if entry.releasesNaturalKey {
+			if entry.releaseConflictingNaturalKey {
 				err := releaseComponentNaturalKey(ctx, tx, &entry.component, now)
 				if err != nil {
 					return err
@@ -532,7 +534,7 @@ func mirrorExpectedComponents(
 			if err != nil {
 				return fmt.Errorf("update component %q: %w", entry.component.SerialNumber, err)
 			}
-			ops := entry.bmcs
+			ops := entry.hostBMCOps
 			for j := range ops.deletes {
 				if _, err := tx.NewDelete().Model(&ops.deletes[j]).Where("mac_address = ?", ops.deletes[j].MacAddress).ForceDelete().Exec(ctx); err != nil {
 					return fmt.Errorf("delete BMC %q: %w", ops.deletes[j].MacAddress, err)
