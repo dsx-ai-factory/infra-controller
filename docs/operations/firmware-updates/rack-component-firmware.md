@@ -278,8 +278,7 @@ To update all racks named `A01` and `A02`, submit a batch rack request:
 Use this procedure for RMS-backed racks when promoting a new SOT firmware
 object. The rollout has three gates: update the canary racks with an explicit
 SOT, promote that SOT as the ingestion default, then update the remaining
-existing racks. This is the operator procedure requested in
-[issue #5871](https://github.com/dsx-ai-factory/infra-controller/issues/5871).
+existing racks.
 
 An explicit REST `version` changes only the requested update. It does not
 change `[rack_profiles.<profile-id>.firmware_object].url` or the document
