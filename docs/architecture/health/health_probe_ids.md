@@ -149,15 +149,21 @@ endpoint URL the monitor resolved, absent when none resolved, and whose
 [`Hardware`](health_alert_classifications.md#hardware) only; it does not block
 allocations. A single failed pass is not reported, since a keepalive timeout on
 a loaded site is routine, and the stored alert is not rewritten while the outage
-continues. The first pass that reaches NMX-C removes the report, as does a rack
-that no longer has managed hosts for the monitor to reconcile. Only passes
-without a stored report count towards the threshold, so removing the report by
-hand during an ongoing outage suppresses it for another
-`partition_monitor_unreachable_alert_after` consecutive failed passes. The
-alert's `in_alert_since` is the first failed pass of the run that raised it, not
-the pass that wrote it. A report write that fails is retried on the next pass.
-Standalone chassis mapped through `nvlink_nmxc_endpoints` have no rack and
-receive no such alert.
+continues. Only passes that contact the rack count: a rack skipped by change
+detection is not checked, so an outage on an otherwise unchanged rack is first
+noticed at its next full check, up to
+`nvlink_config.partition_monitor_full_check_interval` later (default `10m`),
+and the consecutive-pass count starts there. The first pass that reaches NMX-C
+removes the report, as does a rack that no longer has managed hosts for the
+monitor to reconcile. Only passes without a stored report count towards the
+threshold, so removing the report by hand during an ongoing outage suppresses
+it for another `partition_monitor_unreachable_alert_after` consecutive failed
+passes. The alert's `in_alert_since` is the first failed pass of the run that
+raised it, not the pass that wrote it. A report write that fails is retried on
+the next pass, including the removal of a report from a rack that has since
+recovered and is being skipped by change detection. Standalone chassis mapped
+through
+`nvlink_nmxc_endpoints` have no rack and receive no such alert.
 
 ## NVLink GPU health probe identifiers
 
@@ -222,8 +228,10 @@ This removes the whole report for that source, including all affected GPU
 alerts. If both `Replace` and `Merge` reports use this source name, the command
 removes the replace report first; run it again to remove the merge report.
 
-The monitor re-evaluates on each successful GPU-health query
-(`nvlink_config.monitor_run_interval`, default `60s`). If NMX-C still reports an
+The monitor re-evaluates on each successful GPU-health query, which runs when
+a machine group is checked: every pass (`nvlink_config.monitor_run_interval`,
+default `60s`) for a group whose inputs changed, and otherwise at its full check
+(`nvlink_config.partition_monitor_full_check_interval`, default `10m`). If NMX-C still reports an
 unhealthy GPU matching the host's inventory, the monitor re-asserts the alert
 with a new `in_alert_since` after manual removal. Use removal for resolved
 faults whose alerts the monitor can no longer clear, such as a replaced GPU or

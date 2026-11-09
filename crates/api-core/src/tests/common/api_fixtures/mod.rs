@@ -324,7 +324,7 @@ pub(crate) struct TestEnv {
     pub(in crate::tests) attestation_enabled: bool,
     pub(in crate::tests) site_explorer: SiteExplorer,
     pub(in crate::tests) nmxc_sim: Arc<dyn NmxcPool>,
-    /// The same simulator as `nmxc_sim`, kept concrete so tests can drive its failure modes.
+    /// The same simulator as `nmxc_sim`, kept concrete so tests can read its call counters.
     pub(in crate::tests) nmxc_sim_client: Arc<NmxcSimClient>,
     /// True when the test env uses [`NmxcSimClient::simulator_for_nvlink_config`] (gRPC proxy to a local simulator).
     pub(in crate::tests) nmxc_grpc_simulator: bool,
