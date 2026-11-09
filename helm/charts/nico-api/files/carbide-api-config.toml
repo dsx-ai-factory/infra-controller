@@ -154,6 +154,11 @@ max_concurrency = {{ .Values.machineStateController.maxConcurrency | int }}
 {{- end }}
 [api_admission_control]
 enabled = {{ .Values.apiAdmissionControl.enabled }}
+{{- $certDeadline := mul 2 (int .Values.machineCertificates.requestTimeoutSecs) }}
+{{- if and .Values.apiAdmissionControl.enabled (or .Values.global.certificate.useCertManager .Values.global.certificate.useCertManagerUfm) (gt $certDeadline 300) }}
+# Cover cert-manager issuance plus cleanup. 300s is the binary default, keep in sync.
+max_execution_time = "{{ $certDeadline }}s"
+{{- end }}
 
 [vpc_prefix_state_controller]
 vpc_prefix_drain_time = "5m"

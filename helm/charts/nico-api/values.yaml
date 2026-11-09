@@ -44,6 +44,8 @@ machineCertificates:
     name: site-issuer
     kind: ClusterIssuer
   ## Issuance deadline in seconds, including request creation; range 1..600.
+  ## Above 150, the chart raises api_admission_control.max_execution_time to
+  ## twice this value so admission does not drop issuance before its cleanup.
   requestTimeoutSecs: 120
 
 ## Legacy name aliases — opt-in ExternalName Services so binaries that

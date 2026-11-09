@@ -3716,10 +3716,12 @@ impl CarbideConfig {
 
     /// Reject an admission deadline that would drop a cert-manager issuance before its
     /// cleanup runs. Issuance and cleanup each wait up to `request_timeout_secs`, and a
-    /// dropped handler leaves its CertificateRequest behind. Machine identities always
-    /// get the global limit, so service overrides do not need this check.
+    /// dropped handler leaves its CertificateRequest behind. Internal services can reach
+    /// issuance through `DiscoverMachine` and `CreateCredential`, so each service
+    /// `max_execution_time` override must cover it as well.
     pub fn validate_admission_covers_cert_manager(&self) -> eyre::Result<()> {
-        if !self.api_admission_control.enabled {
+        let admission = &self.api_admission_control;
+        if !admission.enabled {
             return Ok(());
         }
         let Some(cert_manager) = self.certificates.cert_manager_config()? else {
@@ -3727,13 +3729,32 @@ impl CarbideConfig {
         };
         let required =
             std::time::Duration::from_secs(cert_manager.request_timeout_secs).saturating_mul(2);
-        eyre::ensure!(
-            self.api_admission_control.max_execution_time >= required,
-            "api_admission_control.max_execution_time ({:?}) must be at least twice \
-             certificates.cert_manager.request_timeout_secs ({}s) when cert-manager is enabled",
-            self.api_admission_control.max_execution_time,
-            cert_manager.request_timeout_secs,
-        );
+        let overrides = admission
+            .service_limits
+            .iter()
+            .filter_map(|(service_id, limits)| {
+                limits.max_execution_time.map(|deadline| {
+                    (
+                        format!(
+                            "api_admission_control.service_limits.{service_id}.max_execution_time"
+                        ),
+                        deadline,
+                    )
+                })
+            });
+        let deadlines = std::iter::once((
+            "api_admission_control.max_execution_time".to_string(),
+            admission.max_execution_time,
+        ))
+        .chain(overrides);
+        for (field, deadline) in deadlines {
+            eyre::ensure!(
+                deadline >= required,
+                "{field} ({deadline:?}) must be at least twice \
+                 certificates.cert_manager.request_timeout_secs ({}s) when cert-manager is enabled",
+                cert_manager.request_timeout_secs,
+            );
+        }
         Ok(())
     }
 
@@ -4394,6 +4415,7 @@ const fn default_api_admission_max_pending_per_client() -> usize {
 const fn default_api_admission_max_execution_time() -> std::time::Duration {
     // Matches the Rust client's request timeout. That client sends no `grpc-timeout`, so a
     // shorter default would cut off admin-cli, Scout and DPU agent calls the client still waits on.
+    // Keep in sync with the cert-manager deadline in the nico-api chart's config template.
     std::time::Duration::from_secs(300)
 }
 
@@ -7053,45 +7075,76 @@ path = "credentials.yaml"
         });
     }
 
-    /// The default admission deadline covers cert-manager's default issuance plus cleanup, and a
-    /// longer cert-manager timeout needs a longer deadline only while both features are enabled.
+    /// The default admission deadline covers cert-manager's default issuance plus cleanup. A
+    /// longer cert-manager timeout, or a shorter service override, is rejected only while
+    /// admission and either cert-manager backend are enabled.
     #[test]
     fn validate_admission_covers_cert_manager_issuance_and_cleanup() {
         struct Case {
             name: &'static str,
             admission_enabled: bool,
             use_cert_manager: bool,
+            use_cert_manager_ufm: bool,
             request_timeout_secs: u64,
-            valid: bool,
+            service_deadline_secs: Option<u64>,
+            rejected_field: Option<&'static str>,
         }
         let cases = [
             Case {
                 name: "exactly twice the default deadline",
                 admission_enabled: true,
                 use_cert_manager: true,
+                use_cert_manager_ufm: false,
                 request_timeout_secs: 150,
-                valid: true,
+                service_deadline_secs: None,
+                rejected_field: None,
             },
             Case {
                 name: "over half the default deadline",
                 admission_enabled: true,
                 use_cert_manager: true,
+                use_cert_manager_ufm: false,
                 request_timeout_secs: 151,
-                valid: false,
+                service_deadline_secs: None,
+                rejected_field: Some("api_admission_control.max_execution_time"),
+            },
+            Case {
+                name: "UFM backend alone",
+                admission_enabled: true,
+                use_cert_manager: false,
+                use_cert_manager_ufm: true,
+                request_timeout_secs: 151,
+                service_deadline_secs: None,
+                rejected_field: Some("api_admission_control.max_execution_time"),
+            },
+            Case {
+                name: "service override below twice the timeout",
+                admission_enabled: true,
+                use_cert_manager: true,
+                use_cert_manager_ufm: false,
+                request_timeout_secs: 150,
+                service_deadline_secs: Some(299),
+                rejected_field: Some(
+                    "api_admission_control.service_limits.site-agent.max_execution_time",
+                ),
             },
             Case {
                 name: "cert-manager disabled",
                 admission_enabled: true,
                 use_cert_manager: false,
+                use_cert_manager_ufm: false,
                 request_timeout_secs: 600,
-                valid: true,
+                service_deadline_secs: Some(1),
+                rejected_field: None,
             },
             Case {
                 name: "admission disabled",
                 admission_enabled: false,
                 use_cert_manager: true,
+                use_cert_manager_ufm: false,
                 request_timeout_secs: 600,
-                valid: true,
+                service_deadline_secs: Some(1),
+                rejected_field: None,
             },
         ];
 
@@ -7102,22 +7155,35 @@ path = "credentials.yaml"
                 .unwrap();
             config.api_admission_control.enabled = case.admission_enabled;
             config.certificates.use_cert_manager = case.use_cert_manager;
+            config.certificates.use_cert_manager_ufm = case.use_cert_manager_ufm;
             config.certificates.cert_manager = Some(cert_manager::Config {
                 request_timeout_secs: case.request_timeout_secs,
                 ..Default::default()
             });
+            if let Some(secs) = case.service_deadline_secs {
+                config.api_admission_control.service_limits.insert(
+                    "site-agent".to_string(),
+                    ApiAdmissionServiceLimitsConfig {
+                        max_work_in_flight: 1,
+                        max_pending: 1,
+                        pending_timeout: std::time::Duration::from_secs(1),
+                        max_execution_time: Some(std::time::Duration::from_secs(secs)),
+                    },
+                );
+            }
 
             let result = config.validate_admission_covers_cert_manager();
-            if case.valid {
-                result.unwrap_or_else(|error| panic!("{}: {error}", case.name));
-            } else {
-                let error = result.expect_err(case.name).to_string();
-                assert!(
-                    error.contains("api_admission_control.max_execution_time")
-                        && error.contains("request_timeout_secs (151s)"),
-                    "{}: unexpected error: {error}",
-                    case.name
-                );
+            match case.rejected_field {
+                None => result.unwrap_or_else(|error| panic!("{}: {error}", case.name)),
+                Some(field) => {
+                    let error = result.expect_err(case.name).to_string();
+                    let timeout = format!("request_timeout_secs ({}s)", case.request_timeout_secs);
+                    assert!(
+                        error.starts_with(&format!("{field} (")) && error.contains(&timeout),
+                        "{}: unexpected error: {error}",
+                        case.name
+                    );
+                }
             }
         }
     }

@@ -24,3 +24,23 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: apiAdmissionControl.enabled must be true or false
+
+  - it: raises the execution deadline to cover a long cert-manager timeout
+    documentIndex: 0
+    set:
+      global.certificate.useCertManager: true
+      machineCertificates.requestTimeoutSecs: 151
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^max_execution_time = "302s"$'
+
+  - it: keeps the binary default deadline when it covers cert-manager
+    documentIndex: 0
+    set:
+      global.certificate.useCertManagerUfm: true
+      machineCertificates.requestTimeoutSecs: 150
+    asserts:
+      - notMatchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^max_execution_time ='
