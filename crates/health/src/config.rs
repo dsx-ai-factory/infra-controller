@@ -1111,7 +1111,7 @@ pub struct CollectorsConfig {
     /// Firmware collector configuration (if present, firmware collector is enabled)
     pub firmware: Configurable<FirmwareCollectorConfig>,
 
-    /// Power shelf Manager collector configuration (if present, manager collector is enabled).
+    /// Redfish Manager collector configuration (if present, manager collector is enabled).
     pub manager: Configurable<ManagerCollectorConfig>,
 
     /// Leak detector collector configuration (if present, leak detector collector is enabled)
@@ -1389,6 +1389,9 @@ pub struct ProcessorsConfig {
 
     /// Rack-level leak processor: aggregates tray leak reports per rack.
     pub rack_leak: Configurable<RackLeakProcessorConfig>,
+
+    /// Projects source collector observations into structured resource-status logs.
+    pub resource_status: Configurable<ResourceStatusProcessorConfig>,
 }
 
 impl Default for ProcessorsConfig {
@@ -1396,9 +1399,15 @@ impl Default for ProcessorsConfig {
         Self {
             leak_detection: Configurable::Enabled(LeakDetectionProcessorConfig::default()),
             rack_leak: Configurable::Enabled(RackLeakProcessorConfig::default()),
+            resource_status: Configurable::Disabled,
         }
     }
 }
+
+/// Configuration for structured Redfish resource-status log projection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResourceStatusProcessorConfig {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1470,7 +1479,7 @@ impl Default for FirmwareCollectorConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ManagerCollectorConfig {
-    /// Interval between power-shelf manager (PMC) status polls.
+    /// Interval between Redfish Manager polls.
     #[serde(with = "humantime_serde")]
     pub poll_interval: Duration,
 }
@@ -3412,6 +3421,7 @@ mod tests {
 
         assert!(config.collectors.sensors.is_enabled());
         assert!(config.collectors.firmware.is_enabled());
+        assert!(config.processors.resource_status.is_enabled());
         if let Configurable::Enabled(ref manager) = config.collectors.manager {
             assert_eq!(manager.poll_interval, Duration::from_secs(120));
         } else {
@@ -3586,6 +3596,7 @@ cache_size = 50
         }
 
         assert!(!config.collectors.firmware.is_enabled());
+        assert!(!config.processors.resource_status.is_enabled());
         if let Configurable::Enabled(ref manager) = config.collectors.manager {
             assert_eq!(manager.poll_interval, Duration::from_secs(300));
         } else {
