@@ -336,6 +336,10 @@ pub(in crate::tests) mod tests {
             /// than mapped from `expect_outcome`, so a wrong recording cannot
             /// be hidden by the mapping that produced it.
             expect_recorded: SchedulingOutcome,
+            /// The coverage alert the decision publishes, or `None` where the
+            /// outcome reports no gap. No case here finishes an attestation,
+            /// so no failure alert joins it.
+            expect_alert: Option<&'static str>,
             expect_devices: i32,
             expect_fallback: bool,
         }
@@ -346,6 +350,7 @@ pub(in crate::tests) mod tests {
                 reprofile: || vec![(MOCK_HOST_HARDWARE_CLASS.to_string(), gpu_allowlist())],
                 expect_outcome: SpdmSchedulingOutcome::Scheduled,
                 expect_recorded: SchedulingOutcome::Scheduled,
+                expect_alert: None,
                 expect_devices: 3,
                 expect_fallback: false,
             },
@@ -354,6 +359,7 @@ pub(in crate::tests) mod tests {
                 reprofile: || vec![(ANY_HARDWARE_CLASS.to_string(), gpu_allowlist())],
                 expect_outcome: SpdmSchedulingOutcome::Scheduled,
                 expect_recorded: SchedulingOutcome::Scheduled,
+                expect_alert: None,
                 expect_devices: 3,
                 expect_fallback: true,
             },
@@ -370,6 +376,7 @@ pub(in crate::tests) mod tests {
                 },
                 expect_outcome: SpdmSchedulingOutcome::AttestationDisabled,
                 expect_recorded: SchedulingOutcome::AttestationDisabled,
+                expect_alert: None,
                 expect_devices: 0,
                 expect_fallback: false,
             },
@@ -378,6 +385,7 @@ pub(in crate::tests) mod tests {
                 reprofile: Vec::new,
                 expect_outcome: SpdmSchedulingOutcome::NoProfile,
                 expect_recorded: SchedulingOutcome::NoProfile,
+                expect_alert: None,
                 expect_devices: 0,
                 expect_fallback: false,
             },
@@ -394,6 +402,7 @@ pub(in crate::tests) mod tests {
                 },
                 expect_outcome: SpdmSchedulingOutcome::PolicyMatchedNothing,
                 expect_recorded: SchedulingOutcome::PolicyMatchedNothing,
+                expect_alert: Some("AttestationPolicyUnsatisfied"),
                 expect_devices: 0,
                 expect_fallback: false,
             },
@@ -416,6 +425,7 @@ pub(in crate::tests) mod tests {
                 },
                 expect_outcome: SpdmSchedulingOutcome::PartiallySatisfied,
                 expect_recorded: SchedulingOutcome::PartiallySatisfied,
+                expect_alert: Some("AttestationPolicyUnsatisfied"),
                 expect_devices: 3,
                 expect_fallback: false,
             },
@@ -533,6 +543,27 @@ pub(in crate::tests) mod tests {
                 ),
                 "{}: the record names the class, the job it created, and the \
                  requirement the profile left unsatisfied",
+                case.scenario
+            );
+
+            // The same trigger publishes the alerts that decision calls for.
+            let published: Option<sqlx::types::Json<health_report::HealthReport>> =
+                sqlx::query_scalar(
+                    "SELECT health_reports->'merges'->'attestation' FROM machines WHERE id = $1",
+                )
+                .bind(machine_id)
+                .fetch_one(&env.pool)
+                .await?;
+            assert_eq!(
+                published.as_ref().map(|report| report
+                    .alerts
+                    .iter()
+                    .map(|alert| (alert.id.as_str(), alert.target.as_deref()))
+                    .collect::<Vec<_>>()),
+                case.expect_alert
+                    .map(|id| vec![(id, Some(MOCK_HOST_HARDWARE_CLASS))]),
+                "{}: the published coverage alert names the requirement and \
+                 targets the class",
                 case.scenario
             );
 

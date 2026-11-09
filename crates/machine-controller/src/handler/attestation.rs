@@ -302,6 +302,13 @@ async fn schedule(
     )
     .await?;
 
+    // Built from the decision just written, because the outcomes that most
+    // need reporting finish here with no job and so no later result to report
+    // from. The devices this call scheduled have not finished, so they change
+    // nothing the report says yet.
+    let health_report = db::attestation::health::build_health_report(&mut txn, machine_id).await?;
+    db::machine::update_attestation_health_report(&mut txn, machine_id, &health_report).await?;
+
     // The caller commits the job with the state that records its ID when applicable.
     Ok((result, txn))
 }
