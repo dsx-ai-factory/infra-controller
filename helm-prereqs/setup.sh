@@ -1345,6 +1345,9 @@ _SETUP_PHASE="[5/6] external-secrets + NICo prereqs"
 echo "=== [5/6] external-secrets + NICo prereqs ==="
 NICO_PREREQS_VAULT_ENABLED="${INSTALL_VAULT}"
 _VAULT_RESOURCES_RETAINED=false
+_NICO_PREREQS_SYNC_ARGS=()
+_RETAINED_APPROLE_ROLE_ID_B64=""
+_RETAINED_APPROLE_SECRET_ID_B64=""
 if ! "${INSTALL_VAULT}"; then
     # A failed probe must never pass as "no consumers": that would drop
     # resources a running consumer needs.
@@ -1355,6 +1358,38 @@ if ! "${INSTALL_VAULT}"; then
     if [[ -n "${_VAULT_CONSUMERS}" ]]; then
         NICO_PREREQS_VAULT_ENABLED=true
         _VAULT_RESOURCES_RETAINED=true
+        # The retained resources only have to exist for those consumers. The
+        # vault-pki-config Job is a post-upgrade hook that waits for an unsealed
+        # Vault, up to the release timeout, to configure a PKI nothing new will
+        # use, so it is left out of this sync; the completed Job from the Vault
+        # install stays, because Helm does not track hooks in the release.
+        _NICO_PREREQS_SYNC_ARGS+=(--set vault.configJob.enabled=false)
+        # That Job's patch step is also what writes the real AppRole credentials
+        # into nico-vault-approle-tokens after every sync re-applies the chart's
+        # empty placeholders, so read the live values now and hand them to the
+        # render (values/nico-prereqs-dynamic.yaml.gotmpl), which applies them
+        # in place of the placeholders. Only a missing Secret means there is
+        # nothing to carry across; any other failure stops the run before the
+        # sync, which would otherwise blank credentials this run could not read.
+        _approle_err="$(mktemp)"
+        if _approle_out="$(kubectl get secret nico-vault-approle-tokens -n nico-system \
+                -o jsonpath='{.data.VAULT_ROLE_ID} {.data.VAULT_SECRET_ID}' 2>"${_approle_err}")"; then
+            read -r _RETAINED_APPROLE_ROLE_ID_B64 _RETAINED_APPROLE_SECRET_ID_B64 <<<"${_approle_out}"
+        elif ! grep -q 'NotFound' "${_approle_err}"; then
+            cat "${_approle_err}" >&2
+            rm -f "${_approle_err}"
+            echo "Error: could not read nico-vault-approle-tokens to carry the AppRole credentials across the nico-prereqs sync; fix cluster access and rerun" >&2
+            exit 1
+        fi
+        rm -f "${_approle_err}"
+        if [[ -n "${_RETAINED_APPROLE_ROLE_ID_B64}" && -n "${_RETAINED_APPROLE_SECRET_ID_B64}" ]]; then
+            NICO_PREREQS_APPROLE_ROLE_ID="$(base64 -d <<<"${_RETAINED_APPROLE_ROLE_ID_B64}")"
+            NICO_PREREQS_APPROLE_SECRET_ID="$(base64 -d <<<"${_RETAINED_APPROLE_SECRET_ID_B64}")"
+            export NICO_PREREQS_APPROLE_ROLE_ID NICO_PREREQS_APPROLE_SECRET_ID
+            echo "Carrying the live AppRole credentials in nico-vault-approle-tokens across the sync"
+        else
+            echo "WARNING: nico-vault-approle-tokens holds no AppRole credentials, so the sync renders the chart's empty placeholders; health-check.sh reports its keys as missing until a run with Vault installed re-creates them"
+        fi
         echo "These still reference Vault:"
         printf '%s\n' "${_VAULT_CONSUMERS}" | sed 's/^/  /'
         echo "Keeping the Vault resources in nico-prereqs (the Vault ConfigMap and token Secrets, and the"
@@ -1364,7 +1399,8 @@ if ! "${INSTALL_VAULT}"; then
 fi
 export NICO_PREREQS_VAULT_ENABLED
 helmfile sync -l name=external-secrets
-helmfile sync -l name=nico-prereqs
+helmfile sync -l name=nico-prereqs ${_NICO_PREREQS_SYNC_ARGS[@]+"${_NICO_PREREQS_SYNC_ARGS[@]}"}
+unset NICO_PREREQS_APPROLE_ROLE_ID NICO_PREREQS_APPROLE_SECRET_ID
 
 # ---------------------------------------------------------------------------
 # Wait for postgres-operator to provision the cluster and ESO to sync creds

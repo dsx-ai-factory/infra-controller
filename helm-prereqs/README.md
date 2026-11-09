@@ -586,7 +586,24 @@ With `--skip-vault`:
   while any consumer in the cluster still references Vault, phase 5 renders
   the release with all of its Vault resources still enabled, including the
   cert-manager Vault-auth ServiceAccount and token through which
-  `vault-nico-issuer` renews certificates, so those consumers keep working. A
+  `vault-nico-issuer` renews certificates, so those consumers keep working.
+  That retained render passes `--set vault.configJob.enabled=false`: the
+  `vault-pki-config` Job is a post-upgrade hook that waits for an unsealed
+  Vault, up to the release timeout, to configure a PKI that nothing new will
+  use, so it does not run again and the sync does not need Vault to be
+  unsealed. The completed Job from the Vault install stays, because Helm does
+  not track hooks in the release. That Job's patch step is also what writes
+  the real AppRole credentials into `nico-vault-approle-tokens` after every
+  sync re-applies the chart's empty placeholders, so setup reads the live
+  `VAULT_ROLE_ID` and `VAULT_SECRET_ID` first and hands them to the render
+  through `values/nico-prereqs-dynamic.yaml.gotmpl` (the chart's
+  `vault.approleSecret.roleId` and `secretId`), printing
+  `Carrying the live AppRole credentials in nico-vault-approle-tokens across the sync`,
+  and the sync applies those values in place of the placeholders. A missing
+  Secret, or one without both keys, prints
+  `WARNING: nico-vault-approle-tokens holds no AppRole credentials, so the sync renders the chart's empty placeholders; health-check.sh reports its keys as missing until a run with Vault installed re-creates them`
+  instead; any other read failure stops setup before the sync with
+  `Error: could not read nico-vault-approle-tokens to carry the AppRole credentials across the nico-prereqs sync; fix cluster access and rerun`. A
   consumer is a Deployment in `nico-system` whose environment has `VAULT_ADDR`
   (a renamed Core such as `nico-api.nameOverride: carbide-api` counts too), or
   a cert-manager `Certificate` in any namespace whose `issuerRef.name` is
@@ -860,11 +877,29 @@ skip. Complete these first, each as described on its page:
    until no entry remains wrapped by the Transit key, and remove the Transit
    provider, as [Rotating and Retiring Keys](../docs/configuration/secrets-storage.md#rotating-and-retiring-keys)
    describes.
-3. Remove any `[certificates]` override that sets a cert-manager flag to
+3. Confirm that Vault PKI still signs with the `site-root` CA that
+   `site-issuer` signs with, as [Installing without Vault](#installing-without-vault)
+   describes: a leaf issued by
+   `vault-nico-issuer`, such as the Core API certificate in the
+   `nico-api-certificate` Secret (`carbide-api-certificate` on a Core renamed
+   with `nico-api.nameOverride: carbide-api`), must verify against the
+   `site-root` Secret.
+
+   ```bash
+   kubectl get secret site-root -n cert-manager -o jsonpath='{.data.tls\.crt}' | base64 -d > site-root.crt
+   kubectl get secret nico-api-certificate -n nico-system -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl verify -CAfile site-root.crt
+   ```
+
+   `stdin: OK` confirms the common trust anchor. If verification fails, the
+   Vault PKI CA was replaced after the install, and certificates from
+   `site-issuer` would be rejected by every client that trusts the Vault CA:
+   keep Vault PKI, and treat the CA change as a separate migration before
+   using `--skip-vault`.
+4. Remove any `[certificates]` override that sets a cert-manager flag to
    `false`, and replace `vault-nico-issuer` in every nested `issuerRef` of the
    Core values. The flags select cert-manager for the machine and UFM
    certificates; existing certificates stay valid until renewal.
-4. Finish the [legacy PSM/NSM cleanup](#upgrading-deployments-that-bundled-psm-and-nsm)
+5. Finish the [legacy PSM/NSM cleanup](#upgrading-deployments-that-bundled-psm-and-nsm)
    while Vault is installed, if the site ever ran the bundled managers.
    Preflight reports an error under `--skip-vault` while that cleanup's
    markers exist.
@@ -879,6 +914,11 @@ Two things differ from a fresh install:
   `VAULT_ADDR`, or a cert-manager `Certificate` in any namespace issued by
   `vault-nico-issuer`, which covers Core, RMS, Flow, and the site-agent. Those
   consumers keep working during the run, and their certificates keep renewing.
+  The retained sync leaves the `vault-pki-config` Job out and carries the
+  live AppRole credentials across, so it completes whether or not Vault is
+  unsealed; it still reads the `vaultroottoken` Secret
+  for `nico-vault-token`, so keep the `vault` namespace until the resources
+  are released.
   At the end of the run, setup probes the cluster again: when the phases it
   ran have redeployed every consumer, so that none references Vault, it
   re-syncs `nico-prereqs` without the Vault resources; otherwise it lists the
@@ -897,7 +937,16 @@ Two things differ from a fresh install:
   so they remain until deleted. All of them are harmless: `health-check.sh`
   keeps checking the Vault pods while they run and warns that the release and
   namespace should be removed when the rollback window closes, but it does not
-  fail. Remove them together at that point:
+  fail. Remove them together at that point, after two checks. First, the Vault
+  resources must have left `nico-prereqs`: the end of a `--skip-vault` run
+  printed `Vault resources removed from nico-prereqs`, and `health-check.sh`
+  reports its Vault integration checks as `not configured (--skip-vault was used)`. Second,
+  nothing outside the installer's releases may still use this Vault. The
+  consumer probe sees only Deployments in `nico-system` and cert-manager
+  Certificates; a REST `powershelf-manager` or `nvswitch-manager` deployed
+  outside the installer with its persistent credential store on this Vault
+  (`VAULT_ADDR` and `VAULT_TOKEN`), or any other client, loses access to its
+  credentials when the namespace goes, so move those off this Vault first.
 
   ```bash
   helm uninstall vault -n vault

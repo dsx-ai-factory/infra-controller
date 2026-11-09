@@ -6,7 +6,9 @@
 # validate INSTALL_VAULT; phases 2 to 5 install no Vault, wait on no Vault
 # resource, still prepare the nico-system namespace and SSH host key, and keep
 # the Vault resources in nico-prereqs while any Deployment or Certificate still
-# references Vault (released at the end of the run once nothing does); the
+# references Vault, without re-running the vault-pki-config Job and with the live
+# AppRole credentials carried across the sync (released at the end of the run
+# after nothing does); the
 # RMS, Core, Flow, and site-agent Helm commands switch their issuer to
 # site-issuer and disable nico-api's Vault client. The default (Vault) path is
 # asserted beside every skip case, so a regression there fails here too.
@@ -116,6 +118,14 @@ case "$*" in
     'get pods -n postgres -l application=spilo -o jsonpath='*) printf 'nico-pg-cluster-0 master\n' ;;
     'get secret nico-vault-approle-tokens -n nico-system -o jsonpath={.data.VAULT_ROLE_ID}') printf 'cm9sZQ==' ;;
     'get secret nico-vault-approle-tokens -n nico-system -o jsonpath={.data.VAULT_SECRET_ID}') printf 'c2VjcmV0' ;;
+    'get secret nico-vault-approle-tokens -n nico-system -o jsonpath={.data.VAULT_ROLE_ID} {.data.VAULT_SECRET_ID}')
+        # FAKE_APPROLE: the carry-over read finds credentials (present), no Secret (absent),
+        # or fails (error).
+        case "${FAKE_APPROLE:-present}" in
+            present) printf 'cm9sZQ== c2VjcmV0' ;;
+            absent) echo 'Error from server (NotFound): secrets "nico-vault-approle-tokens" not found' >&2; exit 1 ;;
+            error) echo 'Unable to connect to the server: dial tcp 192.0.2.10:6443: i/o timeout' >&2; exit 1 ;;
+        esac ;;
     'get deployments -n nico-system -o jsonpath={range .items[*]}'*)
         # FAKE_CORE_ENV: the Deployments and their env names (vault: a renamed Core that
         # references Vault; novault), none (absent), or a failed query (error).
@@ -142,10 +152,12 @@ cat > "${TEST_TMP_DIR}/bin/helm" <<'FAKE_HELM'
 printf 'helm %s\n' "$*" >> "${TEST_CALLS}"
 printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: rendered\n'
 FAKE_HELM
-# The fake helmfile records the variable the gotmpl renders vault.enabled from.
 cat > "${TEST_TMP_DIR}/bin/helmfile" <<'FAKE_HELMFILE'
 #!/usr/bin/env bash
-printf 'helmfile %s [NICO_PREREQS_VAULT_ENABLED=%s]\n' "$*" "${NICO_PREREQS_VAULT_ENABLED:-unset}" >> "${TEST_CALLS}"
+# The fake helmfile records the variables the gotmpl renders vault.enabled and the
+# AppRole credentials from.
+printf 'helmfile %s [NICO_PREREQS_VAULT_ENABLED=%s APPROLE=%s/%s]\n' "$*" "${NICO_PREREQS_VAULT_ENABLED:-unset}" \
+    "${NICO_PREREQS_APPROLE_ROLE_ID:-unset}" "${NICO_PREREQS_APPROLE_SECRET_ID:-unset}" >> "${TEST_CALLS}"
 FAKE_HELMFILE
 printf '#!/usr/bin/env bash\nexit 0\n' > "${TEST_TMP_DIR}/bin/sleep"
 printf '#!/usr/bin/env bash\nprintf "unseal_vault.sh\\n" >> "${TEST_CALLS}"\n' > "${TEST_TMP_DIR}/work/unseal_vault.sh"
@@ -157,8 +169,8 @@ _run_phases_script() { # $1 INSTALL_VAULT, $2 FAKE_CORE_ENV (vault, novault, abs
         cd "${TEST_TMP_DIR}/work"
         export PATH="${TEST_TMP_DIR}/bin:${PATH}"
         export INSTALL_VAULT="$1" FAKE_CORE_ENV="$2" FAKE_CERTS="$3" VAULT_NS=vault CERT_MANAGER_NS=cert-manager \
-            NICO_STORAGE_CLASS=local-path-persistent
-        unset REGISTRY_PULL_SECRET NICO_PREREQS_VAULT_ENABLED
+            NICO_STORAGE_CLASS=local-path-persistent FAKE_APPROLE="${FAKE_APPROLE:-present}"
+        unset REGISTRY_PULL_SECRET NICO_PREREQS_VAULT_ENABLED NICO_PREREQS_APPROLE_ROLE_ID NICO_PREREQS_APPROLE_SECRET_ID
         timeout 60 bash "${TEST_TMP_DIR}/phases.sh" </dev/null
     )
 }
@@ -222,7 +234,9 @@ assert_not_called "nico-vault-approle-tokens"
 # resources: nico-prereqs renders without them.
 assert_called "kubectl get deployments -n nico-system -o jsonpath={range .items[*]}"
 assert_called "kubectl get certificates.cert-manager.io -A -o jsonpath="
-assert_called "helmfile sync -l name=nico-prereqs [NICO_PREREQS_VAULT_ENABLED=false]"
+assert_called "helmfile sync -l name=nico-prereqs [NICO_PREREQS_VAULT_ENABLED=false APPROLE=unset/unset]"
+assert_not_called "vault.configJob.enabled"
+assert_not_called "get secret nico-vault-approle-tokens"
 assert_printed "RETAINED=false"
 assert_not_printed "still reference Vault"
 if ! (( $(call_line "kubectl label namespace nico-system") < $(call_line "bootstrap_ssh_host_key.sh") && \
@@ -239,13 +253,20 @@ assert_printed "Keeping the Vault resources in nico-prereqs (the Vault ConfigMap
 assert_printed "cert-manager Vault-auth ServiceAccount and token that vault-nico-issuer renews through) until"
 assert_printed "no consumer references Vault."
 # nico-prereqs keeps rendering the Vault resources for the old Core, while Vault itself is
-# still neither installed, unsealed, nor waited for.
-assert_called "helmfile sync -l name=nico-prereqs [NICO_PREREQS_VAULT_ENABLED=true]"
+# still neither installed, unsealed, nor waited for: the retained sync leaves out the
+# vault-pki-config Job hook, which would wait for an unsealed Vault.
+# The skipped Job is what normally rewrites the AppRole credentials that the sync
+# resets to the chart's placeholders, so the live values (decoded) go to the render.
+assert_called "kubectl get secret nico-vault-approle-tokens -n nico-system -o jsonpath={.data.VAULT_ROLE_ID} {.data.VAULT_SECRET_ID}"
+assert_called "helmfile sync -l name=nico-prereqs --set vault.configJob.enabled=false [NICO_PREREQS_VAULT_ENABLED=true APPROLE=role/secret]"
+assert_printed "Carrying the live AppRole credentials in nico-vault-approle-tokens across the sync"
 assert_printed "RETAINED=true"
 assert_called "--set vault.enabled=false"
 assert_not_called "helmfile sync -l name=vault"
 assert_not_called "unseal_vault.sh"
-assert_not_called "nico-vault-approle-tokens"
+# The AppRole Secret is read for the carry-over above, never waited on.
+assert_not_printed "Waiting for Vault AppRole credentials to be synced by ESO..."
+assert_not_printed "Vault AppRole credentials ready"
 assert_printed "=== [3/6] vault === Skipped"
 
 CASE="--skip-vault phases while only a Certificate still references Vault"
@@ -253,12 +274,26 @@ run_phases false absent vault
 assert_printed "  certificate/flow/flow-certificate (vault-nico-issuer)"
 assert_not_printed "deployment/"
 assert_not_printed "site-agent-certs"
-assert_called "helmfile sync -l name=nico-prereqs [NICO_PREREQS_VAULT_ENABLED=true]"
+assert_called "helmfile sync -l name=nico-prereqs --set vault.configJob.enabled=false [NICO_PREREQS_VAULT_ENABLED=true APPROLE=role/secret]"
 assert_printed "RETAINED=true"
+
+CASE="--skip-vault phases while a Certificate still references Vault and the AppRole Secret is gone"
+FAKE_APPROLE=absent run_phases false absent vault
+assert_called "helmfile sync -l name=nico-prereqs --set vault.configJob.enabled=false [NICO_PREREQS_VAULT_ENABLED=true APPROLE=unset/unset]"
+assert_printed "WARNING: nico-vault-approle-tokens holds no AppRole credentials, so the sync renders the chart's empty placeholders; health-check.sh reports its keys as missing until a run with Vault installed re-creates them"
+assert_not_printed "Carrying the live AppRole credentials"
+
+# A failed read is not "no credentials": the run stops before any sync would blank them.
+CASE="--skip-vault phases when the AppRole Secret cannot be read"
+FAKE_APPROLE=error run_phases_expecting_abort false absent vault
+assert_printed "could not read nico-vault-approle-tokens to carry the AppRole credentials across the nico-prereqs sync"
+assert_printed "Unable to connect to the server"
+assert_not_called "helmfile sync -l name=external-secrets"
+assert_not_called "helmfile sync -l name=nico-prereqs"
 
 CASE="--skip-vault phases before cert-manager has CRDs"
 run_phases false absent nocrd
-assert_called "helmfile sync -l name=nico-prereqs [NICO_PREREQS_VAULT_ENABLED=false]"
+assert_called "helmfile sync -l name=nico-prereqs [NICO_PREREQS_VAULT_ENABLED=false APPROLE=unset/unset]"
 assert_printed "RETAINED=false"
 
 # A failed probe must never pass as "no consumers": the run stops before phase 5 touches anything.
@@ -301,7 +336,8 @@ assert_called "kubectl get secret nico-vault-approle-tokens -n nico-system -o js
 assert_not_called "kubectl get deployments"
 assert_not_called "kubectl get certificates"
 assert_not_called "vault.enabled"
-assert_called "helmfile sync -l name=nico-prereqs [NICO_PREREQS_VAULT_ENABLED=true]"
+assert_not_called "vault.configJob.enabled"
+assert_called "helmfile sync -l name=nico-prereqs [NICO_PREREQS_VAULT_ENABLED=true APPROLE=unset/unset]"
 assert_printed "RETAINED=false"
 if ! (( $(call_line "helmfile sync -l name=vault") < $(call_line "unseal_vault.sh") && \
         $(call_line "unseal_vault.sh") < $(call_line "bootstrap_ssh_host_key.sh") && \
@@ -334,7 +370,7 @@ run_release() { # $1 _VAULT_RESOURCES_RETAINED, $2 FAKE_CORE_ENV, $3 FAKE_CERTS;
 }
 CASE="retained, no consumer remains"
 run_release true absent none
-assert_called "helmfile sync -l name=nico-prereqs [NICO_PREREQS_VAULT_ENABLED=false]"
+assert_called "helmfile sync -l name=nico-prereqs [NICO_PREREQS_VAULT_ENABLED=false APPROLE=unset/unset]"
 grep -Fq 'No consumer references Vault any more: removing the Vault resources from nico-prereqs' "${RELEASE_OUT}" \
     || fail "${CASE}: the removal was not announced" "${RELEASE_OUT}"
 grep -Fxq 'NICO_PREREQS_VAULT_ENABLED=false' "${RELEASE_OUT}" || fail "${CASE}: the render variable was not exported as false" "${RELEASE_OUT}"

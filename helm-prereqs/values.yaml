@@ -58,6 +58,13 @@ vault:
     create: true
   approleSecret:
     create: true
+    ## Initial contents. Empty by default: the vault-pki-config Job patches the
+    ## real AppRole credentials in after every install and upgrade. setup.sh
+    ## --skip-vault supplies the live values through
+    ## values/nico-prereqs-dynamic.yaml.gotmpl while it retains this Secret
+    ## without running the Job, so that sync does not reset them.
+    roleId: ""
+    secretId: ""
   configJob:
     enabled: true
     vaultImage: "hashicorp/vault:1.17"
