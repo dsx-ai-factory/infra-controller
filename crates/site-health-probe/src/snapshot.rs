@@ -314,6 +314,8 @@ mod tests {
 
     fn unit(id: &str, state: &str) -> Unit {
         Unit {
+            controller_instance_id: None,
+            rest_machine: None,
             id: id.to_string(),
             unit_type: UnitType::Switch,
             source: Source::NicoApi,
