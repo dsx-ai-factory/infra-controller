@@ -8122,6 +8122,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "nico-pre"
+version = "0.0.1"
+dependencies = [
+ "chrono",
+ "clap",
+ "eyre",
+ "indexmap 2.14.0",
+ "ipnet",
+ "mac_address",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "toml 1.1.2+spec-1.1.0",
+ "uuid",
+]
+
+[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
