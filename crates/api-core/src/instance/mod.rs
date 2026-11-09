@@ -63,6 +63,7 @@ use model::instance::config::network::{
 };
 use model::instance::config::spx::{InstanceSpxConfig, SpxAttachmentType};
 use model::instance::nic_firmware::NicFirmwareAllocationTarget;
+use model::machine::astra::astra_nic_mappings_for_dpu_pci_address_prefix;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
     HostHealthConfig, LoadSnapshotOptions, ManagedHostStateSnapshot, NotAllocatableReason,
@@ -3016,6 +3017,53 @@ pub(crate) fn sort_spx_by_slot(
     spx_hw_map
 }
 
+/// Checks if the SPX interface has at least one functional plane.
+/// From the spx_interface, get the PCI name. An example PCI
+/// name would be 0005:06:00.0. Remove the trailing .0, and find the
+/// four entries in ASTRA_NIC_MAPPINGS that have this prefix in dpu_pci_address.
+/// Call the astra_nic_mappings_for_dpu_pci_address_prefix routine to get the four entries.
+/// These four entries have four dpu_original_ifname fields (example A56p0, A56p1, A56p2, A56p3).
+/// Now, get the spx_multiplane_status field from the DPU associated with this host.
+/// Find the four entries corresponding to the four dpu_original_ifname fields.
+/// See if at least one of the four entries has maintenance_mode field set to false.
+/// If at least one of the four entries has maintenance_mode field set to false, return true.
+/// Otherwise, return false.
+pub(crate) fn check_spx_interface_functional_planes(
+    spx_interface: &DpaInterface,
+    mh_snapshot: &ManagedHostStateSnapshot,
+) -> bool {
+    let dpu_pci_address_prefix = spx_interface.pci_name.split('.').next().unwrap();
+    let astra_nic_mappings = astra_nic_mappings_for_dpu_pci_address_prefix(dpu_pci_address_prefix);
+
+    // Only hosts with declared CX9 planes report multiplane observations.
+    let Some(spx_multiplane_status) = mh_snapshot
+        .dpu_snapshots
+        .first()
+        .and_then(|dpu_snapshot| dpu_snapshot.status.spx_multiplane_status.as_ref())
+    else {
+        return false;
+    };
+
+    // Observations are keyed by logical name, so the card's planes are found
+    // through the netdev the agent resolved for each original interface name.
+    for astra_nic_mapping in astra_nic_mappings {
+        let dpu_original_ifname = astra_nic_mapping.dpu_original_ifname;
+        let Some(observation) = spx_multiplane_status
+            .interfaces
+            .values()
+            .find(|observation| observation.netdev.as_deref() == Some(dpu_original_ifname))
+        else {
+            continue;
+        };
+
+        if observation.maintenance_mode == Some(false) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Binds SPX attachments to DPA rows and returns the selected rows' firmware evidence.
 pub(crate) fn allocate_spx_port_mac(
     spx_config: &InstanceSpxConfig,
@@ -3064,6 +3112,20 @@ pub(crate) fn allocate_spx_port_mac(
         }
         if let Some(sorted_spxs) = spx_hw_map.get_mut(&spx_attachment.device) {
             if let Some(spx_interface) = sorted_spxs.get(spx_attachment.device_instance as usize) {
+                // spx_interface is the DPA interface that will be used to bind the SPX attachment
+                // We need to check to make sure this NIC has at least one functional plane.
+                // Call the check_spx_interface_functional_planes routine to check this.
+                // We need to pass in the spx_interface and mh_snapshot to the check_spx_interface_functional_planes routine.
+                if !check_spx_interface_functional_planes(spx_interface, mh_snapshot) {
+                    tracing::error!(
+                        dpa_interface_id = %spx_interface.id,
+                        "SPX interface has no functional planes",
+                    );
+                    return Err(CarbideError::InvalidArgument(format!(
+                        "SPX interface {} has no functional planes",
+                        spx_interface.id,
+                    )));
+                }
                 spx_attachment.mac_address = Some(spx_interface.mac_address.to_string());
                 targets.push(NicFirmwareAllocationTarget::from_binding(
                     spx_attachment.clone(),
