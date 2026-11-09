@@ -14,7 +14,7 @@
 # limitations under the License.
 
 ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
-ARG RUNTIME_IMAGE=nvcr.io/nvidia/distroless/cc:v3.2.1-dev@sha256:3f6fe2b7e87f25d8c665d2caf80763ca691a1a6dfd2ac5a6b6f14c161108f0d4
+ARG RUNTIME_IMAGE=nvcr.io/nvidia/distroless/cc:v3.4.0-dev@sha256:05e712c6aa85050818ec2c72823cb3cc4a852a83a96da8fbd7625609a1bb2c26
 
 FROM ${DEBIAN_IMAGE} AS builder
 
