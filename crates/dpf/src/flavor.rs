@@ -207,6 +207,7 @@ fn get_default_ovs_defaults_with_topology(
         });
     }
     service_vpc_slots.append_ovs_bridges(&mut script);
+    append_emsign_g3_distrust(&mut script);
     append_ovn_encap_ip_bootstrap(&mut script);
     script
 }
@@ -233,6 +234,7 @@ fn get_bf4_ovs_defaults_with_topology(
         });
     }
     service_vpc_slots.append_ovs_bridges(&mut script);
+    append_emsign_g3_distrust(&mut script);
     append_ovn_encap_ip_bootstrap(&mut script);
     append_post_ovs_hook(&mut script);
     script
@@ -250,6 +252,19 @@ fn append_post_ovs_hook(script: &mut String) {
     script.push_str(
         "if [ -x /opt/dpf/extra-script-post-ovs.sh ]; then /opt/dpf/extra-script-post-ovs.sh; fi\n",
     );
+}
+
+/// Appends a best-effort distrust of emSign ECC Root CA - G3 (CVE-2026-111943) to the DPU OS store.
+fn append_emsign_g3_distrust(script: &mut String) {
+    // The stock DOCA BFB ships a ca-certificates that still trusts this root. The guard skips
+    // images where the entry is absent or already disabled, so a fixed BFB makes this a no-op.
+    script.push_str(concat!(
+        "# Distrust emSign ECC Root CA - G3 (CVE-2026-111943) in the DPU OS trust store.\n",
+        "if grep -qx 'mozilla/emSign_ECC_Root_CA_-_G3.crt' /etc/ca-certificates.conf 2>/dev/null; then\n",
+        "    (sed -i 's|^mozilla/emSign_ECC_Root_CA_-_G3\\.crt$|!&|' /etc/ca-certificates.conf &&\n",
+        "        update-ca-certificates) || echo 'failed to distrust emSign ECC Root CA - G3' >&2\n",
+        "fi\n",
+    ));
 }
 
 /// Appends the per-DPU OVN address update to provisioning-time OVS configuration.
