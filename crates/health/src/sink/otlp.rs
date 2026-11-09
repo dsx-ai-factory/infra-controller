@@ -203,6 +203,7 @@ impl OtlpSink {
                 sink_workers.flush_token(),
                 counts.clone(),
             );
+
             let drain = handle.spawn(drain.run());
 
             // Each target and signal owns a drain so a slow collector cannot
@@ -214,9 +215,11 @@ impl OtlpSink {
                 sink_workers.flush_token(),
                 counts.clone(),
             );
+
             let metrics_drain = handle.spawn(metrics_drain.run());
 
             let (logs, metrics) = (queue.clone(), metrics_queue.clone());
+
             sink_workers.register(
                 SINK_TYPE,
                 Some(config.endpoint.clone()),
@@ -1659,6 +1662,7 @@ mod tests {
     fn sink_exporting_with(target: OtlpTargetConfig, name: &str) -> (OtlpSink, SinkWorkers) {
         let metrics_manager = MetricsManager::new(name).expect("metrics manager should initialize");
         let mut sink_workers = SinkWorkers::default();
+
         let sink = OtlpSink::new_many(
             &[target],
             Arc::new(OpenBmcEventMapper),
@@ -1999,6 +2003,7 @@ mod tests {
     #[tokio::test]
     async fn drain_exports_every_full_batch_without_waiting_for_the_flush_interval() {
         let collector = Arc::new(GatedCollector::new(tokio::sync::Semaphore::MAX_PERMITS));
+
         let (sink, _sink_workers) = sink_exporting_to(
             serve_gated_collector(&collector).await,
             2,
@@ -2083,6 +2088,7 @@ mod tests {
             .iter()
             .find(|log| log.message == "Sinks flushed")
             .expect("flush logs its summary");
+
         [
             summary.field("flushed_record_count"),
             summary.field("dropped_record_count"),
@@ -2105,6 +2111,7 @@ mod tests {
             ),
         ] {
             let collector = Arc::new(GatedCollector::new(tokio::sync::Semaphore::MAX_PERMITS));
+
             let (sink, sink_workers) = sink_exporting_to(
                 serve_gated_collector(&collector).await,
                 10,
@@ -2119,6 +2126,7 @@ mod tests {
                 &test_context(),
                 &metric_event_with("primer", "gauge", "celsius"),
             );
+
             wait_until(
                 || collector.exported_points.lock().unwrap().len() == 1,
                 "the first tick exports the primer",
@@ -2136,11 +2144,13 @@ mod tests {
             let ((), logs) = capture_logs_async(sink_workers.flush(deadline)).await;
 
             let flushed = exported.iter().sum::<usize>().to_string();
+
             assert_eq!(
                 collector.exported_points.lock().unwrap()[1..],
                 exported,
                 "{scenario}"
             );
+
             assert_eq!(
                 flush_summary(&logs),
                 [Some(flushed.as_str()), Some("0"), Some("0")],
@@ -2180,6 +2190,7 @@ mod tests {
         let flaky = Arc::new(FlakyCollector::default());
         let stalled = Arc::new(GatedCollector::new(0));
         let half_stalled = Arc::new(GatedCollector::new(1));
+
         let rejecting = serve_collector(
             tonic::transport::Server::builder()
                 .add_service(MetricsServiceServer::new(RejectingCollector)),
@@ -2241,6 +2252,7 @@ mod tests {
 
         for case in cases {
             let scenario = case.scenario;
+
             let (sink, sink_workers) = sink_exporting_with(
                 OtlpTargetConfig {
                     endpoint: case.endpoint.clone(),
@@ -2267,10 +2279,12 @@ mod tests {
                     ) else {
                         panic!("fixture must contain a metric");
                     };
+
                     sample.semantics = MetricSemantics::CumulativeCounter {
                         description: "Number of correctable ECC errors over the memory lifetime",
                         start_time: Some(SystemTime::UNIX_EPOCH),
                     };
+
                     sink.handle_event(&test_context(), &CollectorEvent::Metric(sample));
                 }
             }
@@ -2279,6 +2293,7 @@ mod tests {
             let ((), logs) = capture_logs_async(sink_workers.flush(deadline)).await;
 
             let [flushed, dropped, timed_out] = case.summary;
+
             assert_eq!(
                 flush_summary(&logs),
                 [Some(flushed), Some(dropped), Some(timed_out)],
@@ -2288,11 +2303,13 @@ mod tests {
             let dropped_log = logs
                 .iter()
                 .find(|log| log.message == "Sink dropped records at shutdown");
+
             assert_eq!(
                 dropped_log.and_then(|log| log.field("dropped_record_count")),
                 (dropped != "0").then_some(dropped),
                 "{scenario}"
             );
+
             if let Some(dropped_log) = dropped_log {
                 assert_eq!(
                     dropped_log.field("endpoint_address"),
@@ -2303,6 +2320,7 @@ mod tests {
         }
 
         let exported = flaky.metrics.lock().unwrap();
+
         let points = exported
             .last()
             .expect("the counter observation is exported")
@@ -2311,6 +2329,7 @@ mod tests {
             .flat_map(|rm| &rm.scope_metrics)
             .flat_map(|sm| &sm.metrics)
             .count();
+
         assert_eq!(points, 2, "a counter observation encodes two data points");
     }
 }

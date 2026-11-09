@@ -374,11 +374,13 @@ pub(crate) async fn export_items<E: OtlpExport>(
     while let Some(range) = pending.pop() {
         let request = export.build(&items[range.clone()], observed_nanos);
         let record_count = E::record_count(&request);
+
         if record_count == 0 {
             settle(ExportOutcome {
                 delivered: range.len(),
                 failed: 0,
             });
+
             continue;
         }
         if range.len() > 1 && E::encoded_len(&request) > target.max_request_bytes {
@@ -402,6 +404,7 @@ pub(crate) async fn export_items<E: OtlpExport>(
                 Ok(response) => {
                     let acknowledged = response.record(target, signal, record_count);
                     let failed = (record_count - acknowledged).min(range.len());
+
                     settle(ExportOutcome {
                         delivered: range.len() - failed,
                         failed,
@@ -450,10 +453,12 @@ pub(crate) async fn export_items<E: OtlpExport>(
                         attempt,
                         endpoint: target.endpoint.clone(),
                     });
+
                     settle(ExportOutcome {
                         delivered: 0,
                         failed: range.len(),
                     });
+
                     break;
                 }
             }
@@ -508,6 +513,7 @@ async fn run_drain<K, Q, E>(
     let Some(channel) = connect(&target, signal, &flush_token).await else {
         return;
     };
+
     let mut export = make_export(channel);
     let mut batch = Vec::with_capacity(target.batch_size);
     let mut metric_indices = HashMap::new();
@@ -573,6 +579,7 @@ async fn run_drain<K, Q, E>(
                 (signal == OtlpSignal::Metrics).then_some(&mut metric_indices),
                 target.batch_size,
             );
+
             counts.start(batch.len() - staged);
             let full = batch.len() >= target.batch_size;
             let send_partial = (flush_partial || flushing) && !batch.is_empty();
@@ -588,6 +595,7 @@ async fn run_drain<K, Q, E>(
                 target.clone(),
                 signal,
             ));
+
             // A flush keeps draining after a partial batch: replacements can
             // end a pass before the queue is empty.
             if !full && !flushing {
@@ -700,9 +708,11 @@ async fn connect(
                     retry_in = ?delay,
                     "failed to configure otlp target connection"
                 );
+
                 flush_token
                     .run_until_cancelled(tokio::time::sleep(delay))
                     .await?;
+
                 continue;
             }
         };
@@ -721,6 +731,7 @@ async fn connect(
                     retry_in = ?delay,
                     "failed to connect to otlp target"
                 );
+
                 flush_token
                     .run_until_cancelled(tokio::time::sleep(delay))
                     .await?;
@@ -1135,8 +1146,10 @@ mod tests {
             include_diagnostics: false,
             include_alert_details: false,
         };
+
         let started = tokio::time::Instant::now();
         let mut outcome = super::ExportOutcome::default();
+
         export_items(
             &mut export,
             &case.items,
@@ -1204,6 +1217,7 @@ mod tests {
             };
 
             let mut acknowledged = None;
+
             let logs = capture_logs(|| {
                 acknowledged = Some(response.record(&target, OtlpSignal::Logs, 3));
             });
@@ -1213,6 +1227,7 @@ mod tests {
                 accepted,
                 "{scenario}",
             );
+
             assert_eq!(acknowledged, Some(accepted as usize), "{scenario}");
 
             assert_eq!(!logs.is_empty(), warning, "{scenario}");
@@ -1247,6 +1262,7 @@ mod tests {
             };
 
             let mut outcomes = Vec::new();
+
             export_items(
                 &mut export,
                 &[1, 2, 3],
@@ -1257,6 +1273,7 @@ mod tests {
             .await;
 
             assert_eq!(export.sent.len(), attempts, "{code:?}");
+
             assert_eq!(
                 outcomes,
                 [super::ExportOutcome {

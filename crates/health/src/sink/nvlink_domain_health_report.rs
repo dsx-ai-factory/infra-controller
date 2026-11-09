@@ -83,12 +83,14 @@ impl NvLinkDomainHealthReportSink {
         // A single worker preserves alert and recovery order for each domain.
         // Its cancellation token bounds the worker lifetime to the sink.
         let counts = DeliveryCounts::default();
+
         let worker = run_report_worker(
             Arc::clone(&queue),
             counts.clone(),
             sink_workers.flush_token(),
             move |key, report| submit_report(Arc::clone(&client), key, report),
         );
+
         let worker = handle.spawn(async move {
             worker_cancel_token.run_until_cancelled(worker).await;
         });
@@ -115,6 +117,7 @@ async fn submit_report(
                 .await;
 
             let delivered = result.is_ok();
+
             emit(HealthReportSubmitted {
                 target: HealthReportTarget::NvLinkDomain,
                 outcome: Outcome::from(&result),
@@ -125,6 +128,7 @@ async fn submit_report(
                     .map(|error| error.to_string())
                     .unwrap_or_default(),
             });
+
             delivered
         }
         Err(error) => {
@@ -133,6 +137,7 @@ async fn submit_report(
                 nvlink_domain_id = %key.id,
                 "Failed to convert NVLink domain health report"
             );
+
             false
         }
     }

@@ -164,12 +164,14 @@ mod tests {
         queue.save_latest("a".into(), 1);
         queue.save_latest("a".into(), 2);
         queue.save_latest("b".into(), 3);
+
         assert_eq!(queue.len(), 2);
 
         let mut count = 0;
         while queue.pop().is_some() {
             count += 1;
         }
+
         assert_eq!(count, 2);
         assert_eq!(queue.len(), 0);
     }

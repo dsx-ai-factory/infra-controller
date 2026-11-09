@@ -70,6 +70,7 @@ impl SwitchHealthReportSink {
             Arc::new(DedupQueue::new());
 
         let counts = DeliveryCounts::default();
+
         let handles = (0..config.workers)
             .map(|worker_id| {
                 let client = Arc::clone(&client);
@@ -102,6 +103,7 @@ async fn submit_report(
         Ok(converted) => {
             let result = client.submit_switch_health_report(&key.id, converted).await;
             let delivered = result.is_ok();
+
             emit(HealthReportSubmitted {
                 target: HealthReportTarget::Switch,
                 outcome: Outcome::from(&result),
@@ -109,6 +111,7 @@ async fn submit_report(
                 worker_id,
                 error: result.err().map(|e| e.to_string()).unwrap_or_default(),
             });
+
             delivered
         }
         Err(error) => {
@@ -118,6 +121,7 @@ async fn submit_report(
                 switch_id = %key.id,
                 "Failed to convert switch health report"
             );
+
             false
         }
     }

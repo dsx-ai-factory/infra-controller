@@ -52,6 +52,7 @@ impl OtlpDrainTask {
 
     pub(crate) async fn run(self) {
         let include_alert_details = self.target.include_alert_details;
+
         run_drain(
             self.queue,
             self.target,
