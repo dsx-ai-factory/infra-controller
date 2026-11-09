@@ -17,107 +17,23 @@
 
 use carbide_api_core::test_support::metadata;
 use carbide_test_harness::prelude::*;
-use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::StableHostMachineId;
-use carbide_uuid::network::NetworkSegmentId;
-use model::test_support::ManagedHostConfig;
-use rpc::forge::instance_interface_config::NetworkDetails;
 use rpc::forge::{InstanceAllocationRequest, InstanceConfig, ManagedHostQuarantineMode};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
-struct AllocationFixture {
-    harness: TestHarness,
-    mh: TestManagedHost,
-    segment_id: NetworkSegmentId,
-}
-
-impl AllocationFixture {
-    async fn new(pool: PgPool) -> Self {
-        let harness = TestHarness::builder(pool)
-            .with_resource_pools(
-                ResourcePoolBuilder::default()
-                    .with_vlan_ids(1, 5)
-                    .with_vnis(10_001, 10_005)
-                    .build(),
-            )
-            .build()
-            .await;
-        let domain = harness.create_test_domain("dwrt1.com").await;
-        let network_controller = harness.network_controller();
-        let admin_segment = network_controller.create_admin_segment(&domain).await;
-        let underlay_segment = network_controller.create_underlay_segment(&domain).await;
-        let vpc_id = network_controller.create_vpc("test vpc 1").await;
-        let segment_id = network_controller
-            .create_tenant_segment(&domain, vpc_id)
-            .await
-            .id;
-        let site_explorer = harness.default_test_site_explorer();
-        let mut mh = harness
-            .managed_host_builder(&site_explorer, underlay_segment)
-            .with_config(ManagedHostConfig::default())
-            .with_dpu_network_status_reported()
-            .build()
-            .await
-            .0;
-        mh.host.discover_primary_iface(admin_segment).await;
-        mh.advance_to_converged_ready().await;
-        Self {
-            harness,
-            mh,
-            segment_id,
-        }
-    }
-}
-
-fn default_os_config() -> rpc::forge::InstanceOperatingSystemConfig {
-    rpc::forge::InstanceOperatingSystemConfig {
-        phone_home_enabled: false,
-        run_provisioning_instructions_on_every_boot: false,
-        user_data: Some("SomeRandomData".to_string()),
-        variant: Some(rpc::forge::instance_operating_system_config::Variant::Ipxe(
-            rpc::forge::InlineIpxe {
-                ipxe_script: "SomeRandomiPxe".to_string(),
-            },
-        )),
-    }
-}
-
-fn default_tenant_config() -> rpc::TenantConfig {
-    rpc::TenantConfig {
-        tenant_organization_id: "Tenant1".to_string(),
-        tenant_keyset_ids: vec![],
-        hostname: None,
-    }
-}
-
-fn single_interface_network_config(segment_id: NetworkSegmentId) -> rpc::InstanceNetworkConfig {
-    rpc::InstanceNetworkConfig {
-        interfaces: vec![rpc::InstanceInterfaceConfig {
-            function_type: rpc::InterfaceFunctionType::Physical as i32,
-            network_segment_id: Some(segment_id),
-            network_details: Some(NetworkDetails::SegmentId(segment_id)),
-            device: None,
-            device_instance: 0,
-            virtual_function_id: None,
-            ip_address: None,
-            ipv6_interface_config: None,
-            routing_profile: None,
-        }],
-        #[allow(deprecated)]
-        auto: false,
-        auto_config: None,
-    }
-}
+use super::instance_common::{
+    InstanceFixture, default_os_config, default_tenant_config, single_interface_network_config,
+};
 
 #[sqlx_test]
 async fn test_allocate_instance_with_invalid_metadata(_: PgPoolOptions, options: PgConnectOptions) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let AllocationFixture {
+    let InstanceFixture {
         harness: env,
         mh,
         segment_id,
-    } = AllocationFixture::new(pool).await;
+    } = InstanceFixture::new(pool).await;
     let host_machine_id: StableHostMachineId = mh.host.id.try_into().unwrap();
 
     for (invalid_metadata, expected_err) in metadata::invalid_metadata_testcases(true) {
@@ -157,11 +73,11 @@ async fn test_allocate_instance_with_invalid_metadata(_: PgPoolOptions, options:
 #[sqlx_test]
 async fn test_create_instance_with_provided_id(_: PgPoolOptions, options: PgConnectOptions) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let AllocationFixture {
+    let InstanceFixture {
         harness: env,
         mh,
         segment_id,
-    } = AllocationFixture::new(pool).await;
+    } = InstanceFixture::new(pool).await;
     let host_machine_id: StableHostMachineId = mh.host.id.try_into().unwrap();
 
     let config = InstanceConfig::builder()
@@ -207,11 +123,11 @@ async fn test_create_instance_with_provided_id(_: PgPoolOptions, options: PgConn
 #[sqlx_test]
 async fn test_create_instance_duplicate_keyset_ids(_: PgPoolOptions, options: PgConnectOptions) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let AllocationFixture {
+    let InstanceFixture {
         harness: env,
         mh,
         segment_id,
-    } = AllocationFixture::new(pool).await;
+    } = InstanceFixture::new(pool).await;
     let host_machine_id: StableHostMachineId = mh.host.id.try_into().unwrap();
 
     let config = rpc::InstanceConfig {
@@ -261,11 +177,11 @@ async fn test_create_instance_duplicate_keyset_ids(_: PgPoolOptions, options: Pg
 #[sqlx_test]
 async fn test_create_instance_keyset_ids_max(_: PgPoolOptions, options: PgConnectOptions) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let AllocationFixture {
+    let InstanceFixture {
         harness: env,
         mh,
         segment_id,
-    } = AllocationFixture::new(pool).await;
+    } = InstanceFixture::new(pool).await;
     let host_machine_id: StableHostMachineId = mh.host.id.try_into().unwrap();
 
     let config = rpc::InstanceConfig {
@@ -328,11 +244,11 @@ async fn test_allocate_instance_with_invalid_os_image(
     options: PgConnectOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let AllocationFixture {
+    let InstanceFixture {
         harness: env,
         mh,
         segment_id,
-    } = AllocationFixture::new(pool).await;
+    } = InstanceFixture::new(pool).await;
 
     // Use a non-existent OS image ID
     let invalid_os_image_id = uuid::Uuid::new_v4();
@@ -394,11 +310,11 @@ async fn test_allocate_instance_with_invalid_ib_partition(
     options: PgConnectOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let AllocationFixture {
+    let InstanceFixture {
         harness: env,
         mh,
         segment_id,
-    } = AllocationFixture::new(pool).await;
+    } = InstanceFixture::new(pool).await;
 
     // Use a non-existent IB partition ID
     let invalid_partition_id = carbide_uuid::infiniband::IBPartitionId::new();
@@ -458,11 +374,11 @@ async fn test_can_not_create_instances_with_machine_in_quarantine(
     options: PgConnectOptions,
 ) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let AllocationFixture {
+    let InstanceFixture {
         harness: env,
         mh,
         segment_id,
-    } = AllocationFixture::new(pool).await;
+    } = InstanceFixture::new(pool).await;
     let host_machine_id: StableHostMachineId = mh.host.id.try_into().unwrap();
 
     let config = InstanceConfig::builder()

@@ -39,6 +39,8 @@ mod find_by_ids_guards;
 mod forge_agent_control;
 mod ib_fabric_find;
 mod instance_allocation_validation;
+mod instance_common;
+mod instance_health;
 mod level_filter;
 mod machine_bmc_metadata;
 mod machine_boot_interfaces;

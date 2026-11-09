@@ -30,6 +30,7 @@ use model::machine::ManagedHostState;
 use model::machine::machine_id::host_id_from_dpu_hardware_info;
 use model::site_explorer::EndpointExplorationReport;
 use model::test_support::ManagedHostConfig;
+use tonic::IntoRequest;
 
 use crate::TestHarness;
 use crate::db_machine::DbMachineExt as _;
@@ -133,7 +134,11 @@ impl TestManagedHost {
 
     pub async fn report_dpu_network_status(&self) {
         for dpu in &self.dpus {
-            dpu.record_network_status().await;
+            let status = dpu.network_status().build().await;
+            self.api
+                .record_dpu_network_status(status.into_request())
+                .await
+                .expect("DPU network status should be recorded");
         }
     }
 }
