@@ -3714,11 +3714,6 @@ impl CarbideConfig {
         )
     }
 
-    /// Returns an error when two `tools` entries share a `name`,
-    /// since names are used as stable identifiers (e.g. `name = "grafana"`
-    /// is referenced by the per-machine "Logs" deep link).
-    /// Also rejects entries whose `url` is unparsable or doesn't use the `http` /
-    /// `https` scheme.
     /// Reject an admission deadline that would drop a cert-manager issuance before its
     /// cleanup runs. Issuance and cleanup each wait up to `request_timeout_secs`, and a
     /// dropped handler leaves its CertificateRequest behind. Machine identities always
@@ -3742,6 +3737,11 @@ impl CarbideConfig {
         Ok(())
     }
 
+    /// Returns an error when two `tools` entries share a `name`,
+    /// since names are used as stable identifiers (e.g. `name = "grafana"`
+    /// is referenced by the per-machine "Logs" deep link).
+    /// Also rejects entries whose `url` is unparsable or doesn't use the `http` /
+    /// `https` scheme.
     pub fn validate_web_ui_sidebar_tools(&self) -> eyre::Result<()> {
         let mut seen = std::collections::HashSet::new();
         for tool in &self.web_ui_sidebar_tools {
