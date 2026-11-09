@@ -534,7 +534,8 @@ status:
 
 `--creds-manager-url` and `--creds-manager-ca-path` are the deprecated former
 names of `--cert-manager-url` and `--cert-manager-ca-path`. Site Manager still
-accepts them and logs a warning, but the current name wins when both are given.
+accepts them and logs a warning. When both names are given, the one given last
+wins, the same as repeating one flag.
 
 Connections to nico-rest-cert-manager are verified, so `--cert-manager-ca-path`
 must point at a readable PEM bundle containing the CA that signed that service's

@@ -37,8 +37,8 @@ func TestNewCommandAcceptsSentryDSN(t *testing.T) {
 }
 
 // TestNewOptionsCertManagerFlags checks that the REST Cert Manager flags still
-// accept their former creds-manager names. The current name wins when both are
-// given.
+// accept their former creds-manager names. When both names are given, the one
+// given last wins, so an override appended under the former name keeps working.
 func TestNewOptionsCertManagerFlags(t *testing.T) {
 	const (
 		defaultURL    = "https://localhost:8000"
@@ -73,11 +73,18 @@ func TestNewOptionsCertManagerFlags(t *testing.T) {
 			},
 		},
 		{
-			name:         "current name wins",
+			name:         "former name given last wins",
 			args:         []string{"--cert-manager-url", "https://current.example:8000", "--creds-manager-url", "https://former.example:8000"},
-			wantURL:      "https://current.example:8000",
+			wantURL:      "https://former.example:8000",
 			wantCAPath:   defaultCAPath,
-			wantWarnings: []string{"--creds-manager-url is deprecated and ignored because --cert-manager-url is set"},
+			wantWarnings: []string{"--creds-manager-url is deprecated, use --cert-manager-url"},
+		},
+		{
+			name:         "current name given last wins",
+			args:         []string{"--creds-manager-ca-path", "/ca/former.crt", "--cert-manager-ca-path", "/ca/current.crt"},
+			wantURL:      defaultURL,
+			wantCAPath:   "/ca/current.crt",
+			wantWarnings: []string{"--creds-manager-ca-path is deprecated, use --cert-manager-ca-path"},
 		},
 	}
 	for _, tc := range cases {

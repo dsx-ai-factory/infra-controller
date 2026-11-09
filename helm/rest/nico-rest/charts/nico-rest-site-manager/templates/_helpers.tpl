@@ -43,18 +43,20 @@ is the subchart being relocated, set args.certManagerUrl explicitly.
 {{/*
 REST Cert Manager trust settings. The deprecated former names
 args.credsManagerCaPath and credsManagerCa override the current ones when set,
-since the current names carry defaults.
+since the current names carry defaults. The current names can also be absent:
+helm upgrade --reuse-values renders with the previous release's values, which
+predate them.
 */}}
 {{- define "nico-rest-site-manager.certManagerCaPath" -}}
 {{- .Values.args.credsManagerCaPath | default .Values.args.certManagerCaPath -}}
 {{- end -}}
 
 {{- define "nico-rest-site-manager.certManagerCaSecretName" -}}
-{{- (.Values.credsManagerCa | default dict).secretName | default .Values.certManagerCa.secretName -}}
+{{- (.Values.credsManagerCa | default dict).secretName | default (.Values.certManagerCa | default dict).secretName -}}
 {{- end -}}
 
 {{- define "nico-rest-site-manager.certManagerCaKey" -}}
-{{- (.Values.credsManagerCa | default dict).key | default .Values.certManagerCa.key -}}
+{{- (.Values.credsManagerCa | default dict).key | default (.Values.certManagerCa | default dict).key -}}
 {{- end -}}
 
 {{- define "nico-rest-site-manager.image" -}}

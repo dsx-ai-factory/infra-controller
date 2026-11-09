@@ -104,3 +104,34 @@ tests:
               items:
                 - key: ca.crt
                   path: ca.crt
+
+  # helm upgrade --reuse-values renders with the previous release's values,
+  # which carry the former names at their old defaults and lack the current
+  # ones entirely.
+  - it: renders the values of a release that predates the current names
+    set:
+      args:
+        certManagerUrl: null
+        certManagerCaPath: null
+        credsManagerUrl: ""
+        credsManagerCaPath: /etc/credsmgr-ca/ca.crt
+      certManagerCa: null
+      credsManagerCa:
+        secretName: ca-signing-secret
+        key: tls.crt
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --cert-manager-url=https://nico-rest-cert-manager.nico-rest:8000
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --cert-manager-ca-path=/etc/credsmgr-ca/ca.crt
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: credsmgr-ca
+            secret:
+              secretName: ca-signing-secret
+              items:
+                - key: tls.crt
+                  path: ca.crt
