@@ -44,10 +44,10 @@ var (
 	diskImagePartitionRegex  = regexp.MustCompile(`^/dev/disk/by-id/.*-part[0-9]+$`)
 	errInvalidDiskImagePath  = errors.New("not a valid disk path")
 
-	ValidationErrorNameHasLeadingWhitespace  = errors.New("name field has leading whitespace")  //nolint:staticcheck // Preserve the exported name for existing callers.
-	ValidationErrorNameHasTrailingWhitespace = errors.New("name field has trailing whitespace") //nolint:staticcheck // Preserve the exported name for existing callers.
-	ValidationErrorNameFieldIsEmpty          = errors.New("name field is empty")                //nolint:staticcheck // Preserve the exported name for existing callers.
-	ValidationErrorOnlyWhitespace            = errors.New("field consists only of whitespace")  //nolint:staticcheck // Preserve the exported name for existing callers.
+	ValidationErrorNameHasLeadingWhitespace  = errors.New("name field has leading whitespace")
+	ValidationErrorNameHasTrailingWhitespace = errors.New("name field has trailing whitespace")
+	ValidationErrorNameFieldIsEmpty          = errors.New("name field is empty")
+	ValidationErrorOnlyWhitespace            = errors.New("field consists only of whitespace")
 
 	// Label restrictions
 	LabelKeyMaxLength   = 255

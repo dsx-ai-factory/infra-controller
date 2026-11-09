@@ -17,7 +17,7 @@ type APIMachineBMCResetRequest struct {
 // ToProto converts the APIMachineBMCResetRequest to a Core gRPC AdminBmcResetRequest
 func (ambrr *APIMachineBMCResetRequest) ToProto(machineID string) *corev1.AdminBmcResetRequest {
 	return &corev1.AdminBmcResetRequest{
-		MachineId:   &machineID, //nolint:staticcheck // Core still accepts the legacy machine_id field.
+		MachineId:   &machineID,
 		UseIpmitool: ambrr.UseIpmiTool,
 	}
 }

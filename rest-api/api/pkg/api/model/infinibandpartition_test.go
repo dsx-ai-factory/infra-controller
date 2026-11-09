@@ -73,7 +73,7 @@ func TestAPIInfiniBandPartitionCreateRequest_ToProto(t *testing.T) {
 		require.NotNil(t, got.Id)
 		assert.Equal(t, id.String(), got.Id.Value)
 		require.NotNil(t, got.Config)
-		assert.Equal(t, "ibp-a", got.Config.Name) //nolint:staticcheck // Verify the legacy name remains populated for existing clients.
+		assert.Equal(t, "ibp-a", got.Config.Name)
 		assert.Equal(t, "org-1", got.Config.TenantOrganizationId)
 		require.NotNil(t, got.Metadata)
 		assert.Equal(t, "ibp-a", got.Metadata.Name)
@@ -133,7 +133,7 @@ func TestAPIInfiniBandPartitionUpdateRequest_ToProto(t *testing.T) {
 		require.NotNil(t, got.Id)
 		assert.Equal(t, id.String(), got.Id.Value)
 		require.NotNil(t, got.Config)
-		assert.Equal(t, "ibp-a", got.Config.Name) //nolint:staticcheck // Verify the legacy name remains populated for existing clients.
+		assert.Equal(t, "ibp-a", got.Config.Name)
 		assert.Equal(t, "org-1", got.Config.TenantOrganizationId)
 		require.NotNil(t, got.Metadata)
 		assert.Equal(t, "ibp-a", got.Metadata.Name)

@@ -336,7 +336,7 @@ func (oscr *APIOperatingSystemCreateRequest) Validate() error {
 
 	if oscr.EnableBlockStorage {
 		return validation.Errors{
-			"enableBlockStorage": errors.New("Enabling block storage is not supported at this time"), //nolint:staticcheck // Preserve the API validation message.
+			"enableBlockStorage": errors.New("Enabling block storage is not supported at this time"),
 		}
 	}
 
@@ -532,11 +532,11 @@ func (osur *APIOperatingSystemUpdateRequest) Validate(existingOS *cdbm.Operating
 	if osur.IsActive != nil {
 		if *osur.IsActive && existingOS.IsActive {
 			return validation.Errors{
-				"isActive": errors.New("Operating System is already active"), //nolint:staticcheck // Preserve the API validation message.
+				"isActive": errors.New("Operating System is already active"),
 			}
 		} else if !*osur.IsActive && !existingOS.IsActive {
 			return validation.Errors{
-				"isActive": errors.New("Operating System is already deactivated"), //nolint:staticcheck // Preserve the API validation message.
+				"isActive": errors.New("Operating System is already deactivated"),
 			}
 		} else if *osur.IsActive && osur.DeactivationNote != nil {
 			return validation.Errors{
