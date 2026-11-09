@@ -28,6 +28,8 @@ var (
 	ErrSoftStop   = errors.New("soft stop requested")
 	ErrUnclearKey = journal.ErrUnclearKey
 	ErrKeyBusy    = journal.ErrKeyBusy
+	// ErrCutoff: the call's Cutoff passed before an attempt could go out.
+	ErrCutoff = errors.New("the dispatch cutoff passed")
 	// errPastDeadline: a retry would go out past the run deadline.
 	errPastDeadline = errors.New("a retry past the run deadline")
 	// errDeadline: the attempt's own timeout passed before it dispatched.
@@ -57,7 +59,11 @@ var DefaultRetry = RetryPolicy{5, time.Second, 30 * time.Second, 5 * time.Second
 type Call struct {
 	journal.WriteCall
 	Retry RetryPolicy
+	// Cutoff, when set: no attempt, the first included, goes out at or after it, checked last, right before the dispatch. An attempt already out is not cut.
+	Cutoff time.Time
 }
+
+func (c Call) cut() bool { return !c.Cutoff.IsZero() && !time.Now().Before(c.Cutoff) }
 
 // Gate is the site lock's write gate: Check fails once the lock is lost. The
 // lock package (a later PR) provides it; the writer depends only on this.
@@ -86,6 +92,7 @@ const (
 	Accepted Kind = iota + 1
 	Failed
 	Unclear // a lost reply that may not be resent: the op stays unclear
+	Planned // a dry run journaled the write and sent nothing
 )
 
 // Outcome of one logical write. SentAt (of attempt 1) and RepliedAt are set
@@ -202,8 +209,12 @@ func Send(ctx context.Context, w *Writer, c Call, attempt func(context.Context) 
 		// waits on the journal between this check and the dispatch. run reports
 		// the actual dispatch time, taken after that final check.
 		reply, dispatchAt, halt := run(w, ctx, c.Retry.AttemptTimeout, func() error {
-			if err := w.halted(ctx); err != nil || in.Attempt == 1 || !w.pastDeadline(0) {
+			if err := w.halted(ctx); err != nil {
 				return err
+			} else if c.cut() {
+				return ErrCutoff
+			} else if in.Attempt == 1 || !w.pastDeadline(0) {
+				return nil
 			}
 			return errPastDeadline
 		}, attempt)
@@ -212,11 +223,11 @@ func Send(ctx context.Context, w *Writer, c Call, attempt func(context.Context) 
 			lost := w.j.LostReply(in.Op)
 			if err := w.j.Receipt(in, journal.Outcome{Kind: journal.NotDispatched}); err != nil {
 				return out, err
-			} else if !errors.Is(halt, errPastDeadline) {
+			} else if !errors.Is(halt, errPastDeadline) && (!errors.Is(halt, ErrCutoff) || in.Attempt == 1) {
 				return out, halt
 			}
-			// A retry never goes out past the deadline, however long the
-			// journal took: the op ends with what its last attempt got.
+			// A retry never goes out past the deadline or the cutoff, however
+			// long the journal took: the op ends with what its last attempt got.
 			if lost {
 				return Outcome{Kind: Unclear, Op: in.Op}, nil
 			}
@@ -288,6 +299,44 @@ func Send(ctx context.Context, w *Writer, c Call, attempt func(context.Context) 
 		}
 		timer.Stop()
 	}
+}
+
+// Plan is the dry-run Send: nothing is dispatched and no attempt exists. It
+// claims the key, checks the gate and the stop signal, persists the intent,
+// rechecks, and settles the op with a planned receipt, never an accepted one. A
+// halt or the cutoff after the intent writes notDispatched. An error after the intent is an
+// *OpError, never Dispatched.
+func Plan(ctx context.Context, w *Writer, c Call) (out Outcome, err error) {
+	if err = w.j.Claim(c.Key); err != nil {
+		return out, err
+	}
+	if err = w.halted(ctx); err != nil {
+		return out, err
+	}
+	in, err := w.j.Intent(c.WriteCall)
+	if err != nil {
+		return out, err
+	}
+	defer func() {
+		if err != nil {
+			err = &OpError{Op: in.Op, Err: err}
+		}
+	}()
+	halt := w.halted(ctx)
+	if halt == nil && c.cut() {
+		halt = ErrCutoff
+	}
+	if halt != nil {
+		if err = w.j.Receipt(in, journal.Outcome{Kind: journal.NotDispatched}); err == nil {
+			err = halt
+		}
+		return out, err
+	}
+	if err = w.j.Receipt(in, journal.Outcome{Kind: journal.Planned}); err != nil {
+		return out, err
+	}
+	slog.Info("write planned", "scope", c.Scope, "kind", c.Kind, "key", c.Key, "op", in.Op)
+	return Outcome{Kind: Planned, Op: in.Op}, nil
 }
 
 // run calls attempt under the attempt timeout and ctx, unless halt, run right

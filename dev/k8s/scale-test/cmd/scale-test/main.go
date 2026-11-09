@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // scale-test runs a NICo scale test against a site and reports its result.
-// fleet-up finds whether the site is ready; version prints the version.
+// fleet-up finds whether the site is ready; ingestion registers the MAT
+// inventory and times it to Ready; version prints the version.
 package main
 
 import (
@@ -19,6 +20,7 @@ import (
 	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/cluster"
 	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/config"
 	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/fleetup"
+	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/ingestion"
 	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/lock"
 	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/result"
 	runner "github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/run"
@@ -31,15 +33,15 @@ var version = "dev"
 // line, bad config or a refused lock.
 const exitNotRun = result.ExitNotRun
 
-const usage = "usage: scale-test version | scale-test fleet-up [--config <path>]"
+const usage = "usage: scale-test version | scale-test fleet-up|ingestion [--config <path>]"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
-	if len(args) > 0 && args[0] == "fleet-up" {
-		return fleetUp(args[1:], stdout, stderr)
+	if len(args) > 0 && (args[0] == "fleet-up" || args[0] == "ingestion") {
+		return command(args[0], args[1:], stdout, stderr)
 	}
 	switch command := strings.Join(args, " "); command {
 	case "version":
@@ -53,10 +55,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	return exitNotRun
 }
 
-// fleetUp runs fleet-up and prints its verdict and reasons. SIGTERM and SIGINT cancel the run, which still publishes
-// its result and releases the site lock. A setup failure before the run exits 2 with its cause on stderr.
-func fleetUp(args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("fleet-up", flag.ContinueOnError)
+// command runs fleet-up or ingestion and prints its verdict and reasons. SIGTERM and SIGINT cancel the run, which still
+// publishes its result and releases the site lock. A setup failure before the run exits 2 with its cause on stderr.
+func command(name string, args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	path := flags.String("config", "/etc/scale-test/config.yaml", "")
 	if err := flags.Parse(args); err != nil || flags.NArg() > 0 {
@@ -65,9 +67,9 @@ func fleetUp(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
-	deps, test, err := setUp(ctx, *path)
+	deps, test, err := setUp(ctx, name, *path)
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "scale-test fleet-up:", err)
+		_, _ = fmt.Fprintln(stderr, "scale-test "+name+":", err)
 		return exitNotRun
 	}
 	res := runner.Execute(deps, test)
@@ -78,17 +80,22 @@ func fleetUp(args []string, stdout, stderr io.Writer) int {
 	return result.ExitCode(res.Verdict)
 }
 
-// setUp checks the config and wires the run. The execution ID is the pod name, from SCALE_TEST_EXECUTION_ID.
-func setUp(ctx context.Context, path string) (runner.Deps, runner.Test, error) {
-	cfg, err := config.Load(path, "fleet-up")
+// setUp checks the config and wires the run. The execution ID is the pod name, from SCALE_TEST_EXECUTION_ID. Ingestion
+// writes, so its config must set dryRun; fleet-up's must not.
+func setUp(ctx context.Context, name, path string) (runner.Deps, runner.Test, error) {
+	cfg, err := config.Load(path, name)
 	if err != nil {
 		return runner.Deps{}, nil, err
 	}
 	cfg.ExecutionID = os.Getenv("SCALE_TEST_EXECUTION_ID")
-	if err := errors.Join(cfg.CheckExecutionID(), cfg.CheckDryRun(false)); err != nil {
+	if err := errors.Join(cfg.CheckExecutionID(), cfg.CheckDryRun(name == "ingestion")); err != nil {
 		return runner.Deps{}, nil, err
 	}
-	s, err := fleetup.ParseSettings(cfg.Settings)
+	is, err := ingestion.ParseSettings(cfg.Settings)
+	s := is.Settings
+	if name == "fleet-up" {
+		s, err = fleetup.ParseSettings(cfg.Settings)
+	}
 	if err != nil {
 		return runner.Deps{}, nil, err
 	}
@@ -101,5 +108,10 @@ func setUp(ctx context.Context, path string) (runner.Deps, runner.Test, error) {
 		return runner.Deps{}, nil, err
 	}
 	site := &lock.SiteLock{Cluster: kube, Name: cfg.Site.LockName, Timing: lock.DefaultTiming}
-	return runner.Deps{Config: cfg, Lock: site, CM: kube, Outside: ctx}, fleetup.New(cfg, d), nil
+	deps := runner.Deps{Config: cfg, Lock: site, CM: kube, Outside: ctx}
+	if name == "fleet-up" {
+		return deps, fleetup.New(cfg, d), nil
+	}
+	t, err := ingestion.Production(cfg, is, d)
+	return deps, t, err
 }
