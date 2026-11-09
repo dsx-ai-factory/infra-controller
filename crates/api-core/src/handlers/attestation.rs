@@ -18,12 +18,13 @@ use ::rpc::forge::{self as rpc};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use carbide_machine_controller::handler::attestation::{
-    SchedulingOutcome, select_machine_attesters, trigger_attestation,
+    select_machine_attesters, trigger_attestation,
 };
 use carbide_uuid::machine::{MachineId, MachineType};
 use db::ObjectFilter;
 use itertools::Itertools;
 use model::attestation::spdm as model_spdm;
+use model::attestation_scheduling::SchedulingOutcome;
 use model::bmc_info::BmcInfo;
 use model::machine::machine_search_config::MachineSearchConfig;
 use sqlx::PgPool;

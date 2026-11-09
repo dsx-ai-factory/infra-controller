@@ -25,6 +25,7 @@ pub(in crate::tests) mod tests {
         ComponentIdMatch,
     };
     use model::attestation::spdm::{SpdmAttestationState, SpdmCancellationTarget, SpdmObjectId};
+    use model::attestation_scheduling::SchedulingOutcome;
     use model::controller_outcome::PersistentStateHandlerOutcome;
     use rpc::forge::forge_server::Forge;
     use rpc::forge::list_machine_attestation_statuses_request::Target;
@@ -331,6 +332,10 @@ pub(in crate::tests) mod tests {
             /// class, run before the trigger.
             reprofile: fn() -> Vec<(String, AttesterSelection)>,
             expect_outcome: SpdmSchedulingOutcome,
+            /// The same decision as the machine records it. Spelled out rather
+            /// than mapped from `expect_outcome`, so a wrong recording cannot
+            /// be hidden by the mapping that produced it.
+            expect_recorded: SchedulingOutcome,
             expect_devices: i32,
             expect_fallback: bool,
         }
@@ -340,6 +345,7 @@ pub(in crate::tests) mod tests {
                 scenario: "a profile written for the class attests what it names",
                 reprofile: || vec![(MOCK_HOST_HARDWARE_CLASS.to_string(), gpu_allowlist())],
                 expect_outcome: SpdmSchedulingOutcome::Scheduled,
+                expect_recorded: SchedulingOutcome::Scheduled,
                 expect_devices: 3,
                 expect_fallback: false,
             },
@@ -347,6 +353,7 @@ pub(in crate::tests) mod tests {
                 scenario: "the any profile covers a class nobody wrote one for",
                 reprofile: || vec![(ANY_HARDWARE_CLASS.to_string(), gpu_allowlist())],
                 expect_outcome: SpdmSchedulingOutcome::Scheduled,
+                expect_recorded: SchedulingOutcome::Scheduled,
                 expect_devices: 3,
                 expect_fallback: true,
             },
@@ -362,6 +369,7 @@ pub(in crate::tests) mod tests {
                     )]
                 },
                 expect_outcome: SpdmSchedulingOutcome::AttestationDisabled,
+                expect_recorded: SchedulingOutcome::AttestationDisabled,
                 expect_devices: 0,
                 expect_fallback: false,
             },
@@ -369,6 +377,7 @@ pub(in crate::tests) mod tests {
                 scenario: "an unprofiled class names the missing profile",
                 reprofile: Vec::new,
                 expect_outcome: SpdmSchedulingOutcome::NoProfile,
+                expect_recorded: SchedulingOutcome::NoProfile,
                 expect_devices: 0,
                 expect_fallback: false,
             },
@@ -384,6 +393,7 @@ pub(in crate::tests) mod tests {
                     )]
                 },
                 expect_outcome: SpdmSchedulingOutcome::PolicyMatchedNothing,
+                expect_recorded: SchedulingOutcome::PolicyMatchedNothing,
                 expect_devices: 0,
                 expect_fallback: false,
             },
@@ -405,6 +415,7 @@ pub(in crate::tests) mod tests {
                     )]
                 },
                 expect_outcome: SpdmSchedulingOutcome::PartiallySatisfied,
+                expect_recorded: SchedulingOutcome::PartiallySatisfied,
                 expect_devices: 3,
                 expect_fallback: false,
             },
@@ -496,6 +507,32 @@ pub(in crate::tests) mod tests {
                 case.expect_outcome != SpdmSchedulingOutcome::NoProfile,
                 response.profile_version.is_some(),
                 "{}: a version is reported exactly when a profile decided",
+                case.scenario
+            );
+
+            // Every outcome records its decision, including the four here that
+            // create no job and so have no later moment to report from.
+            let recorded = db::machine::get_attestation_scheduling(&env.pool, &machine_id)
+                .await?
+                .expect("every trigger records what it decided");
+            assert_eq!(recorded.outcome, case.expect_recorded, "{}", case.scenario);
+            assert_eq!(
+                (
+                    recorded.hardware_class.as_deref(),
+                    recorded.job_id.is_some(),
+                    recorded.unsatisfied.is_some(),
+                ),
+                (
+                    Some(MOCK_HOST_HARDWARE_CLASS),
+                    case.expect_devices > 0,
+                    matches!(
+                        case.expect_recorded,
+                        SchedulingOutcome::PartiallySatisfied
+                            | SchedulingOutcome::PolicyMatchedNothing
+                    ),
+                ),
+                "{}: the record names the class, the job it created, and the \
+                 requirement the profile left unsatisfied",
                 case.scenario
             );
 

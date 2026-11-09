@@ -23,11 +23,14 @@ use chrono::{DateTime, SubsecRound, Utc};
 use config_version::ConfigVersion;
 use itertools::Itertools;
 use libredfish::model::component_integrity::{ComponentIntegrities, ComponentIntegrity};
-use model::attestation::profile::{AttesterSelectionMode, ProfileResolution, SelectionOutcome};
+use model::attestation::profile::{
+    AttesterSelectionMode, ProfileResolution, SelectionOutcome, UnsatisfiedRequirement,
+};
 use model::attestation::spdm::{
     SpdmAttestationState, SpdmAttestationStatus, SpdmDeviceAttestation,
     SpdmDeviceAttestationDetails,
 };
+use model::attestation_scheduling::{AttestationScheduling, SchedulingOutcome};
 use model::bmc_info::BmcInfo;
 use model::machine::{
     CleanupContext, CleanupState, FailureCause, FailureDetails, FailureSource, MachineState,
@@ -40,32 +43,6 @@ use state_controller::state_handler::{
 
 use crate::context::MachineStateHandlerContextObjects;
 use crate::handler::{MachineStateHandlerServices, waiting_for_cleanup_state};
-
-/// The attester selection decision used by scheduling and read-only assessment.
-///
-/// A BMC that cannot be reached is not one of these: it stays an error so the
-/// controller retries it, where every value here is a settled answer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, carbide_instrument::LabelValue)]
-pub enum SchedulingOutcome {
-    /// Eligible attesters were selected; scheduling writes one work row per attester.
-    Scheduled,
-    /// Work rows were written, but an allowlist pattern matched no eligible
-    /// attester. Attesting is under way for less than the profile asked for.
-    PartiallySatisfied,
-    /// The profile's mode is `NONE`. The BMC is not contacted.
-    AttestationDisabled,
-    /// The BMC offered nothing eligible, under a policy that asserted nothing
-    /// about what must be there. Points at the hardware, not the profile.
-    NoAttestersFound,
-    /// An operator-authored requirement went unsatisfied, and nothing was left
-    /// to attest.
-    PolicyMatchedNothing,
-    /// No exploration has recorded a hardware class for this machine's BMC,
-    /// and no `any` profile covers it either.
-    ClassNotRecorded,
-    /// Neither the machine's class nor `any` has a profile.
-    NoProfile,
-}
 
 /// Which lookup supplied the profile.
 ///
@@ -136,6 +113,26 @@ impl SchedulingResult {
             devices_scheduled: self.devices_scheduled,
         });
     }
+
+    /// The decision as the machine stores it, for the health report to build
+    /// coverage alerts from.
+    ///
+    /// The empty `hardware_class` an unrecorded class reports becomes `None`:
+    /// the trigger response keeps the empty string, and the record does not
+    /// copy that.
+    fn recorded_decision(
+        &self,
+        unsatisfied: Option<UnsatisfiedRequirement>,
+    ) -> AttestationScheduling {
+        AttestationScheduling {
+            outcome: self.outcome,
+            hardware_class: (!self.hardware_class.is_empty()).then(|| self.hardware_class.clone()),
+            used_any_fallback: self.used_any_fallback,
+            profile_version: self.profile_version.clone(),
+            unsatisfied,
+            job_id: self.job_id,
+        }
+    }
 }
 
 /// Selected BMC components and the policy decision, before any work is scheduled.
@@ -145,6 +142,9 @@ pub struct MachineAttesterSelection {
     hardware_class: String,
     used_any_fallback: bool,
     profile_version: Option<String>,
+    /// Which operator-authored requirement the eligible attesters left
+    /// unsatisfied, for the two outcomes that report one.
+    unsatisfied: Option<UnsatisfiedRequirement>,
     /// Eligible components selected by the resolved profile.
     pub attesters: Vec<ComponentIntegrity>,
 }
@@ -157,6 +157,7 @@ impl MachineAttesterSelection {
             hardware_class: hardware_class.unwrap_or_default(),
             used_any_fallback: false,
             profile_version: None,
+            unsatisfied: None,
             attesters: Vec::new(),
         }
     }
@@ -231,9 +232,7 @@ pub async fn trigger_attestation(
     .await?;
 
     // API triggers have no machine transition to persist with the new job.
-    if let Some(txn) = txn {
-        txn.commit().await?;
-    }
+    txn.commit().await?;
     result.emit_scheduling_event(instrumentation, *machine_id);
 
     Ok(result)
@@ -245,9 +244,9 @@ async fn schedule(
     bmc_info: &BmcInfo,
     machine_id: &MachineId,
     triggered_by_mh_controller: bool,
-) -> Result<(SchedulingResult, Option<PgTransaction<'static>>), StateHandlerError> {
+) -> Result<(SchedulingResult, PgTransaction<'static>), StateHandlerError> {
     // Selection has finished before this function opens a write transaction.
-    let result = SchedulingResult {
+    let settled = SchedulingResult {
         outcome: selection.outcome,
         hardware_class: selection.hardware_class,
         used_any_fallback: selection.used_any_fallback,
@@ -257,45 +256,54 @@ async fn schedule(
         devices_scheduled: 0,
     };
 
-    // Policy-only and empty-inventory outcomes create no job.
-    if selection.attesters.is_empty() {
-        return Ok((result, None));
-    }
-
-    // Each scheduling attempt creates a separate job. Existing jobs retain
-    // their evidence collection claims and results until completion and cleanup.
-    // Truncated to what `timestamptz` stores, so the value reported back is
-    // the one a caller finds on the rows rather than a sub-microsecond miss.
-    let time_now = Utc::now().trunc_subsecs(6);
-    let job_id = uuid::Uuid::new_v4();
-    let device_attestations = selection
-        .attesters
-        .into_iter()
-        .map(|x| from_component_integrity(x, machine_id, &time_now, bmc_info, &job_id))
-        .collect_vec();
-
+    // Every outcome is recorded, including the policy-only and empty-inventory
+    // ones that create no job, so the transaction is not conditional on one.
     let mut txn = db_pool.begin().await?;
 
-    // Origin belongs to the whole job, so all its device rows receive the same value.
-    let records_inserted = db::attestation::spdm::insert_device_attestations(
-        &mut txn,
-        machine_id,
-        device_attestations,
-        &job_id,
-        triggered_by_mh_controller,
-    )
-    .await?;
+    let result = if selection.attesters.is_empty() {
+        settled
+    } else {
+        // Each scheduling attempt creates a separate job. Existing jobs retain
+        // their evidence collection claims and results until completion and cleanup.
+        // Truncated to what `timestamptz` stores, so the value reported back is
+        // the one a caller finds on the rows rather than a sub-microsecond miss.
+        let time_now = Utc::now().trunc_subsecs(6);
+        let job_id = uuid::Uuid::new_v4();
+        let device_attestations = selection
+            .attesters
+            .into_iter()
+            .map(|x| from_component_integrity(x, machine_id, &time_now, bmc_info, &job_id))
+            .collect_vec();
 
-    // The caller commits the job with the state that records its ID when applicable.
-    Ok((
+        // Origin belongs to the whole job, so all its device rows receive the same value.
+        let records_inserted = db::attestation::spdm::insert_device_attestations(
+            &mut txn,
+            machine_id,
+            device_attestations,
+            &job_id,
+            triggered_by_mh_controller,
+        )
+        .await?;
+
         SchedulingResult {
             started_at: Some(time_now),
             job_id: Some(job_id),
             devices_scheduled: records_inserted,
-            ..result
-        },
-        Some(txn),
-    ))
+            ..settled
+        }
+    };
+
+    // Latest decision only, written with the job it names so the two cannot
+    // disagree.
+    db::machine::set_attestation_scheduling(
+        &mut txn,
+        machine_id,
+        &result.recorded_decision(selection.unsatisfied),
+    )
+    .await?;
+
+    // The caller commits the job with the state that records its ID when applicable.
+    Ok((result, txn))
 }
 
 /// The lowest SPDM version this build attests, below which the responder is
@@ -484,13 +492,14 @@ pub(crate) async fn handle_spdm_trigger_state(
     .await?;
     result.emit_scheduling_event(&services.instrumentation, *host_machine_id);
 
-    // Persist the job and its polling state together; a rejected transition rolls back both.
-    // Empty selections have no transaction and advance without polling.
+    // Persist the job, the recorded decision and the polling state together; a
+    // rejected transition rolls back all three. An empty selection records its
+    // decision and advances without polling.
     let next_state = match result.job_id {
         Some(job_id) => next_poll_state(job_id),
         None => next_skip_state,
     };
-    Ok(StateHandlerOutcome::transition(next_state).with_txn_opt(txn))
+    Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
 }
 
 pub(crate) async fn handle_spdm_poll_state(
@@ -696,6 +705,7 @@ pub async fn select_machine_attesters(
         hardware_class: hardware_class.clone(),
         used_any_fallback,
         profile_version: Some(profile_version.clone()),
+        unsatisfied: None,
         attesters: Vec::new(),
     };
     let selection = &profile.policy_document.selection;
@@ -747,8 +757,8 @@ pub async fn select_machine_attesters(
     let eligible = eligible_attesters(&component_integrities);
     let eligible_ids = eligible.iter().map(|c| c.id.as_str()).collect_vec();
 
-    let (selected, outcome) = match selection.evaluate(&eligible_ids) {
-        SelectionOutcome::Scheduled(selected) => (selected, SchedulingOutcome::Scheduled),
+    let (selected, outcome, unsatisfied_requirement) = match selection.evaluate(&eligible_ids) {
+        SelectionOutcome::Scheduled(selected) => (selected, SchedulingOutcome::Scheduled, None),
         SelectionOutcome::PartiallySatisfied {
             selected,
             unsatisfied,
@@ -760,7 +770,11 @@ pub async fn select_machine_attesters(
                 reported = ?eligible_ids,
                 "allowlist patterns matched no eligible attester; attesting what matched"
             );
-            (selected, SchedulingOutcome::PartiallySatisfied)
+            (
+                selected,
+                SchedulingOutcome::PartiallySatisfied,
+                Some(UnsatisfiedRequirement::AllowlistPatterns(unsatisfied)),
+            )
         }
         SelectionOutcome::AttestationDisabled => {
             return Ok(settled(SchedulingOutcome::AttestationDisabled));
@@ -776,7 +790,10 @@ pub async fn select_machine_attesters(
                 reported = ?eligible_ids,
                 "attestation profile matched no eligible attester"
             );
-            return Ok(settled(SchedulingOutcome::PolicyMatchedNothing));
+            return Ok(MachineAttesterSelection {
+                unsatisfied: Some(requirement),
+                ..settled(SchedulingOutcome::PolicyMatchedNothing)
+            });
         }
     };
 
@@ -792,6 +809,7 @@ pub async fn select_machine_attesters(
         hardware_class,
         used_any_fallback,
         profile_version: Some(profile_version),
+        unsatisfied: unsatisfied_requirement,
         attesters,
     })
 }
@@ -894,6 +912,37 @@ mod test {
             // MachineAttesterSelection::unprofiled, which records no version.
             "neither lookup yielded a profile" {
                 (None, false) => ProfileSource::Unprofiled,
+            }
+        );
+    }
+
+    /// An unrecorded class reaches the result as an empty string, which the
+    /// trigger response reports verbatim. The record must not copy that: its
+    /// `None` is what a coverage alert reads to leave itself untargeted, and
+    /// an empty string would target one named "".
+    #[test]
+    fn a_recorded_decision_keeps_an_unrecorded_class_absent() {
+        value_scenarios!(
+            run = |hardware_class: &str| {
+                SchedulingResult {
+                    outcome: SchedulingOutcome::ClassNotRecorded,
+                    hardware_class: hardware_class.to_string(),
+                    used_any_fallback: false,
+                    profile_version: None,
+                    started_at: None,
+                    job_id: None,
+                    devices_scheduled: 0,
+                }
+                .recorded_decision(None)
+                .hardware_class
+            };
+
+            "exploration recorded a class" {
+                "nvidia_dgx-h100" => Some("nvidia_dgx-h100".to_string()),
+            }
+
+            "exploration recorded none" {
+                "" => None,
             }
         );
     }

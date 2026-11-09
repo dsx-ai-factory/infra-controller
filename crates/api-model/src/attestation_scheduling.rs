@@ -32,11 +32,14 @@ use uuid::Uuid;
 
 use crate::attestation::profile::{ANY_HARDWARE_CLASS, ComponentIdMatch, UnsatisfiedRequirement};
 
-/// What scheduling decided for one machine.
+/// The attester selection decision, used by scheduling and by read-only
+/// assessment.
 ///
 /// A BMC that cannot be reached is not one of these: it stays an error so the
 /// controller retries it, where every value here is a settled answer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, carbide_instrument::LabelValue,
+)]
 pub enum SchedulingOutcome {
     /// One work row was written per selected attester.
     Scheduled,
