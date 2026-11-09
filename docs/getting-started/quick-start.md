@@ -631,17 +631,16 @@ auth:
   token: <paste value of $TOKEN here>
 ```
 
-#### 5. Bootstrap the Org (Required One-Time Call)
+#### 5. Check the Org's Service Account (Optional)
 
-This `GET` endpoint lazily initializes the org on first call as follows:
+The org's first request to any endpoint, such as `nicocli site list` in the next step, initializes the org as follows:
 
-1. Checks if service account is enabled in the auth config
+1. Checks whether the token is a service account for the org
 2. Creates an **InfrastructureProvider** for the org if one doesn't exist
 3. Creates a **Tenant** for the org if one doesn't exist
 4. Creates a **TenantAccount** linking the provider and tenant if one doesn't exist, already in `Ready` status with the `targetedInstanceCreation` capability enabled
-5. Returns the service account status with the provider and tenant IDs
 
-Without this call, site operations return 404. Subsequent calls are read-only.
+To confirm the result, call the service account endpoint. It returns the service account status with the provider and tenant IDs:
 
 ```bash
 TOKEN=$(helm-prereqs/keycloak/get-token.sh)

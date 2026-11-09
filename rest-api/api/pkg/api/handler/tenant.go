@@ -25,10 +25,10 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/middleware"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 )
 
 // ~~~~~ Create Handler ~~~~~ //
@@ -112,7 +112,7 @@ func NewGetCurrentTenantHandler(dbSession *cdb.Session, scp *sc.ClientPool, tc t
 
 // Handle godoc
 // @Summary Retrieve the Tenant associated with the org
-// @Description Retrieve the Tenant associated with the org. If it does not exist, it will be created.
+// @Description Retrieve the Tenant associated with the org. The org's first request to any endpoint from a Tenant Admin creates it.
 // @Tags tenant
 // @Accept json
 // @Produce json
@@ -139,7 +139,6 @@ func (gcth GetCurrentTenantHandler) Handle(c echo.Context) error {
 		}
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
 	}
-	userOrgDetails, _ := dbUser.OrgData.GetOrgByName(org)
 
 	//Validate role, only Tenant Admins are allowed to interact with Tenant endpoints
 	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.TenantAdminRole)
@@ -148,67 +147,13 @@ func (gcth GetCurrentTenantHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Tenant Admin role with org", nil)
 	}
 
-	// Get Tenant for this org
-	tnDAO := cdbm.NewTenantDAO(gcth.dbSession)
-
-	tn, err := cdb.WithTxResult(ctx, gcth.dbSession, func(tx *cdb.Tx) (*cdbm.Tenant, error) {
-		// Acquire an advisory lock on the org to serialize concurrent
-		// get-or-create attempts against the same Tenant.
-		derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(org), nil)
-		if derr != nil {
-			logger.Error().Err(derr).Msg("unable to acquire advisory lock for Tenant get-or-create")
-			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve current Tenant, unable to acquire lock", nil)
-		}
-
-		// Re-read inside the tx so the existence check and any create/update
-		// happen against the same locked snapshot.
-		tns, _, derr := tnDAO.GetAll(ctx, tx, cdbm.TenantFilterInput{Orgs: []string{org}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
-		if derr != nil {
-			logger.Error().Err(derr).Msg("error retrieving Tenant for this org")
-			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve current Tenant", nil)
-		}
-
-		if len(tns) == 0 {
-			// Create Tenant
-			created, derr := tnDAO.Create(ctx, tx, cdbm.TenantCreateInput{
-				Name:           userOrgDetails.Name,
-				DisplayName:    &userOrgDetails.DisplayName,
-				Org:            org,
-				OrgDisplayName: cutil.GetPtr(org),
-				CreatedBy:      dbUser.ID,
-			})
-			if derr != nil {
-				logger.Error().Err(derr).Msg("error creating Tenant DB entity")
-				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Tenant", nil)
-			}
-
-			// Update Tenant Accounts if needed
-			derr = updateTenantAccounts(ctx, gcth.dbSession, tx, logger, created)
-			if derr != nil {
-				logger.Error().Err(derr).Msg("error updating Tenant Accounts")
-				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Tenant, could not update Tenant Accounts", nil)
-			}
-			return created, nil
-		}
-
-		// Update Tenant if needed
-		existing := &tns[0]
-		if existing.OrgDisplayName == nil || *existing.OrgDisplayName != userOrgDetails.DisplayName {
-			updated, derr := tnDAO.Update(ctx, tx, cdbm.TenantUpdateInput{
-				TenantID:       existing.ID,
-				OrgDisplayName: cutil.GetPtr(userOrgDetails.DisplayName),
-			})
-			if derr != nil {
-				logger.Error().Err(derr).Msg("error updating Tenant DB entity")
-				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Tenant", nil)
-			}
-			return updated, nil
-		}
-		return existing, nil
-	})
-	if err != nil {
-		return common.HandleTxError(c, logger, err, "Failed to retrieve current Tenant, DB transaction error")
+	oe := middleware.GetOrgEntity(ctx)
+	if oe == nil || oe.Tenant == nil {
+		logger.Error().Msg("Tenant for this org was not resolved by org entity middleware")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve current Tenant", nil)
 	}
+	tn := oe.Tenant
+
 	err = ensurePrivilegedTenantSites(ctx, gcth.dbSession, gcth.scp, logger, tn, dbUser.ID)
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to ensure privileged Tenant/Site associations")
@@ -287,7 +232,7 @@ func ensurePrivilegedTenantSites(ctx context.Context, dbSession *cdb.Session, sc
 		if created == nil {
 			continue
 		}
-		we := startTenantCreate(ctx, scp, logger, tenant, site.ID)
+		we := scp.StartTenantCreate(ctx, logger, tenant, site.ID)
 		if we != nil && len(onlySiteIDs) > 0 {
 			wctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
 			// Core reports a Tenant that is still missing; waiting only avoids racing its creation.
@@ -296,21 +241,6 @@ func ensurePrivilegedTenantSites(ctx context.Context, dbSession *cdb.Session, sc
 		}
 	}
 	return errors.Join(errs...)
-}
-
-// startTenantCreate triggers Tenant creation on the Site; inventory reconciliation retries failures.
-func startTenantCreate(ctx context.Context, scp *sc.ClientPool, logger zerolog.Logger, tenant *cdbm.Tenant, siteID uuid.UUID) temporalClient.WorkflowRun {
-	var we temporalClient.WorkflowRun
-	stc, err := scp.GetClientByID(siteID)
-	if err == nil {
-		we, err = stc.ExecuteWorkflow(ctx, temporalClient.StartWorkflowOptions{
-			ID: "site-tenant-create-" + tenant.Org, TaskQueue: queue.SiteTaskQueue,
-		}, "CreateTenant", tenant.ToCreateRequestProto())
-	}
-	if err != nil {
-		logger.Error().Err(err).Str("Site ID", siteID.String()).Str("Tenant ID", tenant.ID.String()).Msg("failed to trigger Tenant creation; inventory reconciliation will retry")
-	}
-	return we
 }
 
 // ~~~~~ Get Current Routing Profile Handler ~~~~~ //
@@ -590,30 +520,4 @@ func (ucth UpdateCurrentTenantHandler) Handle(c echo.Context) error {
 	}
 
 	return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, model.ErrMsgTenantUpdateEndpointDeprecated, nil)
-}
-
-// Utility functions
-func updateTenantAccounts(ctx context.Context, dbSession *cdb.Session, tx *cdb.Tx, logger zerolog.Logger, tenant *cdbm.Tenant) error {
-	// Get all TenantAccounts for this Tenant
-	taDAO := cdbm.NewTenantAccountDAO(dbSession)
-
-	tenantAccounts, _, err := taDAO.GetAll(ctx, tx, cdbm.TenantAccountFilterInput{TenantOrgs: []string{tenant.Org}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
-	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving TenantAccounts for Tenant")
-		return err
-	}
-
-	// Update Tenant Accounts with new Tenant ID
-	for _, ta := range tenantAccounts {
-		_, err := taDAO.Update(ctx, tx, cdbm.TenantAccountUpdateInput{
-			TenantAccountID: ta.ID,
-			TenantID:        &tenant.ID,
-		})
-		if err != nil {
-			logger.Error().Err(err).Str("Tenant Account ID", ta.ID.String()).Msg("error updating Tenant Account with Tenant ID")
-			return err
-		}
-	}
-
-	return nil
 }

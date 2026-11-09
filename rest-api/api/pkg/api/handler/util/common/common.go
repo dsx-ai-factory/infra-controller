@@ -17,7 +17,6 @@ import (
 	"strings"
 	"sync"
 
-	mapset "github.com/deckarep/golang-set/v2"
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel/attribute"
@@ -177,12 +176,6 @@ func GetTenantFromTenantIDOrOrg(ctx context.Context, tx *cdb.Tx, dbSession *cdb.
 	}
 	// retrieve tenant from org
 	return GetTenantForOrg(ctx, tx, dbSession, *org)
-}
-
-// GenerateAccountNumber will generate a unique account number
-// this will be deprecated - for now, use a uuid
-func GenerateAccountNumber() string {
-	return fmt.Sprintf("nico-%s", strings.ReplaceAll(uuid.New().String(), "-", ""))
 }
 
 // GetSiteFromIDString gets the site DB model from the id string
@@ -1652,71 +1645,9 @@ func ValidateTenantSiteAccess(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Se
 }
 
 // GetPrivilegedAccessSiteIDsForTenant returns Site IDs where the Tenant has
-// effective TargetedInstanceCreation via a Ready TenantAccount and optional
-// TenantSite.config overrides. It is nil-safe and returns an empty slice when
-// the Tenant has no privileged Site access.
+// effective TargetedInstanceCreation. See cdbm.GetPrivilegedAccessSiteIDsForTenant.
 func GetPrivilegedAccessSiteIDsForTenant(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, tenant *cdbm.Tenant) ([]uuid.UUID, error) {
-	if tenant == nil {
-		return nil, nil
-	}
-
-	taDAO := cdbm.NewTenantAccountDAO(dbSession)
-	tas, _, err := taDAO.GetAll(ctx, tx, cdbm.TenantAccountFilterInput{
-		TenantIDs: []uuid.UUID{tenant.ID},
-		Statuses:  []string{cdbm.TenantAccountStatusReady},
-	}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
-	if err != nil {
-		return nil, err
-	}
-	if len(tas) == 0 {
-		return nil, nil
-	}
-
-	readyProviderIDs := mapset.NewSet[uuid.UUID]()
-	enabledProviderIDs := mapset.NewSet[uuid.UUID]()
-	for _, ta := range tas {
-		readyProviderIDs.Add(ta.InfrastructureProviderID)
-		if ta.Config.TargetedInstanceCreation {
-			enabledProviderIDs.Add(ta.InfrastructureProviderID)
-		}
-	}
-
-	siteIDs := mapset.NewSet[uuid.UUID]()
-	if !enabledProviderIDs.IsEmpty() {
-		siteDAO := cdbm.NewSiteDAO(dbSession)
-		sites, _, err := siteDAO.GetAll(ctx, tx, cdbm.SiteFilterInput{
-			InfrastructureProviderIDs: enabledProviderIDs.ToSlice(),
-		}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, site := range sites {
-			siteIDs.Add(site.ID)
-		}
-	}
-
-	tsDAO := cdbm.NewTenantSiteDAO(dbSession)
-	tss, _, err := tsDAO.GetAll(ctx, tx, cdbm.TenantSiteFilterInput{
-		TenantIDs: []uuid.UUID{tenant.ID},
-	}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, []string{cdbm.SiteRelationName})
-	if err != nil {
-		return nil, err
-	}
-
-	for _, ts := range tss {
-		if ts.Config.TargetedInstanceCreation != nil {
-			if *ts.Config.TargetedInstanceCreation {
-				if ts.Site != nil && readyProviderIDs.Contains(ts.Site.InfrastructureProviderID) {
-					siteIDs.Add(ts.SiteID)
-				}
-			} else {
-				siteIDs.Remove(ts.SiteID)
-			}
-		}
-	}
-
-	return siteIDs.ToSlice(), nil
+	return cdbm.GetPrivilegedAccessSiteIDsForTenant(ctx, tx, dbSession, tenant)
 }
 
 // IsProviderOrTenant ensures that user is authorized to act as a Provider Admin or/and Tenant Admin for the org.
@@ -1725,7 +1656,7 @@ func GetPrivilegedAccessSiteIDsForTenant(ctx context.Context, tx *cdb.Tx, dbSess
 // requirePrivilegedScope gates the Tenant on the TargetedInstanceCreation
 // capability: nil means no privilege is required; a non-nil scope requires the
 // capability to be effective within that scope (see TenantPrivilegeScope). It
-// only affects the Tenant path — Provider authorization is unaffected.
+// only affects the Tenant path, Provider authorization is unaffected.
 func IsProviderOrTenant(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session, org string, user *cdbm.User, allowViewerRole bool, requirePrivilegedScope *TenantPrivilegeScope) (infrastructureProvider *cdbm.InfrastructureProvider, tenant *cdbm.Tenant, apiError *cutil.APIError) {
 	// Validate that user belongs to org
 	ok, err := auth.ValidateOrgMembership(user, org)
@@ -2257,7 +2188,7 @@ func ExecuteFirmwareUpdateWorkflow(
 }
 
 // GetFlowUUIDPtr converts an optional API ID string into Flow's proto UUID
-// wrapper. nil or "" means "no value provided" — callers (and Flow) treat
+// wrapper. nil or "" means "no value provided". Callers (and Flow) treat
 // that as "leave unset" / "use default". UUID syntax validation is the
 // model layer's job; this helper only handles the pointer / wrapper plumbing.
 func GetFlowUUIDPtr(id *string) *flowv1.UUID {

@@ -85,6 +85,10 @@ func testTenantAccountBuildUser(t *testing.T, dbSession *db.Session, starfleetID
 	return user
 }
 
+func TestGenerateAccountNumber(t *testing.T) {
+	assert.Regexp(t, `^nico-[0-9a-f]{32}$`, GenerateAccountNumber())
+}
+
 func TestTenantAccountSQLDAO_Create(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testTenantAccountInitDB(t)

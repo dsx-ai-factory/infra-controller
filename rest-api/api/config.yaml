@@ -73,6 +73,7 @@ keycloak:
   clientID: nico-cloud
   clientSecretPath: /var/secrets/keycloak/client-secret
   serviceAccount: true
+  serviceAccountOrgs: [test-org]
 
 rateLimiter:
   enabled: false

@@ -74,9 +74,9 @@ inside the cluster.
 Any client in the realm can use `client_credentials` tokens, including a Tenant's own
 client. `serviceAccount: true` treats only the client that holds both
 `PROVIDER_ADMIN` and `TENANT_ADMIN` in an org listed in `serviceAccountOrgs`, which is
-`ncx-service` in `ncx` above, as a service account. A disconnected deployment has exactly one
-service account org, a Tenant org cannot assume service account privilege. The chart defaults `serviceAccount` to
-`false`.
+`ncx-service` in `ncx` above, as a service account. A disconnected deployment has exactly
+one service account org, a Tenant org cannot assume service account privilege. The chart
+defaults `serviceAccount` to `false`.
 
 If `keycloak.enabled` is `false`, your deployment uses the `issuers` block instead and
 this page does not apply. Onboarding a Tenant is then a configuration change rather than
@@ -437,28 +437,23 @@ print(json.dumps(json.loads(base64.urlsafe_b64decode(padded)), indent=2))
 ## Completing the Setup in NICo
 
 With the realm role in place, the remaining steps are the standard flow in
-[Tenant Management](tenant_management.md). One point is specific to this path.
-
-**The Tenant must call `nicocli tenant current` before accepting an invitation.** That
-call creates the org's Tenant if it does not exist yet, and accepting fails with
-`404 Org does not have tenant` until it does. A Provider can invite an org before that org
-has a Tenant, which leaves the account's `tenantId` empty. Accepting fills it in with the
-org's Tenant, so an invitation that predates the Tenant needs no extra step.
+[Tenant Management](tenant_management.md). A Provider can invite an org before that org
+has a Tenant, which leaves the account's `tenantId` empty. The org's first request from a
+Tenant Admin creates the Tenant and fills it in, so an invitation that predates the Tenant
+needs no extra step.
 
 The order is:
 
 1. Provider Admin creates the invitation. See
    [Creating the Link](tenant_management.md#creating-the-link).
-2. Tenant Admin runs `nicocli tenant current` to create the Tenant and link the
-   invitation.
-3. Tenant Admin accepts, moving the account to `Ready`. See
+2. Tenant Admin accepts, moving the account to `Ready`. See
    [Accepting the Invitation](tenant_management.md#accepting-the-invitation-tenant-side).
-4. Provider Admin creates one Allocation per Site, which is what gives the Tenant
+3. Provider Admin creates one Allocation per Site, which is what gives the Tenant
    capacity. Refer to [Assigning Resources with Allocations](tenant_management.md#assigning-resources-with-allocations).
 
 ### Pointing `nicocli` at the Tenant Org
 
-Steps 2 and 3 are Tenant calls. Two settings decide which org `nicocli` acts as: the
+Step 2 is a Tenant call. Two settings decide which org `nicocli` acts as: the
 token it sends, and the org in the request path, which comes from `api.org`. Both have to
 name the Tenant org. `nicocli login` sets the token and leaves `api.org` as it is.
 
@@ -494,14 +489,15 @@ nicocli --config ~/.nico/acme-corp.yaml \
   login
 ```
 
-The Tenant's file sets `api.org` to `acme-corp`, so steps 2 and 3 run as the Tenant:
+The Tenant's file sets `api.org` to `acme-corp`, so these calls run as the Tenant. The
+first shows the Tenant, the second accepts the invitation:
 
 ```bash
 nicocli --config ~/.nico/acme-corp.yaml tenant current
 nicocli --config ~/.nico/acme-corp.yaml tenant-account update --data '{}' <account-id>
 ```
 
-`--org acme-corp` overrides `api.org` for a single command. Step 4 runs with the
+`--org acme-corp` overrides `api.org` for a single command. Step 3 runs with the
 Provider's file, which the Tenant's login does not change. If either Tenant call returns
 an error, [Troubleshooting](#troubleshooting) lists what each one means.
 
@@ -526,8 +522,8 @@ caller is and which org they act in**, while the Tenant Account decides **what t
 allowed to do**. A realm role of `acme-corp:TENANT_ADMIN` makes someone a Tenant Admin for
 `acme-corp`; it does not make them privileged. Adding a role such as
 `acme-corp:PROVIDER_ADMIN` does not grant the capability either. It authorizes Provider
-operations for `acme-corp`, and it does not create an Infrastructure Provider.
-`nicocli infrastructure-provider current` creates the Infrastructure Provider.
+operations for `acme-corp`, and the org's first request with that role creates an
+Infrastructure Provider for it.
 
 ## Making Realm Changes Permanent
 
@@ -577,7 +573,6 @@ authentication inactive, so confirm Keycloak is ready first.
 | `403 Requested organization not found in token claims` | The token holds no role for the `{org}` in the request path. Either a case mismatch, or the token belongs to an identity with no role in that org | Use the lowercase org name in the path and in `api.org`, and log in as an identity holding a role in that org. See [Pointing `nicocli` at the Tenant Org](#pointing-nicocli-at-the-tenant-org) |
 | `403 User does not have any roles assigned` | No realm role parsed into an org. Usually a role name without exactly one colon | Check `realm_access.roles` in the decoded token |
 | `403 User does not have Tenant Admin role with org` | The token holds a role in the requested org, but not `TENANT_ADMIN`. For example, a Tenant call sent to the Provider org by an identity holding `PROVIDER_ADMIN` there | Send Tenant calls to the Tenant org with `api.org` or `--org`. If they already go there, assign `<tenantOrg>:TENANT_ADMIN` and retry after the one-minute cache expires |
-| `404 Org does not have tenant` when accepting | `nicocli tenant current` has not been run for the Tenant org | Run it, then accept |
 | `400 Tenant in org does not match tenant in TenantAccount` when accepting | The accept went to an org other than the one invited, and the identity holds `TENANT_ADMIN` there too, such as the Provider org | Accept from the Tenant's config file, or pass `--org <tenantOrg>`. See [Pointing `nicocli` at the Tenant Org](#pointing-nicocli-at-the-tenant-org) |
 | `400 Tenant Account status is not Invited` | The account is already `Ready` | No action needed, the invitation was already accepted |
 | A role added in Keycloak has no effect | Org data cached on the user record | Retry after one minute |
