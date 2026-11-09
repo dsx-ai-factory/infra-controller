@@ -34,7 +34,7 @@ accepted, but do not supply both spellings. Interface role and allocation inheri
 `expected-machine patch`. An empty `fallback_dpu_serial_numbers` array clears that list.
 
 Omitted or `null` `host_lifecycle_profile` preserves the profile. When supplying the object, set
-`disable_lockdown` and `control_plane` explicitly to `true` or `false`. Omitting either key inside a
+`disable_lockdown` and `retain_hbn_config_on_boot` explicitly to `true` or `false`. Omitting either key inside a
 supplied object preserves that setting. An empty object preserves both settings with both
 Core PATCH and legacy fallback.
 

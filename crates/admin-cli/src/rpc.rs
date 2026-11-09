@@ -1202,9 +1202,9 @@ impl ApiClient {
             (
                 host_lifecycle_profile
                     .as_ref()
-                    .and_then(|profile| profile.control_plane)
+                    .and_then(|profile| profile.retain_hbn_config_on_boot)
                     .is_some(),
-                "host_lifecycle_profile.control_plane",
+                "host_lifecycle_profile.retain_hbn_config_on_boot",
             ),
             (parsed_interfaces.is_some(), "host_nics"),
         ]
@@ -1279,17 +1279,17 @@ impl ApiClient {
             }
         }
 
-        // An older site has no `control_plane` field, so its update RPC drops the
+        // An older site has no `retain_hbn_config_on_boot` field, so its update RPC drops the
         // designation and still answers OK. That would report a designation the
         // site never stored and never validated, so refuse instead. Reached for
         // both an Unimplemented PATCH and a legacy record that has no ID.
         if host_lifecycle_profile
             .as_ref()
-            .is_some_and(|profile| profile.control_plane.is_some())
+            .is_some_and(|profile| profile.retain_hbn_config_on_boot.is_some())
         {
             return Err(CarbideCliError::UnsupportedOperation(
-                "this site cannot store a control-plane designation. Upgrade the site, or retry \
-                 without --control-plane",
+                "this site cannot store a retain-hbn-config-on-boot designation. Upgrade the site, or retry \
+                 without --retain-hbn-config-on-boot",
             ));
         }
 
@@ -1405,7 +1405,9 @@ impl ApiClient {
                 let existing = expected_machine.host_lifecycle_profile.unwrap_or_default();
                 Some(::rpc::forge::HostLifecycleProfile {
                     disable_lockdown: supplied.disable_lockdown.or(existing.disable_lockdown),
-                    control_plane: supplied.control_plane.or(existing.control_plane),
+                    retain_hbn_config_on_boot: supplied
+                        .retain_hbn_config_on_boot
+                        .or(existing.retain_hbn_config_on_boot),
                 })
             }
             None => expected_machine.host_lifecycle_profile,
@@ -1488,7 +1490,7 @@ impl ApiClient {
                     host_lifecycle_profile: machine.host_lifecycle_profile.map(|hlp| {
                         ::rpc::forge::HostLifecycleProfile {
                             disable_lockdown: hlp.disable_lockdown,
-                            control_plane: hlp.control_plane,
+                            retain_hbn_config_on_boot: hlp.retain_hbn_config_on_boot,
                         }
                     }),
                     server_name: machine.server_name,

@@ -208,7 +208,7 @@ async fn convert_and_print_into_nice_table(
             expected_machine
                 .host_lifecycle_profile
                 .as_ref()
-                .and_then(|hlp| hlp.control_plane)
+                .and_then(|hlp| hlp.retain_hbn_config_on_boot)
                 .unwrap_or_default()
                 .to_string(),
             dpu_policy_display,
@@ -285,7 +285,7 @@ mod tests {
                     bmc_mac_address: "00:11:22:33:44:55".into(),
                     host_lifecycle_profile: Some(::rpc::forge::HostLifecycleProfile {
                         disable_lockdown: Some(true),
-                        control_plane: Some(true),
+                        retain_hbn_config_on_boot: Some(true),
                     }),
                     ..Default::default()
                 },
@@ -331,18 +331,18 @@ mod tests {
             .iter()
             .position(|header| header == "Disable Lockdown")
             .expect("Disable Lockdown column");
-        let control_plane = headers
+        let retain_hbn_config_on_boot = headers
             .iter()
             .position(|header| header == "Control Plane")
             .expect("Control Plane column");
 
         let set = cells("SN-SET");
         assert_eq!(set[lockdown], "true");
-        assert_eq!(set[control_plane], "true");
+        assert_eq!(set[retain_hbn_config_on_boot], "true");
 
         // No stored profile renders the default rather than an empty cell.
         let unset = cells("SN-UNSET");
         assert_eq!(unset[lockdown], "false");
-        assert_eq!(unset[control_plane], "false");
+        assert_eq!(unset[retain_hbn_config_on_boot], "false");
     }
 }

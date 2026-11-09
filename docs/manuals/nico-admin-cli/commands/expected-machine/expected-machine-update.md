@@ -38,9 +38,10 @@ list.
 
 Omitted or `null` `host_lifecycle_profile` preserves the profile.
 When supplying the object, set `disable_lockdown` and
-`control_plane` explicitly to `true` or `false`. Omitting either
-key inside a supplied object preserves that setting. An empty object
-preserves both settings with both Core PATCH and legacy fallback.
+`retain_hbn_config_on_boot` explicitly to `true` or `false`.
+Omitting either key inside a supplied object preserves that setting. An
+empty object preserves both settings with both Core PATCH and legacy
+fallback.
 
 The command first tries Core PATCH, which merges selected fields
 atomically. It falls back to the legacy update on `Unimplemented` or

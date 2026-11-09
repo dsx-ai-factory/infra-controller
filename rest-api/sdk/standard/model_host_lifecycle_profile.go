@@ -24,8 +24,8 @@ var _ MappedNullable = &HostLifecycleProfile{}
 type HostLifecycleProfile struct {
 	// When true, the server is not locked down during host lifecycle management. When omitted, the existing value is preserved.
 	DisableLockdown NullableBool `json:"disableLockdown,omitempty"`
-	// When true, the machine is designated as a control-plane machine. A designated machine requires a fixed or retained IP allocation on every host BMC, DPU BMC, and DPU OS interface. When omitted, the existing value is preserved. After completion of https://github.com/dsx-ai-factory/infra-controller/issues/7568, its management addresses stay usable while the control plane is down.
-	ControlPlane NullableBool `json:"controlPlane,omitempty"`
+	// When true, the machine is designated to retain HBN configuration on boot. This allows the machine to boot while NICO's DHCP and gRPC services are unavailable. A designated machine must declare a dpu_bmc and a dpu_os interface, and requires a fixed or retained IP allocation on the host BMC and on both DPU interfaces. A machine whose dpuPolicy attaches no DPU declares neither. When omitted, the existing value is preserved.
+	RetainHbnConfigOnBoot NullableBool `json:"retainHbnConfigOnBoot,omitempty"`
 }
 
 // NewHostLifecycleProfile instantiates a new HostLifecycleProfile object
@@ -88,47 +88,47 @@ func (o *HostLifecycleProfile) UnsetDisableLockdown() {
 	o.DisableLockdown.Unset()
 }
 
-// GetControlPlane returns the ControlPlane field value if set, zero value otherwise (both if not set or set to explicit null).
-func (o *HostLifecycleProfile) GetControlPlane() bool {
-	if o == nil || IsNil(o.ControlPlane.Get()) {
+// GetRetainHbnConfigOnBoot returns the RetainHbnConfigOnBoot field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *HostLifecycleProfile) GetRetainHbnConfigOnBoot() bool {
+	if o == nil || IsNil(o.RetainHbnConfigOnBoot.Get()) {
 		var ret bool
 		return ret
 	}
-	return *o.ControlPlane.Get()
+	return *o.RetainHbnConfigOnBoot.Get()
 }
 
-// GetControlPlaneOk returns a tuple with the ControlPlane field value if set, nil otherwise
+// GetRetainHbnConfigOnBootOk returns a tuple with the RetainHbnConfigOnBoot field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
-func (o *HostLifecycleProfile) GetControlPlaneOk() (*bool, bool) {
+func (o *HostLifecycleProfile) GetRetainHbnConfigOnBootOk() (*bool, bool) {
 	if o == nil {
 		return nil, false
 	}
-	return o.ControlPlane.Get(), o.ControlPlane.IsSet()
+	return o.RetainHbnConfigOnBoot.Get(), o.RetainHbnConfigOnBoot.IsSet()
 }
 
-// HasControlPlane returns a boolean if a field has been set.
-func (o *HostLifecycleProfile) HasControlPlane() bool {
-	if o != nil && o.ControlPlane.IsSet() {
+// HasRetainHbnConfigOnBoot returns a boolean if a field has been set.
+func (o *HostLifecycleProfile) HasRetainHbnConfigOnBoot() bool {
+	if o != nil && o.RetainHbnConfigOnBoot.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetControlPlane gets a reference to the given NullableBool and assigns it to the ControlPlane field.
-func (o *HostLifecycleProfile) SetControlPlane(v bool) {
-	o.ControlPlane.Set(&v)
+// SetRetainHbnConfigOnBoot gets a reference to the given NullableBool and assigns it to the RetainHbnConfigOnBoot field.
+func (o *HostLifecycleProfile) SetRetainHbnConfigOnBoot(v bool) {
+	o.RetainHbnConfigOnBoot.Set(&v)
 }
 
-// SetControlPlaneNil sets the value for ControlPlane to be an explicit nil
-func (o *HostLifecycleProfile) SetControlPlaneNil() {
-	o.ControlPlane.Set(nil)
+// SetRetainHbnConfigOnBootNil sets the value for RetainHbnConfigOnBoot to be an explicit nil
+func (o *HostLifecycleProfile) SetRetainHbnConfigOnBootNil() {
+	o.RetainHbnConfigOnBoot.Set(nil)
 }
 
-// UnsetControlPlane ensures that no value is present for ControlPlane, not even an explicit nil
-func (o *HostLifecycleProfile) UnsetControlPlane() {
-	o.ControlPlane.Unset()
+// UnsetRetainHbnConfigOnBoot ensures that no value is present for RetainHbnConfigOnBoot, not even an explicit nil
+func (o *HostLifecycleProfile) UnsetRetainHbnConfigOnBoot() {
+	o.RetainHbnConfigOnBoot.Unset()
 }
 
 func (o HostLifecycleProfile) MarshalJSON() ([]byte, error) {
@@ -144,8 +144,8 @@ func (o HostLifecycleProfile) ToMap() (map[string]interface{}, error) {
 	if o.DisableLockdown.IsSet() {
 		toSerialize["disableLockdown"] = o.DisableLockdown.Get()
 	}
-	if o.ControlPlane.IsSet() {
-		toSerialize["controlPlane"] = o.ControlPlane.Get()
+	if o.RetainHbnConfigOnBoot.IsSet() {
+		toSerialize["retainHbnConfigOnBoot"] = o.RetainHbnConfigOnBoot.Get()
 	}
 	return toSerialize, nil
 }

@@ -202,7 +202,7 @@ async fn machine_flags_select_only_supplied_fields() {
                 bmc_retain_credentials: Some(false),
                 host_lifecycle_profile: Some(forge::HostLifecycleProfile {
                     disable_lockdown: Some(false),
-                    control_plane: None,
+                    retain_hbn_config_on_boot: None,
                 }),
                 dpu_mode: Some(forge::DpuMode::Unspecified as i32),
                 bmc_ip_allocation: Some(forge::BmcIpAllocationType::Auto as i32),
@@ -227,28 +227,28 @@ async fn machine_flags_select_only_supplied_fields() {
                 id: Some(rpc_id()),
                 host_lifecycle_profile: Some(forge::HostLifecycleProfile {
                     disable_lockdown: Some(false),
-                    control_plane: None,
+                    retain_hbn_config_on_boot: None,
                 }),
                 ..Default::default()
             },
         },
         Case {
-            scenario: "standalone control-plane flag selects only the nested lifecycle field",
+            scenario: "standalone retain-hbn-config-on-boot flag selects only the nested lifecycle field",
             args: vec![
                 "expected-machine",
                 "patch",
                 "--id",
                 ID,
-                "--control-plane",
+                "--retain-hbn-config-on-boot",
                 "true",
             ],
             methods: &["PatchExpectedMachine"],
-            paths: &["host_lifecycle_profile.control_plane"],
+            paths: &["host_lifecycle_profile.retain_hbn_config_on_boot"],
             expected: forge::ExpectedMachine {
                 id: Some(rpc_id()),
                 host_lifecycle_profile: Some(forge::HostLifecycleProfile {
                     disable_lockdown: None,
-                    control_plane: Some(true),
+                    retain_hbn_config_on_boot: Some(true),
                 }),
                 ..Default::default()
             },
@@ -598,7 +598,7 @@ async fn unsupported_machine_patches_use_the_original_read_merge_update() {
             },
         },
         Case {
-            scenario: "legacy lockdown patch keeps the stored control-plane designation",
+            scenario: "legacy lockdown patch keeps the stored retain-hbn-config-on-boot designation",
             args: &[
                 "expected-machine",
                 "patch",
@@ -621,7 +621,7 @@ async fn unsupported_machine_patches_use_the_original_read_merge_update() {
             expected: forge::ExpectedMachine {
                 host_lifecycle_profile: Some(forge::HostLifecycleProfile {
                     disable_lockdown: Some(true),
-                    control_plane: Some(true),
+                    retain_hbn_config_on_boot: Some(true),
                 }),
                 #[allow(deprecated)]
                 dpf_enabled: true,
@@ -924,18 +924,18 @@ async fn switch_lookup_without_an_id_uses_the_original_mac_update_and_mask() {
     );
 }
 
-/// An older site has no `control_plane` field. The legacy update would drop it
+/// An older site has no `retain_hbn_config_on_boot` field. The legacy update would drop it
 /// and still answer OK, so the CLI would report a designation the site never
 /// stored and never validated. Fail before the legacy write instead.
 #[tokio::test]
-async fn legacy_fallback_rejects_a_control_plane_designation() {
+async fn legacy_fallback_rejects_a_retain_hbn_config_on_boot_designation() {
     let (result, requests) = dispatch_with_replies(
         &[
             "expected-machine",
             "patch",
             "--id",
             ID,
-            "--control-plane",
+            "--retain-hbn-config-on-boot",
             "true",
         ],
         PatchReply::Grpc(Code::Unimplemented),
@@ -943,9 +943,12 @@ async fn legacy_fallback_rejects_a_control_plane_designation() {
         Some(ID),
     )
     .await;
-    let error = result.expect_err("the legacy update cannot store a control-plane designation");
+    let error =
+        result.expect_err("the legacy update cannot store a retain-hbn-config-on-boot designation");
     assert!(
-        error.to_string().contains("control-plane designation"),
+        error
+            .to_string()
+            .contains("retain-hbn-config-on-boot designation"),
         "unexpected error: {error}"
     );
     // The legacy read/merge/update must not run at all.
@@ -1488,7 +1491,7 @@ fn stored_machine() -> forge::ExpectedMachine {
         }],
         host_lifecycle_profile: Some(forge::HostLifecycleProfile {
             disable_lockdown: None,
-            control_plane: Some(true),
+            retain_hbn_config_on_boot: Some(true),
         }),
         ..Default::default()
     }

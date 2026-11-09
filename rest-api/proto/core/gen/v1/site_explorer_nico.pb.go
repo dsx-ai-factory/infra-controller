@@ -321,7 +321,7 @@ type EndpointExplorationReport struct {
 	// If the endpoint is a BMC that belongs to a Machine and enough data is
 	// available to calculate the `MachineId`, this field contains the `MachineId`
 	MachineId *string `protobuf:"bytes,3,opt,name=machine_id,json=machineId,proto3,oneof" json:"machine_id,omitempty"`
-	// / The time it took to explore the endpoint in the last site explorer run
+	/// The time it took to explore the endpoint in the last site explorer run
 	LastExplorationLatency *durationpb.Duration `protobuf:"bytes,4,opt,name=last_exploration_latency,json=lastExplorationLatency,proto3,oneof" json:"last_exploration_latency,omitempty"`
 	// Vendor as reported by Redfish
 	Vendor *string `protobuf:"bytes,11,opt,name=vendor,proto3,oneof" json:"vendor,omitempty"`

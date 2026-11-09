@@ -48,7 +48,7 @@ pub(super) enum UpdateField {
     SkuId,
     IsDpfEnabled,
     DisableLockdown,
-    ControlPlane,
+    RetainHBNConfigOnBoot,
     DefaultPauseIngestionAndPoweron,
     DpuMode,
     BmcIpAllocation,
@@ -94,7 +94,9 @@ impl UpdateMask {
                 ("sku_id", Machine) => SkuId,
                 ("is_dpf_enabled", Machine) => IsDpfEnabled,
                 ("host_lifecycle_profile.disable_lockdown", Machine) => DisableLockdown,
-                ("host_lifecycle_profile.control_plane", Machine) => ControlPlane,
+                ("host_lifecycle_profile.retain_hbn_config_on_boot", Machine) => {
+                    RetainHBNConfigOnBoot
+                }
                 ("default_pause_ingestion_and_poweron", Machine) => DefaultPauseIngestionAndPoweron,
                 ("dpu_mode", Machine) => DpuMode,
                 ("bmc_ip_allocation", Machine) => BmcIpAllocation,

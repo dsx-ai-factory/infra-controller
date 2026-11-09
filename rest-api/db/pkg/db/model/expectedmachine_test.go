@@ -164,21 +164,21 @@ func TestHostLifecycleProfile_ToProto(t *testing.T) {
 		}
 	})
 
-	// controlPlane alone must defeat HasSetFields, otherwise ToProto returns nil
+	// retainHbnConfigOnBoot alone must defeat HasSetFields, otherwise ToProto returns nil
 	// and Core preserves the stored value instead of applying the designation.
-	t.Run("controlPlane alone maps to populated proto", func(t *testing.T) {
-		got := HostLifecycleProfile{ControlPlane: cutil.GetPtr(true)}.ToProto()
+	t.Run("retainHbnConfigOnBoot alone maps to populated proto", func(t *testing.T) {
+		got := HostLifecycleProfile{RetainHBNConfigOnBoot: cutil.GetPtr(true)}.ToProto()
 		if assert.NotNil(t, got) {
 			assert.Nil(t, got.DisableLockdown)
-			assert.Equal(t, true, got.GetControlPlane())
+			assert.Equal(t, true, got.GetRetainHbnConfigOnBoot())
 		}
 	})
 
-	t.Run("controlPlane false maps to populated proto", func(t *testing.T) {
-		got := HostLifecycleProfile{ControlPlane: cutil.GetPtr(false)}.ToProto()
+	t.Run("retainHbnConfigOnBoot false maps to populated proto", func(t *testing.T) {
+		got := HostLifecycleProfile{RetainHBNConfigOnBoot: cutil.GetPtr(false)}.ToProto()
 		if assert.NotNil(t, got) {
-			assert.NotNil(t, got.ControlPlane)
-			assert.Equal(t, false, got.GetControlPlane())
+			assert.NotNil(t, got.RetainHbnConfigOnBoot)
+			assert.Equal(t, false, got.GetRetainHbnConfigOnBoot())
 		}
 	})
 }
@@ -186,12 +186,12 @@ func TestHostLifecycleProfile_ToProto(t *testing.T) {
 func TestHostLifecycleProfile_FromProto(t *testing.T) {
 	t.Run("nil proto clears receiver", func(t *testing.T) {
 		h := HostLifecycleProfile{
-			DisableLockdown: cutil.GetPtr(true),
-			ControlPlane:    cutil.GetPtr(true),
+			DisableLockdown:       cutil.GetPtr(true),
+			RetainHBNConfigOnBoot: cutil.GetPtr(true),
 		}
 		h.FromProto(nil)
 		assert.Nil(t, h.DisableLockdown)
-		assert.Nil(t, h.ControlPlane)
+		assert.Nil(t, h.RetainHBNConfigOnBoot)
 	})
 
 	t.Run("populates disableLockdown", func(t *testing.T) {
@@ -202,11 +202,11 @@ func TestHostLifecycleProfile_FromProto(t *testing.T) {
 		}
 	})
 
-	t.Run("populates controlPlane", func(t *testing.T) {
+	t.Run("populates retainHbnConfigOnBoot", func(t *testing.T) {
 		h := HostLifecycleProfile{}
-		h.FromProto(&corev1.HostLifecycleProfile{ControlPlane: cutil.GetPtr(true)})
-		if assert.NotNil(t, h.ControlPlane) {
-			assert.Equal(t, true, *h.ControlPlane)
+		h.FromProto(&corev1.HostLifecycleProfile{RetainHbnConfigOnBoot: cutil.GetPtr(true)})
+		if assert.NotNil(t, h.RetainHBNConfigOnBoot) {
+			assert.Equal(t, true, *h.RetainHBNConfigOnBoot)
 		}
 	})
 }

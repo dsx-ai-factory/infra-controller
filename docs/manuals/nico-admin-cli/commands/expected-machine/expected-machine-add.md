@@ -19,7 +19,8 @@ nico-admin-cli expected-machine add
 [--extended] [--bmc-ip-address]
 [--bmc-retain-credentials] [--dpu-policy]
 [--bmc-ip-allocation] [--disable-lockdown]
-[--control-plane] [--sort-by] [-h|--help]
+[--retain-hbn-config-on-boot] [--sort-by]
+[-h|--help]
 ```
 
 ## DESCRIPTION
@@ -197,15 +198,14 @@ behavior of locking down the server after configuring the BIOS.
 >
 > - false
 
-`--control-plane <CONTROL_PLANE>`
+`--retain-hbn-config-on-boot <RETAIN_HBN_CONFIG_ON_BOOT>`
 
-If true, designate the machine as a control-plane machine. After
-completion of
-`<https://github.com/dsx-ai-factory/infra-controller/issues/7568>`, its
-management addresses stay usable while the control plane is down. Every
-host BMC, DPU BMC, and DPU OS interface must then use a fixed or
-retained IP allocation. If unset or false, the machine has no
-control-plane designation.
+If true, designate the machine to retain its HBN config on boot. This allows
+the machine to boot while NICO's DHCP and gRPC services are unavailable. The
+machine must declare a DPU BMC and a DPU OS interface, and the host BMC
+and both DPU interfaces must then use a fixed or retained IP allocation.
+A machine whose DPU policy attaches no DPU declares neither. If unset or
+false, the machine will need NICo to be up in order to boot.
 
 *Possible values:*
 
@@ -237,7 +237,7 @@ nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-us
 nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 --interfaces '[{"mac_address":"00:11:22:33:44:55","role":"host_bmc","ip_allocation":"retained"}]'
 nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 --interfaces '[{"mac_address":"02:00:00:00:20:01","role":"dpu_os","ip_allocation":"fixed","fixed_ip":"192.0.2.10"},{"mac_address":"02:00:00:00:20:01","role":"dpu_loopback","fixed_ip":"198.51.100.20"}]'
 nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 --bmc-ip-allocation retained
-nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 --control-plane true --interfaces '[{"mac_address":"00:11:22:33:44:55","role":"host_bmc","ip_allocation":"retained"}]'
+nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 --retain-hbn-config-on-boot true --interfaces '[{"mac_address":"00:11:22:33:44:55","role":"host_bmc","ip_allocation":"retained"}]'
 ```
 
 ---

@@ -387,7 +387,10 @@ impl From<ExpectedMachine> for rpc::forge::ExpectedMachine {
                         .data
                         .host_lifecycle_profile
                         .disable_lockdown,
-                    control_plane: expected_machine.data.host_lifecycle_profile.control_plane,
+                    retain_hbn_config_on_boot: expected_machine
+                        .data
+                        .host_lifecycle_profile
+                        .retain_hbn_config_on_boot,
                 }),
             server_name: expected_machine.data.server_name,
             replace_dpu_loopbacks: false,
@@ -523,7 +526,7 @@ impl TryFrom<rpc::forge::ExpectedMachine> for ExpectedMachineData {
                 .host_lifecycle_profile
                 .map(|hlp| HostLifecycleProfile {
                     disable_lockdown: hlp.disable_lockdown,
-                    control_plane: hlp.control_plane,
+                    retain_hbn_config_on_boot: hlp.retain_hbn_config_on_boot,
                 })
                 .unwrap_or_default(),
             server_name: em.server_name,
@@ -1619,7 +1622,7 @@ mod tests {
             chassis_serial_number: "SN-1".into(),
             host_lifecycle_profile: disable_lockdown.map(|dl| rpc::forge::HostLifecycleProfile {
                 disable_lockdown: Some(dl),
-                control_plane: None,
+                retain_hbn_config_on_boot: None,
             }),
             ..Default::default()
         }
@@ -1662,28 +1665,28 @@ mod tests {
         );
     }
 
-    /// `control_plane` survives the rpc -> data -> rpc round trip independently
+    /// `retain_hbn_config_on_boot` survives the rpc -> data -> rpc round trip independently
     /// of `disable_lockdown`, so a machine carrying only the designation still
     /// produces a profile on the way back.
     #[test]
-    fn control_plane_round_trips_through_proto() {
+    fn retain_hbn_config_on_boot_round_trips_through_proto() {
         scenarios!(
-            run = |control_plane| {
+            run = |retain_hbn_config_on_boot| {
                 let rpc_machine = rpc::forge::ExpectedMachine {
                     bmc_mac_address: "AA:BB:CC:DD:EE:FF".into(),
                     bmc_username: "root".into(),
                     bmc_password: "pass".into(),
                     chassis_serial_number: "SN-1".into(),
-                    host_lifecycle_profile: control_plane.map(|cp| {
+                    host_lifecycle_profile: retain_hbn_config_on_boot.map(|cp| {
                         rpc::forge::HostLifecycleProfile {
                             disable_lockdown: None,
-                            control_plane: Some(cp),
+                            retain_hbn_config_on_boot: Some(cp),
                         }
                     }),
                     ..Default::default()
                 };
                 let data = ExpectedMachineData::try_from(rpc_machine).map_err(drop)?;
-                let data_side = data.host_lifecycle_profile.control_plane;
+                let data_side = data.host_lifecycle_profile.retain_hbn_config_on_boot;
 
                 let em = ExpectedMachine {
                     id: None,
@@ -1691,7 +1694,7 @@ mod tests {
                     data,
                 };
                 let back: rpc::forge::ExpectedMachine = em.into();
-                let back_side = back.host_lifecycle_profile.map(|p| p.control_plane);
+                let back_side = back.host_lifecycle_profile.map(|p| p.retain_hbn_config_on_boot);
 
                 Ok::<_, ()>((data_side, back_side))
             };

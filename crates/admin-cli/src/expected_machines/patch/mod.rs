@@ -50,12 +50,11 @@ impl Run for Args {
                 self.bmc_retain_credentials,
                 self.dpu_policy,
                 self.bmc_ip_allocation,
-                (self.disable_lockdown.is_some() || self.control_plane.is_some()).then_some(
-                    ::rpc::forge::HostLifecycleProfile {
+                (self.disable_lockdown.is_some() || self.retain_hbn_config_on_boot.is_some())
+                    .then_some(::rpc::forge::HostLifecycleProfile {
                         disable_lockdown: self.disable_lockdown,
-                        control_plane: self.control_plane,
-                    },
-                ),
+                        retain_hbn_config_on_boot: self.retain_hbn_config_on_boot,
+                    }),
                 self.interfaces,
             )
             .await?;

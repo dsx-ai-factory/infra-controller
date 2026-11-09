@@ -162,20 +162,19 @@ type HostLifecycleProfile struct {
 	// during lifecycle management. A nil value means the setting is unset, so
 	// Core preserves its existing value (patch semantics).
 	DisableLockdown *bool `json:"disable_lockdown,omitempty"`
-	// ControlPlane, when non-nil, controls whether the machine is designated as
-	// a control-plane machine. After completion of
-	// https://github.com/dsx-ai-factory/infra-controller/issues/7568, a
-	// designated machine keeps its management addresses usable while the control
-	// plane is down. A nil value means the setting is unset, so Core preserves
+	// RetainHBNConfigOnBoot, when non-nil, controls whether the machine is designated as
+	// to retain HBN config on boot. This allows the machine to boot while
+	// NICO's DHCP and gRPC services are unavailable. A nil value means the
+	// setting is unset, so Core preserves
 	// its existing value (patch semantics).
-	ControlPlane *bool `json:"control_plane,omitempty"`
+	RetainHBNConfigOnBoot *bool `json:"retain_hbn_config_on_boot,omitempty"`
 }
 
 // HasSetFields reports whether the profile carries at least one explicitly set
 // field. Keep this method in sync when adding fields to HostLifecycleProfile so
 // update paths do not mistake an empty patch object for a requested write.
 func (h HostLifecycleProfile) HasSetFields() bool {
-	return h.DisableLockdown != nil || h.ControlPlane != nil
+	return h.DisableLockdown != nil || h.RetainHBNConfigOnBoot != nil
 }
 
 // ToProto returns the workflow proto for this profile, or nil when no setting
@@ -185,8 +184,8 @@ func (h HostLifecycleProfile) ToProto() *corev1.HostLifecycleProfile {
 		return nil
 	}
 	return &corev1.HostLifecycleProfile{
-		DisableLockdown: h.DisableLockdown,
-		ControlPlane:    h.ControlPlane,
+		DisableLockdown:       h.DisableLockdown,
+		RetainHbnConfigOnBoot: h.RetainHBNConfigOnBoot,
 	}
 }
 
@@ -198,7 +197,7 @@ func (h *HostLifecycleProfile) FromProto(proto *corev1.HostLifecycleProfile) {
 		return
 	}
 	h.DisableLockdown = proto.DisableLockdown
-	h.ControlPlane = proto.ControlPlane
+	h.RetainHBNConfigOnBoot = proto.RetainHbnConfigOnBoot
 }
 
 // ExpectedMachineCredentials carries the BMC credentials for one

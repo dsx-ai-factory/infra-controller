@@ -782,19 +782,19 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 			wantProfile:          &APIHostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
 		},
 		{
-			desc:                 "controlPlane alone round-trips",
-			hostLifecycleProfile: cdbm.HostLifecycleProfile{ControlPlane: cutil.GetPtr(true)},
-			wantProfile:          &APIHostLifecycleProfile{ControlPlane: cutil.GetPtr(true)},
+			desc:                 "retainHbnConfigOnBoot alone round-trips",
+			hostLifecycleProfile: cdbm.HostLifecycleProfile{RetainHBNConfigOnBoot: cutil.GetPtr(true)},
+			wantProfile:          &APIHostLifecycleProfile{RetainHBNConfigOnBoot: cutil.GetPtr(true)},
 		},
 		{
 			desc: "both profile fields round-trip together",
 			hostLifecycleProfile: cdbm.HostLifecycleProfile{
-				DisableLockdown: cutil.GetPtr(true),
-				ControlPlane:    cutil.GetPtr(false),
+				DisableLockdown:       cutil.GetPtr(true),
+				RetainHBNConfigOnBoot: cutil.GetPtr(false),
 			},
 			wantProfile: &APIHostLifecycleProfile{
-				DisableLockdown: cutil.GetPtr(true),
-				ControlPlane:    cutil.GetPtr(false),
+				DisableLockdown:       cutil.GetPtr(true),
+				RetainHBNConfigOnBoot: cutil.GetPtr(false),
 			},
 		},
 	}
@@ -853,10 +853,10 @@ func TestAPIHostLifecycleProfile_Conversions(t *testing.T) {
 		}
 	})
 
-	t.Run("ToDBModel maps controlPlane", func(t *testing.T) {
-		dbTrue := (&APIHostLifecycleProfile{ControlPlane: cutil.GetPtr(true)}).ToDBModel()
-		if assert.NotNil(t, dbTrue.ControlPlane) {
-			assert.Equal(t, true, *dbTrue.ControlPlane)
+	t.Run("ToDBModel maps retainHbnConfigOnBoot", func(t *testing.T) {
+		dbTrue := (&APIHostLifecycleProfile{RetainHBNConfigOnBoot: cutil.GetPtr(true)}).ToDBModel()
+		if assert.NotNil(t, dbTrue.RetainHBNConfigOnBoot) {
+			assert.Equal(t, true, *dbTrue.RetainHBNConfigOnBoot)
 		}
 		assert.Nil(t, dbTrue.DisableLockdown)
 	})
@@ -864,7 +864,7 @@ func TestAPIHostLifecycleProfile_Conversions(t *testing.T) {
 	t.Run("ToDBModel on nil receiver yields zero value", func(t *testing.T) {
 		var p *APIHostLifecycleProfile
 		assert.Nil(t, p.ToDBModel().DisableLockdown)
-		assert.Nil(t, p.ToDBModel().ControlPlane)
+		assert.Nil(t, p.ToDBModel().RetainHBNConfigOnBoot)
 	})
 
 	t.Run("ToDBModelPtr preserves nil-vs-set distinction", func(t *testing.T) {
@@ -877,11 +877,11 @@ func TestAPIHostLifecycleProfile_Conversions(t *testing.T) {
 			assert.Equal(t, true, *ptr.DisableLockdown)
 		}
 
-		// controlPlane alone is a meaningful write, so it must survive the
+		// retainHbnConfigOnBoot alone is a meaningful write, so it must survive the
 		// nil-vs-set collapse that ToDBModelPtr performs.
-		cpOnly := (&APIHostLifecycleProfile{ControlPlane: cutil.GetPtr(true)}).ToDBModelPtr()
+		cpOnly := (&APIHostLifecycleProfile{RetainHBNConfigOnBoot: cutil.GetPtr(true)}).ToDBModelPtr()
 		if assert.NotNil(t, cpOnly) {
-			assert.Equal(t, true, *cpOnly.ControlPlane)
+			assert.Equal(t, true, *cpOnly.RetainHBNConfigOnBoot)
 		}
 	})
 
@@ -893,10 +893,10 @@ func TestAPIHostLifecycleProfile_Conversions(t *testing.T) {
 			assert.Equal(t, false, *got.DisableLockdown)
 		}
 
-		cpOnly := NewAPIHostLifecycleProfile(cdbm.HostLifecycleProfile{ControlPlane: cutil.GetPtr(true)})
+		cpOnly := NewAPIHostLifecycleProfile(cdbm.HostLifecycleProfile{RetainHBNConfigOnBoot: cutil.GetPtr(true)})
 		if assert.NotNil(t, cpOnly) {
 			assert.Nil(t, cpOnly.DisableLockdown)
-			assert.Equal(t, true, *cpOnly.ControlPlane)
+			assert.Equal(t, true, *cpOnly.RetainHBNConfigOnBoot)
 		}
 	})
 }
@@ -913,32 +913,32 @@ func TestAPIExpectedMachine_HostLifecycleProfile_JSONRoundTrip(t *testing.T) {
 		assert.NoError(t, err)
 		// Profile fields carry no omitempty, so an unset sibling is rendered as
 		// null rather than dropped. See the REST empty-value contract.
-		assert.Contains(t, string(raw), `"hostLifecycleProfile":{"disableLockdown":true,"controlPlane":null}`)
+		assert.Contains(t, string(raw), `"hostLifecycleProfile":{"disableLockdown":true,"retainHbnConfigOnBoot":null}`)
 
 		var round APIExpectedMachine
 		assert.NoError(t, json.Unmarshal(raw, &round))
 		if assert.NotNil(t, round.HostLifecycleProfile) {
 			assert.Equal(t, true, *round.HostLifecycleProfile.DisableLockdown)
-			assert.Nil(t, round.HostLifecycleProfile.ControlPlane)
+			assert.Nil(t, round.HostLifecycleProfile.RetainHBNConfigOnBoot)
 		}
 	})
 
-	t.Run("controlPlane true survives marshal/unmarshal", func(t *testing.T) {
+	t.Run("retainHbnConfigOnBoot true survives marshal/unmarshal", func(t *testing.T) {
 		orig := &APIExpectedMachine{
 			BmcMacAddress:        "00:11:22:33:44:55",
 			ChassisSerialNumber:  "CHASSIS123",
-			HostLifecycleProfile: &APIHostLifecycleProfile{ControlPlane: cutil.GetPtr(true)},
+			HostLifecycleProfile: &APIHostLifecycleProfile{RetainHBNConfigOnBoot: cutil.GetPtr(true)},
 		}
 
 		raw, err := json.Marshal(orig)
 		assert.NoError(t, err)
-		assert.Contains(t, string(raw), `"hostLifecycleProfile":{"disableLockdown":null,"controlPlane":true}`)
+		assert.Contains(t, string(raw), `"hostLifecycleProfile":{"disableLockdown":null,"retainHbnConfigOnBoot":true}`)
 
 		var round APIExpectedMachine
 		assert.NoError(t, json.Unmarshal(raw, &round))
 		if assert.NotNil(t, round.HostLifecycleProfile) {
 			assert.Nil(t, round.HostLifecycleProfile.DisableLockdown)
-			assert.Equal(t, true, *round.HostLifecycleProfile.ControlPlane)
+			assert.Equal(t, true, *round.HostLifecycleProfile.RetainHBNConfigOnBoot)
 		}
 	})
 
@@ -1864,9 +1864,9 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 		{name: "BMC password leaves the username unselected", body: `{"defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_password"}},
 		{name: "BMC pair is selected together", body: `{"defaultBmcUsername":"admin","defaultBmcPassword":"secret"}`, wantPaths: []string{"bmc_username", "bmc_password"}},
 		{name: "empty lifecycle profile preserves policy", body: `{"hostLifecycleProfile":{}}`},
-		{name: "control plane designation is selected", body: `{"hostLifecycleProfile":{"controlPlane":true}}`, wantPaths: []string{"host_lifecycle_profile.control_plane"}},
-		{name: "explicit false control plane remains selected", body: `{"hostLifecycleProfile":{"controlPlane":false}}`, wantPaths: []string{"host_lifecycle_profile.control_plane"}},
-		{name: "both lifecycle flags are selected together", body: `{"hostLifecycleProfile":{"disableLockdown":true,"controlPlane":true}}`, wantPaths: []string{"host_lifecycle_profile.disable_lockdown", "host_lifecycle_profile.control_plane"}},
+		{name: "control plane designation is selected", body: `{"hostLifecycleProfile":{"retainHbnConfigOnBoot":true}}`, wantPaths: []string{"host_lifecycle_profile.retain_hbn_config_on_boot"}},
+		{name: "explicit false control plane remains selected", body: `{"hostLifecycleProfile":{"retainHbnConfigOnBoot":false}}`, wantPaths: []string{"host_lifecycle_profile.retain_hbn_config_on_boot"}},
+		{name: "both lifecycle flags are selected together", body: `{"hostLifecycleProfile":{"disableLockdown":true,"retainHbnConfigOnBoot":true}}`, wantPaths: []string{"host_lifecycle_profile.disable_lockdown", "host_lifecycle_profile.retain_hbn_config_on_boot"}},
 		{name: "interfaces replace Core host NICs", body: `{"interfaces":[{"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9"}]}`, wantPaths: []string{"host_nics"}},
 		{name: "empty interfaces clear Core host NICs", body: `{"interfaces":[]}`, wantPaths: []string{"host_nics"}},
 		{name: "explicit intent clears loopbacks", body: `{"interfaces":[],"replaceDpuLoopbacks":true}`, wantPaths: []string{"host_nics"}, wantReplaceLoopbacks: true},

@@ -332,12 +332,12 @@ type APIHostLifecycleProfile struct {
 	// DisableLockdown, when true, skips locking down the server during host
 	// lifecycle management. When omitted, the existing value is preserved.
 	DisableLockdown *bool `json:"disableLockdown"`
-	// ControlPlane, when true, designates the machine as a control-plane
-	// machine. After completion of
-	// https://github.com/dsx-ai-factory/infra-controller/issues/7568, its
-	// management addresses stay usable while the control plane is down. When
+	// RetainHBNConfigOnBoot, when true, designates the machine to retain HBN
+	// config on boot even if NICo is unavailable. The
+	// machine must declare a DPU BMC and a DPU OS interface, and the host BMC
+	// and both DPU interfaces must then use a fixed or retained IP allocation. When
 	// omitted, the existing value is preserved.
-	ControlPlane *bool `json:"controlPlane"`
+	RetainHBNConfigOnBoot *bool `json:"retainHbnConfigOnBoot"`
 }
 
 // ToDBModel converts the API profile into its DB model form. A nil receiver
@@ -347,8 +347,8 @@ func (p *APIHostLifecycleProfile) ToDBModel() cdbm.HostLifecycleProfile {
 		return cdbm.HostLifecycleProfile{}
 	}
 	return cdbm.HostLifecycleProfile{
-		DisableLockdown: p.DisableLockdown,
-		ControlPlane:    p.ControlPlane,
+		DisableLockdown:       p.DisableLockdown,
+		RetainHBNConfigOnBoot: p.RetainHBNConfigOnBoot,
 	}
 }
 
@@ -372,8 +372,8 @@ func NewAPIHostLifecycleProfile(p cdbm.HostLifecycleProfile) *APIHostLifecyclePr
 		return nil
 	}
 	return &APIHostLifecycleProfile{
-		DisableLockdown: p.DisableLockdown,
-		ControlPlane:    p.ControlPlane,
+		DisableLockdown:       p.DisableLockdown,
+		RetainHBNConfigOnBoot: p.RetainHBNConfigOnBoot,
 	}
 }
 
@@ -659,7 +659,7 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 			util.ExpectedComponentUpdateField{Path: "server_name", Present: emur.ServerName != nil},
 			util.ExpectedComponentUpdateField{Path: "is_dpf_enabled", Present: emur.IsDpfEnabled != nil},
 			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.disable_lockdown", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.DisableLockdown != nil},
-			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.control_plane", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.ControlPlane != nil},
+			util.ExpectedComponentUpdateField{Path: "host_lifecycle_profile.retain_hbn_config_on_boot", Present: emur.HostLifecycleProfile != nil && emur.HostLifecycleProfile.RetainHBNConfigOnBoot != nil},
 		),
 	}
 }

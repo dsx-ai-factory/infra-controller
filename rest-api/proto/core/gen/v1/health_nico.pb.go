@@ -125,9 +125,9 @@ type HealthProbeAlert struct {
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// The component that the probe is targeting.
 	// This could be e.g.
-	//   - a physical component (e.g. a Fan probe might check various chassis fans)
-	//   - a logical component (a check which probes whether disk space is available
-	//     can list the volume name as target)
+	// - a physical component (e.g. a Fan probe might check various chassis fans)
+	// - a logical component (a check which probes whether disk space is available
+	//   can list the volume name as target)
 	//
 	// The field is optional. It can be absent if the probe ID already fully
 	// describes what is tested.
@@ -235,9 +235,9 @@ type HealthProbeSuccess struct {
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// The component that the probe is targeting.
 	// This could be e.g.
-	//   - a physical component (e.g. a Fan probe might check various chassis fans)
-	//   - a logical component (a check which probes whether disk space is available
-	//     can list the volume name as target)
+	// - a physical component (e.g. a Fan probe might check various chassis fans)
+	// - a logical component (a check which probes whether disk space is available
+	//   can list the volume name as target)
 	//
 	// The field is optional. It can be absent if the probe ID already fully
 	// describes what is tested.

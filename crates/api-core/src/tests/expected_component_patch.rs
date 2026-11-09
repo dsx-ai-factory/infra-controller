@@ -66,7 +66,7 @@ fn machine(id: Uuid, suffix: u8) -> forge::ExpectedMachine {
         dpu_mode: Some(forge::DpuMode::NicMode as i32),
         host_lifecycle_profile: Some(forge::HostLifecycleProfile {
             disable_lockdown: Some(true),
-            control_plane: None,
+            retain_hbn_config_on_boot: None,
         }),
         host_nics: vec![
             forge::ExpectedInterface {
@@ -274,7 +274,7 @@ async fn patch_expected_machine_preserves_unselected_fields(pool: PgPool) {
                 dpu_mode: Some(forge::DpuMode::NoDpu as i32),
                 host_lifecycle_profile: Some(forge::HostLifecycleProfile {
                     disable_lockdown: Some(false),
-                    control_plane: None,
+                    retain_hbn_config_on_boot: None,
                 }),
                 ..Default::default()
             }),
@@ -298,7 +298,8 @@ async fn patch_expected_machine_preserves_unselected_fields(pool: PgPool) {
     expected["dpu_mode"] = json!("no_dpu");
     // The profile is one JSONB column, so an unselected sibling is still
     // serialized; it stays null rather than being dropped from the object.
-    expected["host_lifecycle_profile"] = json!({"disable_lockdown": false, "control_plane": null});
+    expected["host_lifecycle_profile"] =
+        json!({"disable_lockdown": false, "retain_hbn_config_on_boot": null});
     assert_eq!(machine_row(&env.pool, id).await, expected);
 
     // Selecting one nested profile path must not disturb the other, which is
@@ -309,15 +310,16 @@ async fn patch_expected_machine_preserves_unselected_fields(pool: PgPool) {
                 id: rpc_id(id),
                 host_lifecycle_profile: Some(forge::HostLifecycleProfile {
                     disable_lockdown: None,
-                    control_plane: Some(false),
+                    retain_hbn_config_on_boot: Some(false),
                 }),
                 ..Default::default()
             }),
-            update_mask: mask(&["host_lifecycle_profile.control_plane"]),
+            update_mask: mask(&["host_lifecycle_profile.retain_hbn_config_on_boot"]),
         }))
         .await
         .unwrap();
-    expected["host_lifecycle_profile"] = json!({"disable_lockdown": false, "control_plane": false});
+    expected["host_lifecycle_profile"] =
+        json!({"disable_lockdown": false, "retain_hbn_config_on_boot": false});
     assert_eq!(machine_row(&env.pool, id).await, expected);
 
     env.api
@@ -624,12 +626,17 @@ async fn patch_expected_machine_dpu_loopback_reservation_restore_owned(pool: PgP
     assert_eq!(
         reservations_of(&env, id).await,
         vec![reservation("02:00:00:00:00:01", "192.0.2.30")]
+    );
+}
+
 /// The designation rule is enforced on the patch path, not only on insert, and
 /// a rejected patch leaves the stored row untouched. The fixture declares no
 /// `dpu_bmc`, so the declaration requirement rejects the patch before the
 /// allocation rule runs.
 #[crate::sqlx_test]
-async fn patch_rejects_control_plane_designation_without_a_declared_dpu_bmc(pool: PgPool) {
+async fn patch_rejects_retain_hbn_config_on_boot_designation_without_a_declared_dpu_bmc(
+    pool: PgPool,
+) {
     let env = create_test_env(pool).await;
     let id = Uuid::new_v4();
     env.api
@@ -645,11 +652,11 @@ async fn patch_rejects_control_plane_designation_without_a_declared_dpu_bmc(pool
                 id: rpc_id(id),
                 host_lifecycle_profile: Some(forge::HostLifecycleProfile {
                     disable_lockdown: None,
-                    control_plane: Some(true),
+                    retain_hbn_config_on_boot: Some(true),
                 }),
                 ..Default::default()
             }),
-            update_mask: mask(&["host_lifecycle_profile.control_plane"]),
+            update_mask: mask(&["host_lifecycle_profile.retain_hbn_config_on_boot"]),
         }))
         .await
         .expect_err("an undeclared DPU BMC must reject the designation");
@@ -670,7 +677,9 @@ async fn patch_rejects_control_plane_designation_without_a_declared_dpu_bmc(pool
 /// rejects the dynamic `dpu_os` the fixture carries. This keeps the two
 /// criteria distinguishable, because both answer `InvalidArgument`.
 #[crate::sqlx_test]
-async fn patch_rejects_control_plane_designation_with_a_dynamic_declared_dpu(pool: PgPool) {
+async fn patch_rejects_retain_hbn_config_on_boot_designation_with_a_dynamic_declared_dpu(
+    pool: PgPool,
+) {
     let env = create_test_env(pool).await;
     let id = Uuid::new_v4();
     let mut declared = machine(id, 2);
@@ -693,11 +702,11 @@ async fn patch_rejects_control_plane_designation_with_a_dynamic_declared_dpu(poo
                 id: rpc_id(id),
                 host_lifecycle_profile: Some(forge::HostLifecycleProfile {
                     disable_lockdown: None,
-                    control_plane: Some(true),
+                    retain_hbn_config_on_boot: Some(true),
                 }),
                 ..Default::default()
             }),
-            update_mask: mask(&["host_lifecycle_profile.control_plane"]),
+            update_mask: mask(&["host_lifecycle_profile.retain_hbn_config_on_boot"]),
         }))
         .await
         .expect_err("a dynamic DPU OS interface must reject the designation");

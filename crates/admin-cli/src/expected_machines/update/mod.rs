@@ -79,7 +79,7 @@ impl Run for Args {
                 expected_machine.host_lifecycle_profile.map(|hlp| {
                     ::rpc::forge::HostLifecycleProfile {
                         disable_lockdown: hlp.disable_lockdown,
-                        control_plane: hlp.control_plane,
+                        retain_hbn_config_on_boot: hlp.retain_hbn_config_on_boot,
                     }
                 }),
                 interfaces,
