@@ -28,7 +28,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	csm "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/sitemgr"
+	csm "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/sites"
 
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
 	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
@@ -170,7 +170,7 @@ func (mst ManageSite) UpdateSiteInDB(ctx context.Context, siteID uuid.UUID, core
 // machine interface, machine capability, operating system site association, instance, subnet, vpc, vpc peering, vpc prefix,
 // infiniband partition, nvlink logical partition, dpu extension service deployment, interface,
 // nvlink interface, infiniband interface, ssh key group associations to site and instance, sku, expected machine,
-// expected switch and expected power shelf.
+// pending Expected Machine batches, expected switch and expected power shelf.
 func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uuid.UUID, infrastructureProviderID uuid.UUID, purgeMachines bool) error {
 	logger := log.With().Str("Activity", "DeleteSiteComponentsFromDB").Str("Site ID", siteID.String()).
 		Str("InfrastructureProvider ID", infrastructureProviderID.String()).Bool("Purge Machines", purgeMachines).Logger()
@@ -185,6 +185,15 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 			logger.Error().Err(err).Msg("failed to retrieve Site from DB by ID")
 			return err
 		}
+	}
+
+	// The API soft-deletes the Site before teardown. Durable batch admission and
+	// recovery lock and re-read that row, preventing a late batch from recreating its
+	// members. Release private SKU references before deleting SKUs.
+	err = cdbm.NewPendingExpectedMachineBatchDAO(mst.dbSession).DeleteAllBySiteID(ctx, nil, siteID)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to delete pending Expected Machine batches from DB")
+		return err
 	}
 
 	itDAO := cdbm.NewInstanceTypeDAO(mst.dbSession)
@@ -839,8 +848,8 @@ func (mst ManageSite) CheckOTPExpirationAndRenewForAllSites(ctx context.Context)
 
 	logger.Info().Msg("starting activity")
 
-	siteMgrURL := mst.cfg.GetSiteManagerEndpoint()
-	if siteMgrURL == "" {
+	siteManagerURL := mst.cfg.GetSiteManagerEndpoint()
+	if siteManagerURL == "" {
 		logger.Error().Msg("Site Manager endpoint is not configured, cannot rotate OTPs")
 		return temporal.NewNonRetryableApplicationError("Site Manager endpoint is not configured", "SiteManagerEndpointNotConfigured", nil)
 	}
@@ -873,14 +882,14 @@ func (mst ManageSite) CheckOTPExpirationAndRenewForAllSites(ctx context.Context)
 			dueSiteCount++
 			logger.Info().Str("siteUUID", site.ID.String()).Msg("Certificates are close to expiry, rotating OTPs")
 
-			err = csm.RollSite(ctx, logger, site.ID.String(), site.Name, siteMgrURL)
+			err = csm.RollSite(ctx, logger, site.ID.String(), site.Name, siteManagerURL)
 			if err != nil {
 				logger.Error().Err(err).Str("siteUUID", site.ID.String()).Msg("Failed to rotate OTPs")
 				failedSiteIDs = append(failedSiteIDs, site.ID.String())
 				continue
 			}
 
-			newOTP, _, err := csm.GetSiteOTP(ctx, logger, site.ID.String(), siteMgrURL)
+			newOTP, _, err := csm.GetSiteOTP(ctx, logger, site.ID.String(), siteManagerURL)
 			if err != nil {
 				logger.Error().Err(err).Str("siteUUID", site.ID.String()).Msg("Failed to retrieve new OTP after rotation")
 				failedSiteIDs = append(failedSiteIDs, site.ID.String())

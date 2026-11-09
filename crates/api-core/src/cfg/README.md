@@ -13,14 +13,16 @@ the invalid key's full section path and source. Names inside intentionally
 dynamic maps, such as pool names and rack-profile IDs, remain user-defined;
 fields within each map value must still match the documented schema.
 
-The removed `force_dpu_nic_mode` and `rack_management_enabled` keys are
-explicitly recognized, ignored, and reported as deprecation warnings. Use
-`site_explorer.dpu_policy` instead of `force_dpu_nic_mode`.
-`rack_management_enabled` lost its last runtime consumer when
-[PR #1583](https://github.com/NVIDIA/infra-controller/pull/1583) made Expected
-Machine lookup during DHCP discovery unconditional. Remove both deprecated keys
-from site configuration; compatibility parsing does not restore their former
-behavior.
+The removed `force_dpu_nic_mode`, `rack_management_enabled`, and
+`site_explorer.explore_mode` keys are explicitly recognized, ignored, and
+reported as deprecation warnings. Use `site_explorer.dpu_policy` instead of
+`force_dpu_nic_mode`. `rack_management_enabled` lost its last runtime consumer
+when [PR #1583](https://github.com/NVIDIA/infra-controller/pull/1583) made
+Expected Machine lookup during DHCP discovery unconditional. Site Explorer
+always explores through nv-redfish, so `explore_mode` no longer selects a
+backend; a site that set it to `libredfish` or `compare-result` now explores
+through nv-redfish. Remove the deprecated keys from site configuration;
+compatibility parsing does not restore their former behavior.
 
 ---
 
@@ -77,6 +79,7 @@ behavior.
 | `machine_update_run_interval` | `Option<u64>` | — | `machines` | Interval (seconds) at which the machine update manager checks for updates. |
 | `retained_boot_interface_window` | `Option<Duration>` | — | `machines` | How long a retained boot interface pair (`retained_boot_interfaces` table) stays applicable after its `machine_interfaces` row was deleted. Unset retains forever; set a window (e.g. `30d`) so a MAC reappearing on different hardware doesn't inherit an obsolete Redfish interface id. |
 | `site_explorer` | `SiteExplorerConfig` | *(see below)* | `hardware` | SiteExplorer hardware discovery settings (see [SiteExplorerConfig](#siteexplorerconfig)). |
+| `bmc_driver_rules` | `Vec<BmcDriverRule>` | `[]` | `hardware` | Site rules that pick BMC drivers for hardware the compiled rules get wrong. Each rule has an `id`, `matchers` on the BMC's identity (all must match, none matches every BMC), and `selections` mapping capabilities such as `power` or `boot_order` to `unsupported`, `standard`, or a compiled driver id. A configured rule outranks every compiled rule for the capabilities it sets, and capabilities it leaves out keep their compiled choice. `nico-admin-cli site-explorer drivers <BMC_IP>` shows the identity to match on and which rule chose each driver. Startup fails on an invalid rule, such as an unknown driver id. Read at startup. A change needs a restart. Full format in [BmcDriverRule](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#bmcdriverrule--bmc_driver_rules). |
 | `vpc_peering_policy` | `Option<VpcPeeringPolicy>` | — | `networking` | VPC peering creation policy. `exclusive` admits capability-compatible pairs, while `none` or omission disables creation. The deprecated `mixed` value logs a startup warning and behaves as `exclusive`. ETV/FNN requests always return `InvalidArgument`. |
 | `vpc_peering_policy_on_existing` | `Option<VpcPeeringPolicy>` | — | `networking` | Activation policy for stored VPC peerings. Omission falls back to `vpc_peering_policy`. `exclusive` enables the virtualization-specific mechanism only for compatible pairs: ETV emits peer-prefix ACL permits, while FNN imports peer-VNI route targets. `none` disables both mechanisms. The deprecated `mixed` value logs a startup warning and behaves as `exclusive`. |
 | `attestation_enabled` | `bool` | `false` | `security` | Enables TPM-based machine attestation (adds `Measuring` state before `Ready`). |
@@ -94,7 +97,7 @@ behavior.
 | `rack_state_controller` | `RackStateControllerConfig` | *(see below)* | `hardware` | Rack state controller timing, optional automatic rack firmware and switch NVOS updates, and primary-switch mTLS service selection. |
 | `power_shelf_state_controller` | `PowerShelfStateControllerConfig` | *(see below)* | `hardware` | Power shelf state controller timing and optional rack firmware reprovisioning. |
 | `switch_state_controller` | `SwitchStateControllerConfig` | *(see below)* | `hardware` | Switch state controller timing and per-switch mTLS service selection. |
-| `spdm_state_controller` | `SpdmStateControllerConfig` | *(see below)* | `security` | SPDM state controller timing. |
+| `spdm_state_controller` | `SpdmStateControllerConfig` | *(see below)* | `security` | SPDM state controller timing and cancellation timeout (see [SpdmStateControllerConfig](#spdmstatecontrollerconfig)). |
 | `host_models` | `HashMap<String, Firmware>` | `{}` | `machines` | Maps host model identifiers to firmware definitions. |
 | `firmware_global` | `FirmwareGlobal` | *(see below)* | `machines` | Global firmware update settings (see [FirmwareGlobal](#firmwareglobal)). |
 | `machine_updater` | `MachineUpdater` | *(see below)* | `machines` | Machine update policies (see [MachineUpdater](#machineupdater)). |
@@ -638,6 +641,8 @@ disabled in v2.4.
 | `nmx_c_certificate_rotation` | `NmxCCertificateRotationConfig` | *(default)* | Optional expiry-driven rotation for NMX-C server certificates. |
 | `partition_monitor_max_concurrent_groups` | `NonZeroUsize` | `16` | Maximum number of NMX-C machine groups (chassis or rack) reconciled concurrently per monitor iteration. Each group in flight holds one NMX-C client and at most one database connection, so this bounds the monitor's gRPC fan-out and its share of the pool. Documented range 1 to 256. Larger values are accepted with a startup warning. 0 is rejected. |
 | `partition_monitor_full_check_interval` | `Duration` | `10m` | How often a machine group is fully reconciled against NMX-C even when nothing changed. Between full checks a group whose database inputs are unchanged since its last successful check, and whose instances all have their NVLink config applied, is skipped. GPU health and the `NvlinkUnhealthy` alert on a skipped group refresh at this interval. `0s` disables skipping. |
+| `partition_monitor_unreachable_alert_after` | `NonZeroU32` | `3` | Consecutive partition monitor passes a rack's NMX-C must be unusable before the monitor raises the rack's `NmxcUnreachable` health alert. The first pass that reaches NMX-C clears it. Must be non-zero. |
+| `switch_reachability` | `SwitchReachabilityConfig` | *(default)* | Periodic TCP reachability checks of ready switches that raise debounced `SwitchUnreachable` and `NmxtUnreachable` switch health alerts. Runs whenever `enabled` is `true` unless `switch_reachability.enabled` says otherwise. |
 
 When `enabled` or `nmx_c_certificate_rotation.enabled` is `true`, `nico-api`
 fills in unset NMX-C TLS settings at startup:
@@ -676,6 +681,18 @@ verified against its own host, which for rack endpoints is the switch NVOS IP.
 `expiry_warning_window` remains accepted as a deprecated alias for
 `rotate_before_expiry`; its value now controls rotation rather than warning only.
 
+### `SwitchReachabilityConfig`
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `enabled` | `Option<bool>` | *(follows `nvlink_config.enabled`)* | Runs the switch reachability monitor. Unset follows `nvlink_config.enabled`; set it to run or stop the monitor independently. |
+| `run_interval` | `Duration` | `60s` | Interval between passes. Each pass probes every switch in the `ready` controller state; switches in other states and switches without an NVOS IP are not probed. |
+| `unreachable_alert_after` | `NonZeroU32` | `3` | Consecutive failed checks of one service before its alert is raised on the switch. The first successful check clears it. Must be non-zero. |
+| `probe_timeout` | `Duration` | `10s` | Timeout for each TCP connection attempt. |
+| `nvos_port` | `u16` | `443` | Port probed on every ready switch's NVOS management address for [`SwitchUnreachable`](../../../../docs/architecture/health/health_probe_ids.md#switchunreachable). |
+| `nmx_t_port` | `u16` | `9352` | Port probed on primary switches, which host NMX-T, for [`NmxtUnreachable`](../../../../docs/architecture/health/health_probe_ids.md#nmxtunreachable). |
+| `max_concurrent_switches` | `NonZeroUsize` | `32` | Maximum number of switches probed at the same time in one pass. Each switch in flight holds at most one open connection attempt, so this bounds the pass's sockets and timeout waiters. 0 and values above the Tokio semaphore limit are rejected. |
+
 Upgrade note: `enabled` previously defaulted to `false`. A site that sets
 `nvlink_config.enabled = true` without this key starts the certificate monitor
 after upgrading, and the monitor can request `ConfigureNmxCluster` rack
@@ -706,9 +723,73 @@ to keep the previous behavior.
 | `power_shelves_created_per_run` | `u64` | `1` | Max power shelves created per run. `0` creates none. |
 | `create_switches` | `bool` | `true` | Auto-create Switch state machines for explored switches with a matching `expected_switches` record. |
 | `switches_created_per_run` | `u64` | `9` | Max switches created per run. `0` creates none. |
-| `explore_mode` | `SiteExplorerExploreMode` | `NvRedfish` | Redfish backend: `libredfish`, `nv-redfish`, or `compare-result`. |
-| `explore_drive_firmware` | `bool` | `false` | Reads drive firmware versions from each host's Redfish Storage subsystems and reports each enabled drive with a usable model and version as a `Drive_<Model>_<DriveId>` firmware inventory entry. Adds one request per Storage subsystem and per drive to every exploration. Takes effect only when `explore_mode` is `nv-redfish`: `libredfish` ignores it, and `compare-result` reads the drives but returns the libredfish report, which omits them. |
+| `explore_drive_firmware` | `bool` | `false` | Reads drive firmware versions from each host's Redfish Storage subsystems and reports each enabled drive with a usable model and version as a `Drive_<Model>_<DriveId>` firmware inventory entry. Adds one request per Storage subsystem and per drive to every exploration. |
 | `dpu_policy` | `Option<HostDpuPolicy>` | — (effective: `manage`) | Site-wide policy for DPU hardware: `manage`, `nic`, or `ignore`. Per-host `nic` and `ignore` override it; per-host `manage` inherits it for backward compatibility. When omitted, the site default is `manage`. The previous `use_as_nic` value and the legacy `dpu_mode` field with `dpu_mode` / `nic_mode` / `no_dpu` values remain accepted during deserialization. |
+
+### `BmcDriverRule` — `bmc_driver_rules`
+
+Each `[[bmc_driver_rules]]` entry picks drivers for the BMCs whose identity
+matches it, so a site can work around hardware that misbehaves before a
+release adds a compiled rule. `nico-admin-cli site-explorer drivers <BMC_IP>`
+shows the identity a BMC's latest exploration report gives, the driver each
+capability uses, and the rule that chose it.
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `id` | `String` | **required** | Identifies the rule in selections and errors. Must not be empty or match any other rule, compiled ones included. |
+| `matchers` | `Vec<IdentityMatcher>` | `[]` | Conditions that must all hold. A rule without matchers applies to every BMC. |
+| `selections` | `Map<Capability, String>` | `{}` | The driver for each capability the rule decides: `unsupported`, `standard`, or the id of a compiled driver for that capability from [`crates/bmc-drivers/src/drivers.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/bmc-drivers/src/drivers.rs). Capabilities are `power`, `bmc_control`, `bios`, `boot_order`, `secure_boot`, `lockdown`, `accounts`, `firmware`, `storage`, `dpu`, `attestation`, `console`, and `super_nic`. `lockdown`, `storage`, `dpu`, `console`, and `super_nic` have no standard driver, so they take `unsupported` or a driver id. |
+| `quirks` | `Vec<Quirk>` | `[]` | Firmware quirks from [`crates/bmc-platform/src/quirk.rs`](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/bmc-platform/src/quirk.rs), in `snake_case`, added to those of every other matching rule. |
+
+An `IdentityMatcher` is `{ field = ..., pattern = { kind = ..., value = ... } }`.
+`field` is one of `service_root_vendor`, `service_root_product`,
+`service_root_oem_key`, `manager_id`, `manager_model`, `manager_firmware`,
+`system_id`, `system_manufacturer`, `system_model`, `system_sku`,
+`system_part_number`, `system_bios_version`, `chassis_id`,
+`chassis_manufacturer`, `chassis_model`, `chassis_part_number`, or
+`manager_mac_address`, or `{ firmware_inventory = "<entry id>" }` for the
+version of one firmware inventory entry. A chassis field matches when any
+chassis has a matching value, and `manager_mac_address` matches when any of the
+manager's network interfaces has the MAC address. `kind` is one of:
+
+- `exact`, `exact_ascii_case_insensitive`, `prefix`, `contains`, or
+  `contains_ascii_case_insensitive`, with a string value.
+- `one_of`, with a list of exact values.
+- `version_equal`, `version_at_least`, or `version_below`, with a version, or
+  `firmware_version_range`, with `{ minimum = ..., maximum = ... }` bounds
+  that both count. These apply only to `manager_firmware`,
+  `system_bios_version`, and firmware inventory entries.
+- `mac_address`, with a MAC address in any case and with `:` or `-`
+  separators. It applies only to `manager_mac_address`, which takes no other
+  kind.
+
+Capabilities a rule leaves out keep what the compiled rules choose. A rule that
+matches `manager_mac_address` names one BMC, so it outranks every other
+configured rule. Otherwise, when several configured rules match a BMC and set
+the same capability, the one with the most matchers wins. If they tie,
+selection fails for that BMC and names the tied rules.
+
+```toml
+[[bmc_driver_rules]]
+id = "site-gb300-no-power"
+matchers = [{ field = "system_model", pattern = { kind = "contains", value = "GB300" } }]
+selections = { power = "unsupported" }
+
+# One host whose BMC misbehaves keeps the standard power driver.
+[[bmc_driver_rules]]
+id = "rack12-node3-standard-power"
+matchers = [{ field = "manager_mac_address", pattern = { kind = "mac_address", value = "C4:5A:B1:C8:38:0D" } }]
+selections = { power = "standard" }
+```
+
+Startup fails on a rule with an empty or repeated `id`, one that selects no
+capability and adds no quirk, a driver id this binary does not compile, a
+driver for another capability, `standard` for a capability without a standard
+driver, an empty or repeated matcher, a version pattern on a field that is not
+a version, a `mac_address` pattern on another field or another pattern on
+`manager_mac_address`, or a value that is not a MAC address. An unknown key
+inside a rule follows the
+[unknown-field policy](#nico-api-configuration-reference) like any other key.
 
 ### `StateControllerConfig`
 
@@ -733,6 +814,38 @@ TOML section: `[rack_state_controller]`.
 |-------|------|---------|-------------|
 | `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
 | `nmx_cluster_switch_mtls_services` | `Vec<SwitchMtlsService>` | N/A (ignored) | **Deprecated.** Accepted and ignored. Rack `ConfigureNmxCluster` binds `nvue_api` before RMS V2. RMS V2 binds NMX-C on the selected primary. gNMI requires an explicit `switch_mtls_services` entry; nmx-telemetry uses the effective service list. |
+
+### `SpdmStateControllerConfig`
+
+TOML section: `[spdm_state_controller]`. Changes require an API restart.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `controller` | `StateControllerConfig` | *(default)* | Common state controller timing (see [StateControllerConfig](#statecontrollerconfig)). |
+| `cancellation_timeout` | `Duration` | `2m` | Optional positive duration up to `5m`, such as `30s` or `5m`. Measured from the persisted start of cancellation cleanup across retries and restarts. Operator requests retain their first cleanup start independently of their latest request timestamp. Repeating or switching the target cannot extend cleanup already in progress. While the evidence collection lock is held, the controller attempts BMC task cancellation and polls for completion; without a task ID it waits for this timeout. BMC confirmation or an HTTP 404 or 410 in `WaitForTaskCancellation` releases the lock early. At or after the timeout, the next controller iteration releases the lock without BMC confirmation and finishes as `Waived` for waivers or `Failed` for operator failure and automatic recovery. This grace period spans iterations and is independent of the per-iteration `max_object_handling_time` budget. Zero, negative, malformed, and greater-than-five-minute values fail configuration loading. Omission uses `2m`, including when the section is absent. |
+
+Automatic cleanup requests BMC cancellation when a task is still nonterminal
+after a fixed two-minute grace measured from entry into `PollEvidenceCollection`.
+This includes `New`, `Starting`, `Running`, and unexpected nonterminal states.
+The polling grace is separate from `cancellation_timeout`. If cancellation is
+pending, unsupported, or returns an error, the controller enters
+`WaitForTaskCancellation`, which only polls. An HTTP 404 or 410 in
+`PollEvidenceCollection` also enters `WaitForTaskCancellation`, preserving the
+task ID, retry count, and evidence collection claim.
+
+In `WaitForTaskCancellation`, an HTTP 404 or 410 is treated as a stopped task and
+releases the claim before the cleanup deadline, without an explicit terminal
+task response or cancellation acknowledgement. A stopped task, including one
+inferred from HTTP 404 or 410, permits another collection attempt while the
+existing collection retry budget remains. The cleanup timeout therefore does
+not guarantee that collection attempts cannot overlap. Operator waiver and
+failure requests take precedence over automatic retries or failures, but still
+wait for a stopped-task result or the cleanup deadline.
+
+The two-minute polling check requires a successful task response. Client creation
+errors, task lookup errors other than HTTP 404 or 410, and evidence fetch errors
+retry the existing state without entering automatic cleanup. An operator waiver
+or failure request starts bounded cleanup for such a stuck job.
 
 ### `SwitchStateControllerConfig`
 
@@ -781,10 +894,17 @@ TOML section: `[observability.per_object_state_metrics]`.
 
 ### `MachineStateControllerConfig`
 
+TOML section: `[machine_state_controller]`.
+
+For `spdm_attester_selection_timeout`, environment values override the site
+override, which overrides the base configuration file. Changes require an API
+restart.
+
 Extends `StateControllerConfig` with:
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
+| `spdm_attester_selection_timeout` | `Duration` | `30s` | Optional positive duration up to `3m`, such as `500ms`, `30s` or `3m`. One total budget per managed-host SPDM selection during triggering, terminal-job polling and failed-state recovery, including database/profile lookup, client creation and both Redfish reads. It does not reset between phases. Expiry returns an error, preserves the lifecycle state and job, and permits a later iteration to retry. The enclosing `controller.max_object_handling_time` can expire earlier. Zero, negative, malformed and greater-than-three-minute values fail configuration loading. Omission uses `30s`, including when this section is absent. Read at startup; changes require an API restart. API-triggered attestation and assessment retain their request-supplied timeouts. |
 | `dpu_wait_time` | `Duration` | `5m` | Time before a DPU is considered definitively down. |
 | `power_down_wait` | `Duration` | `2m` | Wait after power-down before powering on. |
 | `failure_retry_time` | `Duration` | `90m` | Time before re-triggering reboot if machine hasn't called back. |
@@ -849,12 +969,16 @@ TOML section: `[extension_service_state_controller]`.
 | `firmware_directory` | `PathBuf` | `/opt/nico/firmware` | Firmware binary storage directory. |
 | `firmware_download_cache_directory` | `PathBuf` | `/mnt/persistence/fw/download-cache` | Writable directory used to cache downloaded firmware artifacts. |
 | `downloads` | `FirmwareDownloadConfig` | *(see below)* | Shared downloader limits, applied at Core startup. |
+| `nic_firmware_cache_capacity_bytes` | `u64` | `17179869184` (16 GiB) | Maximum payload bytes in `<firmware_download_cache_directory>/digest-v1`, including partial files and active download reservations. Accepts `1` through `1099511627776` (1 TiB), at least `downloads.max_download_bytes`. Active operations and readers prevent eviction. Verified files already present remain readable after a capacity reduction; new reservations require free space. Legacy URL-cache files are outside this limit. Each Core process must use its own cache directory; sharing it between processes is unsupported. Changes require a Core restart. |
+| `nic_firmware_delivery_mode` | `FirmwareDeliveryMode` | `site_cache` | Site policy for new NIC firmware operations. Accepts `site_cache` for authenticated Core delivery or `direct` for anonymous origin HTTP(S). Changes require a Core restart; admission integration is tracked below. |
 | `host_firmware_upgrade_retry_interval` | `Duration` | `60m` | Retry delay for failed host firmware upgrades. |
 | `instance_updates_manual_tagging` | `bool` | `true` | Require manual tagging before firmware updates. |
 | `no_reset_retries` | `bool` | `false` | Disable retry logic after BMC resets. |
 | `hgx_bmc_gpu_reboot_delay` | `Duration` | `30s` | Delay after GPU reboot before HGX BMC access. |
 | `requires_manual_upgrade` | `bool` | `false` | Force all firmware upgrades to require admin approval. |
 | `max_concurrent_bfb_copies` | `usize` | `10` | Maximum number of concurrent BFB copy operations. |
+
+Core loads `firmware_global.nic_firmware_delivery_mode` at startup. Copying this policy into newly admitted production operations is future work tracked in [NIC firmware lifecycle integration](https://github.com/dsx-ai-factory/infra-controller/issues/6680). Changing the setting does not start an update. Saved operations retain their frozen delivery mode, and an omitted mode in an older operation means `Direct`, independently of the site's `site_cache` default. Legacy host-script and DPU firmware updates do not use this setting. Refer to [supervised firmware operations](../../../libmlx/README.md#supervised-firmware-operations) for transfer, authentication, and retry behavior.
 
 ### `FirmwareDownloadConfig`
 
@@ -868,8 +992,8 @@ for affected workflows, deployment guidance, and failure handling.
 
 | Field | Type | Default | Accepted range and behavior |
 | ------- | ------ | --------- | ------------- |
-| `max_concurrent_downloads` | `usize` | `4` | `1`–`16` cache-verification/download workers per Core process. A slot remains occupied through filesystem work and cleanup after cancellation. Saturation defers the next check, even for a cached artifact, without queuing work or consuming a recorded failure. |
-| `max_download_bytes` | `u64` | `4294967296` (4 GiB) | `1`–`17179869184` (16 GiB) bytes per HTTP response body, counted while streaming regardless of `Content-Length`. |
+| `max_concurrent_downloads` | `usize` | `4` | `1`–`16` cache-verification/download workers per Core process, shared by NIC artifact checks, legacy firmware updates, and preingestion. A slot remains occupied through filesystem work and cleanup after cancellation. Saturation defers the next check, even for a cached artifact, without queuing work or consuming a recorded failure; NIC HTTP callers receive `202` with `Retry-After: 5`. Established NIC response readers have a separate 32-reader limit. |
+| `max_download_bytes` | `u64` | `4294967296` (4 GiB) | `1`–`17179869184` (16 GiB) bytes per HTTP response body, counted while streaming regardless of `Content-Length`. Each active NIC transfer reserves this many cache bytes, so `nic_firmware_cache_capacity_bytes` must cover at least one maximum transfer. |
 | `connect_timeout_seconds` | `u64` | `30` | `1`–`300` seconds to connect. |
 | `read_timeout_seconds` | `u64` | `60` | `1`–`600` seconds from starting the request through receiving final response headers, including connection establishment; then an idle timer that resets after each body read. |
 | `request_timeout_seconds` | `u64` | `1800` | `1`–`7200` seconds for one HTTP request, from connecting through body completion. |
@@ -1051,11 +1175,22 @@ client-certificate authentication is not used.
 
 | Field | Type | Default | Description |
 | ------- | ------ | --------- | ------------- |
-| `admin_vpc` | `Option<AdminFnnConfig>` | — | FNN configuration for the admin network VPC. |
+| `admin_vpc` | `Option<AdminFnnConfig>` | — | FNN configuration for the admin network VPC (see [AdminFnnConfig](#adminfnnconfig)). |
 | `common_internal_route_target` | `Option<RouteTargetConfig>` | — | Literal double-tag for internal tenant routes. `vni_self` is rejected because this value has no single VPC owner. |
 | `additional_route_target_imports` | `Vec<RouteTargetConfig>` | `[]` | Literal route targets imported on DPU VRFs. `vni_self` is rejected because these values have no single VPC owner. |
 | `routing_profiles` | `HashMap<String, FnnRoutingProfileConfig>` | `{}` | Named per-VPC routing profiles (see [FnnRoutingProfileConfig](#fnnroutingprofileconfig)). |
 | `use_vpc_vrf_loopback` | `bool` | `false` | Whether IPs are allocated for VPC loopbacks. When false, the VPC loopback pool is unused and no VPC/VRF loopback IP is sent to the DPU. |
+
+### `AdminFnnConfig`
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `enabled` | `bool` | required | Enable FNN for the admin VPC. |
+| `l3_only` | `bool` | `false` | When `enabled = true`, route the host-facing PF without the admin L2VNI, bridge attachment, VLAN SVI, or VRR. Retain host IP allocations, subnet masks, configured gateway prefixes, and per-host EVPN routes. |
+| `vpc_vni` | `Option<u32>` | — | Admin L3VNI; required when `enabled = true`. |
+| `routing_profile` | `FnnRoutingProfileConfig` | effective profile defaults | Inline admin routing profile. |
+
+Set `fnn.admin_vpc.l3_only = true` only after deploying DPU agents that support routed admin DHCP, static host routes, and IPv6 router advertisements. Changes require restarting Core and take effect as agents reconcile their configuration. The setting has no effect when admin FNN is disabled. It does not change admin address allocation to `/31` or `/127`. Hosts retain their existing on-link prefixes, so communication to remote hosts or services inside those prefixes is unsupported in this mode; required provisioning services must be reachable through the gateway. Existing segment VNI and SVI address allocations are retained for switching back to L2 mode.
 
 ### `FnnRoutingProfileConfig`
 
@@ -1617,7 +1752,7 @@ events, so consumers handle them identically.
 | `enabled` | `bool` | `false` | Enable DPF Kubernetes deployment. |
 | `deployment_scoped_service_interfaces` | `bool` | `false` | Migration knob for deployment-scoped DPUServiceInterfaces. BF3 sites (including BF3 GB200) and BF4-generic-only sites use unscoped interfaces by default for backward compatibility. BF4 Astra requires this setting so the whole DPF namespace uses scoped ServiceInterfaces and legacy unscoped ServiceInterfaces cannot also bind Astra nodes. When enabled, NICo removes legacy unscoped ServiceInterfaces before creating scoped replacements. If cleanup remains incomplete for ten minutes, NICo logs an error and continues waiting. If an operator manually completes unscoped cleanup, NICo creates scoped replacements. The setting is read only at startup. To return to unscoped interfaces, stop NICo, delete the scoped ServiceInterfaces and wait for their deletion, then restart NICo with this set to `false`. If scoped ServiceInterfaces exist, DPF initialization rejects a `false` value. |
 | `pf_total_sf_reserved` | `u32` | `30` | SF capacity reserved beyond the NICo-managed HBN, DHCP, and FMDS endpoints and service-VPC reservations when an intercept-bridging inventory is configured. NICo sets `PF_TOTAL_SF` to the effective inventory's endpoint count plus independent SF reservations and this value for BF3 and generic BF4. Without configured intercept bridging, this value is the complete `PF_TOTAL_SF` for BF3 and generic BF4, preserving the legacy default of `30`. BF4 Astra ignores this setting: configured Astra derives `PF_TOTAL_SF` as `17 + 2V`, where `V` is the configured VF count, and topology-free Astra uses `40`. Changing this value changes the BF3/generic-BF4 flavor. Changing Astra's intercept inventory changes its `DPUFlavorTemplate`; initial topology enablement automatically removes the pre-topology scoped PF/VF ServiceInterfaces described above, while reverse and subsequent topology changes require controlled manual cleanup. Every intercept-inventory change requires DPU re-ingestion, even when the serialized flavor and its hash remain unchanged. Operators must select a value compatible with their platform's SF and BAR capacity. With positive service slots, the BF3/generic-BF4 generated pool must also fit the deployment's `max_sf_per_pf`. GB200 always emits a fixed 128-SF profile, and commitment must always fit 128. Without intercept bridging, commitment must also fit `pf_total_sf_reserved`. With intercept bridging, commitment plus this extra reserve must fit 128 when any of `service_vpc_slot_count`, `max_active_service_vpc_interfaces_per_dpu`, or `additional_managed_sf` is positive. When all three are zero, the shared reserve is excluded from the 128-SF check to preserve existing overrides. With configured intercept bridging, startup rejects commitment plus reserve above `u32::MAX` even when all three are zero. |
-| `dpu_service_sync_enabled` | `bool` | `true` | Whether NICo automatically releases DPF maintenance holds for changed DPUDeployment-owned DPUService revisions whose `upgradePolicy.applyNodeEffect` is `true`, after confirming that the host's DPUs match their DPUDeployment. The setting selects who opens an existing gate; it does not add one. NICo sets the field to `false` for the DPU agent, DHCP server, FMDS, and OTel Collector. HBN, DTS, and extra services use the gated default. The setting does not govern direct, detached DPUService objects, including `nico-service-vpc`. Setting it to `false` leaves existing holds for deliberate operator release. |
+| `dpu_service_sync_enabled` | `bool` | `true` | Whether NICo automatically releases DPF maintenance holds for changed DPUDeployment-owned DPUService revisions whose `upgradePolicy.applyNodeEffect` is `true`, after confirming that the host's DPUs match their DPUDeployment. The setting selects who opens an existing gate; it does not add one. NICo services, HBN, DTS, and extra services use the gated default. The setting does not govern direct, detached DPUService objects, including `nico-service-vpc`. Setting it to `false` leaves service-update holds for deliberate operator release. Provisioning still releases its own NodeEffect holds regardless of this setting and clears pending service-sync markers. |
 | `dpu_agent_bootstrap_ca` | `DpfDpuAgentBootstrapCa` | `legacy_download` | Bootstrap trust for the containerized DPU agent. Supports `legacy_download` and `mounted`, as described in the following examples. |
 | `services` | `Box<DpfMandatoryServicesConfig>` | built-in mandatory-service defaults | Helm chart, image, pull-secret, and `extra_helm_values` settings for the six mandatory DPF services. |
 | `extra_services` | `Box<DpfExtraServicesConfig>` | built-in extra-service defaults | Site-wide Helm chart, image, pull-secret, and `extra_helm_values` settings for deployment-specific services. BF4 Astra uses Weave DHCP agent, Weave flow controller, and Xplane; BF3 and generic BF4 do not render them. |

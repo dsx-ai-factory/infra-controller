@@ -119,7 +119,6 @@ nico-api:
       machines_created_per_run = 1000
       explorations_per_run = 1000
       concurrent_explorations = 100
-      explore_mode = "nv-redfish"
 
       [firmware_global]
       autoupdate = true

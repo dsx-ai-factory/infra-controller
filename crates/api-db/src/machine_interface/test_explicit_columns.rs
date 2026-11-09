@@ -171,7 +171,7 @@ async fn exercise_queries(connection: &mut PgConnection) -> Result<(), Box<dyn s
             machine_id: &host_id,
             mac_address,
             expected_network_segment_type: NetworkSegmentType::HostInband,
-            boot_interface_id: Some("NIC.Slot.7-1".to_string()),
+            boot_interface_id: Some("NIC.Slot.7-1"),
             primary_interface: true,
         },
         txn.as_mut(),

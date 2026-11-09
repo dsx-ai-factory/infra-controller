@@ -60,7 +60,7 @@ class ManifestTest(unittest.TestCase):
             "nsm": "./nvswitch-manager",
             "psm": "./powershelf-manager",
             "site-agent": "./site-agent/cmd/site-agent",
-            "sitemgr": "./site-manager/cmd/sitemgr",
+            "site-manager": "./site-manager/cmd/site-manager",
             "workflow": "./workflow/cmd/workflow",
         }
         static_stripped = ("-extldflags=-static", "-w", "-s")
@@ -69,8 +69,8 @@ class ManifestTest(unittest.TestCase):
             "credsmgr": (
                 "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}",
             ),
-            "sitemgr": (
-                "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}",
+            "site-manager": (
+                "-X=github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/metadata.Version=${VERSION}",
             ),
             "api": (
                 "-X=github.com/NVIDIA/infra-controller/rest-api/api/pkg/metadata.Version=${VERSION}",
@@ -89,7 +89,7 @@ class ManifestTest(unittest.TestCase):
         linux_flags = {
             "api": static_stripped + metadata_flags["api"],
             "migrations": static_stripped,
-            "sitemgr": static_stripped + metadata_flags["sitemgr"],
+            "site-manager": static_stripped + metadata_flags["site-manager"],
             "workflow": static_stripped,
             "site-agent": static_stripped + metadata_flags["site-agent"],
             "mock-core": (),

@@ -133,15 +133,30 @@ async fn spdm_snapshot_uses_topology_selected_bmc(
         ca_certificate: None,
         evidence_target: None,
         evidence: None,
+        evidence_collection_locked: false,
+        job_id: uuid::Uuid::new_v4(),
         started_at: Utc::now(),
-        cancelled_at: None,
+        cancellation_requested_at: None,
+        cancellation_target: None,
+        cancellation_cleanup_started_at: None,
         completed_at: None,
     };
-    insert_device_attestations(txn.as_mut(), &machine_id, vec![attestation.clone()]).await?;
+    insert_device_attestations(
+        txn.as_mut(),
+        &machine_id,
+        vec![attestation.clone()],
+        &attestation.job_id,
+        false,
+    )
+    .await?;
 
-    let selected =
-        load_snapshot_for_machine_and_device_id(txn.as_mut(), &machine_id, &attestation.device_id)
-            .await?;
+    let selected = load_snapshot_for_machine_and_device_id(
+        txn.as_mut(),
+        &machine_id,
+        &attestation.device_id,
+        &attestation.job_id,
+    )
+    .await?;
     assert_eq!(
         selected.bmc_info,
         BmcInfo {
@@ -161,9 +176,13 @@ async fn spdm_snapshot_uses_topology_selected_bmc(
     .bind(selected_interface_id)
     .execute(txn.as_mut())
     .await?;
-    let unavailable =
-        load_snapshot_for_machine_and_device_id(txn.as_mut(), &machine_id, &attestation.device_id)
-            .await?;
+    let unavailable = load_snapshot_for_machine_and_device_id(
+        txn.as_mut(),
+        &machine_id,
+        &attestation.device_id,
+        &attestation.job_id,
+    )
+    .await?;
     assert_eq!(
         unavailable.bmc_info,
         BmcInfo {
@@ -185,9 +204,13 @@ async fn spdm_snapshot_uses_topology_selected_bmc(
     .bind(machine_id)
     .execute(txn.as_mut())
     .await?;
-    let fallback =
-        load_snapshot_for_machine_and_device_id(txn.as_mut(), &machine_id, &attestation.device_id)
-            .await?;
+    let fallback = load_snapshot_for_machine_and_device_id(
+        txn.as_mut(),
+        &machine_id,
+        &attestation.device_id,
+        &attestation.job_id,
+    )
+    .await?;
     assert_eq!(
         fallback.bmc_info,
         BmcInfo {
@@ -276,7 +299,7 @@ async fn exercise_snapshot(
         device_id: "HGX_IRoT_GPU_0".to_string(),
         bmc_info,
         nonce: "11111111-2222-3333-4444-555555555555".parse()?,
-        state: SpdmAttestationState::Cancelled,
+        state: SpdmAttestationState::Waived,
         state_version: "V7-T0".parse()?,
         state_outcome: Some(PersistentStateHandlerOutcome::Wait {
             reason: "waiting for attestation evidence".to_string(),
@@ -301,34 +324,53 @@ async fn exercise_snapshot(
             signing_algorithm: "ECDSA".to_string(),
             version: "1.2".to_string(),
         }),
+        evidence_collection_locked: false,
+        job_id: uuid::Uuid::new_v4(),
         started_at: "2026-09-01T12:00:00Z".parse()?,
-        cancelled_at: Some("2026-09-01T12:01:00Z".parse()?),
+        cancellation_requested_at: Some("2026-09-01T12:01:00Z".parse()?),
+        cancellation_target: Some(model::attestation::spdm::SpdmCancellationTarget::Fail),
+        cancellation_cleanup_started_at: Some("2026-09-01T12:01:30Z".parse()?),
         completed_at: Some("2026-09-01T12:02:00Z".parse()?),
     };
     assert_eq!(
-        insert_device_attestations(txn.as_mut(), &machine_id, vec![expected.clone()]).await?,
+        insert_device_attestations(
+            txn.as_mut(),
+            &machine_id,
+            vec![expected.clone()],
+            &expected.job_id,
+            false,
+        )
+        .await?,
         1
     );
+    // The model request time retains the main-branch database column name.
     sqlx::query(
         "UPDATE spdm_machine_devices_attestation
          SET metadata = $1, ca_certificate = $2, evidence = $3,
-             state_outcome = $4, cancelled_at = $5, completed_at = $6
-         WHERE machine_id = $7 AND device_id = $8",
+             state_outcome = $4, cancelled_at = $5, completed_at = $6, cancellation_target = $10, cancellation_cleanup_started_at = $11
+         WHERE machine_id = $7 AND device_id = $8 AND job_id = $9",
     )
     .bind(sqlx::types::Json(&expected.metadata))
     .bind(sqlx::types::Json(&expected.ca_certificate))
     .bind(sqlx::types::Json(&expected.evidence))
     .bind(sqlx::types::Json(&expected.state_outcome))
-    .bind(expected.cancelled_at)
+    .bind(expected.cancellation_requested_at)
     .bind(expected.completed_at)
     .bind(machine_id)
     .bind(&expected.device_id)
+    .bind(expected.job_id)
+    .bind(expected.cancellation_target)
+    .bind(expected.cancellation_cleanup_started_at)
     .execute(txn.as_mut())
     .await?;
 
-    let found =
-        load_snapshot_for_machine_and_device_id(txn.as_mut(), &machine_id, &expected.device_id)
-            .await?;
+    let found = load_snapshot_for_machine_and_device_id(
+        txn.as_mut(),
+        &machine_id,
+        &expected.device_id,
+        &expected.job_id,
+    )
+    .await?;
     assert_eq!(
         serde_json::to_value(&found)?,
         serde_json::to_value(&expected)?

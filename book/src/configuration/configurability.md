@@ -961,6 +961,12 @@ scope          = "mqtt:publish mqtt:subscribe"
 `[*.auth.basic]` / `[*.auth.oauth2]` shape. See
 [`crates/api-core/src/cfg/README.md` → MqttAuthConfig / MqttOAuth2Config](../../../crates/api-core/src/cfg/README.md#mqttauthconfig).
 
+The `nico-dsx-exchange-consumer` chart reads its own MQTT credential and takes no Vault
+credential settings unless you opt in. Its Certificate still uses the Vault-named
+issuer `vault-nico-issuer` by default. Refer to
+[DSX Exchange Consumer Credential](../../../docs/configuration/credential-sources.md#dsx-exchange-consumer-credential)
+for the supported sources and rotation behavior.
+
 ### Network ports and firewall
 
 NICo services need both in-cluster and out-of-cluster reachability. The
@@ -1141,7 +1147,12 @@ enabled = true
 monitor_run_interval = "60s"
 partition_monitor_max_concurrent_groups = 16 # racks or chassis reconciled in parallel per pass, documented range 1 to 256, larger values are accepted with a startup warning
 partition_monitor_full_check_interval = "10m" # racks and chassis whose inputs are unchanged and whose instances are synced are skipped between full checks, GPU health on them refreshes at this interval, "0s" checks every pass
+partition_monitor_unreachable_alert_after = 3 # consecutive passes a rack's NMX-C must be unusable before its NmxcUnreachable rack alert is raised; cleared by the first reachable pass
 nmxc_endpoint = "https://nmxc.example.com"
+
+[nvlink_config.switch_reachability]
+# enabled = false # TCP-probes ready switches each pass (NVOS on every switch, NMX-T on primaries); unset follows nvlink_config.enabled
+unreachable_alert_after = 3 # consecutive failed checks before the SwitchUnreachable or NmxtUnreachable switch alert is raised; the first successful check clears it
 # Plus auth + retry settings — see the canonical reference.
 ```
 

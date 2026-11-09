@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::{fs, io};
 
 use carbide_libmlx_model::device::identity::MlxDeviceSelectorError;
+use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
 use carbide_libmlx_model::firmware::operation::{
     FirmwareOperation, FirmwareOperationState, ObserverExitBehavior,
 };
@@ -36,7 +37,7 @@ use uuid::Uuid;
 
 use super::claim::MutationClaim;
 use super::client::{MESSAGE_LIMIT, PROTOCOL_VERSION};
-use super::execution::run_operation;
+use super::execution::{OperationRuntime, run_operation};
 use super::identity::{DeviceIdentity, current_boot_id};
 use super::journal::{
     Admission, JournalError, JournalRecord, OperationJournal, OperationUpdate, RequestedFirmware,
@@ -44,6 +45,7 @@ use super::journal::{
 use super::launch::ensure_state_directory;
 use super::peer::{ConnectedSocket, PeerInfo, wait_for_exit};
 use crate::firmware::config::{FirmwareFlasherProfile, FirmwareUpdateContext};
+use crate::firmware::core_download::CoreFirmwareDownloadConfig;
 use crate::firmware::preflight::validate_preflight_request;
 use crate::runner::FirmwareToolExecutor;
 
@@ -58,6 +60,7 @@ const MAX_REQUESTS_PER_CONNECTION: u32 = 8;
 struct Work {
     operation_id: String,
     profile: Option<FirmwareFlasherProfile>,
+    core_download_config: Option<CoreFirmwareDownloadConfig>,
     observer: Option<Arc<OwnedFd>>,
     claim: MutationClaim,
     canceled: watch::Receiver<Option<String>>,
@@ -107,6 +110,11 @@ impl ValidatedFirmwareRequest {
                 })?;
                 let context = FirmwareUpdateContext {
                     phase_id: context.phase_id,
+                    delivery_mode: rpc::protos::mlx_device::FirmwareDeliveryMode::try_from(
+                        context.delivery_mode,
+                    )
+                    .map_err(|_| Status::invalid_argument("unknown firmware delivery mode"))?
+                    .into(),
                     expected_digests: context
                         .expected_digests
                         .ok_or_else(|| {
@@ -273,6 +281,7 @@ impl Supervisor {
         let Work {
             operation_id,
             profile,
+            core_download_config,
             observer,
             claim,
             canceled,
@@ -286,8 +295,11 @@ impl Supervisor {
                         profile,
                         self.directory.clone(),
                         self.journal.clone(),
-                        self.executor.clone(),
-                        canceled,
+                        OperationRuntime {
+                            executor: self.executor.clone(),
+                            cancellation: canceled,
+                            core_download_config,
+                        },
                     )
                     .await
                 }
@@ -409,6 +421,25 @@ impl FirmwareSupervisor for Supervisor {
                     "firmware supervisor instance changed; missing operation requires reconciliation",
                 ));
             }
+            // Runtime transport is required only for newly admitted SiteCache
+            // work. A duplicate above returns its immutable receipt without
+            // needing current credentials or changing the accepted worker.
+            let core_download_config = match (
+                update_context.as_ref().map(|context| context.delivery_mode),
+                request.core_download_config,
+            ) {
+                (Some(FirmwareDeliveryMode::SiteCache), Some(config)) => Some(
+                    CoreFirmwareDownloadConfig::try_from(config)
+                        .map_err(|error| Status::invalid_argument(error.to_string()))?,
+                ),
+                (Some(FirmwareDeliveryMode::SiteCache), None) => return Err(
+                    Status::invalid_argument("site_cache firmware delivery requires core transport settings"),
+                ),
+                (_, Some(_)) => return Err(Status::invalid_argument(
+                    "core transport settings require site_cache firmware delivery",
+                )),
+                (_, None) => None,
+            };
             let observer = match behavior {
                 ObserverExitBehavior::Continue => None,
                 ObserverExitBehavior::Terminate => Some(peer.pidfd.ok_or_else(|| {
@@ -474,6 +505,7 @@ impl FirmwareSupervisor for Supervisor {
                 .try_send(Work {
                     operation_id: request.operation_id,
                     profile,
+                    core_download_config,
                     observer,
                     claim,
                     canceled: supervisor.canceled.subscribe(),
@@ -819,6 +851,7 @@ mod tests {
     /// Submit no hardware work unless a test explicitly supplies a profile.
     fn submission(supervisor: &Supervisor, operation_id: &str) -> SubmitFirmwareOperationRequest {
         SubmitFirmwareOperationRequest {
+            core_download_config: None,
             operation_id: operation_id.into(),
             profile: None,
             observer_exit_behavior: wire::ObserverExitBehavior::Continue.into(),
@@ -875,6 +908,7 @@ mod tests {
             .unwrap()
             .firmware_url = "https://host/image.bin".into();
         request.update_context = Some(wire::FirmwareUpdateContext {
+            delivery_mode: Default::default(),
             phase_id: "dispatch-1".into(),
             expected_digests: Some(rpc::protos::mlx_device::FirmwareArtifactDigests {
                 image_sha256: "00".repeat(32),
@@ -883,6 +917,21 @@ mod tests {
             expected_device: None,
         });
         request
+    }
+
+    /// Supply valid runtime settings so mode rejection cannot be masked by
+    /// an unrelated transport validation error. These tests do not open files.
+    fn core_transport_settings() -> wire::CoreFirmwareDownloadConfig {
+        wire::CoreFirmwareDownloadConfig {
+            core_url: "https://core.example.test".into(),
+            root_ca_path: "/runtime-ca.pem".into(),
+            client_cert_path: "/runtime-cert.pem".into(),
+            client_key_path: "/runtime-key.pem".into(),
+            enforce_tls: true,
+            require_client_cert: true,
+            socks_proxy: Some("socks5://runtime-proxy-secret@proxy.test".into()),
+            ..Default::default()
+        }
     }
 
     /// Observation repeats immutable work but cannot request new admission.
@@ -1170,6 +1219,13 @@ mod tests {
                 },
             },
             Case {
+                label: "delivery mode changed",
+                change: |request| {
+                    request.update_context.as_mut().unwrap().delivery_mode =
+                        rpc::protos::mlx_device::FirmwareDeliveryMode::SiteCache.into()
+                },
+            },
+            Case {
                 label: "checked receipt reused as legacy",
                 change: |request| request.update_context = None,
             },
@@ -1221,6 +1277,40 @@ mod tests {
             invalidate: fn(&mut SubmitFirmwareOperationRequest),
         }
         for case in [
+            Case {
+                label: "unknown delivery mode",
+                invalidate: |request| request.update_context.as_mut().unwrap().delivery_mode = 99,
+            },
+            Case {
+                label: "SiteCache requires runtime Core configuration",
+                invalidate: |request| {
+                    request.update_context.as_mut().unwrap().delivery_mode =
+                        rpc::protos::mlx_device::FirmwareDeliveryMode::SiteCache.into()
+                },
+            },
+            Case {
+                label: "Direct rejects Core configuration",
+                invalidate: |request| {
+                    request.core_download_config = Some(core_transport_settings())
+                },
+            },
+            Case {
+                label: "SiteCache validates runtime configuration before admission",
+                invalidate: |request| {
+                    request.update_context.as_mut().unwrap().delivery_mode =
+                        rpc::protos::mlx_device::FirmwareDeliveryMode::SiteCache.into();
+                    let mut config = core_transport_settings();
+                    config.enforce_tls = false;
+                    request.core_download_config = Some(config);
+                },
+            },
+            Case {
+                label: "legacy requests reject Core configuration",
+                invalidate: |request| {
+                    request.update_context = None;
+                    request.core_download_config = Some(core_transport_settings());
+                },
+            },
             Case {
                 label: "missing profile",
                 invalidate: |request| request.profile = None,
@@ -1376,6 +1466,106 @@ mod tests {
         ));
     }
 
+    /// A SiteCache receipt survives reopening with its mode, but no runtime
+    /// origin, credential paths or proxy secrets. Duplicate transport data is
+    /// ignored before validation and cannot replace the accepted Work snapshot.
+    #[tokio::test]
+    async fn site_cache_receipt_keeps_intent_separate_from_runtime_transport() {
+        let (root, mut supervisor, mut receiver) = supervisor_fixture();
+        let config = core_transport_settings();
+        let mut request = checked_submission(&supervisor, "site-cache");
+        request.update_context.as_mut().unwrap().delivery_mode =
+            rpc::protos::mlx_device::FirmwareDeliveryMode::SiteCache.into();
+        request.core_download_config = Some(config.clone());
+        let accepted = supervisor
+            .submit_firmware_operation(peer_request(request.clone()))
+            .await
+            .expect("admit SiteCache work")
+            .into_inner();
+        let work = receiver
+            .recv()
+            .await
+            .expect("accepted worker owns transport");
+        let runtime = work.core_download_config.as_ref().unwrap();
+        assert_eq!(runtime.core_url, config.core_url);
+        assert_eq!(runtime.socks_proxy, config.socks_proxy);
+        let ledger_path = supervisor.directory.join("operations.json");
+        let saved = fs::read(&ledger_path).unwrap();
+        let json = std::str::from_utf8(&saved).unwrap();
+        assert!(json.contains("site_cache"));
+        for runtime_value in [
+            "core.example.test",
+            "runtime-ca.pem",
+            "runtime-cert.pem",
+            "runtime-key.pem",
+            "runtime-proxy-secret",
+        ] {
+            assert!(
+                !json.contains(runtime_value),
+                "runtime configuration must not become durable intent"
+            );
+        }
+        let saved_claim = fs::read(root.path().join("mutation.json")).unwrap();
+        // Reopen actual committed bytes; no recovery path requeues the operation.
+        drop(supervisor.journal);
+        let reopened =
+            OperationJournal::open(&supervisor.directory, "0000:01:00.0", "boot").unwrap();
+        assert_eq!(
+            reopened
+                .record("site-cache")
+                .unwrap()
+                .unwrap()
+                .requested
+                .as_ref()
+                .unwrap()
+                .update_context
+                .as_ref()
+                .unwrap()
+                .delivery_mode,
+            FirmwareDeliveryMode::SiteCache
+        );
+        supervisor.journal = Arc::new(Mutex::new(reopened));
+        for runtime in [None, Some(wire::CoreFirmwareDownloadConfig::default())] {
+            let mut duplicate = request.clone();
+            duplicate.core_download_config = runtime;
+            let answer = supervisor
+                .submit_firmware_operation(peer_request(duplicate))
+                .await
+                .expect("duplicate returns receipt before current configuration validation")
+                .into_inner();
+            // Reopening marks unfinished work for reconciliation. Read the
+            // reopened receipt rather than expecting the earlier Accepted state.
+            assert_eq!(
+                answer.operation,
+                Some(supervisor.snapshot("site-cache").await.unwrap().into())
+            );
+            assert_eq!(
+                answer.operation.as_ref().unwrap().operation_id,
+                accepted.operation.as_ref().unwrap().operation_id
+            );
+        }
+        assert_eq!(
+            fs::read(root.path().join("mutation.json")).unwrap(),
+            saved_claim
+        );
+        let after_duplicates = fs::read(&ledger_path).unwrap();
+        let conflict = supervisor
+            .submit_firmware_operation(peer_request({
+                request.update_context.as_mut().unwrap().delivery_mode =
+                    rpc::protos::mlx_device::FirmwareDeliveryMode::Direct.into();
+                request
+            }))
+            .await
+            .expect_err("a delivery mode change cannot reuse the ID");
+        assert_eq!(conflict.code(), tonic::Code::AlreadyExists);
+        assert_eq!(fs::read(&ledger_path).unwrap(), after_duplicates);
+        assert_eq!(runtime.core_url, config.core_url);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
     /// The reserved prefix still belongs to legacy DPA callers; checked
     /// admission must not make their existing operation IDs invalid.
     #[tokio::test]
@@ -1437,6 +1627,7 @@ mod tests {
                 .try_into()
                 .unwrap();
             let context = FirmwareUpdateContext {
+                delivery_mode: Default::default(),
                 phase_id: "dispatch-1".into(),
                 expected_digests: FirmwareArtifactDigests {
                     image_sha256: [0; 32],
@@ -2301,26 +2492,9 @@ printf '\000\000\000\001x'
 "#,
             hello = std::str::from_utf8(crate::runner::HELLO).unwrap(),
         );
-        // A separate writer keeps writable executable descriptors out of
-        // concurrent test forks. The helper records, but never runs, the tool.
-        let status = timeout(
-            Duration::from_secs(10),
-            tokio::process::Command::new("/bin/sh")
-                .args([
-                    "-c",
-                    "set -eu; umask 077; printf '%s' \"$2\" > \"$1\"",
-                    "fixture-writer",
-                ])
-                .arg(&helper)
-                .arg(contents)
-                .kill_on_drop(true)
-                .status(),
-        )
-        .await
-        .expect("fixture writer completes within its watchdog")
-        .expect("write malformed helper");
-        assert!(status.success());
-        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        // The helper records the requested tool without running it.
+        crate::runner::write_fixture_executables(root.path(), &[("malformed-helper", &contents)])
+            .await;
         supervisor.executor = FirmwareToolExecutor::with_supervisor_path(helper);
 
         let request = checked_submission(&supervisor, "uncertain-inspection");
@@ -2381,6 +2555,7 @@ printf '\000\000\000\001x'
         assert_eq!(
             record.requested.as_ref().unwrap().update_context,
             Some(FirmwareUpdateContext {
+                delivery_mode: Default::default(),
                 phase_id: "dispatch-1".into(),
                 expected_digests: FirmwareArtifactDigests {
                     image_sha256: [0; 32],

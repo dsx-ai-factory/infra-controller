@@ -20,9 +20,9 @@ use std::path::PathBuf;
 use clap::{Args as ClapArgs, Parser, Subcommand};
 
 use crate::component_manager::common::{
-    ComputeTrayComponentArg, ComputeTraySelection, ComputeTrayTargetArgs, NvSwitchComponentArg,
-    PowerShelfComponentArg, PowerShelfSelection, PowerShelfTargetArgs, RackTargetArgs,
-    SwitchSelection, SwitchTargetArgs,
+    ComputeTrayComponentArg, ComputeTraySelection, ComputeTrayTargetArgs, CredentialOverridesArgs,
+    NvSwitchComponentArg, PowerShelfComponentArg, PowerShelfSelection, PowerShelfTargetArgs,
+    RackTargetArgs, SwitchSelection, SwitchTargetArgs,
 };
 use crate::errors::{CarbideCliError, CarbideCliResult};
 
@@ -38,6 +38,12 @@ Update only specific switch components, forcing the update:
     $ nico-admin-cli component-manager update-firmware switch \
     --switch-id 12345678-1234-5678-90ab-cdef01234567 --component bmc,bios --force-update \
     --target-version fw-1.2.3
+
+Update switch firmware directly using credential overrides:
+    $ nico-admin-cli component-manager update-firmware switch \
+    --mac-address 00:11:22:33:44:55 --sot-json-file ./sot.json \
+    --bypass-state-controller --bmc-username admin --bmc-password mypassword \
+    --nvos-username admin --nvos-password mypassword
 
 Queue firmware on a switch by BMC MAC (targets the switch before ingestion):
     $ nico-admin-cli component-manager update-firmware switch \
@@ -95,6 +101,9 @@ enum Target {
 #[derive(ClapArgs, Debug)]
 struct SwitchArgs {
     #[clap(flatten)]
+    credentials: CredentialOverridesArgs,
+
+    #[clap(flatten)]
     ids: SwitchTargetArgs,
 
     #[clap(flatten)]
@@ -121,6 +130,9 @@ struct SwitchArgs {
 #[derive(ClapArgs, Debug)]
 struct PowerShelfArgs {
     #[clap(flatten)]
+    credentials: CredentialOverridesArgs,
+
+    #[clap(flatten)]
     ids: PowerShelfTargetArgs,
 
     #[clap(flatten)]
@@ -146,6 +158,9 @@ struct PowerShelfArgs {
 
 #[derive(ClapArgs, Debug)]
 struct ComputeTrayArgs {
+    #[clap(flatten)]
+    credentials: CredentialOverridesArgs,
+
     #[clap(flatten)]
     ids: ComputeTrayTargetArgs,
 
@@ -253,6 +268,7 @@ impl TryFrom<Args> for rpc::forge::UpdateComponentFirmwareRequest {
                 Ok(Self {
                     target_version,
                     access_token,
+                    credential_overrides: target.credentials.into_overrides(),
                     force_update: target.force_update,
                     bypass_state_controller: target.bypass_state_controller,
                     target: Some(
@@ -282,6 +298,7 @@ impl TryFrom<Args> for rpc::forge::UpdateComponentFirmwareRequest {
                 Ok(Self {
                     target_version,
                     access_token,
+                    credential_overrides: target.credentials.into_overrides(),
                     force_update: target.force_update,
                     bypass_state_controller: target.bypass_state_controller,
                     target: Some(
@@ -311,6 +328,7 @@ impl TryFrom<Args> for rpc::forge::UpdateComponentFirmwareRequest {
                 Ok(Self {
                     target_version,
                     access_token,
+                    credential_overrides: target.credentials.into_overrides(),
                     force_update: target.force_update,
                     bypass_state_controller: target.bypass_state_controller,
                     target: Some(
@@ -338,6 +356,7 @@ impl TryFrom<Args> for rpc::forge::UpdateComponentFirmwareRequest {
                 let (target_version, access_token) =
                     resolve_firmware_source(target.firmware_source)?;
                 Ok(Self {
+                    credential_overrides: None,
                     target_version,
                     access_token,
                     force_update: target.force_update,

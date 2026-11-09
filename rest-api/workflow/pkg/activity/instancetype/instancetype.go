@@ -214,11 +214,7 @@ func (mv ManageInstanceType) UpdateInstanceTypeInCloud(ctx context.Context, site
 	}
 
 	txCommitted := false
-	defer func(dbTx *cdb.Tx, committed *bool) {
-		if committed != nil && !*committed {
-			dbTx.Rollback()
-		}
-	}(tx, &txCommitted)
+	defer cdb.RollbackTx(ctx, tx, &txCommitted)
 
 	_, err = instanceTypeDAO.Update(ctx, tx, cdbm.InstanceTypeUpdateInput{ID: instanceType.ID, Name: &instanceType.Name, Description: instanceType.Description, Version: &controllerInstanceType.Version})
 	if err != nil {
@@ -307,11 +303,7 @@ func (mv ManageInstanceType) AddInstanceTypeToCloud(ctx context.Context, site *c
 	}
 
 	txCommitted := false
-	defer func(dbTx *cdb.Tx, committed *bool) {
-		if committed != nil && !*committed {
-			dbTx.Rollback()
-		}
-	}(tx, &txCommitted)
+	defer cdb.RollbackTx(ctx, tx, &txCommitted)
 
 	// Start by adding the InstanceType
 	instanceType, err := instanceTypeDAO.Create(ctx, tx, cdbm.InstanceTypeCreateInput{

@@ -259,7 +259,9 @@ pub struct NicFirmwareSelections<'a> {
 }
 
 /// `NicFirmwareSelectionScope` identifies the hierarchy level that selected a target.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Frozen NIC firmware targets store it as JSON, so renaming a variant changes
+/// stored operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NicFirmwareSelectionScope {
     /// The operator selected a profile for this card within its machine.
     Card,
@@ -273,7 +275,9 @@ pub enum NicFirmwareSelectionScope {
 
 /// `NicFirmwareResolution` preserves the selected profile revision and exact entry.
 /// It is a read-only decision, not an admitted operation or permission to flash.
-#[derive(Clone, Debug)]
+/// Frozen NIC firmware targets store it as JSON, so changing its serialized
+/// form changes stored operations.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NicFirmwareResolution {
     /// Hierarchy level that selected this profile under the resolver's precedence rules.
     pub scope: NicFirmwareSelectionScope,

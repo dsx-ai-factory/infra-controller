@@ -15,6 +15,9 @@
  * limitations under the License.
  */
 use ::rpc::forge as rpc;
+use carbide_resource_pool::{
+    ResourcePoolBackendError, ResourcePoolRegistryError, ResourcePoolWithBackend,
+};
 use db::resource_pool::{ResourcePoolAllocationNotOwned, ResourcePoolDatabaseError};
 use db::spx_partition::SpxPartitionAlreadyDeleted;
 use db::{ConditionalWrite, ObjectColumnFilter, WithTransaction, spx_partition};
@@ -24,6 +27,7 @@ use model::spx_partition::NewSpxPartition;
 use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
+use super::vni;
 use crate::CarbideError;
 use crate::api::{Api, log_request_data, log_tenant_organization_id};
 
@@ -84,25 +88,38 @@ fn emit_and_map_dpa_vni_allocation_failure(
     }
 }
 
-async fn allocate_dpa_vni(
-    api: &Api,
+/// `select_dpa_vni_pool` finds the backend chosen for the `dpa-vni` pool. A
+/// failed binding read, or a pool with neither a binding nor values, reports the
+/// same diagnostics and allocation-failure metrics as a failed allocation from it.
+async fn select_dpa_vni_pool<'a>(
+    api: &'a Api,
     txn: &mut PgConnection,
     owner_id: &str,
     requested_vni: Option<i32>,
-) -> Result<i32, CarbideError> {
-    let source_pool = &api.common_pools.ethernet.pool_dpa_vni;
-
-    db::resource_pool::allocate(
-        source_pool,
-        txn,
-        resource_pool::OwnerType::SpxPartition,
-        owner_id,
-        requested_vni,
-    )
-    .await
-    .map_err(|error| {
-        emit_and_map_dpa_vni_allocation_failure(source_pool, owner_id, requested_vni, error)
-    })
+) -> Result<ResourcePoolWithBackend<'a, i32>, CarbideError> {
+    let source_pool = api.common_pools.ethernet.pool_dpa_vni.as_ref();
+    match api.resource_pool_registry.select(txn, source_pool).await {
+        Ok(Some(selected)) => Ok(selected),
+        Ok(None) => Err(emit_and_map_dpa_vni_allocation_failure(
+            source_pool,
+            owner_id,
+            requested_vni,
+            resource_pool::ResourcePoolError::MissingAllocationRange {
+                pool_name: source_pool.name().to_owned(),
+                auto_assign: requested_vni.is_none(),
+            }
+            .into(),
+        )),
+        Err(ResourcePoolRegistryError::Database(error)) => {
+            Err(emit_and_map_dpa_vni_allocation_failure(
+                source_pool,
+                owner_id,
+                requested_vni,
+                error.into(),
+            ))
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) async fn create(
@@ -115,17 +132,60 @@ pub(crate) async fn create(
     log_tenant_organization_id(&request_inner.tenant_organization_id);
 
     let req = NewSpxPartition::try_from(request_inner)?;
+    let owner_id = req.id.to_string();
+    let source_pool = api.common_pools.ethernet.pool_dpa_vni.as_ref();
+    // Remote failures return their status without an allocation-failure count
+    // until remote failure events land with remote activation (v2.5, #7129).
+    let map_error = |error| match error {
+        ResourcePoolBackendError::Integrated(error) => {
+            emit_and_map_dpa_vni_allocation_failure(source_pool, &owner_id, req.vni, error)
+        }
+        error => CarbideError::from(error),
+    };
 
     let mut txn = api.txn_begin().await?;
-
-    let vni = allocate_dpa_vni(api, &mut txn, &req.id.to_string(), req.vni).await?;
-
-    let partition = db::spx_partition::create(&req, vni, &mut txn)
-        .await
-        .map_err(CarbideError::from)?;
-    let resp = rpc::SpxPartition::try_from(partition).map(Response::new)?;
+    let selected = select_dpa_vni_pool(api, &mut txn, &owner_id, req.vni).await?;
     txn.commit().await?;
-    Ok(resp)
+    let allocation = selected
+        .prepare_allocation(
+            &api.database_connection,
+            resource_pool::OwnerType::SpxPartition,
+            &owner_id,
+            vni::VNI_SLOT,
+            req.vni,
+            &api.cancel_token,
+        )
+        .await
+        .map_err(map_error)?;
+
+    let completion = async {
+        if let Some(value) = allocation.value() {
+            vni::validate(*value, allocation.route_target_policy())?;
+        }
+        let mut txn = api.txn_begin().await?;
+        let vni = allocation.allocate(&mut txn).await.map_err(map_error)?;
+        let partition = db::spx_partition::create(&req, vni, &mut txn)
+            .await
+            .map_err(CarbideError::from)?;
+        let response = rpc::SpxPartition::try_from(partition)?;
+        txn.commit().await?;
+        Ok::<_, Status>(response)
+    };
+    match completion.await {
+        Ok(response) => Ok(Response::new(response)),
+        Err(error) => {
+            // Dropping the failed transaction rolls back an Integrated VNI. A
+            // remote request saves its cancellation so recovery frees the value.
+            if let Err(cleanup_error) = allocation.cancel(&api.database_connection).await {
+                tracing::error!(
+                    spx_partition_id = %owner_id,
+                    error = %cleanup_error,
+                    "could not save cancellation of SPX partition VNI request",
+                );
+            }
+            Err(error)
+        }
+    }
 }
 
 pub(crate) async fn delete(
@@ -139,7 +199,7 @@ pub(crate) async fn delete(
         .id
         .ok_or_else(|| CarbideError::MissingArgument("id"))?;
 
-    let vni_pool = api.common_pools.ethernet.pool_dpa_vni.clone();
+    let vni_pool = api.common_pools.ethernet.pool_dpa_vni.as_ref();
     api.with_txn(|txn| {
         async move {
             db::spx_partition::lock_for_delete(txn, id).await?;
@@ -152,26 +212,35 @@ pub(crate) async fn delete(
                 )));
             }
 
-            let vni = match db::spx_partition::mark_as_deleted(id, txn).await? {
-                ConditionalWrite::Applied(partition) => partition.vni,
-                ConditionalWrite::NotApplied(SpxPartitionAlreadyDeleted { vni }) => vni,
-            };
-
-            // A persisted deletion may still have its VNI reservation. Retrying
-            // release finishes that cleanup; the owner check leaves any
-            // reservation assigned to another partition unchanged.
-            if let Some(vni) = vni {
-                match db::resource_pool::release(
-                    &vni_pool,
+            // An earlier deletion may have marked the partition deleted without
+            // releasing its VNI, so either result continues to the release.
+            match db::spx_partition::mark_as_deleted(id, txn).await? {
+                ConditionalWrite::Applied(_)
+                | ConditionalWrite::NotApplied(SpxPartitionAlreadyDeleted) => {}
+            }
+            // The lookup finds only a VNI this partition still owns, so a VNI
+            // that another partition reused after an earlier release stays put.
+            let owned_vni = api
+                .resource_pool_registry
+                .find_owned(
+                    vni_pool,
                     txn,
-                    vni,
                     resource_pool::OwnerType::SpxPartition,
                     &id.to_string(),
+                    vni::VNI_SLOT,
                 )
-                .await?
+                .await?;
+            if let Some(allocation) = owned_vni {
+                let vni = *allocation.value();
+                // The lookup locked this allocation, so its release must apply. A
+                // rejection rolls back the deletion so a retry can finish both.
+                if let ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) =
+                    allocation.release(txn).await?
                 {
-                    ConditionalWrite::Applied(())
-                    | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "SPX partition {id} no longer owns VNI `{vni}` in pool `{}`",
+                        vni_pool.name(),
+                    )));
                 }
             }
             Ok::<(), CarbideError>(())

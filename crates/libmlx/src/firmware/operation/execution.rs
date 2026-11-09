@@ -24,6 +24,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
 use carbide_libmlx_model::firmware::operation::{FirmwareOperationPhase, FirmwareOperationState};
 use nix::libc;
 use sha2::{Digest, Sha256};
@@ -35,6 +36,7 @@ use super::journal::{
 };
 use crate::device::discovery::DeviceDiscoveryError;
 use crate::firmware::config::{FirmwareFlasherProfile, FirmwareUpdateContext, FlashSpec};
+use crate::firmware::core_download::{CoreFirmwareDelivery, CoreFirmwareDownloadConfig};
 use crate::firmware::credentials::Credentials;
 use crate::firmware::error::{
     AttemptError, AttemptFailure, FirmwareApplyError, FirmwareError, FirmwarePhase, FirmwareResult,
@@ -42,6 +44,14 @@ use crate::firmware::error::{
 use crate::firmware::flasher::{FirmwareFlasher, FirmwareProgress, FirmwareProgressEvent};
 use crate::firmware::preflight::FirmwarePreflightError;
 use crate::runner::FirmwareToolExecutor;
+
+/// In-memory execution dependencies supplied to the accepted worker. Keep
+/// transport settings separate from the profile and its durable request identity.
+pub(super) struct OperationRuntime {
+    pub(super) executor: FirmwareToolExecutor,
+    pub(super) cancellation: watch::Receiver<Option<String>>,
+    pub(super) core_download_config: Option<CoreFirmwareDownloadConfig>,
+}
 
 /// `run_operation` executes an already admitted request once. Execution errors
 /// become persisted receipts; an error return means that receipt could not be
@@ -52,9 +62,13 @@ pub(super) async fn run_operation(
     mut profile: FirmwareFlasherProfile,
     card_directory: PathBuf,
     journal: Arc<Mutex<OperationJournal>>,
-    executor: FirmwareToolExecutor,
-    cancellation: watch::Receiver<Option<String>>,
+    runtime: OperationRuntime,
 ) -> Result<(), JournalError> {
+    let OperationRuntime {
+        executor,
+        cancellation,
+        core_download_config,
+    } = runtime;
     // The admitted request stays immutable. Only this runtime copy selects the
     // helper's private staging directory for the existing preparation path.
     profile.flash_spec.cache_dir = Some(card_directory.clone());
@@ -87,9 +101,21 @@ pub(super) async fn run_operation(
         )
         .await?
         .with_progress(progress.clone())
-        .with_preparation_cancel(operation_id, cancellation);
+        .with_preparation_cancel(operation_id.clone(), cancellation);
         let flasher = if let Some(context) = update_context {
-            flasher.with_update_validation(context.expected_device)
+            let flasher = flasher.with_update_validation(context.expected_device);
+            match (context.delivery_mode, core_download_config) {
+                (FirmwareDeliveryMode::SiteCache, Some(config)) => flasher.with_core_delivery(
+                    CoreFirmwareDelivery::new(config, operation_id, context.expected_digests)?,
+                ),
+                (FirmwareDeliveryMode::Direct, None) => flasher,
+                _ => {
+                    return Err(FirmwareError::ConfigError(
+                        "firmware delivery mode does not match runtime transport".into(),
+                    )
+                    .into());
+                }
+            }
         } else {
             flasher
         };
@@ -733,7 +759,6 @@ mod tests {
     /// saving a tool failure, not rely on callback fixtures supplying them.
     #[tokio::test]
     async fn run_operation_redacts_profile_credentials_in_the_persisted_receipt() {
-        use std::os::unix::fs::PermissionsExt;
         use std::time::Duration;
 
         use crate::runner::{HELLO, Request, Response};
@@ -795,25 +820,8 @@ printf '{frame_prefix}%s' '{response}'
             hello = std::str::from_utf8(HELLO).unwrap(),
         );
         let helper = directory.join("query-failure-helper");
-        // Keep writable executable descriptors out of concurrent test forks.
-        let status = tokio::time::timeout(
-            Duration::from_secs(10),
-            tokio::process::Command::new("/bin/sh")
-                .args([
-                    "-c",
-                    "set -eu; umask 077; printf '%s' \"$2\" > \"$1\"",
-                    "fixture-writer",
-                ])
-                .arg(&helper)
-                .arg(contents)
-                .kill_on_drop(true)
-                .status(),
-        )
-        .await
-        .expect("fixture writer completes within its watchdog")
-        .expect("write fake supervisor");
-        assert!(status.success());
-        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::runner::write_fixture_executables(directory, &[("query-failure-helper", &contents)])
+            .await;
         let (_cancellation, cancellation) = watch::channel(None);
         tokio::time::timeout(
             Duration::from_secs(10),
@@ -823,8 +831,11 @@ printf '{frame_prefix}%s' '{response}'
                 profile,
                 card_directory.clone(),
                 journal.clone(),
-                FirmwareToolExecutor::with_supervisor_path(helper),
-                cancellation,
+                OperationRuntime {
+                    executor: FirmwareToolExecutor::with_supervisor_path(helper),
+                    cancellation,
+                    core_download_config: None,
+                },
             ),
         )
         .await
@@ -1028,6 +1039,7 @@ printf '{frame_prefix}%s' '{response}'
             let temporary = tempfile::tempdir().unwrap();
             let directory = temporary.path().join("card");
             let context = FirmwareUpdateContext {
+                delivery_mode: Default::default(),
                 phase_id: "dispatch-1".into(),
                 expected_digests: FirmwareArtifactDigests {
                     image_sha256: expected_image,

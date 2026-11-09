@@ -1015,6 +1015,8 @@ pub async fn define_all_from(
     }
     Ok(())
 }
+/// `pool_has_rows` reports whether Integrated inventory exists for this pool,
+/// including rows already allocated. It does not query a remote backend.
 pub async fn pool_has_rows(txn: &mut PgConnection, name: &str) -> Result<bool, DatabaseError> {
     let query: &str = "SELECT EXISTS(SELECT 1 FROM resource_pool WHERE name = $1)";
     let (exists,): (bool,) = sqlx::query_as(query)
@@ -2293,7 +2295,7 @@ mod tests {
     }
 
     /// An exhausted auto-assign pool must report [`ResourcePoolError::Empty`]
-    /// (the variant callers such as `allocate_loopback_ip` translate into
+    /// (the variant callers such as `allocate_loopback_ip_v6` translate into
     /// `ResourceExhausted`). This behaviour used to come from the `stats()`
     /// pre-scan; it now comes from the allocation statement's `RowNotFound`.
     #[crate::sqlx_test]

@@ -42,7 +42,6 @@ COPY common/ ./common/
 COPY site-manager/ ./site-manager/
 COPY proto/ ./proto/
 COPY site-workflow/ ./site-workflow/
-COPY cert-manager/ ./cert-manager/
 
 # Build site-agent
 WORKDIR /workspace/site-agent
@@ -56,7 +55,7 @@ RUN VERSION=${VERSION} && \
         ./cmd/site-agent
 
 # Final stage
-FROM nvcr.io/nvidia/distroless/go:v4.0.8 AS final
+FROM nvcr.io/nvidia/distroless/go:v4.1.8@sha256:676c150ccfb5987f58bbee9accfa506d5519d4acf4252f799d311476a0a7f1b5 AS final
 
 WORKDIR /app
 

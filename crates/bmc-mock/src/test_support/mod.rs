@@ -36,9 +36,9 @@ use crate::mac_address_pool::{
 use crate::machine_info::DpuSettings;
 use crate::redfish::computer_system::SystemState;
 use crate::{
-    ActionError, BmcState, Callbacks, CombinedServer, DeviceEffect, DpuMachineInfo, HardwareType,
-    HostMachineInfo, ListenerOrAddress, MachineInfo, MachineRouterOptions, POWER_CYCLE_DELAY,
-    ResourceResetType,
+    ActionError, BmcState, Callbacks, CombinedServer, DeviceEffect, DpuMachineInfo,
+    EventServiceConfig, EventServiceOverride, HardwareType, HostMachineInfo, ListenerOrAddress,
+    MachineInfo, MachineRouterOptions, POWER_CYCLE_DELAY, ResourceResetType,
 };
 
 pub mod axum_http_client;
@@ -316,6 +316,8 @@ pub struct TestBmcHandle<C: Callbacks = TestCallbacks> {
     /// The client behind `service_root`, for collectors that take the BMC
     /// directly rather than a service root.
     pub bmc: Arc<TestBmc>,
+    /// The router client behind `bmc`, which records every request.
+    pub http_client: AxumRouterHttpClient,
     pub state: BmcState<C>,
 }
 
@@ -324,6 +326,7 @@ impl<C: Callbacks> Clone for TestBmcHandle<C> {
         Self {
             service_root: self.service_root.clone(),
             bmc: self.bmc.clone(),
+            http_client: self.http_client.clone(),
             state: self.state.clone(),
         }
     }
@@ -334,7 +337,7 @@ async fn test_bmc<C: Callbacks>((router, state): (axum::Router, BmcState<C>)) ->
     let endpoint = Url::parse("https://bmc-mock.local").expect("valid URL");
     let credentials = BmcCredentials::new("root".to_string(), "password".to_string());
     let bmc = Arc::new(HttpBmc::new(
-        client,
+        client.clone(),
         endpoint,
         credentials,
         CacheSettings::with_capacity(32),
@@ -345,6 +348,7 @@ async fn test_bmc<C: Callbacks>((router, state): (axum::Router, BmcState<C>)) ->
             .unwrap()
             .into(),
         bmc,
+        http_client: client,
         state,
     }
 }
@@ -527,6 +531,7 @@ pub fn liteon_powershelf_router_with_auth() -> (Router, BmcState<TestCallbacks>)
     )
 }
 
+/// Lite-On power shelf with an undeclared but available Systems collection.
 pub async fn liteon_powershelf_bmc() -> TestBmcHandle {
     test_bmc(create_test_bmc(
         &host_info(HardwareType::LiteOnPowerShelf),
@@ -598,6 +603,22 @@ pub async fn dell_poweredge_r750_bmc() -> TestBmcHandle {
         MachineRouterOptions::default(),
     ))
     .await
+}
+
+/// A Dell R750 router whose EventService uses `limits`, and its state.
+pub fn dell_poweredge_r750_router_with_event_limits(
+    limits: EventServiceConfig,
+) -> (Router, BmcState<TestCallbacks>) {
+    create_test_bmc(
+        &host_info(HardwareType::DellPowerEdgeR750),
+        TestBmcConfig::default(),
+        "test-host-id".to_string(),
+        false,
+        MachineRouterOptions {
+            event_service: EventServiceOverride::Limits(limits),
+            ..Default::default()
+        },
+    )
 }
 
 const TEST_DELL_STORAGE: &str = "/redfish/v1/Systems/System.Embedded.1/Storage";
@@ -1393,16 +1414,16 @@ mod test {
     async fn unroutable_request_returns_404_from_transport() {
         let client = AxumRouterHttpClient::new(Router::new());
         let url = Url::parse("https://bmc-mock.local/redfish/v1").unwrap();
-        let err = client
-            .get::<serde_json::Value>(
+        let result: Result<serde_json::Value, _> = client
+            .get(
                 url,
                 &BmcCredentials::new("root".to_string(), "password".to_string()),
                 None,
                 &axum::http::HeaderMap::new(),
                 &NoRepair,
             )
-            .await
-            .expect_err("empty router should return transport error");
+            .await;
+        let err = result.expect_err("empty router should return transport error");
 
         match err {
             Error::InvalidResponse { status, .. } => {

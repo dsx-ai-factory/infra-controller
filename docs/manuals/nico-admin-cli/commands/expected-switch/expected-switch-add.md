@@ -77,12 +77,15 @@ Rack ID for this machine
 
 `--bmc-ip-address <BMC_IP_ADDRESS>`
 
-BMC IP address of the expected switch
+BMC IP address of the expected switch. Must not be unspecified,
+multicast, or IPv4 limited broadcast, including the IPv4-mapped IPv6
+form of each
 
 `--nvos-ip-address <NVOS_IP_ADDRESS>`
 
 Static IP for the single wired NVOS port. Requires exactly one
---nvos-interface
+--nvos-interface. Must not be unspecified, multicast, or IPv4 limited
+broadcast, including the IPv4-mapped IPv6 form of each
 
 `--bmc-retain-credentials <BMC_RETAIN_CREDENTIALS>`
 
@@ -91,9 +94,9 @@ factory-default credentials in Vault as-is
 
 *Possible values:*
 
-- true
-
-- false
+> - true
+>
+> - false
 
 `--extended`
 
@@ -109,9 +112,9 @@ Sort output by specified field
 
 *Possible values:*
 
-- primary-id: Sort by the primary ID
-
-- state: Sort by state
+> - primary-id: Sort by the primary ID
+>
+> - state: Sort by state
 
 `-h, --help`
 

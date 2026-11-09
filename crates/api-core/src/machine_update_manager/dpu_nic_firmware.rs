@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use carbide_machine_controller::dpf::{DpfOperations, validate_reprovision_compatibility};
 use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use db::dpu_machine_update;
+use db::work_lock_manager::WorkLock;
 use model::dpu_machine_update::{DpuMachineUpdate, OutdatedDpfDpu};
 use model::machine::{ManagedHostStateSnapshot, dpf_based_dpu_provisioning_possible};
 use sqlx::PgConnection;
@@ -73,16 +74,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
         txn: &mut PgConnection,
     ) -> CarbideResult<HashSet<HostMachineId>> {
         let current_updating_machines =
-            match dpu_machine_update::get_reprovisioning_machines(txn).await {
-                Ok(current_updating_machines) => current_updating_machines,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "Error getting outstanding reprovisioning count",
-                    );
-                    vec![]
-                }
-            };
+            dpu_machine_update::get_reprovisioning_machines(txn).await?;
 
         Ok(current_updating_machines
             .iter()
@@ -93,6 +85,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
     async fn start_updates(
         &self,
         pool: &sqlx::Pool<sqlx::Postgres>,
+        work_lock: &WorkLock,
         available_updates: i32,
         updating_host_machines: &HashSet<HostMachineId>,
         snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
@@ -168,11 +161,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                 output + format!("{} ({}) ", dpu.dpu_machine_id, dpu.firmware_version).as_str()
             });
 
-            // If the reprovisioning failed to update the database for a
-            // given {dpu,host}_machine_id, log it as a warning and don't
-            // add it to updates_started.
-
-            let mut txn = db::Transaction::begin(pool).await?;
+            let mut txn = super::update_transaction(pool, work_lock).await?;
             match dpu_machine_update::trigger_reprovisioning_for_managed_host(
                 &mut txn,
                 &machine_updates,
@@ -214,7 +203,10 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
         Ok(updates_started)
     }
 
-    async fn clear_completed_updates(&self, txn: &mut PgConnection) -> CarbideResult<()> {
+    async fn clear_completed_updates(
+        &self,
+        txn: &mut PgConnection,
+    ) -> CarbideResult<Vec<FirmwareUpdateProgress>> {
         let updated_machines =
             dpu_machine_update::get_updated_machines(txn, self.config.host_health).await?;
         tracing::debug!(
@@ -266,7 +258,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                 });
             }
         }
-        Ok(())
+        Ok(Vec::new())
     }
 
     async fn update_metrics(

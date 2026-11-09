@@ -31,7 +31,7 @@ use reqwest::StatusCode;
 
 use crate::config::ReaderConfig;
 use crate::framework::{ObservationRecorder, Probe};
-use crate::readers::{Attempt, Failure, incomplete};
+use crate::readers::{Attempt, Failure, Incomplete};
 use crate::rest::auth::Auth;
 use crate::rest::client::{RestClient, pagination_total};
 use crate::snapshot::{CensusView, Reader, SnapshotSink, SweepMeta, unix_millis};
@@ -249,20 +249,22 @@ impl Probe for RestInventoryReader {
             end: crate::clock::now(),
         };
         let sink = self.sink.as_ref();
-        let mut failed = Vec::new();
+        let mut failed = Incomplete::default();
+        let totals_kind = totals.as_ref().err().map(|f| f.kind);
         if !self
             .attempt
             .deliver(sink, &meta, Family::RestTotals, totals)
         {
-            failed.push(Family::RestTotals);
+            failed.record(Family::RestTotals, totals_kind);
         }
+        let site_match_kind = site_match.as_ref().err().map(|f| f.kind);
         if !self
             .attempt
             .deliver(sink, &meta, Family::RestSiteMatch, site_match)
         {
-            failed.push(Family::RestSiteMatch);
+            failed.record(Family::RestSiteMatch, site_match_kind);
         }
-        incomplete(&failed)
+        failed.finish()
     }
 }
 
@@ -274,7 +276,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::framework::Outcome;
     use crate::rest::fake::FakeRest;
+    use crate::snapshot::FailureKind;
     use crate::snapshot::testing::FakeSink;
 
     /// A census that tests set directly.
@@ -603,6 +607,69 @@ mod tests {
                 pair[1] - pair[0]
             );
         }
+    }
+
+    /// Reads whose every retry times out before the sweep deadline keep the
+    /// last totals and site match and record them as timed out, and the
+    /// scheduler counts the run as a timeout, not a failure: a slow nico-rest
+    /// is a different incident from a down one.
+    #[tokio::test]
+    async fn exhausted_rest_timeouts_are_a_timeout_outcome() {
+        let rest = FakeRest::start().await;
+        rest.set_total("machine", 10);
+        rest.set_total("rack", 5);
+        rest.set_total("tray", 20);
+        let sink = Arc::new(FakeSink::default());
+        let reader: Arc<dyn Probe> = Arc::new(reader(&rest, &sink, Some(&["fm100a"])));
+
+        // A first sweep in real time publishes both families: the fake REST
+        // server answers over a loopback socket, which paused time cannot
+        // drive.
+        reader
+            .run(&ObservationRecorder::default())
+            .await
+            .expect("first sweep");
+        let totals = sink
+            .latest::<RestTotalsData>(Family::RestTotals)
+            .expect("totals");
+        let site = sink
+            .latest::<SiteMatchData>(Family::RestSiteMatch)
+            .expect("site match");
+
+        // Every request now outlasts the gate's call timeout. Pause time so
+        // the gate timeouts and retry backoffs do not spend real seconds: the
+        // reads time out and exhaust their retries before the sweep deadline.
+        rest.set_delay(Duration::from_secs(60));
+        tokio::time::pause();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (mut results, loops) =
+            crate::framework::start(vec![Arc::clone(&reader)], cancel.clone());
+
+        let result = results.recv().await.expect("result");
+        assert_eq!(result.outcome, Outcome::Timeout);
+
+        assert_eq!(
+            sink.latest::<RestTotalsData>(Family::RestTotals),
+            Some(totals),
+            "the last totals and their read time are kept",
+        );
+        assert_eq!(
+            sink.latest::<SiteMatchData>(Family::RestSiteMatch),
+            Some(site),
+            "the last site match and its read time are kept",
+        );
+        for family in [Family::RestTotals, Family::RestSiteMatch] {
+            assert_eq!(
+                sink.failure_kinds(family),
+                vec![FailureKind::Timeout],
+                "{family:?}",
+            );
+        }
+
+        cancel.cancel();
+        crate::framework::join_loops(loops)
+            .await
+            .expect("loops end");
     }
 
     #[test]

@@ -163,6 +163,103 @@ fn bench_prometheus_sink(c: &mut Criterion) {
     group.finish();
 }
 
+/// Measures public telemetry export after fixture construction has finished.
+fn bench_prometheus_export(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sink_prometheus_export");
+    group.sample_size(10);
+
+    for (scenario, endpoints, readings, label_count) in [
+        ("sparse", 256usize, 16usize, 2usize),
+        ("mixed", 32, 512, 8),
+        ("dense", 2, 16_384, 8),
+        ("unique_labels", 8, 1_024, 12),
+    ] {
+        let manager =
+            Arc::new(MetricsManager::new("bench_export").unwrap_or_else(|error| {
+                panic!("benchmark manager initialization failed: {error}")
+            }));
+
+        let sink = PrometheusSink::new(manager.clone(), "bench_export")
+            .unwrap_or_else(|error| panic!("benchmark sink initialization failed: {error}"));
+
+        for endpoint in 0..endpoints {
+            let mut context = event_context();
+            context.endpoint_key = format!("endpoint-{endpoint}");
+            let [high, low] = (endpoint as u16).to_be_bytes();
+            context.addr.mac = Some(MacAddress::new([0x02, 0, 0, 0, high, low]));
+
+            context.labels = (0..4)
+                .map(|label| {
+                    (
+                        format!("endpoint_label_{label}"),
+                        format!("value_{endpoint}"),
+                    )
+                })
+                .collect();
+
+            let mut events = metric_events(readings, readings);
+
+            for (index, event) in events.iter_mut().enumerate() {
+                let CollectorEvent::Metric(sample) = event else {
+                    continue;
+                };
+
+                sample.labels.extend((1..label_count).map(|label| {
+                    let value = if scenario == "unique_labels" {
+                        format!(
+                            "{endpoint:08x}-{index:08x}-{label:08x}-{:016x}",
+                            index * 104_729
+                        )
+                    } else {
+                        format!("component-{}", (index + label) % 32)
+                    };
+
+                    (Cow::Owned(format!("attribute_{label}")), value)
+                }));
+
+                if index.is_multiple_of(3) {
+                    sample.semantics = carbide_health::sink::MetricSemantics::CumulativeCounter {
+                        description: "Synthetic cumulative sensor readings",
+                        start_time: None,
+                    };
+                }
+            }
+
+            emit_metric_batch(&sink, &context, &events);
+        }
+
+        let bytes = {
+            let output = manager
+                .export_telemetry()
+                .unwrap_or_else(|error| panic!("benchmark fixture export failed: {error}"));
+
+            assert_eq!(
+                output.lines().filter(|line| !line.starts_with('#')).count(),
+                endpoints * (readings + readings.div_ceil(3)),
+                "{scenario}: every reading and counter alias must be retained",
+            );
+
+            output.len()
+        };
+
+        group.throughput(Throughput::Bytes(bytes as u64));
+
+        group.bench_function(scenario, |b| {
+            b.iter(|| {
+                black_box(
+                    black_box(&manager)
+                        .export_telemetry()
+                        .unwrap_or_else(|error| panic!("benchmark export failed: {error}")),
+                )
+            });
+        });
+
+        black_box(&sink);
+    }
+
+    group.finish();
+}
+
 struct CompositeBenchState {
     sink: CompositeDataSink,
     context: EventContext,
@@ -667,6 +764,7 @@ fn bench_content_hash(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_prometheus_sink,
+    bench_prometheus_export,
     bench_composite_sink,
     bench_health_report_sink,
     bench_otlp_sink,

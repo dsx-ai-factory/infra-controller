@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-#[derive(Debug, thiserror::Error)]
+use std::sync::Arc;
+
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum ComponentManagerError {
     #[error("backend unavailable: {0}")]
     Unavailable(String),
@@ -46,14 +48,21 @@ pub enum ComponentManagerError {
     #[error("internal error: {0}")]
     Internal(String),
 
+    /// Shares the transport source so cloning retains the original error.
     #[error("gRPC transport error: {0}")]
-    Transport(#[from] tonic::transport::Error),
+    Transport(#[source] Arc<tonic::transport::Error>),
 
     #[error("gRPC status error: {0}")]
     Status(#[from] tonic::Status),
 
     #[error("RMS error: {0}")]
     Rms(String),
+}
+
+impl From<tonic::transport::Error> for ComponentManagerError {
+    fn from(error: tonic::transport::Error) -> Self {
+        Self::Transport(Arc::new(error))
+    }
 }
 
 impl From<librms::RackManagerError> for ComponentManagerError {
@@ -66,5 +75,30 @@ impl From<librms::RackManagerError> for ComponentManagerError {
                 ComponentManagerError::Unavailable(e.to_string())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use super::*;
+
+    #[test]
+    fn cloned_transport_error_retains_its_source() {
+        let source = tonic::transport::Endpoint::new("not a valid uri").unwrap_err();
+        let source_message = source.to_string();
+        let error = ComponentManagerError::from(source);
+        let cloned = error.clone();
+
+        let (ComponentManagerError::Transport(original), ComponentManagerError::Transport(copy)) =
+            (&error, &cloned)
+        else {
+            panic!("cloning must preserve the transport variant");
+        };
+        assert!(Arc::ptr_eq(original, copy));
+        assert_eq!(cloned.to_string(), error.to_string());
+        drop(error);
+        assert_eq!(cloned.source().unwrap().to_string(), source_message);
     }
 }

@@ -81,6 +81,9 @@ pub struct DevicesStatusResponse {
     pub devices: Vec<DeviceStatus>,
 }
 
+/// `DeviceStatus` describes a local simulator in machine and rack status responses,
+/// including nested DPUs. `mat_state` is the local simulator state; Core lifecycle
+/// state is not exposed, and the serialized response has no `api_state` field.
 #[derive(Debug, Clone, Serialize)]
 pub struct DeviceStatus {
     pub mat_id: String,
@@ -92,7 +95,6 @@ pub struct DeviceStatus {
     pub hardware_type: Option<HardwareType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mat_state: Option<String>,
-    pub api_state: String,
     pub power_state: PowerState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_ip: Option<String>,

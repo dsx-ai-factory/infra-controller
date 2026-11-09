@@ -239,6 +239,7 @@ impl Redfish for InstrumentedRedfish {
         fn get_software_inventories<'a>(&'a self) -> Vec<String>;
         fn get_tasks<'a>(&'a self) -> Vec<String>;
         fn get_task<'a>(&'a self, id: &'a str) -> Task;
+        fn cancel_task<'a>(&'a self, id: &'a str) -> bool;
         fn get_power_state<'a>(&'a self) -> PowerState;
         fn get_service_root<'a>(&'a self) -> ServiceRoot;
         fn get_systems<'a>(&'a self) -> Vec<String>;
@@ -292,7 +293,6 @@ impl Redfish for InstrumentedRedfish {
         fn is_bios_setup<'a>(&'a self, boot_interface: Option<BootInterfaceRef<'a>>) -> bool;
         fn set_machine_password_policy<'a>(&'a self) -> ();
         fn lockdown<'a>(&'a self, target: EnabledDisabled) -> ();
-        fn lockdown_has_boot_latched_controls<'a>(&'a self) -> bool;
         fn lockdown_status<'a>(&'a self) -> Status;
         fn setup_serial_console<'a>(&'a self) -> ();
         fn serial_console_status<'a>(&'a self) -> Status;
@@ -524,16 +524,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn boot_latched_lockdown_capability_is_delegated_without_caching() {
+    async fn task_cancellation_delegates_and_records_metrics() {
         let sim = RedfishSim::default();
         let client = sim_client(&sim).await;
-        for required in [false, true] {
-            sim.set_lockdown_has_boot_latched_controls(required);
-            assert_eq!(
-                client.lockdown_has_boot_latched_controls().await.unwrap(),
-                required
-            );
-        }
+        let metrics = MetricsCapture::start();
+
+        // Protocol cases belong in libredfish; this proves the adapter forwards
+        // the task ID and meters cancellation through the same path as other calls.
+        assert!(
+            !client
+                .cancel_task("task-1")
+                .await
+                .expect("pending cancellation")
+        );
+        assert_eq!(sim.task_cancellation_requests(), vec!["task-1"]);
+        assert_eq!(
+            metrics.histogram_count_delta(
+                "carbide_external_call_duration_milliseconds",
+                &[
+                    ("backend", "redfish"),
+                    ("operation", "cancel_task"),
+                    ("outcome", "ok"),
+                ],
+            ),
+            1,
+        );
     }
 
     #[tokio::test]

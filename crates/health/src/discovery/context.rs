@@ -20,7 +20,6 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
@@ -28,9 +27,9 @@ use carbide_uuid::machine::MachineId;
 use carbide_uuid::nvlink::NvLinkDomainId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
-use futures::future::join_all;
 use prometheus::{Histogram, HistogramOpts};
 use tokio::sync::Notify;
+use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use super::DiscoveryShutdown;
@@ -146,6 +145,7 @@ pub(super) struct CollectorState {
     power_shelf_ids: HashMap<Cow<'static, str>, Option<PowerShelfId>>,
     endpoint_connections: HashMap<Cow<'static, str>, EndpointConnection>,
     pub(super) reachability_specs: HashMap<Cow<'static, str>, ReachabilitySpec>,
+    stopping: JoinSet<()>,
 }
 
 impl CollectorState {
@@ -191,7 +191,22 @@ impl CollectorState {
             power_shelf_ids: HashMap::new(),
             endpoint_connections: HashMap::new(),
             reachability_specs: HashMap::new(),
+            stopping: JoinSet::new(),
         }
+    }
+
+    /// Stops `collectors` in tasks this state owns, so a cancelled caller
+    /// leaves them for [`DiscoveryLoopContext::drain_collectors`].
+    pub(super) fn start_stopping(&mut self, collectors: Vec<Collector>) {
+        for collector in collectors {
+            self.stopping.spawn(collector.stop());
+        }
+    }
+
+    /// Stops `collectors` and waits for every stop this state has started.
+    pub(super) async fn stop(&mut self, collectors: Vec<Collector>) {
+        self.start_stopping(collectors);
+        while self.stopping.join_next().await.is_some() {}
     }
 
     fn map(&self, kind: CollectorKind) -> &HashMap<Cow<'static, str>, Collector> {
@@ -576,31 +591,32 @@ impl DiscoveryLoopContext {
         })
     }
 
-    /// Stops every started collector concurrently before `deadline`; collectors
-    /// still running when it passes are abandoned and counted as `timed_out`.
+    /// Stops every started collector, including those discovery was already
+    /// stopping, concurrently before `deadline`; collectors still running when it
+    /// passes are abandoned and counted as `timed_out`.
     pub(crate) async fn drain_collectors(&mut self, deadline: Instant) -> DiscoveryShutdown {
         let collectors = self.collectors.take_all();
-        let total = collectors.len();
+        self.collectors.start_stopping(collectors);
+        let mut stopping = std::mem::take(&mut self.collectors.stopping);
+        let total = stopping.len();
 
         if total == 0 {
             return DiscoveryShutdown::default();
         }
 
-        let closed = AtomicUsize::new(0);
+        let mut closed = 0;
 
-        let stops = collectors.into_iter().map(|collector| async {
-            collector.stop().await;
-            closed.fetch_add(1, Ordering::SeqCst);
-        });
-
-        let finished = tokio::time::timeout_at(deadline, join_all(stops))
-            .await
-            .is_ok();
-        let closed = closed.load(Ordering::SeqCst);
+        tokio::time::timeout_at(deadline, async {
+            while stopping.join_next().await.is_some() {
+                closed += 1;
+            }
+        })
+        .await
+        .ok();
 
         DiscoveryShutdown {
             closed,
-            timed_out: if finished { 0 } else { total - closed },
+            timed_out: total - closed,
         }
     }
 }

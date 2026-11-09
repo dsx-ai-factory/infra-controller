@@ -16,12 +16,14 @@
  */
 
 use health_report::{
-    HealthAlertClassification, HealthProbeAlert, HealthProbeSuccess, HealthReport,
+    HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthProbeSuccess, HealthReport,
 };
 use nvue_client::types::bgp::{BgpNeighbors, BgpPeerState};
 use nvue_client::{FieldFilter, NvueClient};
 
-use super::{add_post_config_wait_alert, failed, make_alert, make_classified_alert, probe_ids};
+use super::{
+    add_post_config_wait_alert, failed, make_alert, make_classified_alert, passed, probe_ids,
+};
 use crate::HBNDeviceNames;
 
 /// The VRF we'll look for our BGP uplinks in.
@@ -37,12 +39,33 @@ pub(crate) struct NvueHealthCheck<'a> {
     pub(crate) hbn_device_names: &'a HBNDeviceNames,
     /// Whether this iteration applied a changed HBN configuration through NVUE.
     pub(crate) has_changed_hbn_config: bool,
+    /// This iteration's DHCP server update, or `None` when HBN was not up and
+    /// the agent did not attempt one.
+    pub(crate) dhcp_server_update: Option<&'a eyre::Result<()>>,
+    /// This iteration's FMDS update.
+    pub(crate) fmds_update: &'a eyre::Result<()>,
 }
 
 impl NvueHealthCheck<'_> {
-    /// Performs all health checks against the NVUE API.
+    /// Performs all health checks against the NVUE API and reports this
+    /// iteration's DHCP server and FMDS updates.
     pub(crate) async fn health_check(&self) -> HealthReport {
         let mut report = HealthReport::empty("forge-dpu-agent".into());
+
+        // These services run outside HBN, so report them even when NVUE is
+        // unavailable.
+        record_service_update(
+            &mut report,
+            probe_ids::DhcpServer.clone(),
+            "DHCP server",
+            self.dhcp_server_update,
+        );
+        record_service_update(
+            &mut report,
+            probe_ids::Fmds.clone(),
+            "FMDS",
+            Some(self.fmds_update),
+        );
 
         match self.nvue_api_health().await {
             Ok(success) => report.successes.push(success),
@@ -104,6 +127,32 @@ impl NvueHealthCheck<'_> {
                 true,
             )),
         }
+    }
+}
+
+/// Records one update of a DPU service that runs outside HBN.
+///
+/// On DPF, the DHCP server and FMDS run in their own pods, and these updates
+/// are the agent's only contact with them. An applied update records a
+/// success, and `None` records nothing. A failed update records an alert with
+/// the full error chain that prevents allocations but not host state changes.
+/// Instance release must still proceed, because on DPF it lets NICo apply the
+/// held service updates that can restore these services.
+fn record_service_update(
+    report: &mut HealthReport,
+    probe_id: HealthProbeId,
+    service_name: &str,
+    update: Option<&eyre::Result<()>>,
+) {
+    match update {
+        None => {}
+        Some(Ok(())) => passed(report, probe_id, None),
+        Some(Err(error)) => report.alerts.push(make_classified_alert(
+            probe_id,
+            None,
+            format!("{service_name} update failed: {error:#}"),
+            vec![HealthAlertClassification::prevent_allocations()],
+        )),
     }
 }
 
@@ -581,6 +630,96 @@ mod tests {
                 sort_alerts(&mut report.alerts);
                 report.alerts
             },
+        );
+    }
+
+    #[test]
+    fn service_update_failure_prevents_allocations_only() {
+        check_values(
+            [
+                Check {
+                    scenario: "skipped update records nothing",
+                    input: None,
+                    expect: (vec![], vec![]),
+                },
+                Check {
+                    scenario: "applied update records a success",
+                    input: Some(Ok(())),
+                    expect: (
+                        vec![HealthProbeSuccess {
+                            id: probe_ids::DhcpServer.clone(),
+                            target: None,
+                        }],
+                        vec![],
+                    ),
+                },
+                Check {
+                    scenario: "failed update reports its error chain",
+                    input: Some(Err(eyre::eyre!("connection refused")
+                        .wrap_err("update_dhcp_via_grpc(http://dhcp)"))),
+                    expect: (
+                        vec![],
+                        vec![health_report::HealthProbeAlert {
+                            id: probe_ids::DhcpServer.clone(),
+                            target: None,
+                            in_alert_since: None,
+                            message: "DHCP server update failed: \
+                                update_dhcp_via_grpc(http://dhcp): connection refused"
+                                .to_string(),
+                            tenant_message: None,
+                            classifications: ExpectedClassifications::PreventAllocations
+                                .health_classifications(),
+                        }],
+                    ),
+                },
+            ],
+            |update: Option<eyre::Result<()>>| {
+                let mut report = HealthReport::empty("forge-dpu-agent".to_string());
+                record_service_update(
+                    &mut report,
+                    probe_ids::DhcpServer.clone(),
+                    "DHCP server",
+                    update.as_ref(),
+                );
+                (report.successes, report.alerts)
+            },
+        );
+    }
+
+    /// The DHCP server and FMDS run outside HBN, so their updates reach the
+    /// report under their own probe IDs even when NVUE is unavailable.
+    #[tokio::test]
+    async fn health_check_reports_service_updates_without_nvue() {
+        let socket_directory = tempfile::tempdir().expect("create NVUE socket directory");
+        let nvue_client = NvueClient::new(nvue_client::client::NvueServerAddress::UnixSocket {
+            socket_path: socket_directory.path().join("missing-nvue.sock"),
+        })
+        .expect("build NVUE client");
+        let dhcp_server_update = Err(eyre::eyre!("injected DHCP failure"));
+        let fmds_update = Ok(());
+
+        let report = NvueHealthCheck {
+            nvue_client: &nvue_client,
+            min_healthy_links: 2,
+            hbn_device_names: &HBNDeviceNames::hbn_23(),
+            has_changed_hbn_config: false,
+            dhcp_server_update: Some(&dhcp_server_update),
+            fmds_update: &fmds_update,
+        }
+        .health_check()
+        .await;
+
+        let alert_ids: Vec<_> = report.alerts.iter().map(|alert| &alert.id).collect();
+        assert_eq!(
+            alert_ids,
+            [&*probe_ids::DhcpServer, &*probe_ids::NvueApiRunning]
+        );
+        assert_eq!(
+            report.successes,
+            [HealthProbeSuccess {
+                id: probe_ids::Fmds.clone(),
+                target: None,
+            }]
         );
     }
 }

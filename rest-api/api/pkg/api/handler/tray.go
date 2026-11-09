@@ -33,6 +33,42 @@ import (
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
+// resolveBatchTrayTargetSpec resolves site-wide selection to concrete component
+// UUIDs. Flow operation targets require identifiers, unlike inventory queries.
+// The caller's context bounds all pages and the subsequent operation together.
+func resolveBatchTrayTargetSpec(ctx context.Context, stc tClient.Client, filter *model.TrayFilter) (*flowv1.OperationTargetSpec, *cutil.APIError) {
+	spec := filter.ToTargetSpec(nil)
+	if spec != nil {
+		return spec, nil
+	}
+
+	types := model.ValidTrayTypeNames()
+	if filter != nil && filter.Type != nil {
+		types = []string{*filter.Type}
+	}
+	req := &flowv1.GetComponentsRequest{
+		Filters:    []*flowv1.Filter{model.GetProtoTrayFilter("type", types)},
+		Pagination: &flowv1.Pagination{Limit: 100},
+		OrderBy:    model.GetProtoTrayOrderByFromQueryParam("name", "ASC"),
+	}
+	var components []*flowv1.Component
+	for {
+		var resp flowv1.GetComponentsResponse
+		apiErr := common.ExecuteFlowGRPC(ctx, stc, flowv1.Flow_GetComponents_FullMethodName,
+			req, &resp, fmt.Sprintf("tray-resolve-batch-%s", common.RequestHash(req)),
+			temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING, "")
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		components = append(components, resp.GetComponents()...)
+		req.Pagination.Offset += int32(len(resp.GetComponents()))
+		if len(resp.GetComponents()) == 0 || req.Pagination.Offset >= resp.GetTotal() {
+			break
+		}
+	}
+	return filter.ToTargetSpec(components), nil
+}
+
 // ~~~~~ Slot resolution helpers ~~~~~ //
 
 // resolveTrayIDsBySlot enumerates trays for the given baseSpec through Flow's
@@ -873,6 +909,14 @@ func (pcth UpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 
 	// Get tray ID from URL param
 	trayStrID := c.Param("id")
+	if c.Request().URL.RawPath != "" {
+		var decodeErr error
+		trayStrID, decodeErr = url.PathUnescape(trayStrID)
+		if decodeErr != nil {
+			logger.Warn().Err(decodeErr).Msg("invalid percent-encoding in Tray identifier")
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Tray identifier in URL is invalid", nil)
+		}
+	}
 	cotel.SetAttribute(handlerSpan, attribute.String("tray_id", trayStrID))
 
 	// Parse and validate request body
@@ -1031,10 +1075,17 @@ func (pctbh BatchUpdateTrayPowerStateHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	// Build TargetSpec from filter (nil filter = all trays). When the
-	// filter pins a rack slot, Flow has no by-slot target shape, so we
-	// resolve to external component IDs first.
-	targetSpec := request.Filter.ToTargetSpec()
+	// Share one deadline across inventory resolution and operation submission.
+	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+	defer cancel()
+	targetSpec, resolveErr := resolveBatchTrayTargetSpec(ctx, stc, request.Filter)
+	if resolveErr != nil {
+		logger.Error().Err(resolveErr.Diagnosis()).Msg("failed to resolve tray targets")
+		return cutil.NewAPIErrorResponse(c, resolveErr.Code, resolveErr.Message, nil)
+	}
+	if targetSpec == nil {
+		return c.JSON(http.StatusOK, model.NewAPIUpdatePowerStateResponse(nil))
+	}
 	if request.Filter.HasSlotFilter() {
 		ids, resolveErr := resolveTrayIDsBySlot(ctx, stc, targetSpec,
 			model.RackComponentSlotMatcher{SlotID: request.Filter.SlotID})
@@ -1288,10 +1339,17 @@ func (futbh BatchUpdateTrayFirmwareHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	// Build TargetSpec from filter (nil filter = all trays). When the
-	// filter pins a rack slot, resolve to external component IDs first; Flow has
-	// no by-slot target shape.
-	targetSpec := request.Filter.ToTargetSpec()
+	// Share one deadline across inventory resolution and operation submission.
+	ctx, cancel := context.WithTimeout(ctx, cutil.WorkflowContextTimeout)
+	defer cancel()
+	targetSpec, resolveErr := resolveBatchTrayTargetSpec(ctx, stc, request.Filter)
+	if resolveErr != nil {
+		logger.Error().Err(resolveErr.Diagnosis()).Msg("failed to resolve tray targets")
+		return cutil.NewAPIErrorResponse(c, resolveErr.Code, resolveErr.Message, nil)
+	}
+	if targetSpec == nil {
+		return c.JSON(http.StatusOK, model.NewAPIUpdateFirmwareResponse(nil))
+	}
 	if request.Filter.HasSlotFilter() {
 		ids, resolveErr := resolveTrayIDsBySlot(ctx, stc, targetSpec,
 			model.RackComponentSlotMatcher{SlotID: request.Filter.SlotID})

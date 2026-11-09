@@ -954,8 +954,9 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 			{
 				name: "create supplied Core fields",
 				reported: &corev1.ExpectedSwitch{
-					BmcIpAddress: "192.0.2.10",
-					RackId:       &corev1.RackId{Id: "initial-rack"},
+					BmcIpAddress:  "192.0.2.10",
+					NvosIpAddress: cutil.GetPtr("192.0.2.20"),
+					RackId:        &corev1.RackId{Id: "initial-rack"},
 					Metadata: &corev1.Metadata{
 						Name:        "initial-name",
 						Description: "initial-description",
@@ -965,7 +966,6 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 					},
 					NvosInterfaces: []*corev1.ExpectedNvosInterface{
 						{MacAddress: "aa:bb:cc:dd:ee:01", IsPrimary: true},
-						{MacAddress: "aa:bb:cc:dd:ee:02"},
 					},
 				},
 				want: cdbm.ExpectedSwitch{
@@ -974,11 +974,21 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 					Name:                  cutil.GetPtr("initial-name"),
 					Description:           cutil.GetPtr("initial-description"),
 					Labels:                cdbm.Labels{"model": "initial-model"},
-					NvosMacAddresses:      []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"},
+					NvosMacAddresses:      []string{"aa:bb:cc:dd:ee:01"},
+					NvosIpAddress:         cutil.GetPtr("192.0.2.20"),
 					NvosPrimaryMacAddress: cutil.GetPtr("aa:bb:cc:dd:ee:01"),
 				},
 			},
 		}
+		multiPort := cases[0]
+		multiPort.name = "multiple ports clear the previous NVOS address"
+		multiPort.reported = proto.Clone(multiPort.reported).(*corev1.ExpectedSwitch)
+		multiPort.reported.NvosInterfaces = append(multiPort.reported.NvosInterfaces, &corev1.ExpectedNvosInterface{MacAddress: "aa:bb:cc:dd:ee:02"})
+		multiPort.reported.NvosIpAddress = nil
+		multiPort.want.NvosMacAddresses = []string{"aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"}
+		multiPort.want.NvosIpAddress = nil
+		cases = append(cases, multiPort)
+
 		for _, field := range []struct {
 			name  string
 			apply func(*corev1.ExpectedSwitch, *cdbm.ExpectedSwitch)
@@ -1019,6 +1029,34 @@ func TestManageExpectedSwitch_UpdateExpectedSwitchesInDB(t *testing.T) {
 		primaryUpdate.reported.NvosInterfaces[1].IsPrimary = true
 		primaryUpdate.want.NvosPrimaryMacAddress = cutil.GetPtr("aa:bb:cc:dd:ee:02")
 		cases = append(cases, primaryUpdate)
+
+		for _, tc := range []struct {
+			name      string
+			ipAddress *string
+		}{
+			{
+				name:      "replace multiple NVOS ports with one port and set its address",
+				ipAddress: cutil.GetPtr("192.0.2.21"),
+			},
+			{
+				name:      "replace NVOS address while preserving ports and primary",
+				ipAddress: cutil.GetPtr("2001:db8::21"),
+			},
+			{name: "clear only the NVOS address"},
+		} {
+			next := cases[len(cases)-1]
+			next.name = tc.name
+			next.reported = proto.Clone(next.reported).(*corev1.ExpectedSwitch)
+			next.reported.NvosInterfaces = []*corev1.ExpectedNvosInterface{{
+				MacAddress: "aa:bb:cc:dd:ee:01",
+				IsPrimary:  true,
+			}}
+			next.reported.NvosIpAddress = tc.ipAddress
+			next.want.NvosMacAddresses = []string{"aa:bb:cc:dd:ee:01"}
+			next.want.NvosPrimaryMacAddress = cutil.GetPtr("aa:bb:cc:dd:ee:01")
+			next.want.NvosIpAddress = tc.ipAddress
+			cases = append(cases, next)
+		}
 
 		preserved := cases[len(cases)-1]
 		preserved.name = "preserve Cloud metadata when Core omits it"

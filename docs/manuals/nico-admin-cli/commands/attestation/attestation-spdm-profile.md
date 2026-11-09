@@ -10,8 +10,8 @@ stored for each hardware class
 ## SYNOPSIS
 
 ```text
-nico-admin-cli attestation spdm profile [--extended]
-[--sort-by] [-h|--help] <subcommands>
+nico-admin-cli attestation spdm profile [--sort-by]
+[-h|--help] <subcommands>
 ```
 
 ## DESCRIPTION
@@ -19,14 +19,6 @@ nico-admin-cli attestation spdm profile [--extended]
 Manage the attestation policy stored for each hardware class
 
 ## OPTIONS
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--sort-by <SORT_BY> [default: primary-id]`
 

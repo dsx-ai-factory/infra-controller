@@ -78,6 +78,7 @@ async fn request_switch_maintenance_via_cm(
             })),
             action: cm_power_action(operation) as i32,
             bypass_state_controller: false,
+            credential_overrides: None,
         }))
         .await
         .expect("component_power_control should succeed")
