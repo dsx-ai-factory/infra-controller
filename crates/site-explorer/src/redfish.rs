@@ -848,29 +848,13 @@ pub(crate) fn map_redfish_error(error: RedfishError) -> EndpointExplorationError
     }
 }
 
-fn nv_error_classifier(
-    err: &carbide_redfish::nv_redfish::BmcError,
-) -> Option<bmc_explorer::ErrorClass> {
-    type BmcError = carbide_redfish::nv_redfish::BmcError;
-    match err {
-        BmcError::InvalidResponse { status, .. } => match *status {
-            http::StatusCode::NOT_FOUND => Some(bmc_explorer::ErrorClass::NotFound),
-            http::StatusCode::INTERNAL_SERVER_ERROR => {
-                Some(bmc_explorer::ErrorClass::InternalServerError)
-            }
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 fn nv_bmc_explore_config(
     boot_interface: Option<&BootInterfaceTarget>,
     explore_drive_firmware: bool,
 ) -> bmc_explorer::Config<'static, carbide_redfish::nv_redfish::RedfishBmc> {
     bmc_explorer::Config {
         boot_interface_mac: boot_interface.map(BootInterfaceTarget::mac_address),
-        error_classifier: &nv_error_classifier,
+        error_classifier: &bmc_explorer::nv_redfish_error_class,
         // Chosen arbitrarily: we want to wait a bit between tries,
         // but not for too long relative to the total exploration
         // time.

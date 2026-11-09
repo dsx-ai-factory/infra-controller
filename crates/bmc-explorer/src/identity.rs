@@ -22,18 +22,28 @@ use bmc_platform::{
     ChassisIdentity, FirmwareInventoryIdentity, ManagerIdentity, PlatformIdentity,
     ServiceRootIdentity, SystemIdentity,
 };
-use model::site_explorer::EndpointExplorationReport;
+use model::site_explorer::{EndpointExplorationReport, ServiceRoot as ModelServiceRoot};
+use nv_redfish::{Bmc, ServiceRoot};
+
+/// The service root part of the identity, read from `root` directly. It is
+/// all a BMC in factory state serves.
+pub fn service_root_identity<B: Bmc>(root: &ServiceRoot<B>) -> ServiceRootIdentity {
+    root_identity(crate::service_root(root))
+}
+
+fn root_identity(root: ModelServiceRoot) -> ServiceRootIdentity {
+    ServiceRootIdentity {
+        vendor: root.vendor,
+        product: root.product,
+        oem_keys: root.oem_keys,
+    }
+}
 
 /// The identity of what `report` recorded: its service root, first manager,
 /// primary system, chassis, and firmware inventory without drive entries.
 pub fn platform_identity(report: &EndpointExplorationReport) -> PlatformIdentity {
-    let service_root = report.service_root.clone().unwrap_or_default();
     PlatformIdentity {
-        service_root: ServiceRootIdentity {
-            vendor: service_root.vendor,
-            product: service_root.product,
-            oem_keys: service_root.oem_keys,
-        },
+        service_root: root_identity(report.service_root.clone().unwrap_or_default()),
         manager: report.managers.first().map(|manager| ManagerIdentity {
             id: manager.id.clone(),
             model: manager.model.clone(),
