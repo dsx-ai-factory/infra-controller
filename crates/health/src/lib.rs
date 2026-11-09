@@ -464,7 +464,14 @@ async fn wait_for_service_exit<I: discovery::DiscoveryIteration, E: std::fmt::De
         return;
     }
 
-    let deadline = Instant::now() + shutdown_timeout;
+    let now = Instant::now();
+
+    // A budget past the clock's range waits up to Tokio's far-future horizon
+    // instead of panicking.
+    let deadline = now
+        .checked_add(shutdown_timeout)
+        .unwrap_or_else(|| now + Duration::from_secs(86_400 * 365 * 30));
+
     tracing::info!("Shutdown signal received; draining collectors");
 
     // The loop observes the same cancellation and returns its iteration.

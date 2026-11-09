@@ -137,7 +137,9 @@ impl SinkWorkers {
             .iter_mut()
             .flat_map(|sink| sink.handles.iter_mut());
 
-        let _ = tokio::time::timeout_at(deadline, join_all(handles)).await;
+        tokio::time::timeout_at(deadline, join_all(handles))
+            .await
+            .ok();
 
         let mut flushed_record_count = 0;
         let mut dropped_record_count = 0;
@@ -680,23 +682,44 @@ mod tests {
     async fn shutdown_phases_share_one_deadline_from_the_observed_signal() {
         struct Case {
             scenario: &'static str,
+            budget: Duration,
+            stall: bool,
             drain: Duration,
             flush_signalled_after: Duration,
+            returned_after: Duration,
+            timed_out_sink_count: &'static str,
         }
 
         for case in [
             Case {
                 scenario: "stalled sink gets the budget left after draining",
+                budget: Duration::from_secs(10),
+                stall: true,
                 drain: Duration::from_secs(5),
                 flush_signalled_after: Duration::from_secs(7),
+                returned_after: Duration::from_secs(10),
+                timed_out_sink_count: "1",
             },
             Case {
                 scenario: "collectors exhaust the budget",
+                budget: Duration::from_secs(10),
+                stall: true,
                 drain: Duration::from_secs(15),
                 flush_signalled_after: Duration::from_secs(10),
+                returned_after: Duration::from_secs(10),
+                timed_out_sink_count: "1",
+            },
+            Case {
+                scenario: "budget past the clock's range does not panic",
+                budget: Duration::MAX,
+                stall: false,
+                drain: Duration::from_secs(5),
+                flush_signalled_after: Duration::from_secs(7),
+                returned_after: Duration::from_secs(7),
+                timed_out_sink_count: "0",
             },
         ] {
-            let fixture = ServiceFixture::new(true);
+            let fixture = ServiceFixture::new(case.stall);
             let flush_token = fixture.sink_workers.flush_token();
 
             let flush_signalled = tokio::spawn(async move {
@@ -719,16 +742,11 @@ mod tests {
                 std::future::pending::<Result<Result<(), String>, JoinError>>(),
                 &fixture.cancel_token,
                 fixture.sink_workers,
-                Duration::from_secs(10),
+                case.budget,
             ))
             .await;
 
-            assert_eq!(
-                start.elapsed(),
-                Duration::from_secs(10),
-                "{}",
-                case.scenario
-            );
+            assert_eq!(start.elapsed(), case.returned_after, "{}", case.scenario);
 
             assert_eq!(
                 flush_signalled.await.unwrap() - start,
@@ -744,7 +762,7 @@ mod tests {
 
             assert_eq!(
                 summary.field("timed_out_sink_count"),
-                Some("1"),
+                Some(case.timed_out_sink_count),
                 "{}",
                 case.scenario
             );
