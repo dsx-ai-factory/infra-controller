@@ -26,7 +26,7 @@
 # - `docker push urm.nvidia.com/swngc-ngcc-docker-local/forge/carbide/x86-64/build-container:{OUTPUT_OF_GIT_DESCRIBE_HERE}`
 
 # This should match rust-toolchain.toml
-FROM rust:1.97.1-slim-bullseye
+FROM rust:1.98.0-slim-bullseye@sha256:1e4acf0228e68cd94b5ab7a5e0b1ab48963ed55117d0f3b785fc117ee32adef8
 
 # Set in gitlab-templates/scripts/build-push-container-image.sh
 ARG CI_COMMIT_SHORT_SHA

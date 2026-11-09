@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-FROM arm64v8/rust:1.97.1-slim-bullseye
+FROM arm64v8/rust:1.98.0-slim-bullseye@sha256:3fc206c485deb073aea7170db09bf1ada3a238e1758fb9b6aecfd56f15313bb9
 
 # Bullseye does not package mold. Keep this image on Bullseye for artifact
 # compatibility and install the pinned upstream ARM64 binary instead.
