@@ -58,6 +58,7 @@ pub(super) fn setup() -> Vec<Check> {
         apply::bios().after(&[HOST_PRIVILEGE]),
         Check::apply(SECURE_BOOT, Capability::SecureBoot, run!(secure_boot)).after(&[BIOS]),
         Check::apply(HTTP_BOOT_ONCE, Capability::BootOrder, run!(http_boot_once))
+            .once()
             .after(&[SECURE_BOOT]),
         Check::apply(HOST_RSHIM, Capability::Dpu, run!(host_rshim)).after(&[NIC_MODE]),
         apply::console(),

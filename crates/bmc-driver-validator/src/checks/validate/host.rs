@@ -172,19 +172,33 @@ async fn ac_cycle(cx: &CheckCx<'_>) -> Step {
         power.set(ResetType::FullPowerCycle).await
     })
     .await?;
-    ops::wait_for_ac_cycle_down(cx, &outcome)
-        .await
-        .map_err(|outcome| match outcome {
-            Outcome::Fail(reason) => {
-                Outcome::Fail(format!("no power cycle was observed: {reason}"))
-            }
-            other => other,
-        })?;
+    let completed =
+        ops::wait_for_ac_cycle_down(cx, &outcome)
+            .await
+            .map_err(|outcome| match outcome {
+                Outcome::Fail(reason) => {
+                    Outcome::Fail(format!("no power cycle was observed: {reason}"))
+                }
+                other => other,
+            })?;
     ops::wait_for_bmc_up(cx).await?;
-    ops::settle(cx, &outcome).await?;
+    let gone = if completed {
+        Ok(Vec::new())
+    } else {
+        ops::settle_after_ac_cycle(cx, &outcome).await
+    };
     ops::power_on(cx).await?;
+    let gone = gone?;
+    let unknown = if gone.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; the BMC dropped {} with the restart, so how it ended is unknown",
+            gone.join(", ")
+        )
+    };
     Ok(format!(
-        "the BMC lost power, and everything was back on {} after the request ({})",
+        "the BMC lost power, and everything was back on {} after the request ({}){unknown}",
         took(started),
         how(&outcome)
     ))

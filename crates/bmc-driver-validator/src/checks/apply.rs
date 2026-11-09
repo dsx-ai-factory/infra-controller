@@ -535,6 +535,11 @@ async fn cycle_power(cx: &CheckCx<'_>) -> Step {
             "the platform reports no single power state".to_string(),
         ));
     };
+    if matches!(original, PowerState::PoweringOn | PowerState::PoweringOff) {
+        return Err(Outcome::Skipped(format!(
+            "the host is {original:?}, so there is no settled state to cycle back to"
+        )));
+    }
     let (away, back) = match original {
         PowerState::Off => (ResetType::On, ResetType::ForceOff),
         _ => (ResetType::ForceOff, ResetType::On),

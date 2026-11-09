@@ -227,11 +227,21 @@ pub(super) async fn wait_for_operations(
     cx: &CheckCx<'_>,
     outcome: &DriverOutcome,
 ) -> Result<(), Outcome> {
+    wait_for_operations_on(cx, &cx.bmc(), outcome).await
+}
+
+/// Waits until every reference in `outcome` completes on `bmc`, the BMC
+/// that started the work.
+async fn wait_for_operations_on(
+    cx: &CheckCx<'_>,
+    bmc: &ConnectedBmc<RedfishBmc>,
+    outcome: &DriverOutcome,
+) -> Result<(), Outcome> {
     for reference in outcome.references() {
         poll_operation(
             |step| cx.trace(step),
             reference,
-            async || cx.bmc().operation_status(reference).await,
+            async || bmc.operation_status(reference).await,
             false,
             async || false,
         )
@@ -315,7 +325,7 @@ pub(super) async fn set_power(
     let started = Instant::now();
     let outcome = bmc.power()?.set(reset).await.map_err(failed("set"))?;
     cx.trace(format!("power {reset:?}: {}", how(&outcome)));
-    wait_for_operations(cx, &outcome).await?;
+    wait_for_operations_on(cx, bmc, &outcome).await?;
     wait_for_power(cx, bmc, target).await?;
     cx.trace(format!("power reads {target:?}"));
     Ok(format!("{reset:?} reached {target:?} in {}", took(started)))
@@ -446,11 +456,12 @@ async fn bmc_answers(cx: &CheckCx<'_>) -> bool {
 /// produced `outcome`. Work the request started, such as a Dell BIOS job that
 /// runs during the next POST, cuts power only once it runs, so it is waited
 /// for first: a job that fails ends the wait, and the BMC going down while the
-/// job runs is the cycle itself.
+/// job runs is the cycle itself. Returns whether all of that work completed
+/// before the BMC went down.
 pub(super) async fn wait_for_ac_cycle_down(
     cx: &CheckCx<'_>,
     outcome: &DriverOutcome,
-) -> Result<(), Outcome> {
+) -> Result<bool, Outcome> {
     for reference in outcome.references() {
         let went_down = work_or_bmc_down(
             |step| cx.trace(step),
@@ -461,11 +472,39 @@ pub(super) async fn wait_for_ac_cycle_down(
         .await?;
         if went_down {
             cx.trace("the BMC stopped answering");
-            return Ok(());
+            return Ok(false);
         }
         cx.trace(format!("{}: Completed", reference.uri()));
     }
-    wait_for_bmc_down(cx, AC_CYCLE_DOWN_TIMEOUT).await
+    wait_for_bmc_down(cx, AC_CYCLE_DOWN_TIMEOUT).await?;
+    Ok(true)
+}
+
+/// Waits for the work an AC power cycle started once the BMC is back. The
+/// restart can drop a reference, so one whose status no longer reads while
+/// the BMC answers ends with its outcome unknown. Returns those references.
+pub(super) async fn settle_after_ac_cycle(
+    cx: &CheckCx<'_>,
+    outcome: &DriverOutcome,
+) -> Result<Vec<String>, Outcome> {
+    let mut gone = Vec::new();
+    for reference in outcome.references() {
+        let seen = poll_operation(
+            |step| cx.trace(step),
+            reference,
+            async || cx.bmc().operation_status(reference).await,
+            false,
+            async || bmc_answers(cx).await,
+        )
+        .await?;
+        if seen == Seen::BmcDown {
+            cx.trace(format!("{}: gone after the BMC restarted", reference.uri()));
+            gone.push(reference.uri().to_string());
+        } else {
+            cx.trace(format!("{}: Completed", reference.uri()));
+        }
+    }
+    Ok(gone)
 }
 
 /// Polls `status` for the work at `reference` until it completes, returning

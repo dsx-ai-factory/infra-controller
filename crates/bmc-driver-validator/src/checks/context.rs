@@ -47,6 +47,18 @@ pub(crate) trait Reporter {
     fn secret(&self, secret: &str);
 }
 
+/// The UEFI password a run's change of it left the firmware with, ordered so
+/// a later attempt cannot make an earlier result look more certain.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum UefiPasswordLeft {
+    /// The firmware refused the change, so the old password is still set.
+    Current,
+    /// The request went unanswered, so either password may be set.
+    Unknown,
+    /// The firmware accepted the change.
+    New,
+}
+
 /// State shared by every check of one run.
 pub(crate) struct Ctx {
     /// The connection checks drive drivers through, replaced when a check
@@ -58,6 +70,8 @@ pub(crate) struct Ctx {
     pub(super) reporter: Arc<dyn Reporter>,
     /// Changes a check made and could not undo.
     not_restored: Mutex<Vec<String>>,
+    /// What this run's change of the UEFI password left, once it tried.
+    uefi_password_left: Mutex<Option<UefiPasswordLeft>>,
 }
 
 impl Ctx {
@@ -75,6 +89,7 @@ impl Ctx {
             inputs,
             reporter,
             not_restored: Mutex::new(Vec::new()),
+            uefi_password_left: Mutex::new(None),
         }
     }
 
@@ -128,6 +143,27 @@ impl<'a> CheckCx<'a> {
 
     pub(super) fn not_restored(&self, change: String) {
         self.ctx.not_restored(change);
+    }
+
+    /// Records what an attempt to change the UEFI password left, keeping the
+    /// most certain result of any attempt.
+    pub(super) fn left_uefi_password(&self, left: UefiPasswordLeft) {
+        let mut recorded = self
+            .ctx
+            .uefi_password_left
+            .lock()
+            .expect("UEFI password lock");
+        *recorded = (*recorded).max(Some(left));
+    }
+
+    /// What this run's change of the UEFI password left; `None` when it did
+    /// not try.
+    pub(super) fn uefi_password_left(&self) -> Option<UefiPasswordLeft> {
+        *self
+            .ctx
+            .uefi_password_left
+            .lock()
+            .expect("UEFI password lock")
     }
 
     pub(super) fn secret(&self, secret: &str) {

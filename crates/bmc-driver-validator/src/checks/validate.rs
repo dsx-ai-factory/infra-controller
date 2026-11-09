@@ -31,9 +31,9 @@ use nv_redfish::account::AccountServiceConfig;
 use serde_json::Value;
 
 pub(super) use self::factory::factory_reset_first;
-use super::context::CheckCx;
+use super::context::{CheckCx, UefiPasswordLeft};
 use super::errors::{describe, failed};
-use super::model::{Check, CheckId, Checked, Detail, Needs, Step};
+use super::model::{Check, CheckId, Checked, Detail, Needs, Outcome, Step};
 use super::ops::{self, Attempt, Effect, SETTLE_POLL_INTERVAL, how, poll, requested};
 use super::text::reported;
 use super::{apply, reads};
@@ -277,7 +277,14 @@ async fn set_uefi_password(cx: &CheckCx<'_>) -> Step {
             .bios()?
             .change_uefi_password(&password.current, &password.new),
     )
-    .await?;
+    .await
+    .inspect_err(|error| {
+        cx.left_uefi_password(match error {
+            Outcome::Unreachable(_) => UefiPasswordLeft::Unknown,
+            _ => UefiPasswordLeft::Current,
+        });
+    })?;
+    cx.left_uefi_password(UefiPasswordLeft::New);
     ops::take_effect(cx, &outcome).await?;
     Ok(format!("set ({}) and restarted", how(&outcome)))
 }

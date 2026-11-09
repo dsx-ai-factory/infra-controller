@@ -293,12 +293,16 @@ impl Session {
     async fn open(args: &Args, terminal: &Terminal) -> Result<Self, String> {
         let address = SocketAddr::new(args.bmc_ip, args.port);
         let given = Target::new(address, &args.username, &args.password);
-        let (target, factory, factory_accounts) = match &args.new_password {
+        // Inputs are read first, so a bad file fails before the factory
+        // password is replaced.
+        let factory = args.new_password.as_ref().map(|_| given.clone());
+        let inputs = inputs(args, factory)?;
+        let (target, factory_accounts) = match &args.new_password {
             Some(new_password) => {
                 let (owned, accounts) = own(args, terminal, &given, new_password).await?;
-                (owned, Some(given), accounts)
+                (owned, accounts)
             }
-            None => (given, None, None),
+            None => (given, None),
         };
 
         terminal.discovering(address);
@@ -314,7 +318,6 @@ impl Session {
                 selection.driver(Capability::Accounts)
             ));
         }
-        let inputs = inputs(args, factory)?;
         Ok(Self {
             address,
             target,

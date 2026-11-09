@@ -93,7 +93,9 @@ impl Selection {
         let rules = if pins.is_empty() {
             built_in_rules.clone()
         } else {
-            rules_with_overrides(&override_document(&pins))
+            let mut pinned = Rule::new(OVERRIDE_RULE, []);
+            pinned.selections = pins.clone();
+            rules_with_overrides([pinned])
                 .map_err(|error| format!("invalid --driver override: {error}"))?
         };
         Drivers::validate_rules(&rules)
@@ -263,20 +265,6 @@ fn known_ids() -> String {
         .join(", ")
 }
 
-/// A deployment-override document with one catch-all rule holding `pins`.
-fn override_document(pins: &BTreeMap<Capability, CapabilitySelection>) -> String {
-    let mut document = format!("[[rules]]\nid = \"{OVERRIDE_RULE}\"\n[rules.selections]\n");
-    for (capability, selection) in pins {
-        let _ = writeln!(
-            document,
-            "{} = \"{}\"",
-            capability.as_str(),
-            label(selection)
-        );
-    }
-    document
-}
-
 fn label(selection: &CapabilitySelection) -> String {
     match selection {
         CapabilitySelection::Standard => "standard".to_string(),
@@ -346,6 +334,7 @@ fn matcher(matcher: &IdentityMatcher) -> String {
         IdentityField::ChassisModel => "chassis model".to_string(),
         IdentityField::ChassisPartNumber => "chassis part".to_string(),
         IdentityField::FirmwareInventory(id) => format!("firmware {id}"),
+        IdentityField::ManagerMacAddress => "manager mac".to_string(),
     };
     let comparison = match &matcher.pattern {
         MatchPattern::Exact(value)
@@ -359,6 +348,7 @@ fn matcher(matcher: &IdentityMatcher) -> String {
         MatchPattern::FirmwareVersionRange(range) => format!("in {range:?}"),
         MatchPattern::VersionAtLeast(value) => format!(">= {value}"),
         MatchPattern::VersionBelow(value) => format!("< {value}"),
+        MatchPattern::MacAddress(mac_address) => format!("= {mac_address}"),
     };
     format!("{field} {comparison}")
 }

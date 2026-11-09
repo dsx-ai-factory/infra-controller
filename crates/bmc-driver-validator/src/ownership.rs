@@ -98,7 +98,18 @@ pub(crate) async fn take(
                 PASSWORD_TIMEOUT.as_secs()
             )
         })?;
-    match factory.log_in().await {
+    let factory_login = factory.log_in().await;
+    // A refused login can briefly lock a BMC out, so the new password has to
+    // work again before discovery logs in with it.
+    logged_in_within(async || owned.log_in().await)
+        .await
+        .map_err(|error| {
+            format!(
+                "the new password is refused after trying the factory one, for {}s: {error}",
+                PASSWORD_TIMEOUT.as_secs()
+            )
+        })?;
+    match factory_login {
         Err(PlatformError::Auth(AuthError::InvalidCredentials)) => {}
         Ok(()) => return Err("the new password works, but so does the factory one".to_string()),
         Err(error) => {

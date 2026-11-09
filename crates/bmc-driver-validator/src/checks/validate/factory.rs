@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use bmc_platform::{AuthError, Capability, PlatformError};
 
 use super::host::lift_lockdown;
-use crate::checks::context::CheckCx;
+use crate::checks::context::{CheckCx, UefiPasswordLeft};
 use crate::checks::errors::describe;
 use crate::checks::model::{Check, CheckId, Needs, Outcome, Step};
 use crate::checks::ops::{self, Attempt, Effect, SETTLE_POLL_INTERVAL, how, poll, requested, took};
@@ -49,11 +49,12 @@ pub(super) fn reset() -> Vec<Check> {
         Check::apply(
             FACTORY_UEFI_PASSWORD,
             Capability::Bios,
-            run!(clear_uefi_password),
+            run!(clear_uefi_password_this_run_set),
         )
         .once()
         .needs(&[Needs::UefiPassword]),
-        Check::apply(FACTORY_BIOS, Capability::Bios, run!(reset_bios)),
+        Check::apply(FACTORY_BIOS, Capability::Bios, run!(reset_bios))
+            .after(&[FACTORY_UEFI_PASSWORD]),
         Check::apply(FACTORY_BMC, Capability::BmcControl, run!(reset_to_factory)).once(),
     ]
 }
@@ -90,6 +91,25 @@ pub(in crate::checks) fn factory_reset_first() -> Vec<Check> {
     ]
 }
 
+/// Clears the UEFI password only when this run's change of it was accepted,
+/// since otherwise the old one is still set or which is set is unknown. An
+/// unknown password fails, which blocks the BIOS reset that would otherwise
+/// leave the host at the firmware's password prompt.
+async fn clear_uefi_password_this_run_set(cx: &CheckCx<'_>) -> Step {
+    match cx.uefi_password_left() {
+        Some(UefiPasswordLeft::New) => clear_uefi_password(cx).await,
+        Some(UefiPasswordLeft::Unknown) => Err(Outcome::Fail(
+            "this run's UEFI password change went unanswered, so which password is set is unknown"
+                .to_string(),
+        )),
+        Some(UefiPasswordLeft::Current) | None => Err(Outcome::Skipped(
+            "this run left the UEFI password unchanged".to_string(),
+        )),
+    }
+}
+
+/// Clears the UEFI password the new one set: before the validation, the one
+/// an earlier run left, and after it, the one this run set.
 async fn clear_uefi_password(cx: &CheckCx<'_>) -> Step {
     let password = cx.inputs().required_uefi_password()?;
     let outcome = requested(
@@ -102,34 +122,38 @@ async fn clear_uefi_password(cx: &CheckCx<'_>) -> Step {
     Ok(format!("cleared ({}) and restarted", how(&outcome)))
 }
 
-/// Restores the BIOS defaults and restarts the host; the reset shows as the
-/// settings the validator applies no longer being in effect.
+/// Restores the BIOS defaults and restarts the host, done once the driver's
+/// work completes and the BIOS reads back. The defaults can match what the
+/// validator applies, so settings still in effect are a warning, not a
+/// failure.
 async fn reset_bios(cx: &CheckCx<'_>) -> Step {
     let bmc = cx.bmc();
     let bios = bmc.bios()?;
     let outcome = requested(cx, "reset", bios.reset()).await?;
     let inputs = cx.inputs();
     let boot_interface = inputs.boot_interface();
-    let differing = ops::read_back(cx, &outcome, Effect::OnRestart, async || {
+    let status = ops::read_back(cx, &outcome, Effect::OnRestart, async || {
         match bios
             .status(&inputs.bios_profile, boot_interface.as_ref())
             .await
         {
-            Ok(status) if ops::only_unreported_differ(&status) => {
-                Attempt::NotYet("the BIOS reports none of the attributes that differ".to_string())
-            }
-            Ok(status) if !status.is_applied => Attempt::Done(status.differences.len()),
-            Ok(_) => {
-                Attempt::NotYet("the validator's BIOS settings are still in effect".to_string())
-            }
+            Ok(status) => Attempt::Done(status),
             Err(error) => Attempt::NotYet(describe("status", &error)),
         }
     })
     .await?;
+    let after = if status.is_applied {
+        "warning: the validator's BIOS settings are still in effect, which the defaults may match"
+            .to_string()
+    } else {
+        format!(
+            "{} now differ from what the validator applies",
+            counted(status.differences.len(), "setting", "settings")
+        )
+    };
     Ok(format!(
-        "reset to defaults ({}) and restarted; {} now differ from what the validator applies",
-        how(&outcome),
-        counted(differing, "setting", "settings")
+        "reset to defaults ({}) and restarted; {after}",
+        how(&outcome)
     ))
 }
 
