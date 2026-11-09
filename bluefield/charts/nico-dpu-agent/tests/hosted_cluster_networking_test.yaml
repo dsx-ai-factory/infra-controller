@@ -1,0 +1,92 @@
+suite: hosted DPU cluster networking
+templates:
+  - daemonset.yaml
+  - configmap.yaml
+tests:
+  - it: preserves the default pod network and service names
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+      dhcp_server:
+        service_name: dhcp
+      fmds:
+        service_name: fmds
+    asserts:
+      - notExists:
+          path: spec.template.spec.hostNetwork
+      - notExists:
+          path: spec.template.spec.hostAliases
+      - equal:
+          path: spec.template.spec.dnsPolicy
+          value: ClusterFirst
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --dhcp-grpc-server=http://carbide-dpf-cluster-dhcp.dpf-operator-system.svc.cluster.local:10079
+      - equal:
+          path: spec.template.spec.containers[1].name
+          value: nico-lldp-sidecar
+
+  - it: uses the DPU management network and named hosted cluster when configured
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+      hostNetwork: true
+      dpuClusterName: doca
+      serviceDaemonSet:
+        hostAliases:
+          - ip: 10.6.135.159
+            hostnames:
+              - carbide-api.forge
+      dhcp_server:
+        service_name: dhcp
+      fmds:
+        service_name: fmds
+      hbn:
+        nvue_https_address: hbn
+      lldpSidecar:
+        enabled: false
+        hostLibraryPath: /usr/lib64
+    asserts:
+      - equal:
+          path: spec.template.spec.hostNetwork
+          value: true
+      - equal:
+          path: spec.template.spec.dnsPolicy
+          value: ClusterFirstWithHostNet
+      - equal:
+          path: spec.template.spec.hostAliases[0].hostnames[0]
+          value: carbide-api.forge
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --dhcp-grpc-server=http://doca-dhcp.dpf-operator-system.svc.cluster.local:10079
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --fmds-grpc-server=http://doca-fmds.dpf-operator-system.svc.cluster.local:50052
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NVUE_HTTPS_ADDRESS
+            value: doca-hbn.dpf-operator-system.svc.cluster.local:8765
+      - notExists:
+          path: spec.template.spec.containers[1]
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: host-library
+          any: true
+
+  - it: writes an explicit NICo API address for the agent
+    template: configmap.yaml
+    set:
+      forgeSystem:
+        apiServer: https://carbide-api.forge:31079
+    asserts:
+      - equal:
+          path: data["config.toml"]
+          value: |
+            [forge-system]
+            api-server = "https://carbide-api.forge:31079"
