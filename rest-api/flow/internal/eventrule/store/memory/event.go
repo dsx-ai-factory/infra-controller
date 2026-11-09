@@ -106,3 +106,17 @@ func (s *Store) setEvent(event *eventrule.Event) error {
 
 	return nil
 }
+
+// GetEventType returns immutable event provenance for task dispatch routing.
+func (s *Store) GetEventType(ctx context.Context, id uuid.UUID) (eventrule.Type, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	record, ok := s.events[id]
+	if !ok {
+		return "", eventrule.ErrEventNotFound
+	}
+	return eventrule.Type(record.EventType), nil
+}

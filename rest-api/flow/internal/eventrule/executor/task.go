@@ -11,7 +11,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/leakage"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
+	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 )
 
@@ -20,9 +22,19 @@ type TaskManager interface {
 	SubmitTask(context.Context, *operation.Request) ([]uuid.UUID, error)
 }
 
+// EventTypeReader supplies immutable provenance for an accepted event.
+type EventTypeReader interface {
+	GetEventType(context.Context, uuid.UUID) (eventrule.Type, error)
+}
+
+type leakageTaskSubmitter interface {
+	SubmitLeakageShutdown(context.Context, *operation.Request) ([]uuid.UUID, error)
+}
+
 // TaskExecutor submits one idempotent task per persisted rack target.
 type TaskExecutor struct {
 	manager TaskManager
+	events  EventTypeReader
 }
 
 // Execute submits every rack target from the immutable plan. The task manager
@@ -40,8 +52,32 @@ func (e *TaskExecutor) Execute(ctx context.Context, request ExecutionRequest) er
 		))
 	}
 
+	submit := e.manager.SubmitTask
+	if request.EventID != uuid.Nil && plan.Operation.Type == taskcommon.TaskTypePowerControl {
+		var info operations.PowerControlTaskInfo
+		err := info.Unmarshal(plan.Operation.Info)
+		if err != nil {
+			return terminalError(err)
+		}
+		if info.Operation == operations.PowerOperationForcePowerOff && info.OverrideReadinessCheck {
+			if e.events == nil {
+				return terminalError(fmt.Errorf("event type reader is required"))
+			}
+			kind, err := e.events.GetEventType(ctx, request.EventID)
+			if err != nil {
+				return retryableError("read parent event type", err)
+			}
+			if kind == leakage.TypeHardwareLeakDetected {
+				manager, ok := e.manager.(leakageTaskSubmitter)
+				if !ok {
+					return terminalError(fmt.Errorf("leakage task submitter is required"))
+				}
+				submit = manager.SubmitLeakageShutdown
+			}
+		}
+	}
 	for _, target := range plan.Targets {
-		if err := e.submitTarget(ctx, request.ExecutionID, plan, target); err != nil {
+		if err := e.submitTarget(ctx, request.ExecutionID, plan, target, submit); err != nil {
 			return err
 		}
 	}
@@ -54,13 +90,14 @@ func (e *TaskExecutor) submitTarget(
 	executionID uuid.UUID,
 	plan *eventrule.SubmitTaskPlan,
 	target operation.RackExecutionTarget,
+	submit func(context.Context, *operation.Request) ([]uuid.UUID, error),
 ) error {
 	request, err := operationRequest(executionID, plan, target)
 	if err != nil {
 		return terminalError(err)
 	}
 
-	taskIDs, err := e.manager.SubmitTask(ctx, request)
+	taskIDs, err := submit(ctx, request)
 	if err != nil {
 		return retryableError("submit task", err)
 	}

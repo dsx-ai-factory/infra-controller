@@ -18,7 +18,9 @@ import (
 // dispatch attempt.
 type ExecutionRequest struct {
 	ExecutionID uuid.UUID
-	Plan        eventrule.ExecutionPlan
+	// EventID identifies the persisted parent event for trusted dispatch routing.
+	EventID uuid.UUID
+	Plan    eventrule.ExecutionPlan
 }
 
 // Validate checks the execution input.

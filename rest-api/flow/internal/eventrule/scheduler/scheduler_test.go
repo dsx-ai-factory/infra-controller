@@ -24,10 +24,13 @@ func TestScheduler_Start(t *testing.T) {
 		store.claims["pending"] = []eventrule.ClaimedExecution{
 			newClaimedExecution(t, "pending_action", 1, testInstanceID),
 		}
+		expectedEventID := store.claims["pending"][0].Execution.EventID
+		var receivedEventID uuid.UUID
 		var executorCalls atomic.Int32
 		configured := newTestScheduler(t, store, executorRegistryFunc(
 			func(eventrule.ActionType) (executor.Executor, error) {
-				return executorFunc(func(context.Context, executor.ExecutionRequest) error {
+				return executorFunc(func(_ context.Context, request executor.ExecutionRequest) error {
+					receivedEventID = request.EventID
 					executorCalls.Add(1)
 
 					return nil
@@ -40,6 +43,7 @@ func TestScheduler_Start(t *testing.T) {
 		transition := receiveTransition(t, store.transitions)
 		require.Equal(t, eventrule.ExecutionStatusCompleted, transition.result.Status)
 		require.EqualValues(t, 1, executorCalls.Load())
+		require.Equal(t, expectedEventID, receivedEventID)
 
 		require.NoError(t, configured.Stop())
 	})

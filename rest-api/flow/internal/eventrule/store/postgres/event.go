@@ -13,6 +13,7 @@ import (
 	converterdao "github.com/NVIDIA/infra-controller/rest-api/flow/internal/converter/dao"
 	dbmodel "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 )
 
@@ -204,4 +205,14 @@ func validateEventPlan(
 	}
 
 	return nil
+}
+
+// GetEventType returns immutable event provenance for task dispatch routing.
+func (s *Store) GetEventType(ctx context.Context, id uuid.UUID) (eventrule.Type, error) {
+	var kind eventrule.Type
+	err := s.pg.DB.NewSelect().Table("events").Column("event_type").Where("id = ?", id).Scan(ctx, &kind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", eventrule.ErrEventNotFound
+	}
+	return kind, err
 }

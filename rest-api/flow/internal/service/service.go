@@ -104,6 +104,7 @@ type Service struct {
 	taskStore              taskstore.Store
 	operationRunStore      operationrundispatcher.Store
 	taskManager            taskmanager.Manager
+	leakageTaskSubmitter   leakdetection.TaskSubmitter
 	operationRunManager    operationrunmanager.Manager
 	operationRunDispatcher *operationrundispatcher.Dispatcher
 	eventRuleManager       *eventrulemanager.Manager
@@ -219,6 +220,7 @@ func New(ctx context.Context, c Config) (*Service, error) {
 		taskStore:              tskStore,
 		operationRunStore:      operationRunStore,
 		taskManager:            taskManager,
+		leakageTaskSubmitter:   taskManager,
 		operationRunManager:    operationRunManager,
 		eventRuleManager:       eventRuleManager,
 		eventIngestionPipeline: eventIngestionPipeline,
@@ -584,7 +586,7 @@ func (s *Service) startScheduler(ctx context.Context) error {
 	leakJob, err := leakdetection.New(
 		ctx,
 		&s.conf.DBConf,
-		s.taskManager,
+		s.leakageTaskSubmitter,
 		s.conf.ProviderRegistry,
 		leakDetectionPipeline,
 		s.conf.FlowConfig,

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/uptrace/bun"
 
@@ -14,17 +15,20 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
-	taskmanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/manager"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
 
-// Query core to get IDs of leaking machines and submit power-off tasks for each
+// TaskSubmitter admits trusted leakage shutdowns outside the ordinary conflict queue.
+type TaskSubmitter interface {
+	SubmitLeakageShutdown(context.Context, *operation.Request) ([]uuid.UUID, error)
+}
+
 func runLeakDetectionOneMachine(
 	ctx context.Context,
 	nicoClient nicoapi.Client,
-	taskMgr taskmanager.Manager,
+	taskMgr TaskSubmitter,
 	pool *cdb.Session,
 ) {
 	log.Info().Msg("Running leak detection for machines")
@@ -54,7 +58,7 @@ func runLeakDetectionOneMachine(
 func runLeakDetectionOneSwitch(
 	ctx context.Context,
 	nicoClient nicoapi.Client,
-	taskMgr taskmanager.Manager,
+	taskMgr TaskSubmitter,
 	pool *cdb.Session,
 ) {
 	log.Info().Msg("Running leak detection for switches")
@@ -83,7 +87,7 @@ func runLeakDetectionOneSwitch(
 func runLeakDetectionOne(
 	ctx context.Context,
 	nicoClient nicoapi.Client,
-	taskMgr taskmanager.Manager,
+	taskMgr TaskSubmitter,
 	pool *cdb.Session,
 ) {
 	log.Info().Msg("Running leak detection")
@@ -158,13 +162,14 @@ func reconcileLeakStatus(
 
 func submitPowerOffTask(
 	ctx context.Context,
-	taskMgr taskmanager.Manager,
+	taskMgr TaskSubmitter,
 	componentExternalId string,
 	componentType devicetypes.ComponentType,
 ) error {
 	info := &operations.PowerControlTaskInfo{
-		Operation: operations.PowerOperationForcePowerOff,
-		Forced:    true,
+		Operation:              operations.PowerOperationForcePowerOff,
+		Forced:                 true,
+		OverrideReadinessCheck: true,
 	}
 
 	raw, err := info.Marshal()
@@ -192,7 +197,7 @@ func submitPowerOffTask(
 		ConflictStrategy: operation.ConflictStrategyQueue,
 	}
 
-	taskIDs, err := taskMgr.SubmitTask(ctx, req)
+	taskIDs, err := taskMgr.SubmitLeakageShutdown(ctx, req)
 	if err != nil {
 		return fmt.Errorf("failed to submit task: %w", err)
 	}

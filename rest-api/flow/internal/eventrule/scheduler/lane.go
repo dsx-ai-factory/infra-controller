@@ -206,6 +206,7 @@ func (l *lane) dispatch(
 	} else {
 		req := eventexecutor.ExecutionRequest{
 			ExecutionID: execution.ID,
+			EventID:     execution.EventID,
 			Plan:        execution.Plan,
 		}
 		if err := executor.Execute(ctx, req); err != nil {

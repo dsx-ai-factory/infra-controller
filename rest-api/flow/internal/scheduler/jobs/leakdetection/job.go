@@ -16,7 +16,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/scheduler/types"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providerapi"
 	nicoprovider "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/providers/nico" //nolint
-	taskmanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/manager"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
@@ -68,7 +67,7 @@ type Job struct {
 func New(
 	ctx context.Context,
 	dbConf *cdb.Config,
-	taskMgr taskmanager.Manager,
+	taskMgr TaskSubmitter,
 	providers *providerapi.ProviderRegistry,
 	pipeline *eventingestion.Pipeline,
 	cfg config.Config,

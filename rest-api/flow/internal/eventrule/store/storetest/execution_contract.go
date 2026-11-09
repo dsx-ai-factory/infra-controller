@@ -19,6 +19,7 @@ import (
 // contract.
 type EventExecutionStore interface {
 	eventrule.EventPlanStore
+	GetEventType(context.Context, uuid.UUID) (eventrule.Type, error)
 	eventrule.ExecutionStore
 }
 
@@ -363,6 +364,11 @@ func testAtomicEventLifecycle(t *testing.T, factory ExecutionFactory) {
 	require.NotNil(t, created)
 	require.Equal(t, 1, created.Observations)
 	require.Equal(t, now, created.CreatedAt)
+	kind, err := store.GetEventType(ctx, created.ID)
+	require.NoError(t, err)
+	require.Equal(t, definition.Type, kind)
+	_, err = store.GetEventType(ctx, uuid.New())
+	require.ErrorIs(t, err, eventrule.ErrEventNotFound)
 
 	now = now.Add(time.Second)
 	duplicate, err := store.CommitEventPlan(ctx, definition, plan)

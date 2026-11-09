@@ -272,6 +272,9 @@ type ExecutionStore interface {
 // Store is the complete persistence boundary required by the event-rule
 // manager.
 type Store interface {
+	// GetEventType reads immutable event provenance without recording an observation.
+	GetEventType(context.Context, uuid.UUID) (Type, error)
+
 	RuleStore
 	BindingStore
 	EventPlanStore

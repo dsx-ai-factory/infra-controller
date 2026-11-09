@@ -332,3 +332,7 @@ func (m *postgresRetryTaskManager) callCount() int {
 
 	return m.calls
 }
+
+func (m *postgresRetryTaskManager) SubmitLeakageShutdown(ctx context.Context, req *operation.Request) ([]uuid.UUID, error) {
+	return m.SubmitTask(ctx, req)
+}

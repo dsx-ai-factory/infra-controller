@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/leakage"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
@@ -20,6 +21,12 @@ import (
 )
 
 func TestTaskExecutorExecute(t *testing.T) {
+	t.Run("idempotent target submission", testTaskExecutorSubmit)
+	t.Run("failure classification", testTaskExecutorClassifiesFailures)
+	t.Run("leakage routing", testTaskExecutorLeakageRouting)
+}
+
+func testTaskExecutorSubmit(t *testing.T) {
 	rackID := uuid.New()
 	componentID := uuid.New()
 	request := submitTaskExecutionRequest(t, rackID, componentID)
@@ -46,7 +53,7 @@ func TestTaskExecutorExecute(t *testing.T) {
 	require.Equal(t, submitted.IdempotencyKey, manager.requests[1].IdempotencyKey)
 }
 
-func TestTaskExecutorClassifiesFailures(t *testing.T) {
+func testTaskExecutorClassifiesFailures(t *testing.T) {
 	request := submitTaskExecutionRequest(t, uuid.New(), uuid.New())
 	tests := map[string]struct {
 		manager        *recordingTaskManager
@@ -142,9 +149,10 @@ func mustTestTime() time.Time {
 }
 
 type recordingTaskManager struct {
-	requests []*operation.Request
-	taskIDs  []uuid.UUID
-	err      error
+	requests        []*operation.Request
+	leakageRequests []*operation.Request
+	taskIDs         []uuid.UUID
+	err             error
 }
 
 func (m *recordingTaskManager) SubmitTask(
@@ -154,4 +162,72 @@ func (m *recordingTaskManager) SubmitTask(
 	m.requests = append(m.requests, request)
 
 	return m.taskIDs, m.err
+}
+
+func (m *recordingTaskManager) SubmitLeakageShutdown(_ context.Context, req *operation.Request) ([]uuid.UUID, error) {
+	m.leakageRequests = append(m.leakageRequests, req)
+	return m.taskIDs, m.err
+}
+
+type eventTypeReaderFunc func(context.Context, uuid.UUID) (eventrule.Type, error)
+
+func (f eventTypeReaderFunc) GetEventType(ctx context.Context, id uuid.UUID) (eventrule.Type, error) {
+	return f(ctx, id)
+}
+
+func testTaskExecutorLeakageRouting(t *testing.T) {
+	for _, tc := range []struct {
+		name                                         string
+		kind                                         eventrule.Type
+		op                                           operations.PowerOperation
+		override, preempt, readErr, missingSubmitter bool
+	}{
+		{name: "leakage force off uses dedicated admission", kind: leakage.TypeHardwareLeakDetected, op: operations.PowerOperationForcePowerOff, override: true, preempt: true},
+		{name: "other event force off uses ordinary admission", kind: "test.other", op: operations.PowerOperationForcePowerOff, override: true},
+		{name: "leakage power on keeps ordinary admission", kind: leakage.TypeHardwareLeakDetected, op: operations.PowerOperationPowerOn, override: true},
+		{name: "predecessor policy without override retains its payload", kind: leakage.TypeHardwareLeakDetected, op: operations.PowerOperationForcePowerOff},
+		{name: "provenance lookup failure submits nothing", op: operations.PowerOperationForcePowerOff, override: true, readErr: true},
+		{name: "missing leakage capability never falls back", kind: leakage.TypeHardwareLeakDetected, op: operations.PowerOperationForcePowerOff, override: true, missingSubmitter: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := submitTaskExecutionRequest(t, uuid.New(), uuid.New())
+			request.EventID = uuid.New()
+			plan := request.Plan.(*eventrule.SubmitTaskPlan)
+			info := operations.PowerControlTaskInfo{Operation: tc.op, OverrideReadinessCheck: tc.override}
+			raw, err := info.Marshal()
+			require.NoError(t, err)
+			plan.Operation = operation.Wrapper{Type: info.Type(), Code: info.CodeString(), Info: raw}
+			manager := &recordingTaskManager{taskIDs: []uuid.UUID{uuid.New()}}
+			executor := &TaskExecutor{manager: manager, events: eventTypeReaderFunc(func(_ context.Context, id uuid.UUID) (eventrule.Type, error) {
+				require.Equal(t, request.EventID, id)
+				if tc.readErr {
+					return "", errors.New("database unavailable")
+				}
+				return tc.kind, nil
+			})}
+			if tc.missingSubmitter {
+				executor.manager = struct{ TaskManager }{manager}
+			}
+			err = executor.Execute(t.Context(), request)
+			if tc.readErr || tc.missingSubmitter {
+				require.Error(t, err)
+				require.Empty(t, manager.requests)
+				require.Empty(t, manager.leakageRequests)
+				if tc.readErr {
+					require.ErrorIs(t, err, ErrRetryable)
+				} else {
+					require.ErrorIs(t, err, ErrTerminal)
+				}
+			} else {
+				require.NoError(t, err)
+				if tc.preempt {
+					require.Len(t, manager.leakageRequests, 1)
+					require.Empty(t, manager.requests)
+				} else {
+					require.Len(t, manager.requests, 1)
+					require.Empty(t, manager.leakageRequests)
+				}
+			}
+		})
+	}
 }

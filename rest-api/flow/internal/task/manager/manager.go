@@ -209,6 +209,15 @@ func (m *ManagerImpl) SubmitTask(
 	ctx context.Context,
 	req *operation.Request,
 ) ([]uuid.UUID, error) {
+	return m.submitTask(ctx, req, m.createAndExecuteTask, true)
+}
+
+func (m *ManagerImpl) submitTask(
+	ctx context.Context,
+	req *operation.Request,
+	create func(context.Context, *operation.Request, *rack.Rack) (uuid.UUID, error),
+	reuseWaiting bool,
+) ([]uuid.UUID, error) {
 	if req == nil {
 		return nil, fmt.Errorf("request is nil")
 	}
@@ -230,7 +239,7 @@ func (m *ManagerImpl) SubmitTask(
 			return nil, err
 		}
 		if existing != nil && (existing.IsScheduled() ||
-			existing.Status == taskcommon.TaskStatusWaiting) {
+			existing.Status.IsFinished() || (reuseWaiting && existing.Status == taskcommon.TaskStatusWaiting)) {
 			return []uuid.UUID{existing.ID}, nil
 		}
 	}
@@ -243,7 +252,7 @@ func (m *ManagerImpl) SubmitTask(
 	// Create and execute task for each rack.
 	var taskIDs []uuid.UUID
 	for _, targetRack := range rackMap {
-		taskID, err := m.createAndExecuteTask(ctx, req, targetRack)
+		taskID, err := create(ctx, req, targetRack)
 		if err != nil {
 			log.Error().
 				Err(err).
@@ -648,6 +657,9 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 				}
 			}
 
+			if task.Status.IsFinished() {
+				return nil
+			}
 			if task.IsScheduled() {
 				log.Info().
 					Str("task_id", task.ID.String()).
