@@ -25,7 +25,7 @@ use crate::{
     instance_type, inventory, ip, ipxe_template, jump, machine, machine_interfaces,
     machine_validation, managed_host, managed_switch, mlx, network_devices, network_security_group,
     network_segment, nvl_domain, nvl_logical_partition, nvl_partition, nvlink_nmxc_endpoints,
-    operating_system, os_image, ping, power_shelf, rack, redfish, resource_pool, rms, route_server,
+    operating_system, os_image, ping, power_shelf, rack, redfish, resource_pool, route_server,
     routing_profile, scout_stream, secrets, set, site_explorer, site_prefix, sku, spx_maintenance,
     spx_partition, ssh, switch, tenant, tenant_keyset, tpm_ca, trim_table, version, vpc,
     vpc_peering, vpc_prefix,
@@ -104,24 +104,6 @@ pub(crate) struct CliOptions {
         help = "Default to CLIENT_KEY_PATH environment variable or $HOME/.config/nico_api_cli.json file."
     )]
     pub(crate) client_key_path: Option<String>,
-
-    #[clap(long, env = "RMS_API_URL")]
-    #[clap(help = "RMS API URL. Default to RMS_API_URL environment variable.")]
-    pub(crate) rms_api_url: Option<String>,
-
-    #[clap(long, env = "RMS_ROOT_CA_PATH")]
-    #[clap(help = "RMS Root CA path. Default to RMS_ROOT_CA_PATH environment variable.")]
-    pub(crate) rms_root_ca_path: Option<String>,
-
-    #[clap(long, env = "RMS_CLIENT_CERT_PATH")]
-    #[clap(
-        help = "RMS client certificate path. Default to RMS_CLIENT_CERT_PATH environment variable."
-    )]
-    pub(crate) rms_client_cert_path: Option<String>,
-
-    #[clap(long, env = "RMS_CLIENT_KEY_PATH")]
-    #[clap(help = "RMS client key path. Default to RMS_CLIENT_KEY_PATH environment variable.")]
-    pub(crate) rms_client_key_path: Option<String>,
 
     #[clap(short, long, num_args(0..), default_value = "0")]
     pub(crate) debug: u8,
@@ -381,8 +363,6 @@ pub(crate) enum CliCommand {
     Redfish(redfish::RedfishAction),
     #[clap(about = "Resource pool handling", subcommand, visible_alias = "rp")]
     ResourcePool(resource_pool::Cmd),
-    #[clap(about = "RMS Actions")]
-    Rms(rms::args::RmsAction),
     #[clap(about = "Route server handling", subcommand)]
     RouteServer(route_server::Cmd),
     #[clap(about = "Inspect site-configured named routing profiles", subcommand)]

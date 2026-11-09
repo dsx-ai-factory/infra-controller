@@ -32,7 +32,6 @@ hardware:
   - component-manager
   - attestation
   - redfish
-  - rms
   - mlx
   - scout-stream
   - tpm-ca

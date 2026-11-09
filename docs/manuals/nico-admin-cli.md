@@ -43,10 +43,6 @@ is absent, it uses the complete config-file pair, then the
 | Server root CA | `--root-ca-path` | `ROOT_CA_PATH` | `root_ca_path` | — |
 | Client cert | `--client-cert-path` | `CLIENT_CERT_PATH` | `client_cert_path` | see [Client-cert fallbacks](#client-cert-fallbacks) |
 | Client key | `--client-key-path` | `CLIENT_KEY_PATH` | `client_key_path` | same chain as client cert |
-| RMS API URL | `--rms-api-url` | `RMS_API_URL` | — | — |
-| RMS root CA | `--rms-root-ca-path` | `RMS_ROOT_CA_PATH` | `rms_root_ca_path` | — |
-| RMS client cert | `--rms-client-cert-path` | `RMS_CLIENT_CERT_PATH` | — | — |
-| RMS client key | `--rms-client-key-path` | `RMS_CLIENT_KEY_PATH` | — | — |
 
 ### Config file
 
@@ -58,8 +54,7 @@ Instead of passing flags every time, create
   "api_url": "https://nico-api.example.com:1079",
   "root_ca_path": "/etc/nico/certs/ca.crt",
   "client_cert_path": "/etc/nico/certs/client.crt",
-  "client_key_path": "/etc/nico/certs/client.key",
-  "rms_root_ca_path": "/etc/nico/certs/rms-ca.crt"
+  "client_key_path": "/etc/nico/certs/client.key"
 }
 ```
 

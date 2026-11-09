@@ -12,7 +12,7 @@ For the mTLS certificate lifecycle and server-side auth configuration, see
 
 | Domain | Commands |
 |--------|----------|
-| [Hardware](./hardware.md) | Machines, BMC, DPUs, firmware, attestation, Redfish, RMS, MLX |
+| [Hardware](./hardware.md) | Machines, BMC, DPUs, firmware, attestation, Redfish, MLX |
 | [Network](./network.md) | VPCs, peerings, prefixes, segments, security groups, IB/NVLink, IP/domain lookups |
 | [Tenant](./tenant.md) | Tenants, instances, compute allocations, expected-inventory, OS images, iPXE, extension services |
 | [Admin](./admin.md) | CLI and system utilities |
