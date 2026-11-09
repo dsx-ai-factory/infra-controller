@@ -330,6 +330,9 @@ enabled unless a diagnosed condition requires an approved override.
 Inspect the stage reports for failed or skipped work, verify installed
 firmware and any required activation, and complete the platform's canary
 acceptance checks. A task-creation response alone does not clear the canary.
+For each affected rack profile with switches, confirm that the candidate SOT
+contains an NVOS image whose firmware type matches `rack_hardware_class`.
+Use `prod` when `rack_hardware_class` is omitted.
 If any check fails, stop here and retain the previous ingestion SOT.
 
 ### 2. Promote the ingestion SOT
@@ -348,6 +351,10 @@ during the change: an ingestion already using the previous SOT needs separate
 verification. The [rack compute-tray pre-ingestion path](pre-ingestion.md#rack-compute-trays)
 and automatic rack maintenance consume the profile's SOT; changing the source
 does not retarget firmware jobs already submitted to the backend.
+
+From promotion until each rack's batch, coordinate or track ordinary
+reprovisioning of existing racks. Include any resulting firmware changes in
+the rollout record.
 
 Complete this step **before expanding the rollout**. Updating the ingestion
 default keeps newly admitted hardware aligned with the production target;
