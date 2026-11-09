@@ -10,7 +10,7 @@ This directory contains multi-stage Dockerfiles optimized for production deploym
 ## Features
 
 ### Multi-Stage Builds
-- **Build Stage**: `golang:1.26.4` - Full Go toolchain for compilation
+- **Build Stage**: `golang:1.26.10` - Full Go toolchain for compilation
 - **Runtime Stage**: `nvcr.io/nvidia/distroless/go:v4.1.8` - Minimal distroless runtime environment
 
 ### Optimizations
