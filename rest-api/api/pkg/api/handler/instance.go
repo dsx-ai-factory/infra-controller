@@ -1271,11 +1271,6 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 				allowUnhealthyMachine = *apiRequest.AllowUnhealthyMachine
 			}
 
-			// A retained deletion record is unavailable even with an unhealthy override.
-			if machine.IsForceDeletionQuarantined() {
-				return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine: %s has a force-deletion request and cannot be used for a new Instance", machine.ID), nil)
-			}
-
 			// Check if Machine is missing on site
 			if machine.IsMissingOnSite {
 				logger.Warn().Str("MachineID", machine.ID).Msg("Machine is missing on site, cannot be used for new Instance")

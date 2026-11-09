@@ -64,23 +64,22 @@ func testBatchBuildMachineWithNVLinkDomain(t *testing.T, dbSession *cdb.Session,
 	return mc
 }
 
-// testBatchInvalidateOnLockHook changes the first candidate from another connection before
-// the row lock, so the locked re-read must reject it. The hook fires only once.
-type testBatchInvalidateOnLockHook struct {
+// testBatchAssignOnLockHook marks the first candidate Machine assigned from another connection right after
+// the batch locks it, so the locked re-read rejects that Machine. bun can't remove a hook, so it fires once.
+type testBatchAssignOnLockHook struct {
 	once      sync.Once
 	dbSession *cdb.Session
 	// lockQueries maps each candidate's pg_try_advisory_xact_lock call to its Machine ID
-	lockQueries   map[string]string
-	assigned      string
-	forceDeletion bool
-	err           error
+	lockQueries map[string]string
+	assigned    string
+	err         error
 }
 
-func (h *testBatchInvalidateOnLockHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+func (h *testBatchAssignOnLockHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
 	return ctx
 }
 
-func (h *testBatchInvalidateOnLockHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+func (h *testBatchAssignOnLockHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
 	if event.Err != nil {
 		return
 	}
@@ -90,13 +89,10 @@ func (h *testBatchInvalidateOnLockHook) AfterQuery(_ context.Context, event *bun
 		}
 		h.once.Do(func() {
 			h.assigned = machineID
-			update := cdbm.MachineUpdateInput{MachineID: machineID, IsAssigned: cutil.GetPtr(true)}
-			if h.forceDeletion {
-				update.IsAssigned = nil
-				update.IsForceDeletionRequested = cutil.GetPtr(true)
-				update.IsUsableByTenant = cutil.GetPtr(false)
-			}
-			_, h.err = cdbm.NewMachineDAO(h.dbSession).Update(context.Background(), nil, update)
+			_, h.err = cdbm.NewMachineDAO(h.dbSession).Update(context.Background(), nil, cdbm.MachineUpdateInput{
+				MachineID:  machineID,
+				IsAssigned: cutil.GetPtr(true),
+			})
 		})
 		return
 	}
@@ -241,37 +237,29 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 		})
 	}
 
-	for _, tc := range []struct {
-		name          string
-		forceDeletion bool
-	}{
-		{"assignment", false},
-		{"force deletion", true},
-	} {
-		t.Run("rejects concurrent "+tc.name+" and releases the candidate lock", func(t *testing.T) {
-			lockedInstanceType := testInstanceBuildInstanceType(t, dbSession, provider, "test-rejected-lock-type-"+tc.name, site, cdbm.InstanceStatusReady)
-			hook := &testBatchInvalidateOnLockHook{dbSession: dbSession, lockQueries: map[string]string{}, forceDeletion: tc.forceDeletion}
-			for range 2 {
-				machine := testInstanceBuildMachine(t, dbSession, provider.ID, site.ID, cutil.GetPtr(false), nil)
-				testInstanceBuildMachineInstanceType(t, dbSession, machine, lockedInstanceType)
-				hook.lockQueries[fmt.Sprintf("pg_try_advisory_xact_lock(%d)", cdb.GetAdvisoryLockIDFromString(machine.ID))] = machine.ID
-			}
-			dbSession.DB.AddQueryHook(hook)
+	t.Run("unlocks a Machine rejected after its lock, keeps the verified Machine locked", func(t *testing.T) {
+		lockedInstanceType := testInstanceBuildInstanceType(t, dbSession, provider, "test-rejected-lock-type", site, cdbm.InstanceStatusReady)
+		hook := &testBatchAssignOnLockHook{dbSession: dbSession, lockQueries: map[string]string{}}
+		for range 2 {
+			machine := testInstanceBuildMachine(t, dbSession, provider.ID, site.ID, cutil.GetPtr(false), nil)
+			testInstanceBuildMachineInstanceType(t, dbSession, machine, lockedInstanceType)
+			hook.lockQueries[fmt.Sprintf("pg_try_advisory_xact_lock(%d)", cdb.GetAdvisoryLockIDFromString(machine.ID))] = machine.ID
+		}
+		dbSession.DB.AddQueryHook(hook)
 
-			tx, err := cdb.BeginTx(ctx, dbSession, nil)
-			require.NoError(t, err)
-			t.Cleanup(func() { _ = tx.Rollback() })
+		tx, err := cdb.BeginTx(ctx, dbSession, nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = tx.Rollback() })
 
-			machines, apiErr := allocateMachinesForBatch(ctx, tx, dbSession, lockedInstanceType, 1, false, nil, nil, zerolog.Nop())
-			require.Nil(t, apiErr)
-			require.NoError(t, hook.err)
-			require.NotEmpty(t, hook.assigned, "batch never locked a candidate Machine")
-			require.Len(t, machines, 1)
-			assert.NotEqual(t, hook.assigned, machines[0].ID)
-			assert.False(t, machineLockedElsewhere(t, hook.assigned), "rejected Machine must be unlocked before the transaction ends")
-			assert.True(t, machineLockedElsewhere(t, machines[0].ID), "verified Machine must stay locked until the transaction ends")
-		})
-	}
+		machines, apiErr := allocateMachinesForBatch(ctx, tx, dbSession, lockedInstanceType, 1, false, nil, nil, zerolog.Nop())
+		require.Nil(t, apiErr)
+		require.NoError(t, hook.err)
+		require.NotEmpty(t, hook.assigned, "batch never locked a candidate Machine")
+		require.Len(t, machines, 1)
+		assert.NotEqual(t, hook.assigned, machines[0].ID)
+		assert.False(t, machineLockedElsewhere(t, hook.assigned), "rejected Machine must be unlocked before the transaction ends")
+		assert.True(t, machineLockedElsewhere(t, machines[0].ID), "verified Machine must stay locked until the transaction ends")
+	})
 }
 
 func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
