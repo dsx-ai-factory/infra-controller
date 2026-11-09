@@ -83,6 +83,8 @@ extraEnv: {}
 
 # A separate, client-only identity; the serving certificate is not used for admission.
 clientCertificate:
+  # -- Override only the client issuer; empty uses global.certificate.issuerRef.
+  issuerRef: {}
   enabled: true
   secretName: site-manager-client-tls
   duration: 2160h

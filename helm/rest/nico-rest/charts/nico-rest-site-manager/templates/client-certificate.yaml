@@ -19,5 +19,5 @@ spec:
   uris:
     - {{ include "nico-rest-site-manager.clientIdentity" . | quote }}
   issuerRef:
-    {{- toYaml .Values.global.certificate.issuerRef | nindent 4 }}
+    {{- toYaml (.Values.clientCertificate.issuerRef | default .Values.global.certificate.issuerRef) | nindent 4 }}
 {{- end }}

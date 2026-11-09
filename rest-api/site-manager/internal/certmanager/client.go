@@ -19,6 +19,8 @@ import (
 
 	commontls "github.com/NVIDIA/infra-controller/rest-api/common/pkg/tls"
 	"github.com/pkg/errors"
+	"github.com/rs/zerolog/log"
+	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
@@ -86,7 +88,10 @@ func NewClient(ctx context.Context, o Options) (*Client, error) {
 		if o.ClientCertPath == "" || o.ClientKeyPath == "" {
 			return nil, fmt.Errorf("both client certificate and key paths are required")
 		}
-		dynamic, err := commontls.NewDynTLSCfg(o.ClientKeyPath, o.ClientCertPath, o.CAPath)
+		logger := logrus.New()
+		logger.SetOutput(io.Discard)
+		logger.AddHook(tlsLogHook{logger: log.Logger})
+		dynamic, err := commontls.NewDynTLSCfg(o.ClientKeyPath, o.ClientCertPath, o.CAPath, logger)
 		if err != nil {
 			return nil, errors.Wrap(err, "configure certificate manager client identity")
 		}

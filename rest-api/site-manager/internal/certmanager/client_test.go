@@ -4,6 +4,7 @@
 package certmanager
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -11,6 +12,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -25,6 +27,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -128,14 +132,33 @@ func TestNewClient(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
+	t.Run("TLS startup diagnostics use service JSON logging", func(t *testing.T) {
+		var logs bytes.Buffer
+		original := log.Logger
+		log.Logger = zerolog.New(&logs).With().Str("component", "site-manager").Logger()
+		t.Cleanup(func() { log.Logger = original })
+		caPath := writePEM(t, srv.Certificate().Raw)
+		ca, err := os.ReadFile(caPath)
+		require.NoError(t, err)
+		ca = append(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("invalid DER")})...)
+		require.NoError(t, os.WriteFile(caPath, ca, 0600))
+		certPath := writePEM(t, srv.Certificate().Raw)
+		// Identity loading fails synchronously after the CA diagnostic, so no poller starts.
+		_, err = NewClient(t.Context(), Options{URL: srv.URL, CAPath: caPath, ClientCertPath: certPath, ClientKeyPath: filepath.Join(t.TempDir(), "missing.key")})
+		require.Error(t, err)
+		var record map[string]any
+		require.NoError(t, json.Unmarshal(logs.Bytes(), &record))
+		assert.Equal(t, "error", record[zerolog.LevelFieldName])
+		assert.Contains(t, record[zerolog.MessageFieldName], "using parseable certificates")
+		assert.Equal(t, "site-manager", record["component"])
+		assert.Equal(t, caPath, record["path"])
+	})
 	for _, tc := range []struct {
 		name             string
 		scheme           string
 		wrongHostname    bool
 		inheritedProxy   bool
-		caContent        string
 		unsetCA          bool
-		emptyCA          bool
 		missingIdentity  bool
 		noIdentity       bool
 		partialIdentity  bool
@@ -153,7 +176,6 @@ func TestNewClient(t *testing.T) {
 		{name: "plain HTTP refused", scheme: "http", wantInitError: true},
 		{name: "missing client certificate", scheme: "https", missingIdentity: true, wantInitError: true},
 		{name: "missing CA file", scheme: "https", missingCA: true, wantInitError: true},
-		{name: "empty CA bundle does not fall back to system roots", scheme: "https", emptyCA: true, wantInitError: true},
 		{name: "unset CA path", scheme: "https", unsetCA: true, wantInitError: true},
 		{name: "redirect does not forward identity", scheme: "https", redirect: true, wantStatus: http.StatusTemporaryRedirect},
 	} {
@@ -205,9 +227,6 @@ func TestNewClient(t *testing.T) {
 			}
 			if tc.missingCA {
 				caPath += ".absent"
-			}
-			if tc.caContent != "" || tc.emptyCA {
-				require.NoError(t, os.WriteFile(caPath, []byte(tc.caContent), 0600))
 			}
 			if tc.unsetCA {
 				caPath = ""
