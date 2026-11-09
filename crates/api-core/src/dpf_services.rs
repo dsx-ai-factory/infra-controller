@@ -1123,7 +1123,12 @@ pub(crate) fn doca_weave_flow_controller_service(
                     "image": {
                         "repository": cfg.docker_repo_url,
                         "tag": cfg.docker_image_tag,
-                    }
+                    },
+                    // The flavor renders this per-DPU file through the chart's existing OVS mount.
+                    "env": [{
+                        "name": "UNDERLAY_CONFIG_FILE",
+                        "value": carbide_dpf::types::WEAVE_UNDERLAY_CONFIG_PATH,
+                    }]
                 }
             }
         }
@@ -2698,6 +2703,11 @@ mod tests {
             "flow-controller image must not use a top-level image key"
         );
 
+        assert_eq!(
+            helm_values["weaveFlowController"]["containers"]["weaveFlowController"]["env"],
+            serde_json::json!([{"name": "UNDERLAY_CONFIG_FILE", "value": carbide_dpf::types::WEAVE_UNDERLAY_CONFIG_PATH}])
+        );
+
         let config = svc.config_values.expect("config_values must be set");
         assert_eq!(
             config["weaveFlowController"]["enabled"],
@@ -2726,6 +2736,26 @@ mod tests {
         assert_eq!(
             interfaces.as_slice(),
             weave_flow_controller_underlay_interfaces().as_slice()
+        );
+    }
+
+    #[test]
+    fn weave_flow_controller_service_allows_staged_underlay_migration() {
+        let mut config = default_doca_weave_flow_controller_service();
+        // Installed DPUs can keep the ConfigMap path until their new flavor file is installed.
+        let env = serde_json::json!([
+            {"name": "UNDERLAY_CONFIG_FILE", "value": "/var/lib/dpf/weave/flow-controller/underlay-config.yaml"},
+            {"name": "LOG_LEVEL", "value": "debug"},
+        ]);
+        config.extra_helm_values = Some(serde_json::Map::from_iter([(
+            "weaveFlowController".to_string(),
+            serde_json::json!({"containers": {"weaveFlowController": {"env": env}}}),
+        )]));
+        let service = doca_weave_flow_controller_service(&config, None);
+        assert_eq!(
+            service.helm_values.unwrap()["weaveFlowController"]["containers"]["weaveFlowController"]
+                ["env"],
+            env
         );
     }
 

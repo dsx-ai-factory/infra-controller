@@ -722,6 +722,7 @@ pub fn flavor_bf4_astra(
         extra_bfcfg_parameters,
         enable_delay_host_init,
         true,
+        None,
     )
 }
 
@@ -741,16 +742,18 @@ pub(crate) fn flavor_bf4_astra_with_topology(
     extra_bfcfg_parameters: &[String],
     enable_delay_host_init: bool,
     partial_multiplane_enabled: bool,
+    weave_underlay: Option<&serde_json::Value>,
 ) -> Result<DPUFlavorTemplate, crate::error::DpfError> {
     reject_template_delimiters(extra_bfcfg_parameters)?;
+    let mut config_files =
+        get_bf4_astra_config_files(proxy, dhcp_acl_interfaces, partial_multiplane_enabled)?;
+    if let Some(underlay) = weave_underlay {
+        config_files.push(weave_underlay_config_file(underlay)?);
+    }
     let flavor_spec = DpuFlavorSpec {
         bfcfg_parameters: (!extra_bfcfg_parameters.is_empty())
             .then(|| extra_bfcfg_parameters.to_vec()),
-        config_files: Some(get_bf4_astra_config_files(
-            proxy,
-            dhcp_acl_interfaces,
-            partial_multiplane_enabled,
-        )?),
+        config_files: Some(config_files),
         containerd_config: Some(DpuFlavorContainerdConfig {
             registry_endpoint: None,
             sandbox_image: None,
@@ -791,6 +794,56 @@ pub(crate) fn flavor_bf4_astra_with_topology(
         spec: flavor_spec,
     };
     flavor_template_from_flavor(&flavor)
+}
+
+/// Keep site-wide Weave settings but render PCI identities from this DPU's validated placement.
+fn weave_underlay_config_file(
+    underlay: &serde_json::Value,
+) -> Result<DpuFlavorConfigFiles, crate::error::DpfError> {
+    // Parse JSON text as YAML to preserve scalar numbers even when serde_json's
+    // arbitrary_precision feature is enabled by the production API dependency graph.
+    let mut settings: serde_yaml::Value =
+        serde_yaml::from_str(&underlay.to_string()).map_err(|error| {
+            crate::error::DpfError::ConfigError(format!("invalid Weave underlay: {error}"))
+        })?;
+    let interfaces = settings
+        .as_mapping_mut()
+        .and_then(|settings| settings.remove(serde_yaml::Value::String("interfaces".to_string())))
+        .ok_or_else(|| {
+            crate::error::DpfError::ConfigError("Weave underlay interfaces are missing".to_string())
+        })?;
+    let mut raw = serde_yaml::to_string(&settings).map_err(|error| {
+        crate::error::DpfError::ConfigError(format!("failed to serialize Weave underlay: {error}"))
+    })?;
+    raw.push_str("interfaces:\n");
+    raw.push_str(indoc::indoc! {r#"
+        {{ if index . "astra_hardware_placement" }}{{ range .astra_hardware_placement }}{{ if not .hw_plane }}  - pciAddress: "{{ .pci_address }}"
+            underlayInterface: "brcx-{{ .group_id }}"
+            overlayDHCPInterface: "{{ .group_id }}"
+            dhcpBridgeName: "br-dhcp-{{ .group_id }}"
+            dropBridgeName: "br-drop-{{ .group_id }}"
+        {{ end }}{{ end }}{{ else }}"#});
+    for line in serde_yaml::to_string(&interfaces)
+        .map_err(|error| {
+            crate::error::DpfError::ConfigError(format!(
+                "failed to serialize Weave interfaces: {error}"
+            ))
+        })?
+        .lines()
+    {
+        raw.push_str("  ");
+        raw.push_str(line);
+        raw.push('\n');
+    }
+    raw.push_str("{{ end }}\n");
+    Ok(DpuFlavorConfigFiles {
+        path: crate::types::WEAVE_UNDERLAY_CONFIG_PATH.to_string(),
+        operation: Some(DpuFlavorConfigFilesOperation::Override),
+        permissions: Some("0644".to_string()),
+        raw: Some(raw),
+        content_from: None,
+        r#type: None,
+    })
 }
 
 /// Default grub kernel parameters for the BF4 flavor.
@@ -2923,6 +2976,73 @@ export -f run_stage ovs-vsctl
             .into_iter()
             .filter_map(|file| file.raw.map(|raw| (file.path, raw)))
             .collect()
+    }
+
+    #[test]
+    fn weave_underlay_uses_per_dpu_placement_and_preserves_defaults() {
+        use crate::astra_placement::{ports_for_dpu, test_machine};
+        let defaults = serde_json::json!({
+            "nicIDType": "mac", "overlayNetworkPrefixLength": 11,
+            "softwarePlaneIDBitLength": 8, "railIDBitLength": 4,
+            "interfaces": [{"pciAddress": "0005:06:00.0", "underlayInterface": "brcx-A56",
+                "overlayDHCPInterface": "A56", "dhcpBridgeName": "br-dhcp-A56", "dropBridgeName": "br-drop-A56"}],
+        });
+        let template = flavor_bf4_astra_with_topology(
+            "test",
+            &None,
+            64,
+            None,
+            None,
+            &[],
+            false,
+            false,
+            Some(&defaults),
+        )
+        .unwrap();
+        let values = serde_json::json!({"server_name": "", "dpu_device_underlay_rows": [{"cerebro_ifname": "", "ip": ""}]});
+        let files = render_astra_files(&template.spec.template, &values);
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&files[crate::types::WEAVE_UNDERLAY_CONFIG_PATH]).unwrap();
+        assert_eq!(yaml["overlayNetworkPrefixLength"].as_u64(), Some(11));
+        assert_eq!(yaml["softwarePlaneIDBitLength"].as_u64(), Some(8));
+        assert_eq!(yaml["railIDBitLength"].as_u64(), Some(4));
+        let rendered: serde_json::Value =
+            serde_yaml::from_str(&files[crate::types::WEAVE_UNDERLAY_CONFIG_PATH]).unwrap();
+        assert_eq!(rendered, defaults);
+        for (serial, offset) in [("dpu-one", 3), ("dpu-two", 20)] {
+            let machine = test_machine(serial, offset);
+            let placement = ports_for_dpu(&machine, serial).unwrap().unwrap();
+            let values = serde_json::json!({"server_name": "", "dpu_device_underlay_rows": [{"cerebro_ifname": "", "ip": ""}], "astra_hardware_placement": placement});
+            let files = render_astra_files(&template.spec.template, &values);
+            let mut rendered: serde_json::Value =
+                serde_yaml::from_str(&files[crate::types::WEAVE_UNDERLAY_CONFIG_PATH]).unwrap();
+            let interfaces = rendered
+                .as_object_mut()
+                .unwrap()
+                .remove("interfaces")
+                .unwrap();
+            let expected = placement
+                .iter()
+                .filter(|port| port.hw_plane == 0)
+                .map(|port| {
+                    serde_json::json!({
+                        "pciAddress": port.pci_address,
+                        "underlayInterface": format!("brcx-{}", port.group_id),
+                        "overlayDHCPInterface": port.group_id,
+                        "dhcpBridgeName": format!("br-dhcp-{}", port.group_id),
+                        "dropBridgeName": format!("br-drop-{}", port.group_id),
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(expected.len(), 8);
+            assert_eq!(interfaces, serde_json::json!(expected));
+            let mut expected_settings = defaults.clone();
+            expected_settings
+                .as_object_mut()
+                .unwrap()
+                .remove("interfaces");
+            assert_eq!(rendered, expected_settings);
+        }
     }
 
     #[test]
@@ -5145,7 +5265,7 @@ done
         value_scenarios!(
             run = |(p, enabled)| {
                 let template = flavor_bf4_astra_with_topology(
-                    "astra-ns", &p, 128, None, None, &[], true, enabled,
+                    "astra-ns", &p, 128, None, None, &[], true, enabled, None,
                 ).unwrap();
                 let spec = flavor_spec_from_template(&template);
                 assert_eq!(

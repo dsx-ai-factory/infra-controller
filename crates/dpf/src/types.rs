@@ -73,6 +73,8 @@ pub const DOCA_WEAVE_DHCP_AGENT_PF_TOTAL_SF: u32 = 8;
 /// Additional PF scalable functions (SFs) reserved for Astra capacity headroom.
 pub const PF_TOTAL_SF_BF4_ASTRA_FUDGE: u32 = 4;
 pub const DOCA_WEAVE_FLOW_CONTROLLER_SERVICE_NAME: &str = "doca-weave-flow-controller";
+/// Per-DPU underlay configuration, exposed by the official Weave chart's OVS mount.
+pub const WEAVE_UNDERLAY_CONFIG_PATH: &str = "/etc/openvswitch/nico-weave-underlay.yaml";
 pub const DOCA_XPLANE_SERVICE_NAME: &str = "doca-xplane";
 /// Hash-stable legacy VF population used by default DPF flavors and SDK initialization.
 pub const DEFAULT_DPU_NUM_OF_VFS: u32 = 16;

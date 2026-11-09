@@ -909,6 +909,12 @@ async fn create_dpu_flavor_template<R: DpuFlavorTemplateRepository>(
         &config.extra_bfcfg_parameters,
         config.enable_delay_host_init,
         !config.partial_multiplane_disabled,
+        config.services.iter().find_map(|service| {
+            service
+                .config_values
+                .as_ref()
+                .and_then(|values| values.pointer("/weaveFlowController/underlayConfigMapData"))
+        }),
     )?;
     let name = template.unique_name(&config.flavor_name)?;
     template.metadata.name = Some(name.clone());

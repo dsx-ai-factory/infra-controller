@@ -700,6 +700,44 @@ async fn conditional_dpu_delete_rejects_uid_mismatch() {
     );
 }
 
+/// Weave's site settings must reach the per-DPU flavor, not only its shared ConfigMap.
+#[tokio::test]
+async fn weave_underlay_is_included_in_astra_flavor() {
+    let mock = InitializationMock::default();
+    let sdk = seed_pre_topology_scoped_astra(&mock).await;
+    let mut config = InitDpfResourcesConfig {
+        deployment_scoped_service_interfaces: true,
+        ..unscoped_astra_config()
+    };
+    config.services = vec![ServiceDefinition {
+        config_values: Some(
+            serde_json::json!({"weaveFlowController": {"underlayConfigMapData": {
+                "nicIDType": "mac", "railIDBitLength": 5,
+                "interfaces": [{"pciAddress": "0005:06:00.0"}],
+            }}}),
+        ),
+        ..ServiceDefinition::new(
+            DOCA_WEAVE_FLOW_CONTROLLER_SERVICE_NAME,
+            "repo",
+            "chart",
+            "1",
+        )
+    }];
+    sdk.create_initialization_objects(&config).await.unwrap();
+    let templates = mock.flavor_templates.iter().collect::<Vec<_>>();
+    assert_eq!(
+        templates.len(),
+        2,
+        "underlay settings must produce a new immutable template"
+    );
+    let templates = templates
+        .iter()
+        .filter(|template| template.spec.template.contains(WEAVE_UNDERLAY_CONFIG_PATH))
+        .collect::<Vec<_>>();
+    assert_eq!(templates.len(), 1);
+    assert!(templates[0].spec.template.contains("railIDBitLength: 5"));
+}
+
 #[tokio::test]
 async fn test_create_initialization_objects() {
     let mock = InitializationMock::default();
