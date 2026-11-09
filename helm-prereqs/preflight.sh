@@ -31,14 +31,16 @@
 #                                Core VIP validation also needs python3 + PyYAML;
 #                                --skip-vault also a TOML parser (3.11 tomllib or tomli)
 #   3. values/metallb-config.yaml: YAML, pools, advertisement mode, ASNs
-#   3b. Core values (--skip-vault): nothing in them makes nico-api need a Vault
+#   3b. Site values completeness: no placeholder or empty required value
+#   3c. Core values (--skip-vault): nothing in them makes nico-api need a Vault
 #                                client: [secrets] in the site TOML, no Transit
 #                                KMS provider, cert-manager flags, no issuer
 #                                reference to vault-nico-issuer (check-vault-free.py);
-#                                blocking: -y cannot skip these findings
+#                                blocking: --ignore-preflight-errors cannot skip these findings
+#   3d. DPF VIP and Kea hook IPs: IPv4-only checks of the Core values
 #   4. Cluster reachability:     kubectl can reach the API server
 #   4e. --skip-vault legacy markers: PSM/NSM hook resources whose cleanup needs
-#                                Vault (blocking: -y cannot skip this finding)
+#                                Vault (blocking: --ignore-preflight-errors cannot skip this finding)
 #   4f. --skip-vault consumers:    Deployments and Certificates that still reference
 #                                Vault and that this run does not redeploy keep the
 #                                Vault resources in nico-prereqs (warning)
@@ -1061,7 +1063,7 @@ if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3b. --skip-vault: nothing in the Core values may make nico-api build a Vault
+# 3c. --skip-vault: nothing in the Core values may make nico-api build a Vault
 #     client. setup.sh sets global.certificate.issuerRef (site-issuer, kind
 #     ClusterIssuer, group cert-manager.io), both cert-manager flags, and
 #     nico-api.vault.enabled=false; the checker
@@ -1072,7 +1074,7 @@ fi
 #     nico-api.vaultClusterInfo. It needs python3 with PyYAML and a TOML
 #     parser (3.11 tomllib or the tomli package): the [secrets] section must
 #     be read, so a missing parser is an error here, not a warning.
-#     Findings block setup even with -y: continuing would drop the Vault
+#     Findings block setup even with --ignore-preflight-errors: continuing would drop the Vault
 #     ConfigMap and Secrets from nico-prereqs in phase 5 and crash-loop
 #     nico-api until the phase 6 --wait times out, taking an existing
 #     Vault site down.
@@ -1122,7 +1124,7 @@ _legacy_flow_manager_markers() {
 # through vaultroottoken and vault-0, so it needs Vault. Report the markers
 # here, before any mutation, instead of stopping setup after phase 6; the
 # cleanup script keeps its own guard as the backstop. Needs the cluster.
-# Blocking: -y cannot skip it, because the run would mutate the cluster
+# Blocking: --ignore-preflight-errors cannot skip it, because the run would mutate the cluster
 # and then stop on the same markers after the Core phase.
 _check_skip_vault_legacy_flow_managers() {
     local _markers _rc=0
@@ -1227,7 +1229,7 @@ if [[ -f "${_SITE_VALUES_CFG}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3c. IPv4-only DPF VIP and Kea DHCP hook IP validation.
+# 3d. IPv4-only DPF VIP and Kea DHCP hook IP validation.
 #     External Service VIPs and MetalLB pool syntax are checked above for both families.
 # ---------------------------------------------------------------------------
 _ip2int() { local a b c d; IFS=. read -r a b c d <<<"$1"; echo $(( (a<<24)+(b<<16)+(c<<8)+d )); }

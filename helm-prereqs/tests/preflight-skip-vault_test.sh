@@ -8,7 +8,7 @@
 # the values-file label, turning a missing python3 or an unusable file into
 # one error; the running-Vault warning and the three-node requirement follow
 # INSTALL_VAULT; legacy PSM/NSM hook resources make --skip-vault an error
-# before any mutation. Both --skip-vault errors block setup even with -y.
+# before any mutation. Both --skip-vault errors block setup even with --ignore-preflight-errors.
 # Vault consumers that this run does not redeploy (Core with --skip-core, Flow
 # and the site-agent with --skip-rest, RMS with --skip-rms, Certificates outside
 # those releases) are listed in a warning that the Vault resources are kept.
@@ -134,25 +134,23 @@ result="$(run_check clean "${TEST_TMP_DIR}/no-python")"
     || fail "missing python3 was not reported as the tool requirement error:" "${result}"
 [[ ! -s "${FAKE_PYTHON_LOG}" ]] || fail "the checker ran without python3 on PATH"
 
-# The findings are blocking: the real output section stops even with -y and says so generically.
+# The findings are blocking: the real output section stops even with --ignore-preflight-errors and says so generically.
 sed -n '/^# Output and prompts/,$p' "${PREFLIGHT_SH}" > "${TEST_TMP_DIR}/output.sh"
 blocking_rc=0
 blocking_out="$(
     # shellcheck disable=SC2034 # Read by the sourced output section.
-    _SOURCED=true AUTO_YES=true _NICO_REST_ENABLED=false
+    _SOURCED=true AUTO_YES=true IGNORE_PREFLIGHT_ERRORS=true _NICO_REST_ENABLED=false
     ERRORS=()
     WARNINGS=()
     BLOCKING_ERRORS=('site/core-values.yaml: the site TOML has no [secrets] section')
     # shellcheck disable=SC1091 # Generated from preflight.sh above.
     source "${TEST_TMP_DIR}/output.sh"
 )" || blocking_rc=$?
-[[ "${blocking_rc}" -ne 0 ]] || fail "preflight continued past a --skip-vault blocking error with -y:" "${blocking_out}"
+[[ "${blocking_rc}" -ne 0 ]] || fail "preflight continued past a --skip-vault blocking error with --ignore-preflight-errors:" "${blocking_out}"
 grep -Fq 'site/core-values.yaml: the site TOML has no [secrets] section' <<< "${blocking_out}" \
     || fail "the blocking error was not printed:" "${blocking_out}"
-grep -Fq 'block setup even with -y' <<< "${blocking_out}" \
-    || fail "the blocking header does not say the errors block -y:" "${blocking_out}"
-! grep -Fq 'The database errors above' <<< "${blocking_out}" \
-    || fail "the blocking header is still database-specific:" "${blocking_out}"
+grep -Fq 'block setup even with --ignore-preflight-errors' <<< "${blocking_out}" \
+    || fail "the blocking header does not say the errors block --ignore-preflight-errors:" "${blocking_out}"
 
 # The check runs only for a --skip-vault Core install against an existing values file.
 gate_line="$(grep -nxF 'if [[ "${INSTALL_VAULT:-true}" == "false" && "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then' "${PREFLIGHT_SH}" | cut -d: -f1)"
@@ -246,6 +244,11 @@ kubectl() {
             printf 'job.batch/flow-vault-tokens\nserviceaccount/flow-vault-tokens-sa\n' ;;
         'present:get clusterrole/flow-vault-tokens-writer clusterrolebinding/flow-vault-tokens-writer --ignore-not-found -o name')
             printf 'clusterrole.rbac.authorization.k8s.io/flow-vault-tokens-writer\n' ;;
+        # partial: the first probe finds markers, the ClusterRole probe fails.
+        'partial:get job/flow-vault-tokens serviceaccount/flow-vault-tokens-sa -n nico-system --ignore-not-found -o name')
+            printf 'job.batch/flow-vault-tokens\nserviceaccount/flow-vault-tokens-sa\n' ;;
+        'partial:get clusterrole/flow-vault-tokens-writer clusterrolebinding/flow-vault-tokens-writer --ignore-not-found -o name')
+            return 1 ;;
         *) ;;
     esac
 }
@@ -274,6 +277,11 @@ result="$(run_legacy_check false absent)"
 result="$(run_legacy_check false error)"
 { ! grep -Eq '^[BE]: .' <<< "${result}" && grep -Fq 'W: --skip-vault: could not inspect the legacy PSM/NSM hook resources' <<< "${result}"; } \
     || fail "a failed marker inspection was not reported as a warning:" "${result}"
+# A marker that one probe found stays blocking when a companion probe fails: the
+# failure is not reported as a warning in its place.
+result="$(run_legacy_check false partial)"
+expected=$'B: --skip-vault: legacy PSM/NSM hook resources exist (job.batch/flow-vault-tokens serviceaccount/flow-vault-tokens-sa) and their cleanup revokes Vault tokens, so it needs Vault — run setup.sh once with Vault installed before using --skip-vault (see helm-prereqs/README.md, section "Installing without Vault")\nE: \nW: '
+[[ "${result}" == "${expected}" ]] || fail "a known marker beside a failed companion probe was not reported as one blocking error:" "${result}"
 result="$(run_legacy_check true present)"
 [[ "${result}" == $'B: \nE: \nW: ' && ! -s "${KUBECTL_LOG}" ]] || fail "the Vault path probed or reported legacy markers:" "${result}"
 unset -f kubectl
@@ -339,6 +347,16 @@ expected=$'B: \nE: \nW: --skip-vault: these still reference Vault and this run d
 result="$(run_consumers_check false false false true consumers)"
 expected=$'B: \nE: \nW: --skip-vault: these still reference Vault and this run does not redeploy them: certificate/monitoring/grafana-tls (vault-nico-issuer); the Vault resources stay in nico-prereqs until they are migrated (redeployed without Vault, or their Certificates reissued from site-issuer)'
 [[ "${result}" == "${expected}" ]] || fail "a run that redeploys Core, REST and RMS must list only the Certificate outside those releases:" "${result}"
+# One flag at a time: each flag keeps exactly its own release's consumers.
+while IFS='|' read -r name skip_core skip_rest install_rms kept; do
+    result="$(run_consumers_check false "${skip_core}" "${skip_rest}" "${install_rms}" consumers)"
+    expected=$'B: \nE: \nW: --skip-vault: these still reference Vault and this run does not redeploy them: '"${kept}"', certificate/monitoring/grafana-tls (vault-nico-issuer); the Vault resources stay in nico-prereqs until they are migrated (redeployed without Vault, or their Certificates reissued from site-issuer)'
+    [[ "${result}" == "${expected}" ]] || fail "${name}: the warning does not list exactly that release's consumers:" "${result}"
+done <<'CASES'
+--skip-core alone keeps Core|true|false|true|deployment/nico-system/carbide-api (VAULT_ADDR), certificate/nico-system/nico-api-certificate (vault-nico-issuer)
+--skip-rest alone keeps Flow|false|true|true|certificate/flow/flow-certificate (vault-nico-issuer)
+--skip-rms alone keeps RMS|false|false|false|certificate/rack-manager/rms-api-server-certificate (vault-nico-issuer)
+CASES
 result="$(run_consumers_check false true true false none)"
 [[ "${result}" == $'B: \nE: \nW: ' ]] || fail "a site without Vault consumers produced a finding:" "${result}"
 result="$(run_consumers_check false true true false nocrd)"

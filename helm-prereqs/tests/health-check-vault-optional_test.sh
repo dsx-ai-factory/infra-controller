@@ -2,14 +2,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# health-check.sh with and without Vault, in five states: Vault installed and
-# required by the nico-api Deployment (with its ConfigMap missing), Vault
-# absent (an install made with --skip-vault), a Vault namespace without the
-# StatefulSet (partial install), Vault still running after --skip-vault moved
-# NICo off it, and NICo configured for a Vault that is gone before Core is
-# installed (vault-cluster-info present, no Deployment). The NICo namespace is
-# detected from the database ConfigMap when vault-cluster-info is absent, with
-# the default as the last fallback.
+# health-check.sh with and without Vault, across the states a site can be in:
+# Vault installed and required by the nico-api Deployment (with its ConfigMap
+# missing), Vault absent (an install made with --skip-vault), a Vault namespace
+# without the StatefulSet (partial install), Vault still running after
+# --skip-vault moved NICo off it, NICo configured for a Vault that is gone
+# before Core is installed (vault-cluster-info present, no Deployment), and the
+# probe failures that leave the integration or the install unknown. The NICo
+# namespace is detected from the database ConfigMap when vault-cluster-info is
+# absent, with the default as the last fallback.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,7 +37,11 @@ case "$*" in
     'get configmap -A --field-selector metadata.name=vault-cluster-info -o jsonpath={.items[0].metadata.namespace}')
         exit 1 ;;
     'get configmap -n '*' vault-cluster-info -o name')
-        if [[ "${TEST_VAULT_CONFIGMAP}" == present ]]; then printf 'configmap/vault-cluster-info\n'; else exit 1; fi ;;
+        case "${TEST_VAULT_CONFIGMAP}" in
+            present) printf 'configmap/vault-cluster-info\n' ;;
+            error) echo 'Unable to connect to the server: dial tcp 192.0.2.10:6443: i/o timeout' >&2; exit 1 ;;
+            *) echo 'Error from server (NotFound): configmaps "vault-cluster-info" not found' >&2; exit 1 ;;
+        esac ;;
     'get certificates.cert-manager.io -A -o jsonpath='*)
         case "${TEST_CERTS}" in
             vault) printf 'flow/flow-certificate vault-nico-issuer\nnico-rest/core-grpc-client-site-agent-certs site-issuer\n' ;;
@@ -52,7 +57,11 @@ case "$*" in
             *) exit 1 ;;
         esac ;;
     'get statefulset -n vault vault -o name')
-        if [[ "${TEST_VAULT}" == installed ]]; then printf 'statefulset.apps/vault\n'; else exit 1; fi ;;
+        case "${TEST_VAULT}" in
+            installed) printf 'statefulset.apps/vault\n' ;;
+            error) echo 'Unable to connect to the server: dial tcp 192.0.2.10:6443: i/o timeout' >&2; exit 1 ;;
+            *) echo 'Error from server (NotFound): statefulsets.apps "vault" not found' >&2; exit 1 ;;
+        esac ;;
     'get statefulset -n vault vault -o jsonpath={.spec.replicas}'|'get statefulset -n vault vault -o jsonpath={.status.readyReplicas}')
         printf '1' ;;
     'get namespace vault')
@@ -230,3 +239,29 @@ grep -Eq '^  NICo namespace: +nico-system$' "${TEST_TMP_DIR}/output" \
 assert_called 'get configmap -A --field-selector metadata.name=vault-cluster-info -o jsonpath={.items[0].metadata.namespace}'
 
 echo "health-check optional Vault tests passed"
+
+# A failed probe leaves the integration unknown: the integration checks say so
+# instead of "not configured", and a running Vault is not offered for removal.
+CASE="Vault running, Core without Vault, Certificate query fails: integration unknown"
+run_health_check installed novault error absent nico-system nico-system
+assert_output 'WARN  could not list cert-manager Certificates; Vault integration is decided without them'
+assert_output 'WARN  vault: running; whether NICo still uses it could not be determined (a Deployment or Certificate query failed above), so keep it until a complete check says otherwise'
+assert_no_output "${VAULT_UNUSED_WARN}"
+assert_output 'SKIP  job/vault-pki-config: Vault integration could not be determined (a Deployment or Certificate query failed above)'
+assert_no_output '(--skip-vault was used)'
+
+# An API error on the StatefulSet query is reported, never read as "Vault was skipped".
+CASE="statefulset/vault cannot be queried"
+run_health_check error novault none absent nico-system nico-system
+assert_output 'FAIL  statefulset/vault: could not be queried (Unable to connect to the server: dial tcp 192.0.2.10:6443: i/o timeout)'
+assert_no_output "${VAULT_ABSENT_SKIP}"
+assert_no_output "${VAULT_UNUSED_WARN}"
+assert_not_called 'exec -n vault'
+
+# The ConfigMap fallback is the last probe: an API error there is unknown too.
+CASE="Vault running, no Deployment, vault-cluster-info query fails: integration unknown"
+run_health_check installed absent none error nico-system nico-system
+assert_output 'WARN  could not query configmap/vault-cluster-info in nico-system; Vault integration is decided without it'
+assert_output 'WARN  vault: running; whether NICo still uses it could not be determined'
+assert_no_output "${VAULT_UNUSED_WARN}"
+assert_no_output '(--skip-vault was used)'

@@ -3,7 +3,9 @@
 
 # `setup.sh --skip-vault` sets vault.enabled=false through the helmfile dynamic
 # values. Every Vault resource must then disappear, whatever its finer toggle
-# says, while the resources a Vault-free site relies on keep rendering.
+# says, while the resources a Vault-free site relies on keep rendering. The
+# first test is the positive control: the same resources render while Vault is
+# enabled, so the absence tests below cannot pass because a template broke.
 suite: Vault resources are gated by vault.enabled
 templates:
   - templates/vault-tls-certs.yaml
@@ -17,6 +19,72 @@ templates:
 set:
   vault.enabled: false
 tests:
+  - it: renders every Vault resource while vault.enabled is true (positive control)
+    set:
+      vault.enabled: true
+    asserts:
+      - containsDocument:
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          name: nicoca-vault-client
+          namespace: vault
+          any: true
+        template: templates/vault-tls-certs.yaml
+      - containsDocument:
+          apiVersion: cert-manager.io/v1
+          kind: Certificate
+          name: vault-raft-tls
+          namespace: vault
+          any: true
+        template: templates/vault-tls-certs.yaml
+      - containsDocument:
+          apiVersion: cert-manager.io/v1
+          kind: ClusterIssuer
+          name: vault-nico-issuer
+        template: templates/vault-nico-issuer.yaml
+      - containsDocument:
+          apiVersion: v1
+          kind: ServiceAccount
+          name: cert-manager-vault-nicoca-issuer
+          namespace: cert-manager
+          any: true
+        template: templates/cert-manager-vault-sa.yaml
+      - containsDocument:
+          apiVersion: v1
+          kind: Secret
+          name: vault-nicoca-issuer-token
+          namespace: cert-manager
+          any: true
+        template: templates/cert-manager-vault-sa.yaml
+      - containsDocument:
+          apiVersion: batch/v1
+          kind: Job
+          name: vault-pki-config
+          namespace: nico-system
+          any: true
+        template: templates/vault-config-job.yaml
+      - containsDocument:
+          apiVersion: v1
+          kind: ConfigMap
+          name: vault-cluster-info
+          namespace: nico-system
+          any: true
+        template: templates/configmaps.yaml
+      - containsDocument:
+          apiVersion: v1
+          kind: Secret
+          name: nico-vault-token
+          namespace: nico-system
+          any: true
+        template: templates/secrets.yaml
+      - containsDocument:
+          apiVersion: v1
+          kind: Secret
+          name: nico-vault-approle-tokens
+          namespace: nico-system
+          any: true
+        template: templates/secrets.yaml
+
   - it: renders no Vault TLS bootstrap, issuer, service account, or configuration Job
     asserts:
       - hasDocuments:
@@ -85,3 +153,24 @@ tests:
           kind: ClusterIssuer
           name: site-issuer
         template: templates/site-issuer.yaml
+
+  - it: keeps the site credentials Secret without Vault
+    template: templates/secrets.yaml
+    set:
+      siteCredentials.enabled: true
+      siteCredentials.bmcRoot.password: NicoSiteRoot1
+      siteCredentials.uefi.dpu.password: DpuUefiSecret1
+      siteCredentials.uefi.host.password: HostUefiSecret1
+    asserts:
+      - containsDocument:
+          apiVersion: v1
+          kind: Secret
+          name: nico-site-credentials
+          namespace: nico-system
+          any: true
+      - containsDocument:
+          apiVersion: v1
+          kind: Secret
+          name: nico-vault-token
+          namespace: nico-system
+        not: true

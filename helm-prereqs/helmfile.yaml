@@ -231,9 +231,11 @@ releases:
   #
   # values/nico-prereqs-dynamic.yaml.gotmpl: rendered at sync time — sets
   #   vault.enabled from NICO_PREREQS_VAULT_ENABLED, then INSTALL_VAULT, as
-  #   exported by setup.sh (unset means true; setup.sh keeps the Vault
-  #   resources while a running Core still mounts them) and reads the Vault
-  #   root token live from the cluster via exec only while they render.
+  #   exported by setup.sh (unset means true; with --skip-vault, setup.sh keeps
+  #   the Vault resources while any Deployment in nico-system or cert-manager
+  #   Certificate still references Vault and removes them in a final sync after
+  #   none does) and reads the Vault root token live from the cluster via exec
+  #   only while they render.
   #
   # nico-system namespace Helm ownership is set by unseal_vault.sh (or by
   # setup.sh phase 4 with --skip-vault) before this runs.

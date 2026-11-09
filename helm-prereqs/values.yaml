@@ -184,9 +184,11 @@ certManager:
   ## issuer on a site installed without Vault
   ## (global.certificate.issuerRef.name=site-issuer on the Core release).
   ## Rendered when true and, on a Vault site (vault.enabled), only while
-  ## vault.tls.create is also true, which preserves the previous behavior: a
-  ## Vault site that disables the TLS bootstrap and manages its own site-issuer
-  ## keeps it. A Vault-free site renders it whatever vault.tls.create says.
+  ## vault.tls.create is also true: a Vault site that disables the TLS
+  ## bootstrap and manages its own site-issuer keeps it. A Vault-free site
+  ## renders it whatever vault.tls.create says. With false, setup.sh phase 2
+  ## leaves the issuer out of its bootstrap render, and ClusterIssuer/site-issuer
+  ## must exist before the Core release.
   siteIssuer:
     create: true
   ## Rendered only while vault.enabled is true.

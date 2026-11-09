@@ -9,10 +9,18 @@ global.certificate.useCertManager=true, global.certificate.useCertManagerUfm=tru
 nico-api.vault.enabled=false. This checker covers what those --set values do not reach, following
 the startup rules of nico-api. The effective TOML config (the site TOML over the base config, merged
 the way nico-api merges them) must have a [secrets] section without the Vault credential backend or a
-Transit KMS provider, both [certificates] cert-manager flags true, and no [certificates.cert_manager]
-signer that names vault-nico-issuer or makes site-issuer a namespaced Issuer. Issuer references below
-the top level of the values must not name vault-nico-issuer, and nico-api.vaultClusterInfo must be
-empty, because the chart rejects it without Vault.
+Transit KMS provider and with the [secrets.kms] (active provider, defined) and [secrets.routing] ("/" entry)
+tables that nico-api requires, both [certificates] cert-manager flags true, and no [certificates.cert_manager]
+signer that names vault-nico-issuer or makes site-issuer a namespaced Issuer (an omitted issuer_name is
+site-issuer, the nico-api default); a custom base config must also keep the cert-manager request
+namespace at the release namespace, which the generated config sets and nico-api otherwise defaults to
+forge-system. Issuer references below the top level of the values must not name vault-nico-issuer,
+unless the chart does not read them (an optional subchart or a feature gate that the charts implement
+is disabled), and nico-api.vaultClusterInfo must be empty, because
+the chart rejects it without Vault. nico-api.extraEnv must not carry CARBIDE_API_SECRETS*,
+CARBIDE_API_CERTIFICATES*, CARBIDE_CREDENTIAL_STORE, or VAULT_* entries, which override or bypass what
+this check reads, and nico-api.automountServiceAccountToken must not be false, because the cert-manager
+provider builds its Kubernetes client from the pod's service account token.
 """
 
 import sys
@@ -34,6 +42,18 @@ SITE_TOML = "the site TOML (nico-api.siteConfig.nicoApiSiteConfig)"
 BASE_CONFIG = "nico-api.configFiles.nicoApiConfig"
 SECRETS_DOC = "docs/configuration/secrets-storage.md"
 PARSER_HINT = "python3 3.11 or later, or the tomli package"
+# nico-api reads CARBIDE_API_* from the environment over both config files (crates/api/src/command_line.rs), and
+# CARBIDE_CREDENTIAL_STORE selects the credential store at startup (crates/api/src/resources.rs).
+RUNTIME_OVERRIDE_PREFIXES = ("CARBIDE_API_SECRETS", "CARBIDE_API_CERTIFICATES")
+CREDENTIAL_STORE_ENV = "CARBIDE_CREDENTIAL_STORE"
+# setup.sh installs Core here; the chart grants nico-api its CertificateRequest permissions in this namespace and
+# the generated base config sets [certificates.cert_manager] namespace to it.
+RELEASE_NAMESPACE = "nico-system"
+# The umbrella chart's optional subcharts (helm/Chart.yaml `condition: <name>.enabled`) with the default of each
+# flag in helm/values.yaml; every other subchart installs unconditionally, so an `enabled: false` under it is not a
+# gate the charts implement. tests/test_vault_free.py keeps this table in step with those files.
+OPTIONAL_SUBCHART_DEFAULTS = {"nico-dsx-exchange-consumer": True, "nico-ntp": True, "unbound": False,
+                              "nico-machine-a-tron": False, "nico-postgres-exporter": False}
 
 
 def _mapping(value, label):
@@ -195,7 +215,10 @@ def check_secrets(effective, site, custom_base):
     if backends is None:
         errors.append('[secrets] backends is omitted and defaults to ["vault"], which keeps the Vault credential backend '
                       'in the read chain; set backends = ["postgres"]')
-    elif isinstance(backends, list) and "vault" in backends:
+    elif not isinstance(backends, list):
+        errors.append(f'[secrets] backends = {_toml_literal(backends)} is not a list; nico-api rejects it at startup, so '
+                      'set backends = ["postgres"]')
+    elif "vault" in backends:
         errors.append('[secrets] backends lists "vault", which keeps the Vault credential backend in the read chain; '
                       'set backends = ["postgres"]')
     writer = secrets.get("writer")
@@ -207,8 +230,27 @@ def check_secrets(effective, site, custom_base):
     if secrets.get("import_from") == "vault":
         errors.append('[secrets] import_from = "vault" keeps the Vault client required at startup, even after the '
                       "import has completed; remove it (the import must already have run with Vault installed)")
+    # SecretsConfig (crates/api-core/src/cfg/file.rs) has no defaults for kms and routing: a [secrets] section
+    # without them fails to parse, and nico-api crash-loops in phase 6 after preflight passed.
+    if secrets.get("kms") is None:
+        errors.append(f"[secrets] has no [secrets.kms] table, which nico-api requires with [secrets]: name the active "
+                      f"provider and define it under [secrets.kms.providers.<name>] ({SECRETS_DOC})")
     kms = _mapping(secrets.get("kms"), "[secrets.kms]")
     providers = _mapping(kms.get("providers"), "[secrets.kms.providers]")
+    if secrets.get("kms") is not None:
+        active = kms.get("active")
+        if not isinstance(active, str) or not active:
+            errors.append("[secrets.kms] active is missing; name the provider that wraps new writes, defined under "
+                          f"[secrets.kms.providers.<name>] ({SECRETS_DOC})")
+        elif active not in providers:
+            errors.append(f"[secrets.kms] active = {_toml_literal(active)} names no table under [secrets.kms.providers]; "
+                          f"define [secrets.kms.providers.{active}] ({SECRETS_DOC})")
+    routing = secrets.get("routing")
+    if routing is None:
+        errors.append('[secrets] has no [secrets.routing] table, which nico-api requires with [secrets]: add it with a '
+                      f'"/" entry naming the kek_id for new writes ({SECRETS_DOC})')
+    elif "/" not in _mapping(routing, "[secrets.routing]"):
+        errors.append(f'[secrets.routing] has no "/" catch-all entry, which nico-api requires ({SECRETS_DOC})')
     for name, table in providers.items():
         if isinstance(table, dict) and table.get("type") == "transit":
             errors.append(f'[secrets.kms.providers.{name}] type = "transit" builds its own Vault client at startup '
@@ -266,11 +308,52 @@ def check_cert_manager_signer(effective, site, custom_base):
             warnings.append(f"[certificates.cert_manager] issuer_name = {_toml_literal(name)} in {name_source} names a "
                             "custom signer; it must chain to the site-root CA that NICo, Scout, and the DPU agents trust")
     kind_source = _source(site, custom_base, cm_path + ("issuer_kind",))
-    if kind_source is not None and signer.get("issuer_kind") != CLUSTER_ISSUER and signer.get("issuer_name") == SITE_ISSUER:
+    # nico-api defaults an omitted issuer_name to site-issuer (crates/cert-manager/src/lib.rs), so a namespaced
+    # kind on its own still asks for Issuer/site-issuer, which the bootstrap does not create.
+    name_set = signer.get("issuer_name") is not None
+    effective_name = signer.get("issuer_name") if name_set else SITE_ISSUER
+    if kind_source is not None and signer.get("issuer_kind") != CLUSTER_ISSUER and effective_name == SITE_ISSUER:
+        name_note = "" if name_set else " (the nico-api default)"
         errors.append(f"[certificates.cert_manager] issuer_kind = {_toml_literal(signer.get('issuer_kind'))} in "
-                      f'{kind_source} with issuer_name "{SITE_ISSUER}": the bootstrap creates {SITE_ISSUER} as a '
+                      f'{kind_source} with issuer_name "{SITE_ISSUER}"{name_note}: the bootstrap creates {SITE_ISSUER} as a '
                       f'{CLUSTER_ISSUER}; set issuer_kind = "{CLUSTER_ISSUER}" or remove it')
+    # The generated base config sets the request namespace to the release namespace, where the chart grants
+    # nico-api its CertificateRequest permissions. A custom base config replaces it, and nico-api defaults an
+    # omitted namespace to forge-system; a site TOML can override it on any site.
+    namespace = signer.get("namespace")
+    namespace_source = _source(site, custom_base, cm_path + ("namespace",))
+    if custom_base is not None and namespace is None:
+        errors.append(f"[certificates.cert_manager] namespace is set in neither {BASE_CONFIG} nor {SITE_TOML}, and "
+                      'nico-api defaults it to "forge-system"; the custom base config replaces the chart\'s generated '
+                      f'config, which sets it to the release namespace, so set namespace = "{RELEASE_NAMESPACE}", where '
+                      "the chart grants nico-api its CertificateRequest permissions")
+    elif namespace is not None and namespace != RELEASE_NAMESPACE:
+        errors.append(f"[certificates.cert_manager] namespace = {_toml_literal(namespace)} in {namespace_source}: "
+                      f"setup.sh installs Core in {RELEASE_NAMESPACE}, where the chart grants nico-api its "
+                      f'CertificateRequest permissions; set it to "{RELEASE_NAMESPACE}" or remove it')
     return errors, warnings
+
+
+def _rendered(values, path):
+    """False when the charts do not read the issuerRef at `path`, judged only by gates the charts implement: an
+    optional subchart that is disabled (OPTIONAL_SUBCHART_DEFAULTS), nico-bmc-proxy.switchTls while
+    switchTls.enabled is false (the chart default), and nico-api.nvSwitchTls while both NVSwitch leaves are disabled
+    (each Certificate is gated before it reads the shared issuer). Any other `enabled: false` is not a gate: the
+    other subcharts install unconditionally."""
+    if path[0] in OPTIONAL_SUBCHART_DEFAULTS:
+        subchart = _mapping(values.get(path[0]), str(path[0]))
+        if not _helm_enabled(subchart, "enabled", OPTIONAL_SUBCHART_DEFAULTS[path[0]]):
+            return False
+    if path[:2] == ("nico-bmc-proxy", "switchTls"):
+        switch_tls = _mapping(_mapping(values.get("nico-bmc-proxy"), "nico-bmc-proxy").get("switchTls"),
+                              "nico-bmc-proxy.switchTls")
+        return _helm_enabled(switch_tls, "enabled", False)
+    if path[:2] == ("nico-api", "nvSwitchTls"):
+        nvswitch = _mapping(_mapping(values.get("nico-api"), "nico-api").get("nvSwitchTls"), "nico-api.nvSwitchTls")
+        client = _mapping(nvswitch.get("nicoClient"), "nico-api.nvSwitchTls.nicoClient")
+        server = _mapping(nvswitch.get("switchServer"), "nico-api.nvSwitchTls.switchServer")
+        return _helm_enabled(client, "enabled", True) or _helm_enabled(server, "enabled", False)
+    return True
 
 
 def check_issuer_refs(values):
@@ -313,23 +396,63 @@ def check_issuer_refs(values):
                                 f"precedence, so the --set global.certificate.issuerRef.name={SITE_ISSUER} from "
                                 f"setup.sh --skip-vault applies to {path[0]} too; remove the subchart copy")
             continue
+        # A reference the charts never read (a disabled optional subchart or feature gate) is no consumer.
+        if not _rendered(values, path):
+            continue
         # A nested reference the installer does not pin must not turn site-issuer into a
         # namespaced Issuer: the bootstrap creates it as a ClusterIssuer. An absent kind is
         # the chart default and fine.
         effective_name = name if name is not None or path != machine_issuer_path else SITE_ISSUER
-        rendered = path != switch_tls_issuer_path or switch_tls_enabled
-        if rendered and effective_name == SITE_ISSUER and "kind" in ref and ref["kind"] != CLUSTER_ISSUER:
+        if effective_name == SITE_ISSUER and "kind" in ref and ref["kind"] != CLUSTER_ISSUER:
             default_note = "" if name is not None else " (the chart default)"
             errors.append(f'{_dotted(path)}.kind is {_toml_literal(ref["kind"])} with name "{SITE_ISSUER}"'
                           f"{default_note}; the bootstrap creates {SITE_ISSUER} as a {CLUSTER_ISSUER}, so set kind "
                           f'to "{CLUSTER_ISSUER}"')
         if path == switch_tls_issuer_path:
-            continue  # the name was judged above, and is ignored while switchTls is disabled
+            continue  # the name was judged above
         if name != VAULT_ISSUER:
             continue
         errors.append(f'{label} is "{VAULT_ISSUER}", a ClusterIssuer that exists only when Vault is installed; '
                       f'set it to "{SITE_ISSUER}"')
     return errors, warnings
+
+
+def check_extra_env(nico_api):
+    """Errors for nico-api.extraEnv entries that override or bypass the configuration this check reads."""
+    errors = []
+    extra_env = nico_api.get("extraEnv")
+    if extra_env is None:
+        return errors
+    if not isinstance(extra_env, list):
+        raise ValueError("nico-api.extraEnv must be a list")
+    for index, entry in enumerate(extra_env):
+        if not isinstance(entry, dict):
+            raise ValueError(f"nico-api.extraEnv[{index}] must be a mapping")
+        name = entry.get("name")
+        if not isinstance(name, str):
+            raise ValueError(f"nico-api.extraEnv[{index}].name must be a string")
+        label = f"nico-api.extraEnv[{index}] sets {name}"
+        if name.startswith(RUNTIME_OVERRIDE_PREFIXES):
+            errors.append(f"{label}, and CARBIDE_API_ variables override both config files at runtime, so it can undo "
+                          "the [secrets] or [certificates] settings this check reads; remove it and put the setting in "
+                          "the site TOML")
+        elif name == CREDENTIAL_STORE_ENV:
+            errors.append(f"{label}, which selects the credential store at startup regardless of [secrets]; remove it")
+        elif name.startswith("VAULT_"):
+            errors.append(f"{label}; setup.sh --skip-vault sets nico-api.vault.enabled=false so the chart renders no "
+                          "Vault environment, and a Deployment whose environment has VAULT_ADDR counts as a Vault "
+                          "consumer to setup.sh and health-check.sh, which keeps the nico-prereqs Vault resources; "
+                          "remove it")
+    return errors
+
+
+def check_cert_manager_client(nico_api):
+    """Error when the nico-api pod would have no Kubernetes credentials for the cert-manager provider."""
+    if "automountServiceAccountToken" in nico_api and nico_api["automountServiceAccountToken"] is False:
+        return ["nico-api.automountServiceAccountToken is false, but setup.sh --skip-vault sets both cert-manager flags "
+                "and the cert-manager certificate provider builds its Kubernetes client from the pod's service account "
+                "token at startup (crates/cert-manager/src/lib.rs); set it to true"]
+    return []
 
 
 def check_overridden_values(values, nico_api):
@@ -381,6 +504,8 @@ def check_vault_free(stream):
     if nico_api.get("vaultClusterInfo"):
         errors.append("nico-api.vaultClusterInfo is set, but setup.sh --skip-vault sets nico-api.vault.enabled=false "
                       "and the nico-api chart refuses to render a Vault ConfigMap without Vault; remove it")
+    errors.extend(check_extra_env(nico_api))
+    errors.extend(check_cert_manager_client(nico_api))
     warnings.extend(check_overridden_values(values, nico_api))
     return errors, warnings
 

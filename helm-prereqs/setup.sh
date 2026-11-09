@@ -169,6 +169,7 @@
 #   ./setup.sh --site-overlay /path/to/kustomize-dir   # kubectl apply -k after Phase 6 (NTP services, etc.)
 #   ./setup.sh --skip-dpf               # skip DPF DPU provisioning (installed by default otherwise)
 #   ./setup.sh --skip-vault             # install without HashiCorp Vault (cert-manager PKI, Postgres credential store)
+#   ./setup.sh --install-vault          # install Vault (the default); overrides NICO_SKIP_VAULT=true in the environment
 #   ./setup.sh --with-observability     # also install the local monitoring stack (Loki, Tempo,
 #                                       #   OTEL collector, Prometheus, Grafana) after Core —
 #                                       #   see helm-prereqs/observability/README.md; can also be
@@ -1186,20 +1187,38 @@ kubectl apply --server-side -f operators/crds/ \
 
 _SITE_CA_RENDER_ARGS=(
     --show-only templates/site-root-certificate.yaml
-    --show-only templates/site-issuer.yaml
 )
+# Render in the same mode phase 5 installs, so the chart's toggles are read as
+# that sync reads them.
+_SITE_CA_MODE_ARGS=()
 if "${INSTALL_VAULT}"; then
     kubectl create namespace "${VAULT_NS}" 2>/dev/null || true
-    _SITE_CA_RENDER_ARGS+=(--show-only templates/vault-tls-certs.yaml)
 else
-    # Render in the same mode phase 5 installs, so site-issuer comes out
-    # whatever the Vault toggles in values.yaml say.
-    _SITE_CA_RENDER_ARGS+=(--set vault.enabled=false)
+    _SITE_CA_MODE_ARGS+=(--set vault.enabled=false)
+fi
+# templates/site-issuer.yaml renders nothing while certManager.siteIssuer.create
+# is false, or vault.tls.create is false on a Vault site (a site that provides
+# ClusterIssuer/site-issuer itself), and `helm template --show-only` fails on a
+# template that rendered nothing, so it is selected only when it renders.
+_SITE_ISSUER_RENDERED=true
+if _site_issuer_probe="$(helm template nico-prereqs . --namespace nico-system \
+        ${_SITE_CA_MODE_ARGS[@]+"${_SITE_CA_MODE_ARGS[@]}"} \
+        --show-only templates/site-issuer.yaml 2>&1)"; then
+    _SITE_CA_RENDER_ARGS+=(--show-only templates/site-issuer.yaml)
+elif grep -q 'could not find template' <<<"${_site_issuer_probe}"; then
+    _SITE_ISSUER_RENDERED=false
+    echo "templates/site-issuer.yaml renders nothing with the chart's toggles (certManager.siteIssuer.create false, or vault.tls.create false on a Vault site): not rendering site-issuer; ClusterIssuer/site-issuer must already exist"
+else
+    printf '%s\n' "${_site_issuer_probe}" >&2
+    exit 1
+fi
+if "${INSTALL_VAULT}"; then
+    _SITE_CA_RENDER_ARGS+=(--show-only templates/vault-tls-certs.yaml)
 fi
 helm template nico-prereqs . \
     --namespace nico-system \
     --set imagePullSecrets.ngcNicoPull="${REGISTRY_PULL_SECRET:-}" \
-    "${_SITE_CA_RENDER_ARGS[@]}" \
+    "${_SITE_CA_RENDER_ARGS[@]}" ${_SITE_CA_MODE_ARGS[@]+"${_SITE_CA_MODE_ARGS[@]}"} \
     | kubectl apply --server-side --field-manager=helm -f -
 
 kubectl wait --for=condition=Ready certificate/site-root \
@@ -1210,8 +1229,10 @@ if "${INSTALL_VAULT}"; then
     kubectl wait --for=condition=Ready certificate/vault-raft-tls \
         -n "${VAULT_NS}" --timeout=120s
     echo "Vault TLS bootstrap complete"
-else
+elif "${_SITE_ISSUER_RENDERED}"; then
     echo "Site CA bootstrap complete (site-root CA, site-issuer ClusterIssuer)"
+else
+    echo "Site CA bootstrap complete (site-root CA; site-issuer is provided by the site)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1318,7 +1339,8 @@ fi
 # Drops the Vault resources that phase 5 retained once nothing references
 # Vault any more, re-probing the cluster at the end of the run (preflight.sh
 # _vault_consumers); otherwise lists what still does and keeps them. A failed
-# re-probe keeps them too. Reads _VAULT_RESOURCES_RETAINED.
+# re-probe or a failed sync keeps them too and never fails the run, which is
+# complete by then. Reads _VAULT_RESOURCES_RETAINED.
 _release_retained_vault_resources() {
     local _remaining
     "${_VAULT_RESOURCES_RETAINED}" || return 0
@@ -1328,11 +1350,16 @@ _release_retained_vault_resources() {
         return 0
     fi
     if [[ -z "${_remaining}" ]]; then
-        _SETUP_PHASE="nico-prereqs Vault resources"
         echo "No consumer references Vault any more: removing the Vault resources from nico-prereqs..."
         export NICO_PREREQS_VAULT_ENABLED=false
-        (cd "${SCRIPT_DIR}" && helmfile sync -l name=nico-prereqs)
-        echo "Vault resources removed from nico-prereqs"
+        # The run is complete at this point, so a failed sync keeps the (unused)
+        # resources and says so instead of ending the run as a setup failure.
+        if (cd "${SCRIPT_DIR}" && helmfile sync -l name=nico-prereqs); then
+            echo "Vault resources removed from nico-prereqs"
+        else
+            echo "WARNING: the nico-prereqs sync that removes the Vault resources failed, so they stay in the release;" >&2
+            echo "         everything else in this run is complete. Rerun setup.sh --skip-vault to remove them." >&2
+        fi
     else
         echo "These still reference Vault, so the Vault resources stay in nico-prereqs:"
         printf '%s\n' "${_remaining}" | sed 's/^/  /'
@@ -1341,13 +1368,100 @@ _release_retained_vault_resources() {
     fi
 }
 
+# Reads the live AppRole credentials in nico-vault-approle-tokens and the token
+# in nico-vault-token and exports them for the retained nico-prereqs sync
+# (values/nico-prereqs-dynamic.yaml.gotmpl renders them in place of the chart's
+# empty placeholders and of the vaultroottoken read, so the sync does not need
+# the vault namespace). Only a missing Secret means there is nothing to carry
+# across; any other failure returns 1 so the caller stops before a sync that
+# would blank credentials this run could not read. Runs with xtrace off:
+# --debug (bash -x) would otherwise print the decoded secret_id and the token.
+_carry_retained_approle_credentials() {
+    local _restore_xtrace=false _rc=0
+    if [[ "$-" == *x* ]]; then
+        set +x
+        _restore_xtrace=true
+    fi
+    _carry_retained_approle_credentials_untraced || _rc=$?
+    if "${_restore_xtrace}"; then
+        set -x
+    fi
+    return "${_rc}"
+}
+_carry_retained_approle_credentials_untraced() {
+    local _approle_err _approle_out _role_id_b64="" _secret_id_b64=""
+    _approle_err="$(mktemp)"
+    # The two values are separated by a character base64 never contains, so an
+    # empty role_id cannot shift the secret_id into its place.
+    if _approle_out="$(kubectl get secret nico-vault-approle-tokens -n nico-system \
+            -o jsonpath='{.data.VAULT_ROLE_ID}{"|"}{.data.VAULT_SECRET_ID}' 2>"${_approle_err}")"; then
+        IFS='|' read -r _role_id_b64 _secret_id_b64 <<<"${_approle_out}"
+    elif ! grep -q 'NotFound' "${_approle_err}"; then
+        cat "${_approle_err}" >&2
+        rm -f "${_approle_err}"
+        echo "Error: could not read nico-vault-approle-tokens to carry the AppRole credentials across the nico-prereqs sync; fix cluster access and rerun" >&2
+        return 1
+    fi
+    rm -f "${_approle_err}"
+    # Each key is carried on its own, so a Secret that holds only one of them
+    # keeps that one. A value that does not decode, or decodes to nothing, must
+    # not reach the render as an empty credential: that would reset the live key.
+    local _key _b64 _decoded _carried=() _missing=()
+    for _key in VAULT_ROLE_ID VAULT_SECRET_ID; do
+        _b64="${_role_id_b64}"
+        [[ "${_key}" == VAULT_SECRET_ID ]] && _b64="${_secret_id_b64}"
+        if [[ -z "${_b64}" ]]; then
+            _missing+=("${_key}")
+            continue
+        fi
+        if ! _decoded="$(base64 -d <<<"${_b64}" 2>/dev/null)" || [[ -z "${_decoded}" ]]; then
+            unset NICO_PREREQS_APPROLE_ROLE_ID NICO_PREREQS_APPROLE_SECRET_ID NICO_PREREQS_VAULT_TOKEN_B64
+            echo "Error: nico-vault-approle-tokens holds a ${_key} value that does not decode as base64; fix the Secret and rerun" >&2
+            return 1
+        fi
+        if [[ "${_key}" == VAULT_ROLE_ID ]]; then
+            export NICO_PREREQS_APPROLE_ROLE_ID="${_decoded}"
+        else
+            export NICO_PREREQS_APPROLE_SECRET_ID="${_decoded}"
+        fi
+        _carried+=("${_key}")
+    done
+    if [[ ${#_carried[@]} -eq 2 ]]; then
+        echo "Carrying the live AppRole credentials in nico-vault-approle-tokens across the sync"
+    elif [[ ${#_carried[@]} -eq 1 ]]; then
+        echo "WARNING: nico-vault-approle-tokens holds no ${_missing[0]}, so the sync renders the chart's empty placeholder for it and carries ${_carried[0]} across; health-check.sh reports ${_missing[0]} as missing until a run with Vault installed re-creates it"
+    else
+        echo "WARNING: nico-vault-approle-tokens holds no AppRole credentials, so the sync renders the chart's empty placeholders; health-check.sh reports its keys as missing until a run with Vault installed re-creates them"
+    fi
+    # nico-vault-token is re-rendered by the sync too, from vaultroottoken in the
+    # vault namespace, which a site on its way off Vault may already have
+    # removed. The token the consumers already hold is carried instead (as the
+    # base64 the Secret stores); the render reads vaultroottoken only without it.
+    local _token_err _token_b64=""
+    _token_err="$(mktemp)"
+    if _token_b64="$(kubectl get secret nico-vault-token -n nico-system -o jsonpath='{.data.token}' 2>"${_token_err}")"; then
+        if [[ -n "${_token_b64}" ]]; then
+            export NICO_PREREQS_VAULT_TOKEN_B64="${_token_b64}"
+            echo "Carrying the existing nico-vault-token across the sync"
+        else
+            echo "WARNING: nico-vault-token holds no token, so the sync reads vaultroottoken in the vault namespace instead"
+        fi
+    elif grep -q 'NotFound' "${_token_err}"; then
+        echo "nico-vault-token is absent, so the sync reads vaultroottoken in the vault namespace"
+    else
+        cat "${_token_err}" >&2
+        rm -f "${_token_err}"
+        echo "Error: could not read nico-vault-token to carry it across the nico-prereqs sync; fix cluster access and rerun" >&2
+        return 1
+    fi
+    rm -f "${_token_err}"
+}
+
 _SETUP_PHASE="[5/6] external-secrets + NICo prereqs"
 echo "=== [5/6] external-secrets + NICo prereqs ==="
 NICO_PREREQS_VAULT_ENABLED="${INSTALL_VAULT}"
 _VAULT_RESOURCES_RETAINED=false
 _NICO_PREREQS_SYNC_ARGS=()
-_RETAINED_APPROLE_ROLE_ID_B64=""
-_RETAINED_APPROLE_SECRET_ID_B64=""
 if ! "${INSTALL_VAULT}"; then
     # A failed probe must never pass as "no consumers": that would drop
     # resources a running consumer needs.
@@ -1366,30 +1480,9 @@ if ! "${INSTALL_VAULT}"; then
         _NICO_PREREQS_SYNC_ARGS+=(--set vault.configJob.enabled=false)
         # That Job's patch step is also what writes the real AppRole credentials
         # into nico-vault-approle-tokens after every sync re-applies the chart's
-        # empty placeholders, so read the live values now and hand them to the
-        # render (values/nico-prereqs-dynamic.yaml.gotmpl), which applies them
-        # in place of the placeholders. Only a missing Secret means there is
-        # nothing to carry across; any other failure stops the run before the
-        # sync, which would otherwise blank credentials this run could not read.
-        _approle_err="$(mktemp)"
-        if _approle_out="$(kubectl get secret nico-vault-approle-tokens -n nico-system \
-                -o jsonpath='{.data.VAULT_ROLE_ID} {.data.VAULT_SECRET_ID}' 2>"${_approle_err}")"; then
-            read -r _RETAINED_APPROLE_ROLE_ID_B64 _RETAINED_APPROLE_SECRET_ID_B64 <<<"${_approle_out}"
-        elif ! grep -q 'NotFound' "${_approle_err}"; then
-            cat "${_approle_err}" >&2
-            rm -f "${_approle_err}"
-            echo "Error: could not read nico-vault-approle-tokens to carry the AppRole credentials across the nico-prereqs sync; fix cluster access and rerun" >&2
-            exit 1
-        fi
-        rm -f "${_approle_err}"
-        if [[ -n "${_RETAINED_APPROLE_ROLE_ID_B64}" && -n "${_RETAINED_APPROLE_SECRET_ID_B64}" ]]; then
-            NICO_PREREQS_APPROLE_ROLE_ID="$(base64 -d <<<"${_RETAINED_APPROLE_ROLE_ID_B64}")"
-            NICO_PREREQS_APPROLE_SECRET_ID="$(base64 -d <<<"${_RETAINED_APPROLE_SECRET_ID_B64}")"
-            export NICO_PREREQS_APPROLE_ROLE_ID NICO_PREREQS_APPROLE_SECRET_ID
-            echo "Carrying the live AppRole credentials in nico-vault-approle-tokens across the sync"
-        else
-            echo "WARNING: nico-vault-approle-tokens holds no AppRole credentials, so the sync renders the chart's empty placeholders; health-check.sh reports its keys as missing until a run with Vault installed re-creates them"
-        fi
+        # empty placeholders, so the live values, and the existing token in
+        # nico-vault-token, are read now and handed to the render.
+        _carry_retained_approle_credentials || exit 1
         echo "These still reference Vault:"
         printf '%s\n' "${_VAULT_CONSUMERS}" | sed 's/^/  /'
         echo "Keeping the Vault resources in nico-prereqs (the Vault ConfigMap and token Secrets, and the"
@@ -1400,7 +1493,7 @@ fi
 export NICO_PREREQS_VAULT_ENABLED
 helmfile sync -l name=external-secrets
 helmfile sync -l name=nico-prereqs ${_NICO_PREREQS_SYNC_ARGS[@]+"${_NICO_PREREQS_SYNC_ARGS[@]}"}
-unset NICO_PREREQS_APPROLE_ROLE_ID NICO_PREREQS_APPROLE_SECRET_ID
+unset NICO_PREREQS_APPROLE_ROLE_ID NICO_PREREQS_APPROLE_SECRET_ID NICO_PREREQS_VAULT_TOKEN_B64
 
 # ---------------------------------------------------------------------------
 # Wait for postgres-operator to provision the cluster and ESO to sync creds
@@ -3196,6 +3289,10 @@ if ! _wait_for_site_agent_connection; then
 fi
 
 echo ""
+# Vault resources retained in phase 5 come out after nothing references Vault.
+_release_retained_vault_resources
+
+echo ""
 echo "========================================================================="
 echo "  Setup complete"
 echo "========================================================================="
@@ -3228,8 +3325,5 @@ if [[ -n "${_STANDALONE_PG_WORKLOADS:-}" ]]; then
     echo "  ${_STANDALONE_PG_HINT}."
 fi
 echo "========================================================================="
-
-# Vault resources retained in phase 5 come out once nothing references Vault.
-_release_retained_vault_resources
 
 _SETUP_PHASE="complete"  # signals _on_failure trap: clean exit, no prompt needed

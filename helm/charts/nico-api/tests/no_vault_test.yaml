@@ -8,12 +8,35 @@ set:
   global.image.repository: registry.example.com/nvmetal-carbide
   global.image.tag: test
 tests:
+  # Positive control for the absence test below: every Vault variable it checks
+  # for is present by name while Vault is enabled, so a renamed variable cannot
+  # pass as "absent".
   - it: injects the Vault environment from the nico-prereqs ConfigMap and Secrets by default
     template: deployment.yaml
     asserts:
-      - equal:
-          path: spec.template.spec.containers[0].env[0].name
-          value: VAULT_ROLE_ID
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_ROLE_ID
+            valueFrom:
+              secretKeyRef:
+                name: nico-vault-approle-tokens
+                key: VAULT_ROLE_ID
+                optional: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_SECRET_ID
+            valueFrom:
+              secretKeyRef:
+                name: nico-vault-approle-tokens
+                key: VAULT_SECRET_ID
+                optional: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_TOKEN
+          any: true
       - contains:
           path: spec.template.spec.containers[0].env
           content:
@@ -22,6 +45,26 @@ tests:
               configMapKeyRef:
                 name: vault-cluster-info
                 key: VAULT_SERVICE
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_NAMESPACE
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_KV_MOUNT_LOCATION
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_PKI_MOUNT_LOCATION
+          any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_PKI_ROLE_NAME
+          any: true
 
   - it: injects no Vault environment when vault.enabled is false
     template: deployment.yaml
@@ -68,9 +111,29 @@ tests:
           content:
             name: VAULT_PKI_ROLE_NAME
           any: true
-      - equal:
-          path: spec.template.spec.containers[0].env[0].name
-          value: DATASTORE_USER
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: DATASTORE_USER
+          any: true
+
+  - it: renders the configuration ConfigMaps without Vault and no Vault ConfigMap
+    template: configmap.yaml
+    set:
+      vault.enabled: false
+    asserts:
+      - containsDocument:
+          apiVersion: v1
+          kind: ConfigMap
+          name: nico-api-config-files
+          namespace: nico-system
+          any: true
+      - containsDocument:
+          apiVersion: v1
+          kind: ConfigMap
+          name: vault-cluster-info
+          namespace: nico-system
+        not: true
 
   - it: renders vaultClusterInfo as the Vault ConfigMap while Vault is enabled
     template: configmap.yaml

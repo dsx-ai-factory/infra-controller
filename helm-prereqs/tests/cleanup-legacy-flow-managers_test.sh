@@ -153,11 +153,13 @@ assert_not_logged "get secret vaultroottoken"
 assert_not_logged "exec -i vault-0"
 assert_not_logged "delete job flow-vault-tokens"
 assert_not_logged "delete clusterrolebinding flow-vault-tokens-writer"
+assert_not_logged "delete "   # nothing at all is deleted while the guard holds
 : > "${TEST_LOG}"
 TEST_MARKERS=absent INSTALL_VAULT=false PATH="${TEST_TMP_DIR}/bin:${PATH}" \
     "${SCRIPT_DIR}/../cleanup-legacy-flow-managers.sh"
 assert_not_logged "get secret vaultroottoken"
 assert_not_logged "delete job flow-vault-tokens"
+assert_not_logged "delete "   # a no-op run deletes nothing either
 
 # A missing root token must stop after authorization removal and before deleting
 # the workload token Secrets, preserving evidence and allowing cleanup to retry.

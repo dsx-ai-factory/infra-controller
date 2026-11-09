@@ -4,9 +4,10 @@
 # setup.sh applies templates/site-issuer.yaml with `helm template --show-only`
 # during the cert-manager bootstrap phase, so the issuer must live in that file
 # and keep its pre-install hook order: after site-root (-9), before the Vault
-# TLS Certificates (-4) that reference it. The issuer used to render only with
-# vault.tls.create; a Vault site that disables the TLS bootstrap and manages its
-# own site-issuer must keep that opt-out, while a Vault-free site always gets it.
+# TLS Certificates (-4) that reference it. On a Vault site the issuer renders
+# only with vault.tls.create, so a site that disables the TLS bootstrap and
+# manages its own site-issuer keeps that opt-out; a Vault-free site always gets
+# it.
 suite: site-issuer ClusterIssuer
 templates:
   - templates/site-issuer.yaml
@@ -54,6 +55,15 @@ tests:
         documentSelector:
           path: metadata.name
           value: vault-raft-tls
+
+  - it: renders nothing without Vault when certManager.siteIssuer.create is false
+    template: templates/site-issuer.yaml
+    set:
+      vault.enabled: false
+      certManager.siteIssuer.create: false
+    asserts:
+      - hasDocuments:
+          count: 0
 
   - it: renders nothing when certManager.siteIssuer.create is false
     template: templates/site-issuer.yaml

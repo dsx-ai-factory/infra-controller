@@ -22,14 +22,13 @@
 ##    -4  vault-raft-tls Certificate         (vault-tls-certs.yaml, vault.enabled only)
 ##
 ## Rendered while certManager.siteIssuer.create is true and, on a Vault site
-## (vault.enabled), only while vault.tls.create is also true. That was the
-## condition when this document lived in vault-tls-certs.yaml, so a Vault site
-## that disables the TLS bootstrap and manages its own site-issuer keeps it. A
-## Vault-free site renders it whatever vault.tls.create says.
+## (vault.enabled), only while vault.tls.create is also true: a Vault site that
+## disables the TLS bootstrap and manages its own site-issuer keeps it. A
+## Vault-free site renders it whatever vault.tls.create says. setup.sh phase 2
+## selects this template for the bootstrap render only when it renders.
 ##
-## This document moved here from vault-tls-certs.yaml unchanged. Helm tracks a
-## hook by kind and name, and before-hook-creation deletes and recreates it on
-## every install and upgrade, so the move causes no churn on existing releases.
+## Helm tracks a hook by kind and name, and before-hook-creation deletes and
+## recreates it on every install and upgrade.
 ## =============================================================================
 
 ---
