@@ -19,8 +19,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 
 use carbide_utils::none_if_empty::NoneIfEmpty;
-use carbide_uuid::machine::HostMachineId;
-use db::machine_interface::MachineInterfaces;
+use carbide_uuid::machine::PredictedHostMachineId;
 use db::{DatabaseError, Transaction};
 use mac_address::MacAddress;
 use model::machine_boot_interface::{
@@ -30,7 +29,6 @@ use model::site_explorer::{ExploredEndpoint, HostPrimaryInterfaceSelection};
 use sqlx::PgConnection;
 
 use crate::errors::SiteExplorerResult;
-use crate::machine_interfaces::MachineInterfacesExt;
 
 /// Selected boot interfaces for host endpoints.
 pub(super) struct HostBootInterfaces {
@@ -157,88 +155,12 @@ impl NicBootInterfaces {
     }
 }
 
-/// Initializes the durable desired boot interface from Site Explorer's settled
-/// interface ownership, or enriches a persisted target that has only a MAC
-/// with a newly observed Redfish interface ID.
-///
-/// The initial read does not lock, so a completed pair does not serialize
-/// unrelated machine updates on every exploration. The mutation helpers lock
-/// and recheck the two allowed transitions: unset to initialized, and a
-/// `MacOnly` target to a `Pair` for the same MAC.
-/// Before either mutation, try the group after the caller's interface work.
-/// A busy member aborts the transaction rather than waiting while holding
-/// rows another network writer may need. Site Explorer retries in a later run.
-pub(super) async fn reconcile_desired_boot_interface(
-    txn: &mut PgConnection,
-    machine_id: &HostMachineId,
-    primary_interface_selection: Option<HostPrimaryInterfaceSelection>,
-    declared_primary: Option<MacAddress>,
-) -> SiteExplorerResult<()> {
-    let desired = db::machine_desired_boot_interface::get(&mut *txn, machine_id).await?;
-
-    if matches!(
-        desired.as_ref().map(|desired| &desired.value),
-        Some(MachineBootInterfaceTarget::Pair(_))
-    ) {
-        return Ok(());
-    }
-
-    let interfaces = MachineInterfaces::load(txn, machine_id).await?;
-    let proposed_target =
-        interfaces.proposed_boot_interface_target(desired.as_ref().map(|desired| &desired.value));
-
-    match (
-        desired.as_ref().map(|desired| &desired.value),
-        proposed_target,
-    ) {
-        (None, Some(target)) => {
-            if !db::machine::try_lock_group_for_update(txn, machine_id.as_machine_id()).await? {
-                return Err(db::DatabaseError::FailedPrecondition(format!(
-                    "machine group for {machine_id} changed or is busy; retry",
-                ))
-                .into());
-            }
-            let selection_source =
-                initial_selection_source(&target, primary_interface_selection, declared_primary);
-            db::machine_desired_boot_interface::initialize_if_unset(
-                txn,
-                machine_id,
-                &target,
-                selection_source,
-            )
-            .await?;
-        }
-        (
-            Some(MachineBootInterfaceTarget::MacOnly(mac_address)),
-            Some(MachineBootInterfaceTarget::Pair(target)),
-        ) => {
-            debug_assert_eq!(*mac_address, target.mac_address);
-            if !db::machine::try_lock_group_for_update(txn, machine_id.as_machine_id()).await? {
-                return Err(db::DatabaseError::FailedPrecondition(format!(
-                    "machine group for {machine_id} changed or is busy; retry",
-                ))
-                .into());
-            }
-            db::machine_desired_boot_interface::enrich_interface_id(
-                txn,
-                machine_id,
-                *mac_address,
-                &target.interface_id,
-            )
-            .await?;
-        }
-        _ => {}
-    }
-
-    Ok(())
-}
-
 /// Returns `ExpectedMachine` when the declared MAC became durable, otherwise
 /// returns the report source only when its MAC matches the durable target.
 /// `LegacyUnknown` covers every other target, including one chosen by a report
 /// fallback when Redfish could not resolve the declared interface and the
 /// fallback selected a different MAC.
-fn initial_selection_source(
+pub(super) fn initial_selection_source(
     target: &MachineBootInterfaceTarget,
     report_selection: Option<HostPrimaryInterfaceSelection>,
     declared_primary: Option<MacAddress>,
@@ -253,6 +175,48 @@ fn initial_selection_source(
         .map_or(BootInterfaceSelectionSource::LegacyUnknown, |selection| {
             selection.source
         })
+}
+
+/// Selects declared or retained primary intent while preserving an existing primary.
+pub(super) async fn zero_dpu_primary_mac(
+    txn: &mut PgConnection,
+    existing_machine_id: Option<PredictedHostMachineId>,
+    mac_addresses: &[MacAddress],
+    declared_primary: Option<MacAddress>,
+    retained_boot_interface_window: Option<chrono::Duration>,
+) -> SiteExplorerResult<Option<MacAddress>> {
+    let has_existing_primary = if declared_primary.is_none()
+        && let Some(machine_id) = existing_machine_id
+    {
+        db::machine_interface::machine_has_primary_interface(&machine_id, &mut *txn).await?
+            || db::predicted_machine_interface::find_by_machine_id(&mut *txn, &machine_id)
+                .await?
+                .iter()
+                .any(|prediction| prediction.primary_interface)
+    } else {
+        false
+    };
+    Ok(match declared_primary {
+        Some(declared) => Some(declared),
+        None if !has_existing_primary => {
+            let mut recovered = None;
+            for mac_address in mac_addresses {
+                if db::retained_boot_interface::find_by_mac(
+                    &mut *txn,
+                    *mac_address,
+                    retained_boot_interface_window,
+                )
+                .await?
+                .is_some()
+                {
+                    recovered = Some(*mac_address);
+                    break;
+                }
+            }
+            recovered
+        }
+        None => None,
+    })
 }
 
 #[cfg(test)]
