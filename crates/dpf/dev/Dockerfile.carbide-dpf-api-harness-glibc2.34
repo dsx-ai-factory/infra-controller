@@ -33,7 +33,7 @@ RUN apt-get update && \
     && if [ "$(dpkg --print-architecture)" = arm64 ]; then \
          DEBIAN_FRONTEND=noninteractive apt-get install -y clang mold; \
        fi \
-    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.98.0 \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97.1 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

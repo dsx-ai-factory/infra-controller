@@ -29,7 +29,7 @@
 # Builder pinned by manifest-list digest so a rebuild cannot pick up different
 # toolchain content without a source change; the tag documents the version and
 # must match rust-toolchain.toml.
-ARG BUILDER_BASE=rust:1.98.0-slim-bookworm@sha256:1469a27c125cb5a3aebfa4f4e4665d935b02fb72cc093b2c974b3d740e43f157
+ARG BUILDER_BASE=rust:1.97.1-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3
 # One overridable runtime base consumed by every target architecture: a single
 # manifest-list digest, so the per-arch base versions cannot drift.
 ARG RUNTIME_BASE=gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
