@@ -442,6 +442,7 @@ pub(super) async fn fetch_machines(
 #[template(path = "machine_detail.html")]
 struct MachineDetail<'a> {
     id: String,
+    tempo_query: String,
     host_id: String,
     rack_id: String,
     lifecycle_detail: super::LifecycleDetail,
@@ -829,8 +830,43 @@ pub(super) struct ValidationRun {
     pub(super) machine_id: String,
 }
 
+/// Construct a query to grafana tempo for spans related to this machine
+fn machine_tempo_query(machine: &forgerpc::Machine) -> String {
+    let mut selectors = Vec::new();
+    if let Some(id) = machine.id.as_ref() {
+        selectors.push(format!("span.nico.machine.id = \"{id}\""));
+        selectors.push(format!("span.nico.managed_host.id = \"{id}\""));
+    }
+    if let Some(ip) = machine
+        .bmc
+        .as_ref()
+        .and_then(|bmc| bmc.ip.as_deref())
+        .and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
+    {
+        let ip = ip.to_canonical();
+        selectors.push(format!("span.nico.machine.bmc.ip = \"{ip}\""));
+        selectors.push(format!("span.nico.managed_host.bmc.ip = \"{ip}\""));
+    }
+    if let Some(status) = machine.status.as_ref() {
+        selectors.extend(
+            status
+                .associated_dpu_machine_ids
+                .iter()
+                .map(|id| format!("span.nico.machine.id = \"{id}\"")),
+        );
+    }
+    if selectors.is_empty() {
+        return String::new();
+    }
+    format!(
+        "{{ {} }} | select(span:name, resource.service.name, span.rpc.method)",
+        selectors.into_iter().unique().join(" || ")
+    )
+}
+
 impl From<forgerpc::Machine> for MachineDetail<'_> {
     fn from(m: forgerpc::Machine) -> Self {
+        let tempo_query = machine_tempo_query(&m);
         let machine_id = m.id.map(|id| id.to_string()).unwrap_or_default();
 
         let history = StateHistoryTable {
@@ -977,6 +1013,7 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
 
         MachineDetail {
             id: machine_id.clone(),
+            tempo_query,
             rack_id: m.rack_id.map(|id| id.to_string()).unwrap_or_default(),
             lifecycle_detail: super::LifecycleDetail::new(
                 m.state,
@@ -1594,6 +1631,81 @@ mod machine_detail_tests {
     use carbide_test_support::value_scenarios;
 
     use super::*;
+
+    #[test]
+    fn tempo_query_includes_the_host_bmc_and_each_dpu() {
+        const HOST: &str = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg";
+        const DPU_ONE: &str = "fm100dt038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg";
+        const DPU_TWO: &str = "fm100dsasb5dsh6e6ogogslpovne4rj82rp9jlf00qd7mcvmaadv85phk3g";
+        let display = MachineDetail::from(forgerpc::Machine {
+            id: Some(HOST.parse().unwrap()),
+            bmc: Some(forgerpc::BmcEndpoint {
+                ip: Some("192.0.2.36".to_string()),
+                ..Default::default()
+            }),
+            status: Some(forgerpc::MachineStatus {
+                associated_dpu_machine_ids: vec![
+                    DPU_ONE.parse().unwrap(),
+                    DPU_TWO.parse().unwrap(),
+                    DPU_ONE.parse().unwrap(),
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            display.tempo_query,
+            format!(
+                "{{ span.nico.machine.id = \"{HOST}\" || span.nico.managed_host.id = \"{HOST}\" || \
+                span.nico.machine.bmc.ip = \"192.0.2.36\" || span.nico.managed_host.bmc.ip = \"192.0.2.36\" || \
+                span.nico.machine.id = \"{DPU_ONE}\" || span.nico.machine.id = \"{DPU_TWO}\" }} \
+                | select(span:name, resource.service.name, span.rpc.method)"
+            )
+        );
+        let html = display.render().expect("machine detail renders");
+        assert!(html.contains("View machine traces in Grafana"));
+        assert!(html.contains(">Copy link</button>"));
+        assert!(html.contains("data-tempo-query="));
+        assert!(html.contains(DPU_TWO));
+        assert!(html.contains("value=\"http://localhost:13000\""));
+        let metadata = html.find("<h3>Metadata</h3>").unwrap();
+        let telemetry = html.find("<h3>Telemetry</h3>").unwrap();
+        assert!(metadata < telemetry);
+        let telemetry_table = html[telemetry..]
+            .split_once("</table>")
+            .expect("telemetry table renders")
+            .0;
+        assert!(telemetry_table.contains("<th>Tracing</th>"));
+        assert!(telemetry_table.contains("id=\"grafana-uri\""));
+        assert!(telemetry_table.contains("id=\"copy-grafana-tempo-link\""));
+        assert!(telemetry_table.contains("id=\"view-grafana-tempo-link\""));
+        assert!(telemetry_table.contains("target=\"_blank\" rel=\"noopener noreferrer\""));
+        assert!(telemetry_table.contains("<details id=\"grafana-address-settings\">"));
+    }
+
+    #[test]
+    fn tempo_query_canonicalizes_bmc_ips_and_omits_unknown_identities() {
+        value_scenarios!(run = |ip: &str| {
+            machine_tempo_query(&forgerpc::Machine {
+                bmc: Some(forgerpc::BmcEndpoint {
+                    ip: Some(ip.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+        };
+            "canonical IPv6" {
+                "2001:0DB8:0000::36" => "{ span.nico.machine.bmc.ip = \"2001:db8::36\" || span.nico.managed_host.bmc.ip = \"2001:db8::36\" } | select(span:name, resource.service.name, span.rpc.method)".to_string(),
+            }
+            "IPv4-mapped IPv6 matches the tracing contract" {
+                "::ffff:192.0.2.36" => "{ span.nico.machine.bmc.ip = \"192.0.2.36\" || span.nico.managed_host.bmc.ip = \"192.0.2.36\" } | select(span:name, resource.service.name, span.rpc.method)".to_string(),
+            }
+            "invalid or absent identities never produce a match-all query" {
+                "not an IP" => String::new(),
+                "" => String::new(),
+            }
+        );
+    }
 
     #[test]
     fn bmc_endpoint_and_status_render_independently() {

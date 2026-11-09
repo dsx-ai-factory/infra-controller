@@ -228,7 +228,10 @@ pub(crate) async fn find_applied_remediation_ids(
         (Some(remediation_id), None) => {
             Ok(AppliedRemediationIdQueryType::RemediationId(remediation_id))
         }
-        (None, Some(machine_id)) => Ok(AppliedRemediationIdQueryType::Machine(machine_id)),
+        (None, Some(machine_id)) => {
+            crate::api::log_machine_id(&machine_id.into());
+            Ok(AppliedRemediationIdQueryType::Machine(machine_id))
+        }
     }?;
 
     let (remediation_ids, dpu_machine_ids) =
@@ -259,6 +262,7 @@ pub(crate) async fn find_applied_remediations(
     let machine_id = request
         .dpu_machine_id
         .ok_or(CarbideError::MissingArgument("dpu machine id"))?;
+    crate::api::log_machine_id(&machine_id.into());
 
     let applied_remediations =
         db::dpu_remediation::find_remediations_by_remediation_id_and_machine(
@@ -291,6 +295,7 @@ pub(crate) async fn get_next_remediation_for_machine(
     let machine_id = request
         .dpu_machine_id
         .ok_or(CarbideError::MissingArgument("machine id"))?;
+    crate::api::log_machine_id(&machine_id.into());
 
     let remediation_to_apply =
         db::dpu_remediation::find_next_remediation_for_machine(&mut txn, machine_id).await?;
@@ -322,6 +327,7 @@ pub(crate) async fn remediation_applied(
     let machine_id = request
         .dpu_machine_id
         .ok_or(CarbideError::MissingArgument("machine id"))?;
+    crate::api::log_machine_id(&machine_id.into());
     let status: model::dpu_remediation::RemediationApplicationStatus = request
         .status
         .ok_or(CarbideError::MissingArgument("status"))?
