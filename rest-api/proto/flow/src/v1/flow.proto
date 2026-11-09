@@ -339,6 +339,8 @@ message Rack {
     HealthReport health = 8;  // Latest Core aggregate health snapshot mirrored by inventory sync.
     optional string rack_profile_id = 9; // Core rack profile mirrored by expected inventory sync.
     repeated string nvl_domain_external_ids = 10; // Public rack-group domain identities.
+    // Output only. Absent on older servers; ignored on inventory writes.
+    RackOperationStatusDetails operation_status_details = 11;
 }
 
 message Identifier {
@@ -2354,4 +2356,33 @@ message PowerTaskReferenceList {
 message PowerTaskReference {
     UUID id = 1;
     PowerTaskRelevance relevance = 2;
+}
+
+// RackOperationStatusDetails explains operation_status, not operation admission.
+message RackOperationStatusDetails {
+    // Counts of active Compute, NVSwitch and PowerShelf inventory records from
+    // the same snapshot used for operation_status, independent of expansion.
+    // Undiscovered records and other component types are excluded. No freshness
+    // or expected-inventory completeness guarantee is implied.
+    TrayStatusCountsByType tray_counts_by_type = 1;
+}
+
+// TrayStatusCountsByType always includes all three types, with zero counts for
+// types without participating records. Empty types do not affect rack phase.
+message TrayStatusCountsByType {
+    TrayStatusCounts compute = 1;
+    TrayStatusCounts nv_switch = 2;
+    TrayStatusCounts power_shelf = 3;
+}
+
+// TrayStatusCounts partitions participating trays by their operation phase.
+// An empty rack has all zero counts and operation_status Unknown. A missing or
+// unrecognized status on an existing participating tray increments unknown.
+message TrayStatusCounts {
+    uint32 ready = 1; // Trays in Ready.
+    uint32 in_use = 2; // Trays in InUse.
+    uint32 initializing = 3; // Trays in Initializing.
+    uint32 error = 4; // Trays in Error.
+    uint32 deleting = 5; // Trays in Deleting.
+    uint32 unknown = 6; // Trays with unknown, missing or unrecognized status.
 }

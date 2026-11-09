@@ -254,11 +254,11 @@ pub async fn run_local(
         .await?;
 
         if delete_from_api {
-            try_join_all(device_simulators.into_iter().map(|simulator| {
+            // All simulators share a client quota; avoid a rack-sized burst of API deletes.
+            for simulator in device_simulators {
                 let api_client = app_context.api_client();
-                async move { simulator.delete_from_api(api_client).await }
-            }))
-            .await?;
+                simulator.delete_from_api(api_client).await?;
+            }
         }
 
         Ok(())

@@ -13603,6 +13603,11 @@ paths:
                       serialNumber: SN-RACK-001
                       description: Primary compute rack
                       operationStatus: Ready
+                      operationStatusDetails:
+                        trayCountsByType:
+                          compute: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+                          nvSwitch: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+                          powerShelf: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
                       nvLinkDomainIds:
                         - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
                       taskStats:
@@ -13695,6 +13700,11 @@ paths:
                     serialNumber: SN-RACK-001
                     description: Primary compute rack
                     operationStatus: Ready
+                    operationStatusDetails:
+                      trayCountsByType:
+                        compute: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+                        nvSwitch: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+                        powerShelf: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
                     nvLinkDomainIds:
                       - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
                     taskStats:
@@ -27033,11 +27043,16 @@ components:
     Rack:
       title: Rack
       type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - health
+        - operationStatusDetails
       description: Rack represents a physical rack in the datacenter
       required:
         - health
         - nvLinkDomainIds
         - operationStatus
+        - operationStatusDetails
         - taskStats
       examples:
         - id: rack-01
@@ -27047,6 +27062,11 @@ components:
           serialNumber: SN-RACK-001
           description: Primary compute rack
           operationStatus: Ready
+          operationStatusDetails:
+            trayCountsByType:
+              compute: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+              nvSwitch: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+              powerShelf: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
           nvLinkDomainIds:
             - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
           taskStats:
@@ -27114,6 +27134,16 @@ components:
             - Deleting
           description: >-
             Operability phase aggregated from tray operationStatus values.
+        operationStatusDetails:
+          oneOf:
+            - $ref: '#/components/schemas/RackOperationStatusDetails'
+            - type: 'null'
+          readOnly: true
+          description: >-
+            Explanation of operationStatus. Null when the upstream Flow server
+            does not provide tray counts. Available on both list and detail
+            responses, independently of includeComponents. This is an inventory
+            snapshot, not a guarantee that an operation is permitted.
         nvLinkDomainIds:
           type: array
           description: Domain external IDs (rack group IDs) containing this Rack. Empty when no rack-group Domain is assigned.
@@ -27134,6 +27164,74 @@ components:
             - $ref: '#/components/schemas/AggregateHealth'
             - type: 'null'
           description: Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
+    RackOperationStatusDetails:
+      type: object
+      required:
+        - trayCountsByType
+      properties:
+        trayCountsByType:
+          $ref: '#/components/schemas/TrayStatusCountsByType'
+    TrayStatusCountsByType:
+      type: object
+      description: >-
+        Counts by component type from the same snapshot used for operationStatus.
+        All three types are returned, with six zero counts for types without
+        participating records. Empty types do not affect the aggregate phase.
+      required: [compute, nvSwitch, powerShelf]
+      properties:
+        compute:
+          $ref: '#/components/schemas/TrayStatusCounts'
+        nvSwitch:
+          $ref: '#/components/schemas/TrayStatusCounts'
+        powerShelf:
+          $ref: '#/components/schemas/TrayStatusCounts'
+      example:
+        compute: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+        nvSwitch: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+        powerShelf: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+    TrayStatusCounts:
+      type: object
+      description: >-
+        Counts of non-deleted tray inventory records for one component type,
+        partitioned by operationStatus. Records across all three types determine the
+        rack phase using Unknown > Error > Initializing > Deleting > InUse > Ready.
+        Other component types and undiscovered records are excluded. Missing or
+        unrecognized status on a participating record counts as unknown. An empty
+        rack has all zero counts and rack phase Unknown. Counts do not establish
+        snapshot freshness or expected-inventory completeness. All six fields
+        are returned, including zero; their sum is the participating count for this type.
+      required: [ready, inUse, initializing, error, deleting, unknown]
+      properties:
+        ready:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Number of trays in Ready.
+        inUse:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Number of trays in InUse.
+        initializing:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Number of trays in Initializing.
+        error:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Number of trays in Error.
+        deleting:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Number of trays in Deleting.
+        unknown:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Number of trays with unknown, missing or unrecognized status.
     RackLocation:
       title: RackLocation
       type: object
