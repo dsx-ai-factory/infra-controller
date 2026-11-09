@@ -18,6 +18,7 @@
 use std::sync::Arc;
 
 use carbide_api_core::test_support::default_config;
+use carbide_test_harness::dns::TestDomain;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use carbide_test_harness::{CarbideConfig, TestNetworkSegment};
@@ -28,6 +29,7 @@ use rpc::forge::instance_interface_config::NetworkDetails;
 pub(super) struct InstanceEnv {
     pub(super) harness: TestHarness,
     pub(super) segment_id: NetworkSegmentId,
+    pub(super) domain: TestDomain,
     admin_segment: TestNetworkSegment,
     underlay_segment: TestNetworkSegment,
     site_explorer: TestSiteExplorer,
@@ -58,6 +60,7 @@ impl InstanceEnv {
         Self {
             harness,
             segment_id,
+            domain,
             admin_segment,
             underlay_segment,
             site_explorer,
@@ -133,6 +136,45 @@ pub(super) fn single_interface_network_config(
             ipv6_interface_config: None,
             routing_profile: None,
         }],
+        #[allow(deprecated)]
+        auto: false,
+        auto_config: None,
+    }
+}
+
+pub(super) fn single_interface_network_config_with_vfs(
+    segment_ids: Vec<NetworkSegmentId>,
+) -> rpc::InstanceNetworkConfig {
+    let mut segment_iter = segment_ids.into_iter().enumerate();
+    let (_function_id, segment_id) = segment_iter.next().unwrap();
+    let mut interfaces = vec![rpc::InstanceInterfaceConfig {
+        function_type: rpc::InterfaceFunctionType::Physical as i32,
+        network_segment_id: Some(segment_id),
+        network_details: Some(NetworkDetails::SegmentId(segment_id)),
+        device: None,
+        device_instance: 0,
+        virtual_function_id: None,
+        ip_address: None,
+        ipv6_interface_config: None,
+        routing_profile: None,
+    }];
+
+    interfaces.extend(
+        segment_iter.map(|(function_id, segment_id)| rpc::InstanceInterfaceConfig {
+            function_type: rpc::InterfaceFunctionType::Virtual as i32,
+            network_segment_id: Some(segment_id),
+            network_details: Some(NetworkDetails::SegmentId(segment_id)),
+            device: None,
+            device_instance: 0,
+            virtual_function_id: Some(function_id as u32),
+            ip_address: None,
+            ipv6_interface_config: None,
+            routing_profile: None,
+        }),
+    );
+
+    rpc::InstanceNetworkConfig {
+        interfaces,
         #[allow(deprecated)]
         auto: false,
         auto_config: None,

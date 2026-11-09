@@ -42,6 +42,7 @@ mod instance_allocation_validation;
 mod instance_common;
 mod instance_health;
 mod instance_release;
+mod instance_vf_policy;
 mod level_filter;
 mod machine_bmc_metadata;
 mod machine_boot_interfaces;

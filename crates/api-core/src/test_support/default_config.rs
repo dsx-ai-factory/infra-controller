@@ -490,3 +490,18 @@ fn host_firmware_example() -> HashMap<String, Firmware> {
         ),
     ])
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_default_config_vf_enabled() {
+        let config = super::get();
+        assert!(
+            config
+                .vmaas_config
+                .as_ref()
+                .map(|vc| vc.allow_instance_vf)
+                .unwrap_or(true)
+        );
+    }
+}
