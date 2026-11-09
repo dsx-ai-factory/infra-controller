@@ -1,0 +1,56 @@
+{{- $name := printf "nico-service-vpc-observer-%s" (printf "%s/%s" .Release.Namespace .Release.Name | sha256sum | trunc 16) }}
+# DPF's DPUServiceCredentialRequest creates the ServiceAccount and rotates its token.
+# Keep grants distinct per Helm release so BF3/BF4 releases can share the observer.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nico-dpu-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["svc.dpu.nvidia.com"]
+    resources: ["servicechainsets", "servicechains"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "nico-dpu-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: nico-service-vpc-observer
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "nico-dpu-agent.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "nico-dpu-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: nico-service-vpc-observer
+    namespace: {{ .Release.Namespace }}

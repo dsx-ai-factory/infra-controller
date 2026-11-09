@@ -5,6 +5,11 @@
 # Rule set follows docs/manuals/dpf.md §3.1 plus bluefieldsoftwares, which the
 # DPF SDK creates for BF4 deployments.
 {{- if .Values.dpf.rbacCreate }}
+{{- $namespace := .Values.dpf.operatorNamespace | default "dpf-operator-system" }}
+{{- $observerCredentials := list }}
+{{- range .Values.dpf.serviceVpcObserverClusters }}
+{{- $observerCredentials = append $observerCredentials (include "nico-api.serviceVpcObserverCredentialName" (printf "%s/%s" $namespace .)) }}
+{{- end }}
 kind: Role
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
@@ -62,6 +67,16 @@ rules:
     resources: ["secrets"]
     resourceNames: ["bmc-shared-password"]
     verbs: ["get", "patch"]
+  {{- if $observerCredentials }}
+  - apiGroups: ["svc.dpu.nvidia.com"]
+    resources: ["dpuservicecredentialrequests"]
+    resourceNames: {{ $observerCredentials | toJson }}
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: {{ $observerCredentials | toJson }}
+    verbs: ["get"]
+  {{- end }}
   # Extra-script ConfigMaps the BF4 DPUFlavors source via contentFrom.
   # NICo reads existing scripts and the Astra runtime config before initialization,
   # but must not update or overwrite operator-owned content.

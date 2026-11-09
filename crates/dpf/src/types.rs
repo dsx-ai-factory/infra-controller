@@ -20,6 +20,9 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
+use carbide_uuid::extension_service::ExtensionServiceId;
+use carbide_uuid::machine::DpuMachineId;
+use config_version::ConfigVersion;
 use derive_builder::Builder;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
@@ -28,6 +31,17 @@ use serde::{Deserialize, Serialize};
 use crate::crds::dpus_generated::{
     DpuStatus, DpuStatusAgentStatus, DpuStatusOperationalConditions, DpuStatusPhase,
 };
+
+/// Identifies the physical DPU on management resources and remote DPU-cluster Nodes.
+pub const DPU_MACHINE_ID_LABEL: &str = "carbide.nvidia.com/dpu-machine-id";
+
+/// Correlates generated sets and chains with the management DPUServiceChain that created them.
+pub const SERVICE_VPC_CHAIN_REGISTRATION_UID_LABEL: &str =
+    "nico/service-vpc-chain-registration-uid";
+
+/// Correlates generated chain specifications with the durable exclusion version.
+pub const SERVICE_VPC_CHAIN_SELECTOR_VERSION_ANNOTATION: &str =
+    "nico/service-vpc-chain-selector-version";
 
 /// IPv4 route prefix lengths used to build Astra DPUDevice underlay values.
 #[derive(Debug, Clone, Copy)]
@@ -798,6 +812,10 @@ pub struct DetachedDpuServiceChainDefinition {
     pub labels: BTreeMap<String, String>,
     /// Exact labels selecting the DPU nodes where the chain is instantiated.
     pub node_selector_labels: BTreeMap<String, String>,
+    /// DPUs excluded even when cached placement labels still select them.
+    pub excluded_dpu_ids: Vec<DpuMachineId>,
+    /// Durable exclusion version propagated to set and child template annotations.
+    pub selector_version: Option<ConfigVersion>,
     /// Labels propagated to each generated chain object.
     pub template_labels: BTreeMap<String, String>,
     /// Ordered interface-label selectors forming the chain's ports.
@@ -806,14 +824,150 @@ pub struct DetachedDpuServiceChainDefinition {
     pub service_mtu: i64,
 }
 
-/// Kubernetes identity required to delete exactly the resource that was observed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DpfDeletePreconditions {
-    /// UID of the exact Kubernetes object generation that may be deleted.
+/// Correlates remote observations with one management DPUCluster UID.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DpuClusterIdentity {
+    /// Management namespace containing the DPUCluster.
+    pub namespace: String,
+    /// Management DPUCluster name.
+    pub name: String,
+    /// UID of the DPUCluster whose remote resources may be observed.
     pub uid: String,
-    /// Resource version of the exact Kubernetes object generation that may be deleted.
+}
+
+/// Records the remote Node incarnation that callers retain before enabling per-DPU ServiceChain creation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceVpcNodeIdentity {
+    /// Management DPUCluster incarnation serving this Node.
+    pub cluster: DpuClusterIdentity,
+    /// Remote Node name established from the management DPU mapping.
+    pub name: String,
+    /// Remote Node UID that subsequent convergence and withdrawal observations must match.
+    pub uid: String,
+}
+
+/// Selects whether an observation checks current ServiceChain configuration or acknowledged withdrawal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceVpcChainIntent {
+    /// Requires one current, reconciled ServiceChain on the retained Node.
+    Active,
+    /// Requires an acknowledged exclusion followed by authoritative ServiceChain absence.
+    Retiring,
+}
+
+/// Correlates chain evidence with the caller's persisted attachment, endpoint and configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceVpcChainCorrelation {
+    /// Server-owned attachment identity retained through termination.
+    pub attachment_id: uuid::Uuid,
+    /// InstanceServiceInterfaceConfig.internal_uuid for the endpoint being observed.
+    pub internal_uuid: uuid::Uuid,
+    /// Registered extension service that owns the chain.
+    pub service_id: ExtensionServiceId,
+    /// Zero-based registered service-interface ordinal.
+    pub interface_ordinal: u32,
+    /// Fixed local service-VPC slot selected for this endpoint.
+    pub slot_index: u32,
+    /// Persisted DPU identity for this endpoint.
+    pub dpu_id: DpuMachineId,
+    /// Version of the instance's complete extension-services configuration.
+    pub extension_services_config_version: ConfigVersion,
+    /// Version of the instance network configuration containing this endpoint.
+    pub network_config_version: ConfigVersion,
+    /// Committed extension_service_chain_selectors.version used by the requested definition.
+    pub selector_version: ConfigVersion,
+    /// Persisted activation or retirement desire for this observation.
+    pub intent: ServiceVpcChainIntent,
+}
+
+/// Supplies committed selector desire and a retained Node identity for one chain observation.
+#[derive(Debug, Clone)]
+pub struct ServiceVpcChainRequest {
+    /// Caller-provided identities and versions returned unchanged with the evidence.
+    pub correlation: ServiceVpcChainCorrelation,
+    /// Canonical registration definition populated from current durable selector desire.
+    pub definition: DetachedDpuServiceChainDefinition,
+    /// Node identity retained before enabling ServiceChain creation; never recapture it for retirement.
+    pub node: ServiceVpcNodeIdentity,
+    /// Previously observed cleanup bypass, retained by the caller until administrative recovery.
+    pub cleanup_bypass_observed: bool,
+}
+
+/// Records the identity and generation used by a chain observation without retaining a raw spec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceVpcResourceObservation {
+    /// Namespace containing the observed resource.
+    pub namespace: String,
+    /// Observed Kubernetes name.
+    pub name: String,
+    /// Observed Kubernetes UID.
+    pub uid: String,
+    /// Current metadata.generation used when checking condition acknowledgements.
+    pub generation: i64,
+    /// Resource version of this exact API observation.
+    pub resource_version: String,
+    /// Whether Kubernetes has accepted deletion of this resource.
+    pub is_deleting: bool,
+}
+
+/// Distinguishes usable chain evidence from pending, stale and failed observations without changing lifecycle state.
+#[derive(Debug, Clone)]
+pub enum ServiceVpcChainState {
+    /// Required resources are absent or have not finished reconciling.
+    PendingCreation,
+    /// Observed identity, specification or configuration no longer matches the request.
+    StaleIdentity,
+    /// The current ServiceChain acknowledges the requested configuration on the retained Node.
+    Converged,
+    /// The requested exclusion has not reached or been acknowledged by the ServiceChainSet.
+    ExclusionPending,
+    /// A required resource is deleting or relevant ServiceChains still remain during withdrawal.
+    Deleting,
+    /// Current exclusion acknowledgement is followed by authoritative absence of relevant ServiceChains on the retained Node.
+    Isolated,
+    /// An incomplete or failed read prevents evidence from being established.
+    ReadFailure(
+        /// Original read failure shared by requests affected by the same batch failure.
+        std::sync::Arc<crate::DpfError>,
+    ),
+}
+
+/// Carries chain configuration evidence and caller correlation for subsequent attachment decisions.
+#[derive(Debug, Clone)]
+pub struct ServiceVpcChainObservation {
+    /// Caller-provided correlation copied unchanged from the request.
+    pub correlation: ServiceVpcChainCorrelation,
+    /// Remote Node identity, when a unique, non-deleting mapping was observed.
+    pub node: Option<ServiceVpcNodeIdentity>,
+    /// Whether this or an earlier request observed a reconciled resource without its cleanup finalizer.
+    /// Callers must retain and resubmit this fact; a later empty list does not clear it.
+    pub cleanup_bypass_observed: bool,
+    /// Initial management registration, revalidated before returning Converged or Isolated.
+    pub registration: Option<ServiceVpcResourceObservation>,
+    /// Observed remote set identity; Converged and Isolated retain the read preceding the child list.
+    pub set: Option<ServiceVpcResourceObservation>,
+    /// Available identities for relevant ServiceChains, ordered by name and UID.
+    pub chains: Vec<ServiceVpcResourceObservation>,
+    /// Resource version of the complete child list taken after set inspection.
+    /// Retiring observations require the current exclusion acknowledgement before this read.
+    pub chain_list_resource_version: Option<String>,
+    /// Current configuration evidence or the reason it is unavailable.
+    pub state: ServiceVpcChainState,
+    /// Diagnostic for a pending or stale result; read failures retain their original error instead.
+    pub reason: Option<&'static str>,
+}
+
+/// Fences a Kubernetes write to the exact observed object and resource version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DpfResourcePreconditions {
+    /// UID of the exact Kubernetes object that may be changed.
+    pub uid: String,
+    /// Resource version of the exact observation the write must match.
     pub resource_version: String,
 }
+
+/// Supplies UID and resource-version preconditions for deleting an observed resource.
+pub type DpfDeletePreconditions = DpfResourcePreconditions;
 
 /// Captures DPUServiceInterface and DPUServiceChain observations for ownership checks,
 /// drift detection, and fenced patches or deletions.
@@ -828,9 +982,9 @@ pub struct DetachedDpfResourceObservation {
     /// Complete observed spec used to validate immutable DPUServiceInterface fields
     /// and detect mutable interface or chain drift.
     pub spec: serde_json::Value,
-    /// Kubernetes UID used to fence deletion.
+    /// Kubernetes UID used to fence deletion and repair.
     pub uid: Option<String>,
-    /// Kubernetes resource version used to fence deletion.
+    /// Kubernetes resource version used to fence deletion and repair.
     pub resource_version: Option<String>,
     /// Whether Kubernetes has accepted deletion and is waiting for finalizers.
     pub is_deleting: bool,
