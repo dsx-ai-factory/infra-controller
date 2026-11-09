@@ -496,6 +496,7 @@ pub(crate) async fn update(
     .await?;
     ensure_bmc_mac_unchanged(existing.as_ref(), parsed_mac)?;
     preserve_omitted_rpc_role_and_allocation(&mut request, existing.as_ref());
+    preserve_omitted_dpu_loopback_reservations(&mut request, existing.as_ref());
     let overrides = LegacyHostBmcOverrides::try_from(&request)?;
     let data: ExpectedMachineData = request.try_into()?;
 
@@ -1428,6 +1429,7 @@ async fn update_expected_machine(
     .await?;
     ensure_bmc_mac_unchanged(existing.as_ref(), parsed_mac)?;
     preserve_omitted_rpc_role_and_allocation(&mut machine, existing.as_ref());
+    preserve_omitted_dpu_loopback_reservations(&mut machine, existing.as_ref());
     let overrides = LegacyHostBmcOverrides::try_from(&machine)?;
     let data: ExpectedMachineData = machine.try_into()?;
 

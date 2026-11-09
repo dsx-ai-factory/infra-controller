@@ -254,6 +254,7 @@ impl From<&SiteExplorerConfig> for crate::inventory_creator::Config {
             create_switches: config.create_switches.clone(),
             switches_created_per_run: config.switches_created_per_run,
             admin_fnn_enabled: config.admin_fnn_enabled,
+            dpu_policy: config.dpu_policy,
             retained_boot_interface_window: config.retained_boot_interface_window,
         }
     }

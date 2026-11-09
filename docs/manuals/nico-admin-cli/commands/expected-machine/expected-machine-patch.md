@@ -203,14 +203,16 @@ Interfaces as a JSON array of ExpectedInterface objects (fields:
 mac_address, role, ip_allocation, network_segment_type, fixed_ip,
 fixed_mask, fixed_gateway, primary; legacy: nic_type). Accepted values:
 role=host|dpu_os|dpu_bmc|host_bmc|dpu_loopback|unspecified and
-ip_allocation=dynamic|fixed|retained|unspecified.
-network_segment_type uses protobuf enum numbers: tenant=0, admin=1,
-underlay=2, host_inband=3. Replaces the full interface list for the
-machine. For a matching stored MAC, omitting role preserves the stored
-physical-interface role. An omitted dpu_loopback role is preserved only
-when both MAC and fixed_ip match the stored loopback; changing its
-address requires explicit role=dpu_loopback. role=unspecified resets it
-to host. Omitting ip_allocation preserves the stored policy when the
+ip_allocation=dynamic|fixed|retained|unspecified. dpu_loopback
+requires fixed_ip and only supports fixed allocation, explicit or
+inferred. network_segment_type uses protobuf enum numbers: tenant=0,
+admin=1, underlay=2, host_inband=3. Replaces the full interface list for
+the machine, including loopback reservations. For a matching stored MAC,
+omitting role preserves the stored physical-interface role. An omitted
+dpu_loopback role is preserved only when both MAC and fixed_ip match the
+stored loopback; changing its address requires explicit
+role=dpu_loopback. role=unspecified resets a physical-interface role to
+host. Omitting ip_allocation preserves the stored policy when the
 presence of fixed_ip is unchanged; ip_allocation=unspecified resets it
 to fixed_ip inference. Omitting any other optional interface field,
 including network_segment_type, clears its stored value.

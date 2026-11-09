@@ -5875,12 +5875,16 @@ func (OperatingSystemType) EnumDescriptor() ([]byte, []int) {
 }
 
 // Identifies which machine endpoint owns an entry in `ExpectedMachine.host_nics`.
-// Each role accepts Dynamic, Fixed, and Retained allocation plus the optional
-// segment guard. The role only derives interface type and primary behavior.
+// Physical-interface roles accept Dynamic, Fixed, and Retained allocation plus
+// the optional segment guard, and derive interface type and primary behavior.
+// DpuLoopback accepts only Fixed allocation, explicit or inferred from fixed_ip,
+// and rejects physical-interface settings.
 //
 // On create, missing and `EXPECTED_INTERFACE_ROLE_UNSPECIFIED` mean Host. On
-// update, omission preserves the stored role, while explicit
-// `EXPECTED_INTERFACE_ROLE_UNSPECIFIED` resets it to Host. A Host BMC entry
+// update, omission preserves a matching physical-interface role. An omitted
+// DpuLoopback role is preserved only when both MAC and fixed_ip match the stored
+// loopback; changing its address requires explicit DpuLoopback. Explicit
+// `EXPECTED_INTERFACE_ROLE_UNSPECIFIED` resets the role to Host. A Host BMC entry
 // configures network allocation, while its identity remains on
 // `ExpectedMachine.bmc_mac_address`.
 type ExpectedInterfaceRole int32
@@ -41399,8 +41403,10 @@ type ExpectedHostNic struct {
 	// loopback resource pool using the DPU OS/admin MAC; only Fixed (or inferred
 	// Fixed) is supported and physical-interface settings are rejected.
 	// On create, missing and Unspecified mean Host.
-	// On update, omission preserves the stored role while explicit Unspecified
-	// resets it to Host.
+	// On update, omission preserves a matching stored physical-interface role.
+	// An omitted DpuLoopback role is preserved only when both its MAC and fixed_ip
+	// match the stored loopback; changing its address requires explicit DpuLoopback.
+	// Explicit Unspecified resets the role to Host.
 	Role *ExpectedInterfaceRole `protobuf:"varint,8,opt,name=role,proto3,enum=forge.ExpectedInterfaceRole,oneof" json:"role,omitempty"`
 	// Optional allocation policy. On create, omission and explicit Unspecified
 	// infer Fixed from `fixed_ip`. Without one, Host BMC infers Retained and every
@@ -41629,7 +41635,8 @@ type ExpectedMachine struct {
 	// Unspecified resets it to AUTO. On replace-all, omission resets a
 	// legacy-only row to AUTO but preserves an existing nested HostBmc policy.
 	BmcIpAllocation *BmcIpAllocationType `protobuf:"varint,18,opt,name=bmc_ip_allocation,json=bmcIpAllocation,proto3,enum=forge.BmcIpAllocationType,oneof" json:"bmc_ip_allocation,omitempty"`
-	// Marks host_nics as a complete replacement. This is needed because a
+	// Marks physical-interface entries in host_nics as a complete replacement;
+	// DpuLoopback entries follow replace_dpu_loopbacks below. This is needed because a
 	// repeated protobuf field cannot distinguish an omitted list from an empty
 	// list. New update clients set this when they intentionally supply
 	// host_nics, including `[]`; older clients leave it false so an unknown
@@ -41643,6 +41650,8 @@ type ExpectedMachine struct {
 	// empty. False/omitted preserves stored loopbacks unless DpuLoopback entries
 	// are supplied, which also explicitly replace the subset. This preserves
 	// reservations across older clients' read-modify-write and replace-all.
+	// Create always persists supplied DpuLoopback entries regardless of this flag.
+	// On patch, this flag applies only when host_nics is selected in the update mask.
 	// 21-28 are used by the REST protobuf snapshot's additional inventory fields.
 	ReplaceDpuLoopbacks bool `protobuf:"varint,29,opt,name=replace_dpu_loopbacks,json=replaceDpuLoopbacks,proto3" json:"replace_dpu_loopbacks,omitempty"`
 	// WARNING: Following fields are not present in Core, but added directly in REST snapshot
@@ -71034,7 +71043,8 @@ type PatchExpectedMachineRequest struct {
 	// Selecting Dynamic or Retained allocation clears a stored fixed address;
 	// selecting a nonempty BMC address with either policy is invalid.
 	//
-	// Selecting `host_nics` replaces the entire list, including an empty list.
+	// Selecting `host_nics` replaces the physical-interface entries, including an
+	// empty list. DpuLoopback entries follow the separate replacement rule below.
 	// Matched interfaces retain omitted roles and allocation policies under
 	// `ExpectedHostNic`'s update rules; explicit Unspecified resets them.
 	// Selected top-level `bmc_ip_address` and `bmc_ip_allocation` override the

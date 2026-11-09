@@ -5304,20 +5304,15 @@ async fn dpu_loopback_interface_update_compatibility(pool: sqlx::PgPool) {
             }))
             .await
             .unwrap();
-        for replace in [false, true] {
-            let mut replacement = input.clone();
-            replacement.host_nics.clear();
-            replacement.replace_dpu_loopbacks = replace;
+        let api = &env.api;
+        let apply = |replacement: rpc::forge::ExpectedMachine| async move {
             match operation {
-                Operation::Update => {
-                    env.api
-                        .update_expected_machine(tonic::Request::new(replacement))
-                        .await
-                        .unwrap();
-                }
+                Operation::Update => api
+                    .update_expected_machine(tonic::Request::new(replacement))
+                    .await
+                    .map(|_| ()),
                 Operation::Batch => {
-                    let response = env
-                        .api
+                    let response = api
                         .update_expected_machines(tonic::Request::new(
                             rpc::forge::BatchExpectedMachineOperationRequest {
                                 expected_machines: Some(ExpectedMachineList {
@@ -5326,29 +5321,54 @@ async fn dpu_loopback_interface_update_compatibility(pool: sqlx::PgPool) {
                                 accept_partial_results: false,
                             },
                         ))
-                        .await
-                        .unwrap()
+                        .await?
                         .into_inner();
                     assert!(response.results[0].success);
+                    Ok(())
                 }
-                Operation::ReplaceAll => {
-                    env.api
-                        .replace_all_expected_machines(tonic::Request::new(ExpectedMachineList {
-                            expected_machines: vec![replacement],
-                        }))
-                        .await
-                        .unwrap();
-                }
+                Operation::ReplaceAll => api
+                    .replace_all_expected_machines(tonic::Request::new(ExpectedMachineList {
+                        expected_machines: vec![replacement],
+                    }))
+                    .await
+                    .map(|_| ()),
             }
-            let stored = env
-                .api
+        };
+        let read = || async {
+            env.api
                 .get_expected_machine(tonic::Request::new(ExpectedMachineRequest {
                     bmc_mac_address: input.bmc_mac_address.clone(),
                     id: None,
                 }))
                 .await
                 .unwrap()
-                .into_inner();
+                .into_inner()
+        };
+        let before = read().await;
+        let mut conflicting = input.clone();
+        conflicting.replace_dpu_loopbacks = false;
+        conflicting.host_nics = vec![rpc::forge::ExpectedInterface {
+            mac_address: Some("02:00:00:00:00:20".to_string()),
+            role: Some(rpc::forge::ExpectedInterfaceRole::Host as i32),
+            ..Default::default()
+        }];
+        assert_eq!(
+            apply(conflicting).await.unwrap_err().code(),
+            tonic::Code::InvalidArgument,
+            "{operation:?}: validate physical interfaces with retained loopbacks"
+        );
+        assert_eq!(
+            read().await,
+            before,
+            "{operation:?}: rejected update is atomic"
+        );
+
+        for replace in [false, true] {
+            let mut replacement = input.clone();
+            replacement.host_nics.clear();
+            replacement.replace_dpu_loopbacks = replace;
+            apply(replacement).await.unwrap();
+            let stored = read().await;
             assert_eq!(
                 stored
                     .host_nics

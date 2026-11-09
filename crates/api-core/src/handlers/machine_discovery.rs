@@ -174,14 +174,14 @@ pub(crate) async fn discover_machine(
         None => match machine_discovery_info.machine_interface_id {
             Some(interface_id) => {
                 match db::machine_interface::find_one(api.pg_pool(), interface_id).await {
-                    Ok(interface) => (interface.machine_id, Some(interface.mac_address)),
+                    Ok(interface) => interface.machine_id,
                     // The transaction below loads this interface again and
                     // reports a missing one itself.
-                    Err(db::DatabaseError::FindOneReturnedNoResultsError(_)) => (None, None),
+                    Err(db::DatabaseError::FindOneReturnedNoResultsError(_)) => None,
                     Err(error) => return Err(error.into()),
                 }
             }
-            None => (None, None),
+            None => None,
         },
     };
     // A host's first discovery renames the caller interface's predicted
@@ -194,7 +194,7 @@ pub(crate) async fn discover_machine(
         caller_machine_id.and_then(|id| PredictedHostMachineId::try_from(id).ok())
     };
 
-    let (dpu_loopback, admin_admission) = if hardware_info.is_dpu() {
+    let (dpu_loopback, admin_admission, loopback_intent) = if hardware_info.is_dpu() {
         let mut preflight = api.txn_begin().await?;
         let interface = discovery_interface(
             &mut preflight,
@@ -233,6 +233,17 @@ pub(crate) async fn discover_machine(
             };
             return Err(CarbideError::InvalidArgument(reason).into());
         }
+        // Read without a reservation lock while the caller interface is locked.
+        // Creation rechecks intent in reservation-before-interface lock order.
+        let reservation = if machine_discovery_info.create_machine {
+            db::expected_dpu_loopback_reservation::find_by_dpu_oob_net0_mac(
+                &mut preflight,
+                interface.mac_address,
+            )
+            .await?
+        } else {
+            None
+        };
         preflight.commit().await?;
         drop(admin_admission);
         (
@@ -242,15 +253,19 @@ pub(crate) async fn discover_machine(
                     &api.resource_pool_registry,
                     &api.common_pools,
                     stable_machine_id,
+                    reservation.as_ref().and_then(|r| r.loopback_ipv4),
                     &api.cancel_token,
                 )
                 .await
                 .map_err(CarbideError::from)?,
             ),
             None,
+            machine_discovery_info
+                .create_machine
+                .then_some((interface.mac_address, reservation)),
         )
     } else {
-        (None, Some(admin_admission))
+        (None, Some(admin_admission), None)
     };
 
     let result = async {
@@ -273,6 +288,22 @@ pub(crate) async fn discover_machine(
         )
         .await?;
         let mut txn = api.txn_begin().await?;
+
+        // Preparation can call a provider outside this transaction. Reject
+        // changed intent before taking admin/interface locks or attaching it.
+        let loopback_reservation = if let Some((mac, expected)) = &loopback_intent {
+            let current = db::expected_dpu_loopback_reservation::find_by_dpu_oob_net0_mac_for_update(
+                &mut txn, *mac,
+            ).await?;
+            if &current != expected {
+                return Err(CarbideError::FailedPrecondition(
+                    "DPU loopback reservation changed during preparation; retry".to_owned(),
+                ).into());
+            }
+            current
+        } else {
+            None
+        };
 
         // Segment advisory locks come before any interface row lock, so the ones
         // this transaction needs are taken before the caller interface is locked.
@@ -302,6 +333,14 @@ pub(crate) async fn discover_machine(
             &mut txn, secure_remote_ip, direct_interface_id,
             machine_discovery_info.machine_interface_id,
         ).await?;
+
+        if let Some((mac, _)) = &loopback_intent
+            && caller_interface.mac_address != *mac
+        {
+            return Err(CarbideError::FailedPrecondition(
+                "DPU discovery interface MAC changed during preparation; retry".to_owned(),
+            ).into());
+        }
 
         // The rows locked above belong to the predicted id read before the
         // transaction opened. A caller interface that carries another predicted
@@ -404,6 +443,7 @@ pub(crate) async fn discover_machine(
                     Some(&api.common_pools),
                     &stable_machine_id,
                     &caller_interface,
+                    loopback_reservation.as_ref().and_then(|r| r.loopback_ipv6),
                 )
                 .await?;
 
@@ -521,6 +561,7 @@ pub(crate) async fn discover_machine(
                     Some(&api.common_pools),
                     &predicted_machine_id,
                     &machine_interface,
+                    None,
                 )
                 .await?;
 

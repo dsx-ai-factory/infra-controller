@@ -90,6 +90,27 @@ pub async fn find_for_machine(
         .map_err(|err| DatabaseError::query(sql, err))
 }
 
+/// Read intent before loopback provider preparation, without locking it.
+/// Creation must re-read under [`find_by_dpu_oob_net0_mac_for_update`] and
+/// reject a changed declaration before attaching the prepared allocation.
+pub async fn find_by_dpu_oob_net0_mac(
+    db: impl DbReader<'_>,
+    dpu_oob_net0_mac_address: MacAddress,
+) -> DatabaseResult<Option<DpuLoopbackReservation>> {
+    let sql = "SELECT dpu_oob_net0_mac_address, loopback_ipv4, loopback_ipv6 \
+               FROM expected_dpu_loopback_reservations \
+               WHERE dpu_oob_net0_mac_address = $1";
+    let row = sqlx::query(sql)
+        .bind(dpu_oob_net0_mac_address)
+        .fetch_optional(db)
+        .await
+        .map_err(|err| DatabaseError::query(sql, err))?;
+    row.as_ref()
+        .map(reservation_from_row)
+        .transpose()
+        .map_err(|err| DatabaseError::query(sql, err))
+}
+
 /// The reservation for one DPU OS/admin MAC, locked for the creating
 /// transaction.
 ///
@@ -169,7 +190,7 @@ async fn lock_inventory(txn: &mut PgConnection) -> DatabaseResult<()> {
 /// Removes omitted MACs and upserts retained/new MACs in `reservations`. The
 /// caller runs this inside the same transaction as the expected-machine write
 /// so the two move atomically. An empty slice clears the host's reservations.
-pub async fn replace_for_machine(
+pub(crate) async fn replace_for_machine(
     txn: &mut PgConnection,
     host_bmc_mac_address: MacAddress,
     reservations: &[DpuLoopbackReservation],

@@ -780,7 +780,7 @@ async fn discover_dpu_by_source_ip(
 }
 
 /// Direct discovery claims the operator's reserved IPv4 and IPv6 loopbacks for a
-/// DPU matched by its product serial, instead of auto-assigning from the pool.
+/// DPU matched by its OS/admin MAC, instead of auto-assigning from the pool.
 #[crate::sqlx_test]
 async fn test_direct_discovery_applies_dpu_loopback_reservation(
     pool: sqlx::PgPool,
@@ -849,12 +849,16 @@ async fn test_direct_discovery_applies_dpu_loopback_reservation(
     );
     // Changing intent does not readdress this live DPU on rediscovery.
     let mut txn = env.pool.begin().await?;
-    db::expected_dpu_loopback_reservation::replace_for_machine(
-        &mut txn,
-        "aa:bb:cc:dd:ee:10".parse()?,
-        &[],
-    )
-    .await?;
+    let mut expected =
+        db::expected_machine::find_by_bmc_mac_address(&mut *txn, "aa:bb:cc:dd:ee:10".parse()?)
+            .await?
+            .expect("reservation host exists");
+    expected
+        .data
+        .interfaces
+        .retain(|interface| !interface.role.is_dpu_loopback());
+    expected.data.replace_dpu_loopbacks = true;
+    db::expected_machine::update(&mut txn, &expected).await?;
     txn.commit().await?;
     let rediscovered = discover_dpu_by_source_ip(&env, dpu, HardwareInfo::from(dpu)).await;
     assert_eq!(
@@ -890,6 +894,154 @@ async fn test_direct_discovery_applies_dpu_loopback_reservation(
     env.api
         .update_expected_machine(Request::new(expected))
         .await?;
+    Ok(())
+}
+
+/// Preparation must not apply a declaration superseded before the creation
+/// transaction locks intent. A retry consumes the replacement reservation.
+#[crate::sqlx_test]
+async fn test_direct_discovery_retries_changed_loopback_reservation(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::expected_machine::DpuLoopbackReservation;
+    use model::resource_pool::ResourcePoolEntryState;
+
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(secure_discovery_config()),
+    )
+    .await;
+    let host_config = env.managed_host_config();
+    let dpu = host_config.get_and_assert_single_dpu();
+    let hardware_info = HardwareInfo::from(dpu);
+    let machine_id = from_hardware_info(&hardware_info)?;
+    let host_bmc_mac = "aa:bb:cc:dd:ee:30".parse()?;
+    let old_address = Ipv4Addr::new(172, 30, 0, 30);
+    let new_address = Ipv4Addr::new(172, 30, 0, 31);
+    let loopback_pool = env.api.common_pools.ethernet.pool_loopback_ip.as_ref();
+    let mut txn = env.pool.begin().await?;
+    db::resource_pool::populate(
+        loopback_pool,
+        &mut txn,
+        vec![IpAddr::V4(old_address), IpAddr::V4(new_address)],
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+    seed_reservation_host(
+        &env,
+        host_bmc_mac,
+        DpuLoopbackReservation {
+            dpu_oob_net0_mac_address: dpu.oob_mac_address,
+            loopback_ipv4: Some(old_address),
+            loopback_ipv6: None,
+        },
+    )
+    .await;
+    let interface_id = dpu_discover_dhcp(&env, &dpu.oob_mac_address.to_string()).await;
+    let remote_ip = "192.0.2.200".parse()?;
+
+    // The Integrated preparation reads existing pool ownership after capturing
+    // declaration intent. Wait for that query, then commit a replacement while
+    // preparation is suspended, without relying on scheduler timing.
+    let mut gate = env.pool.begin().await?;
+    sqlx::query("LOCK TABLE resource_pool IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *gate)
+        .await?;
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await?;
+    let discovery = env.api.discover_machine(discovery_request_from(
+        &hardware_info,
+        Some(interface_id),
+        remote_ip,
+    ));
+    tokio::pin!(discovery);
+    tokio::select! {
+        result = &mut discovery => panic!("discovery bypassed the preparation gate: {result:?}"),
+        _ = wait_for_blocked_query(&env.pool, gate_pid, "SELECT value FROM resource_pool") => {},
+    }
+    let mut writer = env.pool.begin().await?;
+    let mut expected = db::expected_machine::find_by_bmc_mac_address(&mut *writer, host_bmc_mac)
+        .await?
+        .expect("reservation host exists");
+    expected
+        .data
+        .interfaces
+        .retain(|interface| !interface.role.is_dpu_loopback());
+    expected.data.interfaces.extend(
+        DpuLoopbackReservation {
+            dpu_oob_net0_mac_address: dpu.oob_mac_address,
+            loopback_ipv4: Some(new_address),
+            loopback_ipv6: None,
+        }
+        .interfaces(),
+    );
+    expected.data.replace_dpu_loopbacks = true;
+    db::expected_machine::update(&mut writer, &expected).await?;
+    writer.commit().await?;
+    gate.commit().await?;
+
+    let error = tokio::time::timeout(Duration::from_secs(10), &mut discovery)
+        .await?
+        .expect_err("changed intent must defer creation");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(
+        error
+            .message()
+            .contains("DPU loopback reservation changed during preparation; retry")
+    );
+    assert!(
+        db::machine::find_one(&env.pool, &machine_id, MachineSearchConfig::default())
+            .await?
+            .is_none()
+    );
+    for address in [old_address, new_address] {
+        assert!(matches!(
+            db::resource_pool::find_value_in_pool(loopback_pool, &env.pool, &IpAddr::V4(address))
+                .await?
+                .expect("reserved address remains in the pool")
+                .state,
+            ResourcePoolEntryState::Free
+        ));
+    }
+
+    let retried = env
+        .api
+        .discover_machine(discovery_request_from(
+            &hardware_info,
+            Some(interface_id),
+            remote_ip,
+        ))
+        .await?
+        .into_inner();
+    assert_eq!(retried.machine_id, Some(machine_id));
+    let machine = db::machine::find_one(&env.pool, &machine_id, MachineSearchConfig::default())
+        .await?
+        .expect("retry creates the DPU");
+    assert_eq!(
+        machine.network_config.loopback_ip,
+        Some(IpAddr::V4(new_address))
+    );
+    for (address, state) in [
+        (old_address, ResourcePoolEntryState::Free),
+        (
+            new_address,
+            ResourcePoolEntryState::Allocated {
+                owner: machine_id.to_string(),
+                owner_type: model::resource_pool::OwnerType::Machine.to_string(),
+            },
+        ),
+    ] {
+        assert_eq!(
+            db::resource_pool::find_value_in_pool(loopback_pool, &env.pool, &IpAddr::V4(address))
+                .await?
+                .expect("reserved address remains in the pool")
+                .state,
+            state,
+            "retry must allocate only current intent: {address}"
+        );
+    }
     Ok(())
 }
 
