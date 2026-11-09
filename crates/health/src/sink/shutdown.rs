@@ -177,13 +177,138 @@ impl SinkWorkers {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use async_trait::async_trait;
     use carbide_instrument::testing::capture_logs_async;
+    use futures::FutureExt;
+    use futures::future::BoxFuture;
+    use tokio::task::JoinError;
 
     use super::*;
+    use crate::HealthError;
+    use crate::discovery::{DiscoveryIteration, DiscoveryShutdown};
     use crate::sink::dedup_queue::DedupQueue;
     use crate::sink::report_worker::run_report_worker;
+
+    type Discovery = BoxFuture<'static, Result<FinalRecordIteration, JoinError>>;
+    type Listener = BoxFuture<'static, Result<Result<(), String>, JoinError>>;
+
+    /// Discovery iteration whose collector shutdown takes `drain` and then
+    /// queues a final record, as a draining collector would.
+    struct FinalRecordIteration {
+        queue: Arc<DedupQueue<&'static str, ()>>,
+        shutdowns: Arc<AtomicUsize>,
+        drain: Duration,
+    }
+
+    #[async_trait]
+    impl DiscoveryIteration for FinalRecordIteration {
+        async fn run_once(&mut self) -> Result<(), HealthError> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self, _deadline: Instant) -> DiscoveryShutdown {
+            self.shutdowns.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(self.drain).await;
+            self.queue.save_latest("final", ());
+            DiscoveryShutdown {
+                closed: 1,
+                timed_out: 0,
+            }
+        }
+    }
+
+    /// One registered report worker whose submissions wait for the flush
+    /// signal, holding a record queued before shutdown.
+    struct ServiceFixture {
+        sink_workers: SinkWorkers,
+        queue: Arc<DedupQueue<&'static str, ()>>,
+        submitted: Arc<Mutex<Vec<&'static str>>>,
+        shutdowns: Arc<AtomicUsize>,
+        cancel_token: CancellationToken,
+    }
+
+    impl ServiceFixture {
+        fn new(stall: bool) -> Self {
+            let queue = Arc::new(DedupQueue::new());
+            queue.save_latest("queued", ());
+
+            let mut sink_workers = SinkWorkers::default();
+            let counts = DeliveryCounts::default();
+            let submitted = Arc::new(Mutex::new(Vec::new()));
+            let flush_token = sink_workers.flush_token();
+
+            let handle = tokio::spawn(run_report_worker(
+                Arc::clone(&queue),
+                counts.clone(),
+                sink_workers.flush_token(),
+                {
+                    let submitted = Arc::clone(&submitted);
+                    move |key, ()| {
+                        let submitted = Arc::clone(&submitted);
+                        let flush_token = flush_token.clone();
+
+                        async move {
+                            flush_token.cancelled().await;
+
+                            if stall {
+                                std::future::pending::<()>().await;
+                            }
+
+                            submitted.lock().unwrap().push(key);
+                            true
+                        }
+                    }
+                },
+            ));
+
+            let queued = Arc::clone(&queue);
+
+            sink_workers.register(
+                "test_sink",
+                None,
+                move || queued.len(),
+                counts,
+                vec![handle],
+            );
+
+            Self {
+                sink_workers,
+                queue,
+                submitted,
+                shutdowns: Arc::new(AtomicUsize::new(0)),
+                cancel_token: CancellationToken::new(),
+            }
+        }
+
+        fn iteration(&self, drain: Duration) -> FinalRecordIteration {
+            FinalRecordIteration {
+                queue: Arc::clone(&self.queue),
+                shutdowns: Arc::clone(&self.shutdowns),
+                drain,
+            }
+        }
+
+        /// A discovery loop that returns its iteration once cancelled.
+        fn discovery_returning_on_cancel(&self, drain: Duration) -> Discovery {
+            let cancel_token = self.cancel_token.clone();
+            let iteration = self.iteration(drain);
+
+            async move {
+                cancel_token.cancelled().await;
+                Ok(iteration)
+            }
+            .boxed()
+        }
+    }
+
+    async fn join_error() -> JoinError {
+        let handle = tokio::spawn(std::future::pending::<()>());
+        handle.abort();
+        handle.await.unwrap_err()
+    }
 
     #[test]
     fn finish_moves_records_from_pending_to_settled_in_one_snapshot() {
@@ -247,6 +372,7 @@ mod tests {
             },
         ] {
             let queue = Arc::new(DedupQueue::new());
+
             for key in ["a", "b", "c"] {
                 queue.save_latest(key, ());
             }
@@ -265,10 +391,12 @@ mod tests {
                         sink_workers.flush_token(),
                         move |key, ()| {
                             let submitted = Arc::clone(&submitted);
+
                             async move {
                                 if let Submission::Stalled = submission {
                                     std::future::pending::<()>().await;
                                 }
+
                                 submitted.lock().unwrap().push(key);
                                 matches!(submission, Submission::Delivered)
                             }
@@ -293,12 +421,14 @@ mod tests {
             let dropped = logs
                 .iter()
                 .find(|log| log.message == "Sink dropped records at shutdown");
+
             assert_eq!(
                 dropped.and_then(|log| log.field("dropped_record_count")),
                 case.dropped,
                 "{}",
                 case.scenario
             );
+
             if let Some(dropped) = dropped {
                 assert_eq!(dropped.field("sink_type"), Some("test_sink"));
             }
@@ -307,21 +437,314 @@ mod tests {
                 .iter()
                 .find(|log| log.message == "Sinks flushed")
                 .unwrap_or_else(|| panic!("{}: summary is logged", case.scenario));
+
             assert_eq!(
                 summary.field("flushed_record_count"),
                 Some(case.flushed),
                 "{}",
                 case.scenario
             );
+
             assert_eq!(
                 summary.field("dropped_record_count"),
                 Some(case.dropped.unwrap_or("0")),
                 "{}",
                 case.scenario
             );
+
             assert_eq!(
                 summary.field("timed_out_sink_count"),
                 Some(case.timed_out),
+                "{}",
+                case.scenario
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_service_exit_drains_collectors_and_flushes_sinks_once() {
+        #[derive(Clone, Copy)]
+        enum Exit {
+            SignalFirst,
+            ListenerCancelsWhileExiting,
+            DiscoveryCancelsWhileReturning,
+            DiscoveryJoinFailsWhileCancelling,
+        }
+
+        struct Case {
+            scenario: &'static str,
+            exit: Exit,
+            shutdowns: usize,
+            submitted: &'static [&'static str],
+            discovery_log: &'static str,
+        }
+
+        for case in [
+            Case {
+                scenario: "signal observed first",
+                exit: Exit::SignalFirst,
+                shutdowns: 1,
+                submitted: &["queued", "final"],
+                discovery_log: "Collectors drained",
+            },
+            Case {
+                scenario: "listener cancels the token while returning",
+                exit: Exit::ListenerCancelsWhileExiting,
+                shutdowns: 1,
+                submitted: &["queued", "final"],
+                discovery_log: "Collectors drained",
+            },
+            Case {
+                scenario: "discovery cancels the token while returning its iteration",
+                exit: Exit::DiscoveryCancelsWhileReturning,
+                shutdowns: 1,
+                submitted: &["queued", "final"],
+                discovery_log: "Collectors drained",
+            },
+            Case {
+                scenario: "discovery join fails while cancelling",
+                exit: Exit::DiscoveryJoinFailsWhileCancelling,
+                shutdowns: 0,
+                submitted: &["queued"],
+                discovery_log: "Discovery loop join error during shutdown",
+            },
+        ] {
+            let fixture = ServiceFixture::new(false);
+            let cancel_token = fixture.cancel_token.clone();
+            let pending_listener: Listener = std::future::pending().boxed();
+
+            // Async blocks panic if polled after completion, so a completed
+            // discovery future polled again would fail the test.
+            let (discovery, listener): (Discovery, Listener) = match case.exit {
+                Exit::SignalFirst => {
+                    cancel_token.cancel();
+                    (
+                        fixture.discovery_returning_on_cancel(Duration::ZERO),
+                        pending_listener,
+                    )
+                }
+                Exit::ListenerCancelsWhileExiting => (
+                    fixture.discovery_returning_on_cancel(Duration::ZERO),
+                    async move {
+                        cancel_token.cancel();
+                        Ok(Ok(()))
+                    }
+                    .boxed(),
+                ),
+                Exit::DiscoveryCancelsWhileReturning => {
+                    let iteration = fixture.iteration(Duration::ZERO);
+
+                    let discovery = async move {
+                        cancel_token.cancel();
+                        Ok(iteration)
+                    };
+
+                    (discovery.boxed(), pending_listener)
+                }
+                Exit::DiscoveryJoinFailsWhileCancelling => {
+                    let error = join_error().await;
+
+                    let discovery = async move {
+                        cancel_token.cancel();
+                        Err(error)
+                    };
+
+                    (discovery.boxed(), pending_listener)
+                }
+            };
+
+            let ((), logs) = capture_logs_async(crate::wait_for_service_exit(
+                discovery,
+                listener,
+                &fixture.cancel_token,
+                fixture.sink_workers,
+                Duration::from_secs(20),
+            ))
+            .await;
+
+            assert_eq!(
+                fixture.shutdowns.load(Ordering::SeqCst),
+                case.shutdowns,
+                "{}",
+                case.scenario
+            );
+
+            assert_eq!(
+                *fixture.submitted.lock().unwrap(),
+                case.submitted,
+                "{}",
+                case.scenario
+            );
+
+            for message in [case.discovery_log, "Sinks flushed"] {
+                assert_eq!(
+                    logs.iter().filter(|log| log.message == message).count(),
+                    1,
+                    "{}: {message}",
+                    case.scenario
+                );
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn uncancelled_service_exit_logs_the_failure_without_flushing_sinks() {
+        #[derive(Clone, Copy)]
+        enum Exit {
+            ListenerShutdown,
+            ListenerFails,
+            ListenerJoinFails,
+            DiscoveryEnds,
+            DiscoveryJoinFails,
+        }
+
+        for (exit, level, message) in [
+            (
+                Exit::ListenerShutdown,
+                tracing::Level::INFO,
+                "Metrics listener shutdown",
+            ),
+            (
+                Exit::ListenerFails,
+                tracing::Level::ERROR,
+                "Metrics listener failed",
+            ),
+            (
+                Exit::ListenerJoinFails,
+                tracing::Level::ERROR,
+                "Metrics listener join error",
+            ),
+            (
+                Exit::DiscoveryEnds,
+                tracing::Level::ERROR,
+                "Discovery loop ended unexpectedly",
+            ),
+            (
+                Exit::DiscoveryJoinFails,
+                tracing::Level::ERROR,
+                "Discovery loop join error",
+            ),
+        ] {
+            let fixture = ServiceFixture::new(false);
+            let flush_token = fixture.sink_workers.flush_token();
+            let pending_discovery: Discovery = std::future::pending().boxed();
+            let pending_listener: Listener = std::future::pending().boxed();
+
+            let (discovery, listener): (Discovery, Listener) = match exit {
+                Exit::ListenerShutdown => (pending_discovery, async { Ok(Ok(())) }.boxed()),
+                Exit::ListenerFails => (
+                    pending_discovery,
+                    async { Ok(Err("bind failed".to_string())) }.boxed(),
+                ),
+                Exit::ListenerJoinFails => {
+                    let error = join_error().await;
+                    (pending_discovery, async { Err(error) }.boxed())
+                }
+                Exit::DiscoveryEnds => {
+                    let iteration = fixture.iteration(Duration::ZERO);
+                    (async { Ok(iteration) }.boxed(), pending_listener)
+                }
+                Exit::DiscoveryJoinFails => {
+                    let error = join_error().await;
+                    (async { Err(error) }.boxed(), pending_listener)
+                }
+            };
+
+            let ((), logs) = capture_logs_async(crate::wait_for_service_exit(
+                discovery,
+                listener,
+                &fixture.cancel_token,
+                fixture.sink_workers,
+                Duration::from_secs(20),
+            ))
+            .await;
+
+            assert!(
+                logs.iter()
+                    .any(|log| log.level == level && log.message == message),
+                "{message}"
+            );
+
+            assert!(
+                !logs.iter().any(|log| log.message == "Sinks flushed"
+                    || log.message == "Shutdown signal received; draining collectors"),
+                "{message}"
+            );
+
+            assert_eq!(fixture.shutdowns.load(Ordering::SeqCst), 0, "{message}");
+            assert!(!flush_token.is_cancelled(), "{message}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_phases_share_one_deadline_from_the_observed_signal() {
+        struct Case {
+            scenario: &'static str,
+            drain: Duration,
+            flush_signalled_after: Duration,
+        }
+
+        for case in [
+            Case {
+                scenario: "stalled sink gets the budget left after draining",
+                drain: Duration::from_secs(5),
+                flush_signalled_after: Duration::from_secs(7),
+            },
+            Case {
+                scenario: "collectors exhaust the budget",
+                drain: Duration::from_secs(15),
+                flush_signalled_after: Duration::from_secs(10),
+            },
+        ] {
+            let fixture = ServiceFixture::new(true);
+            let flush_token = fixture.sink_workers.flush_token();
+
+            let flush_signalled = tokio::spawn(async move {
+                flush_token.cancelled().await;
+                Instant::now()
+            });
+
+            let iteration = fixture.iteration(case.drain);
+
+            let discovery = async move {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                Ok(iteration)
+            };
+
+            fixture.cancel_token.cancel();
+            let start = Instant::now();
+
+            let ((), logs) = capture_logs_async(crate::wait_for_service_exit(
+                discovery,
+                std::future::pending::<Result<Result<(), String>, JoinError>>(),
+                &fixture.cancel_token,
+                fixture.sink_workers,
+                Duration::from_secs(10),
+            ))
+            .await;
+
+            assert_eq!(
+                start.elapsed(),
+                Duration::from_secs(10),
+                "{}",
+                case.scenario
+            );
+
+            assert_eq!(
+                flush_signalled.await.unwrap() - start,
+                case.flush_signalled_after,
+                "{}",
+                case.scenario
+            );
+
+            let summary = logs
+                .iter()
+                .find(|log| log.message == "Sinks flushed")
+                .unwrap_or_else(|| panic!("{}: summary is logged", case.scenario));
+
+            assert_eq!(
+                summary.field("timed_out_sink_count"),
+                Some("1"),
                 "{}",
                 case.scenario
             );

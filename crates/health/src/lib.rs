@@ -421,17 +421,57 @@ impl discovery::DiscoveryIteration for ServiceDiscoveryIteration {
     }
 }
 
-/// Drains collectors and then flushes sink workers, both before one deadline
-/// `shutdown_timeout` from now.
-async fn shut_down<I: discovery::DiscoveryIteration>(
+/// Waits for cancellation or for the listener or discovery task to exit, then
+/// shuts down gracefully if cancellation has been observed by then.
+///
+/// The `shutdown_timeout` budget starts when this observes cancellation.
+/// Discovery completion, collector draining, and the sink flush share that one
+/// deadline; reaching it stops waiting but does not stop tasks still running.
+/// Exits without cancellation are logged and skip the graceful shutdown.
+async fn wait_for_service_exit<I: discovery::DiscoveryIteration, E: std::fmt::Debug>(
     discovery: impl Future<Output = Result<I, JoinError>>,
+    listener: impl Future<Output = Result<Result<(), E>, JoinError>>,
+    cancel_token: &CancellationToken,
     sink_workers: SinkWorkers,
     shutdown_timeout: Duration,
 ) {
+    let mut discovery = std::pin::pin!(discovery);
+    let mut discovery_result = None;
+
+    tokio::select! {
+        // Cancellation is polled first so a signalled shutdown is not logged as
+        // a listener or discovery exit.
+        biased;
+
+        () = cancel_token.cancelled() => {}
+        res = listener => match res {
+            Ok(Ok(())) => tracing::info!("Metrics listener shutdown"),
+            Ok(Err(e)) => tracing::error!(error=?e, "Metrics listener failed"),
+            Err(e) => tracing::error!(error=?e, "Metrics listener join error"),
+        },
+        res = &mut discovery => discovery_result = Some(res),
+    }
+
+    // A task can exit between the signal and the select observing it; that is
+    // still a graceful shutdown.
+    if !cancel_token.is_cancelled() {
+        match discovery_result {
+            Some(Ok(_)) => tracing::error!("Discovery loop ended unexpectedly"),
+            Some(Err(e)) => tracing::error!(error=?e, "Discovery loop join error"),
+            None => {}
+        }
+
+        return;
+    }
+
     let deadline = Instant::now() + shutdown_timeout;
     tracing::info!("Shutdown signal received; draining collectors");
 
-    drain_discovery(discovery, deadline).await;
+    // The loop observes the same cancellation and returns its iteration.
+    match discovery_result {
+        Some(result) => drain_discovery(std::future::ready(result), deadline).await,
+        None => drain_discovery(discovery, deadline).await,
+    }
 
     // Collectors abandoned at the deadline keep their sink references, so sink
     // workers are told to flush instead of relying on drop.
@@ -472,7 +512,8 @@ async fn drain_discovery<I: discovery::DiscoveryIteration>(
 ///
 /// `cancel_token` carries the shutdown signal: once cancelled, the service stops
 /// discovery, drains its collectors, and then flushes queued sink records, all
-/// before one deadline, `shutdown_timeout` after the signal.
+/// before one deadline, `shutdown_timeout` after the service observes the
+/// signal. Work still running at that deadline is abandoned, not awaited.
 ///
 /// # Errors
 ///
@@ -568,7 +609,7 @@ pub async fn run_service(
 
     let config_arc = Arc::new(config);
 
-    let mut join_discovery: JoinHandle<ServiceDiscoveryIteration> = tokio::spawn({
+    let join_discovery: JoinHandle<ServiceDiscoveryIteration> = tokio::spawn({
         let config = config_arc.clone();
         let shard_manager = ShardManager {
             shard: config.shard,
@@ -615,50 +656,14 @@ pub async fn run_service(
         )
     });
 
-    tokio::select! {
-        // Cancellation is polled first so a discovery loop that has already
-        // drained is reported as a graceful shutdown rather than an unexpected
-        // exit.
-        biased;
-
-        () = cancel_token.cancelled() => {
-            // The loop observes the same cancellation and returns its iteration.
-            shut_down(join_discovery, sink_workers, config_arc.shutdown_timeout).await;
-        }
-        res = join_listener => {
-            match res {
-                Ok(Ok(_)) => {
-                    tracing::info!("Metrics listener shutdown");
-                }
-                 Ok(Err(e)) => {
-                    tracing::error!(error=?e, "Metrics listener failed");
-                }
-                Err(e) => {
-                    tracing::error!(error=?e, "Metrics listener join error");
-                }
-            }
-        }
-        res = &mut join_discovery => {
-            match res {
-                // The loop can return between the signal and this select
-                // observing it; that is still a graceful shutdown.
-                Ok(iteration) if cancel_token.is_cancelled() => {
-                    shut_down(
-                        std::future::ready(Ok(iteration)),
-                        sink_workers,
-                        config_arc.shutdown_timeout,
-                    )
-                    .await;
-                }
-                Ok(_) => {
-                    tracing::error!("Discovery loop ended unexpectedly");
-                }
-                Err(e) => {
-                    tracing::error!(error=?e, "Discovery loop join error");
-                }
-            }
-        }
-    };
+    wait_for_service_exit(
+        join_discovery,
+        join_listener,
+        &cancel_token,
+        sink_workers,
+        config_arc.shutdown_timeout,
+    )
+    .await;
 
     Ok(())
 }
@@ -882,6 +887,7 @@ mac = "aa:bb:cc:dd:ee:03"
             let ((), logs) = capture_logs_async(drain_discovery(join_discovery, deadline)).await;
 
             assert_eq!(Instant::now(), deadline, "{scenario}");
+
             assert!(
                 logs.iter().any(|log| log.level == tracing::Level::WARN
                     && log.message == "Collectors did not drain before the shutdown deadline"),

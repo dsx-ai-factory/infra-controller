@@ -28,9 +28,12 @@ bmc_proxy_url = "http://proxy.example.com:8080"
 
 endpoint_discovery_interval = "5m"
 
-# Budget for draining collectors and then flushing queued sink records on
-# SIGTERM/SIGINT; keep below the pod's terminationGracePeriodSeconds. Must be
-# greater than zero. Default: 20s.
+# Budget, from when the service observes SIGTERM/SIGINT, shared by discovery
+# completion, collector draining and the sink flush; keep below the pod's
+# terminationGracePeriodSeconds. The deadline stops waiting but does not
+# guarantee remaining work terminates immediately; flushed/dropped counts are
+# in queued entries and approximate for in-transit entries and partially
+# rejected OTLP exports. Must be greater than zero. Default: 20s.
 shutdown_timeout = "20s"
 
 # ==============================================================================
