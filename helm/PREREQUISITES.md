@@ -23,7 +23,7 @@ helm install cert-manager jetstack/cert-manager \
 
 ### HashiCorp Vault
 
-Required only when a selected provider needs it. By default Vault serves as the PKI backend of the `vault-nico-issuer` ClusterIssuer and as the credential store of `nico-api`. NICo can keep the credentials it manages in Postgres instead; refer to [Secrets Storage](../docs/configuration/secrets-storage.md). A site that keeps credentials in Postgres, uses no Transit KEK provider, issues certificates through a cert-manager CA issuer (Section 5), and sets `nico-api.vault.enabled: false` needs no Vault; refer to [Running without Vault](README.md#running-without-vault). The reference installer does this with `setup.sh --skip-vault`.
+Required only when a selected provider needs it. By default Vault serves as the PKI backend of the `vault-nico-issuer` ClusterIssuer and as the credential store of `nico-api`. NICo can keep the credentials it manages in Postgres instead; refer to [Secrets Storage](../docs/configuration/secrets-storage.md). A site that keeps credentials in Postgres, uses no Transit KEK provider, issues certificates through a cert-manager CA issuer (Section 5) with `global.certificate.useCertManager` and `global.certificate.useCertManagerUfm` both `true`, and sets `nico-api.vault.enabled: false` needs no Vault; refer to [Running without Vault](README.md#running-without-vault). The reference installer does this with `setup.sh --skip-vault`.
 
 When Vault is used:
 
@@ -246,7 +246,7 @@ spec:
     secretName: site-root
 ```
 
-Set `global.certificate.issuerRef.name` to its name, as shown below, and set `nico-api.vault.enabled: false` when nothing else needs Vault; refer to [Running without Vault](README.md#running-without-vault).
+Set `global.certificate.issuerRef.name` to its name, as shown below, set `global.certificate.useCertManager` and `global.certificate.useCertManagerUfm` to `true` so that `nico-api` requests its machine and UFM certificates through cert-manager, and set `nico-api.vault.enabled: false` when nothing else needs Vault; refer to [Running without Vault](README.md#running-without-vault).
 
 If you are using a different issuer (for example, self-signed or Let's Encrypt), update the issuer reference in your values file:
 

@@ -71,10 +71,11 @@ nico-api:
       command: ["sh", "-c", "cp -r /machine-validation /forge-boot-artifacts/blobs/internal"]
 
   ## Vault runtime configuration. Keep the default (enabled) on a Vault site. A
-  ## site installed with `setup.sh --skip-vault` sets it false, issues its
-  ## certificates from the site-issuer ClusterIssuer
+  ## site installed with `setup.sh --skip-vault` sets it false, sets both
+  ## global.certificate.useCertManager and global.certificate.useCertManagerUfm
+  ## to true, issues its certificates from the site-issuer ClusterIssuer
   ## (global.certificate.issuerRef.name: site-issuer), and leaves
-  ## vaultClusterInfo below empty. See helm/charts/nico-api/values.yaml.
+  ## vaultClusterInfo below empty. Refer to helm/charts/nico-api/values.yaml.
   # vault:
   #   enabled: false
 

@@ -30,11 +30,11 @@ A reference installation and configuration of all these components is described 
 |---|---|
 | External Secrets Operator | v0.8.6 |
 
-ESO syncs secrets from Vault into Kubernetes Secret objects.
+ESO copies the `site-root` CA bundle and the database credentials into the NICo namespaces as Kubernetes Secrets, through ClusterSecretStores that read Kubernetes Secrets in the `cert-manager` and `postgres` namespaces; it does not read Vault.
 
 **Configuration required:**
 
-- A SecretStore or ClusterSecretStore pointing to Vault.
+- ClusterSecretStores for the `cert-manager` and `postgres` namespaces.
 - ExternalSecret objects for each NICo namespace:
   - `nico-roots-eso`: target secret `nico-roots` with keys `site-root`, `nico-root`
   - DB credentials ExternalSecrets per namespace (e.g. `clouddb-db-eso : nico.nico-pg-cluster.credentials`)
@@ -49,7 +49,7 @@ ESO syncs secrets from Vault into Kubernetes Secret objects.
 
 <Note>The cert-manager component issues and rotates the TLS certificates that NICo services use for mTLS/gRPC communication.</Note>
 
-**ClusterIssuers required**: `site-issuer`, a CA issuer backed by the `site-root` Secret, and `vault-nico-issuer`, backed by Vault PKI. The reference installation creates both, plus the `selfsigned-bootstrap` issuer that signs `site-root`; a site installed with `--skip-vault` creates no `vault-nico-issuer` and uses `site-issuer` for every service certificate.
+**ClusterIssuers required**: `site-issuer`, a CA issuer backed by the `site-root` Secret, and `vault-nico-issuer`, backed by Vault PKI. The reference installation creates both, plus the `selfsigned-bootstrap` issuer that signs `site-root`; a site installed with `--skip-vault` creates no `vault-nico-issuer` and uses `site-issuer` for the Core, RMS, Flow, and site-agent service certificates.
 
 **If you already have cert-manager:**
 

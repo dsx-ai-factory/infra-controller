@@ -13,7 +13,7 @@ After any required manual Flow overwrite, every installation phase is safe to re
 | **1 — local-path-provisioner** | Manifests applied using `kubectl apply` are idempotent. The StorageClass is **deleted and re-created** on every run (its `provisioner` field is immutable). Existing PVs and PVCs are unaffected, but new PVC provisioning fails during that brief window. |
 | **1b — postgres-operator** | `helmfile sync` issues `helm upgrade --install` — upgrades the release in place. Existing `PostgreSQL` CRs (including `nico-pg-cluster`) are untouched. |
 | **1c — MetalLB** | CRDs are applied server-side with `--force-conflicts`. Any Helm-owned CRDs from a prior install have their ownership labels stripped before sync, preventing deletion. `helmfile sync` upgrades the release. Existing `IPAddressPool`, `BGPPeer`, and `BGPAdvertisement` instances are preserved and re-applied (idempotent `kubectl apply`). Refer to [MetalLB CRD ownership](#20--21-metallb-crd-ownership-migration). |
-| **2 — cert-manager** | `helmfile sync` upgrades the release. Existing `ClusterIssuer`, `Certificate`, and `CertificateRequest` objects are untouched. The site CA bootstrap and, on a Vault site, the Vault TLS bootstrap certs are re-applied server-side; existing certs that are still valid are not reissued. |
+| **2 — cert-manager** | `helmfile sync` upgrades the release. Existing `ClusterIssuer`, `Certificate`, and `CertificateRequest` objects are untouched. The site CA bootstrap and, on a Vault site, the Vault TLS bootstrap certs are re-applied server-side; existing certs that are still valid are not reissued. The `site-issuer` ClusterIssuer is a hook that each `nico-prereqs` sync deletes and recreates. |
 | **3 — Vault** | `helmfile sync` upgrades the release. The StatefulSet uses `updateStrategy: OnDelete`, so running Vault pods are left alone. A changed pod template, for example new probe settings, reaches a pod only when that pod is deleted, and `setup.sh` prints a warning naming such pods. Skipped on a site installed with `--skip-vault`. |
 | **4 — Vault unseal** | `unseal_vault.sh` checks whether Vault is already initialized. If it is, it skips `vault operator init` and only unseals any pods that were restarted and became sealed again. The Vault cluster keys (`vault-cluster-keys` Secret) and root token (`vaultroottoken`) are preserved. With `--skip-vault`, this step is skipped and `setup.sh` creates and labels the `nico-system` namespace itself. |
 | **4 (SSH host key)** | `bootstrap_ssh_host_key.sh` detects an existing SSH host key Secret and skips re-generation. The cluster's SSH identity is preserved across upgrades. |
@@ -57,7 +57,7 @@ If `flow/flow` or an active Flow Pod still contains a `psm` or `nsm` container, 
 
 ### Back up Vault unseal keys
 
-Skip this step on a site installed with `--skip-vault`; it has no Vault.
+Skip this step only when no `vault` release is installed, as on a site installed with `--skip-vault`. A site that still runs Vault after moving off it keeps backing the keys up until the release is removed.
 
 Vault unseal keys are stored in the `vault-cluster-keys` Secret in the `vault` namespace. If this Secret is lost and all Vault pods restart simultaneously, the Vault data is unrecoverable — a Raft snapshot does **not** substitute for the unseal keys, because snapshots are encrypted with the same keyring the keys protect.
 
@@ -127,7 +127,7 @@ Do not upgrade a cluster that already has degraded components. Resolve any exist
 kubectl get pods -n nico-system
 kubectl get pods -n nico-rest
 kubectl get pods -n temporal
-kubectl get pods -n vault                 # unless installed with --skip-vault
+kubectl get pods -n vault                 # while a vault release is installed
 kubectl get pods -n postgres
 kubectl get pods -n metallb-system
 kubectl get pods -n dpf-operator-system   # if DPF is enabled — phase 5b upgrades it
@@ -142,7 +142,7 @@ kubectl get svc -A -o jsonpath='{range .items[?(@.spec.type=="LoadBalancer")]}{.
     > pre-upgrade-vips.txt
 ```
 
-On a site with Vault, verify that it is fully unsealed — a sealed Vault blocks the upgrade at phase 4. Skip this check on a site installed with `--skip-vault`:
+On a site with Vault, verify that it is fully unsealed — a sealed Vault blocks the upgrade at phase 4. Skip this check only when no `vault` release is installed:
 
 ```bash
 kubectl exec -n vault vault-0 -c vault -- vault status -tls-skip-verify | grep -E "Sealed|Initialized"
@@ -307,7 +307,8 @@ If a phase fails, `setup.sh` prints `SETUP FAILED` and offers: `Run clean.sh to 
 | `--skip-rest` | Skip Phase 7 only. Prerequisites and NICo Core still upgrade; the REST stack is left untouched. |
 | `--skip-rms` | Skip the Rack Management Service upgrade (Phase 5c). RMS installs **by default** (like DPF); `NICO_RMS_IMAGE_TAG` is required unless this flag is passed. Skipping leaves an existing RMS release untouched. |
 | `--skip-dpf` | Use **only** if DPF is not enabled at this site. This is not a pure skip: it clears `INSTALL_DPF`, which drops phase 5b and redeploys NICo Core with the `[dpf]` block disabled — on a DPF-enabled site that is a config change, not a skip. |
-| `--skip-vault` | Use **only** on a site that was installed without Vault, or that has completed the migration off it. This is not a pure skip: it drops the Vault install and unseal phases, removes the Vault resources from the `nico-prereqs` release, and redeploys Core, RMS, Flow, and the site-agent with `site-issuer` certificates and the Core Vault settings disabled — on a Vault site that is a config change that requires the credential migration first, and it never uninstalls Vault. Refer to [Installing without Vault](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#installing-without-vault). |
+| `--skip-vault` | Use **only** on a site that was installed without Vault, or that has completed the migration off it. This is not a pure skip: it drops the Vault install and unseal phases, removes the Vault resources from the `nico-prereqs` release at the end of the run, after nothing references Vault, and redeploys Core, RMS, Flow, and the site-agent with `site-issuer` certificates and the Core Vault settings disabled — on a Vault site that is a config change that requires the credential migration first, and it never uninstalls Vault. Pass it on every upgrade of such a site, or keep `NICO_SKIP_VAULT=true` set; the choice is not stored. Refer to [Installing without Vault](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm-prereqs/README.md#installing-without-vault). |
+| `--install-vault` | Roll a `--skip-vault` site back to Vault, or override `NICO_SKIP_VAULT=true` left in the environment. |
 | `--core-values <file>` | Use a per-site NICo Core values file (same as initial install). |
 | `--flow-values <file>` | Use a per-site NICo Flow values file (same as initial install). Flow overrides applied outside `setup.sh` are reset by the upgrade unless they are in this file. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest or kustomize dir (same as initial install). |
@@ -334,7 +335,7 @@ Run the same checks as after initial installation:
 kubectl get pods -n nico-system
 kubectl get pods -n nico-rest
 kubectl get pods -n temporal
-kubectl get pods -n vault                 # unless installed with --skip-vault
+kubectl get pods -n vault                 # while a vault release is installed
 kubectl get pods -n postgres
 kubectl get pods -n metallb-system
 kubectl get pods -n dpf-operator-system   # if DPF enabled

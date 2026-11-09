@@ -430,7 +430,8 @@ rms:
   apiUrl: "https://rms-api-server.rack-manager.svc.cluster.local:8801"
   ## Enforce TLS when connecting to RMS. The standard RMS deployment serves
   ## mTLS (apiServer.tls.enabled + caEnabled) with a certificate minted from
-  ## the same vault-nico-issuer that signs nico-api's SPIFFE cert.
+  ## the ClusterIssuer that signs nico-api's SPIFFE cert (vault-nico-issuer,
+  ## or site-issuer on a site installed without Vault).
   enforceTls: true
   ## Optional mTLS material overrides — paths inside the nico-api container.
   ## Leave empty: the RMS client (nv-rms-client) auto-discovers nico-api's

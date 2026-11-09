@@ -150,9 +150,11 @@ config it edits.
 
 11. **Install without Vault (opt-in).** To run the site without HashiCorp
     Vault, keep its credentials in Postgres through `[secrets]` in the site
-    config and pass `--skip-vault`. The installer then issues every service
-    certificate from the `site-issuer` ClusterIssuer, and preflight checks the
-    Core values for anything that still needs Vault. Refer to
+    config and pass `--skip-vault`. The installer then issues the Core, RMS,
+    Flow, and site-agent service certificates from the `site-issuer`
+    ClusterIssuer (Flow's Temporal client certificate stays on
+    `nico-rest-ca-issuer`), and preflight checks the Core values for anything
+    that still needs Vault. Refer to
     [Installing without Vault](#installing-without-vault).
 
 ### Building the RMS image
@@ -205,7 +207,7 @@ The tables below summarize the keys that must be set per site.
 | `PREFLIGHT_CHECK_IMAGE` | No | Image used for preflight per-node checks. Defaults to `busybox:1.36`; set to a local mirror for air-gapped clusters. |
 | `NICO_SKIP_DPF` | No | Skip the DPF (DOCA Platform Framework) DPU provisioning stack, which installs **by default**. Same as `--skip-dpf`. Defaults to `false`. |
 | `NICO_SKIP_RMS` | No | Skip the Rack Management Service (rack-manager chart, phase 5c), which installs **by default**. Same as `--skip-rms`. Defaults to `false`. |
-| `NICO_SKIP_VAULT` | No | Install without HashiCorp Vault, which installs **by default**: skip the Vault install and unseal phases, render no Vault resources in `nico-prereqs`, and deploy Core, RMS, Flow, and the site-agent with certificates from the `site-issuer` ClusterIssuer and the Core Vault settings disabled. Same as `--skip-vault`; `NICO_INSTALL_VAULT=false` is honored too. Defaults to `false`. Accepts `true` or `false` only; any other value stops setup with `Error: NICO_SKIP_VAULT must be true or false (got '<value>')`, and `NICO_INSTALL_VAULT` is checked the same way. Not an uninstall: on a site that runs Vault it is a configuration change. Refer to [Installing without Vault](#installing-without-vault). |
+| `NICO_SKIP_VAULT` | No | Install without HashiCorp Vault, which installs **by default**: skip the Vault install and unseal phases, render no Vault resources in `nico-prereqs` (on an existing Vault site, after nothing references Vault any more), and deploy Core, RMS, Flow, and the site-agent with certificates from the `site-issuer` ClusterIssuer and the Core Vault settings disabled. Same as `--skip-vault`; `NICO_INSTALL_VAULT=false` is honored too. Defaults to `false`. Accepts `true` or `false` only; any other value stops setup with `Error: NICO_SKIP_VAULT must be true or false (got '<value>')`, and `NICO_INSTALL_VAULT` is validated the same way, with its own name in the message. The choice is not stored: pass the flag or keep the variable set on every run. Not an uninstall: on a site that runs Vault it is a configuration change. Refer to [Installing without Vault](#installing-without-vault). |
 | `NICO_RMS_IMAGE_TAG` | Unless RMS is skipped (`--skip-rms` / `NICO_SKIP_RMS=true`) | RMS API server image tag (git-describe style, e.g. `v0.10.0-rc2`). No default - the chart fails at render without one. See `setup.sh` header for the full `NICO_RMS_*` family (chart override, image repo, NGC key). The namespace is fixed to `rack-manager` - NICo Core dials the service by that name. |
 | `NICO_DPF_SRC` | No | Local `NVIDIA/doca-platform` checkout to install the DPF operator chart from (air-gapped or self-managed sites). Defaults to unset - the chart comes from the pinned `v26.4.0` commit: the `helm-prereqs/doca-platform` git submodule in a git checkout, or a shallow clone of the commit in `helm-prereqs/doca-platform.pin` when running from the packaged chart. |
 | `NICO_DPF_NGC_API_KEY` | No | NGC API key for `dpf-pull-secret` and the Argo CD helm repository secrets. Defaults to `REGISTRY_PULL_SECRET`. |
@@ -228,7 +230,7 @@ The tables below summarize the keys that must be set per site.
 | `siteName` | `"TMP_SITE"` | **Yes** | Site identifier, injected into postgres pods as `TMP_SITE` |
 | `imagePullSecrets.ngcNicoPull` | `""` | No (auto) | Pull secret for NICo Core images. Set automatically by `setup.sh` from `REGISTRY_PULL_SECRET` when provided. |
 | `vault.enabled` | `true` | No | Render the chart's Vault resources: the `vault-nico-issuer` ClusterIssuer, the cert-manager Vault-auth ServiceAccount, the `vault-pki-config` Job, the `nico-vault-token` and `nico-vault-approle-tokens` Secrets, the `vault-cluster-info` ConfigMap, and the Vault TLS bootstrap Certificates. Running `setup.sh --skip-vault` sets it to `false` through `values/nico-prereqs-dynamic.yaml.gotmpl`. The finer `vault.*` toggles below only apply while it is `true`. Setting it to `false` never uninstalls Vault. While any consumer in the cluster still references Vault (a Deployment in `nico-system` whose environment has `VAULT_ADDR`, or a cert-manager Certificate issued by `vault-nico-issuer`), `setup.sh --skip-vault` keeps the release's Vault resources and removes them at the end of a run that leaves no such consumer; a direct `helm upgrade` that sets it to `false` removes them immediately, while those consumers still rely on them. Refer to [Installing without Vault](#installing-without-vault). |
-| `certManager.siteIssuer.create` | `true` | No | Create the `site-issuer` ClusterIssuer, a cert-manager CA issuer backed by the `site-root` Secret in the cert-manager namespace. It issues the Vault TLS bootstrap certificates and, with `--skip-vault`, every NICo service certificate. On a Vault site it renders only while `vault.tls.create` is also `true`, which keeps the previous behavior for a site that manages its own `site-issuer`; with `vault.enabled: false` it renders regardless of `vault.tls.create`. The issuer is a Helm hook with `before-hook-creation`, kept so that its move out of `vault-tls-certs.yaml` causes no churn on existing releases, so each `nico-prereqs` sync deletes and recreates it; a certificate issued or renewed in that brief window waits for cert-manager's retry. |
+| `certManager.siteIssuer.create` | `true` | No | Create the `site-issuer` ClusterIssuer, a cert-manager CA issuer backed by the `site-root` Secret in the cert-manager namespace. It issues the Vault TLS bootstrap certificates and, with `--skip-vault`, the Core, RMS, Flow, and site-agent service certificates. On a Vault site it renders only while `vault.tls.create` is also `true`, so a site that manages its own `site-issuer` keeps that opt-out; with `vault.enabled: false` it renders regardless of `vault.tls.create`. With `false`, `setup.sh` leaves the issuer out of its phase 2 bootstrap render, and a ClusterIssuer named `site-issuer` must exist before the Core release. The issuer is a Helm hook with `before-hook-creation`, so each `nico-prereqs` sync deletes and recreates it; a certificate issued or renewed in that brief window waits for cert-manager's retry. |
 | `vault.nicoCliClientRole.enabled` | `true` | No | Create the Vault PKI role for short-lived NICo CLI client certificates. This only defines the certificate profile; issuance access must be granted separately. |
 | `vault.nicoCliClientRole.name` | `"nico-cli-client"` | No | Vault role name, and the certificate `SubjectOU` when `ou` is empty. |
 | `vault.nicoCliClientRole.ou` | `""` | No | Certificate `SubjectOU` stamped on issued CLI client certs; empty means use `name`. nico-api maps the OU to the ExternalUser group, but admin-CLI authorization is gated by the issuer CN (`auth.additionalIssuerCns`), not the OU value. Do not set `"Invalid"`. |
@@ -401,7 +403,8 @@ It supports these common deployment modes:
 | `--flow-values <file>` | Pass a site-specific NICo Flow values file to the `flow` Helm release. Every run resets the release to the chart defaults plus the image and pull-secret settings, so Flow overrides made with `helm upgrade` outside `setup.sh` are lost unless they are in this file. The file must not set `namespaceOverride`: `setup.sh` and the site-agent address Flow in the `flow` namespace. |
 | `--metallb-config <path>` | Use a site-specific MetalLB manifest file or kustomize directory. |
 | `--skip-dpf` | Skip the DPF (DOCA Platform Framework) DPU provisioning stack, which installs **by default**. Use for sites with no DPUs or that still use the deprecated iPXE DPU path. See [DPF](#dpf). |
-| `--skip-vault` | Install without HashiCorp Vault, which installs **by default**. An explicit opt-out for a site whose credentials live in Postgres: it skips the Vault install and unseal phases, renders no Vault resources in `nico-prereqs`, and deploys Core, RMS, Flow, and the site-agent with certificates from the `site-issuer` ClusterIssuer and the Core Vault settings disabled. Preflight validates the Core values against the Vault-free contract. It does not uninstall a Vault that is already running. Same as `NICO_SKIP_VAULT=true`. Refer to [Installing without Vault](#installing-without-vault). |
+| `--skip-vault` | Install without HashiCorp Vault, which installs **by default**. An explicit opt-out for a site whose credentials live in Postgres: it skips the Vault install and unseal phases, renders no Vault resources in `nico-prereqs` (on an existing Vault site, after nothing references Vault any more), and deploys Core, RMS, Flow, and the site-agent with certificates from the `site-issuer` ClusterIssuer and the Core Vault settings disabled. Preflight validates the Core values against the Vault-free contract. It does not uninstall a Vault that is already running. Same as `NICO_SKIP_VAULT=true`. Refer to [Installing without Vault](#installing-without-vault). |
+| `--install-vault` | Install Vault, the default. It overrides `NICO_SKIP_VAULT=true` and `NICO_INSTALL_VAULT=false` from the environment, and the last of `--skip-vault` and `--install-vault` on the command line wins. Use it to roll a `--skip-vault` site back to Vault while those variables are still set. |
 | `--install-contour` | Install the optional Contour/Envoy ingress controller. The Envoy Service is `LoadBalancer` and is pinned to the `vip-pool-external` MetalLB pool, so that pool must have addresses before the install. Setup aborts if `projectcontour` already runs a Contour that NICo does not manage, rather than upgrading it with these values. |
 | `--site-overlay <dir>` | Apply a site kustomize overlay after Core deploys. |
 | `--with-observability` | Also install the local monitoring stack (metrics + logs + traces) after Core. Runs in every mode, including `--skip-rest`. Can also be run standalone at any time: `observability/install-observability.sh`. See [observability/README.md](observability/README.md). |
@@ -543,12 +546,21 @@ without it (`NICO_INSTALL_VAULT=false` is honored too). The flag means "do not i
 or configure Vault"; it never uninstalls one. Use it for a new site whose
 credentials live in Postgres from the first boot, or for an existing site
 after the steps in [Moving an existing Vault site](#moving-an-existing-vault-site).
+The choice is not stored: every later `setup.sh` run on the site passes
+`--skip-vault` again or keeps `NICO_SKIP_VAULT=true` set, and a direct
+`helmfile sync -l name=nico-prereqs` exports `INSTALL_VAULT=false`, because
+the dynamic values default to Vault. The KEK provider of the Postgres store
+sets the production posture: the `integrated` provider requires separate
+production qualification, and no KMIP server product is qualified yet
+([#8658](https://github.com/dsx-ai-factory/infra-controller/issues/8658));
+refer to [Secrets Storage](../docs/configuration/secrets-storage.md) before
+choosing one for a production site.
 Vault normally provides five things, and each has a Vault-free replacement:
 
 | Vault provides | Without Vault |
 | --- | --- |
 | The credential store behind `nico-api` | The Postgres credential store, configured through `[secrets]` in the site config with an `integrated` or `kmip` KEK provider. Refer to [Day 0 Credential Store](../docs/getting-started/installation-options/day0-credential-store.md) and [Secrets Storage](../docs/configuration/secrets-storage.md). |
-| PKI behind the `vault-nico-issuer` ClusterIssuer, which signs every NICo service certificate | The `site-issuer` ClusterIssuer, a cert-manager CA issuer backed by the `site-root` Secret. The installer points Core, RMS, Flow, and the site-agent at it. |
+| PKI behind the `vault-nico-issuer` ClusterIssuer, which signs the Core, RMS, Flow, and site-agent service certificates | The `site-issuer` ClusterIssuer, a cert-manager CA issuer backed by the `site-root` Secret. The installer points Core, RMS, Flow, and the site-agent at it. |
 | The machine and UFM certificates that `nico-api` requests through Vault PKI | cert-manager `CertificateRequest` resources against `site-issuer`, selected by `use_cert_manager = true` and `use_cert_manager_ufm = true` in `[certificates]`. The installer sets both through the chart. |
 | KV seeds (`vault.kvSeeds`) for the site-wide and factory-default credentials | None. The `siteCredentials` block renders the site-wide BMC root and UEFI defaults, and the admin CLI adds the factory defaults after Core is up. Refer to [Credentials without Vault](#credentials-without-vault). |
 | The `nico-cli-client` PKI role for admin CLI client certificates | A client certificate from your own PKI, or a cert-manager `Certificate` issued by `site-issuer`. Refer to [Admin CLI credential without Vault](#admin-cli-credential-without-vault). |
@@ -599,11 +611,19 @@ With `--skip-vault`:
   through `values/nico-prereqs-dynamic.yaml.gotmpl` (the chart's
   `vault.approleSecret.roleId` and `secretId`), printing
   `Carrying the live AppRole credentials in nico-vault-approle-tokens across the sync`,
-  and the sync applies those values in place of the placeholders. A missing
-  Secret, or one without both keys, prints
+  and the sync applies those values in place of the placeholders. Each key is
+  carried on its own: a missing Secret, or one with neither key, prints
   `WARNING: nico-vault-approle-tokens holds no AppRole credentials, so the sync renders the chart's empty placeholders; health-check.sh reports its keys as missing until a run with Vault installed re-creates them`
-  instead; any other read failure stops setup before the sync with
-  `Error: could not read nico-vault-approle-tokens to carry the AppRole credentials across the nico-prereqs sync; fix cluster access and rerun`. A
+  instead, and a Secret with one key keeps it and prints a warning that names
+  the missing one; a value that does not decode as base64, or any other read
+  failure, stops setup before the sync with
+  `Error: could not read nico-vault-approle-tokens to carry the AppRole credentials across the nico-prereqs sync; fix cluster access and rerun`
+  or the matching decode error. The existing `nico-vault-token` is carried
+  the same way (`Carrying the existing nico-vault-token across the sync`), so
+  the retained sync does not read `vaultroottoken` and does not need the
+  `vault` namespace; without that Secret it prints
+  `nico-vault-token is absent, so the sync reads vaultroottoken in the vault namespace`
+  and reads it. A
   consumer is a Deployment in `nico-system` whose environment has `VAULT_ADDR`
   (a renamed Core such as `nico-api.nameOverride: carbide-api` counts too), or
   a cert-manager `Certificate` in any namespace whose `issuerRef.name` is
@@ -647,13 +667,16 @@ With `--skip-vault`:
   (`name`, `kind`, and `group`) to Flow, and phase 7i passes them to the
   site-agent. Flow's Temporal client certificate stays on
   `nico-rest-ca-issuer`, as on every site.
-- At the end of the run, after phase 7i or after phase 6 with `--skip-rest`,
-  setup probes the cluster again. When no consumer references Vault, it prints
+- At the end of the run, after phase 7i, after phase 6 with `--skip-rest`, or
+  when the REST deployment prompt is declined, setup probes the cluster again. When no consumer references Vault, it prints
   `No consumer references Vault any more: removing the Vault resources from nico-prereqs...`,
   re-syncs `nico-prereqs` without them, and confirms with
   `Vault resources removed from nico-prereqs`. Like every `nico-prereqs` sync,
   this one deletes and recreates the `site-issuer` hook, so a certificate
   issued or renewed in that brief window waits for cert-manager's retry.
+  If that sync fails, the run is still complete: it prints
+  `WARNING: the nico-prereqs sync that removes the Vault resources failed, so they stay in the release;`
+  and the next `--skip-vault` run removes them.
   Otherwise it prints
   `These still reference Vault, so the Vault resources stay in nico-prereqs:`,
   the remaining consumers, and
@@ -703,30 +726,46 @@ cluster change. It reports an error that names the field when:
 - `[certificates.cert_manager] issuer_name = "vault-nico-issuer"` is set in
   the site TOML or in a custom base config, or `issuer_kind` is set to
   anything other than `ClusterIssuer` while the effective `issuer_name` is
-  `site-issuer`, which the bootstrap creates only as a ClusterIssuer. These
+  `site-issuer` (an omitted `issuer_name` is `site-issuer`, the `nico-api`
+  default), which the bootstrap creates only as a ClusterIssuer. These
   signer rules judge only keys that a TOML file sets;
+- a custom base config does not set `[certificates.cert_manager] namespace`,
+  or sets it to anything other than `nico-system`: the generated config sets
+  it to the release namespace, and `nico-api` defaults an absent value to
+  `forge-system`, where the chart grants it no CertificateRequest
+  permissions;
 - an `issuerRef.name` is `vault-nico-issuer` anywhere other than the two
   places the `--set` list overrides, the top-level
   `global.certificate.issuerRef` and a subchart's own copy of it (for example
   `nico-api.global.certificate.issuerRef`, which the parent chart's global
   value takes precedence over). Examples are
   `nico-api.nvSwitchTls.issuerRef.name` and
-  `nico-api.machineCertificates.issuerRef.name`. The exception is
-  `nico-bmc-proxy.switchTls.issuerRef.name` while
-  `nico-bmc-proxy.switchTls.enabled` is `false`, because the chart renders
-  no switch-client Certificate then;
+  `nico-api.machineCertificates.issuerRef.name`. The exceptions are
+  references under a disabled component (`enabled: false`, or
+  `nico-api.nvSwitchTls` with both of its leaves disabled), which the chart
+  does not read, such as `nico-bmc-proxy.switchTls.issuerRef.name` while
+  `nico-bmc-proxy.switchTls.enabled` is `false`;
 - a nested `issuerRef` whose `name` is `site-issuer`, for example
   `nico-api.machineCertificates.issuerRef` or `nico-api.nvSwitchTls.issuerRef`,
   sets `kind` to anything other than `ClusterIssuer`, because the bootstrap
   creates `site-issuer` only as a ClusterIssuer. An absent `kind` keeps the
   chart default;
 - `nico-bmc-proxy.switchTls.enabled` is `true` and
-  `nico-bmc-proxy.switchTls.issuerRef.name` is not set to `site-issuer`. That
-  Certificate reads its own `issuerRef`, whose chart default is
+  `nico-bmc-proxy.switchTls.issuerRef.name` is absent or `vault-nico-issuer`.
+  That Certificate reads its own `issuerRef`, whose chart default is
   `vault-nico-issuer`, and does not follow the global issuer the installer
-  overrides, so the value must be set explicitly;
+  overrides, so the value must be set explicitly, to `site-issuer` or to
+  another issuer that chains to the site-root CA;
 - `nico-api.vaultClusterInfo` is not empty, which the chart rejects when
-  `nico-api.vault.enabled` is `false`.
+  `nico-api.vault.enabled` is `false`;
+- `nico-api.extraEnv` sets a variable named `CARBIDE_API_SECRETS*`,
+  `CARBIDE_API_CERTIFICATES*`, `CARBIDE_CREDENTIAL_STORE`, or `VAULT_*`: the
+  first two override both config files at runtime, the third selects the
+  credential store ahead of `[secrets]`, and a Deployment whose environment
+  has `VAULT_ADDR` counts as a Vault consumer;
+- `nico-api.automountServiceAccountToken` is `false`: the cert-manager
+  certificate provider builds its Kubernetes client from the pod's service
+  account token.
 
 It warns about values that the `--set` list above overrides, so the override
 is visible: `global.certificate.useCertManager: false`,
@@ -744,7 +783,8 @@ in place and keeps the Vault resources in `nico-prereqs` until no Deployment in
 The check parses the site TOML, so it needs a TOML parser in the `python3`
 environment that already provides PyYAML: Python 3.11 or later (`tomllib`), or
 the `tomli` package; without either, it reports an error. Unlike most values
-checks, these errors block the run even with `-y`, like the database checks. To
+checks, these errors block the run even with `--ignore-preflight-errors`, like
+the database checks. To
 run them before setup, execute `./preflight.sh --skip-vault` directly; a
 sourced `source ./preflight.sh` takes no flags and runs them only with
 `INSTALL_VAULT=false` exported.
@@ -851,7 +891,15 @@ The two answers combine into two more outcomes. A site that still runs Vault
 after switching to `--skip-vault` is installed but not integrated, so the
 Vault section warns with
 `vault: running, but NICo is not configured to use it (--skip-vault); uninstall the vault release and delete the namespace when the rollback window closes`
-and does not fail. A partially migrated site, for example Core without Vault
+and does not fail on that account; its pod checks still fail for a sealed or
+unready Vault. When a Deployment or Certificate query failed, the integration
+is unknown: the warning becomes
+`vault: running; whether NICo still uses it could not be determined (a Deployment or Certificate query failed above), so keep it until a complete check says otherwise`,
+and the integration checks are skipped as
+`Vault integration could not be determined (a Deployment or Certificate query failed above)`
+instead of `not configured (--skip-vault was used)`. A StatefulSet query that
+fails for a reason other than `not found` fails with
+`statefulset/vault: could not be queried (<error>)`. A partially migrated site, for example Core without Vault
 while Flow or site-agent Certificates are still issued by `vault-nico-issuer`,
 stays integrated and gets no such warning. A site that is integrated but has
 lost its StatefulSet fails with
@@ -879,22 +927,42 @@ skip. Complete these first, each as described on its page:
    describes.
 3. Confirm that Vault PKI still signs with the `site-root` CA that
    `site-issuer` signs with, as [Installing without Vault](#installing-without-vault)
-   describes: a leaf issued by
-   `vault-nico-issuer`, such as the Core API certificate in the
-   `nico-api-certificate` Secret (`carbide-api-certificate` on a Core renamed
-   with `nico-api.nameOverride: carbide-api`), must verify against the
-   `site-root` Secret.
+   describes: the issuer that the Vault PKI role signs with (role
+   `nico-cluster` on mount `nicoca` by default, `vault.pkiRole` and
+   `vault.pkiMount` in `values.yaml`) must hold the `site-root` certificate,
+   the `site-root` Secret must hold the matching private key, and
+   `site-issuer` must be Ready. The first command reads the role's
+   `issuer_ref` with the root token from the `vaultroottoken` Secret, passed
+   on standard input, because the role and issuer endpoints need a Vault
+   token; `nicoca/cert/ca` would show the mount's default issuer, which is not
+   necessarily the one the role names.
 
    ```bash
-   kubectl get secret site-root -n cert-manager -o jsonpath='{.data.tls\.crt}' | base64 -d > site-root.crt
-   kubectl get secret nico-api-certificate -n nico-system -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl verify -CAfile site-root.crt
+   kubectl get secret vaultroottoken -n vault -o jsonpath='{.data.token}' | base64 -d |
+     kubectl exec -i -n vault vault-0 -c vault -- sh -c '
+       export VAULT_TOKEN="$(cat)" VAULT_SKIP_VERIFY=1
+       issuer="$(vault read -field=issuer_ref nicoca/roles/nico-cluster)"
+       vault read -field=certificate "nicoca/issuer/${issuer}"' |
+     openssl x509 -noout -fingerprint -sha256
+   kubectl get secret site-root -n cert-manager -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -fingerprint -sha256
+   kubectl get secret site-root -n cert-manager -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -pubkey | sha256sum
+   kubectl get secret site-root -n cert-manager -o jsonpath='{.data.tls\.key}' | base64 -d | openssl pkey -pubout | sha256sum
+   kubectl get clusterissuer site-issuer -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
    ```
 
-   `stdin: OK` confirms the common trust anchor. If verification fails, the
-   Vault PKI CA was replaced after the install, and certificates from
-   `site-issuer` would be rejected by every client that trusts the Vault CA:
-   keep Vault PKI, and treat the CA change as a separate migration before
-   using `--skip-vault`.
+   The two fingerprints must be identical, the two public-key hashes must be
+   identical, and the issuer must report `True`. Comparing the CA, rather
+   than verifying an issued leaf, also catches a Vault PKI CA that was
+   replaced after the install, which a leaf issued earlier would not show.
+   When the fingerprints differ, certificates from `site-issuer` would be
+   rejected by every client that trusts the replacement CA: keep Vault PKI,
+   and treat the CA change as a separate migration before using
+   `--skip-vault`. The key check matters only for a `site-root` Secret that
+   was replaced by hand, because cert-manager issues the chart's `site-root`
+   as a pair: a Ready `site-issuer` proves that the Secret holds a CA
+   certificate and a parseable key, not that they match, and a mismatch fails
+   every certificate request after the switch with
+   `x509: provided PrivateKey doesn't match parent's PublicKey`.
 4. Remove any `[certificates]` override that sets a cert-manager flag to
    `false`, and replace `vault-nico-issuer` in every nested `issuerRef` of the
    Core values. The flags select cert-manager for the machine and UFM
@@ -907,18 +975,18 @@ skip. Complete these first, each as described on its page:
 Then rerun the site's `setup.sh` invocation with `--skip-vault`. Preflight
 warns:
 `--skip-vault: a vault StatefulSet is running in namespace <VAULT_NS>; setup leaves it running and keeps the Vault resources in the nico-prereqs release until no Deployment in nico-system or cert-manager Certificate references Vault, then removes them — credentials, KEK wrapping, and certificate issuance must already have been moved off Vault (see helm-prereqs/README.md, section "Installing without Vault")`.
-Two things differ from a fresh install:
+Three things differ from a fresh install:
 
 - Phase 5 keeps the release's Vault resources while any consumer still
   references Vault: a Deployment in `nico-system` whose environment has
   `VAULT_ADDR`, or a cert-manager `Certificate` in any namespace issued by
   `vault-nico-issuer`, which covers Core, RMS, Flow, and the site-agent. Those
-  consumers keep working during the run, and their certificates keep renewing.
+  consumers keep working during the run, and their certificates keep renewing
+  while Vault stays unsealed.
   The retained sync leaves the `vault-pki-config` Job out and carries the
-  live AppRole credentials across, so it completes whether or not Vault is
-  unsealed; it still reads the `vaultroottoken` Secret
-  for `nico-vault-token`, so keep the `vault` namespace until the resources
-  are released.
+  live AppRole credentials and the existing `nico-vault-token` across, so it
+  completes whether or not Vault is unsealed and does not need the `vault`
+  namespace; a sync with Vault installed reads `vaultroottoken` instead.
   At the end of the run, setup probes the cluster again: when the phases it
   ran have redeployed every consumer, so that none references Vault, it
   re-syncs `nico-prereqs` without the Vault resources; otherwise it lists the
@@ -931,19 +999,46 @@ Two things differ from a fresh install:
   When preflight cannot run the probe, it warns
   `--skip-vault: could not inspect the Vault consumers (Deployments in nico-system and cert-manager Certificates); setup.sh stops before phase 5 while that query fails, because it keeps the Vault resources in nico-prereqs for any consumer that still references Vault`,
   and a failed re-probe at the end of the run keeps the resources.
+- The Certificates of Core, RMS, Flow, and the site-agent switch issuer in
+  place: cert-manager reissues each one from `site-issuer` after its
+  `issuerRef` changes, and the readiness waits in `setup.sh` can pass on the
+  previous issuance. A pod keeps serving its Vault-issued leaf until it reloads
+  the Secret or restarts; RMS reads its TLS material at startup, so after the
+  run wait until the reissued Secret has arrived, which is when
+  `kubectl -n rack-manager get secret rms-api-server-certificate -o jsonpath='{.metadata.annotations.cert-manager\.io/issuer-name}'`
+  prints `site-issuer`, then restart it with
+  `kubectl -n rack-manager rollout restart deployment/rms-api-server` so that
+  it serves the `site-issuer` leaf. Both leaves chain to `site-root`, so
+  clients accept either in the meantime.
 - The `vault` release and its namespace stay in place, because the flag never
   uninstalls. The hook-created `vault-nico-issuer` ClusterIssuer and
-  `vault-pki-config` Job are not tracked by the `nico-prereqs` release either,
-  so they remain until deleted. All of them are harmless: `health-check.sh`
-  keeps checking the Vault pods while they run and warns that the release and
-  namespace should be removed when the rollback window closes, but it does not
-  fail. Remove them together at that point, after two checks. First, the Vault
-  resources must have left `nico-prereqs`: the end of a `--skip-vault` run
-  printed `Vault resources removed from nico-prereqs`, and `health-check.sh`
-  reports its Vault integration checks as `not configured (--skip-vault was used)`. Second,
+  `vault-pki-config` Job, with its `vault-pki-config-sa` ServiceAccount and
+  `vault-pki-config-reader` ClusterRole and ClusterRoleBinding, are not
+  tracked by the `nico-prereqs` release either, so they remain until deleted.
+  All of them are harmless while Vault stays healthy: `health-check.sh` keeps
+  checking the Vault pods while they run, so a sealed or unready pod still
+  fails its own checks, and warns that the release and namespace should be
+  removed when the rollback window closes; the warning itself is not a
+  failure. Remove them together at that point, after three checks. First, the
+  Vault resources must have left `nico-prereqs`: either the end of a
+  `--skip-vault` run printed `Vault resources removed from nico-prereqs`, or
+  `helm get manifest nico-prereqs -n nico-system` lists none of
+  `nico-vault-token`, `nico-vault-approle-tokens`, `vault-cluster-info`,
+  `vault-nicoca-issuer-token`, and `cert-manager-vault-nicoca-issuer` (a rerun
+  that finds no consumer at phase 5 renders them out without that message).
+  `health-check.sh` reporting its Vault integration checks as
+  `not configured (--skip-vault was used)` reflects its consumer probe, not
+  the release. Second, no stored credential may still be wrapped by a Transit
+  KEK: run `nico-admin-cli secrets re-wrap` again and confirm that it
+  reports `stale_remaining` as `0`, as
+  [Rotating and Retiring Keys](../docs/configuration/secrets-storage.md#rotating-and-retiring-keys)
+  describes, because the Transit key goes with the Vault data. Third,
   nothing outside the installer's releases may still use this Vault. The
-  consumer probe sees only Deployments in `nico-system` and cert-manager
-  Certificates; a REST `powershelf-manager` or `nvswitch-manager` deployed
+  consumer probe sees only Deployments in `nico-system` whose container
+  environment names `VAULT_ADDR`, as the chart renders it, and cert-manager
+  Certificates; a workload that consumes the Vault Secrets through `envFrom`
+  or a volume mount is invisible to it; a REST `powershelf-manager` or
+  `nvswitch-manager` deployed
   outside the installer with its persistent credential store on this Vault
   (`VAULT_ADDR` and `VAULT_TOKEN`), or any other client, loses access to its
   credentials when the namespace goes, so move those off this Vault first.
@@ -953,14 +1048,21 @@ Two things differ from a fresh install:
   kubectl delete namespace vault
   kubectl delete clusterissuer vault-nico-issuer
   kubectl delete job vault-pki-config -n nico-system
+  kubectl delete serviceaccount vault-pki-config-sa -n nico-system
+  kubectl delete clusterrole,clusterrolebinding vault-pki-config-reader
   ```
 
   Deleting the namespace also deletes the `vault-cluster-keys`,
   `vaultunsealkeys`, and `vaultroottoken` Secrets and the Vault PVCs; the
   `local-path-persistent` PersistentVolumes stay `Released` until you delete
-  them. `clean.sh` is a full teardown, not a Vault removal.
+  them. `clean.sh` is a full teardown, not a Vault removal: it removes the
+  `vault` release, namespace, key Secrets, and volumes whether or not this
+  installer created them, so never run it on a cluster whose Vault belongs to
+  something else.
 
-Rollback is a rerun of the same invocation without `--skip-vault`: phases 2
+Rollback is a rerun of the same invocation with `--install-vault` in place of
+`--skip-vault` (the flag also overrides `NICO_SKIP_VAULT=true` and
+`NICO_INSTALL_VAULT=false` left in the environment): phases 2
 through 5 reinstall or re-render the Vault resources, and phase 6 restores the
 `vault-nico-issuer` references and the `nico-api` Vault environment. After the
 `vault` release has been removed, that rerun installs a fresh Vault with new
@@ -1053,7 +1155,8 @@ legacy Vault tokens, policies, Secrets, and cluster-wide RBAC even when
 `--skip-rest` is set. This cleanup revokes the legacy tokens with the Vault
 root token, so it needs the site's Vault. Under `--skip-vault`, preflight
 reports an error naming those legacy resources while they exist, before any
-cluster change, and that error blocks the run even with `-y`; when it cannot
+cluster change, and that error blocks the run even with
+`--ignore-preflight-errors`; when it cannot
 inspect the cluster for them, it warns instead,
 and the cleanup script itself stops setup after the Core phase, before
 deleting anything, if they turn out to exist. Run `setup.sh` one more time
@@ -1268,7 +1371,8 @@ receipt from step 2. The Deployments the script stopped also have to be
 unchanged since, because a restart, scale, or recreate in between means the
 copy may be stale. Preflight also stops `false` from moving a database back
 off `nico-pg-cluster`, since there's no supported reverse migration. Both
-checks stop setup, even with `-y`. `auto` never moves a database, so these
+checks stop setup, even with `--ignore-preflight-errors`. `auto` never moves a
+database, so these
 checks only apply to `true` and `false`. `setup.sh` runs them again right
 before phases 7d and 7f repoint Keycloak and Temporal, in case a workload was
 restarted while the earlier phases ran.
