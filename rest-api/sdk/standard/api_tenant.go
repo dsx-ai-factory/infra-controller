@@ -565,13 +565,11 @@ func (r ApiUpdateCurrentTenantRoutingProfileRequest) Execute() (*TenantDefaultRo
 /*
 UpdateCurrentTenantRoutingProfile Update current Tenant default routing profile
 
-Change the current Tenant's default VPC routing profile at one Site. Requires `TENANT_ADMIN` authorization and effective TargetedInstanceCreation for this Tenant at the requested Site. A Site-specific override takes precedence over the Ready Tenant Account's default privilege. The Site must be Registered with native networking enabled. The target Tenant is always resolved from the request organization.
+Change the current Tenant's default VPC routing profile at one Site. Requires `TENANT_ADMIN` authorization and effective TargetedInstanceCreation for this Tenant at the requested Site.
 
-The profile must exist in the Site configuration. The aliases `external`, `internal`, and `privileged-internal` select the built-in profiles; other configured names are case-sensitive and passed unchanged. The default cannot be cleared. Both request fields are required; omission, null, or an empty value is rejected.
+A Tenant may only select a profile whose access tier is numerically greater than or equal to that of its current default routing profile. Unset tiers count as zero.
 
-A privileged Tenant may only select a profile whose access tier is numerically greater than or equal to that of its current default. A lower tier returns 403 before submitting an update. Unset tiers count as zero. The check uses the current Tenant version that also guards the update; a concurrent default change cannot bypass it. This restriction does not apply to the Provider endpoint.
-
-The Tenant must have no active FNN VPCs when changing the profile. Reapplying the same profile is allowed. Existing VPCs are not modified. Tenant metadata is preserved, and a concurrent Tenant change causes a 412 response instead of overwriting newer state. A timeout does not prove the update failed; inspect the Tenant's default before retrying.
+The Tenant must have no active FNN VPCs when changing the profile.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
@@ -763,11 +761,12 @@ func (r ApiUpdateTenantDefaultRoutingProfileRequest) Execute() (*TenantDefaultRo
 /*
 UpdateTenantDefaultRoutingProfile Update Tenant default routing profile
 
-Change the Tenant's default VPC routing profile at one Site. The path parameter is a Tenant ID. Requires `PROVIDER_ADMIN` authorization and a Ready Tenant Account linking that Tenant to the caller's Infrastructure Provider. The Site must belong to the same Provider, be Registered, and have native networking enabled.
+Change the Tenant's default VPC routing profile at one Site.
 
-The profile must exist in the Site configuration. The aliases `external`, `internal`, and `privileged-internal` select the built-in profiles; other configured names are case-sensitive and passed unchanged. The default cannot be cleared. Both request fields are required; omission, null, or an empty value is rejected.
+The Tenant must have no active FNN VPCs when changing the profile.
 
-The Tenant must have no active FNN VPCs when changing the profile. Reapplying the same profile is allowed. Existing VPCs are not modified. Tenant metadata is preserved, and a concurrent Tenant change causes a 412 response instead of overwriting newer state. A timeout does not prove the update failed; inspect the Tenant's default before retrying.
+Org must have an Infrastructure Provider entity, and the specified Tenant must have a Tenant Account linking it to the Infrastructure Provider.
+Infrastructure Provider must be the owner of the site. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Provider Org

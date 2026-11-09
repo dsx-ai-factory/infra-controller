@@ -24,9 +24,9 @@ var _ MappedNullable = &TenantRoutingProfileUpdateRequest{}
 
 // TenantRoutingProfileUpdateRequest Change a Tenant's default VPC routing profile at one Site
 type TenantRoutingProfileUpdateRequest struct {
-	// Registered native-networking Site owned by the Tenant Account's Provider
+	// Id of site for which to change tenant's default routing profile. Must be a registered native-networking Site owned by the Tenant Account's Infrastructure Provider
 	SiteId string `json:"siteId"`
-	// Site-configured profile name or built-in REST alias. Cannot be cleared.
+	// Site-configured profile name. Cannot be cleared.
 	DefaultRoutingProfile string `json:"defaultRoutingProfile"`
 }
 
