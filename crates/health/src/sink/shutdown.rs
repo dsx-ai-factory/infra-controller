@@ -22,8 +22,7 @@
 //! sink registers its workers and backlog here, and [`SinkWorkers::flush`]
 //! signals them all once collectors have drained.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use futures::future::join_all;
 use tokio::task::JoinHandle;
@@ -36,39 +35,42 @@ use tokio_util::sync::CancellationToken;
 /// observation, which can encode several OTLP data points. Records replaced
 /// while waiting in a queue or a staged batch are never started, so they are
 /// neither delivered nor dropped.
+///
+/// The counts change together under one lock, so a snapshot never sees a
+/// record both pending and settled. An entry a worker has removed from its
+/// queue but not yet started is in neither its queue nor these counts, so
+/// totals read while workers still run are approximate for entries in transit.
 #[derive(Clone, Default)]
-pub(crate) struct DeliveryCounts(Arc<Counts>);
+pub(crate) struct DeliveryCounts(Arc<Mutex<Counts>>);
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Counts {
-    pending: AtomicUsize,
-    delivered: AtomicUsize,
-    failed: AtomicUsize,
+    pending: usize,
+    delivered: usize,
+    failed: usize,
 }
 
 impl DeliveryCounts {
     /// Counts `count` records a worker removed from its queue for delivery.
     pub(crate) fn start(&self, count: usize) {
-        self.0.pending.fetch_add(count, Ordering::SeqCst);
+        self.lock().pending += count;
     }
 
     /// Settles `count` started records, of which `delivered` were acknowledged
     /// and `failed` were rejected or could not be sent.
     pub(crate) fn finish(&self, count: usize, delivered: usize, failed: usize) {
-        self.0.delivered.fetch_add(delivered, Ordering::SeqCst);
-        self.0.failed.fetch_add(failed, Ordering::SeqCst);
-        self.0.pending.fetch_sub(count, Ordering::SeqCst);
+        let mut counts = self.lock();
+        counts.pending -= count;
+        counts.delivered += delivered;
+        counts.failed += failed;
     }
 
-    fn settled(&self) -> (usize, usize) {
-        (
-            self.0.delivered.load(Ordering::SeqCst),
-            self.0.failed.load(Ordering::SeqCst),
-        )
+    fn snapshot(&self) -> Counts {
+        *self.lock()
     }
 
-    fn pending(&self) -> usize {
-        self.0.pending.load(Ordering::SeqCst)
+    fn lock(&self) -> std::sync::MutexGuard<'_, Counts> {
+        self.0.lock().expect("delivery counts mutex poisoned")
     }
 }
 
@@ -122,10 +124,10 @@ impl SinkWorkers {
     /// signal, plus records still queued or being delivered at `deadline`, are
     /// logged as dropped, per sink and in the final totals.
     pub(crate) async fn flush(mut self, deadline: Instant) {
-        let settled: Vec<(usize, usize)> = self
+        let before: Vec<Counts> = self
             .sinks
             .iter()
-            .map(|sink| sink.counts.settled())
+            .map(|sink| sink.counts.snapshot())
             .collect();
 
         self.flush_token.cancel();
@@ -141,12 +143,12 @@ impl SinkWorkers {
         let mut dropped_record_count = 0;
         let mut timed_out_sink_count = 0;
 
-        for (sink, (delivered_before, failed_before)) in self.sinks.iter().zip(settled) {
-            let (delivered, failed) = sink.counts.settled();
-            let remaining = (sink.queued)() + sink.counts.pending();
-            let dropped = failed - failed_before + remaining;
+        for (sink, before) in self.sinks.iter().zip(before) {
+            let after = sink.counts.snapshot();
+            let remaining = (sink.queued)() + after.pending;
+            let dropped = after.failed - before.failed + remaining;
 
-            flushed_record_count += delivered - delivered_before;
+            flushed_record_count += after.delivered - before.delivered;
             dropped_record_count += dropped;
 
             if !sink.handles.iter().all(JoinHandle::is_finished) {
@@ -182,6 +184,23 @@ mod tests {
     use super::*;
     use crate::sink::dedup_queue::DedupQueue;
     use crate::sink::report_worker::run_report_worker;
+
+    #[test]
+    fn finish_moves_records_from_pending_to_settled_in_one_snapshot() {
+        let counts = DeliveryCounts::default();
+
+        counts.start(3);
+        counts.finish(2, 1, 1);
+
+        assert_eq!(
+            counts.snapshot(),
+            Counts {
+                pending: 1,
+                delivered: 1,
+                failed: 1,
+            }
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn flush_delivers_queued_reports_and_abandons_stalled_submissions() {
