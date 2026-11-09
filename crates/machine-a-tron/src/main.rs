@@ -41,8 +41,7 @@ use forge_tls::client_config::{
 use mac_address::MacAddress;
 use machine_a_tron::{
     BmcMockRegistry, ControlState, DeviceStatusConfig, DhcpClient, MachineATron, MachineATronArgs,
-    MachineATronConfig, MachineATronContext, SimulatorLifecycle, api_throttler,
-    append_control_routes,
+    MachineATronConfig, MachineATronContext, SimulatorLifecycle, append_control_routes,
 };
 use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use rpc::protos::forge_api_client::ForgeApiClient;
@@ -99,11 +98,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (dhcp_client, dhcp_service) =
         DhcpClient::start(&app_config, forge_api_client.clone().into()).await?;
 
-    let api_throttler = api_throttler::run(
-        tokio::time::interval(Duration::from_secs(2)),
-        forge_api_client.clone().into(),
-    );
-
     let desired_firmware_versions = forge_api_client
         .get_desired_firmware_versions()
         .await?
@@ -154,7 +148,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         forge_client_config,
         bmc_mock_certs_dir,
         bmc_registry,
-        api_throttler,
         desired_firmware_versions: std::sync::RwLock::new(desired_firmware_versions),
         forge_api_client,
         dhcp_client,
@@ -174,7 +167,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Machines are created paused here. While paused, their actors do not advance the FSM, so
     // BMC DHCP and shared-router registration cannot run before the combined BMC mock listener is
     // started below.
-    let (simulators, expected_inventory) = mat.make_devices(true).await?;
+    let (simulators, expected_inventory, served_records) =
+        mat.make_devices_with_records(true).await?;
+    let expected_records =
+        served_records.into_response(inventory_id.clone(), &app_context.app_config);
 
     // Persist them once in case of unclean shutdown
     app_context.app_config.write_persisted_devices(
@@ -194,7 +190,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         DeviceStatusConfig::new(bmc_mock_port),
         inventory_id.into(),
     )
-    .with_expected_inventory(expected_inventory);
+    .with_expected_inventory(expected_inventory)
+    .with_expected_records(Arc::new(expected_records));
     // Hosted mode mounts the shared UFM mock router on machine-a-tron's control server. Its
     // ControlState can be injected as an in-process inventory provider; the standalone binary
     // initializes the same mock without this provider and relies on configured HTTP sources.

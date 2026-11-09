@@ -12,8 +12,12 @@ NVIDIA Infra Controller (NICo) allows you to do the following with NVLink:
 NICo extends the concept of an *NVLink Partition* with the *NVLink Logical Partition*, which allows users to manage NVLink Partitions without having to learn the datacenter topology.
 
 <Note title="Compatibility note">
-NVLink Partitioning is only supported for GB200 compute nodes.
+NVLink Partitioning is supported for GB200, GB300, and Vera Rubin (VR) compute nodes.
 </Note>
+
+<Warning title="Important">
+Tenants cannot use multi-instance NVLink partitioning (GPUs on more than one Instance sharing an NVLink Partition) unless they first create an NVLink Logical Partition. NICo removes the NMX-C default partition. GPUs that are not assigned to an NVLink Logical Partition are placed in a per-tray default partition, so they can share memory only with other GPUs in the same compute tray. Refer to [Creating a NVLink Logical Partition](#creating-a-nvlink-logical-partition) for more details.
+</Warning>
 
 ## Operations: Who Does What
 
@@ -26,14 +30,14 @@ for the role and interface model.
 
 | Task | Role | Interface |
 | --- | --- | --- |
-| Enable NVLink; NMX-C connection and TLS settings | Operator | **TOML** (`[nvlink_config]`) — Day 0 / rare |
+| Enable NVLink; override NMX-C connection and TLS settings | Operator | **TOML** (`[nvlink_config]`) — Day 0 / rare |
 | Fallback NMX-C endpoints (per chassis serial) | Operator | `nico-admin-cli nvlink-nmxc-endpoints ...` (gRPC) — not in REST |
 | Create / update / delete an NVLink Logical Partition | Tenant | **REST** `.../nico/nvlink-logical-partition` · `nicocli nvlink-logical-partition create` |
 | Assign or change an instance's GPUs' partition | Tenant | **REST** `.../nico/instance` (`nvLinkInterfaces`) · `nicocli instance update` |
 | Inspect a machine's GPU domain placement (triage) | Operator | `nico-admin-cli machine nvlink-info show <MACHINE_ID>` (gRPC) |
 
 The operator NMX setup (the first two rows) is detailed under
-[Enabling NMX-C-based NVLink Partitioning](#enabling-nmx-c-based-nvlink-partitioning).
+[Configuring NMX-C-based NVLink Partitioning](#configuring-nmx-c-based-nvlink-partitioning).
 Certificate lifecycle setup and alerting are described in
 [NMX-C Certificate Monitoring and Rotation](../operations/nvlink-certificate-rotation.md).
 The tenant rows are the REST / `nicocli` flow described next.
@@ -41,6 +45,8 @@ The tenant rows are the REST / `nicocli` flow described next.
 ### Creating a NVLink Logical Partition
 
 NICo users can create NVLink Logical Partitions and plan GPU assignments using NVLink Interfaces for Instances (as described in steps **1-2**). NICo can also automatically generate NVLink Interfaces and assign them to Instances (as described in step **3**).
+
+Both methods require step **1** for multi-instance NVLink partitioning because each one assigns GPUs by referencing an existing NVLink Logical Partition ID.
 
 In general, the steps are:
 
@@ -133,6 +139,13 @@ Each reconciliation pass does the following:
    alerts block normal allocation while they remain in aggregate host health.
    See the linked probe contract for recovery, hardware replacement, manual
    removal, and allocation exceptions.
+1. Raises or clears the per-rack
+   [`NmxcUnreachable`](../architecture/health/health_probe_ids.md#nmxcunreachable)
+   health report. A rack whose NMX-C could not be used for
+   `nvlink_config.partition_monitor_unreachable_alert_after` consecutive passes
+   (default `3`) gets a `Hardware` alert naming the endpoint and the failing
+   step; the first pass that reaches NMX-C again clears it. The alert does not
+   block allocations.
 1. Compares observed state against desired state.
 1. Issues create / update / remove operations to the fabric-management
    service to converge it onto desired state.
@@ -157,7 +170,9 @@ whether it applied changes, checked in this order:
 With the default interval, a 61 s pass that applied changes idles 15 s
 rather than one second. The partition owners accept a couple of minutes of
 staleness, so a site whose passes overrun at `60s` can set `120s`. On 556
-simulated racks a pass took 27 to 33 s. Chassis and racks are reconciled in
+simulated racks with `partition_monitor_max_concurrent_groups = 64`, a pass
+took 27 to 33 s before unchanged groups were skipped, and with skipping the
+mean pass on the same fleet was about 10 s. Chassis and racks are reconciled in
 parallel, at most `nvlink_config.partition_monitor_max_concurrent_groups`
 (default `16`, documented range 1 to 256) at a time.
 
@@ -224,10 +239,60 @@ deletion is rejected if any instance still references the Logical
 Partition.
 
 When a host is force-deleted, the instance running on it is implicitly
-released and the above cleanup path runs. Operators do not need to detach
-NVLink configuration manually before force-deleting.
+released. The monitor only removes GPUs from partitions for hosts that NICo
+still manages, so it removes them once the host is rediscovered. If the
+host's compute tray is physically moved or replaced instead, isolate the tray
+first, as described in
+[Moving or Replacing a Compute Tray](#moving-or-replacing-a-compute-tray).
 
-### Enabling NMX-C-based NVLink Partitioning
+### Moving or Replacing a Compute Tray
+
+Remove a compute tray's GPUs from every NVLink partition before the tray leaves
+its slot. NMX-C tracks partition membership by GPU UID and by slot location. If
+a tray is moved or replaced while its GPUs are still in a partition, NMX-C keeps
+the old UIDs as members but gives the slot's membership to the GPUs installed
+next. It then rejects every create, add, and remove request that would reconcile
+the two. The only known recovery is an NMX-C factory reset, which disrupts every
+tray in the NVLink domain.
+
+1. Mark the host with the `compute-tray-due-for-swap` template:
+
+   ```bash
+   nico-admin-cli machine health-report add <machine-id> \
+     --template compute-tray-due-for-swap --message "<ticket>"
+   ```
+
+   The template blocks new allocations and carries the
+   [`IsolateFromNvLinkPartitions`](../architecture/health/health_alert_classifications.md#isolatefromnvlinkpartitions)
+   classification. On its next pass, the monitor removes every GPU on the host
+   from every NVLink partition, tenant or tray default, and keeps them out while
+   the mark remains. It does so even if the host has an instance, which cuts
+   that instance's NVLink connectivity to the rest of its partition.
+
+1. Wait until the monitor reports `NvlinkIsolated` under the `nvlink-isolation`
+   health report source:
+
+   ```bash
+   nico-admin-cli -f json machine health-report show <machine-id> \
+     | jq -r '.[].report | select(.source == "nvlink-isolation") | (.successes[]?.id, .alerts[]?.message)'
+   ```
+
+   `NvlinkIsolated` means NMX-C lists none of the host's GPUs in any partition.
+   Any other output, including no output, means the tray must stay in its slot:
+   a message names the GPUs still in a partition or states that isolation
+   cannot be confirmed, and no output means the monitor has not checked the host
+   since it was marked. For details, see
+   [NVLink isolation health probe identifiers](../architecture/health/health_probe_ids.md#nvlink-isolation-health-probe-identifiers).
+
+1. Keep the mark until the tray is out of its slot, and force-delete the host
+   only after that. Force-deletion removes the mark, and while the tray is
+   still installed, Site Explorer can rediscover it as an unmarked host whose
+   GPUs the monitor returns to `tray_partition_<slot>`.
+
+Removing the tray and ingesting its replacement follow the site's hardware
+replacement process.
+
+### Configuring NMX-C-based NVLink Partitioning
 
 NMX-C is the supported gRPC control path for NVLink partition management.
 
@@ -238,16 +303,21 @@ available temporarily so existing scripts receive a clear unsupported error;
 they do not modify credentials.
 </Note>
 
-Configure the NMX-C client under `[nvlink_config]`:
+Enable NVLink partitioning, and configure the NMX-C client when the defaults
+described below do not fit the site, under `[nvlink_config]`:
 
 ```toml
 [nvlink_config]
 enabled = true
 monitor_run_interval = "60s"
+# Consecutive passes a rack's NMX-C must be unusable before its
+# NmxcUnreachable alert is raised; the first reachable pass clears it.
+partition_monitor_unreachable_alert_after = 3
 
-# TLS material for NMX-C. The CA path is required by the certificate
-# monitor. Configure the client certificate and key together when NMX-C
-# requires mTLS.
+# TLS material for NMX-C. The CA path defaults when nico-api finds a
+# ca.crt (see below); otherwise set it, because the certificate monitor
+# requires it. Configure the client certificate and key together when
+# NMX-C requires mTLS.
 nmx_c_tls_ca_cert_path     = "/etc/nico/nmxc/ca.pem"
 nmx_c_tls_client_cert_path = "/etc/nico/nmxc/client.crt"
 nmx_c_tls_client_key_path  = "/etc/nico/nmxc/client.key"
@@ -255,16 +325,62 @@ nmx_c_tls_authority        = "nmxc.example.internal"
 nmx_c_endpoint_port        = 9370
 
 allow_insecure = false
+
+# TCP reachability checks of ready switches, raising the SwitchUnreachable
+# (NVOS, every switch) and NmxtUnreachable (NMX-T, primary switches) switch
+# health alerts after consecutive failures. They run whenever `enabled` is
+# true above; set `enabled` here to run or stop them independently.
+[nvlink_config.switch_reachability]
+run_interval = "60s"
+unreachable_alert_after = 3
 ```
 
 | Field | Purpose |
 | ----- | ------- |
-| `nmx_c_tls_ca_cert_path` | Optional PEM containing additional CAs for normal NMX-C connectivity. The certificate monitor requires this file and does not use the system trust store |
+| `nmx_c_tls_ca_cert_path` | PEM containing the CAs that verify NMX-C over HTTPS. It is the only trust source: neither the partition monitor nor the certificate monitor uses the system trust store |
 | `nmx_c_tls_client_cert_path` | Optional client certificate for mTLS to NMX-C |
 | `nmx_c_tls_client_key_path` | Optional client key matching the certificate above |
 | `nmx_c_tls_authority` | Optional override for the expected server name during certificate verification (SNI / hostname check) |
 | `nmx_c_endpoint_port` | Optional gRPC port used when deriving an endpoint from a switch NVOS IP; defaults to `9370` |
 | `allow_insecure` | Development option that can select plaintext HTTP for rack-derived endpoints when no client certificate and key are configured. It does not disable certificate-monitor TLS verification |
+
+`enabled` defaults to `false`. Set it to `true` in the site configuration,
+or set the nico-api Helm chart value `nvlink.enabled`, which the site
+configuration overrides. The certificate monitor's
+`nmx_c_certificate_rotation.enabled` follows `enabled` unless it is set.
+
+<Warning>
+On a rack with running instances, the first partition monitor pass removes
+the NMX-C default partition and any NMX-C partition NICo did not create, so
+those instances lose NVLink connectivity until tenants configure NVLink
+partitions through NICo. Enable partitioning before instances are created, or
+schedule the change accordingly.
+</Warning>
+
+When either setting is `true`, `nico-api` fills in unset TLS settings at
+startup:
+
+- **Client certificate, key, and authority.** When none of the four
+  `nmx_c_tls_*` keys is set, `nico-api` uses `tls.crt` and `tls.key` from the
+  nico-api Helm chart's `nvSwitchTls.nicoClient` mount,
+  `/var/run/secrets/nvswitch-client`, and sets `nmx_c_tls_authority` to
+  `initial_domain_name`. Setting any `nmx_c_tls_*` key disables these three
+  defaults.
+- **CA bundle.** When `nmx_c_tls_ca_cert_path` is unset and NMX-C is reached
+  over HTTPS, `nico-api` uses `ca.crt` from that mount, or else
+  `/var/run/secrets/nico-roots/ca.crt`. This applies regardless of the other
+  keys.
+
+The authority default only works when `initial_domain_name` is set and
+matches a DNS SAN of the certificate NMX-C presents. On switches whose server
+certificate is issued by RMS, set it to the same value as RMS's
+`apiServer.dnsDomain`. Without it, `nico-api` verifies each NMX-C endpoint
+against its own host, the switch NVOS IP for rack endpoints, and the TLS
+handshake fails for certificates that carry only a DNS name.
+
+The
+[`NvLinkConfig` reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#nvlinkconfig)
+describes exactly when each default applies.
 
 Rack-associated machines use the NVOS IP of a ready Fabric Manager
 control-plane switch in the rack. Machines without a rack association use an
@@ -325,18 +441,21 @@ below should be repeatable as a checklist.
 1. **Per-machine GPU placement.**
 
    ```bash
-   nicocli machine nvlink-info --machine-id <machine-id>
+   nico-admin-cli --format json machine show <machine-id>
    ```
 
-   Returns the machine's NVLink GPU status observations, including the
-   Domain each GPU is currently assigned to. Use this to confirm that
-   two instances expected to share an NVLink Logical Partition have
+   The `status.nvlink.gpu_status` list holds the machine's NVLink GPU status
+   observations: the `domain_id` of each GPU and the `partition_id` and
+   `logical_partition_id` it is currently assigned to. Use this to confirm
+   that two instances expected to share an NVLink Logical Partition have
    actually landed in the same NVLink Domain — instances in different
    Domains cannot share GPU memory regardless of having the same
-   Logical Partition ID.
+   Logical Partition ID. To see the machine's stored Domain and GPU mapping,
+   run `nico-admin-cli machine nvlink-info show <machine-id>`.
 1. **Cleanup after release.** After releasing an instance, the same
-   `machine nvlink-info` output should show an empty Domain assignment
-   on the affected GPUs within one or two reconcile intervals. Failure
+   `status.nvlink.gpu_status` output should show no `partition_id` or
+   `logical_partition_id` on the affected GPUs within one or two reconcile
+   intervals. Failure
    to clear indicates the monitor could not remove the GPU from its NMX-C
    partition; investigate the corresponding connect-error and op-latency
    metrics.

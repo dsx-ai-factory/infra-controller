@@ -27,11 +27,13 @@ var nvosMacAddressRegexp = regexp.MustCompile(`^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa
 // APINvosMacAddresses is the deprecated flat NVOS MAC list returned in responses.
 type APINvosMacAddresses []string
 
-// APINvosInterface is one NVOS ethernet port of an expected switch: its MAC
-// address and whether it is the primary (eth0) port NICo manages via RMS.
+// APINvosInterface is one NVOS ethernet port of an expected switch: its MAC,
+// optional IP address, and primary (eth0) selection for management via RMS.
 type APINvosInterface struct {
 	// MacAddress is the MAC of this NVOS ethernet port.
 	MacAddress string `json:"macAddress"`
+	// IPAddress is an optional IPv4 or IPv6 address for a single-port switch.
+	IPAddress *string `json:"ipAddress"`
 	// IsPrimary marks this port as the primary (eth0) port. At most one entry
 	// per switch may be primary; when no entry is marked, the REST layer defaults
 	// the first port on a multi-port switch (a single-port switch is always
@@ -45,12 +47,22 @@ type APINvosInterfaces []APINvosInterface
 
 // Validate checks that every entry carries a well-formed MAC, that no MAC
 // repeats (ignoring case and separator style since those spellings refer to the
-// same interface), and that at most one entry is marked primary.
+// same interface), and that at most one entry is marked primary. An IP address
+// may be specified only for a switch with exactly one NVOS interface.
 func (interfaces APINvosInterfaces) Validate() error {
 	seen := make(map[string]bool, len(interfaces))
 	primaryCount := 0
 	for i := range interfaces {
 		iface := interfaces[i]
+		if iface.IPAddress != nil {
+			if len(interfaces) != 1 {
+				return errors.New("ipAddress requires exactly one nvosInterfaces entry")
+			}
+			err := util.ValidateExpectedNvosIPAddress(iface.IPAddress)
+			if err != nil {
+				return err
+			}
+		}
 		if err := validation.Validate(iface.MacAddress,
 			validation.Required.Error(validationErrorValueRequired),
 			validation.Match(nvosMacAddressRegexp).Error("must be a MAC address of six colon- or hyphen-separated octets")); err != nil {
@@ -83,6 +95,15 @@ func (interfaces APINvosInterfaces) MacAddresses() []string {
 		macs = append(macs, interfaces[i].MacAddress)
 	}
 	return macs
+}
+
+// IPAddress returns the optional address of the sole NVOS interface. Call
+// Validate before conversion to reject addresses on multi-port switches.
+func (interfaces APINvosInterfaces) IPAddress() *string {
+	if len(interfaces) != 1 {
+		return nil
+	}
+	return interfaces[0].IPAddress
 }
 
 // PrimaryMacAddress returns the explicitly flagged primary MAC, or nil when no
@@ -153,7 +174,7 @@ func (escr *APIExpectedSwitchCreateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validationis.MAC),
 		validation.Field(&escr.DefaultBmcPassword,
-			validation.Length(0, 255).Error("BMC password must be 255 characters or less")),
+			validation.RuneLength(0, 255).Error("BMC password must be 255 characters or less")),
 		validation.Field(&escr.SwitchSerialNumber,
 			validation.Required.Error(validationErrorValueRequired),
 			validation.Match(util.NotAllWhitespaceRegexp).Error("Switch serial number consists only of whitespace"),
@@ -206,7 +227,7 @@ type APIExpectedSwitchUpdateRequest struct {
 	// NvosInterfaces replaces the switch's NVOS ethernet port set. Omission
 	// leaves the stored set unchanged; an empty array is rejected because a
 	// switch must keep at least one NVOS port. Mark one entry primary to choose
-	// eth0.
+	// eth0. A replacement without ipAddress clears the stored NVOS address.
 	NvosInterfaces APINvosInterfaces `json:"nvosInterfaces"`
 	// NvosMacAddresses is deprecated and ignored, regardless of its JSON value.
 	// Use NvosInterfaces to configure ports and primary selection.
@@ -264,7 +285,7 @@ func (esur *APIExpectedSwitchUpdateRequest) Validate() error {
 			validation.NilOrNotEmpty.Error("BMC Password cannot be empty"),
 			validation.When(esur.DefaultBmcPassword != nil && *esur.DefaultBmcPassword != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("BMC Password consists only of whitespace")),
-			validation.Length(1, 255).Error("BMC Password must be 1-255 characters")),
+			validation.RuneLength(1, 255).Error("BMC Password must be 1-255 characters")),
 		validation.Field(&esur.NvOsUsername,
 			validation.NilOrNotEmpty.Error("NVOS Username cannot be empty")),
 		validation.Field(&esur.NvOsPassword,
@@ -324,6 +345,10 @@ func (esur *APIExpectedSwitchUpdateRequest) ToProto(entity *cdbm.ExpectedSwitch)
 			util.ExpectedComponentUpdateField{Path: "metadata.labels", Present: esur.Labels != nil || esur.Manufacturer != nil || esur.Model != nil || esur.SlotID != nil || esur.TrayIdx != nil || esur.HostID != nil},
 			util.ExpectedComponentUpdateField{Path: "switch_serial_number", Present: esur.SwitchSerialNumber != nil},
 			util.ExpectedComponentUpdateField{Path: "nvos_interfaces", Present: esur.NvosInterfaces != nil},
+			util.ExpectedComponentUpdateField{
+				Path:    "nvos_ip_address",
+				Present: esur.NvosInterfaces != nil,
+			},
 			util.ExpectedComponentUpdateField{Path: "nvos_username", Present: esur.NvOsUsername != nil},
 			util.ExpectedComponentUpdateField{Path: "nvos_password", Present: esur.NvOsPassword != nil},
 		),
@@ -386,6 +411,7 @@ func newAPINvosInterfaces(dbModel *cdbm.ExpectedSwitch) APINvosInterfaces {
 	for _, view := range views {
 		interfaces = append(interfaces, APINvosInterface{
 			MacAddress: view.MacAddress,
+			IPAddress:  view.IPAddress,
 			IsPrimary:  view.IsPrimary,
 		})
 	}

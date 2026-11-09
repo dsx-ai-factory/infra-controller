@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 
 use carbide_firmware::FirmwareConfigSnapshot;
 use carbide_redfish::libredfish::conv::IntoModel;
+use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::credentials::CredentialManager;
-use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::MachineType;
 use chrono::Utc;
@@ -49,10 +49,10 @@ use model::machine_interface::InterfaceType;
 use model::rack_type::RackProfileConfig;
 use model::resource_pool::common::CommonPools;
 use model::site_explorer::{
-    BlueFieldOperatingMode, Chassis, EndpointExplorationError, EndpointExplorationReport,
-    EndpointType, ExplorationTier, ExploredDpu, ExploredEndpoint, ExploredManagedHost,
+    BlueFieldOperatingMode, EndpointExplorationError, EndpointExplorationReport, EndpointType,
+    ExplorationTier, ExploredDpu, ExploredEndpoint, ExploredManagedHost,
     HostPrimaryInterfaceSelection, MachineExpectation, PowerState, PreingestionState,
-    SiteExplorerLastRun, is_bluefield_part_number,
+    SiteExplorerLastRun,
 };
 use sqlx::PgPool;
 use tokio::task::JoinSet;
@@ -78,11 +78,15 @@ mod redfish;
 pub use bmc_endpoint_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
 pub use redfish::{BmcAccess, EstablishedBmc, ProxiedPools};
 mod boot_interfaces;
+mod host_interfaces;
 use boot_interfaces::NicBootInterfaces;
 mod host_dpu_matches;
 use host_dpu_matches::{HostDpuMatches, MatchedDpu};
+mod host_reconciler;
+use host_reconciler::HostReconciler;
 mod boot_order_tracker;
 use boot_order_tracker::BootOrderTracker;
+pub mod dpu_loopback;
 mod inventory_creator;
 pub use inventory_creator::{
     Config as InventoryCreatorConfig, MachineCreator, PowerShelfCreator, SwitchCreator,
@@ -90,11 +94,13 @@ pub use inventory_creator::{
 use inventory_creator::{ConfiguredIngestionCandidate, InventoryCreator};
 mod machine_location_reconciler;
 pub use machine_location_reconciler::MachineLocationReconciler;
+mod endpoint_exploration_report_ext;
 mod explored_endpoint_ext;
 use explored_endpoint_ext::ExploredEndpointExt;
 pub use explored_endpoint_ext::get_sys_image_version;
 pub mod explored_endpoint_index;
 mod managed_host;
+mod rack_order;
 use carbide_uuid::rack::RackId;
 use db::ObjectColumnFilter;
 use db::work_lock_manager::WorkLockManagerHandle;
@@ -117,7 +123,6 @@ use self::metrics::{
     DpuMigrationSignal, PairingBlockerReason, SiteExplorerIterationFinished,
     exploration_error_to_metric_label,
 };
-use crate::config::SiteExplorerExploreMode;
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 
 /// Return whether a HostInband row can be treated as a Redfish endpoint.
@@ -152,15 +157,15 @@ fn should_scan_underlay_interface_for_redfish(
 pub fn new_bmc_explorer(
     bmc_client: Arc<AuthenticatedBmcClient>,
     rotate_switch_nvos_credentials: Arc<AtomicBool>,
-    mode: SiteExplorerExploreMode,
+    explore_drive_firmware: bool,
     database_connection: PgPool,
 ) -> Arc<BmcEndpointExplorer> {
     BmcEndpointExplorer::new(
         bmc_client,
         rotate_switch_nvos_credentials,
-        mode,
         Some(database_connection),
     )
+    .with_drive_firmware(explore_drive_firmware)
     .into()
 }
 
@@ -340,8 +345,10 @@ impl TierCounts {
 /// without a successful report is a refresh wait only for its first few
 /// failed probes and only when its interface MAC is in `expected_bmc_macs`,
 /// the BMC MACs of the expected machines, switches and power shelves; an
-/// undeclared one, or one that keeps failing, stays routine. Each tier gets its
-/// share of the budget (the `*_SHARE_PERCENT` constants) oldest first:
+/// undeclared one, or one that keeps failing, stays routine. A BMC whose
+/// timeouts have not yet reached `timeouts_before_prevent_allocations` is a
+/// refresh wait too. Each tier gets its share of the budget (the
+/// `*_SHARE_PERCENT` constants) oldest first:
 /// unexplored endpoints by interface creation, the other two by report time.
 /// Slots a tier cannot fill go to the other tiers in the same order,
 /// unexplored first, so no slot stays unused while any tier has candidates.
@@ -354,13 +361,17 @@ fn plan_explorations<'a>(
     mut unexplored: Vec<(IpAddr, &'a MachineInterfaceSnapshot)>,
     budget: usize,
     expected_bmc_macs: &HashSet<MacAddress>,
+    timeouts_before_prevent_allocations: u32,
 ) -> ExplorationPlan<'a> {
     let mut priority = Vec::new();
     let mut refresh_waits = Vec::new();
     let mut routine = Vec::new();
     for candidate in candidates {
         let (_, iface, endpoint) = candidate;
-        match endpoint.exploration_tier(expected_bmc_macs.contains(&iface.mac_address)) {
+        match endpoint.exploration_tier(
+            expected_bmc_macs.contains(&iface.mac_address),
+            timeouts_before_prevent_allocations,
+        ) {
             ExplorationTier::Priority => priority.push(candidate),
             ExplorationTier::RefreshWait => refresh_waits.push(candidate),
             ExplorationTier::Routine => routine.push(candidate),
@@ -396,6 +407,12 @@ fn plan_explorations<'a>(
         refresh_wait_candidates,
         routine_candidates,
     }
+}
+
+/// Probe and host-check parallelism: `concurrent_explorations`, at least 1 so
+/// a configured 0 cannot leave every task waiting on an empty semaphore.
+fn exploration_concurrency(configured: u64) -> usize {
+    usize::try_from(configured).unwrap_or(usize::MAX).max(1)
 }
 
 /// How many of `budget` each tier gets: its share, capped by its candidates,
@@ -441,6 +458,25 @@ struct EndpointExplorationTaskResult<'a> {
     steps: EndpointExplorationStepDurations,
 }
 
+/// The endpoints one `update_explored_endpoints` phase probed.
+struct ExploredThisRun {
+    /// Every probed endpoint, whether or not its probe produced a report.
+    endpoints: HashSet<IpAddr>,
+    /// The endpoints whose probe produced a report, so their stored report
+    /// is from this iteration.
+    refreshed: HashSet<IpAddr>,
+}
+
+/// What `can_ingest_host_endpoint` decided for one host endpoint.
+enum HostIngestDecision {
+    Ingest,
+    /// Not in this iteration; `blocker` is the pairing blocker to count, if
+    /// the reason is one.
+    Skip {
+        blocker: Option<PairingBlockerReason>,
+    },
+}
+
 impl Display for Endpoint<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.address)
@@ -477,15 +513,6 @@ struct IngestionCandidate<'a> {
     dpu_matches: Option<HostDpuMatches<'a>>,
     host_dpu_policy: HostDpuPolicy,
     declared_primary: Option<MacAddress>,
-}
-
-/// Host inventory fields that can identify one DPU by serial number.
-#[derive(Clone, Copy)]
-struct HostDpuInventoryCandidate<'a> {
-    /// Part number used by the existing BlueField detection and mode checks.
-    part_number: Option<&'a str>,
-    /// Serial number joined to the DPU endpoint report.
-    serial_number: Option<&'a str>,
 }
 
 /// When Site Explorer last physically reset a BMC, tracked per reset method.
@@ -559,6 +586,7 @@ pub struct SiteExplorer {
     endpoint_exploration_service: Arc<EndpointExplorationService>,
     work_lock_manager_handle: WorkLockManagerHandle,
     inventory_creator: InventoryCreator,
+    host_reconciler: HostReconciler,
     machine_location_reconciler: MachineLocationReconciler,
     boot_order_tracker: BootOrderTracker,
     /// Backstops the persisted BMC-reset timestamps for the reset rate limit,
@@ -579,6 +607,10 @@ impl SiteExplorer {
     #[allow(clippy::too_many_arguments)]
     /// Creates a site explorer.
     ///
+    /// The registry selects each DPU's IPv4 loopback backend. Creation prepares
+    /// provider allocations before the machine transaction; `start` supplies
+    /// the shutdown token for that preparation.
+    ///
     /// When `dpf_enabled_at_site` is true, eligible hosts are marked for DPF-managed ingestion.
     /// Otherwise, hosts use the non-DPF ingestion path.
     pub fn new(
@@ -587,6 +619,7 @@ impl SiteExplorer {
         meter: opentelemetry::metrics::Meter,
         endpoint_exploration_service: Arc<EndpointExplorationService>,
         bmc_client: Arc<dyn AuthenticatedBmc>,
+        resource_pool_registry: ResourcePoolRegistry,
         common_pools: Arc<CommonPools>,
         work_lock_manager_handle: WorkLockManagerHandle,
         rack_profiles: RackProfileConfig,
@@ -599,6 +632,7 @@ impl SiteExplorer {
         let endpoint_explorer = endpoint_exploration_service.endpoint_explorer();
 
         SiteExplorer {
+            host_reconciler: HostReconciler::new(database_connection.clone()),
             machine_location_reconciler: MachineLocationReconciler::new(
                 database_connection.clone(),
                 rack_profiles.clone(),
@@ -608,6 +642,7 @@ impl SiteExplorer {
             inventory_creator: InventoryCreator::new(
                 database_connection.clone(),
                 (&explorer_config).into(),
+                resource_pool_registry,
                 common_pools,
                 rack_profiles,
                 machine_info_provider,
@@ -632,6 +667,8 @@ impl SiteExplorer {
         join_set: &mut JoinSet<()>,
         cancel_token: CancellationToken,
     ) -> io::Result<()> {
+        self.inventory_creator
+            .set_preparation_cancel_token(cancel_token.clone());
         join_set
             .build_task()
             .name("site_explorer")
@@ -703,6 +740,7 @@ impl SiteExplorer {
 
     fn run_failure_category(error: &SiteExplorerError) -> String {
         match error {
+            SiteExplorerError::ResourcePool(_) => "resource_pool",
             SiteExplorerError::DatabaseError(_) => "database_error",
             SiteExplorerError::ModelError(_) => "model_error",
             SiteExplorerError::AlreadyFoundError { .. } => "already_found",
@@ -944,6 +982,16 @@ impl SiteExplorer {
                 // endpoint information available. There might even be an ingested
                 // Machine that corresponds to that endpoint.
 
+                let transient_timeout = match e {
+                    EndpointExplorationError::ConnectionTimeout {
+                        consecutive_count, ..
+                    } => {
+                        *consecutive_count
+                            < self.config.exploration_timeouts_before_prevent_allocations
+                    }
+                    _ => false,
+                };
+
                 // The target allows to distinguish multiple DPUs which might
                 // exhibit different alerts
                 new_health_report
@@ -954,9 +1002,11 @@ impl SiteExplorer {
                         in_alert_since: None,
                         message: format!("Endpoint exploration failed: {e}"),
                         tenant_message: None,
-                        classifications: vec![
-                            health_report::HealthAlertClassification::prevent_allocations(),
-                        ],
+                        classifications: if transient_timeout {
+                            vec![]
+                        } else {
+                            vec![health_report::HealthAlertClassification::prevent_allocations()]
+                        },
                     });
             }
 
@@ -1092,6 +1142,10 @@ impl SiteExplorer {
         let (expected_endpoint_index, explored_this_run) = self
             .update_explored_endpoints(metrics, &run_context)
             .await?;
+        let ExploredThisRun {
+            endpoints: explored_this_run,
+            refreshed: refreshed_this_run,
+        } = explored_this_run;
         metrics.record_phase_latency(
             "update_explored_endpoints",
             update_explored_endpoints_start.elapsed(),
@@ -1106,7 +1160,12 @@ impl SiteExplorer {
         // once we create a managed host and add it to the state machine.
         let identify_machines_to_ingest_start = Instant::now();
         let (explored_dpus, explored_hosts, already_ingested_bmc_ips) = self
-            .identify_machines_to_ingest(metrics, &expected_endpoint_index, &run_context)
+            .identify_machines_to_ingest(
+                metrics,
+                &expected_endpoint_index,
+                &run_context,
+                &refreshed_this_run,
+            )
             .await?;
         metrics.record_phase_latency(
             "identify_machines_to_ingest",
@@ -1217,12 +1276,34 @@ impl SiteExplorer {
         );
 
         self.inventory_creator
-            .create_inventory(
+            .create_or_reconcile_hosts(
                 metrics,
                 &mut identified_hosts,
                 &expected_endpoint_index,
                 &already_ingested_bmc_ips,
                 &explored_this_run,
+                &run_context.suppressed_bmc_macs,
+            )
+            .await;
+
+        let reconcile_desired_boot_interfaces_start = Instant::now();
+        let reconcile_desired_boot_interfaces_res =
+            self.host_reconciler.run_single_iteration().await;
+        metrics.record_phase_latency(
+            "reconcile_desired_boot_interfaces",
+            reconcile_desired_boot_interfaces_start.elapsed(),
+        );
+        if let Err(error) = reconcile_desired_boot_interfaces_res {
+            tracing::warn!(
+                %error,
+                "Desired boot-interface reconciliation pass failed; a later Site Explorer run will retry"
+            );
+        }
+
+        self.inventory_creator
+            .create_switches_and_power_shelves(
+                metrics,
+                &expected_endpoint_index,
                 &run_context.suppressed_bmc_macs,
             )
             .await?;
@@ -1299,6 +1380,7 @@ impl SiteExplorer {
         metrics: &mut SiteExplorationMetrics,
         expected_endpoint_index: &ExploredEndpointIndex,
         run_context: &SiteExplorerRunContext,
+        refreshed_this_run: &HashSet<IpAddr>,
     ) -> SiteExplorerResult<(
         HashMap<IpAddr, ExploredEndpoint>,
         HashMap<IpAddr, ExploredEndpoint>,
@@ -1323,6 +1405,7 @@ impl SiteExplorer {
 
         let mut explored_dpus = HashMap::new();
         let mut explored_hosts = HashMap::new();
+        let mut host_endpoints = Vec::new();
         for ep in explored_endpoints.into_iter() {
             if let Some(bmc_interface) = expected_endpoint_index.underlay_interface(&ep.address)
                 && run_context
@@ -1353,11 +1436,78 @@ impl SiteExplorer {
                 if self.can_ingest_dpu_endpoint(metrics, &ep, &already_ingested_bmc_ips)? {
                     explored_dpus.insert(ep.address, ep);
                 }
-            } else if self
-                .can_ingest_host_endpoint(metrics, &ep, &already_ingested_bmc_ips)
-                .await?
-            {
-                explored_hosts.insert(ep.address, ep);
+            } else {
+                host_endpoints.push(ep);
+            }
+        }
+
+        // One lookup serves every uningested host, and the live checks run
+        // `concurrent_explorations` wide, as the probes do. Each task owns its
+        // endpoint and returns a decision; the metrics are applied after the
+        // join, so nothing is shared across tasks.
+        let uningested_host_ips = host_endpoints
+            .iter()
+            .map(|ep| ep.address)
+            .filter(|address| !already_ingested_bmc_ips.contains(address))
+            .collect::<Vec<_>>();
+        // A failed lookup leaves every interface unknown: the checks below
+        // then skip the live reads.
+        let host_interfaces = match db::machine_interface::find_by_ips(
+            &self.database_connection,
+            &uningested_host_ips,
+        )
+        .await
+        {
+            Ok(host_interfaces) => host_interfaces,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    uningested_host_count = uningested_host_ips.len(),
+                    "Site Explorer could not look up the machine interfaces of the uningested hosts"
+                );
+                HashMap::new()
+            }
+        };
+        let host_interfaces = &host_interfaces;
+        let already_ingested = &already_ingested_bmc_ips;
+        let concurrency_limiter = Arc::new(tokio::sync::Semaphore::new(exploration_concurrency(
+            self.config.concurrent_explorations,
+        )));
+        let decisions = host_endpoints
+            .into_iter()
+            .map(|ep| {
+                let concurrency_limiter = concurrency_limiter.clone();
+                async move {
+                    let _permit = concurrency_limiter
+                        .acquire()
+                        .await
+                        .expect("Semaphore can't be closed");
+                    let decision = self
+                        .can_ingest_host_endpoint(
+                            &ep,
+                            already_ingested,
+                            host_interfaces.get(&ep.address),
+                            refreshed_this_run,
+                        )
+                        .await;
+                    (ep, decision)
+                }
+            })
+            .collect::<FuturesUnordered<_>>()
+            // Drain every task before reporting an error, so no check keeps
+            // running once the phase has returned.
+            .collect::<Vec<_>>()
+            .await;
+        for (ep, decision) in decisions {
+            match decision? {
+                HostIngestDecision::Ingest => {
+                    explored_hosts.insert(ep.address, ep);
+                }
+                HostIngestDecision::Skip { blocker } => {
+                    if let Some(blocker) = blocker {
+                        metrics.increment_host_dpu_pairing_blocker(blocker);
+                    }
+                }
             }
         }
 
@@ -1376,38 +1526,12 @@ impl SiteExplorer {
         metrics: &mut SiteExplorationMetrics,
     ) -> Option<Vec<ExploredDpu>> {
         let HostDpuMatches {
-            inventory: dpu_inventory,
-            inventory_matches,
-            fallback_matches,
-            expected_fallback_count,
+            expected_total,
+            matched_dpus,
         } = matches;
-        let needs_expected_serial_fallback = dpu_inventory.needs_expected_serial_fallback();
+        let cfg_status = self.configure_matched_dpus(ep, matched_dpus, metrics).await;
 
-        let inventory_cfg_status = self
-            .configure_matched_dpus(ep, inventory_matches, metrics)
-            .await;
-        let fallback_cfg_status = self
-            .configure_matched_dpus(ep, fallback_matches, metrics)
-            .await;
-
-        let has_unready_matches = dpu_inventory.matched_total
-            > inventory_cfg_status.running_as_dpu.len() + inventory_cfg_status.running_as_nic_total;
-
-        let host_reported_dpus_total = dpu_inventory.reported_total;
-
-        let incomplete_dpu_exploration = needs_expected_serial_fallback
-            || has_unready_matches
-            || inventory_cfg_status.running_as_dpu.is_empty()
-            || inventory_cfg_status.running_as_dpu.len()
-                != host_reported_dpus_total
-                    .saturating_sub(inventory_cfg_status.running_as_nic_total);
-
-        let host_reported_dpus_nic_mode_total =
-            inventory_cfg_status.running_as_nic_total + fallback_cfg_status.running_as_nic_total;
-        let configuration_requests = inventory_cfg_status.configuration_requests
-            + fallback_cfg_status.configuration_requests;
-
-        if configuration_requests > 0 {
+        if cfg_status.configuration_requests > 0 {
             // A queued `set_nic_mode` only takes effect after a host
             // power cycle, so drive one for every vendor --
             // `redfish_powercycle` issues `PowerCycle` and falls back
@@ -1459,71 +1583,48 @@ impl SiteExplorer {
             return None;
         }
 
-        // Every selected fallback serial must be discovered and ready, whether
-        // the DPU is managed or intentionally runs as a NIC.
-        if fallback_cfg_status.running_as_dpu.len() + fallback_cfg_status.running_as_nic_total
-            != expected_fallback_count
-        {
+        // All matched DPUs must be ready, and their count must cover the host's
+        // reported slots and all configured serials, including NIC-mode devices.
+        if cfg_status.running_as_dpu.len() + cfg_status.running_as_nic_total != expected_total {
+            tracing::warn!(
+                bmc_ip_address = %ep.address,
+                discovered_dpu_count = cfg_status.running_as_dpu.len(),
+                expected_managed_dpu_count = expected_total
+                    .saturating_sub(cfg_status.running_as_nic_total),
+                all_dpus_configured_properly_in_host = cfg_status.configuration_requests == 0,
+                "cannot identify managed host because the site explorer has not discovered all attached DPUs"
+            );
             return None;
         }
 
-        // The site explorer should only create a managed host after exploring all of the DPUs attached to the host.
-        // If a host reports that it has two DPUs, the site explorer must wait until **both** DPUs have made the DHCP request.
-        // If only one of the two DPUs have made the DHCP request, the site explorer must wait until it has explored the latter DPU's BMC
-        // (ensuring that the second DPU has also made the DHCP request).
-        if incomplete_dpu_exploration && fallback_cfg_status.running_as_dpu.is_empty() {
-            // Net DPUs still expected to pair: reported DPU minus those
-            // confirmed to be running as plain NICs.
-            let expected_managed_dpus_total =
-                host_reported_dpus_total.saturating_sub(host_reported_dpus_nic_mode_total);
-            if expected_managed_dpus_total > 0 || has_unready_matches {
-                if expected_managed_dpus_total > 0 {
-                    tracing::warn!(
-                        bmc_ip_address = %ep.address,
-                        discovered_dpu_count = inventory_cfg_status.running_as_dpu.len(),
-                        expected_managed_dpu_count = expected_managed_dpus_total,
-                        all_dpus_configured_properly_in_host = configuration_requests == 0,
-                        "cannot identify managed host because the site explorer has not discovered all attached DPUs"
-                    );
-                }
-
-                return None;
-            } else if host_dpu_policy.expects_managed_dpus() {
-                // No DPUs remain available for management, and the
-                // effective policy is `Manage` --
-                // i.e. neither per-host `ExpectedMachine.dpu_policy`
-                // nor site-wide `[site_explorer] dpu_policy` declared
-                // this host as zero-DPU. We expect DPUs but found none --
-                // probably a misconfiguration or a DPU-discovery
-                // bug. Skip ingestion this cycle; site-explorer
-                // will retry on the next iteration, giving the
-                // operator a chance to either fix the host, select
-                // `HostDpuPolicy::Nic` for installed BlueFields
-                // that should run as NICs, or select
-                // `HostDpuPolicy::Ignore` for a host with no usable DPU
-                // hardware.
-                //
-                // `Ignore` hosts are handled before this method is called;
-                // `Nic` hosts can return an empty DPU list.
-                tracing::warn!(
-                    bmc_ip_address = %ep.address,
-                    exploration_report = ?ep,
-                    ?host_dpu_policy,
-                    "cannot identify managed host: site explorer found no DPUs available for management while the effective DPU policy is `Manage`; use `dpu_policy = \"nic\"` for installed BlueFields that should run as NICs, or `dpu_policy = \"ignore\"` for a host with no usable DPU hardware",
-                );
-                metrics
-                    .increment_host_dpu_pairing_blocker(PairingBlockerReason::NoDpuReportedByHost);
-                return None;
-            }
+        if cfg_status.running_as_dpu.is_empty() && host_dpu_policy.expects_managed_dpus() {
+            // No DPUs remain available for management, and the
+            // effective policy is `Manage` --
+            // i.e. neither per-host `ExpectedMachine.dpu_policy`
+            // nor site-wide `[site_explorer] dpu_policy` declared
+            // this host as zero-DPU. We expect DPUs but found none --
+            // probably a misconfiguration or a DPU-discovery
+            // bug. Skip ingestion this cycle; site-explorer
+            // will retry on the next iteration, giving the
+            // operator a chance to either fix the host, select
+            // `HostDpuPolicy::Nic` for installed BlueFields
+            // that should run as NICs, or select
+            // `HostDpuPolicy::Ignore` for a host with no usable DPU
+            // hardware.
+            //
+            // `Ignore` hosts are handled before this method is called;
+            // `Nic` hosts can return an empty DPU list.
+            tracing::warn!(
+                bmc_ip_address = %ep.address,
+                exploration_report = ?ep,
+                ?host_dpu_policy,
+                "cannot identify managed host: site explorer found no DPUs available for management while the effective DPU policy is `Manage`; use `dpu_policy = \"nic\"` for installed BlueFields that should run as NICs, or `dpu_policy = \"ignore\"` for a host with no usable DPU hardware",
+            );
+            metrics.increment_host_dpu_pairing_blocker(PairingBlockerReason::NoDpuReportedByHost);
+            return None;
         }
 
-        // Expected serials replace inventory DPUs only after a ready DPU match.
-        // An empty or all-NIC fallback keeps the inventory DPU list.
-        if fallback_cfg_status.running_as_dpu.is_empty() {
-            Some(inventory_cfg_status.running_as_dpu)
-        } else {
-            Some(fallback_cfg_status.running_as_dpu)
-        }
+        Some(cfg_status.running_as_dpu)
     }
 
     /// Applies the selected target modes and records each matched DPU's outcome.
@@ -1703,7 +1804,7 @@ impl SiteExplorer {
         &self,
         metrics: &mut SiteExplorationMetrics,
         run_context: &SiteExplorerRunContext,
-    ) -> SiteExplorerResult<(ExploredEndpointIndex, HashSet<IpAddr>)> {
+    ) -> SiteExplorerResult<(ExploredEndpointIndex, ExploredThisRun)> {
         let load_start = Instant::now();
         let mut txn = self.txn_begin().await?;
 
@@ -2067,6 +2168,7 @@ impl SiteExplorer {
             unexplored_endpoints,
             self.config.explorations_per_run as usize,
             &expected_bmc_macs,
+            self.config.exploration_timeouts_before_prevent_allocations,
         );
         for (kind, count) in plan.counts() {
             metrics.record_update_explored_endpoints_count(kind, count);
@@ -2104,9 +2206,9 @@ impl SiteExplorer {
         metrics.record_phase_latency("update_explored_endpoints_plan", plan_start.elapsed());
 
         let task_set = FuturesUnordered::new();
-        let concurrency_limiter = Arc::new(tokio::sync::Semaphore::new(
-            self.config.concurrent_explorations as usize,
-        ));
+        let concurrency_limiter = Arc::new(tokio::sync::Semaphore::new(exploration_concurrency(
+            self.config.concurrent_explorations,
+        )));
 
         // Record the difference between the total expected machine count and
         // the number of expected machines we've actually "seen."
@@ -2235,10 +2337,13 @@ impl SiteExplorer {
         // Any transaction touching multiple explored_endpoints needs to sort them the same way to
         // avoid deadlocks: sort by IP.
         exploration_results.sort_by_key(|result| result.endpoint.address);
-        let explored_this_run: HashSet<IpAddr> = exploration_results
+        let probed_endpoints: HashSet<IpAddr> = exploration_results
             .iter()
             .map(|result| result.endpoint.address)
             .collect();
+        // An endpoint counts as refreshed once the database accepts its
+        // report, so a report rejected as stale is not trusted later.
+        let mut refreshed_endpoints = HashSet::new();
         metrics.record_phase_latency("update_explored_endpoints_probe", probe_start.elapsed());
         for EndpointExplorationTaskResult { steps, .. } in &exploration_results {
             metrics
@@ -2356,6 +2461,7 @@ impl SiteExplorer {
                             match report_write {
                                 ConditionalWrite::Applied(()) => {
                                     attester_inventory::record(&report, &mut txn).await?;
+                                    refreshed_endpoints.insert(address);
                                 }
                                 ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
                                     // Skip transient remediation: it would use
@@ -2410,6 +2516,7 @@ impl SiteExplorer {
                             .await?;
                             attester_inventory::record(&report, &mut txn).await?;
                             insert_endpoint_attempts += 1;
+                            refreshed_endpoints.insert(address);
                         }
                         Err(e) => {
                             // If an endpoint exploration failed we still track the result in the database
@@ -2433,8 +2540,11 @@ impl SiteExplorer {
 
                     if !self.config.create_machines.load(Ordering::Relaxed)
                         || power_shelf_manual_ingestion
+                        || is_endpoint_in_managed_host(address, txn.as_pgconn()).await?
                     {
-                        // We're using manual ingestion, making preingestion updates risky.  Go ahead and skip them.
+                        // Manual ingestion must not run automatic setup, and managed BMCs
+                        // must not repeat preingestion for another address. Keep this in the
+                        // insert branch so refreshes preserve explicit preingestion retries.
                         db::explored_endpoints::set_preingestion_complete(address, &mut txn).await?
                     }
                 }
@@ -2449,6 +2559,10 @@ impl SiteExplorer {
         }
 
         txn.commit().await?;
+        let explored_this_run = ExploredThisRun {
+            endpoints: probed_endpoints,
+            refreshed: refreshed_endpoints,
+        };
         metrics.record_phase_latency("update_explored_endpoints_persist", persist_start.elapsed());
         metrics.record_update_explored_endpoints_count(
             "insert_endpoint_attempts",
@@ -3049,25 +3163,28 @@ impl SiteExplorer {
         }
     }
 
-    //// can_ingest_host_endpoint will return true if the site explorer should proceed with ingesting a given host endpoint.
-    /// It will always return true for a host that has already been ingested.
+    /// Decides whether the site explorer should proceed with ingesting a given host endpoint.
+    /// It always decides `Ingest` for a host that has already been ingested.
     ///
-    /// If the host has not been ingested, and is not on, the function will try to turn the host on and return false.
-    /// If the host has not been ingested, is a Lenovo,  and infinite boot is disabled, the function will try to enable
-    /// infinite boot and return false.
-    /// Otherwise, the function will return true.
+    /// If the host has not been ingested, and is not on, the function will try to turn the host on and skip it.
+    /// If the host has not been ingested, is a Lenovo, and infinite boot is disabled, the function will try to enable
+    /// infinite boot and skip it.
+    /// Otherwise, the function decides `Ingest`.
     ///
-    /// `already_ingested_bmc_ips` is the caller's snapshot of ingested BMC IPs, so
-    /// this decision costs no database round trip per endpoint.
+    /// `already_ingested_bmc_ips` is the caller's snapshot of ingested BMC IPs and
+    /// `interface` the caller's lookup of the BMC's interface, so this decision
+    /// costs no database round trip per endpoint. `refreshed_this_run` holds the
+    /// endpoints whose stored report is from this iteration.
     async fn can_ingest_host_endpoint(
         &self,
-        metrics: &mut SiteExplorationMetrics,
         host_endpoint: &ExploredEndpoint,
         already_ingested_bmc_ips: &HashSet<IpAddr>,
-    ) -> SiteExplorerResult<bool> {
+        interface: Option<&MachineInterfaceSnapshot>,
+        refreshed_this_run: &HashSet<IpAddr>,
+    ) -> SiteExplorerResult<HostIngestDecision> {
         if already_ingested_bmc_ips.contains(&host_endpoint.address) {
             // this host has already been ingested
-            return Ok(true);
+            return Ok(HostIngestDecision::Ingest);
         }
 
         let bmc_target_port = self.config.override_target_port.unwrap_or(443);
@@ -3077,9 +3194,9 @@ impl SiteExplorer {
                 bmc_ip_address = %host_endpoint.address,
                 "Site Explorer could not find the system report for a host",
             );
-            metrics
-                .increment_host_dpu_pairing_blocker(PairingBlockerReason::HostSystemReportMissing);
-            return Ok(false);
+            return Ok(HostIngestDecision::Skip {
+                blocker: Some(PairingBlockerReason::HostSystemReportMissing),
+            });
         };
 
         // if we are explicitly forbidden from powering on in the expected_machines,
@@ -3089,44 +3206,40 @@ impl SiteExplorer {
                 bmc_ip_address = %host_endpoint.address,
                 "Host is configured to pause on ingestion"
             );
-            return Ok(false);
+            return Ok(HostIngestDecision::Skip { blocker: None });
         }
 
         let mut ingest_host = true;
-        let interface = match self
-            .find_machine_interface_for_ip(host_endpoint.address)
-            .await
-        {
-            Ok(interface) => Some(interface),
-            Err(e) => {
-                tracing::warn!(
-                    bmc_ip_address = %host_endpoint.address,
-                    error = %e,
-                    "Site Explorer could not find machine interface for host endpoint",
-                );
-                None
-            }
-        };
+        if interface.is_none() {
+            tracing::warn!(
+                bmc_ip_address = %host_endpoint.address,
+                "Site Explorer could not find machine interface for host endpoint",
+            );
+        }
 
-        // The cached `systems[].power_state` may be stale when this endpoint was
-        // not refreshed in the current iteration, so prefer a live Redfish power
-        // state check for uningested hosts. The exceptions are auth/lockout and
-        // unreachable failures, where another live read is either unsafe or very
-        // unlikely to help. `None` means we have no trustworthy reading; we fall
-        // back to the cached state for remediation decisions only and defer
-        // ingestion to a later run.
+        // The stored `systems[].power_state` is current when this endpoint's
+        // probe produced a report in this iteration. Otherwise it may be stale,
+        // so prefer a live Redfish power state check for uningested hosts. The
+        // exceptions are auth/lockout and unreachable failures, where another
+        // live read is either unsafe or very unlikely to help. `None` means we
+        // have no trustworthy reading; we fall back to the stored state for
+        // remediation decisions only and defer ingestion to a later run.
         let fresh_power_state: Option<PowerState> =
-            match host_endpoint.report.last_exploration_error.as_ref() {
-                Some(err) if err.is_unauthorized() || err.is_unreachable() => None,
-                _ => match interface.as_ref() {
-                    Some(interface) => self
-                        .bmc_client
-                        .redfish_get_power_state(bmc_target_addr, interface)
-                        .await
-                        .ok()
-                        .map(IntoModel::into_model),
-                    None => None,
-                },
+            if refreshed_this_run.contains(&host_endpoint.address) {
+                Some(system.power_state)
+            } else {
+                match host_endpoint.report.last_exploration_error.as_ref() {
+                    Some(err) if err.is_unauthorized() || err.is_unreachable() => None,
+                    _ => match interface {
+                        Some(interface) => self
+                            .bmc_client
+                            .redfish_get_power_state(bmc_target_addr, interface)
+                            .await
+                            .ok()
+                            .map(IntoModel::into_model),
+                        None => None,
+                    },
+                }
             };
 
         let effective_power_state = fresh_power_state.unwrap_or(system.power_state);
@@ -3150,7 +3263,7 @@ impl SiteExplorer {
                     "Site Explorer found an uningested host that isn't on"
                 );
 
-                if let Some(interface) = interface.as_ref() {
+                if let Some(interface) = interface {
                     self.bmc_client
                         .redfish_power_control(
                             bmc_target_addr,
@@ -3177,7 +3290,7 @@ impl SiteExplorer {
                     "Site Explorer could not find the manager report for an NVIDIA host",
                 );
 
-                return Ok(false);
+                return Ok(HostIngestDecision::Skip { blocker: None });
             };
 
             // Viking
@@ -3202,10 +3315,9 @@ impl SiteExplorer {
                                         %expected_cpldmb_0_version,
                                         "Site Explorer found a Viking whose CPLDMB_0 version does not match the expected version. A DC power cycle may be needed",
                                     );
-                                    metrics.increment_host_dpu_pairing_blocker(
-                                        PairingBlockerReason::VikingCpldVersionIssue,
-                                    );
-                                    return Ok(false);
+                                    return Ok(HostIngestDecision::Skip {
+                                        blocker: Some(PairingBlockerReason::VikingCpldVersionIssue),
+                                    });
                                 }
                             }
                             Err(e) => {
@@ -3216,10 +3328,9 @@ impl SiteExplorer {
                                     error = ?e,
                                     "Site Explorer found a Viking with a CPLDMB_0 version and could not compare it to the current CPLDMB_0 version",
                                 );
-                                metrics.increment_host_dpu_pairing_blocker(
-                                    PairingBlockerReason::VikingCpldVersionIssue,
-                                );
-                                return Ok(false);
+                                return Ok(HostIngestDecision::Skip {
+                                    blocker: Some(PairingBlockerReason::VikingCpldVersionIssue),
+                                });
                             }
                         }
                     } else {
@@ -3227,10 +3338,9 @@ impl SiteExplorer {
                             bmc_ip_address = %host_endpoint.address,
                             "Site Explorer could not find the CPLDMB_0 inventory for a Viking",
                         );
-                        metrics.increment_host_dpu_pairing_blocker(
-                            PairingBlockerReason::VikingCpldVersionIssue,
-                        );
-                        return Ok(false);
+                        return Ok(HostIngestDecision::Skip {
+                            blocker: Some(PairingBlockerReason::VikingCpldVersionIssue),
+                        });
                     };
                 }
             }
@@ -3248,12 +3358,15 @@ impl SiteExplorer {
                 "Site Explorer found an uningested Lenovo without infinite boot enabled"
             );
 
-            let interface = self
-                .find_machine_interface_for_ip(bmc_target_addr.ip())
-                .await?;
+            let Some(interface) = interface else {
+                return Err(SiteExplorerError::NotFoundError {
+                    kind: "machine_interface",
+                    id: format!("remote_ip={:?}", host_endpoint.address),
+                });
+            };
 
             self.bmc_client
-                .machine_setup(bmc_target_addr, &interface, None)
+                .machine_setup(bmc_target_addr, interface, None)
                 .await
                 .inspect_err(|err| {
                     tracing::error!(
@@ -3267,7 +3380,7 @@ impl SiteExplorer {
             self.bmc_client
                 .redfish_power_control(
                     bmc_target_addr,
-                    &interface,
+                    interface,
                     libredfish::SystemPowerControl::ForceRestart,
                 )
                 .await
@@ -3283,7 +3396,11 @@ impl SiteExplorer {
             ingest_host = false;
         }
 
-        Ok(ingest_host)
+        Ok(if ingest_host {
+            HostIngestDecision::Ingest
+        } else {
+            HostIngestDecision::Skip { blocker: None }
+        })
     }
 }
 
@@ -3494,58 +3611,6 @@ fn is_dpu_in_nic_mode(dpu_ep: &ExploredEndpoint, host_ep: &ExploredEndpoint) -> 
     nic_mode
 }
 
-/// Returns the normalized serial when a host inventory record repeats a BlueField
-/// serial already seen during this host's ingestion pass.
-fn duplicate_bluefield_serial<'a>(
-    part_number: Option<&str>,
-    serial_number: Option<&'a str>,
-    seen: &mut HashSet<&'a str>,
-) -> Option<&'a str> {
-    if !part_number
-        .map(str::trim)
-        .is_some_and(is_bluefield_part_number)
-    {
-        return None;
-    }
-
-    let serial_number = serial_number.map(str::trim).none_if_empty()?;
-    (!seen.insert(serial_number)).then_some(serial_number)
-}
-
-/// `host_dpu_inventory_records` applies the existing chassis inventory rule in
-/// one place. Some BMCs put the BlueField identity on the chassis itself;
-/// others put it on a nested network adapter. Reading only one form avoids
-/// duplicate representations within this chassis. The same serial can still
-/// appear in other chassis, so callers counting DPUs must deduplicate per host.
-fn host_dpu_inventory_records(chassis: &Chassis) -> Vec<HostDpuInventoryCandidate<'_>> {
-    let chassis_is_bluefield = chassis
-        .part_number
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(is_bluefield_part_number);
-    let chassis_has_serial = chassis
-        .serial_number
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|serial| !serial.is_empty());
-
-    if chassis_is_bluefield && chassis_has_serial {
-        return vec![HostDpuInventoryCandidate {
-            part_number: chassis.part_number.as_deref(),
-            serial_number: chassis.serial_number.as_deref(),
-        }];
-    }
-
-    chassis
-        .network_adapters
-        .iter()
-        .map(|adapter| HostDpuInventoryCandidate {
-            part_number: adapter.part_number.as_deref(),
-            serial_number: adapter.serial_number.as_deref(),
-        })
-        .collect()
-}
-
 /// Status of matched DPUs after applying target operating modes.
 #[derive(Debug)]
 struct DpuConfigStatus {
@@ -3702,7 +3767,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::host_dpu_matches::matched_pcie_dpu;
+    use crate::host_dpu_matches::matched_inventory_dpu;
     use crate::test_support::{bf2_dpu, explored_endpoint};
 
     #[test]
@@ -4371,6 +4436,25 @@ mod tests {
     }
 
     #[test]
+    fn exploration_concurrency_is_at_least_one() {
+        check_values(
+            [
+                Check {
+                    scenario: "a configured value is used as is",
+                    input: 300,
+                    expect: 300,
+                },
+                Check {
+                    scenario: "zero would block every task, so it runs one at a time",
+                    input: 0,
+                    expect: 1,
+                },
+            ],
+            exploration_concurrency,
+        );
+    }
+
+    #[test]
     fn allocate_gives_each_tier_its_share_and_passes_unused_slots_on() {
         let counts = |unexplored, refresh_waits, routine| TierCounts {
             unexplored,
@@ -4634,6 +4718,7 @@ mod tests {
                     .collect(),
                 case.budget,
                 &HashSet::new(),
+                1,
             );
             let ips = |list: &[&str]| -> Vec<IpAddr> {
                 list.iter().map(|a| a.parse().unwrap()).collect()
@@ -4733,6 +4818,7 @@ mod tests {
             Vec::new(),
             3,
             &expected,
+            1,
         );
 
         let ips =
@@ -4851,6 +4937,7 @@ mod tests {
                     .collect(),
                 10,
                 &expected,
+                1,
             );
             assert_eq!(
                 plan.unexplored.len(),
@@ -4885,12 +4972,12 @@ mod tests {
         let host = explored_endpoint(load_dell_ep_report());
         // Mode already correct (`Ok(true)`) -> attach as a managed DPU.
         assert!(matches!(
-            classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, Some(Ok(true))),
+            classify_matched_dpu(&matched_inventory_dpu(&dpu), &host, Some(Ok(true))),
             DiscoveredDpu::RunningAsDpu(_)
         ));
         // A skipped mode check (`None`) behaves the same.
         assert!(matches!(
-            classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, None),
+            classify_matched_dpu(&matched_inventory_dpu(&dpu), &host, None),
             DiscoveredDpu::RunningAsDpu(_)
         ));
     }
@@ -4900,7 +4987,7 @@ mod tests {
         let dpu = bf2_dpu(Some(BlueFieldOperatingMode::Nic));
         let host = explored_endpoint(load_dell_ep_report());
         assert!(matches!(
-            classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, Some(Ok(true))),
+            classify_matched_dpu(&matched_inventory_dpu(&dpu), &host, Some(Ok(true))),
             DiscoveredDpu::RunningAsNic
         ));
     }
@@ -4911,7 +4998,7 @@ mod tests {
         let dpu = bf2_dpu(Some(BlueFieldOperatingMode::Nic));
         let host = explored_endpoint(load_dell_ep_report());
         assert!(matches!(
-            classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, Some(Ok(false))),
+            classify_matched_dpu(&matched_inventory_dpu(&dpu), &host, Some(Ok(false))),
             DiscoveredDpu::NeedsReconfig
         ));
     }
@@ -4922,74 +5009,9 @@ mod tests {
         let host = explored_endpoint(load_dell_ep_report());
         let err = SiteExplorerError::InvalidArgument("boom".to_string());
         assert!(matches!(
-            classify_matched_dpu(&matched_pcie_dpu(&dpu), &host, Some(Err(err))),
+            classify_matched_dpu(&matched_inventory_dpu(&dpu), &host, Some(Err(err))),
             DiscoveredDpu::ModeCheckFailed(_)
         ));
-    }
-
-    #[test]
-    fn duplicate_bluefield_serial_only_flags_repeated_bluefield_serials() {
-        struct Case {
-            name: &'static str,
-            devices: &'static [(Option<&'static str>, Option<&'static str>)],
-            expected: &'static [bool],
-        }
-
-        let cases = [
-            Case {
-                name: "duplicate BlueField serial",
-                devices: &[
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                ],
-                expected: &[false, true],
-            },
-            Case {
-                name: "trimmed duplicate BlueField serial",
-                devices: &[
-                    (Some("900-9D3B6-00SV-AA0"), Some(" DPU-SERIAL-1 ")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                ],
-                expected: &[false, true],
-            },
-            Case {
-                name: "distinct BlueField serials",
-                devices: &[
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-2")),
-                ],
-                expected: &[false, false],
-            },
-            Case {
-                name: "non-BlueField does not reserve serial",
-                devices: &[
-                    (Some("0JKJDC"), Some("DPU-SERIAL-1")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("DPU-SERIAL-1")),
-                ],
-                expected: &[false, false],
-            },
-            Case {
-                name: "missing and empty serials are not duplicates",
-                devices: &[
-                    (Some("900-9D3B6-00SV-AA0"), None),
-                    (Some("900-9D3B6-00SV-AA0"), Some("")),
-                    (Some("900-9D3B6-00SV-AA0"), Some("   ")),
-                ],
-                expected: &[false, false, false],
-            },
-        ];
-
-        for case in cases {
-            let mut seen = HashSet::new();
-            let actual: Vec<bool> = case
-                .devices
-                .iter()
-                .map(|(part_number, serial_number)| {
-                    duplicate_bluefield_serial(*part_number, *serial_number, &mut seen).is_some()
-                })
-                .collect();
-            assert_eq!(actual, case.expected, "{}", case.name);
-        }
     }
 
     #[test]

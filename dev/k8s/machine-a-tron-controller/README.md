@@ -51,7 +51,7 @@ kind load docker-image mat-k8s-controller:latest --name <cluster>
 | `--source-list-debounce` | `SOURCE_LIST_DEBOUNCE` | `5s` | Minimum age of a changed source set before a later discovery pass publishes it with a new `generation` (`0` publishes at once) |
 | `--health-addr` | `HEALTH_ADDR` | `:8091` | Listen address for the liveness endpoint `GET /healthz` on the pod network (empty disables it) |
 | `--health-stale-after` | `HEALTH_STALE_AFTER` | `10m` | How long the reconcile loop may go without completing a pass before `/healthz` reports a stall (`0` disables the check) |
-| `--enable-state-annotations` | `ENABLE_STATE_ANNOTATIONS` | `false` | Include machine state annotations (`mat-api-state`, `mat-power-state`) on Services; causes frequent updates in large deployments |
+| `--enable-state-annotations` | `ENABLE_STATE_ANNOTATIONS` | `false` | Include `mat-power-state` on individual device Services, including fallbacks in `pod` mode; shared per-pod Services omit it. Causes frequent updates |
 | `--service-granularity` | `SERVICE_GRANULARITY` | `device` | `device` publishes one Service per BMC and per switch NVOS endpoint; `pod` publishes all BMC addresses of a pod in one Service and all NVOS addresses in another, without IPMI or SSH ports (see [Per-pod Services](#per-pod-services)). Any other value is rejected at startup |
 
 An environment variable that is set is the flag's default, an empty value
@@ -206,12 +206,14 @@ Created Services have:
 **Annotations:**
 
 - `nvidia-infra-controller/mat-bmc-ip`
-- `nvidia-infra-controller/mat-api-state` (when `--enable-state-annotations=true`)
-- `nvidia-infra-controller/mat-power-state` (when `--enable-state-annotations=true`)
+- `nvidia-infra-controller/mat-power-state` (when `--enable-state-annotations=true`, individual device Services only)
 - `nvidia-infra-controller/mat-hardware-type`
 - `nvidia-infra-controller/mat-ipmi-listen-port` (when `bmc.ipmi` reported in status)
 - `nvidia-infra-controller/mat-ssh-listen-port` (when `bmc.ssh` reported in status)
 - `nvidia-infra-controller/mat-published-addresses` (per-pod Services only)
+
+Reconciliation removes the obsolete `nvidia-infra-controller/mat-api-state`
+annotation from Services managed by this controller.
 
 **Ports:**
 
@@ -270,6 +272,10 @@ pair most devices of the pod report keeps a per-device Service, and the
 controller logs a warning naming it. The dynamic IPMI and SSH ports are not
 published at pod granularity; keep `device` granularity when a client needs
 them.
+
+Shared per-pod Services omit `mat-power-state`, even when
+`--enable-state-annotations=true`. Individual device Services retained as
+fallbacks in `pod` mode follow that flag.
 
 An address two pods both report stays with the Service first by name and is
 withdrawn from the other Service's list alone, reported as a reconciliation

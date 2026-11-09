@@ -433,7 +433,7 @@ func (gansgh GetAllNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 
 		// Check site for existence
 		stDAO := cdbm.NewSiteDAO(gansgh.dbSession)
-		_, err = stDAO.GetByID(ctx, nil, *siteID, nil, false)
+		_, err = stDAO.GetByID(ctx, nil, *siteID, nil, false, false)
 		if err != nil {
 			logger.Error().Err(err).Msg("error retrieving Site from DB by ID")
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not retrieve Site with ID specified in query", nil)
@@ -1090,7 +1090,7 @@ func (dnsgh UpdateNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 
 	// Get any site-specific config
 	stDAO := cdbm.NewSiteDAO(dnsgh.dbSession)
-	site, err := stDAO.GetByID(ctx, nil, nsg.SiteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, nsg.SiteID, nil, false, false)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving Site from DB by ID")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "The Site where this Network Security Group is being updated could not be retrieved", nil)

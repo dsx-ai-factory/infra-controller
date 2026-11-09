@@ -324,6 +324,15 @@ spec:
                 description: AgentStatus contains the information reported from inside
                   the DPU
                 properties:
+                  appliedFlavorGeneration:
+                    description: |-
+                      AppliedFlavorGeneration is the metadata.generation of the DPUFlavor this Run() applied.
+                      Generation advances only with the spec, so it identifies the applied spec, not
+                      metadata-only writes. Debug only. It is not used to decide whether to start in-place reconfig.
+                      Zero means the agent has not reported an applied flavor yet.
+                    format: int64
+                    minimum: 1
+                    type: integer
                   clock:
                     description: |-
                       Clock is the DPU clock compared against the host clock, recorded while the DPU agent was
@@ -405,6 +414,48 @@ spec:
                       - type
                       type: object
                     type: array
+                  ewnicRuntimeConfig:
+                    description: |-
+                      ewnicRuntimeConfig reports E/W NIC runtime configuration on this boot. The DPU agent
+                      sets it when NIC provisioning starts; when set, the controller waits for runtime
+                      configuration before leaving DPU Config. Unset means runtime configuration is not required.
+                    properties:
+                      configuredDevices:
+                        description: configuredDevices is the number of devices whose
+                          last runtime configuration apply succeeded.
+                        format: int32
+                        type: integer
+                      discoveredDevices:
+                        description: discoveredDevices is the number of E/W NIC devices
+                          found on this boot.
+                        format: int32
+                        type: integer
+                      failedDevices:
+                        description: failedDevices lists devices whose last runtime
+                          configuration apply failed.
+                        items:
+                          description: EWNICDeviceFailure describes an E/W NIC device
+                            whose runtime configuration apply failed.
+                          properties:
+                            message:
+                              description: message is the error returned for the device,
+                                truncated by the DPU agent.
+                              type: string
+                            pciAddress:
+                              description: |-
+                                pciAddress is the device's PCI address without the function number
+                                (Domain:Bus:Device, e.g. 0000:03:00), shared by all ports of the device.
+                              type: string
+                            reason:
+                              description: reason is a CamelCase reason for the failure,
+                                e.g. NoCarrier or ApplyFailed.
+                              type: string
+                          required:
+                          - pciAddress
+                          - reason
+                          type: object
+                        type: array
+                    type: object
                   hostOSInit:
                     description: |-
                       hostOSInit reports terminal host OS init release status from the DPU agent.
@@ -609,6 +660,12 @@ spec:
                       was last updated by the DPU agent.
                     format: date-time
                     type: string
+                  version:
+                    description: |-
+                      Version is set by an agent that can GET the live DPUFlavor and start a second Run().
+                      Empty means an old agent; do not start in-place reconfig for this DPU.
+                    minLength: 1
+                    type: string
                 type: object
               bfCFGFile:
                 description: BFCFGFile is the path to the bf.cfg
@@ -677,16 +734,12 @@ spec:
                   type: object
                 type: array
               deploymentMode:
-                allOf:
-                - enum:
-                  - zero-trust
-                  - host-trusted
-                - enum:
-                  - zero-trust
-                  - host-trusted
                 description: |-
                   DeploymentMode is copied from DPFOperatorConfig.spec.deploymentMode by the controller.
                   This field is read-only for users.
+                enum:
+                - zero-trust
+                - host-trusted
                 type: string
               dpfVersion:
                 description: DPF version used to install this DPU
@@ -704,17 +757,40 @@ spec:
                 - redfish
                 type: string
               dpuMode:
-                allOf:
-                - enum:
-                  - dpu
-                  - zero-trust
-                  - nic
-                - enum:
-                  - dpu
-                  - nic
                 default: dpu
                 description: The mode of the DPU
+                enum:
+                - dpu
+                - zero-trust
+                - nic
                 type: string
+              dpuReconfig:
+                description: |-
+                  DPUReconfig is the in-place reconfig round state for this DPU. DPUSet writes it.
+                  The DPU controller reads inProgress and does not write these fields.
+                  Nil means no round has been assigned.
+                properties:
+                  completedRound:
+                    description: |-
+                      CompletedRound is the last round that reached Ready. Zero means this DPU has not
+                      finished an in-place round. While it equals DPUSet status.dpuReconfig.round, this
+                      DPU is not started again for the same annotation.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  inProgress:
+                    description: |-
+                      InProgress permits the DPU controller to jump to Node Effect. It is cleared when
+                      this DPU is Ready again for this round. Do not set it together with Outdated.
+                    type: boolean
+                  round:
+                    description: |-
+                      Round is the DPUSet round assigned when InProgress was set.
+                      Zero means InProgress has not been set for a round.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                type: object
               dpuType:
                 default: Unknown
                 description: The type of the DPU
@@ -875,6 +951,13 @@ spec:
                 - Node Effect Removal
                 - Checking Host Reboot Required
                 type: string
+              postProvisioningDPUConfig:
+                description: |-
+                  PostProvisioningDPUConfig must be set before entering Node Effect for an in-place
+                  flavor reconfig, so Node Effect exits to DPU Config instead of Initialize Interface.
+                  The DPU controller owns this field. If both this and PostProvisioningNodeEffect would
+                  be set, only this one is set.
+                type: boolean
               postProvisioningNodeEffect:
                 description: Indicates that node effect was triggered by post-provisioning
                   label changes
@@ -958,8 +1041,6 @@ spec:
                       enabled on the DPU.
                     type: boolean
                 type: object
-            required:
-            - phase
             type: object
             x-kubernetes-validations:
             - message: 'identityMode is immutable once set: can only transition from

@@ -22,7 +22,7 @@ This crate is intentionally narrow:
 
 - It depends on the firmware **data types** (`Firmware`,
   `FirmwareEntry`, `FirmwareComponentType`, ...) which live in
-  `nico-api-model`. Those types describe firmware; this crate
+  `carbide-api-model`. Those types describe firmware; this crate
   loads and queries them.
 - Core owns the top-level configuration file schema. `FirmwareGlobal` in
   `carbide-machine-controller` contains settings such as `firmware_directory`
@@ -30,6 +30,9 @@ This crate is intentionally narrow:
 - `FirmwareDownloader` fetches Core firmware artifacts and verifies cached
   files. Its worker, HTTP deadline, and streamed-size limits are configured
   through [`firmware_global.downloads`](../api-core/src/cfg/README.md#firmwaredownloadconfig).
+- `FirmwareArtifactCache` owns verified artifact bytes, bounded local storage,
+  and physical readers. Core owns authenticated operation membership and
+  supplies each request's retained digests.
 - It does **not** perform firmware upgrades or version comparison. Those
   concerns live in `nico-api` and `nico-scout`.
 
@@ -88,14 +91,59 @@ Merge rules, applied in oldest-to-newest directory order:
   of its firmware versions as `default`, the `default` flag is
   cleared on all previously-registered entries for that component.
 
+## Managed artifact cache
+
+`FirmwareArtifactCache` stores SHA-256 artifacts in `digest-v1/` beneath the
+configured firmware download-cache root. It preserves legacy URL directories,
+unknown names, symlinks, and nonregular entries. Only one Core process may own a
+namespace; sharing the directory across processes is unsupported. Each replica
+has its own cache and may download the same artifact independently. Eviction can
+make an artifact unavailable offline.
+
+Capacity must be positive, no greater than 1 TiB, and at least
+`firmware_global.downloads.max_download_bytes`. Core owns the configured capacity
+and its default. New transfers reserve the maximum download size before source
+access. Complete files, orphan partials, live readers, and active reservations
+remain charged until physical cleanup settles. Verified files adopted after a
+restart remain readable if the configured budget has shrunk below occupied
+bytes; that pressure blocks new reservations. Each open supplies the caller's
+current retained digests, which eviction protects together with readers and
+active transfers.
+
+Cache opens, checksum work, and transfers share the existing
+`FirmwareDownloader` worker pool. Reader admission has a separate fixed limit
+of 32, without a queue, so slow responses do not hold download workers. `Pending`
+asks callers to poll again; it does not queue another transfer. A failed attempt
+is reported before an explicit later poll retries it. Include the requested
+digest in the retained set: once an idle entry has no bytes or retention, its
+recorded failure may be dropped before any caller sees it.
+
+Construction registers a cache owner in the supplied `JoinSet<()>` and performs
+no filesystem work. Its caller must cancel the supplied token and drain the
+owner set before exiting or removing the directory. Cancellation closes
+admission and joins accepted open, read, download, and settlement work, including
+physical blocking operations that outlive a disconnected request. Managed
+cancellation uses the existing `transfer` download metric label. Worker panics
+propagate through the owner. Dropping an individual request does not cancel an
+accepted transfer.
+
+Managed sources accept anonymous HTTP(S), without userinfo, query parameters,
+or fragments. They never forward request credentials. Redirects are rejected as
+a deliberate source security boundary: an approved origin cannot redirect a
+transfer to a different destination. Managed diagnostics identify the digest
+and bounded failure category without exposing source URL paths; the legacy
+URL downloader keeps its existing redirect and logging behavior.
+
 ## Consumers
 
-Currently used (directly or indirectly) by:
-
-- `nico-api`: `cfg/file.rs` (construction),
-  `machine_update_manager` (hot-reload detection),
-  `handlers/firmware.rs` (HTTP API), `preingestion_manager`,
-  `site_explorer`, `state_controller`, tests.
+- `carbide-api-core`: `cfg/file.rs` constructs firmware metadata loading;
+  `setup.rs` constructs the shared downloader and supervised artifact cache.
+  `handlers/firmware.rs` reads catalog snapshots and
+  `handlers/nic_firmware_artifact.rs` authorizes and streams managed artifacts.
+- `carbide-machine-controller` and `carbide-preingestion-manager`: existing
+  firmware orchestration uses catalog snapshots and the shared downloader.
+- `carbide-site-explorer`: endpoint exploration uses the firmware catalog and
+  its snapshots.
 
 ## Snapshot semantics
 

@@ -5,6 +5,7 @@ package leakdetection
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
@@ -46,50 +48,64 @@ func (m *mockManager) CancelTask(_ context.Context, _ uuid.UUID) error {
 
 // --- tests ---
 
-func TestSubmitPowerOffTask_Success(t *testing.T) {
-	ctx := context.Background()
-	mgr := &mockManager{}
-	machineID := "machine-abc-123"
+func TestSubmitPowerOffTask(t *testing.T) {
+	cases := map[string]struct {
+		componentType devicetypes.ComponentType
+		manager       mockManager
+		wantError     string
+	}{
+		"compute":            {componentType: devicetypes.ComponentTypeCompute},
+		"switch":             {componentType: devicetypes.ComponentTypeNVSwitch},
+		"no tasks":           {manager: mockManager{returnNoTaskID: true}, wantError: "failed to create any power-off tasks"},
+		"submission failure": {manager: mockManager{submitErr: errors.New("submit failed")}, wantError: "submit failed"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := submitPowerOffTask(context.Background(), &tc.manager, "component-1", tc.componentType)
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, tc.manager.requests, 1)
+			req := tc.manager.requests[0]
+			require.True(t, req.TargetSpec.IsComponentTargeting())
+			require.Len(t, req.TargetSpec.Components, 1)
+			comp := req.TargetSpec.Components[0]
+			assert.Equal(t, uuid.Nil, comp.UUID)
+			require.NotNil(t, comp.External)
+			assert.Equal(t, tc.componentType, comp.External.Type)
+			assert.Equal(t, "component-1", comp.External.ID)
+			assert.Equal(t, operation.ConflictStrategyQueue, req.ConflictStrategy)
+			assert.Contains(t, req.Description, "component-1")
+			var info operations.PowerControlTaskInfo
+			require.NoError(t, json.Unmarshal(req.Operation.Info, &info))
+			assert.Equal(t, operations.PowerOperationForcePowerOff, info.Operation)
+			assert.True(t, info.Forced)
+			assert.True(t, info.OverrideReadinessCheck)
+		})
+	}
+}
 
-	err := submitPowerOffTask(ctx, mgr, machineID, devicetypes.ComponentTypeCompute)
+func TestSubmitRackPowerOffTask(t *testing.T) {
+	mgr := &mockManager{}
+	rackID := "rack-abc-123"
+
+	err := submitRackPowerOffTask(context.Background(), mgr, rackID)
+
 	require.NoError(t, err)
 	require.Len(t, mgr.requests, 1)
-
 	req := mgr.requests[0]
-
-	// Verify target spec uses component targeting with ExternalRef
-	assert.True(t, req.TargetSpec.IsComponentTargeting())
-	require.Len(t, req.TargetSpec.Components, 1)
-
-	comp := req.TargetSpec.Components[0]
-	assert.Equal(t, uuid.Nil, comp.UUID)
-	require.NotNil(t, comp.External)
-	assert.Equal(t, devicetypes.ComponentTypeCompute, comp.External.Type)
-	assert.Equal(t, machineID, comp.External.ID)
-
-	// Verify conflict strategy is queue
-	assert.Equal(t, operation.ConflictStrategyQueue, req.ConflictStrategy)
-
-	// Verify description contains machine ID
-	assert.Contains(t, req.Description, machineID)
-}
-
-func TestSubmitPowerOffTask_NoTasksCreated(t *testing.T) {
-	ctx := context.Background()
-	mgr := &mockManager{returnNoTaskID: true}
-
-	err := submitPowerOffTask(ctx, mgr, "machine-xyz", devicetypes.ComponentTypeCompute)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to create any power-off tasks")
-}
-
-func TestSubmitPowerOffTask_SubmitError(t *testing.T) {
-	ctx := context.Background()
-	mgr := &mockManager{submitErr: errors.New("submit failed")}
-
-	err := submitPowerOffTask(ctx, mgr, "machine-xyz", devicetypes.ComponentTypeCompute)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "submit failed")
+	require.True(t, req.TargetSpec.IsRackTargeting())
+	require.Len(t, req.TargetSpec.Racks, 1)
+	require.Equal(t, rackID, req.TargetSpec.Racks[0].Identifier.ExternalID)
+	require.Equal(t, operation.ConflictStrategyQueue, req.ConflictStrategy)
+	require.Contains(t, req.Description, rackID)
+	var info operations.PowerControlTaskInfo
+	require.NoError(t, json.Unmarshal(req.Operation.Info, &info))
+	assert.Equal(t, operations.PowerOperationForcePowerOff, info.Operation)
+	assert.True(t, info.Forced)
+	assert.True(t, info.OverrideReadinessCheck)
 }
 
 func TestRunLeakDetectionOne_NoLeaks(t *testing.T) {
@@ -115,6 +131,20 @@ func TestRunLeakDetectionOne_SubmitsTaskPerMachine(t *testing.T) {
 	require.Len(t, mgr.requests, 3)
 	for i, m := range machines {
 		assert.Equal(t, m, mgr.requests[i].TargetSpec.Components[0].External.ID)
+	}
+}
+
+func TestRunLeakDetectionOne_SubmitsTaskPerRack(t *testing.T) {
+	mgr := &mockManager{}
+	racks := []string{"rack-1", "rack-2"}
+	nicoClient := nicoapi.NewMockClient()
+	nicoClient.SetLeakingRackIds(racks)
+
+	runLeakDetectionOne(context.Background(), nicoClient, mgr, nil)
+
+	require.Len(t, mgr.requests, 2)
+	for i, rackID := range racks {
+		require.Equal(t, rackID, mgr.requests[i].TargetSpec.Racks[0].Identifier.ExternalID)
 	}
 }
 

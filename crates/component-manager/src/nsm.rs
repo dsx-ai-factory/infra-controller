@@ -176,7 +176,9 @@ impl NvSwitchManager for NsmSwitchBackend {
                 None => results.push(SwitchComponentResult {
                     bmc_mac: ep.bmc_mac,
                     success: false,
-                    error: Some("NSM registration failed for switch".into()),
+                    error: Some(ComponentManagerError::Internal(
+                        "NSM registration failed for switch".into(),
+                    )),
                 }),
             }
         }
@@ -216,7 +218,7 @@ impl NvSwitchManager for NsmSwitchBackend {
                     error: if r.error.is_empty() {
                         None
                     } else {
-                        Some(r.error)
+                        Some(ComponentManagerError::Internal(r.error))
                     },
                 });
             }
@@ -245,7 +247,9 @@ impl NvSwitchManager for NsmSwitchBackend {
                 None => results.push(SwitchComponentResult {
                     bmc_mac: ep.bmc_mac,
                     success: false,
-                    error: Some("NSM registration failed for switch".into()),
+                    error: Some(ComponentManagerError::Internal(
+                        "NSM registration failed for switch".into(),
+                    )),
                 }),
             }
         }
@@ -282,7 +286,7 @@ impl NvSwitchManager for NsmSwitchBackend {
                     error: if r.error.is_empty() {
                         None
                     } else {
-                        Some(r.error)
+                        Some(ComponentManagerError::Internal(r.error))
                     },
                 });
             }
@@ -409,6 +413,7 @@ impl NvSwitchManager for NsmSwitchBackend {
             "switch certificate job status is not supported by NSM backend, passthrough"
         );
         Ok(ConfigureSwitchCertificateJobStatus {
+            failure: None,
             state: ConfigureSwitchCertificateState::Completed,
             error: None,
         })

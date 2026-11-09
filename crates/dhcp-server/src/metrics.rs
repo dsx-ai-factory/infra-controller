@@ -276,10 +276,29 @@ pub(crate) enum SocketSetupOperation {
     BindDevice,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
+/// Selects the listener's internal control flow after one socket setup failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SocketSetupNextAction {
     Retry,
+    Return,
+}
+
+/// Preserves the deployed socket-failure label values even though terminal failures now return
+/// instead of panicking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, LabelValue)]
+pub(crate) enum SocketSetupNextActionLabel {
+    Retry,
     Panic,
+}
+
+impl From<SocketSetupNextAction> for SocketSetupNextActionLabel {
+    fn from(action: SocketSetupNextAction) -> Self {
+        match action {
+            SocketSetupNextAction::Retry => Self::Retry,
+            // Existing dashboards and alerts select `panic`, so changing control flow must not rename that time series.
+            SocketSetupNextAction::Return => Self::Panic,
+        }
+    }
 }
 
 /// The one metric the Events below record.
@@ -292,7 +311,7 @@ pub(crate) enum SocketSetupNextAction {
 )]
 pub(crate) struct DhcpSocketSetupFailures {
     operation: SocketSetupOperation,
-    next_action: SocketSetupNextAction,
+    next_action: SocketSetupNextActionLabel,
 }
 
 /// One socket-setup syscall failed. Each variant is the call that failed, and
@@ -310,7 +329,7 @@ pub(crate) enum DhcpSocketSetupFailed {
     )]
     Create {
         #[label]
-        next_action: SocketSetupNextAction,
+        next_action: SocketSetupNextActionLabel,
         #[context(value)]
         retry: i64,
         #[context]
@@ -324,7 +343,7 @@ pub(crate) enum DhcpSocketSetupFailed {
     )]
     ReuseAddress {
         #[label]
-        next_action: SocketSetupNextAction,
+        next_action: SocketSetupNextActionLabel,
         #[context(value)]
         retry: i64,
         #[context]
@@ -338,7 +357,7 @@ pub(crate) enum DhcpSocketSetupFailed {
     )]
     SetNonblocking {
         #[label]
-        next_action: SocketSetupNextAction,
+        next_action: SocketSetupNextActionLabel,
         #[context(value)]
         retry: i64,
         #[context]
@@ -352,7 +371,7 @@ pub(crate) enum DhcpSocketSetupFailed {
     )]
     BindAddress {
         #[label]
-        next_action: SocketSetupNextAction,
+        next_action: SocketSetupNextActionLabel,
         #[context(value)]
         retry: i64,
         #[context]
@@ -366,7 +385,7 @@ pub(crate) enum DhcpSocketSetupFailed {
     )]
     SetBroadcast {
         #[label]
-        next_action: SocketSetupNextAction,
+        next_action: SocketSetupNextActionLabel,
         #[context(value)]
         retry: i64,
         #[context]
@@ -380,7 +399,7 @@ pub(crate) enum DhcpSocketSetupFailed {
     )]
     BindDevice {
         #[label]
-        next_action: SocketSetupNextAction,
+        next_action: SocketSetupNextActionLabel,
         #[context(value)]
         retry: i64,
         #[context]
@@ -397,6 +416,7 @@ impl DhcpSocketSetupFailed {
         error: String,
     ) -> Self {
         let retry = i64::from(retry);
+        let next_action = next_action.into();
         match operation {
             SocketSetupOperation::Create => Self::Create {
                 next_action,
@@ -436,13 +456,13 @@ impl DhcpSocketSetupFailed {
     event_name = "dhcp_server_interface_bind_failed",
     metric_family = DhcpSocketSetupFailures,
     log = info,
-    message = "Interface not ready, retrying"
+    message = "Interface binding failed"
 )]
 pub(crate) struct DhcpInterfaceBindFailed {
     #[label]
     operation: SocketSetupOperation,
     #[label]
-    next_action: SocketSetupNextAction,
+    next_action: SocketSetupNextActionLabel,
     #[context(value)]
     interface_name: String,
     #[context(value)]
@@ -460,7 +480,7 @@ impl DhcpInterfaceBindFailed {
     ) -> Self {
         Self {
             operation: SocketSetupOperation::BindDevice,
-            next_action,
+            next_action: next_action.into(),
             interface_name,
             retries_left: i64::from(retries_left),
             error,
@@ -691,8 +711,8 @@ pub struct DhcpV6ReplySent {
     labels(operation: TimestampFileOperation),
 )]
 pub enum DhcpTimestampFileFailed {
-    /// The startup write could not initialize the file, so this server
-    /// generation does not start.
+    /// The server could not load or create timestamp history, so the generation
+    /// starts with an empty in-memory activity map.
     #[event(
         labels(operation = Initialize),
         log = error,
@@ -952,12 +972,17 @@ mod tests {
         }
     }
 
+    /// Verifies socket setup Events retain their diagnostics and deployed label values while
+    /// terminal control flow is tested separately.
     #[test]
     fn socket_setup_failures_keep_the_existing_diagnostics() {
+        // Snapshot the process-global counter before any case emits its failure Event.
         let metrics = MetricsCapture::start();
 
+        // Define each syscall and terminal-action contract independently so label drift identifies its exact source.
         check_values(
             [
+                // Socket creation uses its dedicated operation label while preserving retry diagnostics.
                 Check {
                     scenario: "socket creation will retry",
                     input: SocketSetupFailureCase {
@@ -982,6 +1007,7 @@ mod tests {
                         None,
                     ),
                 },
+                // Reuse-address failure remains distinct from later option-setting failures.
                 Check {
                     scenario: "reuse-address setup will retry",
                     input: SocketSetupFailureCase {
@@ -1009,6 +1035,7 @@ mod tests {
                         None,
                     ),
                 },
+                // Nonblocking setup preserves its syscall identity and typed retry field.
                 Check {
                     scenario: "nonblocking setup will retry",
                     input: SocketSetupFailureCase {
@@ -1036,6 +1063,7 @@ mod tests {
                         None,
                     ),
                 },
+                // Address binding identifies the local bind operation rather than device binding.
                 Check {
                     scenario: "address bind will retry",
                     input: SocketSetupFailureCase {
@@ -1063,13 +1091,14 @@ mod tests {
                         None,
                     ),
                 },
+                // Exhausted outer setup retains the deployed `panic` label even though the listener now returns its error.
                 Check {
                     scenario: "broadcast setup exhausts the outer loop",
                     input: SocketSetupFailureCase {
                         emit: || {
                             emit(DhcpSocketSetupFailed::new(
                                 SocketSetupOperation::SetBroadcast,
-                                SocketSetupNextAction::Panic,
+                                SocketSetupNextAction::Return,
                                 9,
                                 "permission denied".to_string(),
                             ))
@@ -1090,6 +1119,7 @@ mod tests {
                         None,
                     ),
                 },
+                // Retriable device binding includes interface context and remaining-attempt count.
                 Check {
                     scenario: "device bind will retry",
                     input: SocketSetupFailureCase {
@@ -1107,7 +1137,7 @@ mod tests {
                     expect: expected_socket_setup_failure(
                         (
                             "dhcp_server_interface_bind_failed",
-                            "Interface not ready, retrying",
+                            "Interface binding failed",
                         ),
                         "bind_device",
                         "retry",
@@ -1117,12 +1147,13 @@ mod tests {
                         Some(1),
                     ),
                 },
+                // Exhausted device binding retains the deployed `panic` label without inventing an outer retry index.
                 Check {
                     scenario: "device bind exhausts its retry loop",
                     input: SocketSetupFailureCase {
                         emit: || {
                             emit(DhcpInterfaceBindFailed::new(
-                                SocketSetupNextAction::Panic,
+                                SocketSetupNextAction::Return,
                                 "pf0hpf".to_string(),
                                 0,
                                 "permission denied".to_string(),
@@ -1134,7 +1165,7 @@ mod tests {
                     expect: expected_socket_setup_failure(
                         (
                             "dhcp_server_interface_bind_failed",
-                            "Interface not ready, retrying",
+                            "Interface binding failed",
                         ),
                         "bind_device",
                         "panic",
@@ -1145,7 +1176,10 @@ mod tests {
                     ),
                 },
             ],
-            |case| observe_socket_setup_failure(&metrics, case),
+            |case| {
+                // Emit the selected Event; check_values compares its metric delta and structured log with the case contract.
+                observe_socket_setup_failure(&metrics, case)
+            },
         );
     }
 

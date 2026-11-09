@@ -1,8 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Empty unless CI passes its cached Go module downloads as the `gomodcache`
+# build context, so other builds download every module from the proxy.
+FROM scratch AS gomodcache
+
 # Build stage
-FROM --platform=$BUILDPLATFORM golang:1.26.4 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS builder
 
 # Docker automatically provides these args during multi-platform builds
 ARG TARGETOS=linux
@@ -26,8 +30,11 @@ WORKDIR /workspace
 COPY go.mod go.sum ./
 # Copy SDK go module files, required for maintaining separate go.mod for SDK
 COPY sdk/standard/go.mod ./sdk/standard/
-# Download dependencies
-RUN go mod download
+COPY scripts/go-mod-download.sh ./scripts/
+# Download dependencies. `|` falls back to the regular proxy for anything the
+# cached downloads are missing.
+RUN --mount=type=bind,from=gomodcache,target=/go-mod-download \
+    GOPROXY="file:///go-mod-download|$(go env GOPROXY)" sh scripts/go-mod-download.sh
 
 # Copy source files
 COPY common/ ./common/
@@ -38,12 +45,12 @@ WORKDIR /workspace/cert-manager
 RUN VERSION=${VERSION} && \
     BUILD_TIME=$(date +"%Y-%m-%d %H:%M:%S") && \
     go build \
-        -ldflags "-extldflags '-static' -w -s" \
+        -ldflags "-extldflags '-static' -w -s -X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}" \
         -o /app/credsmgr \
         ./cmd/credsmgr
 
 # Final stage
-FROM nvcr.io/nvidia/distroless/go:v4.0.8 AS final
+FROM nvcr.io/nvidia/distroless/go:v4.1.8@sha256:676c150ccfb5987f58bbee9accfa506d5519d4acf4252f799d311476a0a7f1b5 AS final
 
 WORKDIR /app
 

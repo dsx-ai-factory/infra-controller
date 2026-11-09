@@ -130,6 +130,11 @@ pub(super) async fn instrumented_redfish_initialization<'a, T>(
 /// Records `NotSupported` as an expected `unsupported` outcome for ordinary
 /// operations, while initialization deliberately passes `false` so it keeps
 /// the pre-existing error contract. All other failures emit one WARN.
+#[tracing::instrument(
+    name = "redfish_call",
+    skip_all,
+    fields(backend = REDFISH_BACKEND, operation = operation, outcome = tracing::field::Empty)
+)]
 async fn instrumented_redfish_call<'a, T>(
     operation: &'static str,
     not_supported_is_expected: bool,
@@ -160,6 +165,7 @@ async fn instrumented_redfish_call<'a, T>(
         Err(_) if is_expected_not_supported => "unsupported",
         Err(_) => "error",
     };
+    tracing::Span::current().record("outcome", outcome);
     red::record(
         REDFISH_BACKEND,
         operation,
@@ -233,6 +239,7 @@ impl Redfish for InstrumentedRedfish {
         fn get_software_inventories<'a>(&'a self) -> Vec<String>;
         fn get_tasks<'a>(&'a self) -> Vec<String>;
         fn get_task<'a>(&'a self, id: &'a str) -> Task;
+        fn cancel_task<'a>(&'a self, id: &'a str) -> bool;
         fn get_power_state<'a>(&'a self) -> PowerState;
         fn get_service_root<'a>(&'a self) -> ServiceRoot;
         fn get_systems<'a>(&'a self) -> Vec<String>;
@@ -281,6 +288,8 @@ impl Redfish for InstrumentedRedfish {
             &'a self,
             boot_interface: Option<BootInterfaceRef<'a>>,
         ) -> MachineSetupStatus;
+        fn set_enable_onboard_nics<'a>(&'a self, enable_onboard_nics: EnabledDisabled) -> ();
+        fn are_onboard_nics_enabled<'a>(&'a self) -> Option<EnabledDisabled>;
         fn is_bios_setup<'a>(&'a self, boot_interface: Option<BootInterfaceRef<'a>>) -> bool;
         fn set_machine_password_policy<'a>(&'a self) -> ();
         fn lockdown<'a>(&'a self, target: EnabledDisabled) -> ();
@@ -430,6 +439,18 @@ impl Redfish for InstrumentedRedfish {
         ))
     }
 
+    fn enable_ipmi_account_access<'a>(
+        &'a self,
+        account_id: &'a str,
+        password: &'a str,
+    ) -> RedfishFuture<'a, Result<(), RedfishError>> {
+        Box::pin(self.instrumented_redfish(
+            "enable_ipmi_account_access",
+            [password],
+            self.inner.enable_ipmi_account_access(account_id, password),
+        ))
+    }
+
     fn create_user<'a>(
         &'a self,
         username: &'a str,
@@ -500,6 +521,72 @@ mod tests {
             .await
             .expect("sim client");
         InstrumentedRedfish::new(client, Vec::new())
+    }
+
+    #[tokio::test]
+    async fn task_cancellation_delegates_and_records_metrics() {
+        let sim = RedfishSim::default();
+        let client = sim_client(&sim).await;
+        let metrics = MetricsCapture::start();
+
+        // Protocol cases belong in libredfish; this proves the adapter forwards
+        // the task ID and meters cancellation through the same path as other calls.
+        assert!(
+            !client
+                .cancel_task("task-1")
+                .await
+                .expect("pending cancellation")
+        );
+        assert_eq!(sim.task_cancellation_requests(), vec!["task-1"]);
+        assert_eq!(
+            metrics.histogram_count_delta(
+                "carbide_external_call_duration_milliseconds",
+                &[
+                    ("backend", "redfish"),
+                    ("operation", "cancel_task"),
+                    ("outcome", "ok"),
+                ],
+            ),
+            1,
+        );
+    }
+
+    #[tokio::test]
+    async fn ipmi_account_access_is_delegated() {
+        let sim = RedfishSim::default();
+        sim.seed_user("1", "site_pass");
+        let client = sim_client(&sim).await;
+        client
+            .enable_ipmi_account_access("1", "site_pass")
+            .await
+            .unwrap();
+        assert!(sim.ipmi_account_access_enabled("1"));
+    }
+
+    #[tokio::test]
+    async fn onboard_nics_methods_delegate_to_vendor_client() {
+        let sim = RedfishSim::default();
+        let client = sim_client(&sim).await;
+        assert_eq!(client.are_onboard_nics_enabled().await.unwrap(), None);
+        let timepoint = sim.timepoint();
+        for target in [EnabledDisabled::Enabled, EnabledDisabled::Disabled] {
+            client.set_enable_onboard_nics(target).await.unwrap();
+            assert_eq!(
+                client.are_onboard_nics_enabled().await.unwrap(),
+                Some(target)
+            );
+        }
+        assert_eq!(
+            sim.actions_since(&timepoint).for_host("localhost"),
+            vec![
+                crate::libredfish::test_support::RedfishSimAction::SetEnableOnboardNics(
+                    EnabledDisabled::Enabled
+                ),
+                crate::libredfish::test_support::RedfishSimAction::SetEnableOnboardNics(
+                    EnabledDisabled::Disabled
+                ),
+            ]
+        );
     }
 
     #[tokio::test]

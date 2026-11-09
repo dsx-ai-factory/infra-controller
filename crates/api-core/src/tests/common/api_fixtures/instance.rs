@@ -140,6 +140,7 @@ impl<'a, 'b> TestInstanceBuilder<'a, 'b> {
                 config: Some(self.config),
                 metadata: self.metadata,
                 allow_unhealthy_machine: false,
+                external_validation_request_id: None,
             }))
             .await
             .expect("Create instance failed.")
@@ -193,11 +194,11 @@ impl<'a, 'b> TestInstance<'a, 'b> {
     }
 }
 
-/// Persists a synthetic, attachment-correlated endpoint for lifecycle guard tests.
+/// Persists a synthetic attachment and matching service interface for lifecycle guard tests.
 ///
-/// Public endpoint creation is not available until issue #6125. Matching IDs
-/// satisfy snapshot ownership validation, while writing both records in one
-/// transaction and reloading after commit prove durable correlated state.
+/// Public activation remains fail-closed until the complete lifecycle is enabled. Matching IDs
+/// satisfy attachment-to-service-interface validation, while one transaction and a committed
+/// reread prove both configurations were stored for cleanup tests.
 pub(in crate::tests) async fn seed_service_vpc_endpoint(
     env: &TestEnv,
     instance_id: InstanceId,
@@ -210,43 +211,6 @@ pub(in crate::tests) async fn seed_service_vpc_endpoint(
         .expect("fixture segment belongs to a VPC")
         .id;
     let attachment_id = uuid::Uuid::new_v4();
-    let service_id = ExtensionServiceId::new();
-
-    // Register the fixture tenant before creating the synthetic service to satisfy
-    // the extension service's tenant foreign key.
-    let tenant_config = default_tenant_config();
-    create_fixture_tenant(env, tenant_config.tenant_organization_id.clone())
-        .await
-        .unwrap();
-
-    // Register the synthetic Pod service so managed-host snapshot loading can
-    // resolve the directly seeded attachment before public endpoint creation exists.
-    let registered_version: ConfigVersion = env
-        .api
-        .create_dpu_extension_service(tonic::Request::new(
-            rpc::forge::CreateDpuExtensionServiceRequest {
-                deployment_type: 0,
-                dpu_target: None,
-                service_vpc_interfaces: vec![],
-                service_id: Some(service_id.to_string()),
-                service_name: format!("service-vpc-guard-{attachment_id}"),
-                description: None,
-                tenant_organization_id: tenant_config.tenant_organization_id,
-                service_type: rpc::forge::DpuExtensionServiceType::KubernetesPod.into(),
-                data: "apiVersion: v1\nkind: Pod\nmetadata:\n  name: service-vpc-guard\nspec:\n  containers:\n    - name: app\n      image: nginx:1.27"
-                    .to_string(),
-                credential: None,
-                observability: None,
-            },
-        ))
-        .await
-        .unwrap()
-        .into_inner()
-        .latest_version_info
-        .expect("created service has an initial version")
-        .version
-        .parse()
-        .expect("created service returned a valid config version");
 
     // Attachment, DPU, and VPC identity drive the guard. The remaining fields
     // make the synthetic row a valid fixed-slot endpoint for snapshot loading.
@@ -264,8 +228,76 @@ pub(in crate::tests) async fn seed_service_vpc_endpoint(
         internal_uuid: uuid::Uuid::new_v4(),
     };
 
-    // Keep the attachment identity and endpoint owner in one transaction so
-    // no persisted snapshot can observe only half of the relationship.
+    // Register the fixture tenant before creating the synthetic service to satisfy
+    // the extension service's tenant foreign key.
+    let tenant_config = default_tenant_config();
+    create_fixture_tenant(env, tenant_config.tenant_organization_id.clone())
+        .await
+        .unwrap();
+    persist_service_vpc_attachment(
+        env,
+        instance_id,
+        tenant_config.tenant_organization_id.to_string(),
+        vec![endpoint.clone()],
+    )
+    .await;
+
+    endpoint
+}
+
+/// Persists one attachment and its exact endpoint records so response tests can model committed service networking through stored instance configuration.
+///
+/// Callers must create the supplied tenant first because the synthetic service is registered to it.
+pub(in crate::tests) async fn persist_service_vpc_attachment(
+    env: &TestEnv,
+    instance_id: InstanceId,
+    tenant_organization_id: String,
+    endpoints: Vec<InstanceServiceInterfaceConfig>,
+) -> ExtensionServiceId {
+    // Require one shared attachment ID so every endpoint correlates with the persisted attachment.
+    let attachment_id = endpoints
+        .first()
+        .expect("a service-VPC attachment fixture needs at least one endpoint")
+        .attachment_id;
+    assert!(
+        endpoints
+            .iter()
+            .all(|endpoint| endpoint.attachment_id == attachment_id),
+        "one fixture attachment cannot own endpoints with different attachment IDs"
+    );
+    let service_id = ExtensionServiceId::new();
+
+    // Register the synthetic Pod service so managed-host snapshot loading can
+    // resolve the directly seeded attachment before public endpoint creation exists.
+    let registered_version: ConfigVersion = env
+        .api
+        .create_dpu_extension_service(tonic::Request::new(
+            rpc::forge::CreateDpuExtensionServiceRequest {
+                deployment_type: 0,
+                dpu_target: None,
+                service_vpc_interfaces: vec![],
+                service_id: Some(service_id.to_string()),
+                service_name: format!("service-vpc-guard-{attachment_id}"),
+                description: None,
+                tenant_organization_id,
+                service_type: rpc::forge::DpuExtensionServiceType::KubernetesPod.into(),
+                data: "apiVersion: v1\nkind: Pod\nmetadata:\n  name: service-vpc-guard\nspec:\n  containers:\n    - name: app\n      image: nginx:1.27"
+                    .to_string(),
+                credential: None,
+                observability: None,
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .latest_version_info
+        .expect("created service has an initial version")
+        .version
+        .parse()
+        .expect("created service returned a valid config version");
+
+    // Write the attachment and service interface in one conditional statement so a committed
+    // Instance cannot contain only one side of the relationship.
     let mut txn = env.db_txn().await;
     let stored = db::instance::find_by_id(txn.as_mut(), instance_id)
         .await
@@ -283,32 +315,26 @@ pub(in crate::tests) async fn seed_service_vpc_endpoint(
     services_with_attachment
         .service_configs
         .push(attachment.clone());
-    let mut network_with_endpoint = stored.config.network.clone();
-    network_with_endpoint
+    let mut network_with_endpoints = stored.config.network.clone();
+    network_with_endpoints
         .service_interfaces
-        .push(endpoint.clone());
-    assert_eq!(
-        db::instance::update_extension_services_config(
+        .extend(endpoints.clone());
+    assert!(matches!(
+        db::instance::update_service_network_config(
             txn.as_mut(),
             instance_id,
             stored.extension_services_config_version,
             &current_services,
             &services_with_attachment,
+            stored.network_config_version,
+            &stored.config.network,
+            &network_with_endpoints,
             false,
         )
         .await
         .unwrap(),
-        db::ConditionalWrite::Applied(())
-    );
-    db::instance::update_network_config(
-        txn.as_mut(),
-        instance_id,
-        stored.network_config_version,
-        &network_with_endpoint,
-        false,
-    )
-    .await
-    .unwrap();
+        db::ConditionalWrite::Applied(_)
+    ));
     txn.commit().await.unwrap();
 
     // Reload committed state so an ineffective seed cannot make a guard test pass.
@@ -323,15 +349,15 @@ pub(in crate::tests) async fn seed_service_vpc_endpoint(
             .service_configs
             .contains(&attachment)
     );
-    assert!(
+    assert!(endpoints.iter().all(|endpoint| {
         persisted
             .config
             .network
             .service_interfaces
-            .contains(&endpoint)
-    );
+            .contains(endpoint)
+    }));
 
-    endpoint
+    service_id
 }
 
 pub(in crate::tests) async fn create_instance_with_ib_config<'a, 'b>(

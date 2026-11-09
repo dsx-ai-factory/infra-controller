@@ -36,6 +36,7 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 figment = { workspace = true, features = ["toml", "env"] }
+flate2 = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
@@ -113,7 +114,7 @@ carbide-rpc = { path = "../rpc" }
 carbide-secrets = { path = "../secrets" }
 carbide-tls = { path = "../tls" }
 carbide-version = { path = "../version" }
-carbide-utils = { path = "../utils" }
+carbide-utils = { path = "../utils", features = ["shutdown-handler"] }
 carbide-uuid = { path = "../uuid" }
 logfmt = { path = "../logfmt" }
 

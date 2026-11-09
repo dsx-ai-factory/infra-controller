@@ -611,6 +611,115 @@ async fn test_partition_monitor_skipped_rack_republishes_domain_uuid(pool: sqlx:
     );
 }
 
+/// The partition monitor's merge report on a rack, if it carries one.
+async fn rack_partition_monitor_report(
+    pool: &sqlx::PgPool,
+    rack_id: &RackId,
+) -> Option<health_report::HealthReport> {
+    let reports: Option<sqlx::types::Json<model::health::HealthReportSources>> =
+        sqlx::query_scalar("SELECT health_reports FROM racks WHERE id = $1")
+            .bind(rack_id.as_str())
+            .fetch_one(pool)
+            .await
+            .expect("load rack health reports");
+    reports.and_then(|json| json.0.merges.get("nvlink-partition-monitor").cloned())
+}
+
+/// A rack whose NMX-C stays unusable gets a `NmxcUnreachable` alert from the
+/// monitor only after `partition_monitor_unreachable_alert_after` consecutive
+/// failed passes, the stored alert is not rewritten while the outage lasts,
+/// and the first pass that reaches NMX-C again clears it.
+#[crate::sqlx_test]
+async fn test_partition_monitor_debounces_rack_nmxc_unreachable_alert(pool: sqlx::PgPool) {
+    let mut config = common::api_fixtures::get_config();
+    let nvlink_config = config
+        .nvlink_config
+        .as_mut()
+        .expect("test config has nvlink_config");
+    nvlink_config.enabled = true;
+    nvlink_config.partition_monitor_unreachable_alert_after =
+        std::num::NonZeroU32::new(2).expect("non-zero");
+    // Every pass must contact NMX-C: a rack skipped by change detection is
+    // not checked, so its outage would surface only at its next full check.
+    nvlink_config.partition_monitor_full_check_interval = std::time::Duration::ZERO;
+    let env = common::api_fixtures::create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config),
+    )
+    .await;
+    let mh = create_partitioned_host(&env).await;
+
+    let rack_id: RackId = "rack_1".parse().expect("rack id");
+    let mut txn = pool.begin().await.expect("begin txn");
+    TestRackDbBuilder::new()
+        .with_rack_id(rack_id.clone())
+        .persist(&mut txn)
+        .await
+        .expect("create rack");
+    sqlx::query("UPDATE machines SET rack_id = $1 WHERE id = $2")
+        .bind(rack_id.as_str())
+        .bind(mh.id)
+        .execute(txn.as_mut())
+        .await
+        .expect("set machine rack_id");
+    txn.commit().await.expect("commit rack");
+    create_rack_switch_for_nmxc_simulator(&env, &rack_id).await;
+
+    env.run_nvl_partition_monitor_iteration().await;
+    assert!(
+        rack_partition_monitor_report(&pool, &rack_id)
+            .await
+            .is_none(),
+        "a reachable rack carries no report"
+    );
+
+    env.nmxc_sim_client.set_hello_fails(true);
+    env.run_nvl_partition_monitor_iteration().await;
+    assert!(
+        rack_partition_monitor_report(&pool, &rack_id)
+            .await
+            .is_none(),
+        "one failed pass is below the threshold"
+    );
+
+    env.run_nvl_partition_monitor_iteration().await;
+    let report = rack_partition_monitor_report(&pool, &rack_id)
+        .await
+        .expect("second consecutive failure raises the alert");
+    let [alert] = report.alerts.as_slice() else {
+        panic!("expected one alert, got {:?}", report.alerts);
+    };
+    assert_eq!(alert.id, health_report::HealthProbeId::nmxc_unreachable());
+    assert!(
+        alert
+            .target
+            .as_deref()
+            .is_some_and(|t| t.starts_with("http")),
+        "target is the rack's NMX-C endpoint URL, got {:?}",
+        alert.target
+    );
+    assert_eq!(
+        alert.classifications,
+        vec![health_report::HealthAlertClassification::hardware()]
+    );
+
+    env.run_nvl_partition_monitor_iteration().await;
+    assert_eq!(
+        rack_partition_monitor_report(&pool, &rack_id).await,
+        Some(report),
+        "a stored alert is not rewritten while the outage continues"
+    );
+
+    env.nmxc_sim_client.set_hello_fails(false);
+    env.run_nvl_partition_monitor_iteration().await;
+    assert!(
+        rack_partition_monitor_report(&pool, &rack_id)
+            .await
+            .is_none(),
+        "the first reachable pass clears the alert"
+    );
+}
+
 /// `partition_monitor_full_check_interval = "0s"` turns change detection
 /// off, so a converged group is reconciled on every pass.
 #[crate::sqlx_test]
@@ -2938,7 +3047,7 @@ async fn assert_switch_cert_monitor_nmxc_simulator_probe(
         nvlink_config.nmx_c_tls_client_cert_path = Some(NMXC_SIMULATOR_TLS_CERT.to_string());
         nvlink_config.nmx_c_tls_client_key_path = Some(NMXC_SIMULATOR_TLS_CLIENT_KEY.to_string());
         nvlink_config.nmx_c_tls_authority = Some(NMXC_SIMULATOR_TLS_AUTHORITY.to_string());
-        nvlink_config.nmx_c_certificate_rotation.enabled = true;
+        nvlink_config.nmx_c_certificate_rotation.enabled = Some(true);
         nvlink_config
             .nmx_c_certificate_rotation
             .rotate_before_expiry = rotate_before_expiry;

@@ -95,6 +95,11 @@ on:
         required: false
         default: true
         type: boolean
+      sccache_scope:
+        description: "Name of the sccache directory this build restores from the Actions cache and, on main, saves back. The Dockerfile must define the `sccache-seed` and `sccache-export` stages. Empty disables it."
+        required: false
+        default: ''
+        type: string
       timeout_minutes:
         description: 'Job timeout in minutes'
         required: false
@@ -199,17 +204,19 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
           TAG_LATEST: ${{ inputs.tag_latest }}
           ADDITIONAL_TAGS: ${{ inputs.additional_tags }}
+          PR_PUBLISH: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           set -euo pipefail
           PRIMARY="${IMAGE_NAME}:${IMAGE_TAG}"
           echo "primary=${PRIMARY}" >> "$GITHUB_OUTPUT"
 
           TAGS="${PRIMARY}"
-          if [[ "${TAG_LATEST}" == "true" ]]; then
+          # Suppress shared tags only for the PR publishing command.
+          if [[ "${TAG_LATEST}" == "true" && "${PR_PUBLISH}" != "true" ]]; then
             TAGS="${TAGS}"$'\n'"${IMAGE_NAME}:latest"
           fi
 
-          if [[ -n "${ADDITIONAL_TAGS// }" ]]; then
+          if [[ -n "${ADDITIONAL_TAGS// }" && "${PR_PUBLISH}" != "true" ]]; then
             TAGS="${TAGS}"$'\n'"${ADDITIONAL_TAGS}"
           fi
 
@@ -235,39 +242,41 @@ jobs:
           echo "scope=${scope}" >> "$GITHUB_OUTPUT"
           echo "Cache scope: ${scope}"
 
-      # sccache inside the build needs to reach the Actions cache service, but
-      # ACTIONS_RUNTIME_TOKEN is only visible to JS actions, never to `run:`
-      # steps. github-script is first-party, so we use it to re-export the two
-      # values instead of taking on a third-party action for this.
-      #
       # Deliberately not tied to `inputs.cache`. That input turns off the
       # BuildKit layer cache, which is a different mechanism: sccache caches
       # individual compilations, so it still pays off for an image whose layers
-      # are worthless because `COPY . ./` invalidates everything after it. When
-      # the two shared one input, turning the layer cache off for the Rust
-      # images also dropped sccache to the local mount and cost
-      # build-release-container-x86_64 its 347 hits and 2m11s.
+      # are worthless because `COPY . ./` invalidates everything after it.
       #
-      # Runs unconditionally and always exports a non-empty value. buildx
-      # rejects a secret whose value is empty, so a skipped step or an unset
-      # token would fail the build outright instead of merely disabling the
-      # cache. The sentinel is what the Dockerfiles detect.
-      - name: Expose Actions cache credentials to the build
-        uses: actions/github-script@v7
+      # One restore per build. Using the Actions cache as sccache's backend
+      # made one cache request per compilation and held the repository at the
+      # cache API rate limit. Cargo.lock and rust-toolchain.toml key the entry,
+      # so a toolchain bump saves a fresh one instead of keeping an entry that
+      # can no longer hit. The prefix lets a lockfile bump start from the
+      # previous entry.
+      - name: Restore sccache
+        id: sccache
+        if: inputs.sccache_scope != ''
+        uses: actions/cache/restore@v4
         with:
-          script: |
-            const token = process.env.ACTIONS_RUNTIME_TOKEN || '';
-            const url = process.env.ACTIONS_RESULTS_URL || '';
-            if (token) core.setSecret(token);
-            core.exportVariable('BUILD_ACTIONS_RUNTIME_TOKEN', token || 'unavailable');
-            core.exportVariable('BUILD_ACTIONS_RESULTS_URL', url || 'unavailable');
-            core.info(`In-build sccache backend: ${token && url ? 'enabled' : 'disabled'}`);
+          path: ~/.cache/sccache-build
+          key: sccache-${{ inputs.sccache_scope }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: sccache-${{ inputs.sccache_scope }}-
+
+      # Outside the workspace, because the Rust images `COPY . ./` the whole
+      # checkout into the builder.
+      - name: Locate sccache directory
+        id: sccache-dir
+        if: inputs.sccache_scope != ''
+        run: |
+          dir="${HOME}/.cache/sccache-build"
+          mkdir -p "${dir}"
+          echo "dir=${dir}" >> "$GITHUB_OUTPUT"
 
       - name: Parse build arguments
         id: parse-args
+        env:
+          BUILD_ARGS: ${{ inputs.build_args }}
         run: |
-          BUILD_ARGS='${{ inputs.build_args }}'
-
           # Convert JSON to docker build-arg format
           if [ "${BUILD_ARGS}" != "{}" ] && [ -n "${BUILD_ARGS}" ]; then
             echo "build_args<<EOF" >> $GITHUB_OUTPUT
@@ -323,16 +332,60 @@ jobs:
           # is what carries reuse across commits.
           cache-from: ${{ inputs.cache && format('type=gha,scope={0}', steps.cache.outputs.scope) || '' }}
           cache-to: ${{ inputs.cache && github.ref == 'refs/heads/main' && format('type=gha,mode=max,scope={0}', steps.cache.outputs.scope) || '' }}
-          # Lets sccache in the builder stage use the Actions cache as a shared
-          # backend. Always passed and never empty -- buildx rejects a secret
-          # with an empty value outright. The Dockerfiles check the URL for a
-          # real endpoint and fall back to the local BuildKit cache mount when
-          # it is absent, so a plain local `docker build` still works. PRs can
-          # read compiler entries populated by main but never upload their own.
-          secrets: |
-            actions_results_url=${{ env.BUILD_ACTIONS_RESULTS_URL }}
-            actions_runtime_token=${{ env.BUILD_ACTIONS_RUNTIME_TOKEN }}
-            sccache_gha_rw_mode=${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
+          # Replaces the empty `sccache-seed` stage with the restored directory.
+          build-contexts: ${{ inputs.sccache_scope != '' && format('sccache-seed={0}', steps.sccache-dir.outputs.dir) || '' }}
+
+      # Only main saves, like the other sccache entries: other refs can read
+      # main's entry but not each other's. A run whose Cargo.lock matches the
+      # restored entry skips the export and the upload.
+      #
+      # Every step from here to the save is best-effort and runs only after the
+      # one before it succeeded. A failure skips the save without failing the
+      # job, since the image is already built and pushed by then. It also means
+      # an empty or partial directory is never saved under the key.
+      #
+      # Concurrent main runs that pick up the same Cargo.lock all miss the
+      # restore, but the cache only accepts the first save. A run whose key was
+      # saved while it was building skips the export instead of producing an
+      # archive the save would refuse.
+      - name: Check whether another run saved sccache
+        id: sccache-saved
+        if: inputs.sccache_scope != '' && github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/sccache-build
+          key: ${{ steps.sccache.outputs.cache-primary-key }}
+          lookup-only: true
+
+      - name: Clear sccache directory for the export
+        id: sccache-clear
+        if: steps.sccache-saved.outcome == 'success' && steps.sccache-saved.outputs.cache-hit != 'true'
+        continue-on-error: true
+        env:
+          DIR: ${{ steps.sccache-dir.outputs.dir }}
+        run: rm -rf "${DIR}" && mkdir -p "${DIR}"
+
+      - name: Export sccache directory
+        id: sccache-export
+        if: steps.sccache-clear.outcome == 'success'
+        continue-on-error: true
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ inputs.context_path }}
+          file: ${{ inputs.dockerfile_path }}
+          platforms: ${{ inputs.platforms }}
+          target: sccache-export
+          build-args: ${{ steps.parse-args.outputs.build_args }}
+          outputs: type=local,dest=${{ steps.sccache-dir.outputs.dir }}
+          provenance: false
+
+      - name: Save sccache
+        if: steps.sccache-export.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/sccache-build
+          key: ${{ steps.sccache.outputs.cache-primary-key }}
 
       - name: Login to target registry
         if: ${{ inputs.push && !contains(inputs.platforms, ',') && github.repository != 'dsx-ai-factory/infra-controller' }}
@@ -432,10 +485,24 @@ jobs:
           retention-days: 1
 
       - name: Display build summary
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          PLATFORMS: ${{ inputs.platforms }}
         run: |
           echo "✅ Build completed successfully"
-          echo "  Image: ${{ inputs.image_name }}:${{ inputs.image_tag }}"
+          echo "  Image: ${IMAGE_NAME}:${IMAGE_TAG}"
           echo "  Digest: ${{ steps.build.outputs.digest }}"
-          echo "  Platforms: ${{ inputs.platforms }}"
+          echo "  Platforms: ${PLATFORMS}"
           echo "  Pushed: ${{ inputs.push }}"
           echo "  Loaded locally: ${{ steps.loadgate.outputs.load }}"
+
+      - name: Record published PR image
+        if: ${{ inputs.push && github.event_name == 'workflow_dispatch' }}
+        env:
+          IMAGE_NAME: ${{ inputs.image_name }}
+          TAGS: ${{ steps.tag_list.outputs.tags }}
+          DIGEST: ${{ steps.push.outputs.digest || steps.build.outputs.digest }}
+        run: |
+          printf '### Published image\n\n`%s@%s`\n\n```text\n%s\n```\n\n' \
+            "${IMAGE_NAME}" "${DIGEST}" "${TAGS}" >> "$GITHUB_STEP_SUMMARY"

@@ -324,30 +324,59 @@ func (em *ExpectedMachine) FromProto(proto *corev1.ExpectedMachine, linkedMachin
 	em.HostLifecycleProfile.FromProto(proto.GetHostLifecycleProfile())
 }
 
-// ExpectedMachineCreateInput input parameters for Create method
+// ExpectedMachineCreateInput is also persisted by pending batch recovery. Keep
+// its explicit JSON names stable across Go field renames.
 type ExpectedMachineCreateInput struct {
-	ExpectedMachineID        uuid.UUID
-	SiteID                   uuid.UUID
-	BmcMacAddress            string
-	ChassisSerialNumber      string
-	SkuID                    *string
-	MachineID                *string
-	FallbackDpuSerialNumbers []string
-	Interfaces               []ExpectedMachineInterface
-	BmcIpAddress             *string
-	RackID                   *string
-	Name                     *string
-	Manufacturer             *string
-	Model                    *string
-	Description              *string
-	ServerName               *string
-	SlotID                   *int32
-	TrayIdx                  *int32
-	HostID                   *int32
-	Labels                   map[string]string
-	IsDpfEnabled             *bool
-	HostLifecycleProfile     HostLifecycleProfile
-	CreatedBy                uuid.UUID
+	ExpectedMachineID        uuid.UUID                  `json:"ExpectedMachineID"`
+	SiteID                   uuid.UUID                  `json:"SiteID"`
+	BmcMacAddress            string                     `json:"BmcMacAddress"`
+	ChassisSerialNumber      string                     `json:"ChassisSerialNumber"`
+	SkuID                    *string                    `json:"SkuID"`
+	MachineID                *string                    `json:"MachineID"`
+	FallbackDpuSerialNumbers []string                   `json:"FallbackDpuSerialNumbers"`
+	Interfaces               []ExpectedMachineInterface `json:"Interfaces"`
+	BmcIpAddress             *string                    `json:"BmcIpAddress"`
+	RackID                   *string                    `json:"RackID"`
+	Name                     *string                    `json:"Name"`
+	Manufacturer             *string                    `json:"Manufacturer"`
+	Model                    *string                    `json:"Model"`
+	Description              *string                    `json:"Description"`
+	ServerName               *string                    `json:"ServerName"`
+	SlotID                   *int32                     `json:"SlotID"`
+	TrayIdx                  *int32                     `json:"TrayIdx"`
+	HostID                   *int32                     `json:"HostID"`
+	Labels                   map[string]string          `json:"Labels"`
+	IsDpfEnabled             *bool                      `json:"IsDpfEnabled"`
+	HostLifecycleProfile     HostLifecycleProfile       `json:"HostLifecycleProfile"`
+	CreatedBy                uuid.UUID                  `json:"CreatedBy"`
+}
+
+// ToExpectedMachine constructs the nonsecret record sent to Core or stored after confirmation.
+func (input ExpectedMachineCreateInput) ToExpectedMachine() ExpectedMachine {
+	return ExpectedMachine{
+		ID:                       input.ExpectedMachineID,
+		SiteID:                   input.SiteID,
+		BmcMacAddress:            input.BmcMacAddress,
+		ChassisSerialNumber:      input.ChassisSerialNumber,
+		SkuID:                    input.SkuID,
+		MachineID:                input.MachineID,
+		FallbackDpuSerialNumbers: input.FallbackDpuSerialNumbers,
+		Interfaces:               input.Interfaces,
+		BmcIpAddress:             input.BmcIpAddress,
+		RackID:                   input.RackID,
+		Name:                     input.Name,
+		Manufacturer:             input.Manufacturer,
+		Model:                    input.Model,
+		Description:              input.Description,
+		ServerName:               input.ServerName,
+		SlotID:                   input.SlotID,
+		TrayIdx:                  input.TrayIdx,
+		HostID:                   input.HostID,
+		Labels:                   input.Labels,
+		IsDpfEnabled:             input.IsDpfEnabled,
+		HostLifecycleProfile:     input.HostLifecycleProfile,
+		CreatedBy:                input.CreatedBy,
+	}
 }
 
 // ExpectedMachineUpdateInput input parameters for Update method
@@ -503,30 +532,7 @@ func (emsd ExpectedMachineSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx,
 
 	// NOTE: since Expected Machine can be created by NICo or Cloud API the caller MUST provide the ID.
 	for _, input := range inputs {
-		em := ExpectedMachine{
-			ID:                       input.ExpectedMachineID,
-			SiteID:                   input.SiteID,
-			BmcMacAddress:            input.BmcMacAddress,
-			ChassisSerialNumber:      input.ChassisSerialNumber,
-			SkuID:                    input.SkuID,
-			MachineID:                input.MachineID,
-			FallbackDpuSerialNumbers: input.FallbackDpuSerialNumbers,
-			Interfaces:               input.Interfaces,
-			BmcIpAddress:             input.BmcIpAddress,
-			RackID:                   input.RackID,
-			Name:                     input.Name,
-			Manufacturer:             input.Manufacturer,
-			Model:                    input.Model,
-			Description:              input.Description,
-			ServerName:               input.ServerName,
-			SlotID:                   input.SlotID,
-			TrayIdx:                  input.TrayIdx,
-			HostID:                   input.HostID,
-			Labels:                   input.Labels,
-			IsDpfEnabled:             input.IsDpfEnabled,
-			HostLifecycleProfile:     input.HostLifecycleProfile,
-			CreatedBy:                input.CreatedBy,
-		}
+		em := input.ToExpectedMachine()
 		expectedMachines = append(expectedMachines, em)
 		ids = append(ids, em.ID)
 	}

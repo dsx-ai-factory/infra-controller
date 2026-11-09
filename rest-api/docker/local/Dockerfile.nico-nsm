@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Build stage
-FROM --platform=$BUILDPLATFORM golang:1.26.4 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS builder
 
 # Docker automatically provides these args during multi-platform builds
 ARG TARGETOS
@@ -37,7 +37,7 @@ RUN go build -ldflags "-extldflags '-static'" \
     -o /app/nsm \
     .
 
-# Runtime stage — NSM requires shell tools for firmware update scripts
+# Runtime stage. NSM requires shell tools for firmware update scripts
 FROM alpine:3.24 AS final
 
 RUN apk add --no-cache \

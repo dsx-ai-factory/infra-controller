@@ -40,6 +40,7 @@ func TestExpectedSwitch_FromProto(t *testing.T) {
 		HostID:             cutil.GetPtr(int32(9)),
 		Labels:             Labels{"old": "value"},
 		NvosMacAddresses:   []string{"aa:bb:cc:dd:ee:00"},
+		NvosIpAddress:      cutil.GetPtr("192.0.2.10"),
 	}
 	tests := []struct {
 		name  string
@@ -102,6 +103,23 @@ func TestExpectedSwitch_FromProto(t *testing.T) {
 			},
 		},
 		{
+			name: "reads the single NVOS interface address",
+			proto: &corev1.ExpectedSwitch{
+				NvosInterfaces: []*corev1.ExpectedNvosInterface{{
+					MacAddress: "aa:bb:cc:dd:ee:01",
+					IsPrimary:  true,
+				}},
+				NvosIpAddress: cutil.GetPtr("2001:db8::20"),
+			},
+			want: ExpectedSwitch{
+				ID:                    id,
+				SiteID:                siteID,
+				NvosMacAddresses:      []string{"aa:bb:cc:dd:ee:01"},
+				NvosIpAddress:         cutil.GetPtr("2001:db8::20"),
+				NvosPrimaryMacAddress: cutil.GetPtr("aa:bb:cc:dd:ee:01"),
+			},
+		},
+		{
 			name: "invalid ID preserves identity and absent fields reset the receiver",
 			proto: &corev1.ExpectedSwitch{
 				ExpectedSwitchId: &corev1.UUID{Value: "not-a-uuid"},
@@ -154,10 +172,11 @@ func TestExpectedSwitch_ToProto(t *testing.T) {
 
 func TestExpectedSwitch_NvosInterfaces(t *testing.T) {
 	tests := []struct {
-		desc    string
-		macs    []string
-		primary *string
-		want    []NvosInterface
+		desc      string
+		macs      []string
+		primary   *string
+		ipAddress *string
+		want      []NvosInterface
 	}{
 		{
 			desc: "nil MAC list yields nil",
@@ -182,16 +201,23 @@ func TestExpectedSwitch_NvosInterfaces(t *testing.T) {
 			},
 		},
 		{
-			desc: "lone port is primary implicitly",
-			macs: []string{"aa:bb:cc:dd:ee:01"},
-			want: []NvosInterface{
-				{MacAddress: "aa:bb:cc:dd:ee:01", IsPrimary: true},
-			},
+			desc:      "lone port is primary implicitly and includes its requested address",
+			macs:      []string{"aa:bb:cc:dd:ee:01"},
+			ipAddress: cutil.GetPtr("192.0.2.20"),
+			want: []NvosInterface{{
+				MacAddress: "aa:bb:cc:dd:ee:01",
+				IsPrimary:  true,
+				IPAddress:  cutil.GetPtr("192.0.2.20"),
+			}},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			es := &ExpectedSwitch{NvosMacAddresses: tc.macs, NvosPrimaryMacAddress: tc.primary}
+			es := &ExpectedSwitch{
+				NvosMacAddresses:      tc.macs,
+				NvosPrimaryMacAddress: tc.primary,
+				NvosIpAddress:         tc.ipAddress,
+			}
 			assert.Equal(t, tc.want, es.NvosInterfaces())
 		})
 	}
@@ -345,6 +371,7 @@ func testExpectedSwitchSQLDAOCreateExpectedSwitches(ctx context.Context, t *test
 			BmcMacAddress:      "00:1B:44:11:3A:B7",
 			SwitchSerialNumber: "SWITCH123",
 			NvosMacAddresses:   []string{"00:1B:44:11:3A:D1"},
+			NvosIpAddress:      cutil.GetPtr("192.168.1.10"),
 			Labels: map[string]string{
 				"environment": "test",
 				"location":    "datacenter1",
@@ -649,9 +676,16 @@ func TestExpectedSwitchSQLDAO_Update(t *testing.T) {
 	// OTEL Spanner configuration
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
 
+	nvos := ExpectedSwitch{
+		NvosMacAddresses:      []string{"00:1B:44:11:3A:D1"},
+		NvosPrimaryMacAddress: cutil.GetPtr("00:1B:44:11:3A:D1"),
+		NvosIpAddress:         cutil.GetPtr("192.168.1.10"),
+	}
 	tests := []struct {
 		desc               string
 		input              ExpectedSwitchUpdateInput
+		emptyNVOS          bool
+		wantNVOS           *ExpectedSwitch
 		expectedError      bool
 		verifyChildSpanner bool
 	}{
@@ -684,17 +718,95 @@ func TestExpectedSwitchSQLDAO_Update(t *testing.T) {
 			expectedError: false,
 		},
 		{
+			desc: "set NVOS fields from NULL",
+			input: ExpectedSwitchUpdateInput{
+				NvosMacAddresses:      []string{"00:1B:44:11:3A:D1"},
+				NvosPrimaryMacAddress: cutil.GetPtr("00:1B:44:11:3A:D1"),
+				NvosIpAddress:         cutil.GetPtr("192.168.1.10"),
+			},
+			emptyNVOS: true,
+			wantNVOS:  &nvos,
+		},
+		{
 			desc: "Update NVOS MAC addresses",
 			input: ExpectedSwitchUpdateInput{
-				ExpectedSwitchID: essExp[1].ID,
-				NvosMacAddresses: []string{"00:1B:44:11:3A:D2", "00:1B:44:11:3A:D3"},
+				NvosMacAddresses: []string{"00:1B:44:11:3A:D2", "00:1B:44:11:3A:D1"},
 			},
-			expectedError: false,
+			wantNVOS: &ExpectedSwitch{
+				NvosMacAddresses:      []string{"00:1B:44:11:3A:D2", "00:1B:44:11:3A:D1"},
+				NvosPrimaryMacAddress: nvos.NvosPrimaryMacAddress,
+				NvosIpAddress:         nvos.NvosIpAddress,
+			},
+		},
+		{
+			desc: "Update NVOS primary MAC without changing other NVOS fields",
+			input: ExpectedSwitchUpdateInput{
+				NvosPrimaryMacAddress: cutil.GetPtr("00-1b-44-11-3a-d1"),
+			},
+			wantNVOS: &ExpectedSwitch{
+				NvosMacAddresses:      nvos.NvosMacAddresses,
+				NvosPrimaryMacAddress: cutil.GetPtr("00-1b-44-11-3a-d1"),
+				NvosIpAddress:         nvos.NvosIpAddress,
+			},
+		},
+		{
+			desc: "Update NVOS IP without changing other NVOS fields",
+			input: ExpectedSwitchUpdateInput{
+				NvosIpAddress: cutil.GetPtr("2001:db8::20"),
+			},
+			wantNVOS: &ExpectedSwitch{
+				NvosMacAddresses:      nvos.NvosMacAddresses,
+				NvosPrimaryMacAddress: nvos.NvosPrimaryMacAddress,
+				NvosIpAddress:         cutil.GetPtr("2001:db8::20"),
+			},
+		},
+		{
+			desc:     "nil NVOS inputs preserve stored fields",
+			wantNVOS: &nvos,
+		},
+		{
+			desc: "empty NVOS MAC list replaces stored MACs without clearing other NVOS fields",
+			input: ExpectedSwitchUpdateInput{
+				NvosMacAddresses: []string{},
+			},
+			wantNVOS: &ExpectedSwitch{
+				NvosMacAddresses:      []string{},
+				NvosPrimaryMacAddress: nvos.NvosPrimaryMacAddress,
+				NvosIpAddress:         nvos.NvosIpAddress,
+			},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			var before *ExpectedSwitch
+			if tc.wantNVOS != nil {
+				seed := nvos
+				if tc.emptyNVOS {
+					seed = ExpectedSwitch{}
+				}
+				seed.ID = essExp[0].ID
+				// Seed independently of Update so each case starts with known NVOS values.
+				_, err := dbSession.DB.NewUpdate().Model(&seed).
+					Column("nvos_mac_addresses", "nvos_primary_mac_address", "nvos_ip_address").WherePK().Exec(ctx)
+				require.NoError(t, err)
+				before, err = essd.Get(ctx, nil, seed.ID, nil, false)
+				require.NoError(t, err)
+				tc.input.ExpectedSwitchID = seed.ID
+			}
 			got, err := essd.Update(ctx, nil, tc.input)
+			if tc.wantNVOS != nil {
+				require.NoError(t, err)
+				require.NotNil(t, got)
+				want := *before
+				want.NvosMacAddresses = tc.wantNVOS.NvosMacAddresses
+				want.NvosPrimaryMacAddress = tc.wantNVOS.NvosPrimaryMacAddress
+				want.NvosIpAddress = tc.wantNVOS.NvosIpAddress
+				want.Updated = got.Updated
+				assert.Equal(t, want, *got)
+				stored, readErr := essd.Get(ctx, nil, got.ID, nil, false)
+				require.NoError(t, readErr)
+				assert.Equal(t, &want, stored)
+			}
 			assert.Equal(t, tc.expectedError, err != nil)
 			if err != nil {
 				t.Logf("%s", err.Error())
@@ -737,10 +849,16 @@ func TestExpectedSwitchSQLDAO_Clear(t *testing.T) {
 	// OTEL Spanner configuration
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
 
+	nvos := ExpectedSwitch{
+		NvosMacAddresses:      []string{"00:1B:44:11:3A:D1"},
+		NvosPrimaryMacAddress: cutil.GetPtr("00:1B:44:11:3A:D1"),
+		NvosIpAddress:         cutil.GetPtr("192.168.1.10"),
+	}
 	tests := []struct {
 		desc               string
 		es                 ExpectedSwitch
 		input              ExpectedSwitchClearInput
+		wantNVOS           *ExpectedSwitch
 		expectedUpdate     bool
 		verifyChildSpanner bool
 	}{
@@ -751,6 +869,45 @@ func TestExpectedSwitchSQLDAO_Clear(t *testing.T) {
 				Labels:           true,
 				NvosMacAddresses: true,
 			},
+			wantNVOS: &ExpectedSwitch{
+				NvosPrimaryMacAddress: nvos.NvosPrimaryMacAddress,
+				NvosIpAddress:         nvos.NvosIpAddress,
+			},
+			expectedUpdate: true,
+		},
+		{
+			desc: "can clear NVOS IP address",
+			es:   essExp[0],
+			input: ExpectedSwitchClearInput{
+				NvosIpAddress: true,
+			},
+			wantNVOS: &ExpectedSwitch{
+				NvosMacAddresses:      nvos.NvosMacAddresses,
+				NvosPrimaryMacAddress: nvos.NvosPrimaryMacAddress,
+			},
+			expectedUpdate: true,
+		},
+		{
+			desc: "can clear NVOS primary MAC only",
+			es:   essExp[0],
+			input: ExpectedSwitchClearInput{
+				NvosPrimaryMacAddress: true,
+			},
+			wantNVOS: &ExpectedSwitch{
+				NvosMacAddresses: nvos.NvosMacAddresses,
+				NvosIpAddress:    nvos.NvosIpAddress,
+			},
+			expectedUpdate: true,
+		},
+		{
+			desc: "can clear all NVOS fields together",
+			es:   essExp[0],
+			input: ExpectedSwitchClearInput{
+				NvosMacAddresses:      true,
+				NvosPrimaryMacAddress: true,
+				NvosIpAddress:         true,
+			},
+			wantNVOS:       &ExpectedSwitch{},
 			expectedUpdate: true,
 		},
 		{
@@ -763,17 +920,46 @@ func TestExpectedSwitchSQLDAO_Clear(t *testing.T) {
 		},
 		{
 			desc:           "nop when no cleared fields are specified",
-			es:             essExp[2],
+			es:             essExp[0],
 			input:          ExpectedSwitchClearInput{},
+			wantNVOS:       &nvos,
 			expectedUpdate: false,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
 			tc.input.ExpectedSwitchID = tc.es.ID
+			var before *ExpectedSwitch
+			if tc.wantNVOS != nil {
+				seed := nvos
+				seed.ID = tc.es.ID
+				// Restore all NVOS fields so a previous clear cannot make this case pass vacuously.
+				_, err := dbSession.DB.NewUpdate().Model(&seed).
+					Column("nvos_mac_addresses", "nvos_primary_mac_address", "nvos_ip_address").WherePK().Exec(ctx)
+				require.NoError(t, err)
+				before, err = essd.Get(ctx, nil, seed.ID, nil, false)
+				require.NoError(t, err)
+			}
 			tmp, err := essd.Clear(ctx, nil, tc.input)
-			assert.Nil(t, err)
-			assert.NotNil(t, tmp)
+			require.NoError(t, err)
+			require.NotNil(t, tmp)
+			if tc.wantNVOS != nil {
+				want := *before
+				want.NvosMacAddresses = tc.wantNVOS.NvosMacAddresses
+				want.NvosPrimaryMacAddress = tc.wantNVOS.NvosPrimaryMacAddress
+				want.NvosIpAddress = tc.wantNVOS.NvosIpAddress
+				if tc.input.Labels {
+					want.Labels = nil
+				}
+				if tc.expectedUpdate {
+					assert.True(t, tmp.Updated.After(before.Updated))
+					want.Updated = tmp.Updated
+				}
+				assert.Equal(t, want, *tmp)
+				stored, readErr := essd.Get(ctx, nil, tmp.ID, nil, false)
+				require.NoError(t, readErr)
+				assert.Equal(t, &want, stored)
+			}
 			if tc.input.Labels {
 				assert.Nil(t, tmp.Labels)
 			}

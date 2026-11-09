@@ -28,7 +28,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	csm "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/sitemgr"
+	csm "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/sites"
 
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/internal/config"
 	cwm "github.com/NVIDIA/infra-controller/rest-api/workflow/internal/metrics"
@@ -53,28 +53,6 @@ const (
 	// Site fabric IP block ready message
 	siteFabricIPBlockReadyMsg = "IP Block is ready for use"
 )
-
-// privateIPPrefixes are the RFC 1918 and RFC 4193 ranges, which are not routed
-// on the public Internet.
-var privateIPPrefixes = []netip.Prefix{
-	netip.MustParsePrefix("10.0.0.0/8"),
-	netip.MustParsePrefix("172.16.0.0/12"),
-	netip.MustParsePrefix("192.168.0.0/16"),
-	netip.MustParsePrefix("fc00::/7"),
-}
-
-// getSiteFabricIPBlockRoutingType returns DatacenterOnly for a prefix that lies
-// entirely inside a private range, and Public for any other prefix. Checking the
-// address alone with netip.Addr.IsPrivate is not enough, since a prefix such as
-// 192.168.0.0/15 starts inside a private range but extends past it.
-func getSiteFabricIPBlockRoutingType(prefix netip.Prefix) string {
-	for _, privatePrefix := range privateIPPrefixes {
-		if privatePrefix.Bits() <= prefix.Bits() && privatePrefix.Contains(prefix.Addr()) {
-			return cdbm.IPBlockRoutingTypeDatacenterOnly
-		}
-	}
-	return cdbm.IPBlockRoutingTypePublic
-}
 
 // getSiteFabricIPBlockName returns the name UpdateIPBlocksInDBFromFabricPrefixes
 // gives the IP Block it creates for prefix.
@@ -109,7 +87,7 @@ func (mst ManageSite) UpdateSiteInDB(ctx context.Context, siteID uuid.UUID, core
 	logger.Info().Msg("starting activity")
 
 	siteDAO := cdbm.NewSiteDAO(mst.dbSession)
-	site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			// If Site is not found, return a non-retryable error to prevent the workflow from retrying
@@ -143,6 +121,17 @@ func (mst ManageSite) UpdateSiteInDB(ctx context.Context, siteID uuid.UUID, core
 			updateInput.Config = &cdbm.SiteConfigUpdateInput{}
 		}
 		updateInput.Config.Flow = siteAgentBuildInfo.FlowEnabled
+	}
+
+	// Core's runtime config owns the NVLink partition flag once it reports the field. Older Core
+	// versions omit it, which preserves the stored value.
+	runtimeConfig := coreBuildInfo.GetRuntimeConfig()
+	if runtimeConfig != nil && runtimeConfig.NvlinkPartitioningEnabled != nil &&
+		(site.Config == nil || site.Config.NVLinkPartition != runtimeConfig.GetNvlinkPartitioningEnabled()) {
+		if updateInput.Config == nil {
+			updateInput.Config = &cdbm.SiteConfigUpdateInput{}
+		}
+		updateInput.Config.NVLinkPartition = runtimeConfig.NvlinkPartitioningEnabled
 	}
 
 	// Update build version for Site when Core reports a changed, non-empty value.
@@ -181,7 +170,7 @@ func (mst ManageSite) UpdateSiteInDB(ctx context.Context, siteID uuid.UUID, core
 // machine interface, machine capability, operating system site association, instance, subnet, vpc, vpc peering, vpc prefix,
 // infiniband partition, nvlink logical partition, dpu extension service deployment, interface,
 // nvlink interface, infiniband interface, ssh key group associations to site and instance, sku, expected machine,
-// expected switch and expected power shelf.
+// pending Expected Machine batches, expected switch and expected power shelf.
 func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uuid.UUID, infrastructureProviderID uuid.UUID, purgeMachines bool) error {
 	logger := log.With().Str("Activity", "DeleteSiteComponentsFromDB").Str("Site ID", siteID.String()).
 		Str("InfrastructureProvider ID", infrastructureProviderID.String()).Bool("Purge Machines", purgeMachines).Logger()
@@ -190,12 +179,21 @@ func (mst ManageSite) DeleteSiteComponentsFromDB(ctx context.Context, siteID uui
 
 	// Check if site exists
 	siteDAO := cdbm.NewSiteDAO(mst.dbSession)
-	_, err := siteDAO.GetByID(ctx, nil, siteID, nil, false)
+	_, err := siteDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err != cdb.ErrDoesNotExist {
 			logger.Error().Err(err).Msg("failed to retrieve Site from DB by ID")
 			return err
 		}
+	}
+
+	// The API soft-deletes the Site before teardown. Durable batch admission and
+	// recovery lock and re-read that row, preventing a late batch from recreating its
+	// members. Release private SKU references before deleting SKUs.
+	err = cdbm.NewPendingExpectedMachineBatchDAO(mst.dbSession).DeleteAllBySiteID(ctx, nil, siteID)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to delete pending Expected Machine batches from DB")
+		return err
 	}
 
 	itDAO := cdbm.NewInstanceTypeDAO(mst.dbSession)
@@ -850,8 +848,8 @@ func (mst ManageSite) CheckOTPExpirationAndRenewForAllSites(ctx context.Context)
 
 	logger.Info().Msg("starting activity")
 
-	siteMgrURL := mst.cfg.GetSiteManagerEndpoint()
-	if siteMgrURL == "" {
+	siteManagerURL := mst.cfg.GetSiteManagerEndpoint()
+	if siteManagerURL == "" {
 		logger.Error().Msg("Site Manager endpoint is not configured, cannot rotate OTPs")
 		return temporal.NewNonRetryableApplicationError("Site Manager endpoint is not configured", "SiteManagerEndpointNotConfigured", nil)
 	}
@@ -884,14 +882,14 @@ func (mst ManageSite) CheckOTPExpirationAndRenewForAllSites(ctx context.Context)
 			dueSiteCount++
 			logger.Info().Str("siteUUID", site.ID.String()).Msg("Certificates are close to expiry, rotating OTPs")
 
-			err = csm.RollSite(ctx, logger, site.ID.String(), site.Name, siteMgrURL)
+			err = csm.RollSite(ctx, logger, site.ID.String(), site.Name, siteManagerURL)
 			if err != nil {
 				logger.Error().Err(err).Str("siteUUID", site.ID.String()).Msg("Failed to rotate OTPs")
 				failedSiteIDs = append(failedSiteIDs, site.ID.String())
 				continue
 			}
 
-			newOTP, _, err := csm.GetSiteOTP(ctx, logger, site.ID.String(), siteMgrURL)
+			newOTP, _, err := csm.GetSiteOTP(ctx, logger, site.ID.String(), siteManagerURL)
 			if err != nil {
 				logger.Error().Err(err).Str("siteUUID", site.ID.String()).Msg("Failed to retrieve new OTP after rotation")
 				failedSiteIDs = append(failedSiteIDs, site.ID.String())
@@ -1035,7 +1033,7 @@ func (mst ManageSite) DeleteOrphanedSiteTemporalNamespaces(ctx context.Context) 
 		}
 
 		// Check that namespace refers to a deleted Site
-		_, err = stDAO.GetByID(ctx, nil, siteID, nil, true)
+		_, err = stDAO.GetByID(ctx, nil, siteID, nil, true, false)
 		if err != nil {
 			logger.Error().Err(err).Str("Namespace", namespace).Msg("Failed to retrieve deleted Site from DB, skipping namespace deletion")
 			continue
@@ -1079,7 +1077,7 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 	logger.Info().Msg("starting activity")
 
 	siteDAO := cdbm.NewSiteDAO(mst.dbSession)
-	dbSite, err := siteDAO.GetByID(ctx, nil, siteID, nil, false)
+	dbSite, err := siteDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to retrieve Site from DB by ID")
 		return err
@@ -1250,7 +1248,7 @@ func (mst ManageSite) UpdateIPBlocksInDBFromFabricPrefixes(ctx context.Context, 
 			address := prefix.Addr()
 			prefixAddr := address.String()
 			prefixLength := prefix.Bits()
-			routingType := getSiteFabricIPBlockRoutingType(prefix)
+			routingType := cdbm.GetSiteFabricIPBlockRoutingType(prefix)
 			protocolVersion := cdbm.IPBlockProtocolVersionV4
 			if !address.Is4() {
 				protocolVersion = cdbm.IPBlockProtocolVersionV6

@@ -844,6 +844,7 @@ func TestKeycloakConfig_IssuerConstruction(t *testing.T) {
 				"test-secret",
 				tt.realm,
 				true,
+				[]string{"testorg"},
 			)
 			assert.Equal(t, tt.expectedIssuer, kcConfig.Issuer)
 		})
@@ -892,14 +893,16 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 	processors.InitializeProcessors(toCfg, dbSession, tc, encCfg, nil)
 
 	tests := []struct {
-		name           string
-		tokenClaims    *claim.KeycloakClaims
-		path           string
-		orgName        string
-		expectedStatus int
-		expectedErrMsg string
-		wantErr        bool
-		validateUser   func(*testing.T, echo.Context)
+		name               string
+		tokenClaims        *claim.KeycloakClaims
+		path               string
+		orgName            string
+		serviceAccount     bool
+		serviceAccountOrgs []string
+		expectedStatus     int
+		expectedErrMsg     string
+		wantErr            bool
+		validateUser       func(*testing.T, echo.Context)
 	}{
 		{
 			name: "successful keycloak user authentication and creation",
@@ -912,8 +915,9 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 					Roles: []string{"testorg:PROVIDER_ADMIN"},
 				},
 				RegisteredClaims: jwt.RegisteredClaims{
-					Subject: "user-subject-123",
-					Issuer:  jwksServer.URL + "/realms/nico",
+					Subject:   "user-subject-123",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 				},
 			},
 			path:    "/v2/org/testorg/user/current",
@@ -928,10 +932,11 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 				assert.Equal(t, "john.doe@testorg.com", *dbUser.Email)
 				assert.Equal(t, "John", *dbUser.FirstName)
 				assert.Equal(t, "Doe", *dbUser.LastName)
+				assert.False(t, config.GetIsServiceAccountFromContext(c))
 			},
 		},
 		{
-			name: "keycloak service account authentication",
+			name: "keycloak client with only Tenant Admin role is accepted but is not a service account",
 			tokenClaims: &claim.KeycloakClaims{
 				Email:     "",
 				FirstName: "",
@@ -942,13 +947,15 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 					Roles: []string{"testorg:TENANT_ADMIN"},
 				},
 				RegisteredClaims: jwt.RegisteredClaims{
-					Subject: "service-account-123",
-					Issuer:  jwksServer.URL + "/realms/nico",
+					Subject:   "service-account-123",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 				},
 			},
-			path:    "/v2/org/testorg/user/current",
-			orgName: "testorg",
-			wantErr: false,
+			path:           "/v2/org/testorg/user/current",
+			orgName:        "testorg",
+			serviceAccount: true,
+			wantErr:        false,
 			validateUser: func(t *testing.T, c echo.Context) {
 				user := c.Get("user")
 				assert.NotNil(t, user)
@@ -956,6 +963,114 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 				assert.True(t, ok)
 				assert.Equal(t, "service-account-123", *dbUser.AuxiliaryID) // Uses subject as auxiliary ID
 				assert.Equal(t, "service-client", *dbUser.FirstName)        // FirstName set to ClientId for service accounts
+				assert.False(t, config.GetIsServiceAccountFromContext(c))
+			},
+		},
+		{
+			name: "keycloak client with Provider Admin and Tenant Admin roles is a service account",
+			tokenClaims: &claim.KeycloakClaims{
+				ClientId: "bootstrap-client",
+				RealmAccess: claim.RealmAccess{
+					Roles: []string{"testorg:NICO_PROVIDER_ADMIN", "testorg:NICO_TENANT_ADMIN"},
+				},
+				RegisteredClaims: jwt.RegisteredClaims{
+					Subject:   "service-account-456",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				},
+			},
+			path:               "/v2/org/testorg/user/current",
+			orgName:            "testorg",
+			serviceAccount:     true,
+			serviceAccountOrgs: []string{"testorg"},
+			wantErr:            false,
+			validateUser: func(t *testing.T, c echo.Context) {
+				assert.True(t, config.GetIsServiceAccountFromContext(c))
+			},
+		},
+		{
+			name: "keycloak client with Provider Admin and Tenant Admin roles is accepted but is not a service account with service accounts disabled",
+			tokenClaims: &claim.KeycloakClaims{
+				ClientId: "dual-role-client",
+				RealmAccess: claim.RealmAccess{
+					Roles: []string{"testorg:PROVIDER_ADMIN", "testorg:TENANT_ADMIN"},
+				},
+				RegisteredClaims: jwt.RegisteredClaims{
+					Subject:   "service-account-654",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				},
+			},
+			path:    "/v2/org/testorg/user/current",
+			orgName: "testorg",
+			wantErr: false,
+			validateUser: func(t *testing.T, c echo.Context) {
+				assert.False(t, config.GetIsServiceAccountFromContext(c))
+			},
+		},
+		{
+			name: "keycloak client with Provider Admin and Tenant Admin roles outside the service account org is not a service account",
+			tokenClaims: &claim.KeycloakClaims{
+				ClientId: "other-org-client",
+				RealmAccess: claim.RealmAccess{
+					Roles: []string{"otherorg:PROVIDER_ADMIN", "otherorg:TENANT_ADMIN"},
+				},
+				RegisteredClaims: jwt.RegisteredClaims{
+					Subject:   "service-account-987",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				},
+			},
+			path:               "/v2/org/otherorg/user/current",
+			orgName:            "otherorg",
+			serviceAccount:     true,
+			serviceAccountOrgs: []string{"testorg"},
+			wantErr:            false,
+			validateUser: func(t *testing.T, c echo.Context) {
+				assert.False(t, config.GetIsServiceAccountFromContext(c))
+			},
+		},
+		{
+			name: "keycloak client with Provider Admin and Tenant Admin roles is a service account in any listed service account org",
+			tokenClaims: &claim.KeycloakClaims{
+				ClientId: "connected-org-client",
+				RealmAccess: claim.RealmAccess{
+					Roles: []string{"otherorg:PROVIDER_ADMIN", "otherorg:TENANT_ADMIN"},
+				},
+				RegisteredClaims: jwt.RegisteredClaims{
+					Subject:   "service-account-246",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				},
+			},
+			path:               "/v2/org/otherorg/user/current",
+			orgName:            "otherorg",
+			serviceAccount:     true,
+			serviceAccountOrgs: []string{"testorg", "otherorg"},
+			wantErr:            false,
+			validateUser: func(t *testing.T, c echo.Context) {
+				assert.True(t, config.GetIsServiceAccountFromContext(c))
+			},
+		},
+		{
+			name: "keycloak client with Provider Admin in another org is not a service account",
+			tokenClaims: &claim.KeycloakClaims{
+				ClientId: "split-org-client",
+				RealmAccess: claim.RealmAccess{
+					Roles: []string{"otherorg:PROVIDER_ADMIN", "testorg:TENANT_ADMIN"},
+				},
+				RegisteredClaims: jwt.RegisteredClaims{
+					Subject:   "service-account-789",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				},
+			},
+			path:           "/v2/org/testorg/user/current",
+			orgName:        "testorg",
+			serviceAccount: true,
+			wantErr:        false,
+			validateUser: func(t *testing.T, c echo.Context) {
+				assert.False(t, config.GetIsServiceAccountFromContext(c))
 			},
 		},
 		{
@@ -982,8 +1097,9 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 					Roles: []string{}, // No roles
 				},
 				RegisteredClaims: jwt.RegisteredClaims{
-					Subject: "user-subject-123",
-					Issuer:  jwksServer.URL + "/realms/nico",
+					Subject:   "user-subject-123",
+					Issuer:    jwksServer.URL + "/realms/nico",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 				},
 			},
 			path:           "/v2/org/testorg/user/current",
@@ -994,8 +1110,14 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 		},
 	}
 
+	jwksCfg := toCfg.GetConfig(jwksServer.URL + "/realms/nico")
+	require.NotNil(t, jwksCfg)
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			jwksCfg.ServiceAccount = tt.serviceAccount
+			jwksCfg.ServiceAccountOrgs = tt.serviceAccountOrgs
+
 			// Create JWT token with the test claims using consistent RSA key
 			privateKey := getConsistentTestRSAKey()
 			tokenString, err := generateTestJWT(tt.tokenClaims, privateKey)
@@ -1021,154 +1143,9 @@ func TestAuthProcessor_KeycloakFlowWithMockJWKS(t *testing.T) {
 				assert.Equal(t, tt.expectedStatus, apiErr.Code)
 				assert.Contains(t, apiErr.Message, tt.expectedErrMsg)
 			} else {
-				// Note: JWT validation will likely fail due to key mismatch, but we test business logic
-				if apiErr != nil {
-					// Should not be role-related or realm-related errors for valid test cases
-					assert.NotContains(t, apiErr.Message, "User does not have any roles assigned")
-					assert.NotContains(t, apiErr.Message, "Token from unexpected realm")
-				} else if tt.validateUser != nil {
+				require.Nil(t, apiErr, "expected successful authentication")
+				if tt.validateUser != nil {
 					tt.validateUser(t, c)
-				}
-			}
-		})
-	}
-}
-
-// TestAuthProcessor_KeycloakServiceAccountsDisabled tests Keycloak authentication when service accounts are disabled
-func TestAuthProcessor_KeycloakServiceAccountsDisabled(t *testing.T) {
-	dbSession := cdbu.GetTestDBSession(t, false)
-	defer dbSession.Close()
-
-	// Create user table
-	err := dbSession.DB.ResetModel(context.Background(), (*cdbm.User)(nil))
-	require.NoError(t, err)
-
-	// Create mock JWKS server
-	jwksServer := httptest.NewServer(http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
-		if strings.Contains(req.URL.Path, "/realms/nico/protocol/openid-connect/certs") {
-			res.WriteHeader(http.StatusOK)
-			res.Header().Set("Content-Type", "application/json")
-			// Generate JWKS from the same key used for signing
-			testKey := getConsistentTestRSAKey()
-			jwks := createJWKSFromRSAKey(&testKey.PublicKey, "test-key-id")
-			_, _ = res.Write([]byte(jwks))
-		} else {
-			res.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer jwksServer.Close()
-
-	e := echo.New()
-	tc := &tmocks.Client{}
-
-	// Create Keycloak config with service accounts DISABLED
-	keycloakConfigDisabled := config.NewKeycloakConfig(
-		jwksServer.URL,
-		jwksServer.URL,
-		"test-client",
-		"test-secret",
-		"nico",
-		false, // ServiceAccountEnabled = false
-	)
-
-	// Setup token origin config with Keycloak token origin
-	toCfg := config.NewTokenOriginConfig()
-	toCfg.AddConfig("keycloak", jwksServer.URL+"/realms/nico", jwksServer.URL+"/realms/nico/protocol/openid-connect/certs", config.TokenOriginKeycloak, keycloakConfigDisabled.ServiceAccountEnabled, nil, nil)
-
-	// Initialize JWKS data for testing
-	if err := toCfg.UpdateAllJWKS(); err != nil {
-		t.Fatal(err)
-	}
-
-	encCfg := commonConfig.NewPayloadEncryptionConfig("test-encryption-key")
-
-	// Initialize processors for testing with service accounts DISABLED
-	processors.InitializeProcessors(toCfg, dbSession, tc, encCfg, keycloakConfigDisabled)
-
-	tests := []struct {
-		name           string
-		tokenClaims    *claim.KeycloakClaims
-		path           string
-		orgName        string
-		expectedStatus int
-		expectedErrMsg string
-		wantErr        bool
-	}{
-		{
-			name: "service account token rejected when service accounts disabled",
-			tokenClaims: &claim.KeycloakClaims{
-				Email:     "",
-				FirstName: "",
-				LastName:  "",
-				ClientId:  "service-client-disabled", // Non-empty ClientId indicates service account
-				Oidc_Id:   "",
-				RealmAccess: claim.RealmAccess{
-					Roles: []string{"testorg:PROVIDER_ADMIN"},
-				},
-				RegisteredClaims: jwt.RegisteredClaims{
-					Subject: "service-account-disabled-123",
-					Issuer:  jwksServer.URL + "/realms/nico",
-				},
-			},
-			path:           "/v2/org/testorg/user/current",
-			orgName:        "testorg",
-			expectedStatus: http.StatusUnauthorized,
-			expectedErrMsg: "Service accounts are not enabled",
-			wantErr:        true,
-		},
-		{
-			name: "regular user token still works when service accounts disabled",
-			tokenClaims: &claim.KeycloakClaims{
-				Email:     "user@testorg.com",
-				FirstName: "Test",
-				LastName:  "User",
-				ClientId:  "", // Empty ClientId indicates regular user
-				Oidc_Id:   "oidc-regular-user",
-				RealmAccess: claim.RealmAccess{
-					Roles: []string{"testorg:PROVIDER_ADMIN"},
-				},
-				RegisteredClaims: jwt.RegisteredClaims{
-					Subject: "regular-user-123",
-					Issuer:  jwksServer.URL + "/realms/nico",
-				},
-			},
-			path:    "/v2/org/testorg/user/current",
-			orgName: "testorg",
-			wantErr: false, // Regular users should still work when service accounts are disabled
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Create JWT token with the test claims using consistent RSA key
-			privateKey := getConsistentTestRSAKey()
-			tokenString, err := generateTestJWT(tt.tokenClaims, privateKey)
-			require.NoError(t, err)
-
-			// Create request
-			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
-			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
-			req.Header.Set("Authorization", "Bearer "+tokenString)
-
-			rec := httptest.NewRecorder()
-			c := e.NewContext(req, rec)
-			c.SetParamNames("orgName")
-			c.SetParamValues(tt.orgName)
-			c.Set("orgName", tt.orgName) // Set in context for KeycloakProcessor
-			c.SetPath(tt.path)
-
-			// Execute auth processor with service accounts DISABLED
-			apiErr := AuthProcessor(c, toCfg)
-
-			if tt.wantErr {
-				require.NotNil(t, apiErr, "Expected error but got none")
-				assert.Equal(t, tt.expectedStatus, apiErr.Code, "Expected status code %d but got %d", tt.expectedStatus, apiErr.Code)
-				assert.Contains(t, apiErr.Message, tt.expectedErrMsg, "Expected error message to contain '%s' but got '%s'", tt.expectedErrMsg, apiErr.Message)
-			} else {
-				// For regular users, we expect either success or some other error (not service account related)
-				if apiErr != nil {
-					assert.NotContains(t, apiErr.Message, "Service accounts are not enabled",
-						"Regular users should not be blocked due to service account settings")
 				}
 			}
 		})
@@ -2092,7 +2069,7 @@ func TestKeycloakAuthService_ClientCredentialsAuth_EdgeCases(t *testing.T) {
 			}))
 			defer server.Close()
 
-			kcCfg := config.NewKeycloakConfig(server.URL, server.URL, "client", "secret", "realm", true)
+			kcCfg := config.NewKeycloakConfig(server.URL, server.URL, "client", "secret", "realm", true, []string{"testorg"})
 			svc := NewKeycloakAuthService(kcCfg)
 
 			tokens, err := svc.ClientCredentialsAuth(context.Background(), tt.clientID, tt.clientSecret)
@@ -2222,7 +2199,7 @@ func TestKeycloakAuthService_InitiateAuthFlow_EdgeCases(t *testing.T) {
 			}))
 			defer server.Close()
 
-			kcCfg := config.NewKeycloakConfig(server.URL, server.URL, "test-client", "test-secret", "nico", true)
+			kcCfg := config.NewKeycloakConfig(server.URL, server.URL, "test-client", "test-secret", "nico", true, []string{"testorg"})
 			svc := NewKeycloakAuthService(kcCfg)
 
 			result, err := svc.InitiateAuthFlow(context.Background(), tt.email, tt.redirectURI)
@@ -2294,6 +2271,7 @@ func TestKeycloakConfig_IssuerMatching(t *testing.T) {
 				"test-secret",
 				"nico", // This will be overridden by direct issuer assignment
 				true,
+				[]string{"testorg"},
 			)
 
 			// Override the issuer to match our test case

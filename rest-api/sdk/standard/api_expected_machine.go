@@ -53,6 +53,12 @@ Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also
 
 Maximum batch size: 100 Expected Machines per request.
 
+A successful response confirms that Core created every requested machine and REST saved the corresponding records. HTTP 500 can mean the batch was rejected or that REST could not confirm or save its creation. The status alone does not establish whether creation succeeded or may still finish.
+
+When durable batch recovery is enabled on the server, REST reserves the requested machine IDs, MAC addresses, and chassis serial numbers until it can confirm creation or establish failure. Durable batch recovery is disabled by default. Creates, updates, and deletes using those identities return HTTP 409 while confirmation is pending. The reservation also blocks replacement or deletion of all Expected Machines at the Site.
+
+Check Expected Machine inventory before retrying an unconfirmed request. A missing machine is not proof that creation failed. If the server cannot establish the result, a batch with durable recovery keeps its reservation without automatic expiration.
+
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
 	@return ApiBatchCreateExpectedMachinesRequest
@@ -161,6 +167,17 @@ func (a *ExpectedMachineAPIService) BatchCreateExpectedMachinesExecute(r ApiBatc
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 409 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 500 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

@@ -26,6 +26,8 @@ var _ MappedNullable = &NvosInterface{}
 type NvosInterface struct {
 	// MAC address of this NVOS ethernet port.
 	MacAddress string `json:"macAddress" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
+	// Optional static IPv4 or IPv6 address. May be set only when the Expected Switch has exactly one NVOS interface. It must not be unspecified, multicast, or IPv4 limited broadcast.
+	IpAddress NullableString `json:"ipAddress,omitempty"`
 	// Whether this port is the primary (eth0) NVOS port that NICo manages through RMS. At most one port per switch can be primary; when no port is marked, the first port on a multi-port switch defaults to primary and a single-port switch is always its own primary.
 	IsPrimary *bool `json:"isPrimary,omitempty"`
 }
@@ -74,6 +76,49 @@ func (o *NvosInterface) SetMacAddress(v string) {
 	o.MacAddress = v
 }
 
+// GetIpAddress returns the IpAddress field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *NvosInterface) GetIpAddress() string {
+	if o == nil || IsNil(o.IpAddress.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.IpAddress.Get()
+}
+
+// GetIpAddressOk returns a tuple with the IpAddress field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *NvosInterface) GetIpAddressOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.IpAddress.Get(), o.IpAddress.IsSet()
+}
+
+// HasIpAddress returns a boolean if a field has been set.
+func (o *NvosInterface) HasIpAddress() bool {
+	if o != nil && o.IpAddress.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetIpAddress gets a reference to the given NullableString and assigns it to the IpAddress field.
+func (o *NvosInterface) SetIpAddress(v string) {
+	o.IpAddress.Set(&v)
+}
+
+// SetIpAddressNil sets the value for IpAddress to be an explicit nil
+func (o *NvosInterface) SetIpAddressNil() {
+	o.IpAddress.Set(nil)
+}
+
+// UnsetIpAddress ensures that no value is present for IpAddress, not even an explicit nil
+func (o *NvosInterface) UnsetIpAddress() {
+	o.IpAddress.Unset()
+}
+
 // GetIsPrimary returns the IsPrimary field value if set, zero value otherwise.
 func (o *NvosInterface) GetIsPrimary() bool {
 	if o == nil || IsNil(o.IsPrimary) {
@@ -117,6 +162,9 @@ func (o NvosInterface) MarshalJSON() ([]byte, error) {
 func (o NvosInterface) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["macAddress"] = o.MacAddress
+	if o.IpAddress.IsSet() {
+		toSerialize["ipAddress"] = o.IpAddress.Get()
+	}
 	if !IsNil(o.IsPrimary) {
 		toSerialize["isPrimary"] = o.IsPrimary
 	}

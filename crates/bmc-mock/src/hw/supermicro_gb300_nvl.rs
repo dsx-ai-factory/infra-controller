@@ -46,6 +46,15 @@ pub(crate) struct SupermicroGB300Nvl<'a> {
 }
 
 impl SupermicroGB300Nvl<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Supermicro,
+            product: Some("GB NVL"),
+            redfish_version: "1.17.0",
+            advertises_computer_systems: true,
+        }
+    }
+
     pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
         Some(crate::EventServiceConfig::default())
     }
@@ -158,7 +167,7 @@ impl SupermicroGB300Nvl<'_> {
         .collect::<Vec<_>>();
 
         redfish::computer_system::Config {
-            systems: vec![
+            systems: Some(vec![
                 redfish::computer_system::SingleSystemConfig {
                     base_bios: None,
                     bios_mode: redfish::computer_system::BiosMode::Generic,
@@ -204,7 +213,7 @@ impl SupermicroGB300Nvl<'_> {
                     processors: None,
                     memory: None,
                 },
-            ],
+            ]),
         }
     }
 

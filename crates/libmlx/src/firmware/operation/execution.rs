@@ -24,6 +24,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
 use carbide_libmlx_model::firmware::operation::{FirmwareOperationPhase, FirmwareOperationState};
 use nix::libc;
 use sha2::{Digest, Sha256};
@@ -33,13 +34,24 @@ use super::journal::{
     JournalError, JournalRecord, OperationJournal, OperationUpdate, PreparedArtifact,
     PreparedInputs,
 };
-use crate::firmware::config::{FirmwareFlasherProfile, FlashSpec};
+use crate::device::discovery::DeviceDiscoveryError;
+use crate::firmware::config::{FirmwareFlasherProfile, FirmwareUpdateContext, FlashSpec};
+use crate::firmware::core_download::{CoreFirmwareDelivery, CoreFirmwareDownloadConfig};
 use crate::firmware::credentials::Credentials;
 use crate::firmware::error::{
-    AttemptFailure, FirmwareApplyError, FirmwareError, FirmwarePhase, FirmwareResult,
+    AttemptError, AttemptFailure, FirmwareApplyError, FirmwareError, FirmwarePhase, FirmwareResult,
 };
 use crate::firmware::flasher::{FirmwareFlasher, FirmwareProgress, FirmwareProgressEvent};
+use crate::firmware::preflight::FirmwarePreflightError;
 use crate::runner::FirmwareToolExecutor;
+
+/// In-memory execution dependencies supplied to the accepted worker. Keep
+/// transport settings separate from the profile and its durable request identity.
+pub(super) struct OperationRuntime {
+    pub(super) executor: FirmwareToolExecutor,
+    pub(super) cancellation: watch::Receiver<Option<String>>,
+    pub(super) core_download_config: Option<CoreFirmwareDownloadConfig>,
+}
 
 /// `run_operation` executes an already admitted request once. Execution errors
 /// become persisted receipts; an error return means that receipt could not be
@@ -50,23 +62,36 @@ pub(super) async fn run_operation(
     mut profile: FirmwareFlasherProfile,
     card_directory: PathBuf,
     journal: Arc<Mutex<OperationJournal>>,
-    executor: FirmwareToolExecutor,
-    cancellation: watch::Receiver<Option<String>>,
+    runtime: OperationRuntime,
 ) -> Result<(), JournalError> {
+    let OperationRuntime {
+        executor,
+        cancellation,
+        core_download_config,
+    } = runtime;
     // The admitted request stays immutable. Only this runtime copy selects the
     // helper's private staging directory for the existing preparation path.
     profile.flash_spec.cache_dir = Some(card_directory.clone());
+    let subscribing = journal.clone();
+    let reload_required = tokio::task::spawn_blocking(move || {
+        subscribing
+            .lock()
+            .expect("firmware journal mutex poisoned; saved state may be inconsistent")
+            .subscribe_reload_required()
+    })
+    .await?;
     let progress = Arc::new(JournalProgress {
         operation_id: operation_id.clone(),
         card_directory,
         journal,
+        reload_required,
         redactions: diagnostic_redactions(&profile.flash_spec),
         #[cfg(test)]
         proof_gate: None,
     });
     let result = async {
         let inspecting = progress.clone();
-        tokio::task::spawn_blocking(move || inspecting.inspect())
+        let update_context = tokio::task::spawn_blocking(move || inspecting.inspect())
             .await
             .map_err(|source| progress_error(source.into()))??;
         let flasher = FirmwareFlasher::new_with_executor(
@@ -76,7 +101,24 @@ pub(super) async fn run_operation(
         )
         .await?
         .with_progress(progress.clone())
-        .with_preparation_cancel(operation_id, cancellation);
+        .with_preparation_cancel(operation_id.clone(), cancellation);
+        let flasher = if let Some(context) = update_context {
+            let flasher = flasher.with_update_validation(context.expected_device);
+            match (context.delivery_mode, core_download_config) {
+                (FirmwareDeliveryMode::SiteCache, Some(config)) => flasher.with_core_delivery(
+                    CoreFirmwareDelivery::new(config, operation_id, context.expected_digests)?,
+                ),
+                (FirmwareDeliveryMode::Direct, None) => flasher,
+                _ => {
+                    return Err(FirmwareError::ConfigError(
+                        "firmware delivery mode does not match runtime transport".into(),
+                    )
+                    .into());
+                }
+            }
+        } else {
+            flasher
+        };
         flasher.apply(&profile).await
     }
     .await;
@@ -93,6 +135,7 @@ struct JournalProgress {
     operation_id: String,
     card_directory: PathBuf,
     journal: Arc<Mutex<OperationJournal>>,
+    reload_required: watch::Receiver<bool>,
     redactions: Vec<String>,
     #[cfg(test)]
     proof_gate: Option<Arc<ArtifactProofGate>>,
@@ -109,7 +152,8 @@ struct ArtifactProofGate {
 impl JournalProgress {
     /// `inspect` preserves the admission report before device discovery and
     /// honors cancellation before any inspection or preparation starts.
-    fn inspect(&self) -> FirmwareResult<()> {
+    /// Returns the saved context required for checked-update validation.
+    fn inspect(&self) -> FirmwareResult<Option<FirmwareUpdateContext>> {
         let mut journal = self
             .journal
             .lock()
@@ -122,6 +166,10 @@ impl JournalProgress {
             return Err(FirmwareError::OperationCanceled);
         }
         let report = record.operation.report.clone();
+        let update_context = record
+            .requested
+            .as_ref()
+            .and_then(|requested| requested.update_context.clone());
         journal
             .update(
                 &self.operation_id,
@@ -135,7 +183,7 @@ impl JournalProgress {
                 },
             )
             .map_err(progress_error)?;
-        Ok(())
+        Ok(update_context)
     }
 
     /// `record_failure` saves the settled report without erasing mutation intent.
@@ -210,6 +258,26 @@ impl JournalProgress {
             .map_err(progress_error)?
             .ok_or_else(|| progress_error(JournalError::NotFound(self.operation_id.clone())))?;
         let cancel_requested = record.operation.state == FirmwareOperationState::CancelRequested;
+        let digest_error = prepared_inputs.as_ref().and_then(|inputs| {
+            let expected = &record
+                .requested
+                .as_ref()?
+                .update_context
+                .as_ref()?
+                .expected_digests;
+            if inputs.image.sha256 != expected.image_sha256 {
+                Some(FirmwareError::ImageDigestMismatch)
+            } else if inputs
+                .configuration
+                .as_ref()
+                .map(|artifact| artifact.sha256)
+                != expected.configuration_sha256
+            {
+                Some(FirmwareError::ConfigurationDigestMismatch)
+            } else {
+                None
+            }
+        });
         if cancel_requested
             && matches!(
                 event,
@@ -269,12 +337,38 @@ impl JournalProgress {
         journal
             .update(&self.operation_id, update)
             .map_err(progress_error)?;
-        Ok(())
+        // Save the actual artifact hashes even on mismatch, but withhold the
+        // callback acknowledgement so configuration and burn cannot start.
+        match digest_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 }
 
 #[async_trait::async_trait]
 impl FirmwareProgress for JournalProgress {
+    fn check(&self) -> FirmwareResult<()> {
+        if *self.reload_required.borrow() {
+            return Err(progress_error(JournalError::ReloadRequired));
+        }
+        Ok(())
+    }
+
+    async fn wait_for_failure(&self) -> FirmwareError {
+        let mut reload_required = self.reload_required.clone();
+        if reload_required
+            .wait_for(|required| *required)
+            .await
+            .is_err()
+        {
+            // The progress owner keeps the sender alive. Losing a notification
+            // channel alone is not evidence of a failed journal write.
+            std::future::pending::<()>().await;
+        }
+        progress_error(JournalError::ReloadRequired)
+    }
+
     /// `record` awaits the owned blocking task before apply can advance. RPCs
     /// and observer monitoring remain pollable while artifact evidence is read.
     async fn record(&self, event: FirmwareProgressEvent) -> FirmwareResult<()> {
@@ -362,9 +456,27 @@ fn progress_error(source: JournalError) -> FirmwareError {
     FirmwareError::ProgressPersistence(io::Error::other(source))
 }
 
-/// `failed_before_mutation` recognizes a proven first-command launch failure
-/// even after intent was saved, without clearing that sticky intent record.
+/// `failed_before_mutation` distinguishes settled failures from uncertain
+/// commands or mutations. A proven first-command launch failure remains
+/// `Failed` after intent was saved, without clearing that sticky intent.
 fn failed_before_mutation(record: &JournalRecord, error: &FirmwareError) -> bool {
+    let attempt = match error {
+        FirmwareError::PhaseFailed { source, .. }
+        | FirmwareError::Discovery(DeviceDiscoveryError::QueryAttempt(source))
+        | FirmwareError::Inspection(FirmwarePreflightError::Discovery(
+            DeviceDiscoveryError::QueryAttempt(source),
+        )) => Some(source),
+        _ => None,
+    };
+    // A read can still own the card before mutation intent. Keep exclusion
+    // until the helper proves the tool and its descendants have stopped.
+    if matches!(
+        attempt,
+        Some(AttemptError::Started { status, cleanup_errors, .. })
+            if status.is_none() || !cleanup_errors.is_empty()
+    ) {
+        return false;
+    }
     if !record.mutation_started {
         return true;
     }
@@ -519,15 +631,14 @@ fn failure_diagnostic(error: &FirmwareError, redactions: &[String]) -> String {
         FirmwareError::PhaseFailed { phase, source } => {
             format!("{phase:?}: {}", attempt_diagnostic(source, redactions))
         }
-        FirmwareError::Discovery(crate::device::discovery::DeviceDiscoveryError::QueryAttempt(
-            source,
+        FirmwareError::Discovery(DeviceDiscoveryError::QueryAttempt(source))
+        | FirmwareError::Inspection(FirmwarePreflightError::Discovery(
+            DeviceDiscoveryError::QueryAttempt(source),
         )) => {
             format!("device query: {}", attempt_diagnostic(source, redactions))
         }
         FirmwareError::Io(source) => format!("firmware input I/O: {}", io_diagnostic(source)),
-        FirmwareError::Inspection(
-            crate::firmware::preflight::FirmwarePreflightError::InputIo { source, .. },
-        ) => {
+        FirmwareError::Inspection(FirmwarePreflightError::InputIo { source, .. }) => {
             format!("firmware input inspection: {}", io_diagnostic(source))
         }
         FirmwareError::HttpError(message) => {
@@ -545,6 +656,17 @@ fn failure_diagnostic(error: &FirmwareError, redactions: &[String]) -> String {
                 "firmware version mismatch: {}",
                 safe_diagnostic_text(message, redactions)
             )
+        }
+        FirmwareError::PostResetVerificationTimeout { timeout, source } => {
+            let summary =
+                format!("post-reset firmware verification exceeded its {timeout:?} budget");
+            match source {
+                Some(source) => format!(
+                    "{summary}; last verification failure: {}",
+                    failure_diagnostic(source, redactions)
+                ),
+                None => summary,
+            }
         }
         FirmwareError::SourceResolution { reason, .. } => {
             format!(
@@ -566,7 +688,6 @@ mod tests {
 
     use super::*;
     use crate::firmware::config::FlashOptions;
-    use crate::firmware::error::AttemptError;
     use crate::firmware::operation::journal::RequestedFirmware;
 
     /// Source credentials may appear without their URL in a transfer failure;
@@ -608,13 +729,36 @@ mod tests {
             source: io::Error::from_raw_os_error(libc::ENOSPC),
         });
         assert!(failure_diagnostic(&persistence, &redactions).contains("errno=Some(28)"));
+
+        // The deadline explains why work stopped; the last failed read explains what
+        // the operator should investigate. It needs the same source redaction.
+        let expired = FirmwareError::PostResetVerificationTimeout {
+            timeout: std::time::Duration::from_secs(30),
+            source: Some(Box::new(FirmwareError::VerificationFailed(
+                "source-password\nobserved old firmware".into(),
+            ))),
+        };
+        let diagnostic = failure_diagnostic(&expired, &redactions);
+        assert!(diagnostic.contains("30s budget"));
+        assert!(diagnostic.contains("observed old firmware"));
+        assert!(!diagnostic.contains("source-password"));
+        // Expiry before any failed read has no cause to append or reconstruct.
+        assert_eq!(
+            failure_diagnostic(
+                &FirmwareError::PostResetVerificationTimeout {
+                    timeout: std::time::Duration::from_secs(30),
+                    source: None,
+                },
+                &redactions,
+            ),
+            "post-reset firmware verification exceeded its 30s budget",
+        );
     }
 
     /// `run_operation` must derive redactions from the submitted profile before
     /// saving a tool failure, not rely on callback fixtures supplying them.
     #[tokio::test]
     async fn run_operation_redacts_profile_credentials_in_the_persisted_receipt() {
-        use std::os::unix::fs::PermissionsExt;
         use std::time::Duration;
 
         use crate::runner::{HELLO, Request, Response};
@@ -625,7 +769,7 @@ mod tests {
         let temporary = tempfile::tempdir().expect("create operation fixture");
         let directory = temporary.path();
         let card_directory = directory.join("card");
-        let journal = admitted_progress(&card_directory, FlashOptions::default()).journal;
+        let journal = admitted_progress(&card_directory, FlashOptions::default(), None).journal;
         let profile = FirmwareFlasherProfile {
             firmware_spec: FirmwareSpec {
                 part_number: "part-number".into(),
@@ -676,25 +820,8 @@ printf '{frame_prefix}%s' '{response}'
             hello = std::str::from_utf8(HELLO).unwrap(),
         );
         let helper = directory.join("query-failure-helper");
-        // Keep writable executable descriptors out of concurrent test forks.
-        let status = tokio::time::timeout(
-            Duration::from_secs(10),
-            tokio::process::Command::new("/bin/sh")
-                .args([
-                    "-c",
-                    "set -eu; umask 077; printf '%s' \"$2\" > \"$1\"",
-                    "fixture-writer",
-                ])
-                .arg(&helper)
-                .arg(contents)
-                .kill_on_drop(true)
-                .status(),
-        )
-        .await
-        .expect("fixture writer completes within its watchdog")
-        .expect("write fake supervisor");
-        assert!(status.success());
-        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::runner::write_fixture_executables(directory, &[("query-failure-helper", &contents)])
+            .await;
         let (_cancellation, cancellation) = watch::channel(None);
         tokio::time::timeout(
             Duration::from_secs(10),
@@ -704,8 +831,11 @@ printf '{frame_prefix}%s' '{response}'
                 profile,
                 card_directory.clone(),
                 journal.clone(),
-                FirmwareToolExecutor::with_supervisor_path(helper),
-                cancellation,
+                OperationRuntime {
+                    executor: FirmwareToolExecutor::with_supervisor_path(helper),
+                    cancellation,
+                    core_download_config: None,
+                },
             ),
         )
         .await
@@ -753,7 +883,11 @@ printf '{frame_prefix}%s' '{response}'
 
     /// `admitted_progress` gives callback tests a real persisted admission, so
     /// reopening the journal can verify their recovery-visible effects.
-    fn admitted_progress(directory: &Path, options: FlashOptions) -> JournalProgress {
+    fn admitted_progress(
+        directory: &Path,
+        options: FlashOptions,
+        update_context: Option<crate::firmware::config::FirmwareUpdateContext>,
+    ) -> JournalProgress {
         let mut journal = OperationJournal::open(directory, "0000:01:00.0", "test-boot")
             .expect("open fixture journal");
         journal
@@ -778,6 +912,7 @@ printf '{frame_prefix}%s' '{response}'
                         version: "target-version".to_string(),
                     },
                     options,
+                    update_context,
                 }),
                 observer_exit_behavior: ObserverExitBehavior::Continue,
                 prepared_inputs: None,
@@ -787,6 +922,7 @@ printf '{frame_prefix}%s' '{response}'
         JournalProgress {
             operation_id: "operation".to_string(),
             card_directory: directory.to_path_buf(),
+            reload_required: journal.subscribe_reload_required(),
             journal: Arc::new(Mutex::new(journal)),
             redactions: vec!["secret".to_string()],
             proof_gate: None,
@@ -799,7 +935,7 @@ printf '{frame_prefix}%s' '{response}'
     async fn artifact_proof_yields_to_cancellation_before_mutation() {
         let temporary = tempfile::tempdir().unwrap();
         let directory = temporary.path().join("card");
-        let mut progress = admitted_progress(&directory, FlashOptions::default());
+        let mut progress = admitted_progress(&directory, FlashOptions::default(), None);
         let staged = directory.join("staged");
         fs::create_dir(&staged).unwrap();
         let image = staged.join("image.bin");
@@ -877,6 +1013,89 @@ printf '{frame_prefix}%s' '{response}'
         );
     }
 
+    /// Both artifact digests must match before preparation acknowledges success.
+    /// A mismatch keeps the actual hashes in the durable failure receipt, with
+    /// no mutation intent that could be mistaken for a completed configuration.
+    #[tokio::test]
+    async fn checked_preparation_rejects_either_digest_before_mutation() {
+        use crate::firmware::config::{FirmwareArtifactDigests, FirmwareUpdateContext};
+
+        let image_sha256: [u8; 32] = Sha256::digest(b"image").into();
+        let configuration_sha256: [u8; 32] = Sha256::digest(b"configuration").into();
+        for (scenario, expected_image, expected_configuration, diagnostic) in [
+            (
+                "wrong image",
+                [0; 32],
+                configuration_sha256,
+                "firmware image SHA-256",
+            ),
+            (
+                "wrong configuration after valid image",
+                image_sha256,
+                [0; 32],
+                "firmware configuration SHA-256",
+            ),
+        ] {
+            let temporary = tempfile::tempdir().unwrap();
+            let directory = temporary.path().join("card");
+            let context = FirmwareUpdateContext {
+                delivery_mode: Default::default(),
+                phase_id: "dispatch-1".into(),
+                expected_digests: FirmwareArtifactDigests {
+                    image_sha256: expected_image,
+                    configuration_sha256: Some(expected_configuration),
+                },
+                expected_device: None,
+            };
+            let progress =
+                admitted_progress(&directory, FlashOptions::default(), Some(context.clone()));
+            let staged = directory.join("staged");
+            fs::create_dir(&staged).unwrap();
+            let image = staged.join("image.bin");
+            let configuration = staged.join("config.bin");
+            fs::write(&image, b"image").unwrap();
+            fs::write(&configuration, b"configuration").unwrap();
+            let error = progress
+                .record(FirmwareProgressEvent::Prepared {
+                    directory: staged,
+                    image,
+                    configuration: Some(configuration),
+                })
+                .await
+                .expect_err(scenario);
+            assert!(error.to_string().contains(diagnostic), "{scenario}");
+            progress.record_failure(error.into()).unwrap();
+            drop(progress);
+
+            // Reload the committed failure, not the progress object's cache.
+            let journal = OperationJournal::open(&directory, "0000:01:00.0", "test-boot").unwrap();
+            let record = journal.record("operation").unwrap().unwrap();
+            assert_eq!(
+                record.operation.state,
+                FirmwareOperationState::Failed,
+                "{scenario}"
+            );
+            assert_eq!(
+                record.operation.phase,
+                Some(FirmwareOperationPhase::Prepare),
+                "{scenario}"
+            );
+            assert!(!record.mutation_started, "{scenario}");
+            assert!(record.is_safe_to_release(), "{scenario}");
+            assert_eq!(
+                record.requested.as_ref().unwrap().update_context.as_ref(),
+                Some(&context)
+            );
+            let prepared = record.prepared_inputs.as_ref().unwrap();
+            assert_eq!(prepared.image.sha256, image_sha256, "{scenario}");
+            assert_eq!(
+                prepared.configuration.as_ref().unwrap().sha256,
+                configuration_sha256,
+                "{scenario}"
+            );
+        }
+    }
+
     /// Cancellation preserves completed phase results. It stops a later phase,
     /// but cannot undo an operation whose final phase has already succeeded.
     #[tokio::test]
@@ -893,6 +1112,7 @@ printf '{frame_prefix}%s' '{response}'
                     reset: expected_state == FirmwareOperationState::Canceled,
                     ..FlashOptions::default()
                 },
+                None,
             );
             progress
                 .record(FirmwareProgressEvent::Prepare)
@@ -1056,7 +1276,7 @@ printf '{frame_prefix}%s' '{response}'
             |configuration_applied| async move {
                 let temporary = tempfile::tempdir().expect("create fixture directory");
                 let directory = temporary.path().join("card");
-                let progress = admitted_progress(&directory, FlashOptions::default());
+                let progress = admitted_progress(&directory, FlashOptions::default(), None);
                 progress
                     .record(FirmwareProgressEvent::Prepare)
                     .await
@@ -1123,8 +1343,8 @@ printf '{frame_prefix}%s' '{response}'
         .await;
     }
 
-    /// The persisted classification distinguishes a proven launch failure from
-    /// completed mutations, without saving credentials from the error chain.
+    /// Persisted failures distinguish stopped commands from unknown completion
+    /// and prior mutations, without saving credentials from the error chain.
     #[tokio::test]
     async fn failure_receipts_preserve_progress_without_source_diagnostics() {
         for (scenario, phase, error, expected_state) in [
@@ -1135,6 +1355,73 @@ printf '{frame_prefix}%s' '{response}'
                     description: "https://user:secret@example.invalid/firmware".to_string(),
                     reason: "secret credential was rejected".to_string(),
                 },
+                FirmwareOperationState::Failed,
+            ),
+            (
+                // No mutation intent does not prove the query has stopped.
+                "discovery query completion is unknown",
+                None,
+                FirmwareError::Discovery(DeviceDiscoveryError::QueryAttempt(
+                    AttemptError::Started {
+                        command: "mlxfwmanager".into(),
+                        status: None,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        reason: AttemptFailure::Io(io::Error::other("lost query result")),
+                        cleanup_errors: Vec::new(),
+                    },
+                )),
+                FirmwareOperationState::ManualIntervention,
+            ),
+            (
+                // A reaped leader does not settle its descendants. Long or
+                // sensitive output must not hide the structured cleanup evidence.
+                "preflight cleanup is unconfirmed",
+                None,
+                FirmwareError::Inspection(FirmwarePreflightError::Discovery(
+                    DeviceDiscoveryError::QueryAttempt(AttemptError::Started {
+                        command: "mlxfwmanager secret-command".into(),
+                        status: Some(std::process::ExitStatus::from_raw(41 << 8)),
+                        stdout: format!("{}\nsecret credential\n", "é".repeat(2000)).into_bytes(),
+                        stderr: b"device semaphore busy\nhttps://example.invalid/private\n"
+                            .to_vec(),
+                        reason: AttemptFailure::Nonzero,
+                        cleanup_errors: vec![io::Error::from_raw_os_error(libc::EACCES)],
+                    }),
+                )),
+                FirmwareOperationState::ManualIntervention,
+            ),
+            (
+                // Tool lookup also runs before mutation and must retain exclusion.
+                "tool discovery completion is unknown",
+                None,
+                FirmwareError::PhaseFailed {
+                    phase: FirmwarePhase::ToolDiscovery,
+                    source: AttemptError::Started {
+                        command: "flint --version".into(),
+                        status: None,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        reason: AttemptFailure::Io(io::Error::other("lost probe result")),
+                        cleanup_errors: Vec::new(),
+                    },
+                },
+                FirmwareOperationState::ManualIntervention,
+            ),
+            (
+                // A timed-out read can release the claim once cleanup is confirmed.
+                "discovery deadline settled before mutation",
+                None,
+                FirmwareError::Discovery(DeviceDiscoveryError::QueryAttempt(
+                    AttemptError::Started {
+                        command: "mlxfwmanager".into(),
+                        status: Some(std::process::ExitStatus::from_raw(libc::SIGKILL)),
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                        reason: AttemptFailure::Deadline(std::time::Duration::from_secs(30)),
+                        cleanup_errors: Vec::new(),
+                    },
+                )),
                 FirmwareOperationState::Failed,
             ),
             (
@@ -1178,7 +1465,7 @@ printf '{frame_prefix}%s' '{response}'
         ] {
             let temporary = tempfile::tempdir().expect("create fixture directory");
             let directory = temporary.path().join("card");
-            let progress = admitted_progress(&directory, FlashOptions::default());
+            let progress = admitted_progress(&directory, FlashOptions::default(), None);
             progress
                 .record(FirmwareProgressEvent::Prepare)
                 .await
@@ -1217,6 +1504,11 @@ printf '{frame_prefix}%s' '{response}'
             assert_eq!(record.operation.state, expected_state, "{scenario}");
             assert_eq!(record.mutation_started, phase.is_some(), "{scenario}");
             assert_eq!(
+                record.is_safe_to_release(),
+                expected_state == FirmwareOperationState::Failed && phase.is_none(),
+                "{scenario}"
+            );
+            assert_eq!(
                 record.operation.report.flashed,
                 phase == Some(FirmwarePhase::Burn),
                 "{scenario}"
@@ -1231,7 +1523,10 @@ printf '{frame_prefix}%s' '{response}'
             assert!(!persisted.contains("secret"), "{scenario}");
             assert!(!persisted.contains("example.invalid"), "{scenario}");
             assert!(record.operation.diagnostic.as_ref().unwrap().len() <= 2048);
-            if scenario == "actionable reset failure" {
+            if matches!(
+                scenario,
+                "actionable reset failure" | "preflight cleanup is unconfirmed"
+            ) {
                 assert!(persisted.contains("exit_code=Some(41)"));
                 assert!(persisted.contains("errno=Some(13)"));
                 assert!(persisted.contains("device semaphore busy"));

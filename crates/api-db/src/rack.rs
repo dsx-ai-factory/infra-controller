@@ -379,15 +379,20 @@ pub async fn update_nvos_update_job(
     Ok(())
 }
 
-pub async fn final_delete(txn: &mut PgConnection, rack_id: &RackId) -> DatabaseResult<()> {
+/// `final_delete` permanently deletes an active or soft-deleted rack,
+/// retaining its history.
+///
+/// Returns `true` if a rack was deleted, or `false` if absent. Does not commit
+/// the caller's transaction.
+pub async fn final_delete(txn: &mut PgConnection, rack_id: &RackId) -> DatabaseResult<bool> {
     let query = "DELETE from racks WHERE id=$1";
-    sqlx::query(query)
+    let result = sqlx::query(query)
         .bind(rack_id)
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn insert_health_report(
@@ -406,6 +411,23 @@ pub async fn remove_health_report(
     source: &str,
 ) -> Result<(), DatabaseError> {
     crate::health_report::remove_health_report(txn, "racks", rack_id, mode, source).await
+}
+
+/// Live racks that carry a merge-mode health report from `source`.
+pub async fn find_ids_with_health_report_merge_source(
+    db: impl DbReader<'_>,
+    source: &str,
+) -> Result<Vec<RackId>, DatabaseError> {
+    let query = r#"
+        SELECT id FROM racks
+        WHERE deleted IS NULL
+          AND coalesce(health_reports, '{"merges": {}}'::jsonb)->'merges' ? $1
+    "#;
+    sqlx::query_scalar(query)
+        .bind(source)
+        .fetch_all(db)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
 }
 
 pub async fn update_metadata(

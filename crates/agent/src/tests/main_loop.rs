@@ -45,6 +45,7 @@ fn astra_status_reporting_maps_results_and_preserves_network_errors() {
             }),
             ..Default::default()
         }],
+        ..Default::default()
     };
 
     value_scenarios!(run = |row: Row| {
@@ -90,7 +91,11 @@ fn astra_status_reporting_maps_results_and_preserves_network_errors() {
                 result: Err(eyre::eyre!("astra list failed")),
                 previous_error: None,
             } => (
-                Some(rpc::AstraConfigStatus::default()),
+                Some(rpc::AstraConfigStatus {
+                    is_attachment_status_present: Some(true),
+                    is_maintenance_status_present: Some(false),
+                    ..Default::default()
+                }),
                 Some("astra list failed".to_string()),
             ),
         }
@@ -100,7 +105,11 @@ fn astra_status_reporting_maps_results_and_preserves_network_errors() {
                 result: Err(eyre::eyre!("astra list failed")),
                 previous_error: Some("HBN update failed"),
             } => (
-                Some(rpc::AstraConfigStatus::default()),
+                Some(rpc::AstraConfigStatus {
+                    is_attachment_status_present: Some(true),
+                    is_maintenance_status_present: Some(false),
+                    ..Default::default()
+                }),
                 Some("HBN update failed".to_string()),
             ),
         }
@@ -203,6 +212,96 @@ fn fmds_reply_routes_preserve_ipv4_and_use_the_ipv6_metadata_source() {
     );
 }
 
+fn one_lldp_neighbor() -> carbide_host_support::lldp_collector::LldpNeighbor {
+    carbide_host_support::lldp_collector::LldpNeighbor {
+        local_mac: "02:00:00:00:00:01".to_string(),
+        switch: ::rpc::machine_discovery::LldpSwitchData {
+            local_port: "fabric0".to_string(),
+            remote_port_type: "ifname".to_string(),
+            remote_port_value: "swp1".to_string(),
+            ..Default::default()
+        },
+    }
+}
+
+#[derive(Default)]
+struct NetworkStatusRpcState {
+    statuses: Vec<rpc::DpuNetworkStatus>,
+}
+
+async fn handle_original_network_status(
+    axum::extract::State(state): axum::extract::State<
+        std::sync::Arc<tokio::sync::Mutex<NetworkStatusRpcState>>,
+    >,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let payload = body.get(5..).expect("gRPC request has a frame header");
+    let status = <rpc::DpuNetworkStatus as prost::Message>::decode(payload).unwrap();
+    state.lock().await.statuses.push(status);
+    crate::tests::common::respond(()).into_response()
+}
+
+fn network_status_mock(
+    state: std::sync::Arc<tokio::sync::Mutex<NetworkStatusRpcState>>,
+) -> axum::Router {
+    use axum::routing::{get, post};
+
+    axum::Router::new()
+        .route("/up", get(|| async {}))
+        .route(
+            ::rpc::service_path!("RecordDpuNetworkStatus"),
+            post(handle_original_network_status),
+        )
+        .with_state(state)
+}
+
+async fn record_network_status_before_deadline(
+    address: std::net::SocketAddr,
+    status: rpc::DpuNetworkStatus,
+) -> Result<(), eyre::Report> {
+    let client_config = forge_tls_client::ForgeClientConfig {
+        root_ca_path: concat!(env!("CARGO_MANIFEST_DIR"), "/test-certs/tls.crt").into(),
+        ..Default::default()
+    };
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        record_network_status(status, &format!("https://{address}"), &client_config),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("network status report exceeded its test deadline"))?
+}
+
+#[tokio::test]
+async fn legacy_core_success_keeps_lldp_snapshot_pending() -> eyre::Result<()> {
+    use carbide_host_support::lldp_snapshot_cache::result_of;
+
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(NetworkStatusRpcState::default()));
+    let (address, server) =
+        crate::tests::common::run_grpc_server(network_status_mock(state.clone())).await?;
+    let classified = classify_against_accepted_snapshot(Ok(vec![one_lldp_neighbor()]), None);
+    let sent_report = classified.report.clone();
+
+    record_network_status_before_deadline(
+        address,
+        rpc::DpuNetworkStatus {
+            lldp: Some(sent_report.clone()),
+            lldp_snapshot_fingerprint: classified.snapshot_fingerprint,
+            ..Default::default()
+        },
+    )
+    .await?;
+    server.abort();
+
+    let state = state.lock().await;
+    assert_eq!(state.statuses.len(), 1);
+    assert_eq!(state.statuses[0].lldp.as_ref(), Some(&sent_report));
+    let retry = classify_against_accepted_snapshot(Ok(vec![one_lldp_neighbor()]), None);
+    assert_eq!(result_of(&retry.report), rpc::LldpReportResult::Updated);
+    Ok(())
+}
+
 #[test]
 fn ipv6_only_network_requires_dhcp_acceptance() {
     for (scenario, loopback, dhcp_changed, expected_error) in [
@@ -247,27 +346,71 @@ fn ipv6_only_network_requires_dhcp_acceptance() {
     }
 }
 
-/// A failed stop must not prevent secondary-admin isolation, while DPUs that
-/// configure DHCP must still wait for acceptance before applying IPv6 networking.
+/// Without fixed service listeners, a failed secondary-admin DHCP stop must not prevent NVUE
+/// isolation, while IPv6-primary roles that submit a replacement must wait for acceptance.
 #[test]
 fn dhcp_stop_failure_does_not_block_secondary_admin_isolation() {
     use carbide_test_support::Outcome::{Fails, Yields};
     use carbide_test_support::scenarios;
 
-    scenarios!(run = |(is_primary_dpu, use_admin_network)| {
+    scenarios!(run = |(is_primary_dpu, use_admin_network, inventory)| {
+        // Compare host-DHCP role exemptions with omitted or explicitly empty service inventory.
         let mut config = comparison_network_config();
+        // Use an IPv6 primary loopback so a failed replacement reaches the DHCP acceptance check.
         config.managed_host_config.as_mut().unwrap().loopback_ip = "2001:db8::1".to_string();
         config.is_primary_dpu = is_primary_dpu;
         config.use_admin_network = use_admin_network;
+        config.service_vpc_slot_inventory = inventory;
         let dhcp_result = Err(eyre::eyre!("injected DHCP operation failure"));
 
         require_dhcp_before_ipv6_only_network_update(&config, &dhcp_result).map_err(drop)
     };
-        // Only this role stops DHCP instead of applying a replacement config.
-        "secondary admin" { (false, true) => Yields(()) }
+        // With no service inventory, only this role stops DHCP instead of applying a replacement.
+        "secondary admin" { (false, true, None) => Yields(()) }
+        // Explicit zero slots must preserve the same stop exemption as omitted inventory.
+        "secondary admin with empty inventory" {
+            (
+                false,
+                true,
+                Some(rpc::ServiceVpcSlotInventory { slots: vec![] }),
+            ) => Yields(())
+        }
         // Neither being secondary nor using the admin network alone bypasses it.
-        "secondary tenant" { (false, false) => Fails }
-        "primary admin" { (true, true) => Fails }
+        "secondary tenant" { (false, false, None) => Fails }
+        // A primary admin DPU still submits host DHCP, so admin-network selection cannot bypass
+        // acceptance.
+        "primary admin" { (true, true, None) => Fails }
+    );
+}
+
+/// An IPv6-primary secondary admin DPU with a fixed service listener must wait for DHCP acceptance
+/// because the failed operation is a service replacement rather than the legacy host-only stop.
+#[test]
+fn secondary_admin_service_listener_requires_dhcp_acceptance() {
+    // Use an IPv6 primary loopback so DHCP acceptance controls the IPv6-only NVUE gate.
+    let mut config = comparison_network_config();
+    config.managed_host_config.as_mut().unwrap().loopback_ip = "2001:db8::1".to_string();
+    // Select secondary-admin mode, which would stop DHCP in the legacy host-only topology.
+    config.is_primary_dpu = false;
+    config.use_admin_network = true;
+    // Add one fixed listener so this role submits a service replacement instead of stopping.
+    config.service_vpc_slot_inventory = Some(rpc::ServiceVpcSlotInventory {
+        slots: vec![rpc::ServiceVpcSlot {
+            slot_index: 0,
+            hbn_interface_name: "iface_svc_0".to_string(),
+        }],
+    });
+
+    // A failed service replacement must gate the IPv6-only network update.
+    let dhcp_result = Err(eyre::eyre!("injected DHCP operation failure"));
+    let error = require_dhcp_before_ipv6_only_network_update(&config, &dhcp_result)
+        .expect_err("service-bearing secondary admin update must wait for DHCP");
+
+    // The gate must report the same retryable wait used by other DHCP-bearing roles.
+    assert!(
+        error
+            .to_string()
+            .contains("IPv6-only network update is waiting for DHCP")
     );
 }
 
@@ -278,21 +421,25 @@ fn comparison_routing_profile() -> rpc::RoutingProfile {
         route_target_imports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_001,
-                vni: 101,
+                vni: Some(101),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_002,
-                vni: 102,
+                vni: Some(102),
+                vni_self: false,
             },
         ],
         route_targets_on_exports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_003,
-                vni: 103,
+                vni: Some(103),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_004,
-                vni: 104,
+                vni: Some(104),
+                vni_self: false,
             },
         ],
         leak_default_route_from_underlay: false,
@@ -465,16 +612,19 @@ fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
         datacenter_asn: 65_100,
         common_internal_route_target: Some(::rpc::common::RouteTarget {
             asn: 65_200,
-            vni: 5_000,
+            vni: Some(5_000),
+            vni_self: false,
         }),
         additional_route_target_imports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_201,
-                vni: 5_001,
+                vni: Some(5_001),
+                vni_self: false,
             },
             ::rpc::common::RouteTarget {
                 asn: 65_202,
-                vni: 5_002,
+                vni: Some(5_002),
+                vni_self: false,
             },
         ],
         network_security_policy_overrides: vec![
@@ -498,6 +648,74 @@ fn comparison_network_config() -> ManagedHostNetworkConfigResponse {
     }
 }
 
+/// Adds two service endpoints sharing one fixed slot so fingerprint tests exercise complete
+/// `service_interfaces` and `service_vpc_slot_inventory` values.
+fn comparison_service_network_config() -> ManagedHostNetworkConfigResponse {
+    // Extend the retained full response fixture with one complete fixed service slot.
+    let mut config = comparison_network_config();
+    // Service slots require per-VPC VNIs, so disable the base fixture's site-global VNI.
+    config.site_global_vpc_vni = None;
+    config.service_vpc_slot_inventory = Some(rpc::ServiceVpcSlotInventory {
+        slots: vec![rpc::ServiceVpcSlot {
+            slot_index: 0, // Both endpoints intentionally share the fixed service port.
+            hbn_interface_name: "iface_svc_0".to_string(),
+        }],
+    });
+
+    // Add two independently identified endpoints that intentionally share every port policy field.
+    config.service_interfaces = [
+        (1, "192.0.2.10/31", "02:00:00:00:00:01"),
+        (2, "192.0.2.12/31", "02:00:00:00:00:02"),
+    ]
+    .into_iter()
+    .map(
+        |(identity, link_prefix, mac_address)| rpc::ManagedHostServiceInterfaceConfig {
+            service_id: format!("10000000-0000-0000-0000-{identity:012}"),
+            attachment_id: Some(::rpc::common::Uuid {
+                value: format!("20000000-0000-0000-0000-{identity:012}"),
+            }),
+            interface_ordinal: 0,
+            slot_index: 0, // Both endpoints bind to the fixed inventory slot above.
+            vpc_id: Some("30000000-0000-0000-0000-000000000001".parse().unwrap()),
+            vpc_vni: 1_400, // Keep service policy separate from the inherited host VPCs.
+            vpc_prefixes: vec!["198.51.100.0/24".to_string(), "192.0.2.0/24".to_string()],
+            vpc_peer_prefixes: vec!["203.0.113.0/25".to_string(), "203.0.113.128/25".to_string()],
+            vpc_peer_vnis: vec![2_002, 2_001],
+            vpc_routing_profile: Some(comparison_routing_profile()),
+            interface_routing_profile: Some(rpc::FlatInterfaceRoutingProfile {
+                allowed_anycast_prefixes: vec![
+                    rpc::PrefixFilterPolicyEntry {
+                        prefix: "203.0.113.0/25".to_string(),
+                    },
+                    rpc::PrefixFilterPolicyEntry {
+                        prefix: "203.0.113.128/25".to_string(),
+                    },
+                ],
+            }),
+            network_security_group: Some(rpc::FlatInterfaceNetworkSecurityGroupConfig {
+                id: "service-vpc-nsg".to_string(),
+                version: "nsg-v1".to_string(),
+                source: rpc::NetworkSecurityGroupSource::NsgSourceVpc.into(),
+                rules: vec![comparison_security_group_rule(
+                    "service-rule",
+                    100,
+                    rpc::NetworkSecurityGroupRuleAction::NsgRuleActionPermit,
+                )],
+                stateful_egress: false,
+            }),
+            mtu: Some(9_000), // Gives the MTU mutation case its valid service baseline.
+            link_prefix: link_prefix.to_string(),
+            mac_address: mac_address.to_string(),
+            internal_uuid: Some(::rpc::common::Uuid {
+                value: format!("40000000-0000-0000-0000-{identity:012}"),
+            }),
+            tenant_vrf_loopback_ip: Some("10.0.0.3".to_string()),
+        },
+    )
+    .collect();
+    config
+}
+
 /// Selects the unchanged baseline or one response mutation used to verify the
 /// HBN skip decision.
 #[derive(Clone, Copy, Debug)]
@@ -510,10 +728,13 @@ enum RenderedInputChange {
     SiteFabricPrefix,
     SiteFabricNullRoute,
     AdminInterfaceVni,
+    AdminL2Segment,
     AdminIpv6Prefix,
+    AdminIpv6Loopback,
     TenantInterfaceVni,
     TenantInterfaceIp,
     TenantIpv6Prefix,
+    TenantIpv6Loopback,
     TenantIpv6Mode,
     TenantIpv6Removal,
     TenantVpcPrefix,
@@ -561,6 +782,13 @@ impl RenderedInputChange {
                     .expect("comparison fixture has an admin interface")
                     .vni += 1;
             }
+            Self::AdminL2Segment => {
+                let interface = config
+                    .admin_interface
+                    .as_mut()
+                    .expect("comparison fixture has an admin interface");
+                interface.is_l2_segment = !interface.is_l2_segment;
+            }
             Self::AdminIpv6Prefix => {
                 config
                     .admin_interface
@@ -568,6 +796,14 @@ impl RenderedInputChange {
                     .expect("comparison fixture has an admin interface")
                     .addresses[0]
                     .prefix = "2001:db8:1::/64".to_string();
+            }
+            Self::AdminIpv6Loopback => {
+                config
+                    .admin_interface
+                    .as_mut()
+                    .expect("comparison fixture has an admin interface")
+                    .addresses[0]
+                    .tenant_vrf_loopback_ip = Some("2001:db8::4".to_string());
             }
             Self::TenantInterfaceVni => config.tenant_interfaces[1].vni += 1,
             Self::TenantInterfaceIp => {
@@ -578,6 +814,10 @@ impl RenderedInputChange {
                 address.ip = "2001:db8:1::1".to_string();
                 address.interface_prefix = "2001:db8:1::1/128".to_string();
                 address.prefix = "2001:db8:1::/127".to_string();
+            }
+            Self::TenantIpv6Loopback => {
+                config.tenant_interfaces[1].addresses[0].tenant_vrf_loopback_ip =
+                    Some("2001:db8::4".to_string());
             }
             Self::TenantIpv6Mode => {
                 let address = &mut config.tenant_interfaces[1].addresses[0];
@@ -644,6 +884,18 @@ fn current_network_version_never_matches_before_first_update() {
     assert!(!CurrentNetworkVersion::default().matches_versions_from(&config, None));
 }
 
+#[test]
+fn accepted_lldp_fingerprint_is_not_a_rendered_network_input() {
+    let mut config = comparison_network_config();
+    let mut current = CurrentNetworkVersion::default();
+
+    current.update_from(&config, None);
+
+    config.accepted_lldp_snapshot_fingerprint = Some(vec![1; 32]);
+
+    assert!(current.matches_versions_from(&config, None));
+}
+
 /// The supplemental config file's path never changes between iterations, so
 /// only its content hash can invalidate the cache: an in-place edit or a
 /// removal must force a re-render even when the response is unchanged.
@@ -672,20 +924,42 @@ fn current_network_version_tracks_supplemental_config_hash() {
 }
 
 /// Every input consumed by HBN must invalidate the cache, and either
-/// explicit version must do the same.
+/// explicit version must do the same. Canonical IPv6 VRF loopback replacement must also invalidate
+/// the fingerprint when the deprecated IPv4 loopback field remains absent.
+/// Switching admin between L2 and routed attachments must invalidate unchanged versions.
 #[test]
+#[allow(deprecated)]
 fn current_network_version_detects_rendered_input_changes() {
     use carbide_test_support::value_scenarios;
 
     value_scenarios!(run = |change| {
         let mut config = comparison_network_config();
-        if matches!(change, RenderedInputChange::AdminIpv6Prefix) {
+        // Enable Admin rendering so attachment and canonical IPv6 changes exercise active inputs.
+        if matches!(
+            change,
+            RenderedInputChange::AdminL2Segment
+                | RenderedInputChange::AdminIpv6Prefix
+                | RenderedInputChange::AdminIpv6Loopback
+        ) {
             config.use_admin_network = true;
             config
                 .admin_interface
                 .as_mut()
                 .expect("comparison fixture has an admin interface")
                 .is_l2_segment = true;
+        }
+        // Seed only the canonical loopback so a legacy-field change cannot satisfy these cases.
+        if matches!(
+            change,
+            RenderedInputChange::AdminIpv6Loopback | RenderedInputChange::TenantIpv6Loopback
+        ) {
+            let interface = if matches!(change, RenderedInputChange::AdminIpv6Loopback) {
+                config.admin_interface.as_mut().expect("Admin interface")
+            } else {
+                &mut config.tenant_interfaces[1]
+            };
+            interface.tenant_vrf_loopback_ip = None;
+            interface.addresses[0].tenant_vrf_loopback_ip = Some("2001:db8::3".to_string());
         }
         let mut current = CurrentNetworkVersion::default();
         current.update_from(&config, None);
@@ -709,12 +983,18 @@ fn current_network_version_detects_rendered_input_changes() {
         }
         "interface rendering inputs" {
             RenderedInputChange::AdminInterfaceVni => false,
+            // Changing admin attachment must reconcile even when both explicit versions are unchanged.
+            RenderedInputChange::AdminL2Segment => false,
             // Admin prefix replacement changes the SVI VRR/RA desired state.
             RenderedInputChange::AdminIpv6Prefix => false,
+            // An Admin VRF loopback replacement changes the rendered IPv6 /128.
+            RenderedInputChange::AdminIpv6Loopback => false,
             RenderedInputChange::TenantInterfaceVni => false,
             RenderedInputChange::TenantInterfaceIp => false,
             // Prefix replacement must replace the advertised desired state.
             RenderedInputChange::TenantIpv6Prefix => false,
+            // A tenant VRF loopback must remain visible without an IPv4 compatibility value.
+            RenderedInputChange::TenantIpv6Loopback => false,
             // Stateful-to-SLAAC replacement changes the rendered M/A flags.
             RenderedInputChange::TenantIpv6Mode => false,
             // IPv6 removal must withdraw the complete RA/RDNSS stanza.
@@ -728,6 +1008,329 @@ fn current_network_version_detects_rendered_input_changes() {
             RenderedInputChange::NetworkSecurityPolicyOverride => false,
         }
     );
+}
+
+/// Selects one service endpoint or fixed-slot inventory mutation so `CurrentNetworkVersion`
+/// distinguishes the changed response from the previously recorded response.
+#[derive(Clone, Copy, Debug)]
+enum ServiceInputChange {
+    MacAddress,
+    LinkRemoval,
+    SelectedVpcPolicy,
+    Mtu,
+    InventoryName,
+}
+
+impl ServiceInputChange {
+    /// Mutates one service or inventory field while retaining unrelated fingerprint inputs
+    /// so each case isolates one reason to reconcile.
+    fn apply(self, config: &mut ManagedHostNetworkConfigResponse) {
+        match self {
+            Self::MacAddress => {
+                config.service_interfaces[0].mac_address = "02:00:00:00:00:0a".to_string();
+            }
+            Self::LinkRemoval => {
+                config.service_interfaces.remove(0);
+            }
+            Self::SelectedVpcPolicy => {
+                config.service_interfaces[0]
+                    .network_security_group
+                    .as_mut()
+                    .expect("service fixture has a VPC security group")
+                    .rules[0]
+                    .src_prefixes
+                    .push("100.64.0.0/10".to_string());
+            }
+            Self::Mtu => config.service_interfaces[0].mtu = Some(8_999),
+            Self::InventoryName => {
+                config
+                    .service_vpc_slot_inventory
+                    .as_mut()
+                    .expect("service fixture has fixed inventory")
+                    .slots[0]
+                    .hbn_interface_name = "iface_svc_replacement".to_string();
+            }
+        }
+    }
+}
+
+/// Service MAC, NSG policy, endpoint removal, MTU, and `service_vpc_slot_inventory` changes must
+/// invalidate `CurrentNetworkVersion` even when `instance_network_config_version` is unchanged.
+#[test]
+fn current_network_version_tracks_service_inputs_and_inventory() {
+    let cases = [
+        // A MAC-only change invalidates the fingerprint even though it leaves the HBN address unchanged.
+        ServiceInputChange::MacAddress,
+        // Removing one endpoint must invalidate the fingerprint so HBN can withdraw
+        // only that endpoint's HBN address.
+        ServiceInputChange::LinkRemoval,
+        // An NSG rule change must invalidate the fingerprint without an instance network version change.
+        ServiceInputChange::SelectedVpcPolicy,
+        // MTU remains in the fetched contract shared by HBN and the service NAD.
+        ServiceInputChange::Mtu,
+        // Changing `service_vpc_slot_inventory` must invalidate the fingerprint before reconciliation.
+        ServiceInputChange::InventoryName,
+    ];
+
+    for change in cases {
+        // Record one successfully reconciled response before changing exactly one service input.
+        let mut config = comparison_service_network_config();
+        let mut current = CurrentNetworkVersion::default();
+        current.update_from(&config, None);
+        change.apply(&mut config);
+
+        // No service mutation may match the previously recorded `CurrentNetworkVersion`.
+        assert!(
+            !current.matches_versions_from(&config, None),
+            "{change:?} still matched CurrentNetworkVersion"
+        );
+    }
+
+    // Change `service_vpc_slot_inventory` with no endpoints to prove its HBN interface name
+    // still participates in the fingerprint.
+    let mut inventory_only = comparison_service_network_config();
+    inventory_only.service_interfaces.clear();
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&inventory_only, None);
+    inventory_only
+        .service_vpc_slot_inventory
+        .as_mut()
+        .expect("service fixture has fixed inventory")
+        .slots[0]
+        .hbn_interface_name = "iface_svc_replacement".to_string();
+
+    // Inventory changes remain pending even when no endpoint currently renders an HBN address.
+    assert!(!current.matches_versions_from(&inventory_only, None));
+}
+
+/// Verifies service set reordering leaves `matches_versions_from` and
+/// `describes_same_desired_network` returning true, avoiding unnecessary HBN applies and rejection
+/// of equivalent applied responses as obsolete.
+#[test]
+fn current_network_version_ignores_service_set_order() {
+    // Record one applied grouped response before reordering only set-like service inputs.
+    let mut reordered = comparison_service_network_config();
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&reordered, None);
+
+    // Reverse only collections whose member order has no service networking meaning.
+    reordered.service_interfaces.reverse();
+    for interface in &mut reordered.service_interfaces {
+        interface.vpc_prefixes.reverse();
+        interface.vpc_peer_prefixes.reverse();
+        interface.vpc_peer_vnis.reverse();
+        let profile = interface
+            .vpc_routing_profile
+            .as_mut()
+            .expect("service fixture has a routing profile");
+        profile.route_target_imports.reverse();
+        profile.route_targets_on_exports.reverse();
+        profile.accepted_leaks_from_underlay.reverse();
+        profile.allowed_anycast_prefixes.reverse();
+        interface
+            .interface_routing_profile
+            .as_mut()
+            .expect("service fixture has an interface profile")
+            .allowed_anycast_prefixes
+            .reverse();
+        let rule = &mut interface
+            .network_security_group
+            .as_mut()
+            .expect("service fixture has a VPC security group")
+            .rules[0];
+        rule.src_prefixes.reverse();
+        rule.dst_prefixes.reverse();
+    }
+
+    // Equivalent service sets match both `CurrentNetworkVersion` and the original desired response.
+    assert!(current.matches_versions_from(&reordered, None));
+    assert!(CurrentNetworkVersion::describes_same_desired_network(
+        &comparison_service_network_config(),
+        &reordered
+    ));
+}
+
+/// Verifies reversing equal-priority service NSG rules invalidates `CurrentNetworkVersion` because
+/// their stable ACL order controls first-match policy.
+#[test]
+fn current_network_version_preserves_equal_priority_service_nsg_order() {
+    // Give every grouped endpoint the same two equal-priority rules so the response remains valid.
+    let mut applied = comparison_service_network_config();
+    for interface in &mut applied.service_interfaces {
+        interface
+            .network_security_group
+            .as_mut()
+            .expect("service fixture has a VPC security group")
+            .rules
+            .push(comparison_security_group_rule(
+                "second-service-rule",
+                100,
+                rpc::NetworkSecurityGroupRuleAction::NsgRuleActionDeny,
+            ));
+    }
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&applied, None);
+
+    // Reverse only the equal-priority rules whose relative order is rendered into each ACL.
+    let mut reordered = applied.clone();
+    for interface in &mut reordered.service_interfaces {
+        interface
+            .network_security_group
+            .as_mut()
+            .expect("service fixture has a VPC security group")
+            .rules
+            .swap(0, 1);
+    }
+
+    // The changed first-match order must force another HBN reconciliation.
+    assert!(!current.matches_versions_from(&reordered, None));
+}
+
+/// A failed HBN result leaves `CurrentNetworkVersion` unmatched until HBN and DHCP results both
+/// succeed for the same current response, preventing failed updates from advancing network
+/// acknowledgement.
+#[test]
+fn failed_service_apply_keeps_version_pending_until_success() {
+    // Prepare one desired response with a failed HBN result and successful DHCP result.
+    let config = comparison_service_network_config();
+    let mut current = CurrentNetworkVersion::default();
+    let hbn_failure = Err(eyre::eyre!("injected HBN apply failure"));
+    let dhcp_success = Ok(false);
+
+    // Pass the HBN failure to `record_reconciled_version`, the main loop's HBN/DHCP result check.
+    assert!(!current.record_reconciled_version(
+        &config,
+        Some(&config),
+        None,
+        true,
+        &hbn_failure,
+        &dhcp_success,
+    ));
+    assert!(!current.matches_versions_from(&config, None));
+
+    // Successful HBN and DHCP results for the retry record the still-current response's
+    // versions and fingerprint.
+    assert!(current.record_reconciled_version(
+        &config,
+        Some(&config),
+        None,
+        true,
+        &Ok(true),
+        &dhcp_success,
+    ));
+    assert!(current.matches_versions_from(&config, None));
+}
+
+/// Verifies a DHCP failure after a successful HBN attempt clears `CurrentNetworkVersion` because
+/// HBN may already contain configuration that Core cannot yet acknowledge.
+#[test]
+fn hbn_success_with_dhcp_failure_invalidates_recorded_version() {
+    // Seed `CurrentNetworkVersion` from the service response before supplying another HBN result.
+    let config = comparison_service_network_config();
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&config, None);
+    assert!(current.matches_versions_from(&config, None));
+    let dhcp_failure = Err(eyre::eyre!("injected DHCP submission failure"));
+
+    // Supply a successful HBN result together with a DHCP error for the same response.
+    assert!(!current.record_reconciled_version(
+        &config,
+        Some(&config),
+        None,
+        true,
+        &Ok(true),
+        &dhcp_failure,
+    ));
+
+    // The unmatched `CurrentNetworkVersion` prevents a later iteration from skipping HBN.
+    assert!(!current.matches_versions_from(&config, None));
+}
+
+/// An obsolete HBN attempt clears `CurrentNetworkVersion` so a desired response that returns to the
+/// prior value cannot be skipped or acknowledged until HBN accepts it again.
+#[test]
+fn obsolete_hbn_attempt_invalidates_reverted_version_until_reapplied() {
+    // Record complete A, then change only an HBN-rendered deny prefix to produce B.
+    let config_a = comparison_network_config();
+    let mut config_b = config_a.clone();
+    config_b.deny_prefixes.push("198.51.100.0/24".to_string());
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&config_a, None);
+    assert!(current.matches_versions_from(&config_a, None));
+    let dhcp_success = Ok(false);
+
+    // A failure before HBN is attempted must retain `CurrentNetworkVersion` for response A.
+    let hbn_not_attempted = Err(eyre::eyre!("injected pre-HBN failure"));
+    assert!(!current.record_reconciled_version(
+        &config_b,
+        Some(&config_b),
+        None,
+        false,
+        &hbn_not_attempted,
+        &dhcp_success,
+    ));
+    assert!(current.matches_versions_from(&config_a, None));
+
+    // Complete attempted B only after the fetched desired response has returned to A.
+    assert!(!current.record_reconciled_version(
+        &config_b,
+        Some(&config_a),
+        None,
+        true,
+        &Ok(true),
+        &dhcp_success,
+    ));
+
+    // The cleared `CurrentNetworkVersion` forces returned A through HBN instead of skipping it.
+    assert!(!current.matches_versions_from(&config_a, None));
+
+    // A failed attempted reapply must leave A unacknowledged and `CurrentNetworkVersion` cleared.
+    let hbn_reapply_failure = Err(eyre::eyre!("injected HBN reapply failure"));
+    assert!(!current.record_reconciled_version(
+        &config_a,
+        Some(&config_a),
+        None,
+        true,
+        &hbn_reapply_failure,
+        &dhcp_success,
+    ));
+    assert!(!current.matches_versions_from(&config_a, None));
+
+    // Record A only after HBN and DHCP accept its still-current reapply.
+    assert!(current.record_reconciled_version(
+        &config_a,
+        Some(&config_a),
+        None,
+        true,
+        &Ok(true),
+        &dhcp_success,
+    ));
+    assert!(current.matches_versions_from(&config_a, None));
+}
+
+/// A successful completion for an older service response cannot acknowledge a newer response
+/// supplied as `latest`, including a MAC-only change that HBN itself does not render.
+#[test]
+fn stale_service_network_completion_cannot_become_current() {
+    // Change `latest.service_interfaces[0].mac_address` before supplying the older apply's results.
+    let applied = comparison_service_network_config();
+    let mut latest = applied.clone();
+    latest.service_interfaces[0].mac_address = "02:00:00:00:00:0a".to_string();
+    let mut current = CurrentNetworkVersion::default();
+
+    // Supply successful HBN and DHCP results for the older response after desired inputs change.
+    assert!(!current.record_reconciled_version(
+        &applied,
+        Some(&latest),
+        None,
+        true,
+        &Ok(true),
+        &Ok(true),
+    ));
+
+    // `CurrentNetworkVersion` matches neither the older applied response nor the supplied `latest` response.
+    assert!(!current.matches_versions_from(&applied, None));
+    assert!(!current.matches_versions_from(&latest, None));
 }
 
 /// FNN L2 rendering derives the SVI's IPv6 VRR address from the authoritative
@@ -1006,7 +1609,17 @@ impl NonHbnInputChange {
                         ..Default::default()
                     });
             }
-            Self::AstraConfig => config.astra_config = Some(rpc::AstraConfig::default()),
+            Self::AstraConfig => {
+                config.astra_config = Some(rpc::AstraConfig {
+                    multiplane_interfaces: vec![rpc::AstraMultiplaneInterface {
+                        logical_ifname: "eth_r2_p6".to_string(),
+                        cfg_maintenance_mode: Some(false),
+                        revision: "V2-T1791792000000000".to_string(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+            }
             Self::AdminNetworkTransition => config.use_admin_network_changed = Some(true),
         }
     }
@@ -1126,4 +1739,47 @@ async fn test_get_fabric_interfaces_data() {
     // should pass on any Linux host with real hardware or a virtualized PCI
     // network interface.
     // assert!(fabric_interfaces_data.len() > 0);
+}
+
+#[test]
+fn multiplane_delivery_preserves_optional_mode_without_attachments() {
+    use prost::Message;
+    for mode in [None, Some(true), Some(false)] {
+        let response = ManagedHostNetworkConfigResponse {
+            astra_config: Some(rpc::AstraConfig {
+                astra_attachments: Vec::new(),
+                is_attachment_config_present: Some(false),
+                is_maintenance_config_present: Some(true),
+                multiplane_interfaces: vec![rpc::AstraMultiplaneInterface {
+                    logical_ifname: "eth_r2_p6".to_string(),
+                    cfg_maintenance_mode: mode,
+                    reference: Some("https://tickets.example.com/SPX-42".to_string()),
+                    revision: "V2-T1791792000000000".to_string(),
+                }],
+            }),
+            ..Default::default()
+        };
+        let received =
+            ManagedHostNetworkConfigResponse::decode(response.encode_to_vec().as_slice()).unwrap();
+        let configuration = received.astra_config.unwrap();
+        assert!(configuration.astra_attachments.is_empty());
+        assert_eq!(configuration.is_attachment_config_present, Some(false));
+        assert_eq!(configuration.is_maintenance_config_present, Some(true));
+        assert_eq!(
+            configuration.multiplane_interfaces[0].cfg_maintenance_mode,
+            mode
+        );
+        assert_eq!(
+            configuration.multiplane_interfaces[0].logical_ifname,
+            "eth_r2_p6"
+        );
+        assert_eq!(
+            configuration.multiplane_interfaces[0].revision,
+            "V2-T1791792000000000"
+        );
+        assert_eq!(
+            configuration.multiplane_interfaces[0].reference.as_deref(),
+            Some("https://tickets.example.com/SPX-42")
+        );
+    }
 }

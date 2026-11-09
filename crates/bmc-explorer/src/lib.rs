@@ -44,8 +44,10 @@
 mod chassis;
 mod component_integrity;
 mod computer_system;
+mod drives;
 mod error;
 pub mod hw;
+mod identity;
 mod inventories;
 mod manager;
 mod network_adapter;
@@ -60,14 +62,17 @@ use std::time::Duration;
 use chassis::ExploredChassisCollection;
 use component_integrity::ExploredComponentIntegrity;
 use computer_system::ExploredComputerSystem;
+use drives::ExploredDrives;
 pub use error::Error;
+pub use identity::platform_identity;
 use inventories::ExploredInventories;
 use itertools::Itertools;
 use mac_address::MacAddress;
 use manager::ExploredManager;
 use model::site_explorer::{
     ComputerSystem, EndpointExplorationReport, EndpointType, InternalLockdownStatus,
-    LockdownStatus, MachineSetupDiff, MachineSetupStatus, derive_hardware_class,
+    LockdownStatus, MachineSetupDiff, MachineSetupStatus, ServiceRoot as ModelServiceRoot,
+    derive_hardware_class,
 };
 use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::computer_system::BootOption;
@@ -80,6 +85,9 @@ use nv_redfish::oem::lenovo::computer_system::{FpMode, PortSwitchingTo};
 use nv_redfish::oem::lenovo::manager::KcsState;
 use nv_redfish::oem::lenovo::security_service::FwRollbackState;
 use nv_redfish::oem::supermicro::Privilege as SupermicroPrivilege;
+use nv_redfish::schema::host_interface::{
+    AuthenticationMode, HostInterface as HostInterfaceSchema,
+};
 pub use nv_redfish::service_root::Product;
 use nv_redfish::service_root::Vendor;
 use nv_redfish::{Bmc, ServiceRoot};
@@ -101,6 +109,11 @@ pub struct Config<'a, B: Bmc> {
     pub boot_interface_mac: Option<MacAddress>,
     pub error_classifier: ErrorClassifier<'a, B>,
     pub retry_timeout: Duration,
+    /// Whether to read drive firmware versions from the primary system's
+    /// Storage subsystems and report each enabled drive with a usable model
+    /// and version as a `Drive_<Model>_<DriveId>` firmware inventory entry.
+    /// Costs one request per Storage subsystem and per drive.
+    pub explore_drive_firmware: bool,
 }
 
 pub fn is_bf4_product(product: Option<Product<&str>>) -> bool {
@@ -160,6 +173,7 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
 }
 
 /// Collects required resources, then converts them into an exploration report.
+#[tracing::instrument(name = "generate_exploration_report", skip_all)]
 pub async fn nv_generate_exploration_report<B: Bmc>(
     mut root: Arc<ServiceRoot<B>>,
     config: &Config<'_, B>,
@@ -170,13 +184,20 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let explored_inventories = ExploredInventories::explore(&root).await?;
     let explored_component_integrities = ExploredComponentIntegrity::explore(&root).await;
 
-    // Delta power shelves do not expose a `/redfish/v1/Systems` collection (and
-    // report no vendor in the service root, so nv-redfish fabricates the path
-    // and gets a 404). Detect them from the chassis and synthesize the report
-    // from chassis + manager data instead of fetching a ComputerSystem.
-    if explored_chassis.is_delta_powershelf() {
-        return build_delta_powershelf_report(
+    // Keep the temporary ComputerSystem compatibility for power shelves.
+    // Check the advertised link before calling systems(): older nv-redfish
+    // versions fetch an undeclared /Systems for these BMCs.
+    let powershelf_hw_type = if explored_chassis.is_delta_powershelf() {
+        Some(hw::HwType::DeltaPowerShelf)
+    } else if root.root.systems.is_none() && explored_chassis.is_liteon_powershelf() {
+        Some(hw::HwType::LiteonPowerShelf)
+    } else {
+        None
+    };
+    if let Some(hw_type) = powershelf_hw_type {
+        return build_powershelf_report(
             &root,
+            hw_type,
             explored_chassis,
             explored_inventories,
             explored_component_integrities,
@@ -269,6 +290,11 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     };
 
     let hw_type = hw_type(&root, explored_system, &explored_chassis);
+    let explored_drives = if config.explore_drive_firmware {
+        Some(ExploredDrives::explore(&explored_system.system).await)
+    } else {
+        None
+    };
     let linked_chassis_ids = explored_system.linked_chassis_ids();
     let has_system_mac_address = explored_system.has_usable_ethernet_mac_address();
     if should_use_network_adapter_port_fallback(
@@ -307,6 +333,10 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
                 need_host_interfaces: true,
                 ..Default::default()
             },
+            hw::HwType::GigaComputingAmi => manager::Config {
+                need_host_interfaces: true,
+                ..Default::default()
+            },
             hw::HwType::Supermicro => manager::Config {
                 need_host_interfaces: true,
                 need_oem_supermicro_kcs_interface: !is_mgx_c2,
@@ -328,6 +358,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
             // When needed Chassis Id is equal to System Id.
             Some(
                 hw::HwType::Ami
+                | hw::HwType::GigaComputingAmi
                 | hw::HwType::Dell
                 | hw::HwType::Hpe
                 | hw::HwType::Lenovo
@@ -413,7 +444,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let manager = explored_manager.to_model()?;
-    let service = explored_inventories.to_model(hw_type);
+    let service = explored_inventories.to_model(hw_type, explored_drives.as_ref());
     let hardware_class = hardware_class(&root, &systems[0]);
     let chassis = explored_chassis.to_model();
     let component_integrities = explored_component_integrities.to_model();
@@ -429,6 +460,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         component_integrities: component_integrities.entries,
         component_integrity_unavailable: component_integrities.unavailable,
         vendor: hw_type.and_then(|hw_type| hw_type.bmc_vendor()),
+        service_root: Some(service_root(&root)),
         hardware_class: Some(hardware_class),
         versions: HashMap::default(),
         model: None,
@@ -465,20 +497,17 @@ fn should_fetch_supplemental_network_adapter_ports(
     hw_type == Some(hw::HwType::Lenovo) && has_system_mac_address && !linked_chassis_ids.is_empty()
 }
 
-/// Builds an exploration report for a Delta power shelf.
+/// Builds a compatibility report for a power shelf without advertised Systems.
 ///
-/// Delta BMCs do not serve `/redfish/v1/Systems`, so the standard flow (which
-/// unconditionally fetches a `ComputerSystem`) fails with a 404. Here we skip
-/// that fetch and synthesize a `ComputerSystem` from the chassis, matching the
-/// behavior of the libredfish Delta power-shelf path.
-async fn build_delta_powershelf_report<B: Bmc>(
+/// The synthesized system is temporary until report consumers support power
+/// shelves with empty systems, matching the legacy Delta discovery behavior.
+async fn build_powershelf_report<B: Bmc>(
     root: &ServiceRoot<B>,
+    hw_type: hw::HwType,
     explored_chassis: ExploredChassisCollection<B>,
     explored_inventories: ExploredInventories<B>,
     explored_component_integrities: ExploredComponentIntegrity<B>,
 ) -> Result<EndpointExplorationReport, Error<B>> {
-    let hw_type = hw::HwType::DeltaPowerShelf;
-
     let manager = root
         .managers()
         .await
@@ -504,10 +533,11 @@ async fn build_delta_powershelf_report<B: Bmc>(
         managers: vec![explored_manager.to_model()?],
         systems: vec![system],
         chassis: explored_chassis.to_model(),
-        service: explored_inventories.to_model(Some(hw_type)),
+        service: explored_inventories.to_model(Some(hw_type), None),
         component_integrities: component_integrities.entries,
         component_integrity_unavailable: component_integrities.unavailable,
         vendor: hw_type.bmc_vendor(),
+        service_root: Some(service_root(root)),
         hardware_class: Some(hardware_class),
         versions: HashMap::default(),
         model: None,
@@ -527,6 +557,23 @@ async fn build_delta_powershelf_report<B: Bmc>(
 
 /// The class recorded for an endpoint: the host system's reported identity,
 /// with the service root standing in for the fields it left empty.
+/// The service root fields the report records.
+fn service_root<B: Bmc>(root: &ServiceRoot<B>) -> ModelServiceRoot {
+    ModelServiceRoot {
+        vendor: root.vendor().map(|vendor| vendor.into_inner().to_string()),
+        product: root
+            .product()
+            .map(|product| product.into_inner().to_string()),
+        oem_keys: root
+            .root
+            .oem
+            .as_ref()
+            .and_then(|oem| oem.additional_properties.as_object())
+            .map(|oem| oem.keys().cloned().collect())
+            .unwrap_or_default(),
+    }
+}
+
 fn hardware_class<B: Bmc>(root: &ServiceRoot<B>, system: &ComputerSystem) -> String {
     derive_hardware_class(
         Some(system),
@@ -577,6 +624,14 @@ pub(crate) fn hw_type<B: Bmc>(
         .or_else(|| (oem_id == Some("Supermicro")).then_some("Supermicro"))
         .and_then(|vendor_id| match vendor_id {
             "AMI" if system.raw().id == "DGX" => Some(hw::HwType::Viking),
+            "AMI"
+                if system
+                    .hardware_id()
+                    .manufacturer
+                    .is_some_and(|m| m.into_inner().eq_ignore_ascii_case("Giga Computing")) =>
+            {
+                Some(hw::HwType::GigaComputingAmi)
+            }
             "AMI" => Some(hw::HwType::Ami),
             "Dell" => Some(hw::HwType::Dell),
             "Lenovo" if oem_id == Some("Ami") => Some(hw::HwType::LenovoAmi),
@@ -685,6 +740,17 @@ fn lockdown_status<B: Bmc>(
                 _ => Ok(InternalLockdownStatus::Partial),
             }
             .map(|status| Some(LockdownStatus { status, message }))
+        }
+
+        hw::HwType::GigaComputingAmi => {
+            let host_interfaces = explored_manager
+                .host_interfaces
+                .as_ref()
+                .ok_or_else(Error::bmc_not_provided("host interfaces"))?
+                .iter()
+                .map(|hi| hi.raw())
+                .collect::<Vec<_>>();
+            Ok(Some(giga_computing_ami_lockdown_status(&host_interfaces)))
         }
 
         hw::HwType::Dell => {
@@ -916,6 +982,68 @@ fn lockdown_status<B: Bmc>(
     }
 }
 
+/// WARNING: KCS is not represented: it is neither configurable nor readable over
+/// Redfish on this platform, so `Enabled` means "every path we can see is
+/// closed", not "the host cannot reach the BMC".
+fn giga_computing_ami_lockdown_status(
+    host_interfaces: &[Arc<HostInterfaceSchema>],
+) -> LockdownStatus {
+    let verdicts = host_interfaces
+        .iter()
+        .map(|hi| {
+            // If the BMC does not report InterfaceEnabled (property absent or null)
+            // the code assumes the interface is open.
+            let interface = hi.interface_enabled.flatten().unwrap_or(true);
+            // auth_none answers "can the host talk to the BMC without credentials?"
+            // true only if the list contains AuthNone or AuthenticationMode is absent.
+            let auth_none = hi
+                .authentication_modes
+                .as_ref()
+                .is_none_or(|modes| modes.contains(&AuthenticationMode::AuthNone));
+            // Credential bootstrapping is a Redfish feature (DMTF DSP0270, Host Interface spec)
+            // that lets the OS on the host create its own BMC account without knowing any password.
+            // bootstrap == true means "the host can still obtain a BMC admin account on its own"
+            let bootstrap = hi
+                .credential_bootstrapping
+                .as_ref()
+                .and_then(|cb| cb.enabled.flatten())
+                .unwrap_or(true);
+            (interface, auth_none, bootstrap)
+        })
+        .collect::<Vec<_>>();
+
+    let message = if verdicts.is_empty() {
+        "no host interfaces found".to_string()
+    } else {
+        verdicts
+            .iter()
+            .map(|(interface, auth_none, bootstrap)| {
+                format!(
+                    "host_interface={interface}, auth_none={auth_none}, cred_bootstrap={bootstrap}"
+                )
+            })
+            .join("; ")
+    } + "; KCS not exposed via Redfish on this platform (state unknown)";
+
+    let is_locked = !verdicts.is_empty()
+        && verdicts
+            .iter()
+            .all(|(interface, auth_none, bootstrap)| !interface && !auth_none && !bootstrap);
+    let is_unlocked = !verdicts.is_empty()
+        && verdicts
+            .iter()
+            .all(|(interface, auth_none, bootstrap)| *interface && *auth_none && *bootstrap);
+
+    let status = if is_locked {
+        InternalLockdownStatus::Enabled
+    } else if is_unlocked {
+        InternalLockdownStatus::Disabled
+    } else {
+        InternalLockdownStatus::Partial
+    };
+    LockdownStatus { status, message }
+}
+
 fn machine_setup_status<B: Bmc>(
     hw_type: &hw::HwType,
     explored_manager: &ExploredManager<B>,
@@ -940,6 +1068,18 @@ fn machine_setup_status<B: Bmc>(
         hw::HwType::DeltaPowerShelf => (),
         hw::HwType::NvSwitch => (),
         hw::HwType::Sushy => (),
+        hw::HwType::GigaComputingAmi => {
+            diffs.extend(
+                hw::giga_computing_ami::EXPECTED_BIOS_ATTRS
+                    .iter()
+                    .flat_map(|expected| explored_system.verify_bios_attr(expected)),
+            );
+            if let Some(mac) = boot_interface_mac
+                && let Some(diff) = explored_system.check_boot_by_uefi_prefix(mac)
+            {
+                diffs.push(diff)
+            }
+        }
         hw::HwType::Viking => {
             diffs.extend(
                 hw::viking::EXPECTED_BIOS_ATTRS
@@ -1358,9 +1498,74 @@ mod tests {
 
     use super::hw::HwType;
     use super::{
-        Product, is_bf4_product, should_fetch_bf4_chassis_except_irot_nic,
-        should_fetch_supplemental_network_adapter_ports, should_use_network_adapter_port_fallback,
+        InternalLockdownStatus, Product, giga_computing_ami_lockdown_status, is_bf4_product,
+        should_fetch_bf4_chassis_except_irot_nic, should_fetch_supplemental_network_adapter_ports,
+        should_use_network_adapter_port_fallback,
     };
+
+    /// Build a host interface schema from the JSON a Giga Computing BMC returns
+    /// for `Managers/Self/HostInterfaces/Self`, keeping only the lockdown fields.
+    fn giga_host_interface(json: serde_json::Value) -> std::sync::Arc<super::HostInterfaceSchema> {
+        let mut json = json;
+        json.as_object_mut().expect("object").extend([
+            (
+                "@odata.id".to_string(),
+                serde_json::json!("/redfish/v1/Managers/Self/HostInterfaces/Self"),
+            ),
+            ("Id".to_string(), serde_json::json!("Self")),
+            ("Name".to_string(), serde_json::json!("Host Interface")),
+        ]);
+        std::sync::Arc::new(serde_json::from_value(json).expect("valid HostInterface"))
+    }
+
+    #[test]
+    fn giga_computing_ami_lockdown_status_requires_every_redfish_path_closed() {
+        value_scenarios!(run = |interfaces: Vec<serde_json::Value>| {
+            let interfaces = interfaces.into_iter().map(giga_host_interface).collect::<Vec<_>>();
+            giga_computing_ami_lockdown_status(&interfaces).status
+        };
+            "interface disabled, AuthNone dropped, bootstrapping off" {
+                vec![serde_json::json!({
+                    "InterfaceEnabled": false,
+                    "AuthenticationModes": ["RedfishSessionAuth"],
+                    "CredentialBootstrapping": {"Enabled": false},
+                })] => InternalLockdownStatus::Enabled,
+            }
+            "factory state: everything open" {
+                vec![serde_json::json!({
+                    "InterfaceEnabled": true,
+                    "AuthenticationModes": ["AuthNone", "BasicAuth", "RedfishSessionAuth"],
+                    "CredentialBootstrapping": {"Enabled": true},
+                })] => InternalLockdownStatus::Disabled,
+            }
+            "interface disabled but bootstrapping still on (older lockdown)" {
+                vec![serde_json::json!({
+                    "InterfaceEnabled": false,
+                    "AuthenticationModes": ["RedfishSessionAuth"],
+                    "CredentialBootstrapping": {"Enabled": true},
+                })] => InternalLockdownStatus::Partial,
+            }
+            "interface disabled but AuthNone still allowed" {
+                vec![serde_json::json!({
+                    "InterfaceEnabled": false,
+                    "AuthenticationModes": ["AuthNone"],
+                    "CredentialBootstrapping": {"Enabled": false},
+                })] => InternalLockdownStatus::Partial,
+            }
+            "absent properties read as open" {
+                vec![serde_json::json!({})] => InternalLockdownStatus::Disabled,
+            }
+            "absent bootstrapping block reads as open even when the rest is shut" {
+                vec![serde_json::json!({
+                    "InterfaceEnabled": false,
+                    "AuthenticationModes": ["RedfishSessionAuth"],
+                })] => InternalLockdownStatus::Partial,
+            }
+            "no host interfaces at all is not lockdown" {
+                Vec::<serde_json::Value>::new() => InternalLockdownStatus::Partial,
+            }
+        );
+    }
 
     #[test]
     fn is_bf4_product_matches_bf4_service_root_products() {

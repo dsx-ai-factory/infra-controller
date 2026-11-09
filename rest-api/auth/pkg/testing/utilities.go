@@ -204,8 +204,15 @@ func (h *MockServerHelper) createJWKMap(key interface{}, keyID, algorithm, use s
 	case *ecdsa.PublicKey:
 		jwkMap["kty"] = "EC"
 		jwkMap["crv"] = getCurveName(k.Curve)
-		jwkMap["x"] = EncodeBase64URLBigInt(k.X)
-		jwkMap["y"] = EncodeBase64URLBigInt(k.Y)
+		encoded, err := k.Bytes()
+		assert.NoError(h.t, err)
+		if err != nil {
+			return nil
+		}
+		coordinateLen := (len(encoded) - 1) / 2
+		// Preserve the helper's existing minimal-width coordinate encoding.
+		jwkMap["x"] = EncodeBase64URLBigInt(new(big.Int).SetBytes(encoded[1 : 1+coordinateLen]))
+		jwkMap["y"] = EncodeBase64URLBigInt(new(big.Int).SetBytes(encoded[1+coordinateLen:]))
 	}
 
 	return jwkMap

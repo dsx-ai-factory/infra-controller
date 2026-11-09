@@ -56,6 +56,7 @@ tokio = { features = ["full"], workspace = true }
 tokio-stream = { workspace = true }
 tonic = { workspace = true }
 hyper-util = { features = ["tokio"], workspace = true }
+http-body-util = { workspace = true }
 tower = { features = ["util"], workspace = true }
 reqwest = { features = ["rustls"], workspace = true }
 reqwest-middleware = { workspace = true }
@@ -98,6 +99,7 @@ url = { workspace = true }
 # Internal
 carbide-libmlx-model = { path = "../libmlx-model" }
 carbide-rpc = { path = "../rpc" }
+carbide-tls = { path = "../tls" }
 carbide-uuid = { path = "../uuid" }
 carbide-ssh = { path = "../ssh" }
 
@@ -106,10 +108,14 @@ serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9"
 
 [dev-dependencies]
+rustls = { workspace = true }
+axum = { workspace = true }
+rcgen = { workspace = true }
 carbide-libmlx-model = { path = "../libmlx-model", features = ["test-support"] }
 carbide-ssh = { path = "../ssh", features = ["test_support"] }
 carbide-test-support = { path = "../test-support" }
 russh = { workspace = true }
+tokio = { features = ["test-util"], workspace = true }
 
 [features]
 #default = ["mockdpa"]

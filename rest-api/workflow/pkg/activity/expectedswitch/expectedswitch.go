@@ -64,7 +64,7 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 
 	// Ensure Site exists
 	stDAO := cdbm.NewSiteDAO(mei.dbSession)
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("received inventory for unknown or deleted Site")
@@ -149,6 +149,7 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 				Description:           reported.Description,
 				NvosMacAddresses:      reported.NvosMacAddresses,
 				NvosPrimaryMacAddress: reported.NvosPrimaryMacAddress,
+				NvosIpAddress:         reported.NvosIpAddress,
 				Labels:                reported.Labels,
 				CreatedBy:             siteID, /* This would normally be a user ID, but that isn't something NICo provides */
 			})
@@ -185,6 +186,7 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 			(reported.Description != nil && !util.PtrsEqual(cur.Description, reported.Description)) ||
 			!slices.Equal(cur.NvosMacAddresses, reported.NvosMacAddresses) ||
 			!util.PtrsEqual(cur.NvosPrimaryMacAddress, reported.NvosPrimaryMacAddress) ||
+			!util.PtrsEqual(cur.NvosIpAddress, reported.NvosIpAddress) ||
 			!maps.Equal(cur.Labels, reported.Labels) {
 			uerr := cdb.WithTx(ctx, mei.dbSession, func(tx *cdb.Tx) error {
 				// Lock and re-read before writing so an API change after the
@@ -197,7 +199,7 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 					return nil
 				}
 
-				if _, uerr := esDAO.Update(ctx, tx, cdbm.ExpectedSwitchUpdateInput{
+				_, uerr := esDAO.Update(ctx, tx, cdbm.ExpectedSwitchUpdateInput{
 					ExpectedSwitchID:      cur.ID,
 					BmcMacAddress:         &reported.BmcMacAddress,
 					SwitchSerialNumber:    &reported.SwitchSerialNumber,
@@ -207,20 +209,22 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 					Description:           reported.Description,
 					NvosMacAddresses:      reported.NvosMacAddresses,
 					NvosPrimaryMacAddress: reported.NvosPrimaryMacAddress,
+					NvosIpAddress:         reported.NvosIpAddress,
 					Labels:                reported.Labels,
-				}); uerr != nil {
+				})
+				if uerr != nil {
 					return uerr
 				}
 
-				// Update preserves the stored primary when the selector is nil,
-				// so a reconcile that reports no primary (a switch with no
-				// ports) must clear it explicitly instead of leaving the stale
-				// selector behind.
-				if reported.NvosPrimaryMacAddress == nil {
-					if _, cerr := esDAO.Clear(ctx, tx, cdbm.ExpectedSwitchClearInput{
+				// Update preserves nil values, so explicitly clear NVOS fields
+				// removed from Core's authoritative interface configuration.
+				if reported.NvosPrimaryMacAddress == nil || reported.NvosIpAddress == nil {
+					_, cerr := esDAO.Clear(ctx, tx, cdbm.ExpectedSwitchClearInput{
 						ExpectedSwitchID:      cur.ID,
-						NvosPrimaryMacAddress: true,
-					}); cerr != nil {
+						NvosPrimaryMacAddress: reported.NvosPrimaryMacAddress == nil,
+						NvosIpAddress:         reported.NvosIpAddress == nil,
+					})
+					if cerr != nil {
 						return cerr
 					}
 				}

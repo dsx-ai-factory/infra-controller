@@ -41,6 +41,7 @@ impl IntoLibredfish<libredfish::model::update_service::ComponentType> for Firmwa
             FirmwareComponentType::CombinedBmcUefi => ComponentType::Unknown,
             FirmwareComponentType::Gpu => ComponentType::Unknown,
             FirmwareComponentType::Cx7 => ComponentType::Unknown,
+            FirmwareComponentType::Drive { .. } => ComponentType::Unknown,
             FirmwareComponentType::Unknown => ComponentType::Unknown,
         }
     }
@@ -163,6 +164,7 @@ pub fn bmc_vendor(r: libredfish::model::service_root::RedfishVendor) -> BMCVendo
         RedfishVendor::Hpe => BMCVendor::Hpe,
         RedfishVendor::Lenovo => BMCVendor::Lenovo,
         RedfishVendor::LenovoAMI | RedfishVendor::LenovoGB300 => BMCVendor::LenovoAMI,
+        RedfishVendor::GigaComputingAMI => BMCVendor::GigaComputing,
         RedfishVendor::LiteOnPowerShelf => BMCVendor::Liteon,
         RedfishVendor::DeltaPowerShelf => BMCVendor::Delta,
         RedfishVendor::Supermicro => BMCVendor::Supermicro,
@@ -223,6 +225,7 @@ mod tests {
                 RedfishVendor::Lenovo => BMCVendor::Lenovo,
                 RedfishVendor::LenovoAMI => BMCVendor::LenovoAMI,
                 RedfishVendor::LenovoGB300 => BMCVendor::LenovoAMI,
+                RedfishVendor::GigaComputingAMI => BMCVendor::GigaComputing,
                 RedfishVendor::LiteOnPowerShelf => BMCVendor::Liteon,
                 RedfishVendor::DeltaPowerShelf => BMCVendor::Delta,
                 RedfishVendor::Supermicro => BMCVendor::Supermicro,

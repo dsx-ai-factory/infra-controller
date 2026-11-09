@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"slices"
 	"strings"
@@ -53,6 +54,7 @@ const (
 	// HealthAlertClassification::prevent_allocations() in
 	// crates/health-report/src/lib.rs.
 	classificationPreventAllocations = "PreventAllocations"
+	classificationRackLeak           = "RackLeak"
 
 	// flowFindByIDsBatchSize bounds the number of full protobuf resources Flow
 	// retains in one detail-lookup batch. Core's max_find_by_ids remains the
@@ -409,6 +411,46 @@ func (c *grpcClient) GetPowerShelves(ctx context.Context) ([]ObservedControllerD
 		return nil, fmt.Errorf("FindPowerShelvesByIds for actual inventory: %w", err)
 	}
 	return result, nil
+}
+
+// GetLeakingRackIds retrieves IDs of racks whose aggregate health contains an
+// active RackLeak classification. The ID and detail RPCs receive independent
+// timeout budgets so a slow ID lookup cannot starve the batched health lookup.
+func (c *grpcClient) GetLeakingRackIds(ctx context.Context) ([]string, error) {
+	idsCtx, idsCancel := context.WithTimeout(ctx, c.grpcTimeout)
+	idsResponse, err := c.gclient.FindRackIds(idsCtx, &corev1.RackSearchFilter{})
+	idsCancel()
+	if err != nil {
+		return nil, fmt.Errorf("FindRackIds for leak detection: %w", err)
+	}
+
+	rackIDs := idsResponse.GetRackIds()
+	if len(rackIDs) == 0 {
+		return []string{}, nil
+	}
+
+	detailsCtx, detailsCancel := context.WithTimeout(ctx, c.grpcTimeout)
+	defer detailsCancel()
+	request := &corev1.RacksByIdsRequest{RackIds: rackIDs}
+	leakingRackIDs := make([]string, 0, len(rackIDs))
+	err = c.gclient.visitRackBatchesAllowPartial(detailsCtx, request, func(batch []*corev1.Rack) error {
+		for _, rack := range batch {
+			health := rack.GetStatus().GetHealth()
+			for _, alert := range health.GetAlerts() {
+				if slices.Contains(alert.GetClassifications(), classificationRackLeak) {
+					leakingRackIDs = append(leakingRackIDs, rack.GetId().GetId())
+					break
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("FindRacksByIds for leak detection: %w", err)
+	}
+
+	slices.Sort(leakingRackIDs)
+	return leakingRackIDs, nil
 }
 
 // GetLeakingMachineIds retrieves IDs of all machines which are leaking and are powered on.
@@ -969,11 +1011,11 @@ func (c *grpcClient) FindSwitchRuntimeStatuses(ctx context.Context, switchIds []
 	return result, nil
 }
 
-// FindSwitchNvosIPs returns the resolved NVOS host IP for each given switch,
-// keyed by Core SwitchId. Core resolves nvos_info from the expected switch's
-// NVOS MAC and its assigned interface address, and only populates it once both
-// are known, so switches without a resolved NVOS endpoint are omitted.
-func (c *grpcClient) FindSwitchNvosIPs(ctx context.Context, switchIds []string) (map[string]string, error) {
+// FindSwitchNvosPorts returns every observed NVOS port from status.nvos_ports.
+// It preserves Core's port and address ordering. An empty port list falls back to
+// legacy nvos_info when available. Without either port source, a present status
+// returns an empty slice; a missing status omits the switch.
+func (c *grpcClient) FindSwitchNvosPorts(ctx context.Context, switchIds []string) (map[string][]SwitchNvosPort, error) {
 	if len(switchIds) == 0 {
 		return nil, nil
 	}
@@ -988,19 +1030,69 @@ func (c *grpcClient) FindSwitchNvosIPs(ctx context.Context, switchIds []string) 
 		req.SwitchIds = append(req.SwitchIds, &corev1.SwitchId{Id: id})
 	}
 
-	result := make(map[string]string, len(switchIds))
-	if err := c.gclient.visitSwitchBatches(ctx, req, func(batch []*corev1.Switch) error {
+	result := make(map[string][]SwitchNvosPort, len(switchIds))
+	err := c.gclient.visitSwitchBatches(ctx, req, func(batch []*corev1.Switch) error {
 		for _, sw := range batch {
 			sid := sw.GetId().GetId()
 			if sid == "" {
 				continue
 			}
-			if ip := sw.GetNvosInfo().GetIp(); ip != "" { //nolint:staticcheck // Older Core servers return the NVOS address in this field.
-				result[sid] = ip
+			nvosPorts := sw.GetStatus().GetNvosPorts()
+			legacy := sw.GetNvosInfo() //nolint:staticcheck // Older Core populates status but omits nvos_ports.
+			if len(nvosPorts) == 0 && legacy != nil {
+				port := SwitchNvosPort{
+					MAC:         legacy.Mac,
+					ServicePort: legacy.Port,
+					Addresses:   []IPAddress{},
+					IsPrimary:   true,
+				}
+				if legacy.GetIp() != "" {
+					family := corev1.AddressFamily_ADDRESS_FAMILY_UNSPECIFIED
+					ip := net.ParseIP(legacy.GetIp())
+					switch {
+					case ip.To4() != nil:
+						family = corev1.AddressFamily_ADDRESS_FAMILY_V4
+					case ip != nil:
+						family = corev1.AddressFamily_ADDRESS_FAMILY_V6
+					}
+					port.Addresses = append(port.Addresses, IPAddress{
+						AddressFamily: family.String(),
+						Address:       legacy.GetIp(),
+					})
+				}
+				result[sid] = []SwitchNvosPort{port}
+				continue
 			}
+			if sw.GetStatus() == nil {
+				continue
+			}
+			ports := make([]SwitchNvosPort, 0, len(nvosPorts))
+			for _, port := range nvosPorts {
+				if port == nil {
+					continue
+				}
+				addresses := make([]IPAddress, 0, len(port.GetAddresses()))
+				for _, address := range port.GetAddresses() {
+					if address == nil {
+						continue
+					}
+					addresses = append(addresses, IPAddress{
+						AddressFamily: address.GetAddressFamily().String(),
+						Address:       address.GetAddress(),
+					})
+				}
+				ports = append(ports, SwitchNvosPort{
+					MAC:         port.Mac,
+					ServicePort: port.ServicePort,
+					Addresses:   addresses,
+					IsPrimary:   port.GetIsPrimary(),
+				})
+			}
+			result[sid] = ports
 		}
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, fmt.Errorf("FindSwitchesByIds: %w", err)
 	}
 	return result, nil
@@ -2000,6 +2092,10 @@ func (c *grpcClient) SetLeakingMachineIds(ids []string) {
 	panic("Not a unit test")
 }
 
+func (c *grpcClient) SetLeakingRackIds(ids []string) {
+	panic("Not a unit test")
+}
+
 func (c *grpcClient) SetLeakingSwitchIds(ids []string) {
 	panic("Not a unit test")
 }
@@ -2016,7 +2112,7 @@ func (c *grpcClient) SetSwitchControllerState(switchID, state string) {
 	panic("Not a unit test")
 }
 
-func (c *grpcClient) SetSwitchNvosIP(switchID, ip string) {
+func (c *grpcClient) SetSwitchNvosPorts(switchID string, ports []SwitchNvosPort) {
 	panic("Not a unit test")
 }
 

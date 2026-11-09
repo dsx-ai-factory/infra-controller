@@ -148,6 +148,7 @@ async fn start_libvirt_app(
             ..MachineRouterOptions::default()
         },
     );
+    let state = Arc::new(state);
     actor.run(&state, &mut backend_tasks, stop).await?;
     let _ipmi = if bmc_behaviour.enable_ipmi_simulation {
         Some(bmc_mock::ipmi_sim::start(&state, ipmi_sim_config(), None).await?)
@@ -215,6 +216,7 @@ async fn start_mock_app(
             },
         )
     };
+    let state = Arc::new(state);
     actor.run(&state, &mut backend_tasks, stop);
     let _ipmi = if bmc_behaviour.enable_ipmi_simulation {
         Some(bmc_mock::ipmi_sim::start(&state, ipmi_sim_config(), None).await?)
@@ -349,6 +351,7 @@ impl LibvirtArgs {
                 ("Cd".to_string(), "sdb".to_string()),
                 ("ConfigCd".to_string(), "sdc".to_string()),
             ]),
+            restart_loads_persistent_definition: false,
         }
     }
 }

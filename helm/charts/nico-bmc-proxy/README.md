@@ -51,6 +51,46 @@ to it. Set the `[carbide_api]` table there instead, with all four keys as in the
 [Configuring ACLs](#configuring-acls). Without that table, the proxy dials its built-in default,
 `https://nico-api.nico-system.svc.cluster.local:1079`.
 
+## Switch Client TLS
+
+When switches' NVUE REST API requires a client certificate (NVUE mTLS), `switchTls` gives the
+proxy its own. It is disabled by default. Enabled, the chart:
+
+- creates a cert-manager `Certificate` named `switchTls.name` from `switchTls.issuerRef`, with the
+  `digital signature` and `client auth` usages and the URI SANs in `switchTls.uris`, which must
+  list at least one;
+- mounts its Secret, `switchTls.secretName`, read-only at `switchTls.mountPath`; and
+- sets all four keys of the proxy's [`tls.switch`](../../../crates/bmc-proxy/README.md#tlsswitch)
+  through `NICO_BMC_PROXY__TLS__SWITCH__*` environment variables: the CA bundle from
+  `switchTls.caCertPath`, the client certificate and key from `tls.crt` and `tls.key` under
+  `switchTls.mountPath`, and `tls_server_name` from `switchTls.tlsServerName`, which, empty,
+  unsets the name.
+
+```yaml
+switchTls:
+  enabled: true
+  uris:
+    - spiffe://<trust-domain>/<nico-namespace>/sa/nico-bmc-proxy-switch
+  tlsServerName: switches.example.internal
+```
+
+The issuer must be the site's switch issuer, whose CA the switches trust for client certificates,
+and the switches' client policy must allow the URI identity. The issuer and any cert-manager
+approver policy must allow the identity, duration, key profile, and usages.
+
+`switchTls.caCertPath` defaults to `/var/run/secrets/nico-roots/ca.crt`, the site root the chart
+mounts from `Secret/nico-roots`. It must validate the switches' server certificates. The chart
+adds no other CA volume; if the switches use another CA, provide that mount through the
+surrounding deployment mechanism. Leave `switchTls.tlsServerName` empty when every switch's
+certificate carries its IP.
+
+The environment variables take precedence over the TOML, so with `switchTls` enabled they also
+override any `[tls.switch]` keys in a `configFiles.nicoBmcProxyConfig` override. With `switchTls`
+disabled, the chart sets none of them, and a `[tls.switch]` table in that override still applies,
+with files the deployment must provide. cert-manager renewals reach the mounted files, and the
+proxy checks them on the first request to a switch at least five minutes after its last check, in
+the background, reloading them when they changed, so a renewal needs no restart.
+
 ## Configuring ACLs
 
 The proxy authorizes requests with the `[auth.acls]` section in `nico-bmc-proxy.toml`.

@@ -95,7 +95,15 @@ pub mod test_support;
 pub mod tls;
 
 pub use bmc_state::{BmcEvent, BmcState};
-pub use carbide_axum_utils::authority_router::authority_router as combined_router;
+/// Builds the authority-based router from shared device routes.
+/// Registry wrappers can retain ownership metadata while exposing these routes.
+pub fn combined_router(
+    routes: impl Into<
+        std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, axum::Router>>>,
+    >,
+) -> axum::Router {
+    carbide_axum_utils::authority_router::authority_router(routes.into())
+}
 pub use carbide_axum_utils::injection;
 pub use combined_server::{CombinedServer, ListenerOrAddress};
 pub use http::redfish_error_envelope;
@@ -105,9 +113,10 @@ pub use machine_info::{
     MachineInfo,
 };
 pub use mock_machine_router::{
-    EventServiceOverride, MachineRouterOptions, machine_router, machine_router_with_injection_store,
+    EventServiceOverride, MachineRouterOptions, machine_router, machine_router_with_extension,
+    machine_router_with_injection_store,
 };
-pub use nv_redfish::schema::resource::ResetType as ResourceResetType;
+pub use nv_redfish::schema::resource::{PowerState, ResetType as ResourceResetType};
 /// A switch's NVUE REST API, served at its NVOS address, and the simulation
 /// controls over what it reports.
 pub use nvue::{
@@ -121,8 +130,12 @@ pub use redfish::account_service::AccountServiceState;
 pub use redfish::event_service::{
     EventServiceConfig, EventServiceError, EventServiceLimits, EventServiceState, EventServiceStats,
 };
+pub use redfish::update_service::{
+    BmcTaskState, DpuOsImage, DpuOsStatus, DpuOsStatusSource, UnknownBmcTaskState,
+};
 pub use redfish::virtual_media::{
-    DeviceConfig as VirtualMediaDeviceConfig, VirtualMediaContents, VirtualMediaUpdate,
+    DeviceConfig as VirtualMediaDeviceConfig, VirtualMediaContents, VirtualMediaDrive,
+    VirtualMediaGuard, VirtualMediaUpdate,
 };
 pub use sse::StreamStep;
 
@@ -242,6 +255,29 @@ impl HardwareType {
             Self::GenericSupermicro => None,
         }
     }
+
+    /// Whether the BMC answers 403 outside AccountService while the
+    /// credentials used are still the factory default, as BMCs that force a
+    /// password change on first use do. HPE iLO and the power shelves serve
+    /// every resource with their factory credentials. The other profiles keep
+    /// the stricter behavior.
+    pub(crate) fn bmc_requires_factory_password_change(&self) -> bool {
+        match self {
+            Self::HpeProliantDl380aGen11 | Self::LiteOnPowerShelf | Self::DeltaPowerShelf => false,
+            Self::DellPowerEdgeR750
+            | Self::DellPowerEdgeR760Bf4
+            | Self::WiwynnGB200Nvl
+            | Self::LenovoGB300Nvl
+            | Self::NvidiaDgxGb300
+            | Self::SupermicroGb300Nvl
+            | Self::NvidiaDgxVr
+            | Self::NvidiaSwitchNd5200Ld
+            | Self::NvidiaSwitchN5700Ld
+            | Self::NvidiaDgxH100
+            | Self::GenericAmi
+            | Self::GenericSupermicro => true,
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -255,12 +291,73 @@ pub enum ActionError {
 // Simulate a 5-second power cycle
 pub const POWER_CYCLE_DELAY: Duration = Duration::from_secs(5);
 
+/// A physical effect that a BMC action has on the device behind the BMC, beyond the
+/// Redfish state the BMC itself serves.
+///
+/// This is the contract between bmc-mock and the backend that owns the simulated
+/// device (for example machine-a-tron's power actors). bmc-mock validates the
+/// request and reports the effect through [`Callbacks::device_effect`]. The backend
+/// applies it to everything the real action would reach, and the BMC then serves
+/// the observed result back through its usual state, such as the system `PowerState`.
+///
+/// Add a variant for each action whose effect leaves the BMC. The enum is not
+/// `non_exhaustive`: a new variant must fail to compile in every backend until it
+/// decides what the effect means for its device.
+#[derive(Debug)]
+pub enum DeviceEffect {
+    /// Chassis AC power cycle (`NvidiaChassis.AuxPowerReset` with `ResetType`
+    /// `AuxPowerCycle`). It drops all power to the compute tray, so the host and
+    /// every DPU in it lose power together. The backend applies it whatever the
+    /// current power state is, and it leaves the device `Off`: the BMC has no power
+    /// restore policy of its own, and the controller powers the host on again.
+    AuxPowerCycle,
+    /// Restore BMC factory accounts and restart BMC DHCP without changing system power.
+    /// The backend owns the update and admits DHCP recovery before reporting success.
+    ResetBmcToDefaults(BmcResetUpdate),
+}
+
+/// An owned, serialized BMC factory reset. Dropping it before commit changes no state.
+/// Transfer it to the device actor so an HTTP cancellation cannot interrupt publication.
+pub struct BmcResetUpdate {
+    apply: futures::future::BoxFuture<'static, Result<Duration, ActionError>>,
+}
+
+impl fmt::Debug for BmcResetUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BmcResetUpdate").finish_non_exhaustive()
+    }
+}
+
+impl BmcResetUpdate {
+    /// Synchronizes attached password backends, restores accounts, invalidates sessions
+    /// and starts the BMC outage. Returns the delay before BMC DHCP should resume.
+    pub async fn commit(self) -> Result<Duration, ActionError> {
+        self.apply.await
+    }
+}
+
 /// Backend operations for one BMC, selected by the router's concrete callback type.
 pub trait Callbacks: Send + Sync + 'static {
     fn computer_system_reset(
         &self,
         reset_type: ResourceResetType,
     ) -> impl Future<Output = Result<(), ActionError>> + Send;
+
+    /// Accepts a [`DeviceEffect`] into the owning device's execution path.
+    /// Chassis power may complete asynchronously after acceptance. Factory reset
+    /// must publish BMC state and admit actor-owned DHCP recovery before reporting
+    /// success. Callers observe the result through the state the BMC serves.
+    ///
+    /// The default rejects every effect, so a backend that does not model the
+    /// device fails the action instead of answering success without an effect.
+    fn device_effect(
+        &self,
+        effect: DeviceEffect,
+    ) -> impl Future<Output = Result<(), ActionError>> + Send {
+        std::future::ready(Err(ActionError::BadRequest(eyre::eyre!(
+            "bmc-mock: backend does not support device effect {effect:?}"
+        ))))
+    }
 
     /// Applies one virtual-media operation before reporting success.
     ///

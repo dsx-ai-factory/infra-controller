@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_test_support::{Check, check_values};
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use carbide_uuid::network::NetworkSegmentId;
 use model::allocation_type::AllocationType;
@@ -30,6 +31,45 @@ use model::network_segment::{
 use super::*;
 use crate as db;
 use crate::test_support::postgres::wait_for_blocked_query;
+
+#[test]
+fn admin_lock_admission_permit_count_prefers_the_configuration() {
+    check_values(
+        [
+            Check {
+                scenario: "the configured value wins over the environment",
+                input: (Some(32), Some("8")),
+                expect: 32,
+            },
+            Check {
+                scenario: "the environment applies when nothing is configured",
+                input: (None, Some("8")),
+                expect: 8,
+            },
+            Check {
+                scenario: "an unparsable environment value falls back to the default",
+                input: (None, Some("many")),
+                expect: 16,
+            },
+            Check {
+                scenario: "nothing set gives the default",
+                input: (None, None),
+                expect: 16,
+            },
+            Check {
+                scenario: "zero from the environment would deadlock every gated flow and becomes one",
+                input: (None, Some("0")),
+                expect: 1,
+            },
+            Check {
+                scenario: "a value above the ceiling from the environment is clamped",
+                input: (None, Some("1000")),
+                expect: 256,
+            },
+        ],
+        |(configured, environment)| admin_lock_admission_permit_count(configured, environment),
+    );
+}
 
 async fn create_static_assignments_segment(
     pool: &sqlx::PgPool,
@@ -660,6 +700,37 @@ async fn reconcile_interface_segment_preserves_static_assignment_lookup_failure(
         assert_eq!(interface.hostname, original.hostname, "{source}");
         assert_eq!(interface.addresses, original.addresses, "{source}");
     }
+    Ok(())
+}
+
+// The DHCP handler normally rejects an unknown DHCPv6 relay before this
+// helper runs, so exercise the helper's own guard directly.
+#[crate::sqlx_test]
+async fn observed_dhcp_unknown_relay_is_failed_precondition(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = db::Transaction::begin(&pool).await?;
+    let error = find_or_create_observed_machine_interface(
+        txn.as_pgconn(),
+        None,
+        "02:00:00:00:71:04".parse()?,
+        &["2001:db8:dead::1".parse()?],
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("an unknown relay should not create an observed interface");
+
+    assert!(
+        matches!(
+            &error,
+            DatabaseError::FailedPrecondition(message)
+                if message.starts_with("No network segment defined for relay addresses")
+        ),
+        "{error:?}"
+    );
+
     Ok(())
 }
 

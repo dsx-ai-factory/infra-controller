@@ -319,12 +319,11 @@ async fn certificate_jobs_progress_to_completed() {
 }
 
 /// A poll for a job this process never issued, as NICo does after a restart
-/// of the mock. The certificate and generic status RPCs report it completed,
-/// with one completed child so a reader that needs children is satisfied;
-/// the firmware and switch system image RPCs answer `RETURN_CODE_FAILURE`
-/// with a reason, as their proto specifies and NICo's readers expect.
+/// of the mock. Generic status returns NotFound; certificate, firmware and
+/// switch-image polling report `RETURN_CODE_FAILURE` with a reason and without
+/// a completion state, as their proto specifies and NICo's readers expect.
 #[tokio::test]
-async fn an_unknown_job_is_completed_or_not_found_as_each_rpc_specifies() {
+async fn unknown_jobs_never_report_completion() {
     use librms::protos::rack_manager as v1;
     let url = serve_with(vec![a_switch()]).await;
     let mut client = RackManagerClient::connect(url).await.unwrap();
@@ -339,27 +338,17 @@ async fn an_unknown_job_is_completed_or_not_found_as_each_rpc_specifies() {
         .await
         .unwrap()
         .into_inner();
-    assert_eq!(certificate.job_id, job_id);
-    assert_eq!(certificate.status, v1::ReturnCode::Success as i32);
-    assert_eq!(certificate.state, "completed");
-
+    assert_eq!(certificate.status, v1::ReturnCode::Failure as i32);
+    assert!(certificate.state.is_empty());
+    assert!(certificate.error_message.contains(&job_id));
     let generic = client
         .get_job_status(v1::GetJobStatusRequest {
             job_id: job_id.clone(),
             include_child_job_states: true,
         })
         .await
-        .unwrap()
-        .into_inner();
-    assert_eq!(generic.job_states.len(), 2, "the job and one child");
-    assert_eq!(generic.job_states[0].job_id, job_id);
-    for job in &generic.job_states {
-        assert_eq!(job.execution_state, v1::JobExecutionState::Completed as i32);
-    }
-    assert_eq!(
-        generic.job_states[1].parent_job_id.as_deref(),
-        Some(job_id.as_str())
-    );
+        .unwrap_err();
+    assert_eq!(generic.code(), tonic::Code::NotFound);
 
     let firmware = client
         .get_firmware_job_status(v1::GetFirmwareJobStatusRequest {

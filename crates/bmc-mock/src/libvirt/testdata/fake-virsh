@@ -1,0 +1,28 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Checked-in virsh stub for libvirt backend tests (tests must not generate
+# executable scripts; see libvirt/mod.rs). Called as
+# `virsh --connect test://<control-directory> <command> ...`; the control
+# directory carries the test's state and the reset's exit code, and `log`
+# records each command line.
+directory=${2#test://}
+shift 2
+printf '%s\n' "$*" >> "$directory/log"
+case "$1" in
+  domstate)
+    printf 'running\n'
+    [ ! -e "$directory/finished" ] || touch "$directory/observed-after"
+    ;;
+  # Like virsh, read the XML the backend pipes to /dev/stdin.
+  define|attach-device|update-device|detach-device) cat >/dev/null ;;
+  dumpxml) printf '<domain><name>test-domain</name><os><type>hvm</type><boot dev="hd"/></os><devices/></domain>\n' ;;
+  reset)
+    touch "$directory/started"
+    while [ ! -e "$directory/release" ]; do sleep 0.01; done
+    touch "$directory/finished"
+    exit "$(cat "$directory/exit-code")"
+    ;;
+esac
+exit 0

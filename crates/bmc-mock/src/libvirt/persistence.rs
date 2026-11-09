@@ -112,6 +112,7 @@ mod tests {
                 uri: "test:///default".into(),
                 domain: "test-domain".into(),
                 virtual_media_targets: Default::default(),
+                restart_loads_persistent_definition: false,
             },
             stop.drop_guard(),
         );

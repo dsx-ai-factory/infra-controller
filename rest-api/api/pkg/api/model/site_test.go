@@ -488,6 +488,26 @@ func TestAPISiteUpdateRequest_Validate(t *testing.T) {
 			isProvider: true,
 			wantErr:    true,
 		},
+		{
+			name: "validate update request failure, Provider disabling inventory-managed NVLink partition",
+			fields: fields{
+				Capabilities: &APISiteCapabilitiesUpdateRequest{
+					NVLinkPartition: cutil.GetPtr(false),
+				},
+			},
+			isProvider: true,
+			wantErr:    true,
+		},
+		{
+			name: "validate update request failure, Provider enabling inventory-managed NVLink partition",
+			fields: fields{
+				Capabilities: &APISiteCapabilitiesUpdateRequest{
+					NVLinkPartition: cutil.GetPtr(true),
+				},
+			},
+			isProvider: true,
+			wantErr:    true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -591,6 +611,23 @@ func TestAPISiteCapabilitiesUpdateRequest_ToSiteConfig(t *testing.T) {
 			name: "cannot initialize inventory-managed VPC SLAAC",
 			request: APISiteCapabilitiesUpdateRequest{
 				VpcSlaac: cutil.GetPtr(true),
+			},
+			want: &cdbm.SiteConfig{},
+		},
+		{
+			name: "cannot clear inventory-managed NVLink partition",
+			existing: &cdbm.SiteConfig{
+				NVLinkPartition: true,
+			},
+			request: APISiteCapabilitiesUpdateRequest{
+				NVLinkPartition: cutil.GetPtr(false),
+			},
+			want: &cdbm.SiteConfig{NVLinkPartition: true},
+		},
+		{
+			name: "cannot enable inventory-managed NVLink partition",
+			request: APISiteCapabilitiesUpdateRequest{
+				NVLinkPartition: cutil.GetPtr(true),
 			},
 			want: &cdbm.SiteConfig{},
 		},

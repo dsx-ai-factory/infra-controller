@@ -209,6 +209,7 @@ async fn create_admin_network_segment_with_id(
                     svi_ip: None,
                     free_ip_count_v2: None,
                     free_ip_count_saturated: false,
+                    dhcpv6_link_address: None,
                 }],
                 subdomain_id: Some(env.domain.into()),
                 vpc_id: None,
@@ -3121,6 +3122,74 @@ async fn test_dhcp_v6_request_without_v6_prefix_is_rejected(
     let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
     assert!(interfaces.is_empty());
     txn.rollback().await?;
+
+    Ok(())
+}
+
+// A relay that matches no configured segment is a site configuration gap, not
+// a server fault. Each case reaches a different relay lookup, identified by its
+// message.
+#[crate::sqlx_test]
+async fn test_discover_dhcp_unknown_relay_is_failed_precondition(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_host_inband(pool).await;
+    let unknown_v4_relay = "203.0.113.1";
+    let unknown_v6_relay = "2001:db8:dead::1";
+
+    let known_mac: MacAddress = "02:00:00:00:71:01".parse()?;
+    env.api
+        .discover_dhcp(
+            DhcpDiscovery::builder(known_mac, FIXTURE_DHCP_RELAY_ADDRESS).tonic_request(),
+        )
+        .await?;
+
+    let mock_host = ManagedHostConfig {
+        dpus: vec![],
+        ..ManagedHostConfig::default()
+    };
+    let predicted_mac = *mock_host.non_dpu_macs.first().unwrap();
+    let _mock = site_explorer::ingest_zero_dpu_host_awaiting_first_lease(&env, mock_host).await?;
+
+    let cases = [
+        (
+            "new MAC, DHCPv4",
+            DhcpDiscovery::builder("02:00:00:00:71:02", unknown_v4_relay).tonic_request(),
+            "No network segment defined for relay addresses: [203.0.113.1]",
+        ),
+        (
+            "new MAC, DHCPv6 information request",
+            dhcpv6_discovery(
+                "02:00:00:00:71:03".parse()?,
+                unknown_v6_relay,
+                RPC_MESSAGE_KIND_V6_INFO_REQUEST,
+            ),
+            "no network segment defined for DHCPv6 relay address 2001:db8:dead::1",
+        ),
+        (
+            "known MAC, DHCPv4",
+            DhcpDiscovery::builder(known_mac, unknown_v4_relay).tonic_request(),
+            "No network segment defined for DHCP relay addresses: 203.0.113.1",
+        ),
+        (
+            "predicted MAC, DHCPv4",
+            DhcpDiscovery::builder(predicted_mac, unknown_v4_relay).tonic_request(),
+            "No network segment defined for relay address: 203.0.113.1",
+        ),
+    ];
+
+    for (scenario, request, expected_message) in cases {
+        let status = env.api.discover_dhcp(request).await.expect_err(scenario);
+        assert_eq!(
+            status.code(),
+            tonic::Code::FailedPrecondition,
+            "{scenario}: {status:?}"
+        );
+        assert!(
+            status.message().contains(expected_message),
+            "{scenario}: {status:?}"
+        );
+    }
 
     Ok(())
 }

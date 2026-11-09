@@ -710,6 +710,20 @@ func TestCancelTaskHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusInternalServerError,
 		},
 		{
+			name:     "failure - Flow rejects zero task UUID",
+			reqOrg:   org,
+			user:     providerUser,
+			taskUUID: uuid.Nil.String(),
+			body:     model.APICancelTaskRequest{SiteID: site.ID.String()},
+			mockResultErr: tp.NewNonRetryableApplicationError(
+				"task_id must be a valid non-zero UUID",
+				swe.ErrTypeNICoInvalidArgument,
+				nil,
+			),
+			expectedStatus: http.StatusBadRequest,
+			expectNullData: true,
+		},
+		{
 			name:     "failure - completed task cannot be cancelled",
 			reqOrg:   org,
 			user:     providerUser,

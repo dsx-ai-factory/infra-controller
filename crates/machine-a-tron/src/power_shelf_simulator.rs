@@ -24,14 +24,16 @@ use bmc_mock::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId}
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    ActionError, Callbacks, HardwareType, HostMachineInfo, HostnameQuerying, MachineInfo,
-    POWER_CYCLE_DELAY, ResourceResetType,
+    ActionError, Callbacks, DeviceEffect, HardwareType, HostMachineInfo, HostnameQuerying,
+    MachineInfo, POWER_CYCLE_DELAY, ResourceResetType,
 };
+#[cfg(test)]
+use eyre::WrapErr;
 use nv_redfish::schema::resource::PowerState;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::bmc_mock_wrapper::{BmcCommand, BmcMockWrapper, BmcMockWrapperHandle};
+use crate::bmc_mock_wrapper::{BmcCommand, BmcDhcpRecovery, BmcMockWrapper, BmcMockWrapperHandle};
 use crate::config::{self, MachineATronContext, MachineConfig, PersistedDevice};
 use crate::dhcp_wrapper::{DhcpRequestInfo, DhcpRequester, DhcpResponseInfo, vendor_class};
 use crate::machine_state_machine::{MachineStateError, OsImage};
@@ -48,6 +50,7 @@ struct PowerShelfLiveState {
     ssh_endpoint_port: Option<u16>,
     ssh_host_key: Option<String>,
     state: &'static str,
+    bmc_persistence: crate::bmc_mock_wrapper::BmcPersistence,
 }
 
 impl PowerShelfLiveState {
@@ -59,6 +62,7 @@ impl PowerShelfLiveState {
             ssh_endpoint_port: None,
             ssh_host_key: None,
             state: fsm.state_string(),
+            bmc_persistence: Default::default(),
         }
     }
 }
@@ -89,6 +93,24 @@ impl Callbacks for PowerShelfCallbacks {
         self.set_power_state(reset_type)
     }
 
+    async fn device_effect(&self, effect: DeviceEffect) -> Result<(), ActionError> {
+        if !matches!(&effect, DeviceEffect::ResetBmcToDefaults(_)) {
+            return Err(ActionError::BadRequest(eyre::eyre!(
+                "unsupported device effect"
+            )));
+        }
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.mailbox
+            .send(PowerShelfMessage::Bmc(BmcCommand::DeviceEffect {
+                effect,
+                reply: Some(reply),
+            }))
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))?
+    }
+
     fn state_refresh_indication(&self) {
         let _ = self
             .mailbox
@@ -115,6 +137,7 @@ pub(crate) struct PowerShelfActor {
     bmc_injection: Arc<InjectionStore>,
     _bmc_mock: Option<Arc<BmcMockWrapperHandle>>,
     bmc_dhcp_info: Option<DhcpResponseInfo>,
+    bmc_recovery: BmcDhcpRecovery,
     fsm: PowerShelfFsm,
     actions: VecDeque<Action>,
     /// Spreads a fleet that starts together over the idle interval.
@@ -134,6 +157,7 @@ impl PowerShelfActor {
     ) -> Self {
         let (fsm, actions) = PowerShelfFsm::init(false);
         let first_run_delay = Some(first_run_offset(config.run_interval_idle));
+        let bmc_recovery = app_context.bmc_dhcp_recovery(Duration::ZERO);
         Self {
             mat_id: Uuid::new_v4(),
             machine_config_section,
@@ -147,6 +171,7 @@ impl PowerShelfActor {
             bmc_injection: Arc::new(InjectionStore::new()),
             _bmc_mock: None,
             bmc_dhcp_info: None,
+            bmc_recovery,
             fsm,
             actions: actions.into_iter().collect(),
             first_run_delay,
@@ -178,17 +203,22 @@ impl PowerShelfActor {
             desired_host_firmware: None,
         };
         let (fsm, actions) = PowerShelfFsm::init(true);
+        let mut live_state = PowerShelfLiveState::new(&fsm);
+        live_state.bmc_persistence =
+            crate::bmc_mock_wrapper::BmcPersistence::from_saved(persisted.bmc_state);
         let first_run_delay = Some(first_run_offset(config.run_interval_idle));
+        let bmc_recovery = app_context.bmc_dhcp_recovery(Duration::ZERO);
         Self {
             mat_id: persisted.mat_id,
             machine_config_section,
             host_info,
             app_context,
             config,
-            live_state: Arc::new(RwLock::new(PowerShelfLiveState::new(&fsm))),
+            live_state: Arc::new(RwLock::new(live_state)),
             bmc_injection: Arc::new(InjectionStore::new()),
             _bmc_mock: None,
             bmc_dhcp_info: None,
+            bmc_recovery,
             fsm,
             actions: actions.into_iter().collect(),
             first_run_delay,
@@ -231,6 +261,25 @@ impl PowerShelfActor {
             }
             return ActorResult::Noop;
         }
+        if self.bmc_recovery.next_attempt_in().is_zero() {
+            let info = MachineInfo::Host(self.host_info.clone());
+            if let Some(info) = self
+                .bmc_recovery
+                .advance(
+                    &self.app_context.bmc_registry,
+                    &self.app_context.dhcp_client,
+                    DhcpRequestInfo {
+                        mac_address: self.host_info.bmc_mac_address,
+                        relay_address: self.config.bmc_dhcp_relay_address,
+                        vendor_class: vendor_class(&info, DhcpRequester::Bmc),
+                    },
+                )
+                .await
+            {
+                self.live_state.write().unwrap().bmc_ip = Some(info.ip_address);
+                self.bmc_dhcp_info = Some(info);
+            }
+        }
         if let Some(delay) = self.first_run_delay.take() {
             self.schedule_run(mailbox, delay);
             return ActorResult::Noop;
@@ -241,7 +290,10 @@ impl PowerShelfActor {
         } else {
             self.config.run_interval_idle
         };
-        self.schedule_run(mailbox, jitter_interval(sleep_duration));
+        self.schedule_run(
+            mailbox,
+            jitter_interval(sleep_duration).min(self.bmc_recovery.next_attempt_in()),
+        );
         ActorResult::Noop
     }
 
@@ -382,12 +434,20 @@ impl PowerShelfActor {
                 .change_factory_default_password(password);
         }
 
+        {
+            let mut live_state = self.live_state.write().unwrap();
+            live_state.bmc_persistence.restore(bmc_mock.state())?;
+            live_state.bmc_persistence.attach(bmc_mock.state());
+        }
+
         let bmc_handle = {
-            self.app_context
-                .bmc_registry
-                .write()
-                .await
-                .insert(dhcp_info.ip_address.to_string(), bmc_mock.router().clone());
+            self.bmc_recovery
+                .mount(
+                    &self.app_context.bmc_registry,
+                    dhcp_info.ip_address,
+                    bmc_mock.router().clone(),
+                )
+                .await;
             bmc_mock.start().await?.map(Arc::new)
         };
 
@@ -459,6 +519,8 @@ enum PowerShelfMessage {
     PowerCycleExpired,
     DhcpRetryExpired,
     SetPaused(bool),
+    #[cfg(test)]
+    InboxBarrier(tokio::sync::oneshot::Sender<()>),
     Bmc(BmcCommand),
     Stop,
 }
@@ -483,8 +545,25 @@ impl ActorCallbacks<PowerShelfMessage> for PowerShelfActor {
             PowerShelfMessage::SetPaused(paused) => {
                 self.fsm_event(if paused { Event::Pause } else { Event::Resume })
             }
+            #[cfg(test)]
+            PowerShelfMessage::InboxBarrier(reply) => {
+                let _ = reply.send(());
+            }
             PowerShelfMessage::Bmc(BmcCommand::SetSystemPower { request, reply }) => {
                 let result = self.set_system_power(request);
+                if let Some(reply) = reply {
+                    let _ = reply.send(result);
+                }
+            }
+            PowerShelfMessage::Bmc(BmcCommand::DeviceEffect { effect, reply }) => {
+                let result = match effect {
+                    DeviceEffect::ResetBmcToDefaults(update) => {
+                        self.bmc_recovery.reset(update).await
+                    }
+                    DeviceEffect::AuxPowerCycle => Err(ActionError::BadRequest(eyre::eyre!(
+                        "unsupported device effect"
+                    ))),
+                };
                 if let Some(reply) = reply {
                     let _ = reply.send(result);
                 }
@@ -512,6 +591,17 @@ struct PowerShelfActorHandle {
 pub(crate) struct PowerShelfHandle(Arc<PowerShelfActorHandle>);
 
 impl PowerShelfHandle {
+    /// Observes live BMC effects without contacting its leased address.
+    /// Returns None when the live BMC resource state is unavailable.
+    pub(crate) fn bmc_effect_snapshot(&self) -> Option<bmc_mock::persistence::BmcEffectSnapshot> {
+        self.0
+            .live_state
+            .read()
+            .unwrap()
+            .bmc_persistence
+            .effect_snapshot()
+    }
+
     pub(crate) fn mat_id(&self) -> Uuid {
         self.0.mat_id
     }
@@ -532,6 +622,20 @@ impl PowerShelfHandle {
 
     pub(crate) fn pause(&self) -> eyre::Result<()> {
         self.0.mailbox.send(PowerShelfMessage::SetPaused(true))?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) async fn pause_and_wait(&self, timeout: Duration) -> eyre::Result<()> {
+        self.pause()?;
+        let (reply, acknowledged) = tokio::sync::oneshot::channel();
+        self.0
+            .mailbox
+            .send(PowerShelfMessage::InboxBarrier(reply))?;
+        tokio::time::timeout(timeout, acknowledged)
+            .await
+            .wrap_err("timed out waiting for power-shelf pause")?
+            .wrap_err("power shelf stopped before acknowledging pause")?;
         Ok(())
     }
 
@@ -557,7 +661,6 @@ impl PowerShelfHandle {
             machine_id: None,
             hardware_type: Some(self.0.host_info.hw_type),
             mat_state: Some(state.state.to_string()),
-            api_state: "Unknown".to_string(),
             power_state: state.power_state,
             machine_ip: None,
             nvos_ip: None,
@@ -591,9 +694,14 @@ impl PowerShelfHandle {
                 host_bits: self.0.host_info.hw_mac_addr_pool.host_bits(),
             }),
             active_host_firmware: None,
-            // Power shelves always accept factory-default logins, so there is
-            // no rotated credential to persist (issue #5966).
-            bmc_state: None,
+            // Preserve the current accounts and factory-reset generation.
+            bmc_state: self
+                .0
+                .live_state
+                .read()
+                .unwrap()
+                .bmc_persistence
+                .persisted(),
             nvos_admin: None,
         }
     }

@@ -25,7 +25,7 @@ mod startup;
 use std::collections::HashSet;
 
 use carbide_network::ip::prefix::IpNet;
-use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_network::virtualization::{RouteTargetContributions, VpcVirtualizationType};
 use carbide_uuid::vpc::VpcId;
 use db::ObjectColumnFilter;
 pub(super) use instances::validate_affected_instances;
@@ -46,7 +46,8 @@ pub(crate) use startup::{validate_retained_state, validate_retained_state_in_tra
 
 use crate::api::Api;
 use crate::cfg::file::{
-    CarbideConfig, FnnRoutingProfileConfig, VpcIsolationBehaviorType, VpcPeeringPolicy,
+    CarbideConfig, FnnRoutingProfileConfig, RouteTargetConfig, VpcIsolationBehaviorType,
+    VpcPeeringPolicy,
 };
 use crate::{CarbideError, CarbideResult};
 
@@ -187,8 +188,13 @@ fn site_policy_is_isolated(runtime_config: &CarbideConfig) -> bool {
         && runtime_config.anycast_site_prefixes.is_empty()
         && runtime_config.dpu_config.service_vpc_slot_count == 0
         && runtime_config.fnn.as_ref().is_some_and(|fnn| {
-            fnn.common_internal_route_target.is_none()
-                && fnn.additional_route_target_imports.is_empty()
+            let contributions = RouteTargetContributions {
+                profile_imports: &[],
+                profile_exports: &[],
+                common_export: fnn.common_internal_route_target.as_ref(),
+                site_imports: &fnn.additional_route_target_imports,
+            };
+            !contributions.has_additional_targets()
         })
 }
 
@@ -295,6 +301,13 @@ pub(super) fn routing_profile_is_nonexpanding(
     if candidate.is_eligible_for_tenant_prefix_overlap() {
         return true;
     }
+    // Treat absent non-symbolic VNIs as legacy zero so wire presence alone
+    // cannot turn a routing-policy contraction into an expansion.
+    let route_targets_match = |left: &RouteTargetConfig, right: &RouteTargetConfig| {
+        left.asn == right.asn
+            && left.vni_self == right.vni_self
+            && left.vni.unwrap_or_default() == right.vni.unwrap_or_default()
+    };
     // New profile fields need an explicit decision here as well as in the
     // eligibility check. Access tiers authorize selection; they do not route.
     let FnnRoutingProfileConfig {
@@ -312,10 +325,20 @@ pub(super) fn routing_profile_is_nonexpanding(
     internal.unwrap_or_default() == previous.internal.unwrap_or_default()
         && *tenant_prefix_overlap_eligible == previous.tenant_prefix_overlap_eligible
         && route_target_imports.as_deref().unwrap_or_default().iter().all(|target| {
-            previous.route_target_imports.as_deref().unwrap_or_default().contains(target)
+            previous
+                .route_target_imports
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|allowed| route_targets_match(allowed, target))
         })
         && route_targets_on_exports.as_deref().unwrap_or_default().iter().all(|target| {
-            previous.route_targets_on_exports.as_deref().unwrap_or_default().contains(target)
+            previous
+                .route_targets_on_exports
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|allowed| route_targets_match(allowed, target))
         })
         && (!leak_default_route_from_underlay.unwrap_or_default()
             || previous.leak_default_route_from_underlay.unwrap_or_default())
@@ -479,11 +502,13 @@ pub(super) fn instance_network_is_nonexpanding(
                 interfaces: vec![retained.clone()],
                 auto_config: previous.auto_config,
                 service_interfaces: vec![],
+                vpc_local_interfaces: vec![],
             };
             let requested_interface = InstanceNetworkConfig {
                 interfaces: vec![requested.clone()],
                 auto_config: candidate.auto_config,
                 service_interfaces: vec![],
+                vpc_local_interfaces: vec![],
             };
             !previous_interface.is_network_config_update_requested(&requested_interface)
         })
@@ -747,9 +772,7 @@ mod tests {
     use model::vpc::{VpcConfig, VpcStatus};
 
     use super::*;
-    use crate::cfg::file::{
-        FnnConfig, FnnRoutingProfileConfig, PrefixFilterPolicyEntry, RouteTargetConfig,
-    };
+    use crate::cfg::file::{FnnConfig, FnnRoutingProfileConfig, PrefixFilterPolicyEntry};
 
     #[test]
     fn instance_network_contraction_keeps_retained_interface_intent() {
@@ -1103,15 +1126,20 @@ mod tests {
         );
     }
 
+    /// Verifies routing-profile contractions remain admissible because they
+    /// cannot expose prefixes that the previous effective policy suppressed.
     #[test]
     fn routing_profile_contractions_use_effective_policy() {
+        // Build route-target and prefix variants used by the contraction cases.
         let target_a = RouteTargetConfig {
             asn: 65000,
-            vni: 100,
+            vni: Some(100),
+            vni_self: false,
         };
         let target_b = RouteTargetConfig {
             asn: 65000,
-            vni: 200,
+            vni: Some(200),
+            vni_self: false,
         };
         let previous = FnnRoutingProfileConfig {
             tenant_prefix_overlap_eligible: true,
@@ -1151,11 +1179,61 @@ mod tests {
         };
         check_values(
             [
+                // Explicit defaults are semantically identical to omitted defaults.
                 Check {
                     scenario: "explicit false and empty values preserve omitted defaults",
                     input: (previous.clone(), explicit_defaults, vec![]),
                     expect: true,
                 },
+                // Legacy omission and explicit zero identify the same literal route target.
+                Check {
+                    scenario: "legacy omitted VNI preserves explicit literal zero",
+                    input: (
+                        FnnRoutingProfileConfig {
+                            route_target_imports: Some(vec![RouteTargetConfig {
+                                asn: 65_000,
+                                vni: Some(0), // Persisted numeric zero retains explicit presence.
+                                vni_self: false,
+                            }]),
+                            ..Default::default()
+                        },
+                        FnnRoutingProfileConfig {
+                            route_target_imports: Some(vec![RouteTargetConfig {
+                                asn: 65_000,
+                                vni: None, // An older client omits proto3's zero value.
+                                vni_self: false,
+                            }]),
+                            ..Default::default()
+                        },
+                        vec![],
+                    ),
+                    expect: true,
+                },
+                // VPC-derived targets must not collapse to literal zero.
+                Check {
+                    scenario: "symbolic VNI differs from literal zero",
+                    input: (
+                        FnnRoutingProfileConfig {
+                            route_target_imports: Some(vec![RouteTargetConfig {
+                                asn: 65_000,
+                                vni: Some(0), // Preserve the literal route-target value.
+                                vni_self: false,
+                            }]),
+                            ..Default::default()
+                        },
+                        FnnRoutingProfileConfig {
+                            route_target_imports: Some(vec![RouteTargetConfig {
+                                asn: 65_000,
+                                vni: None,
+                                vni_self: true, // Resolve from the VPC instead of literal zero.
+                            }]),
+                            ..Default::default()
+                        },
+                        vec![],
+                    ),
+                    expect: false,
+                },
+                // Removing an import narrows route visibility despite retaining another target.
                 Check {
                     scenario: "remove one import while another remains",
                     input: (
@@ -1168,11 +1246,13 @@ mod tests {
                     ),
                     expect: true,
                 },
+                // Replacing broad prefix filters with subnets narrows accepted announcements.
                 Check {
                     scenario: "prefix filters narrow without removing other imports",
                     input: (with_prefixes.clone(), narrowed, vec![]),
                     expect: true,
                 },
+                // Community handling can suppress routes, so disabling it is not a contraction.
                 Check {
                     scenario: "disabling community handling can newly export a route",
                     input: (
@@ -1185,6 +1265,7 @@ mod tests {
                     ),
                     expect: false,
                 },
+                // Removing the IPv4 list activates the broader legacy site fallback.
                 Check {
                     scenario: "empty IPv4 anycast exposes legacy fallback even with an eligible profile",
                     input: (
@@ -1348,11 +1429,19 @@ mod tests {
                     }
                     Variation::CommonInternalRouteTarget => {
                         config.fnn.as_mut().unwrap().common_internal_route_target =
-                            Some(crate::cfg::file::RouteTargetConfig { asn: 1, vni: 2 });
+                            Some(crate::cfg::file::RouteTargetConfig {
+                                asn: 1,
+                                vni: Some(2),
+                                vni_self: false,
+                            });
                     }
                     Variation::AdditionalRouteTargetImport => {
                         config.fnn.as_mut().unwrap().additional_route_target_imports =
-                            vec![crate::cfg::file::RouteTargetConfig { asn: 3, vni: 4 }];
+                            vec![crate::cfg::file::RouteTargetConfig {
+                                asn: 3,
+                                vni: Some(4),
+                                vni_self: false,
+                            }];
                     }
                     Variation::MissingIsolationRoute => {
                         config.site_fabric_null_routes = Some(vec![]);

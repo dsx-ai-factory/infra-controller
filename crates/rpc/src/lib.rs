@@ -80,6 +80,7 @@ pub mod admission_retry;
 pub mod errors;
 pub mod forge_tls_client;
 pub mod libmlx;
+pub mod lldp_snapshot;
 pub mod measured_boot;
 pub mod network;
 pub mod node_jwt;
@@ -1076,6 +1077,7 @@ impl forge_agent_control_response::Action {
             Self::MachineValidation(_) => "MACHINE_VALIDATION",
             Self::MlxAction(_) => "MLX_ACTION",
             Self::FirmwareUpgrade(_) => "FIRMWARE_UPGRADE",
+            Self::MlxDeviceInfoReport(_) => "MLX_DEVICE_INFO_REPORT",
         }
     }
 }
