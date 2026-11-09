@@ -3039,6 +3039,11 @@ pub(crate) fn check_spx_interface_functional_planes(
 
     let dpu_pci_address_prefix = spx_interface.pci_name.split('.').next().unwrap();
     let astra_nic_mappings = astra_nic_mappings_for_dpu_pci_address_prefix(dpu_pci_address_prefix);
+    // Legacy inventory registers an indexed `CX_n` locator and declares no
+    // logical interfaces, so such a card has no planes to drain or observe.
+    if astra_nic_mappings.is_empty() {
+        return true;
+    }
 
     // An unobserved card stays unproven, so a missing readback is not functional.
     let Some(spx_multiplane_status) = mh_snapshot
@@ -3337,6 +3342,52 @@ mod tests {
                         error => panic!("unexpected mapper error: {error}"),
                     })
             },
+        );
+    }
+
+    /// Legacy Astra inventory registers indexed `CX_n` locators and declares no
+    /// logical interfaces, so such a host reports no planes at all. Admission
+    /// must still accept it instead of reading the absent readback as drained.
+    #[test]
+    fn spx_binding_accepts_legacy_indexed_astra_locators() {
+        const DEVICE: &str = "NVIDIA Dual ConnectX-9 SuperNIC";
+        const CARDS: u32 = 8;
+
+        let mut snapshot = managed_host_state_snapshot();
+        let machine_id = snapshot.host_snapshot.id;
+        snapshot.dpa_interface_snapshots = (0..CARDS)
+            .map(|card| DpaInterface {
+                interface_type: DpaInterfaceType::Astra,
+                ..spx_interface(
+                    machine_id,
+                    DEVICE,
+                    &format!("CX_{card}"),
+                    &format!("02:11:22:33:44:{card:02x}"),
+                )
+            })
+            .collect();
+        // Legacy provisioning never initializes maintenance readback.
+        assert!(
+            snapshot.dpu_snapshots[0]
+                .status
+                .spx_multiplane_status
+                .is_none()
+        );
+
+        let config = InstanceSpxConfig {
+            spx_attachments: (0..CARDS)
+                .map(|card| spx_attachment(DEVICE, card))
+                .collect(),
+        };
+
+        let (bound, targets) = allocate_spx_port_mac(&config, &snapshot).unwrap();
+        assert_eq!(bound.spx_attachments.len(), CARDS as usize);
+        assert_eq!(targets.len(), CARDS as usize);
+        assert!(
+            bound
+                .spx_attachments
+                .iter()
+                .all(|attachment| attachment.mac_address.is_some())
         );
     }
 
