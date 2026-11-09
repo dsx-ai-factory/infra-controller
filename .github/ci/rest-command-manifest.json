@@ -64,7 +64,8 @@
       "ldflags": [
         "-extldflags=-static",
         "-w",
-        "-s"
+        "-s",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/metadata.Version=${VERSION}"
       ],
       "output": "bin/workflow"
     },
@@ -213,7 +214,8 @@
       "ldflags": [
         "-extldflags=-static",
         "-w",
-        "-s"
+        "-s",
+        "-X=github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/metadata.Version=${VERSION}"
       ],
       "output": "bin/workflow"
     },
@@ -348,7 +350,9 @@
       "package": "./workflow/cmd/workflow",
       "target": "darwin-arm64",
       "cgo_enabled": false,
-      "ldflags": [],
+      "ldflags": [
+        "-X=github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/metadata.Version=${VERSION}"
+      ],
       "output": "bin/workflow"
     },
     {

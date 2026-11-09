@@ -74,6 +74,9 @@ class ManifestTest(unittest.TestCase):
                 "-X=github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/metadata.Version=${VERSION}",
                 "-X=github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/metadata.BuildTime=${BUILD_TIME_LEGACY}",
             ),
+            "workflow": (
+                "-X=github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/metadata.Version=${VERSION}",
+            ),
             "flow": (
                 "-X=github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata.Version=${VERSION}",
                 "-X=github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata.BuildTime=${BUILD_TIME_RFC3339}",
@@ -84,7 +87,7 @@ class ManifestTest(unittest.TestCase):
             "api": static_stripped + metadata_flags["api"],
             "migrations": static_stripped,
             "sitemgr": static_stripped,
-            "workflow": static_stripped,
+            "workflow": static_stripped + metadata_flags["workflow"],
             "site-agent": static_stripped + metadata_flags["site-agent"],
             "mock-core": (),
             "mock-flow": (),
