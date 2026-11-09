@@ -599,6 +599,8 @@ impl ClusterEndpointSource {
 
             endpoints.push(Arc::new(BmcEndpoint {
                 addr,
+                hostname: Some(node.hostname.clone()),
+                identity: None,
                 metadata: None,
                 rack_id,
                 labels: Default::default(),

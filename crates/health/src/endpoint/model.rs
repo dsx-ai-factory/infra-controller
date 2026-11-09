@@ -32,6 +32,7 @@ use url::Url;
 
 use crate::HealthError;
 use crate::bmc::{BmcClient, BoxFuture};
+use crate::config::IdentityField;
 
 /// Shared, write-once UUID reported by a machine's primary ComputerSystem.
 ///
@@ -75,6 +76,11 @@ impl From<Option<uuid::Uuid>> for SharedSystemUuid {
 #[derive(Clone)]
 pub struct BmcEndpoint {
     pub addr: BmcAddr,
+    /// BMC hostname reported by the source, if any.
+    pub hostname: Option<String>,
+    /// Identity chosen by `endpoint_sources.identity`. None means the MAC, or
+    /// the IP when there is no MAC.
+    pub identity: Option<EndpointIdentity>,
     pub metadata: Option<EndpointMetadata>,
     pub rack_id: Option<RackId>,
     pub labels: BTreeMap<String, String>,
@@ -129,12 +135,18 @@ pub struct EndpointSnapshot {
 }
 
 impl BmcEndpoint {
-    /// Returns the MAC identity, or `ip:<address>` when the inventory has no MAC.
-    pub fn key(&self) -> String {
-        match self.addr.mac {
-            Some(mac) => mac.to_string(),
-            None => format!("ip:{}", self.addr.ip),
+    /// Returns the configured identity, or else the MAC, or else the IP.
+    pub fn identity(&self) -> EndpointIdentity {
+        match (&self.identity, self.addr.mac) {
+            (Some(identity), _) => identity.clone(),
+            (None, Some(mac)) => EndpointIdentity::Mac(mac),
+            (None, None) => EndpointIdentity::Ip(self.addr.ip),
         }
+    }
+
+    /// Returns the key of this endpoint's identity.
+    pub fn key(&self) -> String {
+        self.identity().key()
     }
 
     pub fn hash_key(&self) -> Cow<'static, str> {
@@ -341,6 +353,43 @@ pub enum BmcCredentials {
     },
 }
 
+/// What identifies a BMC endpoint across discovery iterations: the endpoint
+/// key, the `endpoint_key` series label, and the shard hash of endpoints
+/// without a rack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EndpointIdentity {
+    Hostname(String),
+    Mac(MacAddress),
+    Ip(IpAddr),
+}
+
+impl EndpointIdentity {
+    /// Returns the first of `fields` that the endpoint reports. An empty
+    /// hostname counts as absent.
+    pub(crate) fn resolve(
+        fields: &[IdentityField],
+        hostname: Option<&str>,
+        addr: &BmcAddr,
+    ) -> Option<Self> {
+        fields.iter().find_map(|field| match field {
+            IdentityField::Hostname => hostname
+                .filter(|hostname| !hostname.is_empty())
+                .map(|hostname| Self::Hostname(hostname.to_owned())),
+            IdentityField::Mac => addr.mac.map(Self::Mac),
+            IdentityField::Ip => Some(Self::Ip(addr.ip)),
+        })
+    }
+
+    /// Returns `host:<hostname>`, the MAC, or `ip:<address>`.
+    pub fn key(&self) -> String {
+        match self {
+            Self::Hostname(hostname) => format!("host:{hostname}"),
+            Self::Mac(mac) => mac.to_string(),
+            Self::Ip(ip) => format!("ip:{ip}"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct BmcAddr {
     pub ip: IpAddr,
@@ -429,6 +478,76 @@ mod tests {
         SwitchData, SwitchEndpointRole,
     };
     use crate::endpoint::test_support::{endpoint_with_creds, mac, test_endpoint};
+
+    #[test]
+    fn identity_resolves_first_reported_field() {
+        use super::EndpointIdentity;
+        use crate::config::IdentityField::{Hostname, Ip, Mac};
+
+        let mac = MacAddress::from_str("00:11:22:33:44:55").unwrap();
+        let with_mac = addr("10.0.0.1", None);
+        let without_mac = BmcAddr {
+            ip: with_mac.ip,
+            port: None,
+            mac: None,
+        };
+        let ip = with_mac.ip;
+        check_values(
+            [
+                Check {
+                    scenario: "hostname preferred when reported",
+                    input: (&[Hostname, Mac, Ip][..], Some("bmc-01"), &with_mac),
+                    expect: Some(EndpointIdentity::Hostname("bmc-01".into())),
+                },
+                Check {
+                    scenario: "missing hostname falls back to mac",
+                    input: (&[Hostname, Mac, Ip][..], None, &with_mac),
+                    expect: Some(EndpointIdentity::Mac(mac)),
+                },
+                Check {
+                    scenario: "empty hostname counts as missing",
+                    input: (&[Hostname, Ip][..], Some(""), &with_mac),
+                    expect: Some(EndpointIdentity::Ip(ip)),
+                },
+                Check {
+                    scenario: "missing mac falls back to ip",
+                    input: (&[Mac, Ip][..], None, &without_mac),
+                    expect: Some(EndpointIdentity::Ip(ip)),
+                },
+                Check {
+                    scenario: "ip preferred over a present mac",
+                    input: (&[Ip, Mac][..], None, &with_mac),
+                    expect: Some(EndpointIdentity::Ip(ip)),
+                },
+                Check {
+                    scenario: "no listed field reported",
+                    input: (&[Hostname, Mac][..], None, &without_mac),
+                    expect: None,
+                },
+            ],
+            |(fields, hostname, addr)| EndpointIdentity::resolve(fields, hostname, addr),
+        );
+        check_values(
+            [
+                Check {
+                    scenario: "hostname key",
+                    input: EndpointIdentity::Hostname("bmc-01".into()),
+                    expect: "host:bmc-01".to_string(),
+                },
+                Check {
+                    scenario: "mac key",
+                    input: EndpointIdentity::Mac(mac),
+                    expect: "00:11:22:33:44:55".to_string(),
+                },
+                Check {
+                    scenario: "ip key",
+                    input: EndpointIdentity::Ip(ip),
+                    expect: "ip:10.0.0.1".to_string(),
+                },
+            ],
+            |identity| identity.key(),
+        );
+    }
 
     fn addr(ip: &str, port: Option<u16>) -> BmcAddr {
         BmcAddr {
