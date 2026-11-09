@@ -42,7 +42,7 @@ use db::{
 use ipnetwork::IpNetwork;
 use itertools::Itertools;
 use model::ConfigValidationError;
-use model::dpa_interface::{DpaInterface, DpaSearchConfig};
+use model::dpa_interface::{DpaInterface, DpaInterfaceType, DpaSearchConfig};
 use model::expected_machine::ExpectedMachine;
 use model::extension_service::{
     DpuTarget, ExtensionService, ExtensionServiceDeploymentType, ExtensionServiceLifecycleState,
@@ -3032,10 +3032,15 @@ pub(crate) fn check_spx_interface_functional_planes(
     spx_interface: &DpaInterface,
     mh_snapshot: &ManagedHostStateSnapshot,
 ) -> bool {
+    // Only Astra cards carry planes; other SPX hardware has none to drain.
+    if spx_interface.interface_type != DpaInterfaceType::Astra {
+        return true;
+    }
+
     let dpu_pci_address_prefix = spx_interface.pci_name.split('.').next().unwrap();
     let astra_nic_mappings = astra_nic_mappings_for_dpu_pci_address_prefix(dpu_pci_address_prefix);
 
-    // Only hosts with declared CX9 planes report multiplane observations.
+    // An unobserved card stays unproven, so a missing readback is not functional.
     let Some(spx_multiplane_status) = mh_snapshot
         .dpu_snapshots
         .first()
@@ -3171,6 +3176,10 @@ mod tests {
     use model::instance::config::extension_services::InstanceExtensionServiceConfig;
     use model::instance::config::infiniband::InstanceIbInterfaceConfig;
     use model::instance::config::spx::InstanceSpxAttachment;
+    use model::machine::astra::ASTRA_NIC_MAPPINGS;
+    use model::machine::spx_multiplane::{
+        MachineSpxMultiplaneObservation, MachineSpxMultiplaneStatus,
+    };
     use model::test_support::machine_snapshot::managed_host_state_snapshot;
 
     use super::*;
@@ -3224,6 +3233,111 @@ mod tests {
             device_description: Some(device.to_string()),
             interface_type: DpaInterfaceType::Svpc,
         }
+    }
+
+    /// Observations for all 32 Astra planes, in maintenance except for the
+    /// planes whose DPU-original interface name is listed as available.
+    fn astra_multiplane_status(available_netdevs: &[&str]) -> MachineSpxMultiplaneStatus {
+        let interfaces = ASTRA_NIC_MAPPINGS
+            .iter()
+            .enumerate()
+            .map(|(plane, mapping)| {
+                // Four rails of eight planes carry the table's 32 entries.
+                let logical_ifname = format!("eth_r{}_p{}", plane / 8, plane % 8);
+                let observation = MachineSpxMultiplaneObservation {
+                    maintenance_mode: Some(
+                        !available_netdevs.contains(&mapping.dpu_original_ifname),
+                    ),
+                    revision: ConfigVersion::initial(),
+                    netdev: Some(mapping.dpu_original_ifname.to_string()),
+                    error: None,
+                    observed_at: chrono::Utc::now(),
+                };
+                (logical_ifname, observation)
+            })
+            .collect();
+        MachineSpxMultiplaneStatus { interfaces }
+    }
+
+    /// An Astra card is usable only while one of its four planes is out of
+    /// maintenance, so a host whose planes are all drained must be rejected
+    /// instead of binding attachments to hardware that cannot carry traffic.
+    #[test]
+    fn spx_binding_rejects_astra_cards_with_every_plane_in_maintenance() {
+        const DEVICE: &str = "NVIDIA Dual ConnectX-9 SuperNIC";
+
+        // One DPA row per card, located by the card's first-lane DPU address.
+        let mut card_pci_names = ASTRA_NIC_MAPPINGS
+            .iter()
+            .filter(|mapping| mapping.dpu_original_ifname.ends_with("p0"))
+            .map(|mapping| mapping.dpu_pci_address)
+            .collect::<Vec<_>>();
+        card_pci_names.sort_unstable();
+
+        let mut snapshot = managed_host_state_snapshot();
+        let machine_id = snapshot.host_snapshot.id;
+        snapshot.dpa_interface_snapshots = card_pci_names
+            .iter()
+            .enumerate()
+            .map(|(card, pci_name)| DpaInterface {
+                // Only an Astra card is gated on plane maintenance.
+                interface_type: DpaInterfaceType::Astra,
+                ..spx_interface(
+                    machine_id,
+                    DEVICE,
+                    pci_name,
+                    &format!("02:11:22:33:44:{card:02x}"),
+                )
+            })
+            .collect();
+        let config = InstanceSpxConfig {
+            spx_attachments: (0..card_pci_names.len() as u32)
+                .map(|device_instance| spx_attachment(DEVICE, device_instance))
+                .collect(),
+        };
+
+        // Attachments bind highest index first, so the last card fails first.
+        let first_bound = snapshot.dpa_interface_snapshots.last().unwrap().id;
+        // Leaving one plane per card available proves the rejection below comes
+        // from plane maintenance rather than from the fixture itself.
+        let one_plane_per_card = ASTRA_NIC_MAPPINGS
+            .iter()
+            .filter(|mapping| mapping.dpu_original_ifname.ends_with("p3"))
+            .map(|mapping| mapping.dpu_original_ifname)
+            .collect::<Vec<_>>();
+
+        let drained = format!("SPX interface {first_bound} has no functional planes");
+        check_cases(
+            [
+                Case {
+                    scenario: "every plane of all eight cards in maintenance",
+                    input: Some(Vec::new()),
+                    expect: FailsWith(drained.clone()),
+                },
+                // An unobserved card is unproven, not implicitly available.
+                Case {
+                    scenario: "no plane readback reported for the host",
+                    input: None,
+                    expect: FailsWith(drained),
+                },
+                Case {
+                    scenario: "one plane per card left out of maintenance",
+                    input: Some(one_plane_per_card),
+                    expect: Yields(card_pci_names.len()),
+                },
+            ],
+            |available_netdevs| {
+                let mut snapshot = snapshot.clone();
+                snapshot.dpu_snapshots[0].status.spx_multiplane_status = available_netdevs
+                    .map(|available_netdevs| astra_multiplane_status(&available_netdevs));
+                allocate_spx_port_mac(&config, &snapshot)
+                    .map(|(bound, _)| bound.spx_attachments.len())
+                    .map_err(|error| match error {
+                        CarbideError::InvalidArgument(message) => message,
+                        error => panic!("unexpected mapper error: {error}"),
+                    })
+            },
+        );
     }
 
     /// An error after a successful binding must reject the entire mapper result,
