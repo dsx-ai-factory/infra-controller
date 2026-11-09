@@ -41,6 +41,7 @@ mod ib_fabric_find;
 mod instance_allocation_validation;
 mod instance_common;
 mod instance_health;
+mod instance_release;
 mod level_filter;
 mod machine_bmc_metadata;
 mod machine_boot_interfaces;

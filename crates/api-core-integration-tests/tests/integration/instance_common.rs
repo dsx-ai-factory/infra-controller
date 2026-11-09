@@ -15,20 +15,26 @@
  * limitations under the License.
  */
 
+use std::sync::Arc;
+
+use carbide_api_core::test_support::default_config;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
+use carbide_test_harness::{CarbideConfig, TestNetworkSegment};
 use carbide_uuid::network::NetworkSegmentId;
 use model::test_support::ManagedHostConfig;
 use rpc::forge::instance_interface_config::NetworkDetails;
 
-pub(super) struct InstanceFixture {
+pub(super) struct InstanceEnv {
     pub(super) harness: TestHarness,
-    pub(super) mh: TestManagedHost,
     pub(super) segment_id: NetworkSegmentId,
+    admin_segment: TestNetworkSegment,
+    underlay_segment: TestNetworkSegment,
+    site_explorer: TestSiteExplorer,
 }
 
-impl InstanceFixture {
-    pub(super) async fn new(pool: PgPool) -> Self {
+impl InstanceEnv {
+    pub(super) async fn new(pool: PgPool, config: CarbideConfig) -> Self {
         let harness = TestHarness::builder(pool)
             .with_resource_pools(
                 ResourcePoolBuilder::default()
@@ -36,6 +42,7 @@ impl InstanceFixture {
                     .with_vnis(10_001, 10_005)
                     .build(),
             )
+            .with_api_builder_fn(move |builder| builder.with_runtime_config(Arc::new(config)))
             .build()
             .await;
         let domain = harness.create_test_domain("dwrt1.com").await;
@@ -48,19 +55,44 @@ impl InstanceFixture {
             .await
             .id;
         let site_explorer = harness.default_test_site_explorer();
-        let mut mh = harness
-            .managed_host_builder(&site_explorer, underlay_segment)
+        Self {
+            harness,
+            segment_id,
+            admin_segment,
+            underlay_segment,
+            site_explorer,
+        }
+    }
+
+    pub(super) async fn create_managed_host(&self) -> TestManagedHost {
+        let mut mh = self
+            .harness
+            .managed_host_builder(&self.site_explorer, self.underlay_segment)
             .with_config(ManagedHostConfig::default())
             .with_dpu_network_status_reported()
             .build()
             .await
             .0;
-        mh.host.discover_primary_iface(admin_segment).await;
+        mh.host.discover_primary_iface(self.admin_segment).await;
         mh.advance_to_converged_ready().await;
+        mh
+    }
+}
+
+pub(super) struct InstanceFixture {
+    pub(super) harness: TestHarness,
+    pub(super) mh: TestManagedHost,
+    pub(super) segment_id: NetworkSegmentId,
+}
+
+impl InstanceFixture {
+    pub(super) async fn new(pool: PgPool) -> Self {
+        let env = InstanceEnv::new(pool, default_config::get()).await;
+        let mh = env.create_managed_host().await;
         Self {
-            harness,
+            harness: env.harness,
             mh,
-            segment_id,
+            segment_id: env.segment_id,
         }
     }
 }
