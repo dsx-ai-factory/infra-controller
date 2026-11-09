@@ -519,6 +519,46 @@ impl HealthProbeAlert {
         }
     }
 
+    /// Creates a SwitchUnreachable alert for a switch whose NVOS management address did not
+    /// accept a connection for several consecutive checks. `target` is the probed
+    /// `address:port`, and `reason` is the last connection error. Carries `hardware` only: the
+    /// alert is a signal about the switch, not an allocation gate. `in_alert_since` is when the
+    /// outage was first observed, which precedes the write when the caller debounces.
+    pub fn switch_unreachable(
+        target: String,
+        reason: &str,
+        in_alert_since: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        Self {
+            id: HealthProbeId::switch_unreachable(),
+            message: format!(
+                "Switch NVOS management address {target} did not accept a connection ({reason})"
+            ),
+            target: Some(target),
+            in_alert_since: Some(in_alert_since),
+            tenant_message: None,
+            classifications: vec![HealthAlertClassification::hardware()],
+        }
+    }
+
+    /// Creates a NmxtUnreachable alert for a primary switch whose NMX-T telemetry listener did
+    /// not accept a connection for several consecutive checks. `target` is the probed
+    /// `address:port`, and `reason` is the last connection error. Carries `hardware` only.
+    pub fn nmxt_unreachable(
+        target: String,
+        reason: &str,
+        in_alert_since: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        Self {
+            id: HealthProbeId::nmxt_unreachable(),
+            message: format!("NMX-T at {target} did not accept a connection ({reason})"),
+            target: Some(target),
+            in_alert_since: Some(in_alert_since),
+            tenant_message: None,
+            classifications: vec![HealthAlertClassification::hardware()],
+        }
+    }
+
     /// Creates a NmxcUnreachable alert for a rack whose NMX-C the partition monitor could not
     /// use for several consecutive passes. `endpoint` is the NMX-C URL the monitor resolved for
     /// the rack, absent when no switch yielded one, and `reason` names the failing step. Carries
@@ -688,6 +728,18 @@ impl HealthProbeId {
     /// Used by the NVLink partition monitor when GPUs are detected as unhealthy.
     pub fn nvlink_unhealthy() -> Self {
         HealthProbeId("NvlinkUnhealthy".to_string())
+    }
+
+    /// The ID used when the switch reachability monitor cannot connect to a switch's NVOS
+    /// management address.
+    pub fn switch_unreachable() -> Self {
+        HealthProbeId("SwitchUnreachable".to_string())
+    }
+
+    /// The ID used when the switch reachability monitor cannot connect to the NMX-T telemetry
+    /// listener on a primary switch.
+    pub fn nmxt_unreachable() -> Self {
+        HealthProbeId("NmxtUnreachable".to_string())
     }
 
     /// The ID used when the NVLink partition monitor cannot reach a rack's NMX-C.
