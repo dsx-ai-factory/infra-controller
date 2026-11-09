@@ -720,9 +720,10 @@ async fn test_hostname_retry_error_is_not_replaced_by_earlier_contention(
             first_segment.id, second_segment.id
         )
     );
-    // Four statements for contention, then five per hostname attempt. SQLx
-    // may also resolve the interface_type enum once on this connection.
-    let expected_queries = 4 + super::HOST_ALLOCATION_MAX_ATTEMPTS * 5;
+    // Four statements for contention, then seven per hostname attempt,
+    // including the shared Domain lock and live-row validation. SQLx may also
+    // resolve the interface_type enum once on this connection.
+    let expected_queries = 4 + super::HOST_ALLOCATION_MAX_ATTEMPTS * 7;
     assert!(
         (expected_queries..=expected_queries + 1).contains(&query_count),
         "expected {expected_queries} queries plus at most one type lookup, got {query_count}"

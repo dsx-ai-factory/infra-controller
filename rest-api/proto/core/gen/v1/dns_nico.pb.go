@@ -976,6 +976,7 @@ type UpdateDomainRequest struct {
 	// Only `id` is required. `name` may be empty or must equal the stored name;
 	// renaming is not supported and is rejected with INVALID_ARGUMENT. See
 	// Domain.default_ttl for how an absent TTL is treated.
+	// Unknown or deleted IDs are rejected with NOT_FOUND.
 	// Omitted vpc_id preserves ownership; a supplied value must match the owner
 	// or the request is rejected with INVALID_ARGUMENT. Ownership cannot be cleared.
 	Domain        *Domain `protobuf:"bytes,1,opt,name=domain,proto3" json:"domain,omitempty"`
@@ -1073,8 +1074,11 @@ func (x *DomainSearchQuery) GetName() string {
 }
 
 type DomainDeletionRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Id            *DomainId              `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required Domain ID. Deletion is rejected with FAILED_PRECONDITION while
+	// a live network segment or machine interface references the Domain.
+	// Repeated deletion of a previously deleted Domain succeeds.
+	Id            *DomainId `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
