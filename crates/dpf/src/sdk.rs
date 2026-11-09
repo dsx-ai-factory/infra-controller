@@ -1168,6 +1168,58 @@ pub fn build_service_nad(service_nad: &ServiceNAD, namespace: &str, suffix: &str
     }
 }
 
+/// Creates a service NAD when absent and leaves an existing NAD under its current owner's
+/// control. The bridge, resource type, and IPAM mode must still satisfy the service contract;
+/// serviceMTU may be site-specific and is deliberately not rewritten or constrained here.
+pub(crate) async fn apply_or_validate_service_nad<R: DpuServiceNADRepository>(
+    repo: &R,
+    desired: &DPUServiceNAD,
+) -> Result<(), DpfError> {
+    let name = desired
+        .metadata
+        .name
+        .as_deref()
+        .ok_or_else(|| DpfError::InvalidState("DPUServiceNAD name is required".to_string()))?;
+    let namespace =
+        desired.metadata.namespace.as_deref().ok_or_else(|| {
+            DpfError::InvalidState("DPUServiceNAD namespace is required".to_string())
+        })?;
+
+    if let Some(existing) = repo.get(name, namespace).await? {
+        let same_resource_type = matches!(
+            (&existing.spec.resource_type, &desired.spec.resource_type),
+            (DpuServiceNadResourceType::Sf, DpuServiceNadResourceType::Sf)
+                | (DpuServiceNadResourceType::Vf, DpuServiceNadResourceType::Vf)
+                | (
+                    DpuServiceNadResourceType::Veth,
+                    DpuServiceNadResourceType::Veth
+                )
+        );
+        let compatible = existing.spec.bridge == desired.spec.bridge
+            && existing.spec.ipam.unwrap_or(false) == desired.spec.ipam.unwrap_or(false)
+            && same_resource_type;
+        if !compatible {
+            return Err(DpfError::InvalidState(format!(
+                "existing DPUServiceNAD {namespace}/{name} has incompatible bridge, resource type, or IPAM settings; resolve it before NICo initializes DPF services"
+            )));
+        }
+
+        if existing.spec.service_mtu != desired.spec.service_mtu {
+            tracing::warn!(
+                namespace,
+                name,
+                existing_mtu = ?existing.spec.service_mtu,
+                desired_mtu = ?desired.spec.service_mtu,
+                "Preserving the existing DPUServiceNAD MTU; validate it for this site"
+            );
+        }
+        return Ok(());
+    }
+
+    repo.apply(desired).await?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_deployment(
     services: &[ServiceDefinition],
@@ -2624,8 +2676,7 @@ async fn create_flavor_services_and_deployment<
         )
         .await?;
         for nad in &svc.service_nads {
-            DpuServiceNADRepository::apply(repo, &build_service_nad(nad, namespace, suffix))
-                .await?;
+            apply_or_validate_service_nad(repo, &build_service_nad(nad, namespace, suffix)).await?;
         }
     }
 
