@@ -55,7 +55,7 @@ impl MetaDataIdentitySigner for FmdsState {
             return Ok(MetaDataIdentityOutcome::HttpProxy(resp));
         }
 
-        let forge_client_config = self.forge_client_config.as_ref().ok_or_else(|| {
+        let carbide_client_config = self.carbide_client_config.as_ref().ok_or_else(|| {
             tonic::Status::failed_precondition(
                 "forge client TLS is not configured; cannot sign machine identity",
             )
@@ -63,7 +63,7 @@ impl MetaDataIdentitySigner for FmdsState {
         let snap = self.machine_identity.load();
         let resp = sign_machine_identity_with_forge(
             &self.forge_api,
-            forge_client_config.as_ref(),
+            carbide_client_config.as_ref(),
             snap.forge_call_timeout,
             audiences,
         )

@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use ::rpc::carbide_api_client::CarbideApiClient;
 use ::rpc::forge::instance_interface_config::NetworkDetails;
 use ::rpc::forge::{
     self as rpc, BmcEndpointRequest, FindInstanceTypesByIdsRequest,
@@ -31,7 +32,6 @@ use ::rpc::forge::{
     SpxPartitionSearchFilter, UpdateMachineHardwareInfoRequest, UpdateNetworkSecurityGroupRequest,
     VpcCreationRequest, VpcSearchFilter, VpcVirtualizationType, VpcsByIdsRequest,
 };
-use ::rpc::forge_api_client::ForgeApiClient;
 use ::rpc::{Machine, NetworkSegment};
 use carbide_uuid::dpa_interface::DpaInterfaceId;
 use carbide_uuid::dpu_remediations::RemediationId;
@@ -58,10 +58,10 @@ use crate::expected_machines::common::{ExpectedMachineJson, HostDpuPolicy};
 use crate::instance::AllocateInstance;
 use crate::machine::MachineAutoupdate;
 
-/// [`ApiClient`] is a thin wrapper around [`ForgeApiClient`], which mainly adds some convenience
+/// [`ApiClient`] is a thin wrapper around [`CarbideApiClient`], which mainly adds some convenience
 /// methods.
 #[derive(Clone)]
-pub(crate) struct ApiClient(pub(crate) ForgeApiClient);
+pub(crate) struct ApiClient(pub(crate) CarbideApiClient);
 
 /// Returns `True` when `status` *can* mean the server does not implement
 /// the requested RPC, telling the caller to retry through the legacy operation.
@@ -213,12 +213,12 @@ const MAX_PAGED_FETCH_ATTEMPTS: usize = 8;
 const MAX_PAGED_FETCH_BACKOFF: Duration = Duration::from_secs(120);
 
 // Note: You do *not* need to add every gRPC method to this wrapper. Callers can use `.0` to get
-// access to the underlying ForgeApiClient, if they want to simply call the gRPC methods themselves.
+// access to the underlying CarbideApiClient, if they want to simply call the gRPC methods themselves.
 // Add methods here if there's some value to it, like constructing rpc request objects from simpler
 // primitives, or other data conversions.
 //
 // (this module used to have more logic around establishing a connection to carbide, but this is all
-// now done in ForgeApiClient itself, leaving these methods only concerned with data conversions and
+// now done in CarbideApiClient itself, leaving these methods only concerned with data conversions and
 // other conveniences. 90% of these methods no longer justify their existence... we probably don't
 // need to add more.)
 impl ApiClient {
@@ -3334,14 +3334,14 @@ impl ApiClient {
 
 #[cfg(test)]
 mod tests {
-    use ::rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use ::rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
     use ::rpc::{DiscoveryInfo, NetworkInterface, PciDeviceProperties};
     use carbide_test_support::{Case, Check, Outcome, check_cases_async, check_values};
     use clap::Parser;
 
     use super::{
-        AllocateInstance, ApiClient, ForgeApiClient, LegacyBmcPatchFields, Machine, NetworkDetails,
-        cap_chunk_size, legacy_bmc_patch_fields, maybe_unimplemented, rpc,
+        AllocateInstance, ApiClient, CarbideApiClient, LegacyBmcPatchFields, Machine,
+        NetworkDetails, cap_chunk_size, legacy_bmc_patch_fields, maybe_unimplemented, rpc,
     };
 
     #[tokio::test]
@@ -3459,9 +3459,9 @@ mod tests {
                     }),
                     ..Default::default()
                 };
-                let client = ApiClient(ForgeApiClient::new(&ApiConfig::new(
+                let client = ApiClient(CarbideApiClient::new(&ApiConfig::new(
                     "invalid-unconnected-url",
-                    &ForgeClientConfig::default(),
+                    &CarbideClientConfig::default(),
                 )));
                 let request = client
                     .build_instance_request(machine, &args, "vf-test", None)

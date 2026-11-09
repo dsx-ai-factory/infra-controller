@@ -39,7 +39,7 @@ use hickory_server::zone_handler::MessageResponseBuilder;
 use metrics_endpoint::{MetricsEndpointConfig, new_metrics_setup, run_metrics_endpoint};
 use opentelemetry::StringValue;
 use opentelemetry::metrics::{Counter, Meter, ObservableGauge};
-use rpc::forge_tls_client::{ApiConfig, ForgeClientT, ForgeTlsClient};
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientT, CarbideTlsClient};
 use rpc::protos::dns::{DnsLookupOutcome, DnsResourceRecordLookupRequest};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::Mutex;
@@ -87,7 +87,7 @@ impl std::fmt::Debug for DnsMetrics {
 
 #[derive(Debug)]
 pub struct DnsServer {
-    forge_client: Mutex<ForgeClientT>,
+    forge_client: Mutex<CarbideClientT>,
     negative_cache: Arc<NegativeCache>,
     /// Per-request ceiling on the upstream `lookup_record` call.
     upstream_lookup_timeout: Duration,
@@ -764,7 +764,7 @@ struct UpstreamReply {
 }
 
 impl DnsServer {
-    pub fn new(forge_client: Mutex<ForgeClientT>, meter: &Meter, config: &Config) -> Self {
+    pub fn new(forge_client: Mutex<CarbideClientT>, meter: &Meter, config: &Config) -> Self {
         let servfail_ttl = config.servfail_cache_ttl();
         if servfail_ttl.as_secs() != config.negative_cache_servfail_ttl_secs {
             warn!(
@@ -799,7 +799,7 @@ impl DnsServer {
     // then include only qname and qtype
     #[tracing::instrument(level = "debug", skip_all, fields(qname = %qname, qtype = %qtype))]
     async fn retrieve_records(
-        mut forge_client: ForgeClientT,
+        mut forge_client: CarbideClientT,
         qname: &str,
         qtype: DnsResourceRecordType,
         record_name: &Name,
@@ -872,13 +872,13 @@ impl DnsServer {
 
         info!(listen_address = %listen, "Starting DNS server");
 
-        let forge_client_config = config.forge_client_config();
+        let carbide_client_config = config.carbide_client_config();
         let api_uri = config.api_uri.to_string();
-        let api_config = ApiConfig::new(api_uri.as_str(), &forge_client_config);
+        let api_config = ApiConfig::new(api_uri.as_str(), &carbide_client_config);
 
         info!(%api_uri, "Connecting to carbide-api");
 
-        let client = Mutex::new(ForgeTlsClient::retry_build(&api_config).await?);
+        let client = Mutex::new(CarbideTlsClient::retry_build(&api_config).await?);
 
         // Sweep at the shorter of the two negative-cache lifetimes. ServFail
         // entries expire far sooner than NXDomain/Refused, and although an

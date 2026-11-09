@@ -17,8 +17,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use ::rpc::carbide_tls_client::{self, ApiConfig, CarbideClientConfig};
 use ::rpc::forge as rpc;
-use ::rpc::forge_tls_client::{self, ApiConfig, ForgeClientConfig};
 use carbide_uuid::machine::DpuMachineId;
 
 use crate::command_line::AgentPlatformType;
@@ -33,7 +33,7 @@ pub(super) struct MachineInventoryUpdaterConfig {
     pub(super) update_inventory_interval: Duration,
     pub(super) machine_id: DpuMachineId,
     pub(super) forge_api: String,
-    pub(super) forge_client_config: Arc<ForgeClientConfig>,
+    pub(super) carbide_client_config: Arc<CarbideClientConfig>,
     pub(super) agent_platform_type: AgentPlatformType,
 }
 
@@ -102,7 +102,7 @@ pub(super) async fn single_run(config: &MachineInventoryUpdaterConfig) -> eyre::
 
         update_agent_reported_inventory(
             agent_report,
-            &config.forge_client_config,
+            &config.carbide_client_config,
             &config.forge_api,
         )
         .await
@@ -123,10 +123,10 @@ pub(super) async fn single_run(config: &MachineInventoryUpdaterConfig) -> eyre::
 
 async fn update_agent_reported_inventory(
     inventory_report: rpc::DpuAgentInventoryReport,
-    client_config: &forge_tls_client::ForgeClientConfig,
+    client_config: &carbide_tls_client::CarbideClientConfig,
     forge_api: &str,
 ) -> eyre::Result<()> {
-    let mut client = match forge_tls_client::ForgeTlsClient::retry_build(&ApiConfig::new(
+    let mut client = match carbide_tls_client::CarbideTlsClient::retry_build(&ApiConfig::new(
         forge_api,
         client_config,
     ))

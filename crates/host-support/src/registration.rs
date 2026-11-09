@@ -17,8 +17,8 @@
 
 use std::time::Duration;
 
+use ::rpc::carbide_tls_client::{CarbideClientConfig, CarbideClientT, CarbideTlsClient};
 use ::rpc::forge::{AttestQuoteRequest, MachineCertificate};
-use ::rpc::forge_tls_client::{ForgeClientConfig, ForgeClientT, ForgeTlsClient};
 use ::rpc::{MachineDiscoveryInfo, forge as rpc, machine_discovery as rpc_discovery};
 use carbide_uuid::machine::MachineId;
 use eyre::WrapErr;
@@ -60,7 +60,7 @@ pub struct DiscoveryRetry {
 // doing async retries of machine discovery requests. Since
 // everything here is async, retrying futures gets interesting,
 // because values get moved into them (as in needing to clone or
-// recreate the underlying forge_tls_client, gRPC message, etc.
+// recreate the underlying carbide_tls_client, gRPC message, etc.
 //
 // This could have also just gone inline with register_machine,
 // but breaking the code out like this does help to make
@@ -73,8 +73,8 @@ struct RegistrationClient<'a, 'c> {
     api_url: &'a str,
 
     // config is, quite obviously, a reference
-    // to a ForgeClientConfig to use.
-    config: &'c ForgeClientConfig,
+    // to a CarbideClientConfig to use.
+    config: &'c CarbideClientConfig,
 
     retry: DiscoveryRetry,
 }
@@ -82,8 +82,8 @@ struct RegistrationClient<'a, 'c> {
 impl<'a, 'c> RegistrationClient<'a, 'c> {
     // new creates a new RegistrationClient, where the
     // only things needed here are references to the API
-    // URL and the corresponding ForgeClientConfig.
-    fn new(api_url: &'a str, config: &'c ForgeClientConfig, retry: DiscoveryRetry) -> Self {
+    // URL and the corresponding CarbideClientConfig.
+    fn new(api_url: &'a str, config: &'c CarbideClientConfig, retry: DiscoveryRetry) -> Self {
         Self {
             api_url,
             config,
@@ -91,8 +91,8 @@ impl<'a, 'c> RegistrationClient<'a, 'c> {
         }
     }
 
-    // connect will create a new ForgeTlsClient and return an underlying
-    // ForgeClientT connection for callers to leverage, returning an error
+    // connect will create a new CarbideTlsClient and return an underlying
+    // CarbideClientT connection for callers to leverage, returning an error
     // if we were unable to create a client (e.g. if there was an issue
     // loading certificates), or establish a connection. All calls from
     // devices -> carbide-api generally follow this pattern, so you merely
@@ -102,9 +102,9 @@ impl<'a, 'c> RegistrationClient<'a, 'c> {
     // let mut connection = self.connect("<what-youre-doing>").await?;
     // let response = connection.your_api_endpoint(request).await?;
     //
-    async fn connect(&self, purpose: &str) -> Result<ForgeClientT, RegistrationError> {
+    async fn connect(&self, purpose: &str) -> Result<CarbideClientT, RegistrationError> {
         tracing::debug!(purpose, "creating tls client connection");
-        let client = ForgeTlsClient::new(self.config);
+        let client = CarbideTlsClient::new(self.config);
         match client.build(self.api_url.to_string()).await {
             Ok(connection) => {
                 tracing::debug!(purpose, ?connection, "created tls client connection");
@@ -128,7 +128,7 @@ impl<'a, 'c> RegistrationClient<'a, 'c> {
     ) -> Result<rpc::MachineDiscoveryResult, RegistrationError> {
         tracing::info!(attempt, "Attempting to discover_machine");
 
-        // Create a new connection off of the ForgeTlsClient.
+        // Create a new connection off of the CarbideTlsClient.
         let mut connection = self.connect("discover_machine_once").await?;
 
         // Create a new request with the provided MachineDiscoveryInfo.
@@ -174,7 +174,7 @@ impl<'a, 'c> RegistrationClient<'a, 'c> {
         &self,
         quote: &AttestQuoteRequest,
     ) -> Result<rpc::AttestQuoteResponse, RegistrationError> {
-        // Create a new connection off of the ForgeTlsClient.
+        // Create a new connection off of the CarbideTlsClient.
         let mut connection = self.connect("attest_quote").await?;
 
         // Create a new request with the provided AttestQuoteRequest.
@@ -190,22 +190,22 @@ impl<'a, 'c> RegistrationClient<'a, 'c> {
     }
 }
 
-// create_client_config creates a new ForgeClientConfig. All
+// create_client_config creates a new CarbideClientConfig. All
 // calls in here follow the same pattern, so this was moved out
 // into its own function to clean up tons of duplication.
 fn create_client_config(
     purpose: &str,
     use_mgmt_vrf: bool,
     root_ca: String,
-) -> Result<ForgeClientConfig, RegistrationError> {
-    let forge_client_config = match use_mgmt_vrf {
-        true => ForgeClientConfig::new(root_ca, None)
+) -> Result<CarbideClientConfig, RegistrationError> {
+    let carbide_client_config = match use_mgmt_vrf {
+        true => CarbideClientConfig::new(root_ca, None)
             .use_mgmt_vrf()
             .map_err(|e| RegistrationError::TransportError(e.to_string()))?,
-        false => ForgeClientConfig::new(root_ca, None),
+        false => CarbideClientConfig::new(root_ca, None),
     };
-    tracing::debug!(purpose, ?forge_client_config, "client_config");
-    Ok(forge_client_config)
+    tracing::debug!(purpose, ?carbide_client_config, "client_config");
+    Ok(carbide_client_config)
 }
 
 /// Registers a machine at the Forge API server for further interactions
@@ -242,8 +242,8 @@ pub async fn register_machine(
     };
     tracing::info!(machine_discovery_info = ?info, "register_machine discovery_info");
 
-    let forge_client_config = create_client_config("register_machine", use_mgmt_vrf, root_ca)?;
-    let response = RegistrationClient::new(forge_api, &forge_client_config, retry)
+    let carbide_client_config = create_client_config("register_machine", use_mgmt_vrf, root_ca)?;
+    let response = RegistrationClient::new(forge_api, &carbide_client_config, retry)
         .discover_machine(info)
         .await?;
 
@@ -285,8 +285,8 @@ pub async fn attest_quote(
 ) -> Result<bool, RegistrationError> {
     tracing::info!("registration client sending attest_quote");
 
-    let forge_client_config = create_client_config("attest_quote", use_mgmt_vrf, root_ca)?;
-    let response = RegistrationClient::new(forge_api, &forge_client_config, retry)
+    let carbide_client_config = create_client_config("attest_quote", use_mgmt_vrf, root_ca)?;
+    let response = RegistrationClient::new(forge_api, &carbide_client_config, retry)
         .attest_quote(quote)
         .await?;
 

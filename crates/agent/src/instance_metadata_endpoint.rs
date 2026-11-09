@@ -16,7 +16,7 @@
  */
 use std::sync::Arc;
 
-use ::rpc::forge_tls_client::ForgeClientConfig;
+use ::rpc::carbide_tls_client::CarbideClientConfig;
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use axum::Router;
@@ -93,7 +93,7 @@ pub(super) struct InstanceMetadataRouterStateImpl {
     latest_network_config: ArcSwapOption<ManagedHostNetworkConfigResponse>,
     machine_id: DpuMachineId,
     forge_api: String,
-    forge_client_config: Arc<ForgeClientConfig>,
+    carbide_client_config: Arc<CarbideClientConfig>,
     outbound_governor:
         Arc<RateLimiter<NotKeyed, InMemoryState, clock::DefaultClock, NoOpMiddleware>>,
     /// Rate limits, Forge/sign-proxy timeouts, and optional HTTP sign-proxy client for
@@ -124,7 +124,7 @@ impl InstanceMetadataRouterState for InstanceMetadataRouterStateImpl {
             Err(e) => return Err(eyre!("rate limit exceeded for phone_home; {}\n", e)),
         };
 
-        let mut client = create_forge_client(&self.forge_api, &self.forge_client_config).await?;
+        let mut client = create_forge_client(&self.forge_api, &self.carbide_client_config).await?;
 
         let timestamp = phone_home(&mut client, &self.machine_id).await?;
 
@@ -143,7 +143,7 @@ impl InstanceMetadataRouterState for InstanceMetadataRouterStateImpl {
     ) -> Result<forge::MachineIdentityResponse, tonic::Status> {
         sign_machine_identity_with_forge(
             &self.forge_api,
-            &self.forge_client_config,
+            &self.carbide_client_config,
             self.identity_serving.forge_call_timeout,
             audiences,
         )
@@ -201,7 +201,7 @@ impl InstanceMetadataRouterStateImpl {
     pub(super) fn new(
         machine_id: DpuMachineId,
         forge_api: String,
-        forge_client_config: Arc<ForgeClientConfig>,
+        carbide_client_config: Arc<CarbideClientConfig>,
         machine_identity: MachineIdentityConfig,
     ) -> Result<Self, String> {
         let params = machine_identity::MachineIdentityParams::try_from_limits(
@@ -220,7 +220,7 @@ impl InstanceMetadataRouterStateImpl {
             latest_network_config: ArcSwapOption::new(None),
             machine_id,
             forge_api,
-            forge_client_config,
+            carbide_client_config,
             outbound_governor: Arc::new(RateLimiter::direct(PHONE_HOME_RATE_LIMIT)),
             identity_serving: serving,
         })

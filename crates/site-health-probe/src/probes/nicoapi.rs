@@ -27,8 +27,8 @@ use std::time::Duration;
 
 use eyre::eyre;
 use forge_tls::client_config::ClientCert;
+use rpc::carbide_tls_client::{CarbideClientConfig, CarbideTlsClient};
 use rpc::forge::{MachineSearchConfig, MachinesByIdsRequest};
-use rpc::forge_tls_client::{ForgeClientConfig, ForgeTlsClient};
 
 use crate::config;
 use crate::framework::{ObservationRecorder, Probe};
@@ -73,9 +73,9 @@ impl Probe for MachinesProbe {
     /// canary: it measures the cold path a new client experiences (and
     /// re-reads the certs, making rotation need no restart) rather than the
     /// warm path of a pooled connection. For the same reason this uses
-    /// `ForgeTlsClient::build` (one attempt, like agent/main_loop and
+    /// `CarbideTlsClient::build` (one attempt, like agent/main_loop and
     /// host-support/registration) rather than `retry_build` or the pooled
-    /// `ForgeApiClient` wrapper — their connect retries and per-connect
+    /// `CarbideApiClient` wrapper — their connect retries and per-connect
     /// version() health check would hide exactly the failures a canary
     /// exists to count.
     async fn run(&self, recorder: &ObservationRecorder) -> eyre::Result<()> {
@@ -84,7 +84,7 @@ impl Probe for MachinesProbe {
         // failure; validate it up front so a bad mount names itself.
         preflight_ca(&self.cfg.tls.ca).await?;
 
-        let mut client_config = ForgeClientConfig::new(
+        let mut client_config = CarbideClientConfig::new(
             self.cfg.tls.ca.clone(),
             Some(ClientCert {
                 cert_path: self.cfg.tls.cert.clone(),
@@ -98,7 +98,7 @@ impl Probe for MachinesProbe {
         client_config.enforce_tls = true;
 
         let url = format!("https://{}", self.cfg.target);
-        let mut client = ForgeTlsClient::new(&client_config)
+        let mut client = CarbideTlsClient::new(&client_config)
             .build(&url)
             .await
             .map_err(|e| eyre!("dial: {e}"))?;
