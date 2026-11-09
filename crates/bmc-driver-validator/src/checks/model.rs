@@ -53,9 +53,9 @@ pub(crate) struct UefiPassword {
     pub(crate) new: String,
 }
 
-/// An input a check cannot run without. The runner skips a check that
-/// needs an input the operator did not supply, so the `required_*`
-/// accessors only fail for a check that does not declare what it reads.
+/// An input a check cannot run without. Planning skips a check that needs
+/// an input the operator did not supply, so the `required_*` accessors only
+/// fail for a check that does not declare what it reads.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Needs {
     BootInterface,
@@ -67,33 +67,35 @@ pub(super) enum Needs {
     SuperNics,
 }
 
-impl Needs {
-    /// How a check ends without the input: skipped, naming its flag.
-    pub(super) fn skipped(self) -> Outcome {
-        let flag = match self {
-            Self::BootInterface => "--boot-mac",
-            Self::NtpServers => "--ntp-server",
-            Self::UefiPassword => "--uefi-password",
-            Self::AcCycle => "--allow-ac-cycle",
-            Self::StorageErase => "--allow-storage-erase",
-            Self::HostBmc => "--host-bmc",
-            Self::SuperNics => "--super-nics",
-        };
-        Outcome::Skipped(format!("needs {flag}"))
-    }
-}
-
 impl Inputs {
-    pub(super) fn has(&self, needs: Needs) -> bool {
+    /// The flag that supplies `needs`, and whether the operator gave it.
+    fn supplied(&self, needs: Needs) -> (&'static str, bool) {
         match needs {
-            Needs::BootInterface => self.boot_mac.is_some(),
-            Needs::NtpServers => !self.ntp_servers.is_empty(),
-            Needs::UefiPassword => self.uefi_password.is_some(),
-            Needs::AcCycle => self.allow_ac_cycle,
-            Needs::StorageErase => self.allow_storage_erase,
-            Needs::HostBmc => self.host_bmc.is_some(),
-            Needs::SuperNics => self.super_nics.is_some(),
+            Needs::BootInterface => ("--boot-mac", self.boot_mac.is_some()),
+            Needs::NtpServers => ("--ntp-server", !self.ntp_servers.is_empty()),
+            Needs::UefiPassword => ("--uefi-password", self.uefi_password.is_some()),
+            Needs::AcCycle => ("--allow-ac-cycle", self.allow_ac_cycle),
+            Needs::StorageErase => ("--allow-storage-erase", self.allow_storage_erase),
+            Needs::HostBmc => ("--host-bmc", self.host_bmc.is_some()),
+            Needs::SuperNics => ("--super-nics", self.super_nics.is_some()),
         }
+    }
+
+    /// How a check needing an input the operator did not supply ends:
+    /// skipped, naming the flag; `None` when every input in `needs` was given.
+    pub(super) fn missing(&self, needs: &[Needs]) -> Option<Outcome> {
+        needs
+            .iter()
+            .find(|needs| !self.supplied(**needs).1)
+            .map(|needs| self.skipped(*needs))
+    }
+
+    fn skipped(&self, needs: Needs) -> Outcome {
+        Outcome::Skipped(format!("needs {}", self.supplied(needs).0))
+    }
+
+    fn required<T>(&self, needs: Needs, value: Option<T>) -> Result<T, Outcome> {
+        value.ok_or_else(|| self.skipped(needs))
     }
 
     pub(super) fn boot_interface(&self) -> Option<BootInterfaceSelector> {
@@ -101,32 +103,30 @@ impl Inputs {
     }
 
     pub(super) fn required_boot_interface(&self) -> Result<BootInterfaceSelector, Outcome> {
-        self.boot_interface()
-            .ok_or_else(|| Needs::BootInterface.skipped())
+        self.required(Needs::BootInterface, self.boot_interface())
     }
 
     pub(super) fn required_uefi_password(&self) -> Result<&UefiPassword, Outcome> {
-        self.uefi_password
-            .as_ref()
-            .ok_or_else(|| Needs::UefiPassword.skipped())
+        self.required(Needs::UefiPassword, self.uefi_password.as_ref())
     }
 
     pub(super) fn required_super_nics(&self) -> Result<u8, Outcome> {
-        self.super_nics.ok_or_else(|| Needs::SuperNics.skipped())
+        self.required(Needs::SuperNics, self.super_nics)
     }
 
     pub(super) fn required_host_bmc(&self) -> Result<&Target, Outcome> {
-        self.host_bmc
-            .as_ref()
-            .ok_or_else(|| Needs::HostBmc.skipped())
+        self.required(Needs::HostBmc, self.host_bmc.as_ref())
     }
 }
 
 /// How a check ended.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum Outcome {
     Pass(Detail),
     Fail(String),
+    /// The check sent a change and cannot tell whether it took effect, as
+    /// when a request it cannot safely repeat goes unanswered.
+    Unconfirmed(String),
     /// The BMC did not answer or reported itself temporarily unavailable, as
     /// while a reset, a settings change, or a host POST occupies it. The
     /// runner runs the check again until it answers or the wait runs out.
@@ -140,9 +140,37 @@ pub(crate) enum Outcome {
     Blocked(String),
 }
 
+impl Outcome {
+    /// What the ending says: a pass's summary, or the reason.
+    pub(crate) fn text(&self) -> &str {
+        match self {
+            Self::Pass(detail) => &detail.summary,
+            Self::Fail(reason)
+            | Self::Unconfirmed(reason)
+            | Self::Unreachable(reason)
+            | Self::Unsupported(reason)
+            | Self::Skipped(reason)
+            | Self::Blocked(reason) => reason,
+        }
+    }
+
+    /// Whether the check failed, which fails the run.
+    pub(crate) fn is_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Fail(_) | Self::Unconfirmed(_) | Self::Unreachable(_)
+        )
+    }
+
+    /// Whether checks that follow this one must not run.
+    pub(crate) fn blocks(&self) -> bool {
+        self.is_failure() || matches!(self, Self::Blocked(_))
+    }
+}
+
 /// What a passing check observed: a one-line summary and the name/value
 /// fields shown beneath it.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Detail {
     pub(crate) summary: String,
     pub(crate) fields: Vec<(String, String)>,
@@ -166,23 +194,23 @@ pub(super) type Checked = Result<Detail, Outcome>;
 pub(super) type CheckFn =
     for<'a> fn(&'a CheckCx<'a>) -> Pin<Box<dyn Future<Output = Checked> + 'a>>;
 
-/// A check's id, as `--check` names it and dependencies refer to it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct CheckId(&'static str);
+/// A check's id, as `--check` names it and dependencies refer to it: the
+/// capability whose driver it drives, then its name, as `power.state`.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct CheckId {
+    pub(crate) capability: Capability,
+    name: &'static str,
+}
 
 impl CheckId {
-    pub(super) const fn new(id: &'static str) -> Self {
-        Self(id)
-    }
-
-    pub(crate) const fn as_str(self) -> &'static str {
-        self.0
+    pub(super) const fn new(capability: Capability, name: &'static str) -> Self {
+        Self { capability, name }
     }
 }
 
 impl fmt::Display for CheckId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad(self.0)
+        f.pad(&format!("{}.{}", self.capability, self.name))
     }
 }
 
@@ -194,13 +222,12 @@ pub(crate) enum Kind {
     Apply,
 }
 
+/// One check, defined once; a sequence decides where it runs.
+#[derive(Clone, Copy)]
 pub(crate) struct Check {
     pub(crate) id: CheckId,
-    pub(crate) capability: Capability,
     pub(crate) kind: Kind,
     pub(super) needs: &'static [Needs],
-    /// Checks that must not have failed for this one to run.
-    pub(super) after: Vec<CheckId>,
     /// Whether the check may run again when it finds the BMC unreachable;
     /// not for one whose repeat would redo a change it may already have made.
     pub(super) rerun: bool,
@@ -209,13 +236,11 @@ pub(crate) struct Check {
 }
 
 impl Check {
-    pub(super) fn read(id: &'static str, capability: Capability, run: CheckFn) -> Self {
+    pub(super) fn read(id: CheckId, run: CheckFn) -> Self {
         Self {
-            id: CheckId::new(id),
-            capability,
+            id,
             kind: Kind::Read,
             needs: &[],
-            after: Vec::new(),
             rerun: true,
             timeout: Duration::from_secs(60),
             run,
@@ -224,11 +249,11 @@ impl Check {
 
     /// Apply checks bound their own waits so they can restore what they
     /// changed; the timeout only backstops a hung request.
-    pub(super) fn apply(id: CheckId, capability: Capability, run: CheckFn) -> Self {
+    pub(super) fn apply(id: CheckId, run: CheckFn) -> Self {
         Self {
             kind: Kind::Apply,
             timeout: Duration::from_secs(2 * 60 * 60),
-            ..Self::read(id.as_str(), capability, run)
+            ..Self::read(id, run)
         }
     }
 
@@ -240,18 +265,34 @@ impl Check {
         Self { needs, ..self }
     }
 
-    pub(super) fn after(self, after: &[CheckId]) -> Self {
-        Self {
-            after: after.to_vec(),
-            ..self
-        }
-    }
-
-    /// Fails the check, rather than running it again, when it finds the BMC
-    /// unreachable.
+    /// Ends the check unconfirmed, rather than running it again, when it
+    /// finds the BMC unreachable.
     pub(super) fn once(self) -> Self {
         Self {
             rerun: false,
+            ..self
+        }
+    }
+}
+
+/// One step of a sequence: a check, and the checks before it that must not
+/// have failed for it to run.
+pub(super) struct Sequenced {
+    pub(super) id: CheckId,
+    pub(super) after: Vec<CheckId>,
+}
+
+impl Sequenced {
+    pub(super) fn new(id: CheckId) -> Self {
+        Self {
+            id,
+            after: Vec::new(),
+        }
+    }
+
+    pub(super) fn after(self, after: &[CheckId]) -> Self {
+        Self {
+            after: after.to_vec(),
             ..self
         }
     }

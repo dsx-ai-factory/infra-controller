@@ -64,7 +64,7 @@ impl Terminal {
 
     /// Reports one step of `check`, which started at `started`: printed to
     /// stderr with `--verbose`, shown on the activity line otherwise.
-    pub(super) fn trace(&self, check: &'static str, started: Instant, step: &str) {
+    pub(super) fn trace(&self, check: &str, started: Instant, step: &str) {
         let step = self.redactor.apply(step);
         if !self.verbose {
             self.activity.step(check, step);

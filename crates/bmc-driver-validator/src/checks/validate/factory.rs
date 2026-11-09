@@ -21,10 +21,11 @@ use std::time::{Duration, Instant};
 
 use bmc_platform::{AuthError, Capability, PlatformError};
 
-use super::host::lift_lockdown;
-use crate::checks::context::{CheckCx, UefiPasswordLeft};
+use super::UEFI_PASSWORD;
+use crate::checks::apply::lift_lockdown;
+use crate::checks::context::CheckCx;
 use crate::checks::errors::describe;
-use crate::checks::model::{Check, CheckId, Needs, Outcome, Step};
+use crate::checks::model::{Check, CheckFn, CheckId, Needs, Outcome, Sequenced, Step};
 use crate::checks::ops::{self, Attempt, Effect, SETTLE_POLL_INTERVAL, how, poll, requested, took};
 use crate::checks::text::counted;
 
@@ -33,29 +34,62 @@ use crate::checks::text::counted;
 const FACTORY_DOWN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const FACTORY_RESET_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
-const FACTORY_LOCKDOWN: CheckId = CheckId::new("factory.lockdown");
-const FACTORY_UEFI_PASSWORD: CheckId = CheckId::new("factory.uefi_password");
-const FACTORY_BIOS: CheckId = CheckId::new("factory.bios");
-const FACTORY_BMC: CheckId = CheckId::new("factory.bmc");
-const FACTORY_RESET_LOCKDOWN: CheckId = CheckId::new("factory_reset.lockdown");
-const FACTORY_RESET_UEFI_PASSWORD: CheckId = CheckId::new("factory_reset.uefi_password");
-const FACTORY_RESET_BIOS: CheckId = CheckId::new("factory_reset.bios");
-const FACTORY_RESET_BMC: CheckId = CheckId::new("factory_reset.bmc");
+/// The steps back to factory state, as one pass of them reports them.
+struct FactorySteps {
+    lockdown: CheckId,
+    uefi_password: CheckId,
+    bios: CheckId,
+    bmc: CheckId,
+}
+
+/// The pass after validating, with `--validate factory`.
+const AFTER: FactorySteps = FactorySteps {
+    lockdown: CheckId::new(Capability::Lockdown, "factory"),
+    uefi_password: CheckId::new(Capability::Bios, "factory_uefi_password"),
+    bios: CheckId::new(Capability::Bios, "factory"),
+    bmc: CheckId::new(Capability::BmcControl, "factory"),
+};
+
+/// The pass before validating, with `--factory-reset-first`.
+const FIRST: FactorySteps = FactorySteps {
+    lockdown: CheckId::new(Capability::Lockdown, "factory_first"),
+    uefi_password: CheckId::new(Capability::Bios, "factory_first_uefi_password"),
+    bios: CheckId::new(Capability::Bios, "factory_first"),
+    bmc: CheckId::new(Capability::BmcControl, "factory_first"),
+};
+
+impl FactorySteps {
+    /// Lockdown off so the BIOS takes the reset, the UEFI password cleared
+    /// by `clear_uefi_password`, the BIOS reset, then the BMC.
+    fn checks(&self, clear_uefi_password: CheckFn) -> [Check; 4] {
+        [
+            Check::apply(self.lockdown, run!(lift_lockdown)),
+            Check::apply(self.uefi_password, clear_uefi_password)
+                .once()
+                .needs(&[Needs::UefiPassword]),
+            Check::apply(self.bios, run!(reset_bios)),
+            Check::apply(self.bmc, run!(reset_to_factory)).once(),
+        ]
+    }
+}
+
+/// Both passes' checks: after validating, the UEFI password is cleared only
+/// when this run set it; before, the one an earlier run left is.
+pub(super) fn checks() -> Vec<Check> {
+    AFTER
+        .checks(run!(clear_uefi_password_this_run_set))
+        .into_iter()
+        .chain(FIRST.checks(run!(clear_uefi_password)))
+        .collect()
+}
 
 /// Back to factory state; each step runs whatever came before.
-pub(super) fn reset() -> Vec<Check> {
+pub(super) fn reset() -> Vec<Sequenced> {
     vec![
-        Check::apply(FACTORY_LOCKDOWN, Capability::Lockdown, run!(lift_lockdown)),
-        Check::apply(
-            FACTORY_UEFI_PASSWORD,
-            Capability::Bios,
-            run!(clear_uefi_password_this_run_set),
-        )
-        .once()
-        .needs(&[Needs::UefiPassword]),
-        Check::apply(FACTORY_BIOS, Capability::Bios, run!(reset_bios))
-            .after(&[FACTORY_UEFI_PASSWORD]),
-        Check::apply(FACTORY_BMC, Capability::BmcControl, run!(reset_to_factory)).once(),
+        Sequenced::new(AFTER.lockdown),
+        Sequenced::new(AFTER.uefi_password),
+        Sequenced::new(AFTER.bios).after(&[AFTER.uefi_password]),
+        Sequenced::new(AFTER.bmc),
     ]
 }
 
@@ -64,45 +98,23 @@ pub(super) fn reset() -> Vec<Check> {
 /// an earlier run set cleared before it, since a BIOS reset keeps it and the
 /// host then stops at its prompt, and the BMC last since it removes the
 /// account the run logged in with.
-pub(in crate::checks) fn factory_reset_first() -> Vec<Check> {
+pub(in crate::checks) fn factory_reset_first() -> Vec<Sequenced> {
     vec![
-        Check::apply(
-            FACTORY_RESET_LOCKDOWN,
-            Capability::Lockdown,
-            run!(lift_lockdown),
-        ),
-        Check::apply(
-            FACTORY_RESET_UEFI_PASSWORD,
-            Capability::Bios,
-            run!(clear_uefi_password),
-        )
-        .once()
-        .needs(&[Needs::UefiPassword])
-        .after(&[FACTORY_RESET_LOCKDOWN]),
-        Check::apply(FACTORY_RESET_BIOS, Capability::Bios, run!(reset_bios))
-            .after(&[FACTORY_RESET_LOCKDOWN, FACTORY_RESET_UEFI_PASSWORD]),
-        Check::apply(
-            FACTORY_RESET_BMC,
-            Capability::BmcControl,
-            run!(reset_to_factory),
-        )
-        .once()
-        .after(&[FACTORY_RESET_BIOS]),
+        Sequenced::new(FIRST.lockdown),
+        Sequenced::new(FIRST.uefi_password).after(&[FIRST.lockdown]),
+        Sequenced::new(FIRST.bios).after(&[FIRST.lockdown, FIRST.uefi_password]),
+        Sequenced::new(FIRST.bmc).after(&[FIRST.bios]),
     ]
 }
 
-/// Clears the UEFI password only when this run's change of it was accepted,
-/// since otherwise the old one is still set or which is set is unknown. An
-/// unknown password fails, which blocks the BIOS reset that would otherwise
-/// leave the host at the firmware's password prompt.
+/// Clears the UEFI password when this run's change of it may have taken:
+/// it passed, or the firmware's answer left it unconfirmed. A clear that
+/// finds the new password unset fails, which blocks the BIOS reset that
+/// would otherwise leave the host at the firmware's password prompt.
 async fn clear_uefi_password_this_run_set(cx: &CheckCx<'_>) -> Step {
-    match cx.uefi_password_left() {
-        Some(UefiPasswordLeft::New) => clear_uefi_password(cx).await,
-        Some(UefiPasswordLeft::Unknown) => Err(Outcome::Fail(
-            "this run's UEFI password change went unanswered, so which password is set is unknown"
-                .to_string(),
-        )),
-        Some(UefiPasswordLeft::Current) | None => Err(Outcome::Skipped(
+    match cx.result_of(UEFI_PASSWORD) {
+        Some(Outcome::Pass(_) | Outcome::Unconfirmed(_)) => clear_uefi_password(cx).await,
+        _ => Err(Outcome::Skipped(
             "this run left the UEFI password unchanged".to_string(),
         )),
     }
@@ -118,7 +130,7 @@ async fn clear_uefi_password(cx: &CheckCx<'_>) -> Step {
         cx.bmc().bios()?.clear_uefi_password(&password.new),
     )
     .await?;
-    ops::take_effect(cx, &outcome).await?;
+    cx.driven().take_effect(&outcome).await?;
     Ok(format!("cleared ({}) and restarted", how(&outcome)))
 }
 
@@ -132,16 +144,18 @@ async fn reset_bios(cx: &CheckCx<'_>) -> Step {
     let outcome = requested(cx, "reset", bios.reset()).await?;
     let inputs = cx.inputs();
     let boot_interface = inputs.boot_interface();
-    let status = ops::read_back(cx, &outcome, Effect::OnRestart, async || {
-        match bios
-            .status(&inputs.bios_profile, boot_interface.as_ref())
-            .await
-        {
-            Ok(status) => Attempt::Done(status),
-            Err(error) => Attempt::NotYet(describe("status", &error)),
-        }
-    })
-    .await?;
+    let status = cx
+        .driven()
+        .read_back(&outcome, Effect::OnRestart, async || {
+            match bios
+                .status(&inputs.bios_profile, boot_interface.as_ref())
+                .await
+            {
+                Ok(status) => Attempt::Done(status),
+                Err(error) => Attempt::NotYet(describe("status", &error)),
+            }
+        })
+        .await?;
     let after = if status.is_applied {
         "warning: the validator's BIOS settings are still in effect, which the defaults may match"
             .to_string()

@@ -41,7 +41,7 @@ use clap::Parser;
 use mac_address::MacAddress;
 use tracing_subscriber::EnvFilter;
 
-use crate::checks::{CheckResult, Ctx, EndState, Inputs, Outcome, Planned, Scope, UefiPassword};
+use crate::checks::{CheckResult, Ctx, EndState, Inputs, Planned, Scope, UefiPassword};
 use crate::connect::Target;
 use crate::redact::Redactor;
 use crate::report::Terminal;
@@ -257,9 +257,7 @@ async fn run(args: Args, terminal: Arc<Terminal>) -> Result<ExitCode, String> {
     if args.factory_reset_first {
         let plan = session.plan(Scope::FactoryReset)?;
         let (reset, left) = session.run(&terminal, plan, jobs).await?;
-        let finished = !reset
-            .iter()
-            .any(|result| matches!(result.outcome, Outcome::Fail(_) | Outcome::Blocked(_)));
+        let finished = !reset.iter().any(|result| result.outcome.blocks());
         results.extend(reset);
         unrestored.extend(left);
         if !finished {
@@ -422,10 +420,7 @@ fn inputs(args: &Args, factory: Option<Target>) -> Result<Inputs, String> {
 fn exit_code(results: &[CheckResult], unrestored: &[String]) -> ExitCode {
     if !unrestored.is_empty() {
         ExitCode::from(3)
-    } else if results
-        .iter()
-        .any(|result| matches!(result.outcome, Outcome::Fail(_)))
-    {
+    } else if results.iter().any(|result| result.outcome.is_failure()) {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS

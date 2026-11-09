@@ -19,71 +19,66 @@
 
 use std::time::Instant;
 
-use bmc_platform::{Capability, LockdownDesiredState, ManagerSettings};
+use bmc_platform::{Capability, ManagerSettings};
 use nv_redfish::resource::ResetType;
 
-use super::{BMC_RESET, uefi_password};
-use crate::checks::apply::{self, BIOS, CONSOLE, POWER_CYCLE, STORAGE_ERASE};
+use super::{BMC_RESET, UEFI_PASSWORD};
+use crate::checks::apply::{
+    BIOS, BOOT_ORDER, CONSOLE, POWER_CYCLE, STORAGE_ERASE, STORAGE_VOLUME, enable_lockdown,
+    lift_lockdown,
+};
 use crate::checks::context::CheckCx;
 use crate::checks::errors::{describe, failed};
-use crate::checks::model::{Check, CheckId, Checked, Detail, Needs, Outcome, Step};
+use crate::checks::model::{Check, CheckId, Checked, Detail, Needs, Outcome, Sequenced, Step};
 use crate::checks::ops::{
     self, Attempt, Effect, SETTLE_POLL_INTERVAL, SETTLE_TIMEOUT, how, poll, requested, took,
 };
 use crate::checks::text::{counted, difference_detail, reported};
 
-const IPMI_OVER_LAN: CheckId = CheckId::new("bmc_control.enable_ipmi_over_lan");
-const LOCKDOWN_LIFT: CheckId = CheckId::new("lockdown.lift");
-const MANAGER_SETTINGS: CheckId = CheckId::new("bmc_control.settings");
-const AC_CYCLE: CheckId = CheckId::new("power.ac_cycle");
-const LOCKDOWN_ENABLE: CheckId = CheckId::new("lockdown.enable");
-const SUPER_NIC_ENABLE: CheckId = CheckId::new("super_nic.enable_east_west");
-const SUPER_NIC_IN_EFFECT: CheckId = CheckId::new("super_nic.east_west_in_effect");
+const IPMI_OVER_LAN: CheckId = CheckId::new(Capability::BmcControl, "enable_ipmi_over_lan");
+const LOCKDOWN_LIFT: CheckId = CheckId::new(Capability::Lockdown, "lift");
+const MANAGER_SETTINGS: CheckId = CheckId::new(Capability::BmcControl, "settings");
+const AC_CYCLE: CheckId = CheckId::new(Capability::Power, "ac_cycle");
+const LOCKDOWN_ENABLE: CheckId = CheckId::new(Capability::Lockdown, "enable");
+const SUPER_NIC_ENABLE: CheckId = CheckId::new(Capability::SuperNic, "enable_east_west");
+const SUPER_NIC_IN_EFFECT: CheckId = CheckId::new(Capability::SuperNic, "east_west_in_effect");
+
+/// The host setup checks only the host sequence runs.
+pub(super) fn checks() -> Vec<Check> {
+    vec![
+        Check::apply(IPMI_OVER_LAN, run!(ipmi_over_lan)),
+        Check::apply(LOCKDOWN_LIFT, run!(lift_lockdown)),
+        Check::apply(MANAGER_SETTINGS, run!(manager_settings)),
+        Check::apply(SUPER_NIC_ENABLE, run!(enable_east_west)).needs(&[Needs::SuperNics]),
+        Check::apply(AC_CYCLE, run!(ac_cycle))
+            .once()
+            .needs(&[Needs::AcCycle]),
+        Check::apply(SUPER_NIC_IN_EFFECT, run!(east_west_in_effect))
+            .needs(&[Needs::SuperNics, Needs::AcCycle]),
+        Check::apply(LOCKDOWN_ENABLE, run!(enable_lockdown)),
+    ]
+}
 
 /// The host setup steps, then lockdown, which follows every one of them:
 /// once locked down, the BMC refuses the changes they make.
-pub(super) fn setup() -> Vec<Check> {
+pub(super) fn setup() -> Vec<Sequenced> {
     let mut steps = vec![
-        Check::apply(IPMI_OVER_LAN, Capability::BmcControl, run!(ipmi_over_lan))
-            .after(&[BMC_RESET]),
-        Check::apply(LOCKDOWN_LIFT, Capability::Lockdown, run!(lift_lockdown))
-            .after(&[IPMI_OVER_LAN]),
-        Check::apply(
-            MANAGER_SETTINGS,
-            Capability::BmcControl,
-            run!(manager_settings),
-        )
-        .after(&[LOCKDOWN_LIFT]),
-        apply::decommission_controller().after(&[LOCKDOWN_LIFT]),
-        apply::create_volume().after(&[STORAGE_ERASE]),
-        apply::bios().after(&[LOCKDOWN_LIFT]),
-        apply::boot_order().after(&[BIOS]),
-        apply::console().after(&[BIOS]),
-        apply::power_cycle().after(&[CONSOLE]),
-        Check::apply(
-            SUPER_NIC_ENABLE,
-            Capability::SuperNic,
-            run!(enable_east_west),
-        )
-        .needs(&[Needs::SuperNics])
-        .after(&[BMC_RESET]),
-        Check::apply(AC_CYCLE, Capability::Power, run!(ac_cycle))
-            .once()
-            .needs(&[Needs::AcCycle])
-            .after(&[POWER_CYCLE]),
-        Check::apply(
-            SUPER_NIC_IN_EFFECT,
-            Capability::SuperNic,
-            run!(east_west_in_effect),
-        )
-        .needs(&[Needs::SuperNics, Needs::AcCycle])
-        .after(&[SUPER_NIC_ENABLE, AC_CYCLE]),
-        uefi_password().after(&[BIOS]),
+        Sequenced::new(IPMI_OVER_LAN).after(&[BMC_RESET]),
+        Sequenced::new(LOCKDOWN_LIFT).after(&[IPMI_OVER_LAN]),
+        Sequenced::new(MANAGER_SETTINGS).after(&[LOCKDOWN_LIFT]),
+        Sequenced::new(STORAGE_ERASE).after(&[LOCKDOWN_LIFT]),
+        Sequenced::new(STORAGE_VOLUME).after(&[STORAGE_ERASE]),
+        Sequenced::new(BIOS).after(&[LOCKDOWN_LIFT]),
+        Sequenced::new(BOOT_ORDER).after(&[BIOS]),
+        Sequenced::new(CONSOLE).after(&[BIOS]),
+        Sequenced::new(POWER_CYCLE).after(&[CONSOLE]),
+        Sequenced::new(SUPER_NIC_ENABLE).after(&[BMC_RESET]),
+        Sequenced::new(AC_CYCLE).after(&[POWER_CYCLE]),
+        Sequenced::new(SUPER_NIC_IN_EFFECT).after(&[SUPER_NIC_ENABLE, AC_CYCLE]),
+        Sequenced::new(UEFI_PASSWORD).after(&[BIOS]),
     ];
     let earlier: Vec<CheckId> = steps.iter().map(|step| step.id).collect();
-    steps.push(
-        Check::apply(LOCKDOWN_ENABLE, Capability::Lockdown, run!(enable_lockdown)).after(&earlier),
-    );
+    steps.push(Sequenced::new(LOCKDOWN_ENABLE).after(&earlier));
     steps
 }
 
@@ -98,26 +93,19 @@ async fn ipmi_over_lan(cx: &CheckCx<'_>) -> Step {
         return Ok("already enabled".to_string());
     }
     let outcome = requested(cx, "set_ipmi_over_lan", control.set_ipmi_over_lan(true)).await?;
-    ops::read_back(cx, &outcome, Effect::Immediate, async || {
-        match control.ipmi_over_lan_enabled().await {
-            Ok(true) => Attempt::Done(()),
-            Ok(false) => Attempt::NotYet("IPMI over LAN reads disabled".to_string()),
-            Err(error) => Attempt::NotYet(describe("ipmi_over_lan_enabled", &error)),
-        }
-    })
-    .await?;
+    cx.driven()
+        .read_back(&outcome, Effect::Immediate, async || {
+            match control.ipmi_over_lan_enabled().await {
+                Ok(true) => Attempt::Done(()),
+                Ok(false) => Attempt::NotYet("IPMI over LAN reads disabled".to_string()),
+                Err(error) => Attempt::NotYet(describe("ipmi_over_lan_enabled", &error)),
+            }
+        })
+        .await?;
     Ok(format!(
         "enabled ({}); IPMI over LAN reads enabled",
         how(&outcome)
     ))
-}
-
-pub(super) async fn lift_lockdown(cx: &CheckCx<'_>) -> Step {
-    ops::set_lockdown(cx, LockdownDesiredState::Disabled).await
-}
-
-async fn enable_lockdown(cx: &CheckCx<'_>) -> Step {
-    ops::set_lockdown(cx, LockdownDesiredState::Enabled).await
 }
 
 async fn manager_settings(cx: &CheckCx<'_>) -> Checked {
@@ -129,14 +117,18 @@ async fn manager_settings(cx: &CheckCx<'_>) -> Checked {
         control.apply_settings(&ManagerSettings::default()),
     )
     .await?;
-    let status = ops::read_back(cx, &outcome, Effect::Immediate, async || {
-        match control.settings_status().await {
-            Ok(status) if status.is_applied => Attempt::Done(status),
-            Ok(status) => Attempt::NotYet(format!("{} settings differ", status.differences.len())),
-            Err(error) => Attempt::NotYet(describe("settings_status", &error)),
-        }
-    })
-    .await?;
+    let status = cx
+        .driven()
+        .read_back(&outcome, Effect::Immediate, async || {
+            match control.settings_status().await {
+                Ok(status) if status.is_applied => Attempt::Done(status),
+                Ok(status) => {
+                    Attempt::NotYet(format!("{} settings differ", status.differences.len()))
+                }
+                Err(error) => Attempt::NotYet(describe("settings_status", &error)),
+            }
+        })
+        .await?;
     let detail = difference_detail(
         status
             .differences
@@ -187,7 +179,7 @@ async fn ac_cycle(cx: &CheckCx<'_>) -> Step {
     } else {
         ops::settle_after_ac_cycle(cx, &outcome).await
     };
-    ops::power_on(cx).await?;
+    cx.driven().power_on().await?;
     let gone = gone?;
     let unknown = if gone.is_empty() {
         String::new()
@@ -218,7 +210,7 @@ async fn enable_east_west(cx: &CheckCx<'_>) -> Step {
             super_nic.set_east_west_control(index, true),
         )
         .await?;
-        ops::wait_for_operations(cx, &outcome).await?;
+        cx.driven().wait_for_operations(&outcome).await?;
         requests.push(format!("{index}: {}", how(&outcome)));
     }
     Ok(format!(

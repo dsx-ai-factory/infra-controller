@@ -24,12 +24,10 @@ use tokio::time::error::Elapsed;
 
 use super::context::{CheckCx, Ctx};
 use super::model::{Check, CheckId, Checked, Kind, Outcome};
+use super::ops::until_answered;
 use super::plan::Planned;
 
-/// How long a check keeps trying while the BMC cannot answer, and how often.
-pub(super) const UNREACHABLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-pub(super) const RETRY_INTERVAL: Duration = Duration::from_secs(30);
-
+#[derive(Clone)]
 pub(crate) struct CheckResult {
     pub(crate) id: CheckId,
     pub(crate) driver: String,
@@ -48,9 +46,13 @@ pub(crate) async fn run(ctx: &Ctx, plan: Vec<Planned>, jobs: usize) -> Vec<Check
                 batch.push(gated(next, &results));
             }
         }
-        let mut running =
-            futures::stream::iter(batch.into_iter().map(|planned| run_one(ctx, planned)))
-                .buffered(jobs);
+        let earlier = results.clone();
+        let mut running = futures::stream::iter(
+            batch
+                .into_iter()
+                .map(|planned| run_one(ctx, &earlier, planned)),
+        )
+        .buffered(jobs);
         while let Some(result) = running.next().await {
             ctx.reporter.result(&result);
             results.push(result);
@@ -64,10 +66,10 @@ fn gated(planned: Planned, results: &[CheckResult]) -> Planned {
     if planned.skip.is_some() {
         return planned;
     }
-    let blocker = planned.check.after.iter().find(|id| {
-        results.iter().any(|result| {
-            result.id == **id && matches!(result.outcome, Outcome::Fail(_) | Outcome::Blocked(_))
-        })
+    let blocker = planned.after.iter().find(|id| {
+        results
+            .iter()
+            .any(|result| result.id == **id && result.outcome.blocks())
     });
     match blocker {
         Some(id) => Planned {
@@ -78,14 +80,14 @@ fn gated(planned: Planned, results: &[CheckResult]) -> Planned {
     }
 }
 
-async fn run_one(ctx: &Ctx, planned: Planned) -> CheckResult {
-    let Planned { check, skip } = planned;
+async fn run_one(ctx: &Ctx, earlier: &[CheckResult], planned: Planned) -> CheckResult {
+    let Planned { check, skip, .. } = planned;
     let started = Instant::now();
     let outcome = match skip {
         Some(outcome) => outcome,
         None => {
             ctx.reporter.started(check.id, started);
-            let cx = CheckCx::new(ctx, check.id, started);
+            let cx = CheckCx::new(ctx, earlier, check.id, started);
             let answered = run_until_answered(
                 &check,
                 async || (check.run)(&cx).await,
@@ -109,45 +111,40 @@ async fn run_one(ctx: &Ctx, planned: Planned) -> CheckResult {
     };
     CheckResult {
         id: check.id,
-        driver: ctx.selection.driver(check.capability),
+        driver: ctx.selection.driver(check.id.capability),
         outcome,
         elapsed: started.elapsed(),
     }
 }
 
-/// Runs `attempt`, running it again every [`RETRY_INTERVAL`] while it ends
-/// unreachable, until [`UNREACHABLE_TIMEOUT`] passes, unless `check` is not
-/// safe to repeat. The check's own call is the probe: a BMC can accept
-/// logins well before its other services answer. Fails with [`Elapsed`] when
-/// an attempt outlasts the check's timeout.
+/// Runs `attempt` until it answers, as [`until_answered`] runs a request,
+/// unless `check` is not safe to repeat: then an unreachable BMC leaves it
+/// unconfirmed. The check's own call is the probe: a BMC can accept logins
+/// well before its other services answer. Fails with [`Elapsed`] when an
+/// attempt outlasts the check's timeout.
 async fn run_until_answered(
     check: &Check,
     attempt: impl AsyncFn() -> Checked,
     trace: impl Fn(String),
 ) -> Result<Outcome, Elapsed> {
-    let deadline = tokio::time::Instant::now() + UNREACHABLE_TIMEOUT;
-    loop {
-        let reason = match tokio::time::timeout(check.timeout, attempt()).await? {
-            Ok(detail) => return Ok(Outcome::Pass(detail)),
-            Err(Outcome::Unreachable(reason)) => reason,
-            Err(outcome) => return Ok(outcome),
-        };
-        if !check.rerun {
-            return Ok(Outcome::Fail(format!(
-                "{reason}; not run again, since repeating it could redo a change"
-            )));
+    let mut cut_off = None;
+    let answered = until_answered(trace, async || {
+        match tokio::time::timeout(check.timeout, attempt()).await {
+            Ok(Err(Outcome::Unreachable(reason))) if !check.rerun => Err(Outcome::Unconfirmed(
+                format!("{reason}; not run again, since repeating it could redo a change"),
+            )),
+            Ok(checked) => checked,
+            Err(elapsed) => {
+                let reason = elapsed.to_string();
+                cut_off = Some(elapsed);
+                Err(Outcome::Fail(reason))
+            }
         }
-        if tokio::time::Instant::now() + RETRY_INTERVAL > deadline {
-            return Ok(Outcome::Fail(format!(
-                "{reason}; still unavailable after {}s",
-                UNREACHABLE_TIMEOUT.as_secs()
-            )));
-        }
-        trace(format!(
-            "{reason}; running again in {}s",
-            RETRY_INTERVAL.as_secs()
-        ));
-        tokio::time::sleep(RETRY_INTERVAL).await;
+    })
+    .await;
+    match cut_off {
+        Some(elapsed) => Err(elapsed),
+        None => Ok(answered.map_or_else(|outcome| outcome, Outcome::Pass)),
     }
 }
 
@@ -161,23 +158,23 @@ mod tests {
     use super::*;
     use crate::checks::model::Step;
 
-    const FIRST: CheckId = CheckId::new("test.first");
+    const FIRST: CheckId = CheckId::new(Capability::Power, "first");
 
     async fn unused(_: &CheckCx<'_>) -> Step {
         unreachable!("the runner tests drive attempts themselves")
     }
 
     fn check() -> Check {
-        Check::read("test.check", Capability::Power, run!(unused))
+        Check::read(CheckId::new(Capability::Power, "check"), run!(unused))
     }
 
     fn unreachable() -> Checked {
         Err(Outcome::Unreachable("HTTP 503".to_string()))
     }
 
-    /// A check that finds the BMC unreachable runs again until it answers,
-    /// unless repeating it could redo a change or the wait runs out; any
-    /// other ending is final.
+    /// A check that finds the BMC unreachable runs again until it answers or
+    /// the wait runs out, unless repeating it could redo a change, which
+    /// leaves it unconfirmed; any other ending is final.
     #[tokio::test(start_paused = true)]
     async fn unreachable_checks_run_again_until_answered() {
         let cases: [(&str, Check, Vec<Checked>, &str, usize); 4] = [
@@ -192,7 +189,7 @@ mod tests {
                 "a check that is not safe to repeat",
                 check().once(),
                 vec![unreachable()],
-                "not run again",
+                "Unconfirmed(\"HTTP 503; not run again",
                 1,
             ),
             (
@@ -248,18 +245,25 @@ mod tests {
         assert!(result.is_err(), "{result:?}");
     }
 
-    /// A check runs unless one it follows failed or was blocked; a skip
-    /// decided at planning stands.
+    /// A check runs unless one it follows failed, was left unconfirmed, or
+    /// was blocked; a skip decided at planning stands.
     #[test]
     fn checks_after_a_failure_or_block_are_blocked() {
         let follower = || Planned {
-            check: check().after(&[FIRST]),
+            check: check(),
+            after: vec![FIRST],
             skip: None,
         };
         let cases = [
             (
                 "follows a failure",
                 Outcome::Fail(String::new()),
+                follower(),
+                "blocked",
+            ),
+            (
+                "follows an unconfirmed change",
+                Outcome::Unconfirmed(String::new()),
                 follower(),
                 "blocked",
             ),

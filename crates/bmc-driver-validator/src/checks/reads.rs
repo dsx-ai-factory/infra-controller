@@ -23,7 +23,7 @@ use bmc_platform::{Capability, ConsoleSpec, EvidenceProgress, PlatformError};
 
 use super::context::CheckCx;
 use super::errors::failed;
-use super::model::{Check, Checked, Detail, Needs, Outcome, Step};
+use super::model::{Check, CheckId, Checked, Detail, Needs, Outcome, Step};
 use super::text::{boot_order_summary, counted, difference_detail, reported, yes_no};
 
 /// How long a signed-measurement request may stay pending.
@@ -32,73 +32,73 @@ const EVIDENCE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 pub(super) fn checks() -> Vec<Check> {
     vec![
-        Check::read("power.state", Capability::Power, run!(power_state)),
+        Check::read(CheckId::new(Capability::Power, "state"), run!(power_state)),
         Check::read(
-            "power.ac_power_cycle_supported",
-            Capability::Power,
+            CheckId::new(Capability::Power, "ac_power_cycle_supported"),
             run!(ac_power_cycle_supported),
         ),
         Check::read(
-            "bmc_control.ipmi_over_lan",
-            Capability::BmcControl,
+            CheckId::new(Capability::BmcControl, "ipmi_over_lan"),
             run!(ipmi_over_lan),
         ),
         Check::read(
-            "bmc_control.settings_status",
-            Capability::BmcControl,
+            CheckId::new(Capability::BmcControl, "settings_status"),
             run!(manager_settings_status),
         ),
-        Check::read("bios.status", Capability::Bios, run!(bios_status)),
-        Check::read("bios.infinite_boot", Capability::Bios, run!(infinite_boot)),
+        Check::read(CheckId::new(Capability::Bios, "status"), run!(bios_status)),
         Check::read(
-            "boot_order.status",
-            Capability::BootOrder,
+            CheckId::new(Capability::Bios, "infinite_boot"),
+            run!(infinite_boot),
+        ),
+        Check::read(
+            CheckId::new(Capability::BootOrder, "status"),
             run!(boot_order_status),
         )
         .needs(&[Needs::BootInterface]),
         Check::read(
-            "secure_boot.status",
-            Capability::SecureBoot,
+            CheckId::new(Capability::SecureBoot, "status"),
             run!(secure_boot_status),
         ),
         Check::read(
-            "secure_boot.platform_key",
-            Capability::SecureBoot,
+            CheckId::new(Capability::SecureBoot, "platform_key"),
             run!(platform_key),
         ),
         Check::read(
-            "lockdown.status",
-            Capability::Lockdown,
+            CheckId::new(Capability::Lockdown, "status"),
             run!(lockdown_status),
         ),
-        Check::read("accounts.list", Capability::Accounts, run!(accounts_list)),
         Check::read(
-            "firmware.inventory",
-            Capability::Firmware,
+            CheckId::new(Capability::Accounts, "list"),
+            run!(accounts_list),
+        ),
+        Check::read(
+            CheckId::new(Capability::Firmware, "inventory"),
             run!(firmware_inventory),
         ),
         Check::read(
-            "storage.boot_controller",
-            Capability::Storage,
+            CheckId::new(Capability::Storage, "boot_controller"),
             run!(boot_controller),
         ),
-        Check::read("dpu.status", Capability::Dpu, run!(dpu_status)),
+        Check::read(CheckId::new(Capability::Dpu, "status"), run!(dpu_status)),
         Check::read(
-            "attestation.components",
-            Capability::Attestation,
+            CheckId::new(Capability::Attestation, "components"),
             run!(attestation_components),
         ),
         Check::read(
-            "attestation.evidence",
-            Capability::Attestation,
+            CheckId::new(Capability::Attestation, "evidence"),
             run!(attestation_evidence),
         )
         .timeout(EVIDENCE_TIMEOUT + Duration::from_secs(60)),
-        Check::read("console.status", Capability::Console, run!(console_status)),
-        Check::read("console.spec", Capability::Console, run!(console_spec)),
         Check::read(
-            "super_nic.east_west",
-            Capability::SuperNic,
+            CheckId::new(Capability::Console, "status"),
+            run!(console_status),
+        ),
+        Check::read(
+            CheckId::new(Capability::Console, "spec"),
+            run!(console_spec),
+        ),
+        Check::read(
+            CheckId::new(Capability::SuperNic, "east_west"),
             run!(super_nic_east_west),
         )
         .needs(&[Needs::SuperNics]),

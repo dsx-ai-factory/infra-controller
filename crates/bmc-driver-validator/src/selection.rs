@@ -67,8 +67,8 @@ impl Selection {
         let other = Self::with_pins(identity, self.overrides.clone())?.resolved;
         let mut changes: Vec<String> = Capability::iter()
             .filter_map(|capability| {
-                let before = decided(&self.resolved, capability);
-                let after = decided(&other, capability);
+                let before = choice(&self.resolved, &self.built_in_rules, capability);
+                let after = choice(&other, &self.built_in_rules, capability);
                 (before != after).then(|| format!("{capability}: {before} -> {after}"))
             })
             .collect();
@@ -130,7 +130,7 @@ impl Selection {
 
     /// The selected driver's id, `standard`, or `unsupported`.
     pub(crate) fn driver(&self, capability: Capability) -> String {
-        label(self.resolved.drivers.get(capability))
+        self.resolved.drivers.get(capability).to_string()
     }
 
     /// Why `capability` has its selection.
@@ -138,7 +138,7 @@ impl Selection {
         if self.overrides.contains_key(&capability) {
             return format!("--driver override; {}", self.override_note(capability));
         }
-        rule_reason(&self.resolved, &self.built_in_rules, capability)
+        self.decided(capability).explained()
     }
 
     /// How an overridden capability's pin compares with what the rules select.
@@ -146,9 +146,8 @@ impl Selection {
         let selection = self.resolved.drivers.get(capability);
         let built_in = self.built_in.drivers.get(capability);
         let rules_choice = format!(
-            "{} ({})",
-            label(built_in),
-            rule_reason(&self.built_in, &self.built_in_rules, capability)
+            "{built_in} ({})",
+            Decided::of(&self.built_in, &self.built_in_rules, capability).explained()
         );
         if built_in == selection {
             return format!("same as the rules: {rules_choice}");
@@ -175,17 +174,17 @@ impl Selection {
         note
     }
 
-    /// What decided `capability`, briefly: a rule id, the compiled default,
-    /// or an override.
+    /// What decided `capability`, briefly: a rule, the compiled default, or
+    /// an override.
     pub(crate) fn source(&self, capability: Capability) -> String {
         if self.overrides.contains_key(&capability) {
             return "--driver override".to_string();
         }
-        match self.resolved.rule_for(capability) {
-            Some(id) => id.to_string(),
-            None if self.is_supported(capability) => "default".to_string(),
-            None => "no rule, no standard driver".to_string(),
-        }
+        self.decided(capability).brief()
+    }
+
+    fn decided(&self, capability: Capability) -> Decided<'_> {
+        Decided::of(&self.resolved, &self.built_in_rules, capability)
     }
 
     /// Every capability pinned by `--driver`.
@@ -265,41 +264,75 @@ fn known_ids() -> String {
         .join(", ")
 }
 
-fn label(selection: &CapabilitySelection) -> String {
-    match selection {
-        CapabilitySelection::Standard => "standard".to_string(),
-        CapabilitySelection::Unsupported => "unsupported".to_string(),
-        CapabilitySelection::Driver(driver) => driver.as_str().to_string(),
-    }
-}
-
 /// The selection for `capability` and what decided it, e.g.
 /// `ami-megarac-bios (rule lenovo-ami)`.
-fn decided(resolved: &ResolvedSelection, capability: Capability) -> String {
-    let source = resolved
-        .rule_for(capability)
-        .map_or_else(|| "default".to_string(), |id| format!("rule {id}"));
-    format!("{} ({source})", label(resolved.drivers.get(capability)))
+fn choice(resolved: &ResolvedSelection, rules: &Rules, capability: Capability) -> String {
+    format!(
+        "{} ({})",
+        resolved.drivers.get(capability),
+        Decided::of(resolved, rules, capability).brief()
+    )
 }
 
-fn rule_reason(resolved: &ResolvedSelection, rules: &Rules, capability: Capability) -> String {
-    let unsupported = resolved.drivers.get(capability) == &CapabilitySelection::Unsupported;
-    match resolved.rule_for(capability) {
-        Some(id) => {
-            let verb = if unsupported {
-                "marks it unsupported"
-            } else {
-                "selects it"
-            };
-            match rules.rules().iter().find(|rule| rule.id == id) {
-                Some(rule) => format!("rule {id} {verb} ({})", matchers(rule)),
-                None => format!("rule {id} {verb}"),
+/// What decided one capability's selection.
+enum Decided<'a> {
+    /// A rule, with its matchers when the rules hold it.
+    Rule {
+        id: &'a str,
+        rule: Option<&'a Rule>,
+        unsupported: bool,
+    },
+    /// No rule: the compiled default, a standard driver or none.
+    Default { standard: bool },
+}
+
+impl<'a> Decided<'a> {
+    fn of(resolved: &'a ResolvedSelection, rules: &'a Rules, capability: Capability) -> Self {
+        let selection = resolved.drivers.get(capability);
+        match resolved.rule_for(capability) {
+            Some(id) => Self::Rule {
+                id,
+                rule: rules.rules().iter().find(|rule| rule.id == id),
+                unsupported: selection == &CapabilitySelection::Unsupported,
+            },
+            None => Self::Default {
+                standard: selection == &CapabilitySelection::Standard,
+            },
+        }
+    }
+
+    /// As the driver table and changes show it, e.g. `rule lenovo-ami`.
+    fn brief(&self) -> String {
+        match self {
+            Self::Rule { id, .. } => format!("rule {id}"),
+            Self::Default { standard: true } => "default".to_string(),
+            Self::Default { standard: false } => "no rule, no standard driver".to_string(),
+        }
+    }
+
+    /// As a reason, with the rule's matchers.
+    fn explained(&self) -> String {
+        match self {
+            Self::Rule {
+                id,
+                rule,
+                unsupported,
+            } => {
+                let verb = if *unsupported {
+                    "marks it unsupported"
+                } else {
+                    "selects it"
+                };
+                match rule {
+                    Some(rule) => format!("rule {id} {verb} ({})", matchers(rule)),
+                    None => format!("rule {id} {verb}"),
+                }
+            }
+            Self::Default { standard: true } => "the compiled default".to_string(),
+            Self::Default { standard: false } => {
+                "no rule selects a driver and no standard driver is compiled".to_string()
             }
         }
-        None if resolved.drivers.get(capability) == &CapabilitySelection::Standard => {
-            "the compiled default".to_string()
-        }
-        None => "no rule selects a driver and no standard driver is compiled".to_string(),
     }
 }
 

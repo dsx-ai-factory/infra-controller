@@ -47,7 +47,7 @@ struct ActivityState {
 }
 
 struct Running {
-    id: &'static str,
+    id: String,
     started: Instant,
     step: String,
 }
@@ -70,7 +70,7 @@ impl Activity {
         Self { state, ticker }
     }
 
-    pub(super) fn start(&self, id: &'static str, started: Instant) {
+    pub(super) fn start(&self, id: String, started: Instant) {
         self.state
             .lock()
             .expect("activity lock")
@@ -193,7 +193,7 @@ mod tests {
             running: steps
                 .iter()
                 .map(|step| Running {
-                    id: "check",
+                    id: "check".to_string(),
                     started: Instant::now(),
                     step: step.to_string(),
                 })

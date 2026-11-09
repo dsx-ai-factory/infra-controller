@@ -26,6 +26,7 @@ use bmc_runtime::ConnectedBmc;
 use carbide_redfish::nv_redfish::RedfishBmc;
 
 use super::model::{CheckId, Inputs, Outcome};
+use super::ops::Driven;
 use super::runner::CheckResult;
 use crate::connect::Target;
 use crate::selection::Selection;
@@ -47,18 +48,6 @@ pub(crate) trait Reporter {
     fn secret(&self, secret: &str);
 }
 
-/// The UEFI password a run's change of it left the firmware with, ordered so
-/// a later attempt cannot make an earlier result look more certain.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(super) enum UefiPasswordLeft {
-    /// The firmware refused the change, so the old password is still set.
-    Current,
-    /// The request went unanswered, so either password may be set.
-    Unknown,
-    /// The firmware accepted the change.
-    New,
-}
-
 /// State shared by every check of one run.
 pub(crate) struct Ctx {
     /// The connection checks drive drivers through, replaced when a check
@@ -70,8 +59,6 @@ pub(crate) struct Ctx {
     pub(super) reporter: Arc<dyn Reporter>,
     /// Changes a check made and could not undo.
     not_restored: Mutex<Vec<String>>,
-    /// What this run's change of the UEFI password left, once it tried.
-    uefi_password_left: Mutex<Option<UefiPasswordLeft>>,
 }
 
 impl Ctx {
@@ -89,7 +76,6 @@ impl Ctx {
             inputs,
             reporter,
             not_restored: Mutex::new(Vec::new()),
-            uefi_password_left: Mutex::new(None),
         }
     }
 
@@ -105,23 +91,40 @@ impl Ctx {
     }
 }
 
-/// What one check runs with: the run's state, and the check's own identity
-/// for what it reports.
+/// What one check runs with: the run's state, the results of the checks
+/// before it, and the check's own identity for what it reports.
 pub(super) struct CheckCx<'a> {
     ctx: &'a Ctx,
+    earlier: &'a [CheckResult],
     id: CheckId,
     started: Instant,
 }
 
 impl<'a> CheckCx<'a> {
-    pub(super) fn new(ctx: &'a Ctx, id: CheckId, started: Instant) -> Self {
-        Self { ctx, id, started }
+    pub(super) fn new(
+        ctx: &'a Ctx,
+        earlier: &'a [CheckResult],
+        id: CheckId,
+        started: Instant,
+    ) -> Self {
+        Self {
+            ctx,
+            earlier,
+            id,
+            started,
+        }
     }
 
     /// The current connection; a handle taken from it keeps the connection
     /// it was taken from across a reconnect.
     pub(super) fn bmc(&self) -> Arc<ConnectedBmc<RedfishBmc>> {
         self.ctx.bmc.load_full()
+    }
+
+    /// The BMC under test, driven through the current connection. Take one
+    /// again after a reconnect, which replaces the connection.
+    pub(super) fn driven(&'a self) -> Driven<'a> {
+        Driven::new(self, self.bmc())
     }
 
     pub(super) fn selection(&self) -> &'a Selection {
@@ -145,25 +148,12 @@ impl<'a> CheckCx<'a> {
         self.ctx.not_restored(change);
     }
 
-    /// Records what an attempt to change the UEFI password left, keeping the
-    /// most certain result of any attempt.
-    pub(super) fn left_uefi_password(&self, left: UefiPasswordLeft) {
-        let mut recorded = self
-            .ctx
-            .uefi_password_left
-            .lock()
-            .expect("UEFI password lock");
-        *recorded = (*recorded).max(Some(left));
-    }
-
-    /// What this run's change of the UEFI password left; `None` when it did
-    /// not try.
-    pub(super) fn uefi_password_left(&self) -> Option<UefiPasswordLeft> {
-        *self
-            .ctx
-            .uefi_password_left
-            .lock()
-            .expect("UEFI password lock")
+    /// How `check` ended, when it ran before this one.
+    pub(super) fn result_of(&self, check: CheckId) -> Option<&'a Outcome> {
+        self.earlier
+            .iter()
+            .find(|result| result.id == check)
+            .map(|result| &result.outcome)
     }
 
     pub(super) fn secret(&self, secret: &str) {

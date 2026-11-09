@@ -31,9 +31,9 @@ use nv_redfish::account::AccountServiceConfig;
 use serde_json::Value;
 
 pub(super) use self::factory::factory_reset_first;
-use super::context::{CheckCx, UefiPasswordLeft};
+use super::context::CheckCx;
 use super::errors::{describe, failed};
-use super::model::{Check, CheckId, Checked, Detail, Needs, Outcome, Step};
+use super::model::{Check, CheckId, Checked, Detail, Needs, Outcome, Sequenced, Step};
 use super::ops::{self, Attempt, Effect, SETTLE_POLL_INTERVAL, how, poll, requested};
 use super::text::reported;
 use super::{apply, reads};
@@ -53,49 +53,51 @@ pub(crate) enum EndState {
 const CLOCK_TOLERANCE: Duration = Duration::from_secs(5 * 60);
 const CLOCK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-const ACCOUNT_POLICY: CheckId = CheckId::new("accounts.policy");
-const BMC_RESET: CheckId = CheckId::new("bmc_control.reset");
-const NTP: CheckId = CheckId::new("bmc_control.ntp");
-const UTC: CheckId = CheckId::new("bmc_control.utc");
-const UEFI_PASSWORD: CheckId = CheckId::new("bios.uefi_password");
+const ACCOUNT_POLICY: CheckId = CheckId::new(Capability::Accounts, "policy");
+const BMC_RESET: CheckId = CheckId::new(Capability::BmcControl, "reset");
+const NTP: CheckId = CheckId::new(Capability::BmcControl, "ntp");
+const UTC: CheckId = CheckId::new(Capability::BmcControl, "utc");
+const UEFI_PASSWORD: CheckId = CheckId::new(Capability::Bios, "uefi_password");
 
-pub(super) fn checks(dpu: bool, end_state: EndState) -> Vec<Check> {
+/// The `--validate` steps, once each, for `--check` and the sequences to
+/// name.
+pub(super) fn checks() -> Vec<Check> {
     let mut checks = vec![
-        Check::apply(ACCOUNT_POLICY, Capability::Accounts, run!(account_policy)),
-        apply::accounts_lifecycle(),
-        Check::apply(BMC_RESET, Capability::BmcControl, run!(ops::reset_bmc)).once(),
-        Check::apply(NTP, Capability::BmcControl, run!(ntp))
-            .needs(&[Needs::NtpServers])
-            .after(&[BMC_RESET]),
-        Check::apply(UTC, Capability::BmcControl, run!(utc)).after(&[BMC_RESET]),
+        Check::apply(ACCOUNT_POLICY, run!(account_policy)),
+        Check::apply(BMC_RESET, run!(ops::reset_bmc)).once(),
+        Check::apply(NTP, run!(ntp)).needs(&[Needs::NtpServers]),
+        Check::apply(UTC, run!(utc)),
+        Check::apply(UEFI_PASSWORD, run!(set_uefi_password))
+            .once()
+            .needs(&[Needs::UefiPassword]),
     ];
-    checks.extend(if dpu { dpu::setup() } else { host::setup() });
-    checks.extend(reads::checks());
-    if end_state == EndState::Factory {
-        checks.extend(factory::reset());
-    }
+    checks.extend(host::checks());
+    checks.extend(dpu::checks());
+    checks.extend(factory::checks());
     checks
 }
 
-/// Every step of the `--validate` sequences, once each.
-pub(super) fn steps() -> Vec<Check> {
-    let mut steps: Vec<Check> = Vec::new();
-    for check in checks(false, EndState::Factory)
-        .into_iter()
-        .chain(checks(true, EndState::Factory))
-        .chain(factory_reset_first())
-    {
-        if !steps.iter().any(|step| step.id == check.id) {
-            steps.push(check);
-        }
+/// The `--validate` sequence for a host or a DPU: account policy, a BMC
+/// reset and its clock, the BMC's own setup, every read check, and with
+/// `end_state` factory, the steps back to factory state.
+pub(super) fn sequence(dpu: bool, end_state: EndState) -> Vec<Sequenced> {
+    let mut steps = vec![
+        Sequenced::new(ACCOUNT_POLICY),
+        Sequenced::new(apply::ACCOUNTS_LIFECYCLE),
+        Sequenced::new(BMC_RESET),
+        Sequenced::new(NTP).after(&[BMC_RESET]),
+        Sequenced::new(UTC).after(&[BMC_RESET]),
+    ];
+    steps.extend(if dpu { dpu::setup() } else { host::setup() });
+    steps.extend(
+        reads::checks()
+            .into_iter()
+            .map(|check| Sequenced::new(check.id)),
+    );
+    if end_state == EndState::Factory {
+        steps.extend(factory::reset());
     }
     steps
-}
-
-fn uefi_password() -> Check {
-    Check::apply(UEFI_PASSWORD, Capability::Bios, run!(set_uefi_password))
-        .once()
-        .needs(&[Needs::UefiPassword])
 }
 
 async fn account_policy(cx: &CheckCx<'_>) -> Checked {
@@ -108,7 +110,7 @@ async fn account_policy(cx: &CheckCx<'_>) -> Checked {
             .apply_default_policy(target.username(), target.password()),
     )
     .await?;
-    ops::wait_for_operations(cx, &outcome).await?;
+    cx.driven().wait_for_operations(&outcome).await?;
     let service = async {
         cx.target()
             .fresh_connection()
@@ -186,18 +188,22 @@ async fn ntp(cx: &CheckCx<'_>) -> Step {
     let bmc = cx.bmc();
     let control = bmc.bmc_control()?;
     let outcome = requested(cx, "set_ntp_servers", control.set_ntp_servers(servers)).await?;
-    let listed = ops::read_back(cx, &outcome, Effect::Immediate, async || {
-        match control.time_status().await {
-            Ok(status) if lists_ntp_servers(&status, servers) => Attempt::Done(status.ntp_servers),
-            Ok(status) => Attempt::NotYet(format!(
-                "NTP is enabled: {}; it lists {}",
-                reported(&status.ntp_enabled),
-                status.ntp_servers.join(", ")
-            )),
-            Err(error) => Attempt::NotYet(describe("time_status", &error)),
-        }
-    })
-    .await?;
+    let listed = cx
+        .driven()
+        .read_back(&outcome, Effect::Immediate, async || {
+            match control.time_status().await {
+                Ok(status) if lists_ntp_servers(&status, servers) => {
+                    Attempt::Done(status.ntp_servers)
+                }
+                Ok(status) => Attempt::NotYet(format!(
+                    "NTP is enabled: {}; it lists {}",
+                    reported(&status.ntp_enabled),
+                    status.ntp_servers.join(", ")
+                )),
+                Err(error) => Attempt::NotYet(describe("time_status", &error)),
+            }
+        })
+        .await?;
     let skew = poll(
         cx,
         CLOCK_TIMEOUT,
@@ -245,17 +251,19 @@ async fn utc(cx: &CheckCx<'_>) -> Step {
     let bmc = cx.bmc();
     let control = bmc.bmc_control()?;
     let outcome = requested(cx, "set_utc_timezone", control.set_utc_timezone()).await?;
-    let offset = ops::read_back(cx, &outcome, Effect::Immediate, async || {
-        match control.time_status().await.map(|status| status.utc_offset) {
-            Ok(None) => Attempt::Done(None),
-            Ok(Some(offset)) if UTC_OFFSETS.contains(&offset.as_str()) => {
-                Attempt::Done(Some(offset))
+    let offset = cx
+        .driven()
+        .read_back(&outcome, Effect::Immediate, async || {
+            match control.time_status().await.map(|status| status.utc_offset) {
+                Ok(None) => Attempt::Done(None),
+                Ok(Some(offset)) if UTC_OFFSETS.contains(&offset.as_str()) => {
+                    Attempt::Done(Some(offset))
+                }
+                Ok(Some(offset)) => Attempt::NotYet(format!("the UTC offset is {offset}")),
+                Err(error) => Attempt::NotYet(describe("time_status", &error)),
             }
-            Ok(Some(offset)) => Attempt::NotYet(format!("the UTC offset is {offset}")),
-            Err(error) => Attempt::NotYet(describe("time_status", &error)),
-        }
-    })
-    .await?;
+        })
+        .await?;
     Ok(format!(
         "{} ({})",
         match offset {
@@ -277,15 +285,16 @@ async fn set_uefi_password(cx: &CheckCx<'_>) -> Step {
             .bios()?
             .change_uefi_password(&password.current, &password.new),
     )
-    .await
-    .inspect_err(|error| {
-        cx.left_uefi_password(match error {
-            Outcome::Unreachable(_) => UefiPasswordLeft::Unknown,
-            _ => UefiPasswordLeft::Current,
-        });
-    })?;
-    cx.left_uefi_password(UefiPasswordLeft::New);
-    ops::take_effect(cx, &outcome).await?;
+    .await?;
+    cx.driven()
+        .take_effect(&outcome)
+        .await
+        .map_err(|outcome| match outcome {
+            Outcome::Fail(reason) | Outcome::Unreachable(reason) => Outcome::Unconfirmed(format!(
+                "the firmware accepted the new password, but {reason}"
+            )),
+            other => other,
+        })?;
     Ok(format!("set ({}) and restarted", how(&outcome)))
 }
 
@@ -366,7 +375,7 @@ mod tests {
     fn lockdown_follows_every_host_setup_step() {
         let setup = host::setup();
         let (lockdown, steps) = setup.split_last().expect("host setup has steps");
-        assert_eq!(lockdown.id.as_str(), "lockdown.enable");
+        assert_eq!(lockdown.id.to_string(), "lockdown.enable");
         for step in steps {
             assert!(lockdown.after.contains(&step.id), "{}", step.id);
         }
@@ -377,23 +386,20 @@ mod tests {
     #[test]
     fn every_dependency_names_one_earlier_step() {
         let sequences = [
-            checks(false, EndState::Factory),
-            checks(true, EndState::Factory),
+            sequence(false, EndState::Factory),
+            sequence(true, EndState::Factory),
             factory_reset_first(),
         ];
-        for checks in sequences {
-            for (index, check) in checks.iter().enumerate() {
-                for dependency in &check.after {
-                    let runs = |checks: &[Check]| {
-                        checks
-                            .iter()
-                            .filter(|other| other.id == *dependency)
-                            .count()
+        for steps in sequences {
+            for (index, step) in steps.iter().enumerate() {
+                for dependency in &step.after {
+                    let runs = |steps: &[Sequenced]| {
+                        steps.iter().filter(|other| other.id == *dependency).count()
                     };
                     assert!(
-                        runs(&checks[..index]) == 1 && runs(&checks) == 1,
+                        runs(&steps[..index]) == 1 && runs(&steps) == 1,
                         "{} follows {dependency}, which must run once, before it",
-                        check.id
+                        step.id
                     );
                 }
             }

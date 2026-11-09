@@ -56,15 +56,15 @@ const FIELD_GUTTER: usize = 4;
 
 impl Reporter for Terminal {
     fn started(&self, check: CheckId, started: Instant) {
-        self.activity.start(check.as_str(), started);
+        self.activity.start(check.to_string(), started);
     }
 
     fn step(&self, check: CheckId, started: Instant, step: &str) {
-        self.trace(check.as_str(), started, step);
+        self.trace(&check.to_string(), started, step);
     }
 
     fn finished(&self, check: CheckId) {
-        self.activity.finish(check.as_str());
+        self.activity.finish(&check.to_string());
     }
 
     fn result(&self, result: &CheckResult) {
@@ -76,7 +76,7 @@ impl Reporter for Terminal {
                 result.id,
                 seconds(result.elapsed).dimmed(),
             );
-            self.print_in_column(&columns, DETAIL_COLUMN, detail(&result.outcome), |line| {
+            self.print_in_column(&columns, DETAIL_COLUMN, result.outcome.text(), |line| {
                 ended.tint(line)
             });
             if let Outcome::Pass(detail) = &result.outcome {
@@ -234,14 +234,14 @@ impl Terminal {
                 Kind::Apply => "apply",
             };
             let (symbol, note) = match &planned.skip {
-                Some(outcome) => (Ended::of(outcome).symbol(), detail(outcome)),
+                Some(outcome) => (Ended::of(outcome).symbol(), outcome.text()),
                 None => ("▸".normal(), ""),
             };
             let columns = format!(
                 "  {symbol} {:<CHECK_WIDTH$} {} {:<DRIVER_WIDTH$} ",
                 planned.check.id,
                 kind.dimmed(),
-                selection.driver(planned.check.capability)
+                selection.driver(planned.check.id.capability)
             );
             self.print_in_column(
                 &columns,
@@ -292,10 +292,10 @@ impl Terminal {
                 self.line(&format!(
                     "  {} {}  {}",
                     Ended::Failed.symbol(),
-                    result.id.as_str().bold(),
+                    result.id.to_string().bold(),
                     result.driver.dimmed()
                 ));
-                self.print_in_column("      ", 6, detail(&result.outcome), |line| line.normal());
+                self.print_in_column("      ", 6, result.outcome.text(), |line| line.normal());
             }
         }
         for (ended, title) in [
@@ -313,7 +313,7 @@ impl Terminal {
                 self.print_in_column(
                     &columns,
                     2 + 2 + CHECK_WIDTH + 1,
-                    detail(&result.outcome),
+                    result.outcome.text(),
                     |line| line.dimmed(),
                 );
             }
@@ -352,7 +352,7 @@ impl Ended {
     fn of(outcome: &Outcome) -> Self {
         match outcome {
             Outcome::Pass(_) => Self::Passed,
-            Outcome::Fail(_) | Outcome::Unreachable(_) => Self::Failed,
+            Outcome::Fail(_) | Outcome::Unconfirmed(_) | Outcome::Unreachable(_) => Self::Failed,
             Outcome::Unsupported(_) => Self::Unsupported,
             Outcome::Skipped(_) => Self::Skipped,
             Outcome::Blocked(_) => Self::Blocked,
@@ -395,17 +395,6 @@ impl Ended {
             Self::Failed => text.red(),
             Self::Unsupported | Self::Skipped | Self::Blocked => text.dimmed(),
         }
-    }
-}
-
-fn detail(outcome: &Outcome) -> &str {
-    match outcome {
-        Outcome::Pass(detail) => &detail.summary,
-        Outcome::Fail(detail)
-        | Outcome::Unreachable(detail)
-        | Outcome::Unsupported(detail)
-        | Outcome::Skipped(detail)
-        | Outcome::Blocked(detail) => detail,
     }
 }
 
