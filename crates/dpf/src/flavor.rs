@@ -2963,7 +2963,7 @@ export -f run_stage ovs-vsctl
             .unwrap()
     }
 
-    fn render_astra_files(
+    pub(crate) fn render_astra_files(
         source: &str,
         values: &serde_json::Value,
     ) -> std::collections::HashMap<String, String> {
@@ -2981,11 +2981,31 @@ export -f run_stage ovs-vsctl
     #[test]
     fn weave_underlay_uses_per_dpu_placement_and_preserves_defaults() {
         use crate::astra_placement::{ports_for_dpu, test_machine};
+        let interfaces = [
+            ("0005:06:00.0", "A56"),
+            ("0005:03:00.0", "A53"),
+            ("0000:06:00.0", "A6"),
+            ("0000:03:00.0", "A3"),
+            ("0004:03:00.0", "A43"),
+            ("0004:06:00.0", "A46"),
+            ("0001:03:00.0", "A13"),
+            ("0001:06:00.0", "A16"),
+        ]
+        .into_iter()
+        .map(|(pci_address, group)| {
+            serde_json::json!({
+                "pciAddress": pci_address,
+                "underlayInterface": format!("brcx-{group}"),
+                "overlayDHCPInterface": group,
+                "dhcpBridgeName": format!("br-dhcp-{group}"),
+                "dropBridgeName": format!("br-drop-{group}"),
+            })
+        })
+        .collect::<Vec<_>>();
         let defaults = serde_json::json!({
             "nicIDType": "mac", "overlayNetworkPrefixLength": 11,
             "softwarePlaneIDBitLength": 8, "railIDBitLength": 4,
-            "interfaces": [{"pciAddress": "0005:06:00.0", "underlayInterface": "brcx-A56",
-                "overlayDHCPInterface": "A56", "dhcpBridgeName": "br-dhcp-A56", "dropBridgeName": "br-drop-A56"}],
+            "interfaces": interfaces,
         });
         let template = flavor_bf4_astra_with_topology(
             "test",

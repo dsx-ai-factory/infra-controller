@@ -735,7 +735,25 @@ async fn weave_underlay_is_included_in_astra_flavor() {
         .filter(|template| template.spec.template.contains(WEAVE_UNDERLAY_CONFIG_PATH))
         .collect::<Vec<_>>();
     assert_eq!(templates.len(), 1);
-    assert!(templates[0].spec.template.contains("railIDBitLength: 5"));
+    let files = crate::flavor::tests::render_astra_files(
+        &templates[0].spec.template,
+        &serde_json::json!({
+            "server_name": "",
+            "dpu_device_underlay_rows": [{"cerebro_ifname": "", "ip": ""}],
+        }),
+    );
+    let underlay: serde_json::Value =
+        serde_yaml::from_str(&files[WEAVE_UNDERLAY_CONFIG_PATH]).unwrap();
+    assert_eq!(
+        &underlay,
+        config.services[0]
+            .config_values
+            .as_ref()
+            .unwrap()
+            .pointer("/weaveFlowController/underlayConfigMapData")
+            .unwrap(),
+        "omitted placement must install the configured defaults at the stable per-DPU path"
+    );
 }
 
 #[tokio::test]

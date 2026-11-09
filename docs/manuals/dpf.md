@@ -986,10 +986,55 @@ and selects each device's flavor. Existing deployment selection, ServiceInterfac
 and Cerebro underlay branch selection still apply. BDF and `phys_port_name`
 resolve netdevs independently of Linux interface names.
 
-Omission preserves the fixed mapping and rendered default flavor specification.
-The shared template body and hash change once to add placement support. The
-`OnDelete` strategy requires the supported reprovisioning lifecycle to consume
-changed templates or values; restarting the API alone does not apply them.
+Every Weave-enabled Astra flavor installs its underlay configuration at
+`/etc/openvswitch/nico-weave-underlay.yaml`. The Weave service selects that stable
+path through its `UNDERLAY_CONFIG_FILE` environment variable. The path is the
+same whether placement is omitted or supplied:
+
+- With placement omitted, the file retains the original hardcoded PCI addresses
+  and interface definitions from the deployment's shared underlay configuration.
+- With placement supplied, the file replaces those interface definitions with
+  the selected DPU's eight hardware-plane-zero PCI addresses and group names.
+  Site-wide settings, including overlay prefix length and rail/software-plane
+  bit lengths, remain shared.
+
+The official Weave chart exposes the DPU's `/etc/openvswitch` directory to the
+container. Its original `/var/lib/dpf/weave/flow-controller/underlay-config.yaml`
+comes from a read-only ConfigMap mount; installing a host file at that original
+path would not replace the container's ConfigMap contents. NICo retains the
+ConfigMap configuration for staged upgrades.
+
+The shared template body and hash change to add placement support and the
+underlay file. The `OnDelete` strategy requires the supported reprovisioning
+lifecycle to install changed templates or values; restarting the API alone does
+not install the file on existing DPUs. Service configuration updates and DPU
+reprovisioning must be sequenced explicitly.
+
+For a fresh deployment, use the generated service settings. For an existing
+Astra deployment whose DPUs lack the new file:
+
+1. Before upgrading NICo, retain the original ConfigMap path with this
+   deployment-local override (replace `bf4_astra` with the deployment's name):
+
+   ```toml
+   [dpf.deployments.bf4_astra.extra_services.doca_weave_flow_controller.extra_helm_values.weaveFlowController.containers.weaveFlowController]
+   env = [{ name = "UNDERLAY_CONFIG_FILE", value = "/var/lib/dpf/weave/flow-controller/underlay-config.yaml" }]
+   ```
+
+   The `env` array replaces the generated array. Include any other environment
+   entries the deployment needs.
+2. Upgrade NICo, then reprovision the deployment's DPUs through the supported
+   lifecycle to install the flavor-provided file. Verify that each DPU has
+   `/etc/openvswitch/nico-weave-underlay.yaml` before switching the service path.
+3. Remove the temporary `UNDERLAY_CONFIG_FILE` override so the generated service
+   settings select the new file. Preserve other operator-defined environment
+   entries, if any, and include the generated file path when retaining an
+   explicit `env` array.
+
+Do not ingest DPUs that require explicit placement while the service still
+selects the legacy ConfigMap: it contains the shared default PCI mapping. Enable
+those placements after the deployment has switched to the per-DPU file. This
+sequence does not eliminate the disruption inherent in DPU reprovisioning.
 
 Declare all 32 ports before ingestion. Replacing `host_nics` replaces placement;
 a field-mask patch that omits `host_nics` preserves it. Registration rejects

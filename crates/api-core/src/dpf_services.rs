@@ -1124,7 +1124,8 @@ pub(crate) fn doca_weave_flow_controller_service(
                         "repository": cfg.docker_repo_url,
                         "tag": cfg.docker_image_tag,
                     },
-                    // The flavor renders this per-DPU file through the chart's existing OVS mount.
+                    // Every Weave-enabled Astra flavor installs this file, including default placement.
+                    // UNDERLAY_CONFIG_FILE is the environment variable consumed by upstream Weave.
                     "env": [{
                         "name": "UNDERLAY_CONFIG_FILE",
                         "value": carbide_dpf::types::WEAVE_UNDERLAY_CONFIG_PATH,
@@ -2728,30 +2729,60 @@ mod tests {
         let interfaces = config["weaveFlowController"]["underlayConfigMapData"]["interfaces"]
             .as_array()
             .expect("interfaces must be an array");
-        assert_eq!(
-            interfaces.len(),
-            WEAVE_FLOW_CONTROLLER_UNDERLAY_PORTS.len(),
-            "every Astra uplink must be present in underlayConfigMapData.interfaces"
-        );
-        assert_eq!(
-            interfaces.as_slice(),
-            weave_flow_controller_underlay_interfaces().as_slice()
-        );
+        let expected_interfaces = [
+            ("0005:06:00.0", "A56"),
+            ("0005:03:00.0", "A53"),
+            ("0000:06:00.0", "A6"),
+            ("0000:03:00.0", "A3"),
+            ("0004:03:00.0", "A43"),
+            ("0004:06:00.0", "A46"),
+            ("0001:03:00.0", "A13"),
+            ("0001:06:00.0", "A16"),
+        ]
+        .into_iter()
+        .map(|(pci_address, group)| {
+            serde_json::json!({
+                "pciAddress": pci_address,
+                "underlayInterface": format!("brcx-{group}"),
+                "overlayDHCPInterface": group,
+                "dhcpBridgeName": format!("br-dhcp-{group}"),
+                "dropBridgeName": format!("br-drop-{group}"),
+            })
+        })
+        .collect::<Vec<_>>();
+        assert_eq!(interfaces, &expected_interfaces);
     }
 
     #[test]
-    fn weave_flow_controller_service_allows_staged_underlay_migration() {
-        let mut config = default_doca_weave_flow_controller_service();
-        // Installed DPUs can keep the ConfigMap path until their new flavor file is installed.
+    fn weave_flow_controller_service_allows_legacy_underlay_path_override() {
+        let config: crate::cfg::file::DpfConfig = toml::from_str(
+            r#"
+[deployments.bf4_astra]
+flavor_name = "astra-flavor"
+deployment_name = "astra-deployment"
+node_label_key = "carbide.nvidia.com/astra"
+
+[deployments.bf4_astra.extra_services.doca_weave_flow_controller.extra_helm_values.weaveFlowController.containers.weaveFlowController]
+env = [
+    { name = "UNDERLAY_CONFIG_FILE", value = "/var/lib/dpf/weave/flow-controller/underlay-config.yaml" },
+    { name = "LOG_LEVEL", value = "debug" },
+]
+"#,
+        )
+        .unwrap();
+        let resolved = config.resolved_services_for(
+            config.deployments.bf4_astra.as_ref().unwrap(),
+            carbide_dpf::types::DpuDeploymentType::Bf4Astra,
+        );
+        let service = doca_weave_flow_controller_service(
+            &resolved.extra[&DpfExtraService::DocaWeaveFlowController],
+            None,
+        );
+        // Installed DPUs keep the ConfigMap path until their new flavor file is installed.
         let env = serde_json::json!([
             {"name": "UNDERLAY_CONFIG_FILE", "value": "/var/lib/dpf/weave/flow-controller/underlay-config.yaml"},
             {"name": "LOG_LEVEL", "value": "debug"},
         ]);
-        config.extra_helm_values = Some(serde_json::Map::from_iter([(
-            "weaveFlowController".to_string(),
-            serde_json::json!({"containers": {"weaveFlowController": {"env": env}}}),
-        )]));
-        let service = doca_weave_flow_controller_service(&config, None);
         assert_eq!(
             service.helm_values.unwrap()["weaveFlowController"]["containers"]["weaveFlowController"]
                 ["env"],
