@@ -1,7 +1,10 @@
 # Rack and Tray Firmware Updates
 
-Firmware updates for racks, compute trays, NVSwitches, and power shelves are
-explicit operations. NICo does not start them from the host or DPU drift
+This page describes on-demand firmware updates for racks, compute trays,
+NVSwitches, and power shelves. Automatic rack ingestion and ordinary
+reprovisioning use the
+[rack profile firmware object](configuration.md#rack-profile-firmware-object).
+NICo does not start these on-demand updates from the host or DPU drift
 detectors described elsewhere in this guide. A Provider Admin submits a REST
 request, and NICo Flow creates one or more asynchronous tasks to sequence the
 work.
@@ -46,7 +49,7 @@ request body and must identify a site owned by the provider organization.
 | Scope | Endpoint | Selection |
 |---|---|---|
 | One rack | [`PATCH /v2/org/{org}/nico/rack/{rack-id}/firmware`](api:PATCH/v2/org/{org}/nico/rack/{id}/firmware) | The rack in the URL. |
-| Several or all racks | [`PATCH /v2/org/{org}/nico/rack/firmware`](api:PATCH/v2/org/{org}/nico/rack/firmware) | Optional `filter.names`. No filter means every rack in the site. |
+| Several or all racks | [`PATCH /v2/org/{org}/nico/rack/firmware`](api:PATCH/v2/org/{org}/nico/rack/firmware) | Supply a nonempty `filter.names` list naming every intended rack, including for site-wide updates. |
 | One tray | [`PATCH /v2/org/{org}/nico/tray/{tray-id}/firmware`](api:PATCH/v2/org/{org}/nico/tray/{id}/firmware) | The tray in the URL. |
 | Several or all trays | [`PATCH /v2/org/{org}/nico/tray/firmware`](api:PATCH/v2/org/{org}/nico/tray/firmware) | Optional `filter`. No filter means all compute, NVSwitch, and power-shelf trays in every site rack. |
 
@@ -62,7 +65,7 @@ The batch tray filter supports:
 
 Rack selection cannot be combined with `ids` or `componentIds`. Prefer a
 single-rack or single-tray request for the first update of a new firmware
-bundle. An unfiltered batch request can affect the entire site.
+bundle. A batch request can affect the entire site.
 
 ## Describe the update
 
@@ -269,6 +272,106 @@ To update all racks named `A01` and `A02`, submit a batch rack request:
   "version": "<complete or layered firmware target serialized as a string>"
 }
 ```
+
+## Roll out a SOT from canary to production
+
+Use this procedure for RMS-backed racks when promoting a new SOT firmware
+object. The rollout has three gates: update the canary racks with an explicit
+SOT, promote that SOT as the ingestion default, then update the remaining
+existing racks. This is the operator procedure requested in
+[issue #5871](https://github.com/dsx-ai-factory/infra-controller/issues/5871).
+
+An explicit REST `version` changes only the requested update. It does not
+change `[rack_profiles.<profile-id>.firmware_object].url` or the document
+served there. If you update existing racks without promoting that source,
+newly ingested hardware can still receive the previous firmware.
+
+### Prepare the rollout
+
+Before submitting an update, prepare the following information:
+
+1. Identify the site, canary rack IDs or names, remaining rack names, and the
+   rack profile used by each group. Group hardware by compatible SOT and
+   operation rule; do not send one platform's SOT to unrelated hardware.
+1. Obtain the complete candidate SOT from the firmware release process.
+   Preserve a copy of both the candidate and the previous production SOT,
+   along with their artifact locations and the profile's configured URL.
+   Keep the candidate unchanged throughout validation and rollout.
+1. Confirm the maintenance scope, tenant impact, firmware-download
+   credentials, activation requirements, and canary acceptance criteria.
+   Use the same operation rule and component scope for validation and the
+   corresponding production updates. The [built-in rule](#default-sequencing)
+   excludes power shelves and does not perform an activation power cycle.
+
+### 1. Update and validate the canary racks
+
+Submit an on-demand update for a single canary rack, or use
+`PATCH /v2/org/{org}/nico/rack/firmware` with a nonempty `filter.names` list. For
+example, this request body selects only racks `A01` and `A02`:
+
+```json
+{
+  "siteId": "2b88bb63-9a21-4bad-b113-68a54aa6e3dd",
+  "filter": {
+    "names": ["A01", "A02"]
+  },
+  "version": "<complete candidate SOT firmware-object JSON serialized as a string>"
+}
+```
+
+Replace the example site and rack names with the canary selection. Serialize
+the complete candidate document as described in
+[SOT firmware-object JSON](#sot-firmware-object-json); the placeholder above
+is not firmware input. Supply `ruleId` and `authenticationData` when required
+by the selected rule and artifact source. Keep readiness and version checks
+enabled unless a diagnosed condition requires an approved override.
+
+[Monitor every returned task](#monitor-and-cancel-tasks) to a terminal result.
+Inspect the stage reports for failed or skipped work, verify installed
+firmware and any required activation, and complete the platform's canary
+acceptance checks. A task-creation response alone does not clear the canary.
+If any check fails, stop here and retain the previous ingestion SOT.
+
+### 2. Promote the ingestion SOT
+
+After the canary passes, publish the exact validated SOT document at the URL
+configured under each affected rack profile's `firmware_object`. Use the
+artifact repository's publication process. If the repository uses immutable
+URLs, update the profile's `url` to the validated document through the site's
+configuration deployment process instead. Confirm that the running NICo
+configuration uses the intended URL.
+
+Read back the document from that URL and compare it with the validated SOT.
+Confirm that NICo can fetch it and that RMS can access its referenced
+artifacts with the configured credentials. Coordinate hardware admissions
+during the change: an ingestion already using the previous SOT needs separate
+verification. The [rack compute-tray pre-ingestion path](pre-ingestion.md#rack-compute-trays)
+and automatic rack maintenance consume the profile's SOT; changing the source
+does not retarget firmware jobs already submitted to the backend.
+
+Complete this step **before expanding the rollout**. Updating the ingestion
+default keeps newly admitted hardware aligned with the production target;
+it does not submit site-wide on-demand updates for existing racks.
+
+### 3. Update and verify the remaining racks
+
+Submit on-demand updates for the remaining compatible racks using the same
+validated SOT in `version`. Use nonempty rack-name batches to control scope.
+For a site-wide rollout, explicitly list every intended compatible rack in
+those batches. An omitted, null, or empty filter, including an empty names
+list, is rejected before task creation; it does not select every rack.
+
+Monitor every task and verify installed and activated firmware for each
+selected component type. Also verify newly ingested hardware against the
+promoted SOT. Record the SOT identity, profile URLs, rack selection, task IDs,
+and validation results so partial completion is visible.
+
+If a production batch fails, pause further batches and inspect task reports,
+backend status, and component inventory before retrying. Failure or
+cancellation does not undo completed firmware work. Restoring the previous
+SOT source affects subsequent consumers; it does not roll back flashed
+hardware. Use the platform's approved recovery procedure before attempting a
+downgrade, and keep the ingestion target consistent with the recovery plan.
 
 ## Default sequencing
 
