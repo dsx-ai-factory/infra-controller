@@ -296,10 +296,18 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_ib_partition_pkey_missing_total</td><td>counter</td><td>Number of IB partitions missing a pkey, by controller state</td></tr>
 <tr><td>carbide_ib_partitions_count</td><td>gauge</td><td>Number of carbide_ib_partitions in the system</td></tr>
 <tr><td>carbide_ib_partitions_enqueuer_iteration_latency_milliseconds</td><td>histogram</td><td>The overall time it took to enqueue state handling tasks for all carbide_ib_partitions in the system</td></tr>
+<tr><td>carbide_ib_partitions_handler_latency_in_state_milliseconds</td><td>histogram</td><td>The amount of time it took to invoke the state handler for objects of type carbide_ib_partitions in a certain state</td></tr>
 <tr><td>carbide_ib_partitions_iteration_latency_milliseconds</td><td>histogram</td><td>Elapsed time of each completed state processor iteration for objects of type carbide_ib_partitions</td></tr>
+<tr><td>carbide_ib_partitions_object_tasks_completed_total</td><td>counter</td><td>Number of object handling tasks completed for objects of type carbide_ib_partitions</td></tr>
+<tr><td>carbide_ib_partitions_object_tasks_dispatched_total</td><td>counter</td><td>Number of object handling tasks dequeued and dispatched for processing for objects of type carbide_ib_partitions</td></tr>
 <tr><td>carbide_ib_partitions_object_tasks_enqueued_total</td><td>counter</td><td>Number of object handling tasks freshly enqueued for objects of type carbide_ib_partitions</td></tr>
+<tr><td>carbide_ib_partitions_object_tasks_errored_total</td><td>counter</td><td>Number of object handling tasks completed with an error for objects of type carbide_ib_partitions</td></tr>
+<tr><td>carbide_ib_partitions_object_tasks_requeued_total</td><td>counter</td><td>Number of object handling tasks requeued for objects of type carbide_ib_partitions</td></tr>
 <tr><td>carbide_ib_partitions_object_tasks_running</td><td>gauge</td><td>Number of object handling tasks currently running of type carbide_ib_partitions</td></tr>
+<tr><td>carbide_ib_partitions_per_state</td><td>gauge</td><td>Number of carbide_ib_partitions in the system with a given state</td></tr>
+<tr><td>carbide_ib_partitions_per_state_above_sla</td><td>gauge</td><td>Number of carbide_ib_partitions currently in a state longer than the SLA allows</td></tr>
 <tr><td>carbide_ib_partitions_total</td><td>gauge</td><td>Number of carbide_ib_partitions in the system</td></tr>
+<tr><td>carbide_ib_partitions_with_state_handling_errors_per_state</td><td>gauge</td><td>Number of carbide_ib_partitions whose most recent state handler run returned an error, by state, substate, and error; the error=any series is the total across all errors for that state and substate, so exclude it when summing over error</td></tr>
 <tr><td>carbide_ipmi_commands_total</td><td>counter</td><td>Number of IPMI command executions, by command and outcome.</td></tr>
 <tr><td>carbide_kms_token_maintenance_failures_total</td><td>counter</td><td>Number of Transit KMS token maintenance failures, by maintenance stage</td></tr>
 <tr><td>carbide_log_events_total</td><td>counter</td><td>Number of log events emitted, by level and component. The always-on log-volume and error-rate signal for every binary.</td></tr>

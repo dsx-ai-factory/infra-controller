@@ -685,6 +685,13 @@ pub enum DpfHelmChartServiceDataError {
     InvalidDeployInCluster,
     #[error("tenant values may not set NICo-owned field serviceDaemonSet.nodeSelector")]
     ReservedNodeSelector,
+    /// Rejects invalid SF requests during Service VPC resource construction to avoid replacing
+    /// malformed caller quantities with a derived minimum.
+    #[error(
+        // xtask:allow-error-case (Kubernetes is a proper noun)
+        "serviceDaemonSet.resources[\"nvidia.com/bf_sf\"] must be a nonnegative whole-number Kubernetes quantity within the signed 64-bit range"
+    )]
+    InvalidSfQuantity,
 }
 
 impl DpfHelmChartServiceData {
