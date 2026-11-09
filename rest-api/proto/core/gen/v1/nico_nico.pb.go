@@ -76866,8 +76866,8 @@ func (x *MachineStateList) GetMachines() []*MachineStateSummary {
 
 type DNSMessage_DNSQuestion struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	QName         *string                `protobuf:"bytes,1,opt,name=q_name,json=qName,proto3,oneof" json:"q_name,omitempty"`     // FQDN including trailing dot
-	QType         *uint32                `protobuf:"varint,2,opt,name=q_type,json=qType,proto3,oneof" json:"q_type,omitempty"`    //
+	QName         *string                `protobuf:"bytes,1,opt,name=q_name,json=qName,proto3,oneof" json:"q_name,omitempty"` // FQDN including trailing dot
+	QType         *uint32                `protobuf:"varint,2,opt,name=q_type,json=qType,proto3,oneof" json:"q_type,omitempty"`
 	QClass        *uint32                `protobuf:"varint,3,opt,name=q_class,json=qClass,proto3,oneof" json:"q_class,omitempty"` // Usually 1 (IN)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
