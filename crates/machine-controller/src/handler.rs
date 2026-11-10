@@ -2660,40 +2660,44 @@ impl MachineStateHandler {
         let cage_mpo_encoded_string =
             model::machine::astra::astra_get_cage_mpo_encoded_string(nic_index);
 
-        let (fixed_ip, dpu_pci_address) = if let Some(nic) = legacy_nic {
+        let (fixed_ip, dpu_pci_address, logical_ifname) = if let Some(nic) = legacy_nic {
             // Preserve the MAC/IP inventory's original indexed DPA registration.
             let fixed_ip = nic.fixed_ip.ok_or_else(|| {
                 StateHandlerError::GenericError(eyre!(
                     "fixed IP not found for legacy astra NIC {nic_index}"
                 ))
             })?;
-            (fixed_ip, format!("CX_{nic_index}"))
+            // Legacy inventory declares no lanes, so it names no interface.
+            (fixed_ip, format!("CX_{nic_index}"), None)
         } else {
-            // Every declared lane has a validated fixed IP. Use one lane's address
-            // for the card-level DPA registration.
-            let lane_prefix = format!("{cage_mpo_encoded_string}-L");
-            let fixed_ip = cx9_nics
+            // The card-level DPA registration stands for lane L1, so a single
+            // declaration supplies its address, locator, and interface name.
+            let l1_physical_ifname = format!("{cage_mpo_encoded_string}-L1");
+            let l1_lane = cx9_nics
                 .iter()
-                .filter(|nic| {
-                    nic.physical_ifname
-                        .as_deref()
-                        .is_some_and(|name| name.starts_with(&lane_prefix))
-                })
-                .find_map(|nic| nic.fixed_ip)
+                .find(|nic| nic.physical_ifname.as_deref() == Some(l1_physical_ifname.as_str()))
                 .ok_or_else(|| {
                     StateHandlerError::GenericError(eyre!(
-                        "fixed IP not found for astra card {cage_mpo_encoded_string}"
+                        "astra lane {l1_physical_ifname} is not declared"
                     ))
                 })?;
+            // Every declared lane has a validated fixed IP.
+            let fixed_ip = l1_lane.fixed_ip.ok_or_else(|| {
+                StateHandlerError::GenericError(eyre!(
+                    "fixed IP not found for astra lane {l1_physical_ifname}"
+                ))
+            })?;
+            // A lane may be declared without a logical name, so this stays optional.
+            let logical_ifname = l1_lane.logical_ifname.clone();
             let dpu_pci_address = model::machine::astra::astra_dpu_pci_address_for_physical_ifname(
-                &format!("{cage_mpo_encoded_string}-L1"),
+                &l1_physical_ifname,
             )
             .ok_or_else(|| {
                 StateHandlerError::GenericError(eyre!(
                     "DPU PCI address not found for astra card {cage_mpo_encoded_string}"
                 ))
             })?;
-            (fixed_ip, dpu_pci_address.to_string())
+            (fixed_ip, dpu_pci_address.to_string(), logical_ifname)
         };
 
         // Now enable EastWestControlEnabled on this card.
@@ -2719,6 +2723,7 @@ impl MachineStateHandler {
                 pci_name: dpu_pci_address,
                 device_description: Some("NVIDIA Dual ConnectX-9 SuperNIC C9280V for Vera Rubin NVL 144 systems, Crypto Enabled, Secure Boot Enabled, Liquid Cooled".to_string()),
                 interface_type: DpaInterfaceType::Astra,
+                interface_name: logical_ifname,
             },
             &mut txn,
         )

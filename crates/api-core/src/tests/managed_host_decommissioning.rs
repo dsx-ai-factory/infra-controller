@@ -435,6 +435,7 @@ async fn stale_supernic_unlock_rolls_back_before_a_fresh_iteration(pool: sqlx::P
             pci_name: "0000:cc:00.0".to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         },
         &mut txn,
     )
@@ -448,6 +449,7 @@ async fn stale_supernic_unlock_rolls_back_before_a_fresh_iteration(pool: sqlx::P
             pci_name: "0000:dd:00.0".to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         },
         &mut txn,
     )
