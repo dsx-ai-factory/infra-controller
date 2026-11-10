@@ -98,6 +98,23 @@ tests:
           path: data["nico-lifecycle.json"]
           pattern: '"text": "extension_services", "value": "extension_services"'
 
+  - it: keeps the site and fleet dashboards focused on NICo services
+    set:
+      grafanaDashboards.enabled: true
+    asserts:
+      - notMatchRegex:
+          path: data["nico-site-detail.json"]
+          pattern: '"name":\s*"(job|namespace)"|\$\{?(job|namespace)\b|\b(job|namespace)\s*(=|!=|!~)|\b(kube_|container_)'
+        documentSelector:
+          path: metadata.name
+          value: nico-system-test-nico-nico-site-detail
+      - notMatchRegex:
+          path: data["nico-fleet.json"]
+          pattern: '"name":\s*"(job|namespace)"|\$\{?(job|namespace)\b|\b(job|namespace)\s*(=|!=|!~)|\b(kube_|container_)'
+        documentSelector:
+          path: metadata.name
+          value: nico-system-test-nico-nico-fleet
+
   - it: supports a Grafana namespace and sidecar-specific metadata
     values:
       - fixtures/grafana-custom-values.yaml

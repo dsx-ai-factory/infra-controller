@@ -85,7 +85,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(count by ($site_label) (${metric_prefix}_api_ready{job=~\"$job\"}))",
+          "expr": "count(count by ($site_label) (${metric_prefix}_api_ready))",
           "legendFormat": "sites",
           "range": false,
           "instant": true,
@@ -152,7 +152,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(max by ($site_label) (${metric_prefix}_api_ready{job=~\"$job\"}) == 0) or vector(0)",
+          "expr": "count(max by ($site_label) (${metric_prefix}_api_ready) == 0) or vector(0)",
           "legendFormat": "sites down",
           "range": false,
           "instant": true,
@@ -215,7 +215,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_machines_total{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"}))",
           "legendFormat": "hosts",
           "range": false,
           "instant": true,
@@ -278,7 +278,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_gpus_total_count{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_gpus_total_count{fresh=\"true\"}))",
           "legendFormat": "GPUs",
           "range": false,
           "instant": true,
@@ -345,7 +345,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label, state, substate) (${metric_prefix}_machines_per_state_above_sla{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label, state, substate) (${metric_prefix}_machines_per_state_above_sla{fresh=\"true\"}))",
           "legendFormat": "hosts",
           "range": false,
           "instant": true,
@@ -412,7 +412,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label, in_use) (${metric_prefix}_hosts_health_status_count{job=~\"$job\",fresh=\"true\",healthy=\"false\"}))",
+          "expr": "sum(max by ($site_label, in_use) (${metric_prefix}_hosts_health_status_count{fresh=\"true\",healthy=\"false\"}))",
           "legendFormat": "hosts",
           "range": false,
           "instant": true,
@@ -479,7 +479,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_hosts_health_status_count{job=~\"$job\",fresh=\"true\",healthy=\"false\",in_use=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_hosts_health_status_count{fresh=\"true\",healthy=\"false\",in_use=\"true\"}))",
           "legendFormat": "hosts",
           "range": false,
           "instant": true,
@@ -542,7 +542,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count(count by (build_version) (${metric_prefix}_api_version{job=~\"$job\"}))",
+          "expr": "count(count by (build_version) (${metric_prefix}_api_version))",
           "legendFormat": "versions",
           "range": false,
           "instant": true,
@@ -639,7 +639,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "min by ($site_label) (${metric_prefix}_api_ready{job=~\"$job\"})",
+          "expr": "min by ($site_label) (${metric_prefix}_api_ready)",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -734,7 +734,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label, state, substate) (${metric_prefix}_machines_per_state_above_sla{job=~\"$job\",fresh=\"true\",state=\"assigned\"}))",
+          "expr": "sum(max by ($site_label, state, substate) (${metric_prefix}_machines_per_state_above_sla{fresh=\"true\",state=\"assigned\"}))",
           "legendFormat": "with an instance (all sites)",
           "range": true,
           "instant": false,
@@ -746,7 +746,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label, state, substate) (${metric_prefix}_machines_per_state_above_sla{job=~\"$job\",fresh=\"true\"})) - (sum(max by ($site_label, state, substate) (${metric_prefix}_machines_per_state_above_sla{job=~\"$job\",fresh=\"true\",state=\"assigned\"})) or vector(0))",
+          "expr": "sum(max by ($site_label, state, substate) (${metric_prefix}_machines_per_state_above_sla{fresh=\"true\"})) - (sum(max by ($site_label, state, substate) (${metric_prefix}_machines_per_state_above_sla{fresh=\"true\",state=\"assigned\"})) or vector(0))",
           "legendFormat": "without an instance (all sites)",
           "range": true,
           "instant": false,
@@ -758,7 +758,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label) (max by ($site_label, state, substate) (${metric_prefix}_machines_per_state_above_sla{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum by ($site_label) (max by ($site_label, state, substate) (${metric_prefix}_machines_per_state_above_sla{fresh=\"true\"}))",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -867,7 +867,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_machines_total{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"}))",
           "legendFormat": "total",
           "range": true,
           "instant": false,
@@ -879,7 +879,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_hosts_in_use_count{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_hosts_in_use_count{fresh=\"true\"}))",
           "legendFormat": "in use",
           "range": true,
           "instant": false,
@@ -891,7 +891,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label, state, substate) (${metric_prefix}_machines_per_state{job=~\"$job\",fresh=\"true\",state=\"ready\"}))",
+          "expr": "sum(max by ($site_label, state, substate) (${metric_prefix}_machines_per_state{fresh=\"true\",state=\"ready\"}))",
           "legendFormat": "in the ready state",
           "range": true,
           "instant": false,
@@ -903,7 +903,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_hosts_usable_count{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_hosts_usable_count{fresh=\"true\"}))",
           "legendFormat": "usable",
           "range": true,
           "instant": false,
@@ -998,7 +998,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_gpus_total_count{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_gpus_total_count{fresh=\"true\"}))",
           "legendFormat": "total",
           "range": true,
           "instant": false,
@@ -1010,7 +1010,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_gpus_in_use_count{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_gpus_in_use_count{fresh=\"true\"}))",
           "legendFormat": "in use",
           "range": true,
           "instant": false,
@@ -1022,7 +1022,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_gpus_usable_count{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_gpus_usable_count{fresh=\"true\"}))",
           "legendFormat": "usable",
           "range": true,
           "instant": false,
@@ -1034,7 +1034,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_gpus_total_count{job=~\"$job\",fresh=\"true\"})) - sum(max by ($site_label) (${metric_prefix}_gpus_in_use_count{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_gpus_total_count{fresh=\"true\"})) - sum(max by ($site_label) (${metric_prefix}_gpus_in_use_count{fresh=\"true\"}))",
           "legendFormat": "not in use",
           "range": true,
           "instant": false,
@@ -1129,7 +1129,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_hosts_in_use_count{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_hosts_in_use_count{fresh=\"true\"})",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -1224,7 +1224,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_gpus_in_use_count{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_gpus_in_use_count{fresh=\"true\"})",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -1319,7 +1319,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_hosts_usable_count{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_hosts_usable_count{fresh=\"true\"})",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -1414,7 +1414,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_gpus_usable_count{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_gpus_usable_count{fresh=\"true\"})",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -1509,7 +1509,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (tenant_org_id) (max by ($site_label, tenant_org_id) (${metric_prefix}_hosts_in_use_by_tenant_count{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum by (tenant_org_id) (max by ($site_label, tenant_org_id) (${metric_prefix}_hosts_in_use_by_tenant_count{fresh=\"true\"}))",
           "legendFormat": "{{tenant_org_id}}",
           "range": true,
           "instant": false,
@@ -1604,7 +1604,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (tenant_org_id) (max by ($site_label, tenant_org_id) (${metric_prefix}_gpus_in_use_by_tenant_count{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum by (tenant_org_id) (max by ($site_label, tenant_org_id) (${metric_prefix}_gpus_in_use_by_tenant_count{fresh=\"true\"}))",
           "legendFormat": "{{tenant_org_id}}",
           "range": true,
           "instant": false,
@@ -1672,7 +1672,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label, tenant_org_id) (${metric_prefix}_hosts_in_use_by_tenant_count{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label, tenant_org_id) (${metric_prefix}_hosts_in_use_by_tenant_count{fresh=\"true\"})",
           "legendFormat": "hosts",
           "range": false,
           "instant": true,
@@ -1685,7 +1685,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label, tenant_org_id) (${metric_prefix}_gpus_in_use_by_tenant_count{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label, tenant_org_id) (${metric_prefix}_gpus_in_use_by_tenant_count{fresh=\"true\"})",
           "legendFormat": "GPUs",
           "range": false,
           "instant": true,
@@ -1777,7 +1777,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label, build_version, git_sha) (${metric_prefix}_api_version{job=~\"$job\"})",
+          "expr": "max by ($site_label, build_version, git_sha) (${metric_prefix}_api_version)",
           "legendFormat": "{{$site_label}}",
           "range": false,
           "instant": true,
@@ -1891,7 +1891,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count by (build_version) (max by ($site_label, build_version) (${metric_prefix}_api_version{job=~\"$job\"}))",
+          "expr": "count by (build_version) (max by ($site_label, build_version) (${metric_prefix}_api_version))",
           "legendFormat": "{{build_version}}",
           "range": true,
           "instant": false,
@@ -1986,7 +1986,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (version) (max by ($site_label, version) (${metric_prefix}_dpu_agent_version_count{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum by (version) (max by ($site_label, version) (${metric_prefix}_dpu_agent_version_count{fresh=\"true\"}))",
           "legendFormat": "{{version}}",
           "range": true,
           "instant": false,
@@ -2081,7 +2081,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (firmware_version) (max by ($site_label, firmware_version) (${metric_prefix}_dpu_firmware_version_count{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum by (firmware_version) (max by ($site_label, firmware_version) (${metric_prefix}_dpu_firmware_version_count{fresh=\"true\"}))",
           "legendFormat": "{{firmware_version}}",
           "range": true,
           "instant": false,
@@ -2176,7 +2176,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (name, version) (max by ($site_label, name, version) (${metric_prefix}_machine_inventory_component_version_count{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum by (name, version) (max by ($site_label, name, version) (${metric_prefix}_machine_inventory_component_version_count{fresh=\"true\"}))",
           "legendFormat": "{{name}} {{version}}",
           "range": true,
           "instant": false,
@@ -2285,7 +2285,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_machines_total{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"})",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -2380,7 +2380,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (state, substate) (max by ($site_label, state, substate) (${metric_prefix}_machines_per_state{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum by (state, substate) (max by ($site_label, state, substate) (${metric_prefix}_machines_per_state{fresh=\"true\"}))",
           "legendFormat": "{{state}} / {{substate}}",
           "range": true,
           "instant": false,
@@ -2475,7 +2475,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label, state, substate) (${metric_prefix}_machines_per_state_above_sla{job=~\"$job\",fresh=\"true\",state=\"assigned\"})) or vector(0)",
+          "expr": "sum(max by ($site_label, state, substate) (${metric_prefix}_machines_per_state_above_sla{fresh=\"true\",state=\"assigned\"})) or vector(0)",
           "legendFormat": "fleet total",
           "range": true,
           "instant": false,
@@ -2487,7 +2487,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label, substate) (${metric_prefix}_machines_per_state_above_sla{job=~\"$job\",fresh=\"true\",state=\"assigned\"})",
+          "expr": "max by ($site_label, substate) (${metric_prefix}_machines_per_state_above_sla{fresh=\"true\",state=\"assigned\"})",
           "legendFormat": "{{$site_label}} assigned / {{substate}}",
           "range": true,
           "instant": false,
@@ -2582,7 +2582,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label, state, substate) (${metric_prefix}_machines_per_state_above_sla{job=~\"$job\",fresh=\"true\",state!=\"assigned\"})",
+          "expr": "max by ($site_label, state, substate) (${metric_prefix}_machines_per_state_above_sla{fresh=\"true\",state!=\"assigned\"})",
           "legendFormat": "{{$site_label}} {{state}} / {{substate}}",
           "range": true,
           "instant": false,
@@ -2677,7 +2677,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_network_segments_total{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_network_segments_total{fresh=\"true\"})",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -2772,7 +2772,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label, state, substate) (${metric_prefix}_network_segments_per_state_above_sla{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label, state, substate) (${metric_prefix}_network_segments_per_state_above_sla{fresh=\"true\"})",
           "legendFormat": "{{$site_label}} {{state}} / {{substate}}",
           "range": true,
           "instant": false,
@@ -2867,7 +2867,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_ib_partitions_total{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_ib_partitions_total{fresh=\"true\"})",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -2962,7 +2962,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label, state, substate) (${metric_prefix}_ib_partitions_per_state_above_sla{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label, state, substate) (${metric_prefix}_ib_partitions_per_state_above_sla{fresh=\"true\"})",
           "legendFormat": "{{$site_label}} {{state}} / {{substate}}",
           "range": true,
           "instant": false,
@@ -3028,7 +3028,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_machines_total{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"}))",
           "legendFormat": "machines",
           "range": true,
           "instant": false,
@@ -3040,7 +3040,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_network_segments_total{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_network_segments_total{fresh=\"true\"}))",
           "legendFormat": "network segments",
           "range": true,
           "instant": false,
@@ -3052,7 +3052,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_vpc_prefixes_total{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_vpc_prefixes_total{fresh=\"true\"}))",
           "legendFormat": "VPC prefixes",
           "range": true,
           "instant": false,
@@ -3064,7 +3064,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_ib_partitions_total{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_ib_partitions_total{fresh=\"true\"}))",
           "legendFormat": "IB partitions",
           "range": true,
           "instant": false,
@@ -3076,7 +3076,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_switches_total{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_switches_total{fresh=\"true\"}))",
           "legendFormat": "switches",
           "range": true,
           "instant": false,
@@ -3088,7 +3088,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_racks_total{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_racks_total{fresh=\"true\"}))",
           "legendFormat": "racks",
           "range": true,
           "instant": false,
@@ -3100,7 +3100,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_power_shelves_total{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_power_shelves_total{fresh=\"true\"}))",
           "legendFormat": "power shelves",
           "range": true,
           "instant": false,
@@ -3195,7 +3195,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_racks_total{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_racks_total{fresh=\"true\"})",
           "legendFormat": "{{$site_label}} racks",
           "range": true,
           "instant": false,
@@ -3207,7 +3207,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_switches_total{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_switches_total{fresh=\"true\"})",
           "legendFormat": "{{$site_label}} switches",
           "range": true,
           "instant": false,
@@ -3219,7 +3219,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_power_shelves_total{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_power_shelves_total{fresh=\"true\"})",
           "legendFormat": "{{$site_label}} power shelves",
           "range": true,
           "instant": false,
@@ -3330,7 +3330,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "(max by ($site_label) (${metric_prefix}_machines_total{job=~\"$job\",fresh=\"true\"}) - clamp_min((sum by ($site_label) (max by ($site_label, in_use) (${metric_prefix}_hosts_health_status_count{job=~\"$job\",fresh=\"true\",healthy=\"false\"})) or 0 * max by ($site_label) (${metric_prefix}_machines_total{job=~\"$job\",fresh=\"true\"})) - (sum by ($site_label) (max by ($site_label, in_use, probe_target) (${metric_prefix}_hosts_unhealthy_by_probe_id_count{job=~\"$job\",fresh=\"true\",probe_id=\"Maintenance\"})) or 0 * max by ($site_label) (${metric_prefix}_machines_total{job=~\"$job\",fresh=\"true\"})), 0)) / max by ($site_label) (${metric_prefix}_machines_total{job=~\"$job\",fresh=\"true\"})",
+          "expr": "(max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"}) - clamp_min((sum by ($site_label) (max by ($site_label, in_use) (${metric_prefix}_hosts_health_status_count{fresh=\"true\",healthy=\"false\"})) or 0 * max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"})) - (sum by ($site_label) (max by ($site_label, in_use, probe_target) (${metric_prefix}_hosts_unhealthy_by_probe_id_count{fresh=\"true\",probe_id=\"Maintenance\"})) or 0 * max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"})), 0)) / max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"})",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -3427,7 +3427,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "(max by ($site_label) (${metric_prefix}_machines_total{job=~\"$job\",fresh=\"true\"}) - clamp_min((sum by ($site_label) (max by ($site_label, in_use) (${metric_prefix}_hosts_health_status_count{job=~\"$job\",fresh=\"true\",healthy=\"false\"})) or 0 * max by ($site_label) (${metric_prefix}_machines_total{job=~\"$job\",fresh=\"true\"})) - (sum by ($site_label) (max by ($site_label, in_use) (${metric_prefix}_hosts_unhealthy_by_classification_count{job=~\"$job\",fresh=\"true\",classification=\"SuppressExternalAlerting\"})) or 0 * max by ($site_label) (${metric_prefix}_machines_total{job=~\"$job\",fresh=\"true\"})), 0)) / max by ($site_label) (${metric_prefix}_machines_total{job=~\"$job\",fresh=\"true\"})",
+          "expr": "(max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"}) - clamp_min((sum by ($site_label) (max by ($site_label, in_use) (${metric_prefix}_hosts_health_status_count{fresh=\"true\",healthy=\"false\"})) or 0 * max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"})) - (sum by ($site_label) (max by ($site_label, in_use) (${metric_prefix}_hosts_unhealthy_by_classification_count{fresh=\"true\",classification=\"SuppressExternalAlerting\"})) or 0 * max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"})), 0)) / max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"})",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -3522,7 +3522,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label) (max by ($site_label, in_use) (${metric_prefix}_hosts_health_status_count{job=~\"$job\",fresh=\"true\",healthy=\"false\"}))",
+          "expr": "sum by ($site_label) (max by ($site_label, in_use) (${metric_prefix}_hosts_health_status_count{fresh=\"true\",healthy=\"false\"}))",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -3534,7 +3534,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label, in_use) (${metric_prefix}_hosts_health_status_count{job=~\"$job\",fresh=\"true\",healthy=\"false\"}))",
+          "expr": "sum(max by ($site_label, in_use) (${metric_prefix}_hosts_health_status_count{fresh=\"true\",healthy=\"false\"}))",
           "legendFormat": "fleet total",
           "range": true,
           "instant": false,
@@ -3629,7 +3629,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label) (max by ($site_label) (${metric_prefix}_hosts_health_status_count{job=~\"$job\",fresh=\"true\",healthy=\"false\",in_use=\"true\"}))",
+          "expr": "sum by ($site_label) (max by ($site_label) (${metric_prefix}_hosts_health_status_count{fresh=\"true\",healthy=\"false\",in_use=\"true\"}))",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -3641,7 +3641,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label) (${metric_prefix}_hosts_health_status_count{job=~\"$job\",fresh=\"true\",healthy=\"false\",in_use=\"true\"}))",
+          "expr": "sum(max by ($site_label) (${metric_prefix}_hosts_health_status_count{fresh=\"true\",healthy=\"false\",in_use=\"true\"}))",
           "legendFormat": "fleet total",
           "range": true,
           "instant": false,
@@ -3736,7 +3736,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (probe_id) (max by ($site_label, probe_id, probe_target, in_use) (${metric_prefix}_hosts_unhealthy_by_probe_id_count{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum by (probe_id) (max by ($site_label, probe_id, probe_target, in_use) (${metric_prefix}_hosts_unhealthy_by_probe_id_count{fresh=\"true\"}))",
           "legendFormat": "{{probe_id}}",
           "range": true,
           "instant": false,
@@ -3831,7 +3831,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (probe_id) (max by ($site_label, probe_id, probe_target) (${metric_prefix}_hosts_unhealthy_by_probe_id_count{job=~\"$job\",fresh=\"true\",in_use=\"true\"}))",
+          "expr": "sum by (probe_id) (max by ($site_label, probe_id, probe_target) (${metric_prefix}_hosts_unhealthy_by_probe_id_count{fresh=\"true\",in_use=\"true\"}))",
           "legendFormat": "{{probe_id}}",
           "range": true,
           "instant": false,
@@ -3926,7 +3926,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (probe_id, probe_target) (max by ($site_label, probe_id, probe_target, in_use) (${metric_prefix}_hosts_unhealthy_by_probe_id_count{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum by (probe_id, probe_target) (max by ($site_label, probe_id, probe_target, in_use) (${metric_prefix}_hosts_unhealthy_by_probe_id_count{fresh=\"true\"}))",
           "legendFormat": "{{probe_id}} [{{probe_target}}]",
           "range": true,
           "instant": false,
@@ -4021,7 +4021,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (classification) (max by ($site_label, classification, in_use) (${metric_prefix}_hosts_unhealthy_by_classification_count{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum by (classification) (max by ($site_label, classification, in_use) (${metric_prefix}_hosts_unhealthy_by_classification_count{fresh=\"true\"}))",
           "legendFormat": "{{classification}}",
           "range": true,
           "instant": false,
@@ -4116,7 +4116,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label) (max by ($site_label, override_type, in_use) (${metric_prefix}_hosts_health_overrides_count{job=~\"$job\",fresh=\"true\"})) > 0",
+          "expr": "sum by ($site_label) (max by ($site_label, override_type, in_use) (${metric_prefix}_hosts_health_overrides_count{fresh=\"true\"})) > 0",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -4128,7 +4128,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(max by ($site_label, override_type, in_use) (${metric_prefix}_hosts_health_overrides_count{job=~\"$job\",fresh=\"true\"})) > 0",
+          "expr": "sum(max by ($site_label, override_type, in_use) (${metric_prefix}_hosts_health_overrides_count{fresh=\"true\"})) > 0",
           "legendFormat": "fleet total",
           "range": true,
           "instant": false,
@@ -4223,7 +4223,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_machines_total{job=~\"$job\",fresh=\"true\"}) - (max by ($site_label) (${metric_prefix}_hosts_with_bios_password_set{job=~\"$job\",fresh=\"true\"}) or 0 * max by ($site_label) (${metric_prefix}_machines_total{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"}) - (max by ($site_label) (${metric_prefix}_hosts_with_bios_password_set{fresh=\"true\"}) or 0 * max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"}))",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -4318,7 +4318,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "count by ($site_label) (max by ($site_label, machine_id) (${metric_prefix}_hosts_alerts_suppressed_count{job=~\"$job\",fresh=\"true\"} == 1))",
+          "expr": "count by ($site_label) (max by ($site_label, machine_id) (${metric_prefix}_hosts_alerts_suppressed_count{fresh=\"true\"} == 1))",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -4413,7 +4413,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_dpus_up_count{job=~\"$job\",fresh=\"true\"}) - max by ($site_label) (${metric_prefix}_dpus_healthy_count{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_dpus_up_count{fresh=\"true\"}) - max by ($site_label) (${metric_prefix}_dpus_healthy_count{fresh=\"true\"})",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -4508,7 +4508,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (failure) (max by ($site_label, failure) (${metric_prefix}_dpu_health_check_failed_count{job=~\"$job\",fresh=\"true\"}))",
+          "expr": "sum by (failure) (max by ($site_label, failure) (${metric_prefix}_dpu_health_check_failed_count{fresh=\"true\"}))",
           "legendFormat": "{{failure}}",
           "range": true,
           "instant": false,
@@ -4603,7 +4603,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_dpus_up_count{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_dpus_up_count{fresh=\"true\"})",
           "legendFormat": "{{$site_label}} online",
           "range": true,
           "instant": false,
@@ -4615,7 +4615,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_dpus_healthy_count{job=~\"$job\",fresh=\"true\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_dpus_healthy_count{fresh=\"true\"})",
           "legendFormat": "{{$site_label}} healthy",
           "range": true,
           "instant": false,
@@ -4724,7 +4724,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_ib_monitor_fabrics_count{job=~\"$job\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_ib_monitor_fabrics_count)",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -4819,7 +4819,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label) (max by ($site_label, fabric, error) (${metric_prefix}_ib_monitor_fabric_error_count{job=~\"$job\"}))",
+          "expr": "sum by ($site_label) (max by ($site_label, fabric, error) (${metric_prefix}_ib_monitor_fabric_error_count))",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -4914,7 +4914,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label) (max by ($site_label, fabric) (${metric_prefix}_ib_monitor_insecure_fabric_configuration_count{job=~\"$job\"}) > 0 and max by ($site_label, fabric) (${metric_prefix}_ib_monitor_allow_insecure_fabric_configuration_count{job=~\"$job\"}) == 0)",
+          "expr": "sum by ($site_label) (max by ($site_label, fabric) (${metric_prefix}_ib_monitor_insecure_fabric_configuration_count) > 0 and max by ($site_label, fabric) (${metric_prefix}_ib_monitor_allow_insecure_fabric_configuration_count) == 0)",
           "legendFormat": "{{$site_label}} not permitted",
           "range": true,
           "instant": false,
@@ -4926,7 +4926,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label) (max by ($site_label, fabric) (${metric_prefix}_ib_monitor_insecure_fabric_configuration_count{job=~\"$job\"}) > 0 and max by ($site_label, fabric) (${metric_prefix}_ib_monitor_allow_insecure_fabric_configuration_count{job=~\"$job\"}) == 1)",
+          "expr": "sum by ($site_label) (max by ($site_label, fabric) (${metric_prefix}_ib_monitor_insecure_fabric_configuration_count) > 0 and max by ($site_label, fabric) (${metric_prefix}_ib_monitor_allow_insecure_fabric_configuration_count) == 1)",
           "legendFormat": "{{$site_label}} permitted by configuration",
           "range": true,
           "instant": false,
@@ -5021,7 +5021,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label, version) (${metric_prefix}_ib_monitor_ufm_version_count{job=~\"$job\"})",
+          "expr": "max by ($site_label, version) (${metric_prefix}_ib_monitor_ufm_version_count)",
           "legendFormat": "{{$site_label}}: {{version}}",
           "range": true,
           "instant": false,
@@ -5116,7 +5116,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_ib_monitor_machines_with_missing_pkeys_count{job=~\"$job\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_ib_monitor_machines_with_missing_pkeys_count)",
           "legendFormat": "{{$site_label}} missing",
           "range": true,
           "instant": false,
@@ -5128,7 +5128,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_ib_monitor_machines_with_unexpected_pkeys_count{job=~\"$job\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_ib_monitor_machines_with_unexpected_pkeys_count)",
           "legendFormat": "{{$site_label}} unexpected",
           "range": true,
           "instant": false,
@@ -5223,7 +5223,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_nvlink_partition_monitor_num_physical_partitions{job=~\"$job\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_nvlink_partition_monitor_num_physical_partitions)",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -5334,7 +5334,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "1 - (sum by ($site_label) (rate(${metric_prefix}_api_grpc_server_duration_milliseconds_count{job=~\"$job\",grpc_status_code!~\"0|Ok|OK\"}[$__rate_interval])) or 0 * sum by ($site_label) (rate(${metric_prefix}_api_grpc_server_duration_milliseconds_count{job=~\"$job\"}[$__rate_interval]))) / sum by ($site_label) (rate(${metric_prefix}_api_grpc_server_duration_milliseconds_count{job=~\"$job\"}[$__rate_interval]))",
+          "expr": "1 - (sum by ($site_label) (rate(${metric_prefix}_api_grpc_server_duration_milliseconds_count{grpc_status_code!~\"0|Ok|OK\"}[$__rate_interval])) or 0 * sum by ($site_label) (rate(${metric_prefix}_api_grpc_server_duration_milliseconds_count[$__rate_interval]))) / sum by ($site_label) (rate(${metric_prefix}_api_grpc_server_duration_milliseconds_count[$__rate_interval]))",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -5431,7 +5431,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "1 - (sum by ($site_label) (rate(${metric_prefix}_api_grpc_server_duration_milliseconds_count{job=~\"$job\",grpc_status_code!~\"0|Ok|OK\",grpc_status_code!~\"Cancelled|InvalidArgument|NotFound|AlreadyExists|PermissionDenied|Unauthenticated|ResourceExhausted|FailedPrecondition|Aborted|OutOfRange\"}[$__rate_interval])) or 0 * sum by ($site_label) (rate(${metric_prefix}_api_grpc_server_duration_milliseconds_count{job=~\"$job\"}[$__rate_interval]))) / sum by ($site_label) (rate(${metric_prefix}_api_grpc_server_duration_milliseconds_count{job=~\"$job\"}[$__rate_interval]))",
+          "expr": "1 - (sum by ($site_label) (rate(${metric_prefix}_api_grpc_server_duration_milliseconds_count{grpc_status_code!~\"0|Ok|OK\",grpc_status_code!~\"Cancelled|InvalidArgument|NotFound|AlreadyExists|PermissionDenied|Unauthenticated|ResourceExhausted|FailedPrecondition|Aborted|OutOfRange\"}[$__rate_interval])) or 0 * sum by ($site_label) (rate(${metric_prefix}_api_grpc_server_duration_milliseconds_count[$__rate_interval]))) / sum by ($site_label) (rate(${metric_prefix}_api_grpc_server_duration_milliseconds_count[$__rate_interval]))",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -5526,7 +5526,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label)(rate(${metric_prefix}_api_grpc_server_duration_milliseconds_count{job=~\"$job\"}[$__rate_interval]))",
+          "expr": "sum by ($site_label)(rate(${metric_prefix}_api_grpc_server_duration_milliseconds_count[$__rate_interval]))",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -5621,7 +5621,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label) (rate(${metric_prefix}_api_grpc_server_duration_milliseconds_count{job=~\"$job\",grpc_status_code!~\"0|Ok|OK\"}[$__rate_interval]))",
+          "expr": "sum by ($site_label) (rate(${metric_prefix}_api_grpc_server_duration_milliseconds_count{grpc_status_code!~\"0|Ok|OK\"}[$__rate_interval]))",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -5717,7 +5717,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label)(increase(${metric_prefix}_api_grpc_server_duration_milliseconds_sum{job=~\"$job\"}[$__rate_interval])) / sum by ($site_label)(increase(${metric_prefix}_api_grpc_server_duration_milliseconds_count{job=~\"$job\"}[$__rate_interval]))",
+          "expr": "sum by ($site_label)(increase(${metric_prefix}_api_grpc_server_duration_milliseconds_sum[$__rate_interval])) / sum by ($site_label)(increase(${metric_prefix}_api_grpc_server_duration_milliseconds_count[$__rate_interval]))",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -5813,7 +5813,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, $site_label) (rate(${metric_prefix}_api_grpc_server_duration_milliseconds_bucket{job=~\"$job\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, $site_label) (rate(${metric_prefix}_api_grpc_server_duration_milliseconds_bucket[$__rate_interval])))",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -5909,7 +5909,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label)(increase(${metric_prefix}_machines_iteration_latency_milliseconds_sum{job=~\"$job\"}[$__rate_interval])) / sum by ($site_label)(increase(${metric_prefix}_machines_iteration_latency_milliseconds_count{job=~\"$job\"}[$__rate_interval]))",
+          "expr": "sum by ($site_label)(increase(${metric_prefix}_machines_iteration_latency_milliseconds_sum[$__rate_interval])) / sum by ($site_label)(increase(${metric_prefix}_machines_iteration_latency_milliseconds_count[$__rate_interval]))",
           "legendFormat": "{{$site_label}} machines",
           "range": true,
           "instant": false,
@@ -5921,7 +5921,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label)(increase(${metric_prefix}_network_segments_iteration_latency_milliseconds_sum{job=~\"$job\"}[$__rate_interval])) / sum by ($site_label)(increase(${metric_prefix}_network_segments_iteration_latency_milliseconds_count{job=~\"$job\"}[$__rate_interval]))",
+          "expr": "sum by ($site_label)(increase(${metric_prefix}_network_segments_iteration_latency_milliseconds_sum[$__rate_interval])) / sum by ($site_label)(increase(${metric_prefix}_network_segments_iteration_latency_milliseconds_count[$__rate_interval]))",
           "legendFormat": "{{$site_label}} network segments",
           "range": true,
           "instant": false,
@@ -5933,7 +5933,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label)(increase(${metric_prefix}_ib_partitions_iteration_latency_milliseconds_sum{job=~\"$job\"}[$__rate_interval])) / sum by ($site_label)(increase(${metric_prefix}_ib_partitions_iteration_latency_milliseconds_count{job=~\"$job\"}[$__rate_interval]))",
+          "expr": "sum by ($site_label)(increase(${metric_prefix}_ib_partitions_iteration_latency_milliseconds_sum[$__rate_interval])) / sum by ($site_label)(increase(${metric_prefix}_ib_partitions_iteration_latency_milliseconds_count[$__rate_interval]))",
           "legendFormat": "{{$site_label}} IB partitions",
           "range": true,
           "instant": false,
@@ -6030,7 +6030,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "1 - (sum by ($site_label) (rate(${metric_prefix}_api_vault_requests_failed_total{job=~\"$job\",http_response_status_code!=\"404\"}[$__rate_interval])) or 0 * sum by ($site_label) (rate(${metric_prefix}_api_vault_requests_attempted_total{job=~\"$job\"}[$__rate_interval]))) / sum by ($site_label) (rate(${metric_prefix}_api_vault_requests_attempted_total{job=~\"$job\"}[$__rate_interval]))",
+          "expr": "1 - (sum by ($site_label) (rate(${metric_prefix}_api_vault_requests_failed_total{http_response_status_code!=\"404\"}[$__rate_interval])) or 0 * sum by ($site_label) (rate(${metric_prefix}_api_vault_requests_attempted_total[$__rate_interval]))) / sum by ($site_label) (rate(${metric_prefix}_api_vault_requests_attempted_total[$__rate_interval]))",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -6099,7 +6099,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 24,
         "x": 0,
         "y": 235
       },
@@ -6125,7 +6125,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label) (rate(${metric_prefix}_log_events_total{job=~\"$job\",level=~\"ERROR|WARN\"}[$__rate_interval]))",
+          "expr": "sum by ($site_label) (rate(${metric_prefix}_log_events_total{level=~\"ERROR|WARN\"}[$__rate_interval]))",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -6135,101 +6135,6 @@
       "title": "Warning and error log rate by site",
       "type": "timeseries",
       "id": 70
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "description": "The twenty busiest containers in the selected namespaces. Needs cAdvisor metrics from kubelet.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 235
-      },
-      "options": {
-        "legend": {
-          "calcs": [
-            "lastNotNull",
-            "max"
-          ],
-          "displayMode": "table",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "topk(20, sum by ($site_label, namespace, pod) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\",container!=\"\",image!=\"\"}[$__rate_interval])))",
-          "legendFormat": "{{$site_label}} {{namespace}}/{{pod}}",
-          "range": true,
-          "instant": false,
-          "refId": "A"
-        }
-      ],
-      "title": "Top CPU-consuming NICo pods across the fleet",
-      "type": "timeseries",
-      "id": 71
     },
     {
       "collapsed": false,
@@ -6302,7 +6207,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label, machine_type) (max by ($site_label, machine_type, expectation) (${metric_prefix}_endpoint_exploration_machines_explored_overall_count{job=~\"$job\"}))",
+          "expr": "sum by ($site_label, machine_type) (max by ($site_label, machine_type, expectation) (${metric_prefix}_endpoint_exploration_machines_explored_overall_count))",
           "legendFormat": "{{$site_label}} {{machine_type}}",
           "range": false,
           "instant": true,
@@ -6381,7 +6286,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label, expectation) (${metric_prefix}_endpoint_exploration_identified_managed_hosts_overall_count{job=~\"$job\"})",
+          "expr": "max by ($site_label, expectation) (${metric_prefix}_endpoint_exploration_identified_managed_hosts_overall_count)",
           "legendFormat": "{{$site_label}} {{expectation}}",
           "range": false,
           "instant": true,
@@ -6460,7 +6365,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label, failure) (${metric_prefix}_endpoint_exploration_failures_overall_count{job=~\"$job\"} > 0)",
+          "expr": "max by ($site_label, failure) (${metric_prefix}_endpoint_exploration_failures_overall_count > 0)",
           "legendFormat": "{{$site_label}} {{failure}}",
           "range": false,
           "instant": true,
@@ -6566,7 +6471,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_endpoint_exploration_expected_machines_missing_overall_count{job=~\"$job\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_endpoint_exploration_expected_machines_missing_overall_count)",
           "legendFormat": "{{$site_label}} machines",
           "range": true,
           "instant": false,
@@ -6578,7 +6483,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label) (${metric_prefix}_endpoint_exploration_expected_power_shelves_missing_overall_count{job=~\"$job\"})",
+          "expr": "max by ($site_label) (${metric_prefix}_endpoint_exploration_expected_power_shelves_missing_overall_count)",
           "legendFormat": "{{$site_label}} power shelves",
           "range": true,
           "instant": false,
@@ -6673,7 +6578,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label, machine_type) (${metric_prefix}_endpoint_exploration_expected_serial_number_mismatches_overall_count{job=~\"$job\"} > 0)",
+          "expr": "max by ($site_label, machine_type) (${metric_prefix}_endpoint_exploration_expected_serial_number_mismatches_overall_count > 0)",
           "legendFormat": "{{$site_label}} {{machine_type}}",
           "range": true,
           "instant": false,
@@ -6768,7 +6673,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by ($site_label, machine_type) (${metric_prefix}_endpoint_exploration_preingestions_incomplete_overall_count{job=~\"$job\"})",
+          "expr": "max by ($site_label, machine_type) (${metric_prefix}_endpoint_exploration_preingestions_incomplete_overall_count)",
           "legendFormat": "{{$site_label}} {{machine_type}}",
           "range": true,
           "instant": false,
@@ -6864,7 +6769,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label)(increase(${metric_prefix}_site_explorer_iteration_latency_milliseconds_sum{job=~\"$job\"}[$__rate_interval])) / sum by ($site_label)(increase(${metric_prefix}_site_explorer_iteration_latency_milliseconds_count{job=~\"$job\"}[$__rate_interval]))",
+          "expr": "sum by ($site_label)(increase(${metric_prefix}_site_explorer_iteration_latency_milliseconds_sum[$__rate_interval])) / sum by ($site_label)(increase(${metric_prefix}_site_explorer_iteration_latency_milliseconds_count[$__rate_interval]))",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -6975,7 +6880,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label) (ssh_console_healthy_machines{job=~\"$job\"}) / clamp_min(sum by ($site_label) (ssh_console_grpc_total_machines{job=~\"$job\"}), 1)",
+          "expr": "sum by ($site_label) (ssh_console_healthy_machines) / clamp_min(sum by ($site_label) (ssh_console_grpc_total_machines), 1)",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -7070,7 +6975,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label) (ssh_console_grpc_total_machines{job=~\"$job\"})",
+          "expr": "sum by ($site_label) (ssh_console_grpc_total_machines)",
           "legendFormat": "{{$site_label}} tracked",
           "range": true,
           "instant": false,
@@ -7082,7 +6987,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label) (ssh_console_healthy_machines{job=~\"$job\"})",
+          "expr": "sum by ($site_label) (ssh_console_healthy_machines)",
           "legendFormat": "{{$site_label}} healthy",
           "range": true,
           "instant": false,
@@ -7094,7 +6999,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label) (ssh_console_failed_machines{job=~\"$job\"})",
+          "expr": "sum by ($site_label) (ssh_console_failed_machines)",
           "legendFormat": "{{$site_label}} failed",
           "range": true,
           "instant": false,
@@ -7189,7 +7094,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by ($site_label) (ssh_console_total_clients{job=~\"$job\"})",
+          "expr": "sum by ($site_label) (ssh_console_total_clients)",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,
@@ -7252,7 +7157,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(ssh_console_grpc_total_machines{job=~\"$job\"})",
+          "expr": "sum(ssh_console_grpc_total_machines)",
           "legendFormat": "tracked",
           "range": false,
           "instant": true,
@@ -7315,7 +7220,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(ssh_console_healthy_machines{job=~\"$job\"})",
+          "expr": "sum(ssh_console_healthy_machines)",
           "legendFormat": "healthy",
           "range": false,
           "instant": true,
@@ -7382,7 +7287,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(ssh_console_failed_machines{job=~\"$job\"})",
+          "expr": "sum(ssh_console_failed_machines)",
           "legendFormat": "failed",
           "range": false,
           "instant": true,
@@ -7450,60 +7355,6 @@
         ],
         "query": "forge_site",
         "type": "textbox"
-      },
-      {
-        "allValue": ".*",
-        "current": {
-          "selected": true,
-          "text": "All",
-          "value": "$__all"
-        },
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${datasource}"
-        },
-        "definition": "label_values(${metric_prefix}_api_ready, job)",
-        "description": "Prometheus jobs that scrape NICo components.",
-        "includeAll": true,
-        "label": "NICo scrape job",
-        "multi": true,
-        "name": "job",
-        "options": [],
-        "query": {
-          "query": "label_values(${metric_prefix}_api_ready, job)",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
-        },
-        "refresh": 1,
-        "regex": "",
-        "sort": 1,
-        "type": "query"
-      },
-      {
-        "allValue": ".*",
-        "current": {
-          "selected": true,
-          "text": "All",
-          "value": "$__all"
-        },
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${datasource}"
-        },
-        "definition": "label_values(container_cpu_usage_seconds_total, namespace)",
-        "description": "Namespaces for the pod CPU panel. Needs cAdvisor metrics; leave this on All when they are not collected.",
-        "includeAll": true,
-        "label": "Kubernetes namespace",
-        "multi": true,
-        "name": "namespace",
-        "options": [],
-        "query": {
-          "query": "label_values(container_cpu_usage_seconds_total, namespace)",
-          "refId": "PrometheusVariableQueryEditor-VariableQuery"
-        },
-        "refresh": 1,
-        "regex": "",
-        "sort": 1,
-        "type": "query"
       }
     ]
   },
