@@ -745,19 +745,15 @@ async fn load_ingestion_firmware_inventory(
     services: &crate::context::RackStateHandlerServices,
 ) -> Result<RackFirmwareInventory, StateHandlerError> {
     let mut conn = services.db_pool.acquire().await?;
-    let machine_ids = load_scoped_machines(conn.as_mut(), &rack.id, &MaintenanceScope::default())
-        .await?
-        .iter()
-        .filter(|machine| ready_for_ingestion_firmware(machine))
-        .map(|machine| machine.id)
-        .collect::<Vec<_>>();
+    let mut machine_ids =
+        load_scoped_machines(conn.as_mut(), &rack.id, &MaintenanceScope::default())
+            .await?
+            .iter()
+            .filter(|machine| ready_for_ingestion_firmware(machine))
+            .map(|machine| machine.id)
+            .collect::<Vec<_>>();
     let off = desired_off_machine_ids(conn.as_mut(), &machine_ids).await?;
-    if !off.is_empty() {
-        return Err(StateHandlerError::GenericError(eyre::eyre!(
-            "ingestion firmware cannot target machines whose desired power state is off: {}",
-            format_machine_ids(&off),
-        )));
-    }
+    machine_ids.retain(|id| !off.contains(id));
     let switch_ids = load_scoped_switches(conn.as_mut(), &rack.id, &MaintenanceScope::default())
         .await?
         .iter()
@@ -833,7 +829,7 @@ async fn reconcile_ingestion_firmware_machines(
                 && !matches!(machine.state.value, ManagedHostState::Assigned { .. })
         })
         .collect::<Vec<_>>();
-    let ready_ids = missing
+    let mut ready_ids = missing
         .iter()
         .filter(|machine| ready_for_ingestion_firmware(machine))
         .map(|machine| machine.id)
@@ -842,11 +838,9 @@ async fn reconcile_ingestion_firmware_machines(
         return Ok(!missing.is_empty());
     }
     let desired_off = desired_off_machine_ids(conn.as_mut(), &ready_ids).await?;
-    if !desired_off.is_empty() {
-        return Err(StateHandlerError::GenericError(eyre::eyre!(
-            "ingestion firmware cannot target newly discovered machines whose desired power state is off: {}",
-            format_machine_ids(&desired_off),
-        )));
+    ready_ids.retain(|id| !desired_off.contains(id));
+    if ready_ids.is_empty() {
+        return Ok(true);
     }
     drop(conn);
 
@@ -3062,6 +3056,12 @@ pub async fn handle_maintenance(
                         completed,
                         failed,
                     } => {
+                        if is_automatic_ingestion(state)
+                            && job.status == Some(FirmwareProgressState::Completed)
+                        {
+                            job.status = Some(FirmwareProgressState::InProgress);
+                            job.completed_at = None;
+                        }
                         db_rack::update_firmware_upgrade_job(txn.as_mut(), id, Some(&job)).await?;
                         state.firmware_upgrade_job = Some(job);
                         Ok(StateHandlerOutcome::wait(format!(
@@ -3794,6 +3794,10 @@ pub async fn handle_maintenance(
                     .as_ref()
                     .is_some_and(|status| !status.is_terminal());
                 if needs_firmware_wait || pending {
+                    if job.status == Some(FirmwareProgressState::Completed) {
+                        job.status = Some(FirmwareProgressState::InProgress);
+                        job.completed_at = None;
+                    }
                     // Also persist the marker when late hosts are not ready and
                     // reconciliation has not submitted a batch yet.
                     let mut txn = ctx.services.db_pool.begin().await?;
