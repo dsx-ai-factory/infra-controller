@@ -9,7 +9,7 @@
 # On Apple Silicon (M1/M2/M3): do not set --platform=linux/amd64. Building on
 # arm64 produces a native image; use Colima with enough CPU/memory and virtiofs (see docs).
 #
-FROM rust:1.97.1-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3
+FROM rust:1.97.1-slim-bookworm
 
 RUN apt-get update && \
 	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \

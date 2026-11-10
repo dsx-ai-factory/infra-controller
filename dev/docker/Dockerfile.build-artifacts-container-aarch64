@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-FROM arm64v8/rust:1.97.1-slim-bullseye@sha256:bb85bc12e2d9656649be16258dd0ef5526673cd98cdcb3da496324d24ca9b453
+FROM arm64v8/rust:1.97.1-slim-bullseye
 
 # Bullseye does not package mold. Keep this image on Bullseye for artifact
 # compatibility and install the pinned upstream ARM64 binary instead.
@@ -25,6 +25,9 @@ ARG MOLD_SHA256=258aaf2b7808ea22fca625480efdf7a13830e9ee311716db0ba9c62af1770c07
 ARG CI_COMMIT_SHORT_SHA
 ENV CI_COMMIT_SHORT_SHA $CI_COMMIT_SHORT_SHA
 
+# Bullseye security package downloads return 404 from deb.debian.org.
+# Use Debian's archive so Rust 1.97.1 builds can upgrade CA certificates
+# and install PostgreSQL 13 without changing the base image version.
 RUN sed -i \
     's|http://deb.debian.org/debian-security|https://archive.debian.org/debian-security|g' \
     /etc/apt/sources.list

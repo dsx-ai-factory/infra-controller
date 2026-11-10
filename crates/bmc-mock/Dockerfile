@@ -24,7 +24,7 @@
 #     -t bmc-mock:latest \
 #     .
 
-ARG RUST_IMAGE=rust:1.97.1-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3
+ARG RUST_IMAGE=rust:1.97.1-slim-bookworm@sha256:96c0af8cf054fd006435089f0076729716784ec9be485bd655de59c55df105ce
 ARG RUNTIME_IMAGE=debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 FROM --platform=$BUILDPLATFORM ${RUST_IMAGE} AS builder

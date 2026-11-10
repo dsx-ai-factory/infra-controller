@@ -29,7 +29,7 @@
 #
 ARG RUST_VERSION=1.97.1
 
-FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
+FROM --platform=$BUILDPLATFORM rust:${RUST_VERSION}-slim-bookworm AS builder
 
 ARG VERSION
 ARG CI_COMMIT_SHORT_SHA
