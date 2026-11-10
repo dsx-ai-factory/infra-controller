@@ -38,6 +38,8 @@ type MachineGPUInfo struct {
 	Frequency NullableString `json:"frequency,omitempty"`
 	// PCI BusId of the Machine's GPU
 	PciBusId NullableString `json:"pciBusId,omitempty"`
+	// PCI device ID of the Machine's GPU
+	DeviceId NullableString `json:"deviceId,omitempty"`
 }
 
 // NewMachineGPUInfo instantiates a new MachineGPUInfo object
@@ -401,6 +403,49 @@ func (o *MachineGPUInfo) UnsetPciBusId() {
 	o.PciBusId.Unset()
 }
 
+// GetDeviceId returns the DeviceId field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *MachineGPUInfo) GetDeviceId() string {
+	if o == nil || IsNil(o.DeviceId.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.DeviceId.Get()
+}
+
+// GetDeviceIdOk returns a tuple with the DeviceId field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *MachineGPUInfo) GetDeviceIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DeviceId.Get(), o.DeviceId.IsSet()
+}
+
+// HasDeviceId returns a boolean if a field has been set.
+func (o *MachineGPUInfo) HasDeviceId() bool {
+	if o != nil && o.DeviceId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDeviceId gets a reference to the given NullableString and assigns it to the DeviceId field.
+func (o *MachineGPUInfo) SetDeviceId(v string) {
+	o.DeviceId.Set(&v)
+}
+
+// SetDeviceIdNil sets the value for DeviceId to be an explicit nil
+func (o *MachineGPUInfo) SetDeviceIdNil() {
+	o.DeviceId.Set(nil)
+}
+
+// UnsetDeviceId ensures that no value is present for DeviceId, not even an explicit nil
+func (o *MachineGPUInfo) UnsetDeviceId() {
+	o.DeviceId.Unset()
+}
+
 func (o MachineGPUInfo) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -434,6 +479,9 @@ func (o MachineGPUInfo) ToMap() (map[string]interface{}, error) {
 	}
 	if o.PciBusId.IsSet() {
 		toSerialize["pciBusId"] = o.PciBusId.Get()
+	}
+	if o.DeviceId.IsSet() {
+		toSerialize["deviceId"] = o.DeviceId.Get()
 	}
 	return toSerialize, nil
 }
