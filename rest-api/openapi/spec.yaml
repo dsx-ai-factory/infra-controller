@@ -6013,7 +6013,7 @@ paths:
                   rackGroupId: nvl5-gp1-jhb01
                   topology: gb200_nvl72r1_c2g4
                   protocol: NVLINK_V6
-                  racks: [{rackId: rack-01, members: [{type: NVSwitch, manufacturer: NVIDIA, id: switch-01}]}, {rackId: rack-02, members: []}]
+                  racks: [{rackId: rack-01, members: [{type: NVSwitch, manufacturer: NVIDIA, id: switch-01, cartridgeIndex: 0}]}, {rackId: rack-02, members: []}]
                   name: NVL rack group 1
                   description: Production NVL rack group in row A
                   labels:
@@ -32680,6 +32680,7 @@ components:
                 - type: NVSwitch
                   manufacturer: NVIDIA
                   id: switch-01
+                  cartridgeIndex: 0
             - rackId: rack-02
               members: []
           name: NVL rack group 1
@@ -32768,6 +32769,7 @@ components:
                 - type: NVSwitch
                   manufacturer: NVIDIA
                   id: switch-01
+                  cartridgeIndex: 0
             - rackId: rack-02
               members: []
           name: NVL rack group 1
@@ -32806,7 +32808,7 @@ components:
             - 'null'
           description: Ordered racks and their devices. Rack IDs and device identity tuples must be unique across the group, with case-sensitive comparison. A provided array replaces the complete list; on PATCH, omission or null preserves it and [] clears it. On create, omission or null supplies an empty list.
           items:
-            $ref: '#/components/schemas/ExpectedRackGroupRack'
+            $ref: '#/components/schemas/ExpectedRackGroupRackRequest'
         name:
           type:
             - string
@@ -32956,7 +32958,7 @@ components:
             - 'null'
           description: Ordered racks and their devices. Rack IDs and device identity tuples must be unique across the group, with case-sensitive comparison. A provided array replaces the complete list; on PATCH, omission or null preserves it and [] clears it. On create, omission or null supplies an empty list.
           items:
-            $ref: '#/components/schemas/ExpectedRackGroupRack'
+            $ref: '#/components/schemas/ExpectedRackGroupRackRequest'
         name:
           type:
             - string
@@ -32978,6 +32980,44 @@ components:
             pattern: '^[\x00-\x7F]+$'
           description: |-
             User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location. Omission or null preserves existing labels; an empty object clears them. When labels is null, provide a non-null value for at least one of `rackGroupId`, `topology`, `protocol`, `racks`, `name`, or `description`.
+    ExpectedRackGroupRackRequest:
+      type: object
+      additionalProperties: false
+      required: [rackId]
+      properties:
+        rackId:
+          type: string
+          minLength: 1
+          pattern: '\S'
+          description: External rack identifier.
+        members:
+          type: [array, 'null']
+          description: Devices in this rack. Omitted or null means an empty list.
+          items:
+            $ref: '#/components/schemas/ExpectedRackGroupMemberRequest'
+    ExpectedRackGroupMemberRequest:
+      type: object
+      additionalProperties: false
+      required: [type, manufacturer, id, cartridgeIndex]
+      properties:
+        type:
+          type: string
+          enum: [Compute, NVSwitch, PowerShelf]
+          description: Case-sensitive REST rack component type.
+        manufacturer:
+          type: string
+          minLength: 1
+          description: Non-blank manufacturer name.
+        id:
+          type: string
+          minLength: 1
+          description: Non-blank external device identifier.
+        cartridgeIndex:
+          type: integer
+          format: uint32
+          minimum: 0
+          maximum: 4294967295
+          description: Required cartridge index. Zero is valid.
     ExpectedRackGroupRack:
       type: object
       additionalProperties: false
@@ -33009,9 +33049,16 @@ components:
         - type: NVSwitch
           manufacturer: NVIDIA
           id: switch-01
+          cartridgeIndex: 0
       description: External device identity; the case-sensitive tuple (type, manufacturer, id) is unique within a group.
       required: [type, manufacturer, id]
       properties:
+        cartridgeIndex:
+          type: [integer, 'null']
+          format: uint32
+          minimum: 0
+          maximum: 4294967295
+          description: Cartridge index, or null for a legacy member without an index.
         type:
           type: string
           minLength: 1

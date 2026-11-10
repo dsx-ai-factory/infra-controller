@@ -19195,9 +19195,11 @@ type ExpectedRackGroupMember struct {
 	// Non-blank external manufacturer name.
 	Manufacturer string `protobuf:"bytes,2,opt,name=manufacturer,proto3" json:"manufacturer,omitempty"`
 	// Non-blank external inventory identifier.
-	Id            string `protobuf:"bytes,3,opt,name=id,proto3" json:"id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Id string `protobuf:"bytes,3,opt,name=id,proto3" json:"id,omitempty"`
+	// Required in declarations; absent in legacy records. Zero is valid.
+	CartridgeIndex *uint32 `protobuf:"varint,4,opt,name=cartridge_index,json=cartridgeIndex,proto3,oneof" json:"cartridge_index,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ExpectedRackGroupMember) Reset() {
@@ -19249,6 +19251,13 @@ func (x *ExpectedRackGroupMember) GetId() string {
 		return x.Id
 	}
 	return ""
+}
+
+func (x *ExpectedRackGroupMember) GetCartridgeIndex() uint32 {
+	if x != nil && x.CartridgeIndex != nil {
+		return *x.CartridgeIndex
+	}
+	return 0
 }
 
 type ExpectedRackGroupRequest struct {
@@ -80579,11 +80588,13 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\arack_id\x18\x01 \x01(\v2\x0e.common.RackIdH\x00R\x06rackId\x88\x01\x01\x128\n" +
 	"\amembers\x18\x02 \x03(\v2\x1e.forge.ExpectedRackGroupMemberR\amembersB\n" +
 	"\n" +
-	"\b_rack_id\"a\n" +
+	"\b_rack_id\"\xa3\x01\n" +
 	"\x17ExpectedRackGroupMember\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\"\n" +
 	"\fmanufacturer\x18\x02 \x01(\tR\fmanufacturer\x12\x0e\n" +
-	"\x02id\x18\x03 \x01(\tR\x02id\">\n" +
+	"\x02id\x18\x03 \x01(\tR\x02id\x12,\n" +
+	"\x0fcartridge_index\x18\x04 \x01(\rH\x00R\x0ecartridgeIndex\x88\x01\x01B\x12\n" +
+	"\x10_cartridge_index\">\n" +
 	"\x18ExpectedRackGroupRequest\x12\"\n" +
 	"\rrack_group_id\x18\x01 \x01(\tR\vrackGroupId\"c\n" +
 	"\x15ExpectedRackGroupList\x12J\n" +
@@ -91341,6 +91352,7 @@ func file_nico_nico_proto_init() {
 	file_nico_nico_proto_msgTypes[170].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[171].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[172].OneofWrappers = []any{}
+	file_nico_nico_proto_msgTypes[173].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[179].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[184].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[187].OneofWrappers = []any{}
