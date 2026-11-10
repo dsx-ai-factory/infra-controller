@@ -537,7 +537,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_machines_total{forge_site=~\"$site\",fresh=\"true\"})",
+          "expr": "sum(max by (forge_site) (${metric_prefix}_machines_total{forge_site=~\"$site\",fresh=\"true\"}))",
           "legendFormat": "total",
           "range": true,
           "instant": false,
@@ -549,7 +549,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_hosts_usable_count{forge_site=~\"$site\",fresh=\"true\"})",
+          "expr": "sum(max by (forge_site) (${metric_prefix}_hosts_usable_count{forge_site=~\"$site\",fresh=\"true\"}))",
           "legendFormat": "usable",
           "range": true,
           "instant": false,
@@ -561,7 +561,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_hosts_in_use_count{forge_site=~\"$site\",fresh=\"true\"})",
+          "expr": "sum(max by (forge_site) (${metric_prefix}_hosts_in_use_count{forge_site=~\"$site\",fresh=\"true\"}))",
           "legendFormat": "in use",
           "range": true,
           "instant": false,
@@ -573,7 +573,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_machines_total{forge_site=~\"$site\",fresh=\"true\"}) - max(${metric_prefix}_hosts_in_use_count{forge_site=~\"$site\",fresh=\"true\"}) - max(${metric_prefix}_hosts_usable_count{forge_site=~\"$site\",fresh=\"true\"})",
+          "expr": "sum(max by (forge_site) (${metric_prefix}_machines_total{forge_site=~\"$site\",fresh=\"true\"})) - sum(max by (forge_site) (${metric_prefix}_hosts_in_use_count{forge_site=~\"$site\",fresh=\"true\"})) - sum(max by (forge_site) (${metric_prefix}_hosts_usable_count{forge_site=~\"$site\",fresh=\"true\"}))",
           "legendFormat": "neither usable nor in use",
           "range": true,
           "instant": false,
@@ -668,7 +668,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_gpus_total_count{forge_site=~\"$site\",fresh=\"true\"})",
+          "expr": "sum(max by (forge_site) (${metric_prefix}_gpus_total_count{forge_site=~\"$site\",fresh=\"true\"}))",
           "legendFormat": "total",
           "range": true,
           "instant": false,
@@ -680,7 +680,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_gpus_usable_count{forge_site=~\"$site\",fresh=\"true\"})",
+          "expr": "sum(max by (forge_site) (${metric_prefix}_gpus_usable_count{forge_site=~\"$site\",fresh=\"true\"}))",
           "legendFormat": "usable",
           "range": true,
           "instant": false,
@@ -692,7 +692,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_gpus_in_use_count{forge_site=~\"$site\",fresh=\"true\"})",
+          "expr": "sum(max by (forge_site) (${metric_prefix}_gpus_in_use_count{forge_site=~\"$site\",fresh=\"true\"}))",
           "legendFormat": "in use",
           "range": true,
           "instant": false,
@@ -704,7 +704,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_gpus_total_count{forge_site=~\"$site\",fresh=\"true\"}) - max(${metric_prefix}_gpus_in_use_count{forge_site=~\"$site\",fresh=\"true\"}) - max(${metric_prefix}_gpus_usable_count{forge_site=~\"$site\",fresh=\"true\"})",
+          "expr": "sum(max by (forge_site) (${metric_prefix}_gpus_total_count{forge_site=~\"$site\",fresh=\"true\"})) - sum(max by (forge_site) (${metric_prefix}_gpus_in_use_count{forge_site=~\"$site\",fresh=\"true\"})) - sum(max by (forge_site) (${metric_prefix}_gpus_usable_count{forge_site=~\"$site\",fresh=\"true\"}))",
           "legendFormat": "neither usable nor in use",
           "range": true,
           "instant": false,
@@ -1144,7 +1144,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_machines_total{forge_site=~\"$site\",fresh=\"true\"})",
+          "expr": "sum(max by (forge_site) (${metric_prefix}_machines_total{forge_site=~\"$site\",fresh=\"true\"}))",
           "legendFormat": "machines",
           "range": true,
           "instant": false,
