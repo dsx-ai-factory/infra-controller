@@ -31,6 +31,7 @@ use model::machine_update_module::{
     AutomaticFirmwareUpdateReference, DpuReprovisionInitiator, HOST_UPDATE_HEALTH_REPORT_SOURCE,
 };
 use sqlx::PgConnection;
+use tokio::sync::Notify;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -49,6 +50,7 @@ struct TestUpdateModule {
     pub(in crate::tests) updates_in_progress: Vec<HostMachineId>,
     pub(in crate::tests) updates_started: HashSet<HostMachineId>,
     start_update_budgets: Arc<Mutex<Vec<i32>>>,
+    start_updates_notified: Arc<Notify>,
     clear_completed_updates_called: Arc<Mutex<i32>>,
     cleanup_marker: Option<HostMachineId>,
 }
@@ -74,6 +76,7 @@ impl MachineUpdateModule for TestUpdateModule {
             .lock()
             .unwrap()
             .push(available_updates);
+        self.start_updates_notified.notify_one();
         Ok(self.updates_started.clone())
     }
 
@@ -114,6 +117,7 @@ impl TestUpdateModule {
             updates_in_progress,
             updates_started,
             start_update_budgets: Arc::new(Mutex::new(Vec::new())),
+            start_updates_notified: Arc::new(Notify::new()),
             clear_completed_updates_called: Arc::new(Mutex::new(0)),
             cleanup_marker: None,
         }
@@ -124,6 +128,28 @@ impl TestUpdateModule {
 
     pub(in crate::tests) fn get_clear_completed_updates_called(&self) -> i32 {
         *self.clear_completed_updates_called.lock().unwrap()
+    }
+
+    async fn wait_for_start_updates(&self, minimum_calls: usize) -> usize {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let calls = self.get_start_updates_called();
+                if calls >= minimum_calls {
+                    return calls;
+                }
+
+                // `notify_one` retains a permit if an iteration runs between
+                // the count check and this wait. The count handles coalescing.
+                self.start_updates_notified.notified().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "expected at least {minimum_calls} update iterations, observed {}",
+                self.get_start_updates_called()
+            )
+        })
     }
 }
 
@@ -342,27 +368,18 @@ fn test_start(pool: sqlx::PgPool) {
         .start(&mut join_set, cancel_token.clone())
         .expect("Start failed");
 
-    tokio::time::sleep(Duration::from_secs(4)).await;
-
-    let start_count = test_module.get_start_updates_called();
-
-    tokio::time::sleep(Duration::from_secs(4)).await;
-
-    let end_count = test_module.get_start_updates_called();
-
-    assert_ne!(start_count, end_count);
+    let start_count = test_module.wait_for_start_updates(1).await;
+    let end_count = test_module.wait_for_start_updates(start_count + 1).await;
+    assert!(end_count > start_count);
 
     cancel_token.cancel();
 
-    join_set.join_all().await;
-
-    let start_count = test_module.get_start_updates_called();
-
-    tokio::time::sleep(Duration::from_secs(4)).await;
-
-    let end_count = test_module.get_start_updates_called();
-
-    assert_eq!(start_count, end_count);
+    // Joining both tasks proves the manager and its work-lock service have
+    // stopped; neither can start another iteration after the join.
+    let completed_tasks = tokio::time::timeout(Duration::from_secs(30), join_set.join_all())
+        .await
+        .expect("machine update tasks did not stop after cancellation");
+    assert_eq!(completed_tasks.len(), 2);
 }
 
 /// A lock acquisition that fails for infrastructure reasons (here: the work
