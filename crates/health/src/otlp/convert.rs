@@ -442,19 +442,19 @@ fn resource_status_body(report: &ResourceStatusReport) -> Result<String, serde_j
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum ResourceStatusHealth {
-    Healthy,
+    Ok,
     Unknown,
-    Degraded,
-    Unhealthy,
+    Warning,
+    Critical,
 }
 
 impl ResourceStatusHealth {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::Healthy => "Healthy",
+            Self::Ok => "OK",
             Self::Unknown => "Unknown",
-            Self::Degraded => "Degraded",
-            Self::Unhealthy => "Unhealthy",
+            Self::Warning => "Warning",
+            Self::Critical => "Critical",
         }
     }
 }
@@ -474,13 +474,13 @@ fn resource_status_health(info: &ResourceStatusInfo) -> ResourceStatusHealth {
                 .flatten()
                 .filter_map(|condition| condition.severity.as_ref()),
         );
-    let mut health = ResourceStatusHealth::Healthy;
+    let mut health = ResourceStatusHealth::Ok;
     let mut observed = false;
     for value in values {
         observed = true;
         match value.as_str() {
-            "Critical" => return ResourceStatusHealth::Unhealthy,
-            "Warning" => health = ResourceStatusHealth::Degraded,
+            "Critical" => return ResourceStatusHealth::Critical,
+            "Warning" => health = ResourceStatusHealth::Warning,
             "OK" => {}
             _ if health < ResourceStatusHealth::Unknown => {
                 health = ResourceStatusHealth::Unknown;
@@ -507,9 +507,9 @@ fn resource_status_report_health(report: &ResourceStatusReport) -> ResourceStatu
 
 fn resource_status_report_severity(report: &ResourceStatusReport) -> LogSeverity {
     match resource_status_report_health(report) {
-        ResourceStatusHealth::Unhealthy => LogSeverity::Error,
-        ResourceStatusHealth::Degraded => LogSeverity::Warn,
-        ResourceStatusHealth::Unknown | ResourceStatusHealth::Healthy => LogSeverity::Info,
+        ResourceStatusHealth::Critical => LogSeverity::Error,
+        ResourceStatusHealth::Warning => LogSeverity::Warn,
+        ResourceStatusHealth::Unknown | ResourceStatusHealth::Ok => LogSeverity::Info,
     }
 }
 
@@ -1465,7 +1465,7 @@ mod tests {
             );
             assert_eq!(
                 attr_value(&record.attributes, RESOURCE_STATUS_AGGREGATE_HEALTH_KEY),
-                Some("Unhealthy")
+                Some("Critical")
             );
             assert_eq!(
                 attr_array_value(&record.attributes, "redfish.resource.ids"),
@@ -1505,7 +1505,7 @@ mod tests {
         assert_eq!(record.severity_text, "WARN");
         assert_eq!(
             attr_value(&record.attributes, RESOURCE_STATUS_AGGREGATE_HEALTH_KEY),
-            Some("Degraded")
+            Some("Warning")
         );
         let body: serde_json::Value =
             serde_json::from_str(body_value(record).expect("JSON body")).expect("valid JSON");
@@ -1531,7 +1531,7 @@ mod tests {
         }
 
         for (resources, expected) in [
-            (vec![info(Some(Some("OK")))], ResourceStatusHealth::Healthy),
+            (vec![info(Some(Some("OK")))], ResourceStatusHealth::Ok),
             (
                 vec![info(Some(Some("OK"))), info(Some(None))],
                 ResourceStatusHealth::Unknown,
@@ -1542,11 +1542,11 @@ mod tests {
             ),
             (
                 vec![info(None), info(Some(Some("Warning")))],
-                ResourceStatusHealth::Degraded,
+                ResourceStatusHealth::Warning,
             ),
             (
                 vec![info(Some(Some("Warning"))), info(Some(Some("Critical")))],
-                ResourceStatusHealth::Unhealthy,
+                ResourceStatusHealth::Critical,
             ),
         ] {
             let report = ResourceStatusReport {
