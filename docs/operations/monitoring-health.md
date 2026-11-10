@@ -508,11 +508,11 @@ Resource-status records use `event.type = "redfish.resource_status"` and carry t
 | `redfish.resource_status.schema_version` | string | Always | `v2` for the contract documented here. |
 | `redfish.resource.type` | string | Always | `system`, `manager`, `chassis`, or `firmware`. |
 | `redfish.resource.count` | integer | Always | Number of resources represented in the body. |
-| `redfish.resource_status.aggregate_health` | string | Always | `Unhealthy`, `Degraded`, `Unknown`, or `Healthy` for the complete report. |
+| `redfish.resource_status.aggregate_health` | string | Always | `Critical`, `Warning`, `Unknown`, or `OK` for the complete report. |
 
 The log body is a JSON object with a `resources` array. Each resource contains `id`, `name`, and `status`. Status contains the canonical Redfish `state`, `health`, `healthRollup`, and `conditions` fields. Each condition contains `timestamp`, `messageId`, `severity`, and `conditionType`; all except `messageId` can be `null`. A missing individual value is JSON `null`; if the resource omits the entire `Status` object, `status` is `null`. At most 64 conditions are included per resource, and `conditionsDropped` gives the number omitted after that limit or `0` when `conditions` is `null`.
 
-Aggregate health uses the worst result represented in the report: any `Critical` health, health rollup, or condition produces `Unhealthy`; otherwise any `Warning` produces `Degraded`; otherwise any resource without an available health signal produces `Unknown`; and only reports whose resources all have `OK` health signals produce `Healthy`. Record severity follows the aggregate result: `ERROR` for `Unhealthy`, `WARN` for `Degraded`, and `INFO` for `Unknown` or `Healthy`. Missing status remains missing rather than being reported as healthy.
+Aggregate health uses the worst Redfish result represented in the report: any `Critical` health, health rollup, or condition produces `Critical`; otherwise any `Warning` produces `Warning`; otherwise any resource without an available health signal produces `Unknown`; and only reports whose resources all have `OK` health signals produce `OK`. Record severity follows the aggregate result: `ERROR` for `Critical`, `WARN` for `Warning`, and `INFO` for `Unknown` or `OK`. Missing status remains missing rather than being reported as `OK`.
 
 When `[sinks.tracing]` is enabled, each report is also logged as "Redfish resource status report" with `resource_type`, `resource_count`, `resource_ids`, and `resources` fields.
 
