@@ -45,6 +45,7 @@ const KEA_LEASE_TYPE_NA: u32 = 0;
 const KEA_LEASE_STATE_DEFAULT: u32 = 0;
 const KEA_LEASE_STATE_DECLINED: u32 = 1;
 const KEA_LEASE_STATE_EXPIRED_RECLAIMED: u32 = 2;
+const KEA_LEASE_STATE_RELEASED: u32 = 3;
 
 fn assert_assigned_leases(stats: &serde_json::Value, subnet_count: i64, pool_count: i64) {
     assert_eq!(stats["subnet[1].assigned-nas"][0][0], subnet_count);
@@ -1094,6 +1095,75 @@ fn boot_stage_handoff_reuses_a_retained_reclaimed_lease() -> Result<(), eyre::Re
     assert_eq!(h.read_leases()?.len(), 1);
     assert_assigned_leases(&h.kea.statistics()?, 1, 1);
     assert_eq!(h.api_server.expired_leases().len(), 1);
+    Ok(())
+}
+
+#[test]
+fn hinted_targets_enforce_stored_ownership_before_native_reuse() -> Result<(), eyre::Report> {
+    const HEADER: &str = "address,duid,valid_lifetime,expire,subnet_id,pref_lifetime,lease_type,iaid,prefix_len,fqdn_fwd,fqdn_rev,hostname,hwaddr,state,user_context,hwtype,hwaddr_source";
+    for (case, mac, state) in [
+        (
+            "foreign expired",
+            "02:00:00:00:00:01",
+            KEA_LEASE_STATE_DEFAULT,
+        ),
+        (
+            "foreign released",
+            "02:00:00:00:00:01",
+            KEA_LEASE_STATE_RELEASED,
+        ),
+        (
+            "foreign reclaimed",
+            "02:00:00:00:00:01",
+            KEA_LEASE_STATE_EXPIRED_RECLAIMED,
+        ),
+        ("unknown expired", "", KEA_LEASE_STATE_DEFAULT),
+        ("declined", "", KEA_LEASE_STATE_DECLINED),
+    ] {
+        let idx = 0xc9;
+        let address = DHCPv6Factory::mock_addr(idx);
+        let h = Harness::new_with_generated_leases(
+            Kea6Config {
+                expired_leases_processing: Some(Kea6ExpiredLeasesProcessing {
+                    reclaim_timer_wait_time: 3600,
+                    flush_reclaimed_timer_wait_time: 3600,
+                    hold_reclaimed_time: 3600,
+                    max_reclaim_leases: 10,
+                    max_reclaim_time: 100,
+                    unwarned_reclaim_cycles: 1,
+                }),
+                ..Kea6Config::default()
+            },
+            || {
+                let expired = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    - 60;
+                format!(
+                    "{HEADER}\n{address},{},600,{expired},1,300,0,1,128,0,0,,{mac},{state},,1,8\n",
+                    DHCPv6Factory::duid_hex(&DHCPv6Factory::duid_en(29))
+                )
+            },
+        );
+        let original = h.read_leases()?;
+        let assigned = h.kea.statistics()?["subnet[1].assigned-nas"][0][0]
+            .as_i64()
+            .unwrap();
+        let info =
+            send_and_recv_v6(&h.socket, DHCPv6Factory::information_request(idx))?.expect(case);
+        let reply = send_and_recv_v6(
+            &h.socket,
+            DHCPv6Factory::request(idx, DHCPv6Factory::server_id(&info), address),
+        )?;
+        assert!(
+            reply.as_ref().and_then(DHCPv6Factory::ia_addr).is_none(),
+            "{case}"
+        );
+        assert_eq!(h.read_leases()?, original, "{case}");
+        assert_assigned_leases(&h.kea.statistics()?, assigned, assigned);
+        assert!(h.api_server.expired_leases().is_empty(), "{case}");
+    }
     Ok(())
 }
 
@@ -2414,14 +2484,15 @@ fn unsupported_redirected_candidates_wait_for_background_reclamation() -> Result
 fn reclaimed_client_revalidates_dynamic_address_but_keeps_reservation() -> Result<(), eyre::Report>
 {
     const HEADER: &str = "address,duid,valid_lifetime,expire,subnet_id,pref_lifetime,lease_type,iaid,prefix_len,fqdn_fwd,fqdn_rev,hostname,hwaddr,state,user_context,hwtype,hwaddr_source";
-    for (case, reserved, global) in [
-        ("dynamic", false, false),
-        ("subnet reservation", true, false),
-        ("global reservation", true, true),
+    for (case, reserved, global, renew_first) in [
+        ("dynamic", false, false, false),
+        ("dynamic renewal", false, false, true),
+        ("subnet reservation", true, false, false),
+        ("global reservation", true, true, false),
     ] {
         let idx = 1;
         let retired = DHCPv6Factory::mock_addr(idx);
-        let selected = if reserved {
+        let selected = if reserved || renew_first {
             retired
         } else {
             DHCPv6Factory::mock_addr(0xb6)
@@ -2450,15 +2521,17 @@ fn reclaimed_client_revalidates_dynamic_address_but_keeps_reservation() -> Resul
         );
         h.api_server
             .set_address_override(&DHCPv6Factory::mac_string(idx), &selected.to_string());
-        // Obtain only Server-ID; the REQUEST assertion independently checks
+        // Obtain only Server-ID; the initial exchange independently checks
         // persistence even if the old fast path offers the wrong address.
         let info = send_and_recv_v6(&h.socket, DHCPv6Factory::information_request(idx))?
             .expect("server identity");
-        let reply = send_and_recv_v6(
-            &h.socket,
-            DHCPv6Factory::request(idx, DHCPv6Factory::server_id(&info), retired),
-        )?;
-        if !reserved {
+        let initial_request = if renew_first {
+            DHCPv6Factory::renew(idx, DHCPv6Factory::server_id(&info), retired)
+        } else {
+            DHCPv6Factory::request(idx, DHCPv6Factory::server_id(&info), retired)
+        };
+        let reply = send_and_recv_v6(&h.socket, initial_request)?;
+        if selected != retired {
             assert!(
                 h.active_lease(retired, &DHCPv6Factory::duid_ll_hex(idx))?
                     .is_none(),
@@ -2473,6 +2546,25 @@ fn reclaimed_client_revalidates_dynamic_address_but_keeps_reservation() -> Resul
         h.wait_for_active_lease(selected, &DHCPv6Factory::duid_ll_hex(idx))?;
         assert_assigned_leases(&h.kea.statistics()?, 1, 1);
         assert!(h.api_server.expired_leases().is_empty());
+        for renewal in [
+            DHCPv6Factory::renew(idx, DHCPv6Factory::server_id(&info), selected),
+            DHCPv6Factory::rebind(idx, selected),
+        ] {
+            let reply = send_and_recv_v6(&h.socket, renewal)?.expect(case);
+            assert_eq!(DHCPv6Factory::ia_addr(&reply), Some(selected), "{case}");
+            let Some(DhcpOption::IANA(ia)) = reply.opts().get(OptionCode::IANA) else {
+                panic!("missing renewed IA_NA: {case}");
+            };
+            let Some(DhcpOption::IAAddr(address)) = ia.opts.get(OptionCode::IAAddr) else {
+                panic!("missing renewed address: {case}");
+            };
+            assert!(
+                address.valid_life > 0,
+                "renewal revoked the active lease: {case}"
+            );
+            h.wait_for_active_lease(selected, &DHCPv6Factory::duid_ll_hex(idx))?;
+            assert_assigned_leases(&h.kea.statistics()?, 1, 1);
+        }
     }
     Ok(())
 }
