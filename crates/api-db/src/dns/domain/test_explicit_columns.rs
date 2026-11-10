@@ -46,6 +46,66 @@ async fn domain_queries_survive_added_columns(
     Ok(())
 }
 
+#[crate::sqlx_test]
+async fn reserved_intent_migration_preserves_legacy_writer(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    async fn legacy_insert(
+        connection: &mut PgConnection,
+        name: &str,
+    ) -> Result<DomainId, Box<dyn std::error::Error>> {
+        let mut txn = connection.begin().await?;
+        let metadata_id = domain_metadata::DbMetadata::create_default(txn.as_mut()).await?;
+        let value = NewDomain::new(name);
+        let id = sqlx::query_scalar(
+            "INSERT INTO domains (name, soa, domain_metadata_id, default_ttl)
+             VALUES ($1, $2, $3, 600)
+             RETURNING id",
+        )
+        .bind(&value.name)
+        .bind(sqlx::types::Json(&value.soa))
+        .bind(metadata_id)
+        .fetch_one(txn.as_mut())
+        .await?;
+        txn.commit().await?;
+        Ok(id)
+    }
+
+    // Recreate the predecessor shape while retaining the same legacy writer
+    // connection and its prepared statement across the shipped migration.
+    let mut writer = pool.acquire().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE domains DROP COLUMN reserved_create, DROP COLUMN create_default_ttl;
+         DROP TABLE domain_reserved_id_cancellations;",
+    )
+    .execute(&mut *writer)
+    .await?;
+    let before = legacy_insert(&mut writer, "before-migration.example").await?;
+
+    let mut migration = pool.begin().await?;
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/20261110174114_domain_reserved_create_intent.sql"
+    ))
+    .execute(migration.as_mut())
+    .await?;
+    migration.commit().await?;
+    let after = legacy_insert(&mut writer, "after-migration.example").await?;
+
+    for id in [before, after] {
+        let (reserved, create_ttl): (bool, Option<i32>) =
+            sqlx::query_as("SELECT reserved_create, create_default_ttl FROM domains WHERE id = $1")
+                .bind(id)
+                .fetch_one(&mut *writer)
+                .await?;
+        assert!(!reserved, "a legacy writer cannot become a reserved intent");
+        assert_eq!(create_ttl, None);
+        let domain = find_by_uuid(&mut *writer, id).await?.unwrap();
+        assert_eq!(domain.default_ttl, Some(ZoneTtl::try_from(600)?));
+        assert!(domain.deleted.is_none());
+    }
+    Ok(())
+}
+
 async fn exercise_domain_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -142,6 +202,36 @@ async fn exercise_domain_queries(
     assert_eq!(
         serde_json::to_value(&stored)?,
         serde_json::to_value(&domain)?
+    );
+
+    // The tenant reserved-ID create, replay and delete paths prepare their own
+    // statements; Core reuses them across a live column-adding migration too.
+    let reserved_id: DomainId = uuid::Uuid::new_v4().into();
+    lock_id_exclusive(&mut txn, reserved_id).await?;
+    let reserved_input = NewDomain {
+        default_ttl: Some(ZoneTtl::try_from(450)?),
+        ..NewDomain::new("reserved.example.com")
+    };
+    let reserved = persist_reserved(reserved_input.clone(), reserved_id, &mut txn).await?;
+    assert_eq!(reserved.id, reserved_id);
+    assert_eq!(reserved.name, reserved_input.name);
+    assert_eq!(reserved.default_ttl, reserved_input.default_ttl);
+    assert_eq!(reserved.deleted, None);
+    let (intent, is_reserved, create_ttl) = reserved_create_intent(&mut txn, reserved_id)
+        .await?
+        .expect("the reserved create intent is retained");
+    assert!(is_reserved);
+    assert_eq!(create_ttl, reserved_input.default_ttl);
+    assert_eq!(
+        serde_json::to_value(&intent)?,
+        serde_json::to_value(&reserved)?
+    );
+    let locked = find_by_uuid_for_delete(&mut txn, reserved_id)
+        .await?
+        .expect("the reserved domain is found for deletion");
+    assert_eq!(
+        serde_json::to_value(&locked)?,
+        serde_json::to_value(&reserved)?
     );
 
     // Leave an empty table so `persist_first` inserts on both passes. The

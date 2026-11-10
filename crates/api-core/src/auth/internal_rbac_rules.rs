@@ -64,13 +64,13 @@ impl InternalRBACRules {
         // Add additional permissions to the list below.
         x.perm("Version", vec![Anonymous]);
         x.perm("StreamConsoleLogs", vec![ForgeAdminCLI]);
-        x.perm("CreateDomain", vec![]);
+        x.perm("CreateDomain", vec![SiteAgent]);
         x.perm("CreateDomainLegacy", vec![]);
         x.perm("UpdateDomainLegacy", vec![]);
         x.perm("DeleteDomainLegacy", vec![]);
         x.perm("FindDomainLegacy", vec![ForgeAdminCLI]);
         x.perm("UpdateDomain", vec![]);
-        x.perm("DeleteDomain", vec![]);
+        x.perm("DeleteDomain", vec![SiteAgent]);
         x.perm("FindDomain", vec![ForgeAdminCLI]);
         x.perm("CreateVpc", vec![SiteAgent, Machineatron]);
         x.perm("UpdateVpc", vec![ForgeAdminCLI, SiteAgent]);
@@ -1382,6 +1382,48 @@ mod rbac_rule_tests {
                 InternalRBACRules::allowed_from_static("AddNetworkSegmentPrefix", &principals)
             },
         );
+    }
+
+    #[test]
+    fn site_agent_domain_lifecycle_operation_permissions() {
+        let admin = Principal::ExternalUser(ExternalUserInfo::new(
+            None,
+            "nico-cli-client".to_string(),
+            None,
+        ));
+        let site_agent = Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string());
+        let unrelated = Principal::SpiffeServiceIdentifier("nico-dns".to_string());
+        let anonymous = Principal::Anonymous;
+        for method in ["CreateDomain", "DeleteDomain"] {
+            assert!(InternalRBACRules::allowed_from_static(
+                method,
+                std::slice::from_ref(&site_agent),
+            ));
+            for principal in [&unrelated, &anonymous] {
+                assert!(
+                    !InternalRBACRules::allowed_from_static(
+                        method,
+                        std::slice::from_ref(principal)
+                    ),
+                    "{method} allowed {}",
+                    principal.as_identifier()
+                );
+            }
+        }
+        assert!(InternalRBACRules::allowed_from_static(
+            "FindDomain",
+            std::slice::from_ref(&admin)
+        ));
+        for principal in [&site_agent, &unrelated, &anonymous] {
+            assert!(
+                !InternalRBACRules::allowed_from_static(
+                    "FindDomain",
+                    std::slice::from_ref(principal)
+                ),
+                "FindDomain allowed {}",
+                principal.as_identifier()
+            );
+        }
     }
 
     #[test]

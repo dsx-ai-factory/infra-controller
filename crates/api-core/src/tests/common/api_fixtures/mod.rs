@@ -1954,6 +1954,7 @@ async fn create_test_env_with_overrides_inner(
                 name: domain_name.to_string(),
                 default_ttl: None,
                 vpc_id: None,
+                reserved_id: None,
             }))
             .await
             .expect("fixture domain creation succeeds")

@@ -901,7 +901,9 @@ type CreateDomainRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Reverse DNS serves inventory-derived PTRs, not managed zones. Names at or below
 	// in-addr.arpa or ip6.arpa are rejected with INVALID_ARGUMENT, ignoring case,
-	// surrounding whitespace, and trailing dots. Forward names must be lowercase.
+	// surrounding whitespace, and trailing dots. Reserved-ID forward names are
+	// normalized to ASCII lowercase with trailing dots removed; other forward
+	// names must already be lowercase.
 	// Live names are unique across all owners, with case and trailing dots ignored
 	// when checking uniqueness. A deleted domain's name may be reused, and parent
 	// and child domains may coexist.
@@ -915,7 +917,13 @@ type CreateDomainRequest struct {
 	// unknown or deleted VPC is rejected with NOT_FOUND. A VPC owns at most one
 	// live domain; another is rejected with INVALID_ARGUMENT. The owning VPC
 	// cannot be deleted while this domain is live.
-	VpcId         *VpcId `protobuf:"bytes,3,opt,name=vpc_id,json=vpcId,proto3" json:"vpc_id,omitempty"`
+	VpcId *VpcId `protobuf:"bytes,3,opt,name=vpc_id,json=vpcId,proto3" json:"vpc_id,omitempty"`
+	// Internal REST ownership-index retry, required for the exclusive SiteAgent
+	// identity. Other callers supplying an ID, or SiteAgent omitting it, receive
+	// PERMISSION_DENIED. Omit for legacy/operator calls. A cancelled, deleted, or
+	// legacy-created ID is rejected with FAILED_PRECONDITION, as is a replay whose
+	// canonical name, VPC, or requested TTL differs from the original intent.
+	ReservedId    *DomainId `protobuf:"bytes,4,opt,name=reserved_id,json=reservedId,proto3" json:"reserved_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -967,6 +975,13 @@ func (x *CreateDomainRequest) GetDefaultTtl() uint32 {
 func (x *CreateDomainRequest) GetVpcId() *VpcId {
 	if x != nil {
 		return x.VpcId
+	}
+	return nil
+}
+
+func (x *CreateDomainRequest) GetReservedId() *DomainId {
+	if x != nil {
+		return x.ReservedId
 	}
 	return nil
 }
@@ -1078,9 +1093,17 @@ type DomainDeletionRequest struct {
 	// Required Domain ID. Deletion is rejected with FAILED_PRECONDITION while
 	// a live network segment or machine interface references the Domain.
 	// Repeated deletion of a previously deleted Domain succeeds.
-	Id            *DomainId `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Id *DomainId `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Internal cancellation of an owned, durably reserved ID. Only the exclusive
+	// SiteAgent identity may set this to true, and SiteAgent must use this mode;
+	// other combinations receive PERMISSION_DENIED. False when omitted for
+	// legacy/operator deletes.
+	// On an absent ID this records a terminal tombstone so a delayed CreateDomain
+	// cannot resurrect the zone. Any existing ID not created through reserved_id
+	// is rejected with FAILED_PRECONDITION, including a deleted legacy Domain.
+	CancelReservedId bool `protobuf:"varint,2,opt,name=cancel_reserved_id,json=cancelReservedId,proto3" json:"cancel_reserved_id,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *DomainDeletionRequest) Reset() {
@@ -1118,6 +1141,13 @@ func (x *DomainDeletionRequest) GetId() *DomainId {
 		return x.Id
 	}
 	return nil
+}
+
+func (x *DomainDeletionRequest) GetCancelReservedId() bool {
+	if x != nil {
+		return x.CancelReservedId
+	}
+	return false
 }
 
 type DomainDeletionResult struct {
@@ -1229,12 +1259,14 @@ const file_dns_nico_proto_rawDesc = "" +
 	"defaultTtl\x88\x01\x01\x12$\n" +
 	"\x06vpc_id\x18\t \x01(\v2\r.common.VpcIdR\x05vpcIdB\x06\n" +
 	"\x04_soaB\x0e\n" +
-	"\f_default_ttl\"\x85\x01\n" +
+	"\f_default_ttl\"\xb8\x01\n" +
 	"\x13CreateDomainRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12$\n" +
 	"\vdefault_ttl\x18\x02 \x01(\rH\x00R\n" +
 	"defaultTtl\x88\x01\x01\x12$\n" +
-	"\x06vpc_id\x18\x03 \x01(\v2\r.common.VpcIdR\x05vpcIdB\x0e\n" +
+	"\x06vpc_id\x18\x03 \x01(\v2\r.common.VpcIdR\x05vpcId\x121\n" +
+	"\vreserved_id\x18\x04 \x01(\v2\x10.common.DomainIdR\n" +
+	"reservedIdB\x0e\n" +
 	"\f_default_ttl\":\n" +
 	"\x13UpdateDomainRequest\x12#\n" +
 	"\x06domain\x18\x01 \x01(\v2\v.dns.DomainR\x06domain\"c\n" +
@@ -1242,9 +1274,10 @@ const file_dns_nico_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\v2\x10.common.DomainIdH\x00R\x02id\x88\x01\x01\x12\x17\n" +
 	"\x04name\x18\x02 \x01(\tH\x01R\x04name\x88\x01\x01B\x05\n" +
 	"\x03_idB\a\n" +
-	"\x05_name\"9\n" +
+	"\x05_name\"g\n" +
 	"\x15DomainDeletionRequest\x12 \n" +
-	"\x02id\x18\x01 \x01(\v2\x10.common.DomainIdR\x02id\"\x16\n" +
+	"\x02id\x18\x01 \x01(\v2\x10.common.DomainIdR\x02id\x12,\n" +
+	"\x12cancel_reserved_id\x18\x02 \x01(\bR\x10cancelReservedId\"\x16\n" +
 	"\x14DomainDeletionResult*\x8d\x02\n" +
 	"\x10DnsLookupOutcome\x12\"\n" +
 	"\x1eDNS_LOOKUP_OUTCOME_UNSPECIFIED\x10\x00\x12\x1e\n" +
@@ -1309,14 +1342,15 @@ var file_dns_nico_proto_depIdxs = []int32{
 	4,  // 12: dns.Domain.metadata:type_name -> dns.DomainMetadata
 	21, // 13: dns.Domain.vpc_id:type_name -> common.VpcId
 	21, // 14: dns.CreateDomainRequest.vpc_id:type_name -> common.VpcId
-	13, // 15: dns.UpdateDomainRequest.domain:type_name -> dns.Domain
-	19, // 16: dns.DomainSearchQuery.id:type_name -> common.DomainId
-	19, // 17: dns.DomainDeletionRequest.id:type_name -> common.DomainId
-	18, // [18:18] is the sub-list for method output_type
-	18, // [18:18] is the sub-list for method input_type
-	18, // [18:18] is the sub-list for extension type_name
-	18, // [18:18] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	19, // 15: dns.CreateDomainRequest.reserved_id:type_name -> common.DomainId
+	13, // 16: dns.UpdateDomainRequest.domain:type_name -> dns.Domain
+	19, // 17: dns.DomainSearchQuery.id:type_name -> common.DomainId
+	19, // 18: dns.DomainDeletionRequest.id:type_name -> common.DomainId
+	19, // [19:19] is the sub-list for method output_type
+	19, // [19:19] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_dns_nico_proto_init() }

@@ -864,6 +864,7 @@ impl ApiClient {
             name,
             vpc_id,
             default_ttl,
+            reserved_id: None,
         };
         Ok(self.0.create_domain(request).await?)
     }

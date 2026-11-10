@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use carbide_uuid::domain::DomainId;
 use carbide_uuid::vpc::VpcId;
 use db::ObjectColumnFilter;
 use model::dns::NewDomain;
@@ -97,6 +98,26 @@ async fn live_domain_pins_its_vpc(pool: sqlx::PgPool) {
     // so we can still delete the domain and its VPC below.
     let mut attempt = sqlx::Acquire::begin(&mut txn).await.expect("savepoint");
     let duplicate = persist_owned(attempt.as_mut(), "second.example", Some(vpc_id)).await;
+    attempt.rollback().await.expect("release savepoint");
+    assert!(
+        matches!(duplicate, Err(DatabaseError::InvalidArgument(ref message)) if message.contains("already owns a domain")),
+        "{duplicate:?}"
+    );
+
+    let mut attempt = sqlx::Acquire::begin(&mut txn).await.expect("savepoint");
+    let reserved_id = DomainId::new();
+    db::dns::domain::lock_id_exclusive(attempt.as_mut(), reserved_id)
+        .await
+        .expect("lock the new reserved identity");
+    let duplicate = db::dns::domain::persist_reserved(
+        NewDomain {
+            vpc_id: Some(vpc_id),
+            ..NewDomain::new("reserved.example")
+        },
+        reserved_id,
+        attempt.as_mut(),
+    )
+    .await;
     attempt.rollback().await.expect("release savepoint");
     assert!(
         matches!(duplicate, Err(DatabaseError::InvalidArgument(ref message)) if message.contains("already owns a domain")),
@@ -500,4 +521,18 @@ async fn soa_serial_cannot_leave_the_u32_range(pool: sqlx::PgPool) {
         u32::MAX,
         "the rejected bump left the stored serial alone"
     );
+}
+
+#[crate::sqlx_test]
+async fn reserved_name_collision_preserves_invalid_argument(pool: sqlx::PgPool) {
+    let mut txn = pool.begin().await.unwrap();
+    db::dns::domain::persist(NewDomain::new("existing.example"), txn.as_mut())
+        .await
+        .unwrap();
+    let id = uuid::Uuid::new_v4().into();
+    let error =
+        db::dns::domain::persist_reserved(NewDomain::new("existing.example."), id, txn.as_mut())
+            .await
+            .unwrap_err();
+    assert!(matches!(error, DatabaseError::InvalidArgument(_)));
 }

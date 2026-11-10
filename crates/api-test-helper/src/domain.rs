@@ -29,6 +29,7 @@ pub async fn create(carbide_api_addrs: &[SocketAddr], name: &str) -> eyre::Resul
         name: name.to_string(),
         default_ttl: None,
         vpc_id: None,
+        reserved_id: None,
     };
     let domain = api_client::call(carbide_api_addrs, "CreateDomain", |mut client| async move {
         client.create_domain(request).await
