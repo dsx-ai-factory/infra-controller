@@ -5828,7 +5828,8 @@ impl DpuMachineStateHandler {
                     | Some(TaskState::Running)
                     | Some(TaskState::Pending) => {
                         return Ok(StateHandlerOutcome::wait(format!(
-                            "Waiting for certificate upload task {task_id} to complete",
+                            "Waiting for certificate upload task {task_id} to complete{}",
+                            task_progress(task.percent_complete),
                         )));
                     }
                     Some(TaskState::Completed) => {
@@ -12538,7 +12539,10 @@ impl HostUpgradeState {
                             messages = ?task_info.messages,
                             "Upgrade task not yet complete",
                         );
-                        Ok(StateHandlerOutcome::do_nothing())
+                        Ok(StateHandlerOutcome::wait(format!(
+                            "Waiting for firmware upgrade task {task_id} to complete{}",
+                            task_progress(task_info.percent_complete),
+                        )))
                     }
                     Some(TaskState::Completed) => {
                         // Task has completed, update is done and we can clean up.  Site explorer will ingest this next time it runs on this endpoint.
@@ -13290,6 +13294,13 @@ where
         }
         Err(error) => Err(error.into()),
     }
+}
+
+/// Formats a Redfish task's reported progress as a wait-reason suffix; absent progress adds nothing.
+fn task_progress(percent_complete: Option<u32>) -> String {
+    percent_complete
+        .map(|percent| format!(": {percent}%"))
+        .unwrap_or_default()
 }
 
 fn require_legacy_http_push_uri(uri: &str) -> Result<(), RedfishError> {
