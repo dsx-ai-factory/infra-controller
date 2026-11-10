@@ -2791,6 +2791,22 @@ async fn update_instance_spx_config(
 
     mh_snapshot.dpa_interface_snapshots = dpa_interfaces;
 
+    // Plane admission consumes maintenance state that an operator request or a
+    // DPU readback can commit after this request loaded its snapshot. Both of
+    // those writers take the host lock before touching desired state or
+    // observations, so holding it here serializes them and lets the refreshed
+    // reads below describe one point in time instead of the request's baseline.
+    // Lock the host before any DPU, matching the order the readback path uses.
+    if partial_multiplane_enabled {
+        mh_snapshot.host_snapshot.spx_multiplane =
+            db::machine::lock_spx_multiplane(txn.as_mut(), &host_machine_id).await?;
+        for dpu_snapshot in &mut mh_snapshot.dpu_snapshots {
+            let status =
+                db::machine::lock_spx_multiplane_status(txn.as_mut(), &dpu_snapshot.id).await?;
+            dpu_snapshot.status.spx_multiplane_status = status;
+        }
+    }
+
     validate_spx_partition_ownership(txn, &instance.config.tenant.tenant_organization_id, spxcfg)
         .await?;
 
