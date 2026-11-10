@@ -79,6 +79,7 @@ table.validation-results, table.validation-current-work { table-layout: fixed; }
 </section>
 <section aria-label="Attempt logs">
 <h2>Attempt Logs</h2>
+<p>Attempt logs require an authorized OAuth or client-certificate identity. Basic authentication alone does not grant log access.</p>
 <p>Open a test to load stdout/stderr and refresh every 2 seconds. The display keeps about 32,000 characters of recent output. Logs may be empty if collection is disabled, no output has arrived, or retention has expired. Reload the page to discover new attempts.</p>
 {% for log in attempt_logs %}
 <details id="attempt-log-{{ log.attempt_id }}" class="validation-log" data-url="/admin/machinevalidation/attempts/{{ log.attempt_id }}/logs">
@@ -125,7 +126,7 @@ async function refreshValidationLogs(view) {
             });
             if (response.status === 401 || response.status === 403) {
                 view.denied = true;
-                status.textContent = 'Log access requires an authorized user identity. Reload after signing in.';
+                status.textContent = 'Log access requires an authorized user identity from OAuth or a client certificate. Basic authentication alone does not grant access. Reload after signing in.';
                 return;
             }
             if (!response.ok) throw new Error(`HTTP ${response.status}`);

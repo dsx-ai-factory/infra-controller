@@ -230,6 +230,7 @@ async fn validation_run_pages_show_progress_current_work_and_logs(pool: sqlx::Pg
         assert!(!html.contains("Click current attempt to expand relevant logs"));
         assert!(!html.contains("Click View logs to expand the relevant attempt logs"));
         assert!(html.contains("<tr><th>Context</th><td>OnDemand</td></tr>"));
+        assert!(html.contains("Basic authentication alone does not grant log access."));
         assert!(html.contains(&format!(
             "<th>Machine ID</th><td><a href=\"/admin/machine/{machine_id}\">{machine_id}</a></td>"
         )));
