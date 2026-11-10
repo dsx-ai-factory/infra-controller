@@ -4976,6 +4976,15 @@ async fn test_ready_boot_config_lock_host_is_restart_safe(pool: sqlx::PgPool) {
     });
     let env = create_zero_dpu_test_env(pool).await;
     let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
+    // HS350 can restore its host interface through BMC-only lockdown without
+    // entering the HG635N_V2-only full-policy recovery path.
+    set_ready_lockdown_platform(
+        &env,
+        &mh,
+        Some(bmc_vendor::BMCVendor::LenovoAMI),
+        Some("ThinkSystem HS350X V3"),
+    )
+    .await;
     let pending = set_pending_boot_interface(&env, &mh).await;
     let expected_mac = pending.value.mac_address().to_string();
     let locking = ManagedHostState::BootConfiguring {
