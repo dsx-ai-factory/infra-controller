@@ -9,7 +9,9 @@ use carbide_uuid::rack::RackProfileId;
 use librms::protos::rack_manager as rms;
 use model::expected_power_shelf::ExpectedPowerShelf;
 use model::metadata::Metadata;
-use model::power_shelf::{PowerShelfControllerState, PowerShelfStatus};
+use model::power_shelf::{
+    PowerShelfControllerState, PowerShelfRackReprovisioningSkip, PowerShelfStatus,
+};
 use model::test_support::{TEST_RMS_RACK_PROFILE_ID, power_shelf_config, rms_rack_profiles};
 
 use crate::common::{
@@ -82,10 +84,15 @@ async fn ready_persists_observations_and_preserves_them_after_failed_polls(pool:
         .unwrap();
 
     let mut shelf = load_power_shelf(&pool, &shelf_id).await;
+    let skipped = PowerShelfRackReprovisioningSkip {
+        requested_at: chrono::Utc::now(),
+        reason: "rack_firmware_reprovisioning_enabled is false".into(),
+    };
     shelf.status = Some(PowerShelfStatus {
-        shelf_name: "retained shelf name".into(),
-        power_state: "on".into(),
-        health_status: "retained health".into(),
+        shelf_name: Some("retained shelf name".into()),
+        power_state: Some("on".into()),
+        health_status: Some("retained health".into()),
+        rack_firmware_reprovisioning_skip: Some(skipped.clone()),
     });
     db::power_shelf::update(&shelf, pool.acquire().await.unwrap().as_mut())
         .await
@@ -149,9 +156,26 @@ async fn ready_persists_observations_and_preserves_them_after_failed_polls(pool:
             "{scenario}"
         );
         let status = stored.status.expect("poll should retain the shelf status");
-        assert_eq!(status.power_state, expected_state, "{scenario}");
-        assert_eq!(status.shelf_name, "retained shelf name", "{scenario}");
-        assert_eq!(status.health_status, "retained health", "{scenario}");
+        assert_eq!(
+            status.power_state.as_deref(),
+            Some(expected_state),
+            "{scenario}"
+        );
+        assert_eq!(
+            status.shelf_name.as_deref(),
+            Some("retained shelf name"),
+            "{scenario}"
+        );
+        assert_eq!(
+            status.health_status.as_deref(),
+            Some("retained health"),
+            "{scenario}"
+        );
+        assert_eq!(
+            status.rack_firmware_reprovisioning_skip.as_ref(),
+            Some(&skipped),
+            "{scenario}: polling must preserve the skip record"
+        );
         let reads = env.rms_sim.submitted_batch_get_power_state_requests().await;
         assert_eq!(
             reads.len(),

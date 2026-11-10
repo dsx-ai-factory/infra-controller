@@ -84,9 +84,10 @@ async fn exercise_power_shelf_reader(
 
     let timestamp = "2026-09-01T12:00:00Z".parse()?;
     expected.status = Some(PowerShelfStatus {
-        shelf_name: "projection power shelf".to_string(),
-        power_state: "on".to_string(),
-        health_status: "ok".to_string(),
+        shelf_name: Some("projection power shelf".to_string()),
+        power_state: Some("on".to_string()),
+        health_status: Some("ok".to_string()),
+        rack_firmware_reprovisioning_skip: None,
     });
     expected.controller_state.value = PowerShelfControllerState::Ready;
     expected.controller_state.version = expected.controller_state.version.increment();

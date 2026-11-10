@@ -21,7 +21,8 @@ use carbide_uuid::power_shelf::PowerShelfId;
 use component_manager::component_common::{PowerStatePollOutcome, interpret_power_state_poll};
 use db::power_shelf as db_power_shelf;
 use model::power_shelf::{
-    PowerShelf, PowerShelfControllerState, PowerShelfDecommissioningState, PowerShelfStatus,
+    PowerShelf, PowerShelfControllerState, PowerShelfDecommissioningState,
+    PowerShelfRackReprovisioningSkip, PowerShelfStatus,
 };
 use sqlx::PgTransaction;
 use state_controller::state_handler::{
@@ -83,17 +84,29 @@ pub async fn handle_ready(
 
     if let Some(req) = &state.power_shelf_reprovisioning_requested {
         if !ctx.services.rack_firmware_reprovisioning_enabled {
-            tracing::info!(
-                power_shelf_id = %power_shelf_id,
-                initiator = %req.initiator,
-                "Rack reprovision request ignored; rack_firmware_reprovisioning_enabled is false"
-            );
+            let reason = "rack_firmware_reprovisioning_enabled is false";
+            let mut status = state.status.clone().unwrap_or_default();
+            status.rack_firmware_reprovisioning_skip = Some(PowerShelfRackReprovisioningSkip {
+                requested_at: req.requested_at,
+                reason: reason.to_string(),
+            });
             let mut txn = ctx.services.db_pool.begin().await?;
-            db_power_shelf::clear_power_shelf_reprovisioning_requested(
+            if db_power_shelf::skip_power_shelf_reprovisioning_requested(
                 txn.as_mut(),
                 *power_shelf_id,
+                req,
+                &status,
             )
-            .await?;
+            .await?
+            {
+                tracing::warn!(
+                    power_shelf_id = %power_shelf_id,
+                    initiator = %req.initiator,
+                    reason,
+                    "Skipping power shelf rack reprovisioning"
+                );
+                state.status = Some(status);
+            }
             return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
         }
 
@@ -137,11 +150,21 @@ pub async fn handle_ready(
             ?reprovisioning_state,
             "Rack-level reprovisioning requested — entering ReProvisioning"
         );
-        return Ok(StateHandlerOutcome::transition(
-            PowerShelfControllerState::ReProvisioning {
+        let mut outcome =
+            StateHandlerOutcome::transition(PowerShelfControllerState::ReProvisioning {
                 reprovisioning_state,
-            },
-        ));
+            });
+        if let Some(mut status) = state.status.clone()
+            && status.rack_firmware_reprovisioning_skip.take().is_some()
+        {
+            let mut updated_state = state.clone();
+            updated_state.status = Some(status);
+            let mut txn = ctx.services.db_pool.begin().await?;
+            db_power_shelf::update(&updated_state, txn.as_mut()).await?;
+            state.status = updated_state.status;
+            outcome = outcome.with_txn(txn);
+        }
+        return Ok(outcome);
     }
 
     // Lowest precedence: only converge the PMC credential once the power shelf is
@@ -282,13 +305,15 @@ async fn persist_observed_power_state(
     let new_status = match state.status.as_ref() {
         Some(existing) => PowerShelfStatus {
             shelf_name: existing.shelf_name.clone(),
-            power_state: observed_power_state.to_owned(),
+            power_state: Some(observed_power_state.to_owned()),
             health_status: existing.health_status.clone(),
+            rack_firmware_reprovisioning_skip: existing.rack_firmware_reprovisioning_skip.clone(),
         },
         None => PowerShelfStatus {
-            shelf_name: state.config.name.clone(),
-            power_state: observed_power_state.to_owned(),
-            health_status: String::new(),
+            shelf_name: Some(state.config.name.clone()),
+            power_state: Some(observed_power_state.to_owned()),
+            health_status: Some(String::new()),
+            rack_firmware_reprovisioning_skip: None,
         },
     };
 
@@ -299,7 +324,7 @@ async fn persist_observed_power_state(
     {
         tracing::debug!(
             power_shelf_id = %power_shelf_id,
-            power_state = %new_status.power_state,
+            power_state = %observed_power_state,
             "PowerShelf status power_state unchanged; skipping DB write",
         );
         return None;

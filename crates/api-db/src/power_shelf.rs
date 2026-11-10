@@ -27,7 +27,7 @@ use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::metadata::Metadata;
 use model::power_shelf::{
     NewPowerShelf, PowerShelf, PowerShelfControllerState, PowerShelfMaintenanceOperation,
-    PowerShelfMaintenanceRequest, PowerShelfReprovisionRequest,
+    PowerShelfMaintenanceRequest, PowerShelfReprovisionRequest, PowerShelfStatus,
 };
 use model::rack::{MaintenanceActivity, RackFirmwareUpgradeStatus};
 use sqlx::PgConnection;
@@ -541,6 +541,40 @@ pub async fn clear_power_shelf_reprovisioning_requested(
         .await
         .map_err(|e| DatabaseError::new("clear_power_shelf_reprovisioning_requested", e))?;
     Ok(())
+}
+
+/// Records a skip only while the pending request still matches the observed request.
+/// The caller must keep the locked read and update in the same transaction.
+pub async fn skip_power_shelf_reprovisioning_requested(
+    txn: &mut PgConnection,
+    power_shelf_id: PowerShelfId,
+    request: &PowerShelfReprovisionRequest,
+    status: &PowerShelfStatus,
+) -> DatabaseResult<bool> {
+    let query =
+        "SELECT power_shelf_reprovisioning_requested FROM power_shelves WHERE id = $1 FOR UPDATE";
+    let current_request = sqlx::query_scalar::<
+        _,
+        Option<sqlx::types::Json<Option<PowerShelfReprovisionRequest>>>,
+    >(query)
+    .bind(power_shelf_id)
+    .fetch_optional(&mut *txn)
+    .await
+    .map_err(|error| DatabaseError::new("skip_power_shelf_reprovisioning_requested", error))?
+    .flatten()
+    .and_then(|request| request.0);
+    if current_request.as_ref() != Some(request) {
+        return Ok(false);
+    }
+
+    let query = "UPDATE power_shelves SET status = $1, power_shelf_reprovisioning_requested = NULL WHERE id = $2 RETURNING id";
+    let _: PowerShelfId = sqlx::query_scalar(query)
+        .bind(sqlx::types::Json(status))
+        .bind(power_shelf_id)
+        .fetch_one(txn)
+        .await
+        .map_err(|error| DatabaseError::new("skip_power_shelf_reprovisioning_requested", error))?;
+    Ok(true)
 }
 
 /// Clears a rack-owned reprovisioning request before the power shelf leaves
@@ -1218,9 +1252,10 @@ mod tests {
         .await?;
 
         let status = model::power_shelf::PowerShelfStatus {
-            shelf_name: "Status Test Power Shelf".to_string(),
-            power_state: "on".to_string(),
-            health_status: "ok".to_string(),
+            shelf_name: Some("Status Test Power Shelf".to_string()),
+            power_state: Some("on".to_string()),
+            health_status: Some("ok".to_string()),
+            rack_firmware_reprovisioning_skip: None,
         };
 
         power_shelf.status = Some(status.clone());
@@ -1228,9 +1263,12 @@ mod tests {
 
         assert!(updated_power_shelf.status.is_some());
         let updated_status = updated_power_shelf.status.as_ref().unwrap();
-        assert_eq!(updated_status.shelf_name, "Status Test Power Shelf");
-        assert_eq!(updated_status.power_state, "on");
-        assert_eq!(updated_status.health_status, "ok");
+        assert_eq!(
+            updated_status.shelf_name.as_deref(),
+            Some("Status Test Power Shelf")
+        );
+        assert_eq!(updated_status.power_state.as_deref(), Some("on"));
+        assert_eq!(updated_status.health_status.as_deref(), Some("ok"));
 
         txn.rollback().await?;
 

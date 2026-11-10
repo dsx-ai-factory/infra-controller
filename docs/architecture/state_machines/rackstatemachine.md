@@ -222,6 +222,28 @@ because their own provisioning is waiting or failed. Shelf membership is persist
 separately from RMS handles because RMS may omit shelf jobs; the existing
 controller-completion fallback applies only to those admitted shelves.
 
+Power-shelf controller participation in rack-owned reprovisioning requests is
+controlled by `power_shelf_state_controller.rack_firmware_reprovisioning_enabled`,
+which defaults to `false`. The `nico-api` Helm chart exposes the same default
+through `powerShelfStateController.rackFirmwareReprovisioningEnabled`. Enable it
+with the following chart values.
+
+```yaml
+powerShelfStateController:
+  rackFirmwareReprovisioningEnabled: true
+```
+
+A complete `configFiles.nicoApiConfig` override takes precedence over this chart
+value. When the flag is disabled, the shelf controller logs a warning, clears the
+request, and records its timestamp and skip reason in the shelf's persisted
+status. `FindPowerShelves` exposes this record as
+`status.rack_firmware_reprovisioning_skip`, with `requested_at` and `reason`.
+Power polling and idle controller iterations preserve the record. It is cleared
+when a subsequent enabled rack reprovisioning request is admitted. Enabling the
+flag applies to subsequent requests; a previously skipped request requires a new
+rack maintenance operation. A rack maintenance completion can therefore coexist
+with a recorded shelf skip.
+
 A ready host with desired power `Off` blocks submission with a retryable handler
 error; its desired power is not changed. Results polled for existing devices
 are committed before supplemental admission. Inventory, credential, or dispatch

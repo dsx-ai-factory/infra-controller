@@ -72,17 +72,181 @@ async fn test_ready_clears_reprovision_request_when_flag_disabled(
     txn.commit().await?;
 
     let mut state = load_power_shelf(&pool, &power_shelf_id).await;
+    assert!(state.status.is_none());
+    let requested_at = state
+        .power_shelf_reprovisioning_requested
+        .as_ref()
+        .expect("reprovision request should exist")
+        .requested_at;
     let mut services = services_without_component_manager(&pool, false);
     let outcome = run_handler(&mut services, &mut state).await;
     assert!(matches!(outcome, StateHandlerOutcome::DoNothing { .. }));
     commit_outcome(outcome).await;
 
-    let state = load_power_shelf(&pool, &power_shelf_id).await;
+    let mut state = load_power_shelf(&pool, &power_shelf_id).await;
     assert!(state.power_shelf_reprovisioning_requested.is_none());
     assert!(matches!(
         state.controller_state.value,
         PowerShelfControllerState::Ready
     ));
+    let status = state.status.as_ref().expect("skip should be persisted");
+    assert!(status.shelf_name.is_none());
+    assert!(status.power_state.is_none());
+    assert!(status.health_status.is_none());
+    let skipped = status
+        .rack_firmware_reprovisioning_skip
+        .as_ref()
+        .expect("disabled reprovisioning should record a skip")
+        .clone();
+    assert_eq!(skipped.requested_at, requested_at);
+    assert!(
+        skipped
+            .reason
+            .contains("rack_firmware_reprovisioning_enabled")
+    );
+    assert!(skipped.reason.contains("false"));
+
+    let shelf = env
+        .api()
+        .find_power_shelves(tonic::Request::new(rpc::forge::PowerShelfQuery {
+            power_shelf_id: Some(power_shelf_id),
+            name: None,
+        }))
+        .await?
+        .into_inner()
+        .power_shelves
+        .pop()
+        .expect("skipped shelf should be visible through the API");
+    let status = shelf.status.expect("API should expose shelf status");
+    assert!(status.shelf_name.is_none());
+    assert!(status.power_state.is_none());
+    assert!(status.health_status.is_none());
+    let api_skip = status
+        .rack_firmware_reprovisioning_skip
+        .expect("API should expose the recorded skip");
+    assert_eq!(api_skip.requested_at, Some(requested_at.into()));
+    assert_eq!(api_skip.reason, skipped.reason);
+
+    let outcome = run_handler(&mut services, &mut state).await;
+    assert!(matches!(outcome, StateHandlerOutcome::DoNothing { .. }));
+    commit_outcome(outcome).await;
+    let state = load_power_shelf(&pool, &power_shelf_id).await;
+    assert_eq!(
+        state
+            .status
+            .as_ref()
+            .unwrap()
+            .rack_firmware_reprovisioning_skip
+            .as_ref(),
+        Some(&skipped),
+        "an idle sweep must preserve the completed request's skip"
+    );
+
+    let mut txn = pool.begin().await?;
+    db_power_shelf::set_power_shelf_reprovisioning_requested(
+        txn.as_mut(),
+        power_shelf_id,
+        "rack-next-request",
+        firmware_only_activities(),
+    )
+    .await?;
+    txn.commit().await?;
+    let mut state = load_power_shelf(&pool, &power_shelf_id).await;
+    services.rack_firmware_reprovisioning_enabled = true;
+    let outcome = run_handler(&mut services, &mut state).await;
+    assert!(matches!(
+        outcome,
+        StateHandlerOutcome::Transition {
+            next_state: PowerShelfControllerState::ReProvisioning {
+                reprovisioning_state: ReProvisioningState::WaitingForRackFirmwareUpgrade,
+            },
+            ..
+        }
+    ));
+    commit_outcome(outcome).await;
+    let state = load_power_shelf(&pool, &power_shelf_id).await;
+    assert!(
+        state
+            .status
+            .as_ref()
+            .unwrap()
+            .rack_firmware_reprovisioning_skip
+            .is_none(),
+        "admitting a later request must clear the earlier skip"
+    );
+    assert_eq!(
+        state
+            .power_shelf_reprovisioning_requested
+            .as_ref()
+            .expect("admitted request must remain available to reprovisioning")
+            .initiator,
+        "rack-next-request"
+    );
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_disabled_reprovisioning_preserves_a_replacement_request(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let TestPowerShelf { id: power_shelf_id } = env
+        .create_power_shelf(power_shelf_config("Replaced reprovision request"))
+        .await;
+    let mut txn = pool.begin().await?;
+    park_ready(txn.as_mut(), &power_shelf_id).await;
+    db_power_shelf::set_power_shelf_reprovisioning_requested(
+        txn.as_mut(),
+        power_shelf_id,
+        "rack-original",
+        firmware_only_activities(),
+    )
+    .await?;
+    txn.commit().await?;
+    let mut stale_state = load_power_shelf(&pool, &power_shelf_id).await;
+
+    let mut txn = pool.begin().await?;
+    db_power_shelf::set_power_shelf_reprovisioning_requested(
+        txn.as_mut(),
+        power_shelf_id,
+        "rack-replacement",
+        firmware_only_activities(),
+    )
+    .await?;
+    txn.commit().await?;
+    let replacement = load_power_shelf(&pool, &power_shelf_id)
+        .await
+        .power_shelf_reprovisioning_requested
+        .expect("replacement request should exist");
+
+    let mut services = services_without_component_manager(&pool, false);
+    let outcome = run_handler(&mut services, &mut stale_state).await;
+    assert!(matches!(outcome, StateHandlerOutcome::DoNothing { .. }));
+    commit_outcome(outcome).await;
+    let mut state = load_power_shelf(&pool, &power_shelf_id).await;
+    assert_eq!(
+        state.power_shelf_reprovisioning_requested.as_ref(),
+        Some(&replacement)
+    );
+    assert!(state.status.is_none());
+
+    let outcome = run_handler(&mut services, &mut state).await;
+    assert!(matches!(outcome, StateHandlerOutcome::DoNothing { .. }));
+    commit_outcome(outcome).await;
+    let state = load_power_shelf(&pool, &power_shelf_id).await;
+    assert!(state.power_shelf_reprovisioning_requested.is_none());
+    let skipped = state
+        .status
+        .expect("replacement request should record a skip")
+        .rack_firmware_reprovisioning_skip
+        .expect("replacement request's skip should be present");
+    assert_eq!(skipped.requested_at, replacement.requested_at);
+    assert!(
+        skipped
+            .reason
+            .contains("rack_firmware_reprovisioning_enabled")
+    );
+    assert!(skipped.reason.contains("false"));
     Ok(())
 }
 
