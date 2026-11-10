@@ -75,7 +75,7 @@ use carbide_vpc_prefix_controller::context::VpcPrefixStateHandlerServices;
 use carbide_vpc_prefix_controller::handler::VpcPrefixStateHandler;
 use carbide_vpc_prefix_controller::io::VpcPrefixStateControllerIO;
 use db::Transaction;
-use db::machine::{update_dpu_asns, update_dpu_loopback_ips_v6};
+use db::machine::update_dpu_loopback_ips_v6;
 use db::resource_pool::DefineResourcePoolError;
 use eyre::WrapErr;
 use futures_util::TryFutureExt;
@@ -1912,7 +1912,14 @@ async fn initialize_and_start_controllers<'a>(
         );
     }
 
-    if let Err(e) = update_dpu_asns(db_pool, common_pools).await {
+    if let Err(e) = carbide_site_explorer::dpu_asn::update_dpu_asns(
+        db_pool,
+        &api_service.resource_pool_registry,
+        common_pools,
+        &cancel_token,
+    )
+    .await
+    {
         tracing::warn!(
             error = %e,
             "Failed to update ASN for DPUs",
