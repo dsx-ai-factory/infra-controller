@@ -1881,8 +1881,11 @@ fn reclamation_recovers_from_memfile_write_failure() -> Result<(), eyre::Report>
         let candidate = "2001:db8::1".parse::<Ipv6Addr>()?;
         let address = DHCPv6Factory::mock_addr(idx);
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let context = serde_json::json!({"ISC": {"relay-info": [{"hop": 0, "link": "2001:db8::1", "peer": "fe80::1"}]}})
+            .to_string()
+            .replace(',', "&#x2c");
         let rows = format!(
-            "{HEADER}\n{candidate},{},600,{},1,300,0,1,128,1,1,expired.example.test,{},0,,1,1\n{address},{},7200,{},1,3600,0,1,128,0,0,,{},0,,1,1\n",
+            "{HEADER}\n{candidate},{},600,{},1,300,0,1,128,1,1,expired.example.test,{},0,{context},1,1\n{address},{},7200,{},1,3600,0,1,128,0,0,,{},0,,1,1\n",
             DHCPv6Factory::duid_ll_hex(1),
             now - 60,
             DHCPv6Factory::mac_string(1),
@@ -1980,6 +1983,10 @@ fn reclamation_recovers_from_memfile_write_failure() -> Result<(), eyre::Report>
                 &columns[9..12],
                 &["0", "0", ""],
                 "reclamation clears DNS metadata: {case}"
+            );
+            assert_eq!(
+                columns[14], "",
+                "reclamation clears extended metadata: {case}"
             );
         }
         h.wait_for_scoped_expiry(candidate, &DHCPv6Factory::mac_string(1));
