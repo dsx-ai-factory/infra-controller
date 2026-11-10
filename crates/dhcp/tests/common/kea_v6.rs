@@ -553,6 +553,7 @@ impl Kea6 {
         let deadline = Instant::now() + KEA_READY_TIMEOUT;
         loop {
             if let Some(status) = self.process.as_mut().unwrap().try_wait()? {
+                self.process = None;
                 eyre::ensure!(
                     !status.success(),
                     "storage failure must stop Kea with an error"
