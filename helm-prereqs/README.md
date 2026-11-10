@@ -667,6 +667,14 @@ With `--skip-vault`:
   (`name`, `kind`, and `group`) to Flow, and phase 7i passes them to the
   site-agent. Flow's Temporal client certificate stays on
   `nico-rest-ca-issuer`, as on every site.
+- `setup.sh` does not install `machine-a-tron`, so `--skip-vault` does not
+  change it. Its chart defaults `global.certificate.issuerRef` to
+  `vault-nico-issuer`, and `mat-k8s-controller` and `nico-site-health-probe`
+  read the same value. On a site without Vault, install it with
+  `--set global.certificate.issuerRef.name=site-issuer`,
+  `--set global.certificate.issuerRef.kind=ClusterIssuer`, and
+  `--set global.certificate.issuerRef.group=cert-manager.io`, or its
+  Certificates wait on an issuer that does not exist.
 - At the end of the run, after phase 7i, after phase 6 with `--skip-rest`, or
   when the REST deployment prompt is declined, setup probes the cluster again. When no consumer references Vault, it prints
   `No consumer references Vault any more: removing the Vault resources from nico-prereqs...`,
@@ -824,7 +832,8 @@ root and both UEFI defaults before it explores anything:
   values at the rendered Secret with
   `nico-api.credentials.file.existingSecret.name: nico-site-credentials` and
   `key: credentials.yaml`, as [Site Credentials Secret](#site-credentials-secret)
-  describes. Or add them after Core is up with
+  describes. On a site that already holds these credentials, set each password
+  to the value in use; refer to the note after this list. Or add them after Core is up with
   `nico-admin-cli credential add-bmc --kind=site-wide-root` and
   `credential add-uefi --kind=host` and `--kind=dpu`, as in the
   [Quick Start Guide](../docs/getting-started/quick-start.md#set-site-wide-credentials).
@@ -832,6 +841,16 @@ root and both UEFI defaults before it explores anything:
   `nico-admin-cli credential add-dpu-factory-default` and
   `credential add-host-factory-default`. They are written to the Postgres
   credential store.
+
+Do not leave the `siteCredentials` passwords empty on a site that already holds
+these credentials, for example one moved off Vault whose values are in Vault KV
+or Postgres. The chart generates a random password for each empty entry, and
+`nico-api` reads the file ahead of the persistent backends, so a generated
+password shadows the real one while the devices keep the old one. This holds
+for both UEFI defaults whatever the policy, and for the site-wide BMC root
+under the default `nico-api.credentials.bmcSiteWideRootSource: local_first`.
+Set each password to the value in use, or leave `siteCredentials` disabled and
+keep the credentials where they are.
 
 The DPF bootstrap is unchanged: `NICO_DPF_BMC_ROOT_PASSWORD` still seeds the
 watched version-0 Secret, with the same rules as on a Vault site. Per-DPU
@@ -1032,7 +1051,10 @@ Three things differ from a fresh install:
   KEK: run `nico-admin-cli secrets re-wrap` again and confirm that it
   reports `stale_remaining` as `0`, as
   [Rotating and Retiring Keys](../docs/configuration/secrets-storage.md#rotating-and-retiring-keys)
-  describes, because the Transit key goes with the Vault data. Third,
+  describes, because the Transit key goes with the Vault data. Keep the key
+  recoverable until the backup-retention window ends as well:
+  `stale_remaining` counts live entries only, and restoring a Postgres backup
+  taken before the re-wrap still needs the Transit key. Third,
   nothing outside the installer's releases may still use this Vault. The
   consumer probe sees only Deployments in `nico-system` whose container
   environment names `VAULT_ADDR`, as the chart renders it, and cert-manager
