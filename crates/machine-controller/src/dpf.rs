@@ -833,19 +833,19 @@ async fn initial_dpu_bmc_credential(
                 DpfError::BmcPasswordSourceUnavailable(
                     "could not read the DPU's confirmed BMC credential version".to_string(),
                 )
-            })?
-            .ok_or_else(|| {
-                DpfError::BmcPasswordSourceUnavailable(
-                    "DPU BMC credential enrollment is missing".to_string(),
-                )
             })?;
-    if state.rotating_to_version.is_some() {
+    if state
+        .as_ref()
+        .is_some_and(|state| state.rotating_to_version.is_some())
+    {
         return Err(DpfError::BmcPasswordSourceUnavailable(
             "DPU BMC credential rotation is in progress".to_string(),
         ));
     }
+    // Missing enrollment provides no proven version; the stored per-BMC credential
+    // is still authoritative for initial registration.
     let version = state
-        .current_version
+        .and_then(|state| state.current_version)
         .map(u32::try_from)
         .transpose()
         .map_err(|_| {
@@ -1316,9 +1316,6 @@ mod bmc_password_tests {
         );
 
         let retained_mac = "02:00:00:00:00:02".parse().unwrap();
-        record_device_enrolled(&mut conn, retained_mac, CredentialRotationType::Bmc, None)
-            .await
-            .unwrap();
         store
             .set_credentials(
                 &CredentialKey::BmcCredentials {
@@ -1328,6 +1325,26 @@ mod bmc_password_tests {
                 },
                 &Credentials::new("admin", "retained-password"),
             )
+            .await
+            .unwrap();
+        assert_eq!(
+            initial_dpu_bmc_credential(&store, &pool, retained_mac)
+                .await
+                .unwrap(),
+            (None, "retained-password".to_string())
+        );
+        assert!(
+            db::credential_rotation::device_rotation_operation_state(
+                &pool,
+                CredentialRotationType::Bmc,
+                retained_mac,
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+
+        record_device_enrolled(&mut conn, retained_mac, CredentialRotationType::Bmc, None)
             .await
             .unwrap();
         assert_eq!(
