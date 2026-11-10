@@ -954,6 +954,102 @@ fn boot_stage_duid_change_reuses_the_mac_owned_address() -> Result<(), eyre::Rep
 }
 
 #[test]
+fn handoff_with_chart_allocation_settings_survives_restart_and_expires() -> Result<(), eyre::Report>
+{
+    for (scenario, rapid_commit) in [("REQUEST", false), ("Rapid Commit", true)] {
+        let idx = 0xc6;
+        let address = DHCPv6Factory::mock_addr(idx);
+        let firmware_duid = DHCPv6Factory::duid_uuid(idx);
+        let mut h = Harness::new_with_config(Kea6Config {
+            multi_threading: false,
+            pool_id: None,
+            address_pool: "::1-ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe",
+            rapid_commit_v6: rapid_commit,
+            ..Kea6Config::default()
+        });
+        let assert_counts = |stats: serde_json::Value, expected: i64| {
+            assert_eq!(
+                stats["subnet[1].assigned-nas"][0][0], expected,
+                "{scenario}"
+            );
+            assert_eq!(
+                stats["subnet[1].pool[0].assigned-nas"][0][0], expected,
+                "{scenario}: implicit chart pool"
+            );
+        };
+        let offer = send_and_recv_v6(
+            &h.socket,
+            DHCPv6Factory::solicit_with_duid(idx, firmware_duid.clone(), true),
+        )?
+        .expect("firmware offer");
+        let server_id = DHCPv6Factory::server_id(&offer);
+        let firmware_reply = send_and_recv_v6(
+            &h.socket,
+            DHCPv6Factory::request_with_duid(
+                idx,
+                server_id.clone(),
+                address,
+                firmware_duid.clone(),
+                true,
+            ),
+        )?
+        .expect("firmware reply");
+        assert_eq!(DHCPv6Factory::ia_addr(&firmware_reply), Some(address));
+        h.wait_for_active_lease(address, &DHCPv6Factory::duid_hex(&firmware_duid))?;
+
+        let reply = if rapid_commit {
+            let reply = send_and_recv_v6(
+                &h.socket,
+                DHCPv6Factory::solicit_with_rapid_commit_options(idx, 1),
+            )?
+            .expect("OS rapid commit reply");
+            assert!(reply.opts().get(OptionCode::RapidCommit).is_some());
+            reply
+        } else {
+            let original = h.read_leases()?;
+            let offer =
+                send_and_recv_v6(&h.socket, DHCPv6Factory::solicit(idx))?.expect("OS offer");
+            assert_eq!(DHCPv6Factory::ia_addr(&offer), Some(address));
+            assert_eq!(h.read_leases()?, original, "offer preserves firmware owner");
+            send_and_recv_v6(
+                &h.socket,
+                DHCPv6Factory::request(idx, server_id.clone(), address),
+            )?
+            .expect("OS request reply")
+        };
+        assert_eq!(reply.msg_type(), v6::MessageType::Reply, "{scenario}");
+        assert_eq!(DHCPv6Factory::ia_addr(&reply), Some(address), "{scenario}");
+        h.wait_for_active_lease(address, &DHCPv6Factory::duid_ll_hex(idx))?;
+        assert_eq!(h.read_leases()?.len(), 1, "{scenario}");
+        assert_counts(h.kea.statistics()?, 1);
+        assert!(h.api_server.expired_leases().is_empty(), "{scenario}");
+        h.kea.restart()?;
+        h.wait_for_active_lease(address, &DHCPv6Factory::duid_ll_hex(idx))?;
+        assert_counts(h.kea.statistics()?, 1);
+        let renewed = send_and_recv_v6(
+            &h.socket,
+            DHCPv6Factory::renew(idx, server_id.clone(), address),
+        )?
+        .expect("OS renewal after restart");
+        assert_eq!(DHCPv6Factory::ia_addr(&renewed), Some(address));
+        assert!(h.api_server.expired_leases().is_empty(), "{scenario}");
+
+        let released = send_and_recv_v6(
+            &h.socket,
+            DHCPv6Factory::release_with_hop_count(idx, server_id, address, 0),
+        )?
+        .expect("OS release");
+        assert_eq!(released.msg_type(), v6::MessageType::Reply);
+        h.wait_for_no_active_lease(address, &DHCPv6Factory::duid_ll_hex(idx))?;
+        // Default background reclamation must still notify Core when no
+        // subsequent allocation selects the released target for handoff.
+        h.wait_for_scoped_expiry(address, &DHCPv6Factory::mac_string(idx));
+        assert_counts(h.kea.statistics()?, 0);
+    }
+    Ok(())
+}
+
+#[test]
 fn boot_stage_handoff_reuses_a_retained_reclaimed_lease() -> Result<(), eyre::Report> {
     let idx = 0xac;
     let mut config = short_expiry_config();
@@ -1397,6 +1493,78 @@ fn unsupported_ia_shapes_do_not_reach_native_handoff() -> Result<(), eyre::Repor
         assert_assigned_leases(&h.kea.statistics()?, 1, 1);
         assert_eq!(h.api_server.calls_for(ENDPOINT_DISCOVER_DHCP), before);
     }
+    Ok(())
+}
+
+#[test]
+fn expired_firmware_lease_hands_off_without_core_expiry() -> Result<(), eyre::Report> {
+    const HEADER: &str = "address,duid,valid_lifetime,expire,subnet_id,pref_lifetime,lease_type,iaid,prefix_len,fqdn_fwd,fqdn_rev,hostname,hwaddr,state,user_context,hwtype,hwaddr_source";
+    let idx = 0xc5;
+    let address = DHCPv6Factory::mock_addr(idx);
+    let mut h = Harness::new_with_generated_leases(
+        Kea6Config {
+            expired_leases_processing: Some(Kea6ExpiredLeasesProcessing {
+                reclaim_timer_wait_time: 3600,
+                flush_reclaimed_timer_wait_time: 3600,
+                hold_reclaimed_time: 3600,
+                max_reclaim_leases: 10,
+                max_reclaim_time: 100,
+                unwarned_reclaim_cycles: 1,
+            }),
+            ..Kea6Config::default()
+        },
+        || {
+            let expired = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                - 60;
+            format!(
+                "{HEADER}\n{address},{},600,{expired},1,300,0,{idx},128,0,0,,{},0,,1,8\n",
+                DHCPv6Factory::duid_ll_hex(idx),
+                DHCPv6Factory::mac_string(idx)
+            )
+        },
+    );
+    let original = h.read_leases()?;
+    assert_assigned_leases(&h.kea.statistics()?, 1, 1);
+    let os_duid = DHCPv6Factory::duid_en(27);
+    let offer = send_and_recv_v6(
+        &h.socket,
+        DHCPv6Factory::solicit_with_duid(idx, os_duid.clone(), true),
+    )?
+    .expect("OS offer after firmware expiry");
+    assert_eq!(DHCPv6Factory::ia_addr(&offer), Some(address));
+    assert_eq!(
+        h.read_leases()?,
+        original,
+        "offer must preserve expired row"
+    );
+    assert!(h.api_server.expired_leases().is_empty());
+
+    // A hint sends the expired row through native reclamation before SELECT.
+    let reply = send_and_recv_v6(
+        &h.socket,
+        DHCPv6Factory::request_with_duid(
+            idx,
+            DHCPv6Factory::server_id(&offer),
+            address,
+            os_duid.clone(),
+            true,
+        ),
+    )?
+    .expect("OS reply after firmware expiry");
+    assert!(
+        h.api_server.expired_leases().is_empty(),
+        "retiring the selected firmware row must preserve Core assignment"
+    );
+    assert_eq!(DHCPv6Factory::ia_addr(&reply), Some(address));
+    h.wait_for_active_lease(address, &DHCPv6Factory::duid_hex(&os_duid))?;
+    assert_eq!(h.read_leases()?.len(), 1);
+    assert_assigned_leases(&h.kea.statistics()?, 1, 1);
+    h.kea.restart()?;
+    h.wait_for_active_lease(address, &DHCPv6Factory::duid_hex(&os_duid))?;
+    assert_assigned_leases(&h.kea.statistics()?, 1, 1);
     Ok(())
 }
 
