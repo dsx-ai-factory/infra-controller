@@ -16,7 +16,9 @@
  */
 
 use super::{CollectorEvent, EventContext, EventProcessor};
-use crate::sink::{RedfishResourceType, ResourceStatusInfo, ResourceStatusObservation};
+use crate::sink::{
+    RedfishResourceType, ResourceStatusInfo, ResourceStatusObservation, ResourceStatusReport,
+};
 
 /// Projects source-owned Redfish observations into resource-status log events.
 #[derive(Default)]
@@ -43,34 +45,70 @@ impl EventProcessor for ResourceStatusProcessor {
             return Vec::new();
         };
 
-        let info = match observation.as_ref() {
-            ResourceStatusObservation::System(resource) => ResourceStatusInfo::from_redfish(
-                RedfishResourceType::System,
-                &resource.id,
-                &resource.name,
-                resource.status.as_ref(),
-            ),
-            ResourceStatusObservation::Manager(resource) => ResourceStatusInfo::from_redfish(
-                RedfishResourceType::Manager,
-                &resource.id,
-                &resource.name,
-                resource.status.as_ref(),
-            ),
-            ResourceStatusObservation::Chassis(resource) => ResourceStatusInfo::from_redfish(
-                RedfishResourceType::Chassis,
-                &resource.id,
-                &resource.name,
-                resource.status.as_ref(),
-            ),
-            ResourceStatusObservation::Firmware(resource) => ResourceStatusInfo::from_redfish(
-                RedfishResourceType::Firmware,
-                &resource.id,
-                &resource.name,
-                resource.status.as_ref(),
-            ),
+        let report = match observation.as_ref() {
+            ResourceStatusObservation::System(resources) => ResourceStatusReport {
+                resource_type: RedfishResourceType::System,
+                resources: resources
+                    .iter()
+                    .map(|resource| {
+                        ResourceStatusInfo::from_redfish(
+                            RedfishResourceType::System,
+                            &resource.id,
+                            &resource.name,
+                            resource.status.as_ref(),
+                        )
+                    })
+                    .collect(),
+            },
+            ResourceStatusObservation::Manager(resources) => ResourceStatusReport {
+                resource_type: RedfishResourceType::Manager,
+                resources: resources
+                    .iter()
+                    .map(|resource| {
+                        ResourceStatusInfo::from_redfish(
+                            RedfishResourceType::Manager,
+                            &resource.id,
+                            &resource.name,
+                            resource.status.as_ref(),
+                        )
+                    })
+                    .collect(),
+            },
+            ResourceStatusObservation::Chassis(resources) => ResourceStatusReport {
+                resource_type: RedfishResourceType::Chassis,
+                resources: resources
+                    .iter()
+                    .map(|resource| {
+                        ResourceStatusInfo::from_redfish(
+                            RedfishResourceType::Chassis,
+                            &resource.id,
+                            &resource.name,
+                            resource.status.as_ref(),
+                        )
+                    })
+                    .collect(),
+            },
+            ResourceStatusObservation::Firmware(resources) => ResourceStatusReport {
+                resource_type: RedfishResourceType::Firmware,
+                resources: resources
+                    .iter()
+                    .map(|resource| {
+                        ResourceStatusInfo::from_redfish(
+                            RedfishResourceType::Firmware,
+                            &resource.id,
+                            &resource.name,
+                            resource.status.as_ref(),
+                        )
+                    })
+                    .collect(),
+            },
         };
 
-        vec![CollectorEvent::ResourceStatus(Box::new(info))]
+        if report.resources.is_empty() {
+            Vec::new()
+        } else {
+            vec![CollectorEvent::ResourceStatus(Box::new(report))]
+        }
     }
 }
 
@@ -112,7 +150,20 @@ mod tests {
             }
         }))
         .expect("firmware resource");
-        let observation = ResourceStatusObservation::Firmware(Arc::new(resource));
+        let second_resource = serde_json::from_value(serde_json::json!({
+            "@odata.id": "/redfish/v1/UpdateService/FirmwareInventory/CPLD",
+            "Id": "CPLD",
+            "Name": "CPLD",
+            "Status": {
+                "State": "Enabled",
+                "Health": "OK"
+            }
+        }))
+        .expect("second firmware resource");
+        let observation = ResourceStatusObservation::Firmware(vec![
+            Arc::new(resource),
+            Arc::new(second_resource),
+        ]);
 
         let projected = processor.process_event(
             &context(),
@@ -120,9 +171,12 @@ mod tests {
         );
         assert!(matches!(
             projected.as_slice(),
-            [CollectorEvent::ResourceStatus(projected)] if projected.id == "BMC"
+            [CollectorEvent::ResourceStatus(projected)] if projected.resources.len() == 2
                 && projected.resource_type == RedfishResourceType::Firmware
-                && projected.status.as_ref().and_then(|status| status.health.as_deref())
+                && projected.resources[0].id == "BMC"
+                && projected.resources[1].id == "CPLD"
+                && projected.resources[0].status.as_ref()
+                    .and_then(|status| status.health.as_deref())
                     == Some("Warning")
         ));
         assert!(

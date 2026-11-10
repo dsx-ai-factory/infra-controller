@@ -90,14 +90,13 @@ impl<B: Bmc + 'static> FirmwareCollector<B> {
         let firmware_inventories = update_service.firmware_inventories().await?;
 
         let mut firmware_count = 0;
+        let mut firmware_statuses = Vec::new();
 
         for firmware_item in firmware_inventories.iter().flatten() {
             let firmware_data = firmware_item.raw();
 
             if self.emit_resource_status {
-                self.emit_event(CollectorEvent::ResourceStatusObservation(Box::new(
-                    ResourceStatusObservation::Firmware(Arc::clone(&firmware_data)),
-                )));
+                firmware_statuses.push(Arc::clone(&firmware_data));
             }
 
             let Some(version) = firmware_data.version.clone().flatten() else {
@@ -121,6 +120,11 @@ impl<B: Bmc + 'static> FirmwareCollector<B> {
                 attributes,
             }));
             firmware_count += 1;
+        }
+        if !firmware_statuses.is_empty() {
+            self.emit_event(CollectorEvent::ResourceStatusObservation(Box::new(
+                ResourceStatusObservation::Firmware(firmware_statuses),
+            )));
         }
 
         Ok(IterationResult {

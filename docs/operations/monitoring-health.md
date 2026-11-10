@@ -499,26 +499,22 @@ enabled = true
 
 Firmware collection continues to emit its existing version inventory records for resources that provide a version. Resource-status records are also emitted for versionless FirmwareInventory resources.
 
+NICo emits one resource-status record for each resource type observed in a source collector iteration. System and Chassis remain separate records even though entity discovery obtains both. Resource details are aggregated in the JSON log body, while attributes provide routing and indexing fields.
+
 Resource-status records use `event.type = "redfish.resource_status"` and carry these structured attributes:
 
 | Attribute | OTLP type | Presence | Value |
 |---|---|---|---|
-| `redfish.resource_status.schema_version` | string | Always | `v1` for the contract documented here. |
+| `redfish.resource_status.schema_version` | string | Always | `v2` for the contract documented here. |
 | `redfish.resource.type` | string | Always | `system`, `manager`, `chassis`, or `firmware`. |
-| `redfish.resource.id` | string | Always | Redfish resource `Id`. |
-| `redfish.resource.name` | string | Always | Redfish resource `Name`. |
-| `redfish.status.state` | string | Optional | Canonical Redfish `Status.State` value. |
-| `redfish.status.health` | string | Optional | Canonical Redfish `Status.Health` value. |
-| `redfish.status.health_rollup` | string | Optional | Canonical Redfish `Status.HealthRollup` value. |
-| `redfish.status.condition_count` | integer | Conditional | Number of conditions. Present when the BMC supplies `Status.Conditions`, including an empty list. |
-| `redfish.status.conditions` | array of `kvlist` | Conditional | First 64 conditions. Each entry contains `message_id` and the optional `timestamp`, `severity`, and `condition_type`. |
-| `redfish.status.conditions.dropped` | integer | Conditional | Number of conditions omitted after the first 64. |
+| `redfish.resource.count` | integer | Always | Number of resources represented in the body. |
+| `redfish.resource.ids` | array of strings | Always | Redfish resource `Id` values represented in the body. |
 
-The log body provides a compact human-readable summary, for example `firmware CPLDMB_0 status: state=Enabled, health=OK, health_rollup=OK, conditions=0`. A missing individual value is shown as `unknown`; if the resource omits the entire `Status` object, the body ends with `status: unavailable`. Use the structured attributes rather than parsing the body.
+The log body is a JSON object with a `resources` array. Each resource contains `id`, `name`, and `status`. Status contains the canonical Redfish `state`, `health`, `healthRollup`, and `conditions` fields. A missing individual value is JSON `null`; if the resource omits the entire `Status` object, `status` is `null`. At most 64 conditions are included per resource, and `conditionsDropped` gives the number omitted after that limit.
 
-The OTLP severity is `ERROR` when health, health rollup, or a condition is `Critical`; `WARN` when at least one is `Warning`; and `INFO` otherwise. Missing status remains missing rather than being reported as healthy. At most 64 conditions are included in one record.
+The record severity is the worst status represented in the report: `ERROR` when any resource health, health rollup, or condition is `Critical`; `WARN` when at least one is `Warning`; and `INFO` otherwise. Missing status remains missing rather than being reported as healthy.
 
-When `[sinks.tracing]` is enabled, each record is also logged as "Redfish resource status event" with `resource_type`, `resource_id`, `resource_name`, and `status` fields.
+When `[sinks.tracing]` is enabled, each report is also logged as "Redfish resource status report" with `resource_type`, `resource_count`, `resource_ids`, and `resources` fields.
 
 ## DPU Health Checks
 

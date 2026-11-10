@@ -132,6 +132,11 @@ impl DataSink for TracingSink {
             }
             CollectorEvent::ResourceStatusObservation(_) => {}
             CollectorEvent::ResourceStatus(info) => {
+                let resource_ids = info
+                    .resources
+                    .iter()
+                    .map(|resource| resource.id.as_str())
+                    .collect::<Vec<_>>();
                 tracing::info!(
                     endpoint = %context.endpoint_key(),
                     collector = %context.collector_type,
@@ -139,10 +144,10 @@ impl DataSink for TracingSink {
                     system_uuid = context.system_uuid().map(tracing::field::display),
                     labels = ?context.labels(),
                     resource_type = info.resource_type.as_str(),
-                    resource_id = %info.id,
-                    resource_name = %info.name,
-                    status = ?info.status,
-                    "Redfish resource status event"
+                    resource_count = info.resources.len(),
+                    resource_ids = ?resource_ids,
+                    resources = ?info.resources,
+                    "Redfish resource status report"
                 );
             }
             CollectorEvent::HealthReport(report) => {

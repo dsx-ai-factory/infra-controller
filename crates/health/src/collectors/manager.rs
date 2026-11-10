@@ -89,16 +89,20 @@ where
         };
 
         self.emit_event(CollectorEvent::MetricCollectionStart);
+        let mut manager_statuses = Vec::new();
         for manager in &managers {
             let raw = manager.raw();
             if self.emit_resource_status {
-                self.emit_event(CollectorEvent::ResourceStatusObservation(Box::new(
-                    ResourceStatusObservation::Manager(Arc::clone(&raw)),
-                )));
+                manager_statuses.push(Arc::clone(&raw));
             }
             for sample in manager_metrics(&raw, &raw.odata_id.to_string()) {
                 self.emit_event(CollectorEvent::Metric(Box::new(sample)));
             }
+        }
+        if !manager_statuses.is_empty() {
+            self.emit_event(CollectorEvent::ResourceStatusObservation(Box::new(
+                ResourceStatusObservation::Manager(manager_statuses),
+            )));
         }
         self.emit_event(CollectorEvent::MetricCollectionEnd);
 
