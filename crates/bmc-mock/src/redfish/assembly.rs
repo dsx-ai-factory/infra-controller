@@ -31,22 +31,30 @@ pub(crate) fn chassis_resource(chassis_id: &str) -> redfish::Resource<'static> {
     }
 }
 
-pub(crate) fn response(
-    chassis_id: &str,
-    member_id: &str,
-    serial_number: &str,
-) -> serde_json::Value {
+pub(crate) fn response(chassis_id: &str, assemblies: &[(&str, &str, &str)]) -> serde_json::Value {
     use super::schema::assembly::{Assembly, AssemblyData};
     let resource = chassis_resource(chassis_id);
-    let member_uri = format!("{}#/Assemblies/{member_id}", resource.odata_id);
+    let member_uris: Vec<_> = (0..assemblies.len())
+        .map(|index| format!("{}#/Assemblies/{index}", resource.odata_id))
+        .collect();
     let model = Assembly::new(
         resource.odata_id.as_ref(),
         resource.id.as_ref(),
         resource.name.as_ref(),
     )
-    .assemblies([member_uri.as_str()]);
-    let assembly = AssemblyData::new(member_uri, member_id).serial_number(serial_number);
+    .assemblies(member_uris.iter().map(String::as_str));
+    let assemblies: Vec<_> = assemblies
+        .iter()
+        .zip(member_uris.iter())
+        .enumerate()
+        .map(|(index, ((name, model, serial_number), member_uri))| {
+            AssemblyData::new(member_uri.as_str(), index.to_string())
+                .name(*name)
+                .model(*model)
+                .serial_number(*serial_number)
+        })
+        .collect();
     // The generator represents navigation properties as links; assembly data
     // is embedded in the containing resource by Redfish.
-    model.into_json().patch(json!({"Assemblies": [assembly]}))
+    model.into_json().patch(json!({"Assemblies": assemblies}))
 }
