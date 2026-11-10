@@ -1800,7 +1800,7 @@ jobs:
         # still lets the post steps run, rather than the runner being killed
         # mid-flight with no attribution.
         timeout-minutes: 15
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/codeql-scan@20dc10dda4fa9f8f0380a47cd9a7800d3da3dcf3
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/codeql-scan@a86675cddd27de0cc3182d2a33db75a26c20bb90
         with:
           languages: 'rust'
           build-mode: 'none'
