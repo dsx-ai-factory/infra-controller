@@ -47,7 +47,7 @@ const RESOURCE_STATUS_SCHEMA_VERSION: &str = "v2";
 const RESOURCE_STATUS_SCHEMA_VERSION_KEY: &str = "redfish.resource_status.schema_version";
 const RESOURCE_TYPE_KEY: &str = "redfish.resource.type";
 const RESOURCE_COUNT_KEY: &str = "redfish.resource.count";
-const RESOURCE_IDS_KEY: &str = "redfish.resource.ids";
+const RESOURCE_STATUS_AGGREGATE_HEALTH_KEY: &str = "redfish.resource_status.aggregate_health";
 
 /// Maximum alerts serialized into the `health_report.alerts` attribute.
 ///
@@ -377,14 +377,8 @@ fn resource_status_attributes(report: &ResourceStatusReport) -> Vec<(&'static st
             AnyValue::from(i64::try_from(report.resources.len()).unwrap_or(i64::MAX)),
         ),
         (
-            RESOURCE_IDS_KEY,
-            AnyValue::ListAny(Box::new(
-                report
-                    .resources
-                    .iter()
-                    .map(|resource| AnyValue::from(resource.id.clone()))
-                    .collect(),
-            )),
+            RESOURCE_STATUS_AGGREGATE_HEALTH_KEY,
+            AnyValue::from(resource_status_report_health(report).as_str()),
         ),
     ]
 }
@@ -446,9 +440,28 @@ fn resource_status_body(report: &ResourceStatusReport) -> Result<String, serde_j
     serde_json::to_string(&ResourceStatusBody { resources })
 }
 
-fn resource_status_severity(info: &ResourceStatusInfo) -> LogSeverity {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum ResourceStatusHealth {
+    Healthy,
+    Unknown,
+    Degraded,
+    Unhealthy,
+}
+
+impl ResourceStatusHealth {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "Healthy",
+            Self::Unknown => "Unknown",
+            Self::Degraded => "Degraded",
+            Self::Unhealthy => "Unhealthy",
+        }
+    }
+}
+
+fn resource_status_health(info: &ResourceStatusInfo) -> ResourceStatusHealth {
     let Some(status) = &info.status else {
-        return LogSeverity::Info;
+        return ResourceStatusHealth::Unknown;
     };
     let values = status
         .health_rollup
@@ -461,34 +474,42 @@ fn resource_status_severity(info: &ResourceStatusInfo) -> LogSeverity {
                 .flatten()
                 .filter_map(|condition| condition.severity.as_ref()),
         );
-    let mut warning = false;
+    let mut health = ResourceStatusHealth::Healthy;
+    let mut observed = false;
     for value in values {
-        if value == "Critical" {
-            return LogSeverity::Error;
-        }
-        warning |= value == "Warning";
-    }
-    if warning {
-        LogSeverity::Warn
-    } else {
-        LogSeverity::Info
-    }
-}
-
-fn resource_status_report_severity(report: &ResourceStatusReport) -> LogSeverity {
-    let mut warning = false;
-    for resource in &report.resources {
-        match resource_status_severity(resource) {
-            LogSeverity::Error => return LogSeverity::Error,
-            LogSeverity::Warn => warning = true,
+        observed = true;
+        match value.as_str() {
+            "Critical" => return ResourceStatusHealth::Unhealthy,
+            "Warning" => health = ResourceStatusHealth::Degraded,
+            "OK" => {}
+            _ if health < ResourceStatusHealth::Unknown => {
+                health = ResourceStatusHealth::Unknown;
+            }
             _ => {}
         }
     }
 
-    if warning {
-        LogSeverity::Warn
+    if observed {
+        health
     } else {
-        LogSeverity::Info
+        ResourceStatusHealth::Unknown
+    }
+}
+
+fn resource_status_report_health(report: &ResourceStatusReport) -> ResourceStatusHealth {
+    report
+        .resources
+        .iter()
+        .map(resource_status_health)
+        .max()
+        .unwrap_or(ResourceStatusHealth::Unknown)
+}
+
+fn resource_status_report_severity(report: &ResourceStatusReport) -> LogSeverity {
+    match resource_status_report_health(report) {
+        ResourceStatusHealth::Unhealthy => LogSeverity::Error,
+        ResourceStatusHealth::Degraded => LogSeverity::Warn,
+        ResourceStatusHealth::Unknown | ResourceStatusHealth::Healthy => LogSeverity::Info,
     }
 }
 
@@ -1442,15 +1463,13 @@ mod tests {
                 attr_int_value(&record.attributes, RESOURCE_COUNT_KEY),
                 Some(2)
             );
-            let ids = attr_array_value(&record.attributes, RESOURCE_IDS_KEY).expect("resource IDs");
-            assert_eq!(ids.len(), 2);
             assert_eq!(
-                ids[0].value.as_ref(),
-                Some(&any_value::Value::StringValue("resource-1".to_string()))
+                attr_value(&record.attributes, RESOURCE_STATUS_AGGREGATE_HEALTH_KEY),
+                Some("Unhealthy")
             );
             assert_eq!(
-                ids[1].value.as_ref(),
-                Some(&any_value::Value::StringValue("resource-2".to_string()))
+                attr_array_value(&record.attributes, "redfish.resource.ids"),
+                None
             );
         }
     }
@@ -1484,11 +1503,58 @@ mod tests {
         let record = &request.resource_logs[0].scope_logs[0].log_records[0];
 
         assert_eq!(record.severity_text, "WARN");
+        assert_eq!(
+            attr_value(&record.attributes, RESOURCE_STATUS_AGGREGATE_HEALTH_KEY),
+            Some("Degraded")
+        );
         let body: serde_json::Value =
             serde_json::from_str(body_value(record).expect("JSON body")).expect("valid JSON");
         assert!(body["resources"][0]["status"].is_null());
         assert!(body["resources"][1]["status"]["state"].is_null());
         assert_eq!(body["resources"][1]["status"]["health"], "Warning");
+    }
+
+    #[test]
+    fn resource_status_report_health_uses_documented_precedence() {
+        fn info(health: Option<Option<&str>>) -> ResourceStatusInfo {
+            ResourceStatusInfo {
+                resource_type: RedfishResourceType::Firmware,
+                id: "BMC".to_string(),
+                name: "Baseboard Management Controller".to_string(),
+                status: health.map(|health| RedfishStatus {
+                    state: Some("Enabled".to_string()),
+                    health: health.map(str::to_string),
+                    health_rollup: None,
+                    conditions: None,
+                }),
+            }
+        }
+
+        for (resources, expected) in [
+            (vec![info(Some(Some("OK")))], ResourceStatusHealth::Healthy),
+            (
+                vec![info(Some(Some("OK"))), info(Some(None))],
+                ResourceStatusHealth::Unknown,
+            ),
+            (
+                vec![info(Some(Some("OK"))), info(None)],
+                ResourceStatusHealth::Unknown,
+            ),
+            (
+                vec![info(None), info(Some(Some("Warning")))],
+                ResourceStatusHealth::Degraded,
+            ),
+            (
+                vec![info(Some(Some("Warning"))), info(Some(Some("Critical")))],
+                ResourceStatusHealth::Unhealthy,
+            ),
+        ] {
+            let report = ResourceStatusReport {
+                resource_type: RedfishResourceType::Firmware,
+                resources,
+            };
+            assert_eq!(resource_status_report_health(&report), expected);
+        }
     }
 
     #[test]

@@ -499,7 +499,7 @@ enabled = true
 
 Firmware collection continues to emit its existing version inventory records for resources that provide a version. Resource-status records are also emitted for versionless FirmwareInventory resources.
 
-NICo emits one resource-status record for each resource type observed in a source collector iteration. System and Chassis remain separate records even though entity discovery obtains both. Resource details are aggregated in the JSON log body, while attributes provide routing and indexing fields.
+NICo emits one resource-status record for each resource type observed in a source collector iteration. System and Chassis remain separate records even though entity discovery obtains both. Resource details are aggregated in the JSON log body, while low-cardinality attributes provide routing fields and the aggregate result.
 
 Resource-status records use `event.type = "redfish.resource_status"` and carry these structured attributes:
 
@@ -508,11 +508,11 @@ Resource-status records use `event.type = "redfish.resource_status"` and carry t
 | `redfish.resource_status.schema_version` | string | Always | `v2` for the contract documented here. |
 | `redfish.resource.type` | string | Always | `system`, `manager`, `chassis`, or `firmware`. |
 | `redfish.resource.count` | integer | Always | Number of resources represented in the body. |
-| `redfish.resource.ids` | array of strings | Always | Redfish resource `Id` values represented in the body. |
+| `redfish.resource_status.aggregate_health` | string | Always | `Unhealthy`, `Degraded`, `Unknown`, or `Healthy` for the complete report. |
 
-The log body is a JSON object with a `resources` array. Each resource contains `id`, `name`, and `status`. Status contains the canonical Redfish `state`, `health`, `healthRollup`, and `conditions` fields. A missing individual value is JSON `null`; if the resource omits the entire `Status` object, `status` is `null`. At most 64 conditions are included per resource, and `conditionsDropped` gives the number omitted after that limit.
+The log body is a JSON object with a `resources` array. Each resource contains `id`, `name`, and `status`. Status contains the canonical Redfish `state`, `health`, `healthRollup`, and `conditions` fields. Each condition contains `timestamp`, `messageId`, `severity`, and `conditionType`; all except `messageId` can be `null`. A missing individual value is JSON `null`; if the resource omits the entire `Status` object, `status` is `null`. At most 64 conditions are included per resource, and `conditionsDropped` gives the number omitted after that limit or `0` when `conditions` is `null`.
 
-The record severity is the worst status represented in the report: `ERROR` when any resource health, health rollup, or condition is `Critical`; `WARN` when at least one is `Warning`; and `INFO` otherwise. Missing status remains missing rather than being reported as healthy.
+Aggregate health uses the worst result represented in the report: any `Critical` health, health rollup, or condition produces `Unhealthy`; otherwise any `Warning` produces `Degraded`; otherwise any resource without an available health signal produces `Unknown`; and only reports whose resources all have `OK` health signals produce `Healthy`. Record severity follows the aggregate result: `ERROR` for `Unhealthy`, `WARN` for `Degraded`, and `INFO` for `Unknown` or `Healthy`. Missing status remains missing rather than being reported as healthy.
 
 When `[sinks.tracing]` is enabled, each report is also logged as "Redfish resource status report" with `resource_type`, `resource_count`, `resource_ids`, and `resources` fields.
 
