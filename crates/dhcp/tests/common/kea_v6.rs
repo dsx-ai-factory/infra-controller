@@ -74,6 +74,8 @@ pub(crate) struct Kea6Config {
     pub(crate) reject_runtime_capability: Option<&'static str>,
     pub(crate) reserved_address: Option<(&'static str, &'static str, bool)>,
     pub(crate) address_pool: &'static str,
+    pub(crate) pool_id: Option<u32>,
+    pub(crate) multi_threading: bool,
     pub(crate) mac_sources: Option<&'static [&'static str]>,
     pub(crate) expired_leases_processing: Option<Kea6ExpiredLeasesProcessing>,
 }
@@ -98,6 +100,8 @@ impl Default for Kea6Config {
             reject_runtime_capability: None,
             reserved_address: None,
             address_pool: "2001:db8::1-2001:db8::ffff",
+            pool_id: Some(1),
+            multi_threading: true,
             mac_sources: None,
             expired_leases_processing: None,
         }
@@ -703,7 +707,7 @@ impl Kea6 {
             },
             // Exercise the hook's advertised Kea multithreading compatibility.
             "multi-threading": {
-                "enable-multi-threading": true,
+                "enable-multi-threading": config.multi_threading,
                 "thread-pool-size": 4,
                 "packet-queue-size": 28
             },
@@ -768,10 +772,10 @@ impl Kea6 {
                 }
             ]
         });
-        {
+        if let Some(pool_id) = config.pool_id {
             // Zero also means an unset lease pool. Use a real positive ID so
             // restart assertions can detect a redirected lease retaining it.
-            dhcp6["subnet6"][0]["pools"][0]["pool-id"] = json!(1);
+            dhcp6["subnet6"][0]["pools"][0]["pool-id"] = json!(pool_id);
         }
         if config.continue_after_store_failure {
             // Kea 3 normally shuts down after fatal memfile I/O. Exercise its

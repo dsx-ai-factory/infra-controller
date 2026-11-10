@@ -118,8 +118,11 @@ candidate is a separate operation and can succeed before the target write fails.
 Firmware RELEASE ends the local Kea lease without expiring Core's assignment.
 Once Kea considers the released lease expired, the OS can reuse it without
 waiting for a background reclamation pass. Allocation-time retirement of that
-same NIC's selected released target also preserves Core's assignment; background
-reclamation retains the normal scoped expiry notification.
+same NIC's selected expired or released target also preserves Core's assignment.
+Background reclamation retains the normal scoped expiry notification, including
+released firmware leases that the OS has not yet reclaimed. If Core's
+`dhcp_lease_expiry_handling` is enabled, that notification removes the matching
+Core allocation; the next discovery must allocate again. It is disabled by default.
 
 Kea 3 enables multithreading by default; the repository chart explicitly disables
 it. For configurations that enable multithreading, the hook holds MAC and address guards
@@ -129,14 +132,19 @@ also validate their persisted lease snapshots and acquire each address guard
 before native reservation cleanup or updates, including queued continuations.
 A different relay MAC cannot use an unhinted firmware DUID/IAID request to
 restore a stale owner after handoff. Unrelated clients can continue while Core
-discovery is pending. These guards coordinate one Kea process, not external
-lease writers or multiple active servers.
+discovery is pending. Background reclamation retains acquired guards until the
+pass finishes, so a competing client may need to retry. These guards coordinate
+one Kea process, not external lease writers or multiple active servers.
 
 A failed retirement write vetoes native reclamation before counters change and
 before allocation or renewal continues. Kea 3's default memfile failure policy
-stops the server on fatal storage I/O errors; restore storage and restart with
-the retained lease files before retrying. A custom `serve-retry-continue` policy
-permits in-process retries, but still cannot bypass a refused retirement. Delayed RENEW or REBIND with the previous DUID or IAID is dropped with
+stops the server on fatal storage I/O errors. With native or externally mounted
+lease storage, restore storage and restart with the retained lease files before
+retrying. The chart does not mount a volume at `/var/lib/kea`: its lease files
+live in ephemeral container storage and are lost on container or pod replacement.
+Retained-file recovery requires operator-provided storage and a single writer.
+A custom `serve-retry-continue` policy permits in-process retries, but still
+cannot bypass a refused retirement. Delayed RENEW or REBIND with the previous DUID or IAID is dropped with
 `stale_lease_identity` and does not extend or replace the new owner's lease.
 The receive-side drop sends no reply; refusal in the native existing-lease path
 can return an IA-scoped failure. Inspect the `reason` label on
@@ -146,7 +154,7 @@ The IPv6 memfile writer closes and truncates a failed append to its previous
 offset before reopening it. Refused buffered rows cannot be replayed by a later
 append or graceful shutdown. Recovery reopens the existing file without a create/truncate fallback.
 If truncation fails, Kea stops even with `serve-retry-continue`; inspect and
-repair the lease file before restart. Reopen failures retain fatal-error handling. This is not a power-loss
+repair any retained lease file before restart. Reopen failures retain fatal-error handling. This is not a power-loss
 or cross-process transaction guarantee.
 
 The chart does not enable native D2 updates. If a custom configuration enables

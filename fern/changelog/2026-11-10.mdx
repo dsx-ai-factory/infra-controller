@@ -1,0 +1,28 @@
+---
+tags: ["unreleased", "deployment", "provisioning"]
+---
+
+## NVIDIA Infra Controller v2.5 — unreleased
+
+### DHCPv6 firmware-to-OS lease handoff
+
+DHCPv6 can transfer Core's selected address between firmware and OS clients with
+different DUIDs or IAIDs on the same NIC. The stored MAC and subnet must match.
+REQUEST or jointly enabled Rapid Commit persists the new owner; ordinary
+SOLICIT preserves the previous owner. Stale renewals cannot restore the previous
+identity, and failed lease writes preserve the target for retry.
+
+Deploy the NICo hook with the patched Kea runtime from the same repository
+revision. External images using stock Kea, or an older NICo patch, fail DHCPv6
+startup with `NICo DHCPv6 requires patched Kea`. Rebuild those images; the package
+version alone is insufficient. No chart value or lease-file schema change is
+required. DHCPv4 does not require this DHCPv6 contract.
+
+Allocation-time handoff preserves Core's assignment, including an expired or
+released firmware lease. Normal background expiry remains enabled and can
+remove the Core allocation when `dhcp_lease_expiry_handling` is enabled.
+The chart uses ephemeral lease storage; retaining leases across container or pod
+replacement requires operator-provided storage.
+
+See [Lease Handoff and Refusal](../../docs/provisioning/dhcpv6-deployment.md#lease-handoff-and-refusal)
+for ownership, concurrency, recovery, and custom native D2 constraints.

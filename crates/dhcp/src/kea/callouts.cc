@@ -1828,10 +1828,10 @@ int lease6_expire(CalloutHandle &handle) {
   isc::asiolink::IOAddress selected_address("::");
   const bool selected_target = machine &&
       machine_ipv6_address(machine.get(), selected_address) && selected_address == lease->addr_;
-  bool released_handoff = false;
-  if (retire_owned && selected_target && lease->state_ == Lease::STATE_RELEASED) {
+  bool selected_handoff = false;
+  if (retire_owned && selected_target) {
     char *selected_mac = machine_get_discovery_mac(machine.get());
-    released_handoff = selected_mac && mac == canonical_mac(selected_mac);
+    selected_handoff = selected_mac && mac == canonical_mac(selected_mac);
     if (selected_mac) {
       machine_free_discovery_mac(selected_mac);
     }
@@ -1889,8 +1889,8 @@ int lease6_expire(CalloutHandle &handle) {
     // Keep native declined-lease recovery and unsupported lease types intact.
     handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
   }
-  // RELEASE already ended the firmware's local lease. Reusing its selected
-  // address for the same NIC must not deallocate the new Core assignment.
-  return released_handoff ? 0 : handle_carbide_lease6_end(handle, "lease6_expire");
+  // Allocation-time retirement of the same NIC's selected expired or released
+  // target must preserve Core ownership. Background sweeps have no selection.
+  return selected_handoff ? 0 : handle_carbide_lease6_end(handle, "lease6_expire");
 }
 }
