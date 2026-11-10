@@ -120,6 +120,15 @@ pub(crate) enum BmcSessionError {
         detail: String,
     },
 
+    /// The BMC rejected the stored root credential (HTTP 401/403) but the lockout breaker has
+    /// not tripped yet. Distinct from `Redfish` so callers can tell a rejected password from a
+    /// transport or protocol failure.
+    #[error("BMC at {bmc_addr} rejected the stored root credential with HTTP {http_status}")]
+    CredentialRejected {
+        bmc_addr: SocketAddr,
+        http_status: u16,
+    },
+
     /// Failure reading the BMC root credentials from the credential store.
     #[error("credential store error: {0}")]
     CredentialStore(String),
@@ -794,13 +803,23 @@ impl BmcSessionManager {
         bmc_addr: SocketAddr,
         rejected_credential_fingerprint: u64,
     ) -> BmcSessionError {
-        if let Some(status) = classify_unauthorized(&err)
-            && let Some(lockout_err) = self
-                .record_unauthorized(bmc_mac, status, rejected_credential_fingerprint)
+        // Preserve a BMC authentication rejection even before enough attempts
+        // have accumulated to trip the lockout breaker.
+        if let Some(http_status) = classify_unauthorized(&err) {
+            if let Some(lockout_err) = self
+                .record_unauthorized(bmc_mac, http_status, rejected_credential_fingerprint)
                 .await
-        {
-            return lockout_err;
+            {
+                return lockout_err;
+            }
+            return BmcSessionError::CredentialRejected {
+                bmc_addr,
+                http_status,
+            };
         }
+
+        // Keep transport, protocol, and other HTTP failures on the general
+        // Redfish path.
         BmcSessionError::Redfish {
             bmc_addr,
             detail: err.to_string(),
@@ -995,6 +1014,7 @@ mod tests {
     use arc_swap::ArcSwap;
     use async_trait::async_trait;
     use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs};
+    use carbide_redfish::nv_redfish::BmcError;
     use carbide_secrets::SecretsError;
     use carbide_secrets::credentials::{
         BmcCredentialType, CredentialKey, CredentialManager, CredentialReader, CredentialWriter,
@@ -1005,6 +1025,7 @@ mod tests {
     use db::ConditionalWrite;
     use db::bmc_redfish_session::SessionNotOwned;
     use mac_address::MacAddress;
+    use nv_redfish::Error as NvError;
     use sqlx::types::chrono::Utc;
     use tokio::sync::Mutex;
 
@@ -1757,6 +1778,85 @@ mod tests {
             .expect("state should exist after recording");
         assert_eq!(state.consecutive_unauthorized, 2);
         assert!(state.tripped_at.is_none());
+    }
+
+    /// Verifies classification preserves a below-threshold BMC rejection while leaving
+    /// non-authentication failures on the general Redfish error path.
+    #[tokio::test]
+    async fn classify_and_map_distinguishes_bmc_rejection_from_other_redfish_errors() {
+        struct Case {
+            scenario: &'static str,
+            status: reqwest::StatusCode,
+            expected_rejection_status: Option<u16>,
+        }
+
+        let (manager, _store) = manager_with_creds_and_threshold(3);
+        let bmc_mac = mac(0xDE);
+        let bmc_addr = "192.0.2.1:443".parse().expect("valid BMC address");
+
+        for case in [
+            // A first 401 consumes breaker budget but must remain recognizable to the caller.
+            Case {
+                scenario: "below-threshold credential rejection",
+                status: reqwest::StatusCode::UNAUTHORIZED,
+                expected_rejection_status: Some(401),
+            },
+            // An upstream transport-style HTTP failure is not evidence that credentials failed.
+            Case {
+                scenario: "non-authentication Redfish failure",
+                status: reqwest::StatusCode::BAD_GATEWAY,
+                expected_rejection_status: None,
+            },
+        ] {
+            // Use the same nv-redfish error shape produced by an unsuccessful BMC response.
+            let error = NvError::Bmc(BmcError::InvalidResponse {
+                url: "https://192.0.2.1/redfish/v1"
+                    .parse()
+                    .expect("valid Redfish URL"),
+                status: case.status,
+                text: "test response".to_string(),
+            });
+
+            // Classify through the production path so breaker recording and error mapping
+            // are both exercised.
+            let mapped = manager
+                .classify_and_map(
+                    error,
+                    bmc_mac,
+                    bmc_addr,
+                    test_credential_fingerprint("password"),
+                )
+                .await;
+
+            // Authentication responses expose their status; all other failures retain
+            // the detailed Redfish error.
+            match (mapped, case.expected_rejection_status) {
+                (
+                    BmcSessionError::CredentialRejected {
+                        bmc_addr: got_addr,
+                        http_status,
+                    },
+                    Some(expected_status),
+                ) => {
+                    assert_eq!(got_addr, bmc_addr, "{}", case.scenario);
+                    assert_eq!(http_status, expected_status, "{}", case.scenario);
+                }
+                (
+                    BmcSessionError::Redfish {
+                        bmc_addr: got_addr, ..
+                    },
+                    None,
+                ) => {
+                    assert_eq!(got_addr, bmc_addr, "{}", case.scenario);
+                }
+                (other, expected) => {
+                    panic!(
+                        "{}: expected rejection status {expected:?}, got {other:?}",
+                        case.scenario
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
