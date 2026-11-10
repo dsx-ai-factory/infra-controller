@@ -367,9 +367,8 @@ async fn remote_dpu_discovery_and_site_repair_reuse_a_lost_reply(
         let owned = found.matches.iter().filter(|entry| entry.ip_type == forge::IpType::LoopbackIp as i32).collect::<Vec<_>>();
         assert_eq!(owned.len(), 1);
         assert_eq!(owned[0].owner_id.as_deref(), Some(inputs.machine_id.to_string().as_str()));
-        assert!(!creator.create_managed_host(
-            &inputs.explored, &mut inputs.host_report, Some(&inputs.expected), &fixture.env.pool,
-        ).await?);
+        let explorer = owning_site_explorer(&fixture, &inputs).await?;
+        explorer.run_single_iteration().await?;
         let repaired = db::machine::get_network_config(&fixture.env.pool, &inputs.machine_id).await?;
         assert_eq!(repaired.value.loopback_ip, Some(address));
         assert_ne!(repaired.version, cleared_version);

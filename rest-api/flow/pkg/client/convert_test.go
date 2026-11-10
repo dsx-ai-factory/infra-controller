@@ -17,10 +17,11 @@ func TestRackFromProto(t *testing.T) {
 	domainIDs := []uuid.UUID{uuid.New(), uuid.New()}
 
 	tests := []struct {
-		name      string
-		rack      *pb.Rack
-		want      []uuid.UUID
-		wantPhase types.Phase
+		name        string
+		rack        *pb.Rack
+		want        []uuid.UUID
+		wantPhase   types.Phase
+		wantDetails *types.RackOperationStatusDetails
 	}{
 		{
 			name: "nil rack",
@@ -36,11 +37,13 @@ func TestRackFromProto(t *testing.T) {
 		{
 			name: "rack with domain memberships",
 			rack: &pb.Rack{
-				NvlDomainIds:    uuidsToProto(domainIDs),
-				OperationStatus: pb.Phase_PHASE_DELETING,
+				NvlDomainIds:           uuidsToProto(domainIDs),
+				OperationStatus:        pb.Phase_PHASE_DELETING,
+				OperationStatusDetails: &pb.RackOperationStatusDetails{TrayCountsByType: &pb.TrayStatusCountsByType{NvSwitch: &pb.TrayStatusCounts{Deleting: 2}}},
 			},
-			want:      domainIDs,
-			wantPhase: types.PhaseDeleting,
+			want:        domainIDs,
+			wantPhase:   types.PhaseDeleting,
+			wantDetails: &types.RackOperationStatusDetails{TrayCountsByType: types.TrayStatusCountsByType{NVSwitch: types.TrayStatusCounts{Deleting: 2}}},
 		},
 	}
 
@@ -53,6 +56,7 @@ func TestRackFromProto(t *testing.T) {
 			}
 			assert.Equal(t, tt.want, got.NVLDomainIDs)
 			assert.Equal(t, tt.wantPhase, got.OperationStatus)
+			assert.Equal(t, tt.wantDetails, got.OperationStatusDetails)
 		})
 	}
 }
@@ -77,7 +81,7 @@ func TestRackToProto(t *testing.T) {
 		},
 		{
 			name: "rack with NVLink domains",
-			rack: &types.Rack{NVLDomainIDs: domainIDs, OperationStatus: types.PhaseError},
+			rack: &types.Rack{NVLDomainIDs: domainIDs, OperationStatus: types.PhaseError, OperationStatusDetails: &types.RackOperationStatusDetails{TrayCountsByType: types.TrayStatusCountsByType{Compute: types.TrayStatusCounts{Error: 1}}}},
 			want: uuidsToProto(domainIDs),
 		},
 	}
@@ -91,6 +95,7 @@ func TestRackToProto(t *testing.T) {
 			}
 			assert.Equal(t, tt.want, got.GetNvlDomainIds())
 			assert.Equal(t, pb.Phase_PHASE_UNKNOWN, got.GetOperationStatus())
+			assert.Nil(t, got.GetOperationStatusDetails())
 		})
 	}
 }

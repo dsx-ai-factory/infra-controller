@@ -118,9 +118,9 @@ func TestParseRules(t *testing.T) {
 		{"whole run over seven days", sub("3600", "604801"), "timeouts.wholeRunSeconds", "must be at most 604800"},
 
 		{"result budget at the lower bound", with("resultMaxBytes: 262144\n"), "", ""},
-		{"result budget at the upper bound", with("resultMaxBytes: 1000000\n"), "", ""},
-		{"result budget under the bound", with("resultMaxBytes: 262143\n"), "resultMaxBytes", "must be 262144 to 1000000"},
-		{"result budget over the bound", with("resultMaxBytes: 1000001\n"), "resultMaxBytes", "must be 262144 to 1000000"},
+		{"result budget at the upper bound", with("resultMaxBytes: 16777216\n"), "", ""},
+		{"result budget under the bound", with("resultMaxBytes: 262143\n"), "resultMaxBytes", "must be 262144 to 16777216"},
+		{"result budget over the bound", with("resultMaxBytes: 16777217\n"), "resultMaxBytes", "must be 262144 to 16777216"},
 		{"result budget over 32 bits", with("resultMaxBytes: 4294967296\n"), "yaml", ""},
 
 		{"probe URL without scheme", with("probe:\n  url: nico-site-health-probe-api:9010\n"), "probe.url", "must be an http or https URL"},
@@ -195,7 +195,7 @@ func TestParseDefaults(t *testing.T) {
 		Timeouts:       Timeouts{WholeRunSeconds: 3600, ReadinessSeconds: 300, FinalizeSeconds: 900},
 		Journal:        Journal{Dir: "/journal"},
 		ConfigMaps:     ConfigMaps{Run: "r1-burst-run", Result: "r1-burst-result"},
-		ResultMaxBytes: 900000,
+		ResultMaxBytes: 8388608,
 	}
 	if !reflect.DeepEqual(*c, want) {
 		t.Errorf("got %+v, want %+v", *c, want)
@@ -231,6 +231,20 @@ func TestChecks(t *testing.T) {
 	for id, ok := range map[string]bool{"": false, "r1-burst-abcde": true, strings.Repeat("x", 253): true, strings.Repeat("x", 254): false} {
 		if err := (&Config{ExecutionID: id}).CheckExecutionID(); (err == nil) != ok {
 			t.Errorf("executionId of %d bytes: %v", len(id), err)
+		}
+	}
+}
+
+// TestIngestionNeedsTheLongerTimeouts: ingestion's ten summaries and end reads run in the finalize budget.
+func TestIngestionNeedsTheLongerTimeouts(t *testing.T) {
+	for _, tc := range []struct{ timeouts, err string }{
+		{"wholeRunSeconds: 3600\n  finalizeSeconds: 1800", ""},
+		{"wholeRunSeconds: 1800\n  finalizeSeconds: 900", "config timeouts.wholeRunSeconds: must be over 1800 for ingestion"},
+		{"wholeRunSeconds: 3600\n  finalizeSeconds: 1799", "config timeouts.finalizeSeconds: must be at least 1800 for ingestion"},
+	} {
+		raw := strings.Replace(strings.Replace(minimal, "command: burst", "command: ingestion", 1), "wholeRunSeconds: 3600", tc.timeouts, 1)
+		if _, err := Parse([]byte(raw), "ingestion"); err == nil && tc.err != "" || err != nil && err.Error() != tc.err {
+			t.Errorf("%q: %v, want %q", tc.timeouts, err, tc.err)
 		}
 	}
 }

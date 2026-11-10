@@ -175,7 +175,8 @@ modes, paths, inventory, and contents described above.
 ## Embedded metadata
 
 The Linux and Darwin `api` and `site-agent` builds set `metadata.Version` to
-`--version` and `metadata.BuildTime` to `YYYY-MM-DD HH:MM:SS`. Their `flow`
+`--version` and `metadata.BuildTime` to `YYYY-MM-DD HH:MM:SS`. Their `workflow`
+builds set `metadata.Version` to `--version`. Their `flow`
 builds set `metadata.Version` to `--version`, `metadata.BuildTime` to
 `YYYY-MM-DDTHH:MM:SSZ`, and `metadata.GitCommit` to `--short-sha`. Their full Go
 symbol paths live in the source manifest and are pinned by the command-contract

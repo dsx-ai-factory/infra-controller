@@ -790,6 +790,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "bmc-driver-validator"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "bmc-drivers",
+ "bmc-explorer",
+ "bmc-platform",
+ "bmc-runtime",
+ "carbide-ipmi",
+ "carbide-redfish",
+ "carbide-secrets",
+ "carbide-uuid",
+ "clap",
+ "colored",
+ "futures",
+ "libc",
+ "mac_address",
+ "nv-redfish",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "strum",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "bmc-drivers"
 version = "0.1.0"
 dependencies = [
@@ -2173,6 +2201,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-dpf",
  "carbide-machine-controller",
+ "carbide-test-support",
  "carbide-uuid",
  "config-version",
  "futures",
@@ -2289,6 +2318,7 @@ dependencies = [
  "criterion",
  "dashmap",
  "figment",
+ "flate2",
  "futures",
  "http",
  "http-body-util",
@@ -3377,6 +3407,7 @@ dependencies = [
  "dns-record",
  "eyre",
  "hickory-resolver",
+ "http-body-util",
  "hyper",
  "hyper-rustls",
  "hyper-util",
@@ -3387,6 +3418,8 @@ dependencies = [
  "mac_address",
  "nonempty",
  "once_cell",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "p256 0.14.0",
  "prettytable-rs",
  "prost",
@@ -3410,8 +3443,10 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "tower",
+ "tower-http 0.7.0",
  "trace-propagation",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "tryhard",
  "uuid",

@@ -152,6 +152,7 @@ message UpdateDomainRequest {
   // Only `id` is required. `name` may be empty or must equal the stored name;
   // renaming is not supported and is rejected with INVALID_ARGUMENT. See
   // Domain.default_ttl for how an absent TTL is treated.
+  // Unknown or deleted IDs are rejected with NOT_FOUND.
   // Omitted vpc_id preserves ownership; a supplied value must match the owner
   // or the request is rejected with INVALID_ARGUMENT. Ownership cannot be cleared.
   Domain domain = 1;
@@ -163,6 +164,9 @@ message DomainSearchQuery {
 }
 
 message DomainDeletionRequest {
+  // Required Domain ID. Deletion is rejected with FAILED_PRECONDITION while
+  // a live network segment or machine interface references the Domain.
+  // Repeated deletion of a previously deleted Domain succeeds.
   common.DomainId id = 1;
 }
 

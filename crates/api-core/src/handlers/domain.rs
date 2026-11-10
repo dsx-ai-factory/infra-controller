@@ -92,13 +92,15 @@ pub(crate) async fn update(
         .id
         .ok_or_else(|| CarbideError::MissingArgument("id"))?;
 
-    let mut domain =
-        domain::find_by_uuid(&mut txn, uuid)
-            .await?
-            .ok_or_else(|| CarbideError::NotFoundError {
-                kind: "domain",
-                id: uuid.to_string(),
-            })?;
+    // Serial-bump writers can already own this row while syncing an interface.
+    // The update's timestamp/live-row predicates detect conflicting writes.
+    let mut domain = domain::find_by_uuid(&mut txn, uuid)
+        .await?
+        .filter(|domain| domain.deleted.is_none())
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "domain",
+            id: uuid.to_string(),
+        })?;
 
     if domain_proto.vpc_id.is_some() && domain_proto.vpc_id != domain.vpc_id {
         return Err(CarbideError::InvalidArgument(format!(
@@ -142,18 +144,25 @@ pub(crate) async fn delete(
     let req = request.into_inner();
     let uuid = req.id.ok_or_else(|| CarbideError::MissingArgument("id"))?;
 
-    let domain =
-        domain::find_by_uuid(&mut txn, uuid)
-            .await?
-            .ok_or_else(|| CarbideError::NotFoundError {
-                kind: "domain",
-                id: uuid.to_string(),
-            })?;
+    let domain = domain::find_by_uuid_for_delete(txn.as_mut(), uuid)
+        .await?
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "domain",
+            id: uuid.to_string(),
+        })?;
+    if domain.deleted.is_some() {
+        txn.commit().await?;
+        return Ok(Response::new(DomainDeletionResult {}));
+    }
 
     db::dns::lock_reverse_zone_names(&mut txn, std::slice::from_ref(&domain.name)).await?;
 
-    // TODO: This needs to validate that nothing references the domain anymore
-    // (like NetworkSegments)
+    if domain::has_live_references(txn.as_mut(), uuid).await? {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "domain {uuid} is still referenced by a network segment or machine interface"
+        ))
+        .into());
+    }
 
     domain::delete(domain, &mut txn).await?;
 

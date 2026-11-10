@@ -4,14 +4,18 @@
 package cli
 
 import (
+	"errors"
 	"flag"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -127,6 +131,102 @@ func TestLoginWithOIDCConfig(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, "new-token", loaded.Auth.OIDC.Token)
 			}
+		})
+	}
+}
+
+func TestParseTokenResponse(t *testing.T) {
+	const secret = "synthetic-secret-4686"
+	tests := []struct {
+		name, method, body, wantCode string
+	}{
+		{
+			name: "post structured credential echo", method: "client_secret_post",
+			body:     `{"error":"invalid_client","error_description":"` + secret + `"}`,
+			wantCode: "invalid_client",
+		},
+		{
+			name: "basic raw credential echo", method: "client_secret_basic",
+			body: `token endpoint rejected ` + secret,
+		},
+		{
+			name: "unknown error identifier and reason phrase", method: "client_secret_post",
+			body: `{"error":"` + secret + `","error_description":"` + secret + `"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tt.method == "client_secret_basic" {
+					_, _, ok := r.BasicAuth()
+					require.True(t, ok)
+				} else {
+					require.NoError(t, r.ParseForm())
+					require.Equal(t, secret, r.Form.Get("client_secret"))
+				}
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer server.Close()
+			cfg := &ConfigFile{Auth: ConfigAuth{OIDC: &ConfigOIDC{
+				TokenURL: server.URL, ClientID: "synthetic-client", ClientSecret: secret,
+				ClientAuthMethod: tt.method,
+			}}}
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			_, err := LoginWithOIDCConfig(cfg, configPath)
+			require.Error(t, err)
+			require.ErrorContains(t, err, "HTTP 401")
+			require.ErrorContains(t, err, "token endpoint: "+server.URL)
+			require.ErrorContains(t, err, "check OIDC client credentials")
+			if tt.wantCode != "" {
+				require.ErrorContains(t, err, tt.wantCode)
+			}
+			require.NotContains(t, err.Error(), secret)
+			require.NoFileExists(t, configPath)
+		})
+	}
+	// Password and refresh grants also use postToken; rejection diagnostics
+	// must stay safe for those shared call sites.
+	for _, grant := range []struct {
+		name string
+		call func(string) (*TokenResponse, error)
+	}{
+		{"password", func(endpoint string) (*TokenResponse, error) {
+			return passwordGrant(endpoint, "client", secret, "user", "password")
+		}},
+		{"refresh", func(endpoint string) (*TokenResponse, error) {
+			return refreshTokenGrant(endpoint, "client", secret, "refresh")
+		}},
+	} {
+		t.Run(grant.name+" grant", func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"` + secret + `"}`))
+			}))
+			defer server.Close()
+			_, err := grant.call(server.URL)
+			require.ErrorContains(t, err, "HTTP 401, invalid_grant")
+			require.NotContains(t, err.Error(), secret)
+		})
+	}
+	// Exercise the reader directly: an HTTP server normalizes reason phrases,
+	// and transport buffering would hide how much of the response is consumed.
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{"custom reason phrase is not exposed", `{"error":"` + secret + `"}`},
+		{"oversized error response is bounded", strings.Repeat(" ", 4096) + `{"error":"invalid_client","error_description":"` + secret + `"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := strings.NewReader(tt.body)
+			resp := &http.Response{StatusCode: http.StatusBadRequest, Status: "400 " + secret,
+				Body: io.NopCloser(body)}
+			token, err := parseTokenResponse(resp)
+			require.Nil(t, token)
+			require.LessOrEqual(t, len(tt.body)-body.Len(), 4096, "failed response reads must stay bounded")
+			require.EqualError(t, err, "authentication failed (HTTP 400); check OIDC client credentials, scopes, and token endpoint configuration")
+			require.NotContains(t, err.Error(), secret)
 		})
 	}
 }
@@ -750,22 +850,103 @@ func TestLoginCommandConfiguredNvapiKeySkipsAuthnURL(t *testing.T) {
 	require.Equal(t, "nvapi-configured-key", loaded.Auth.APIKey.Token)
 }
 
-func TestExchangeAPIKeyNvapiReturnsKeyDirectly(t *testing.T) {
-	configPath := filepath.Join(t.TempDir(), "config.yaml")
-	cfg := &ConfigFile{
-		Auth: ConfigAuth{
-			APIKey: &ConfigAPIKey{Key: "nvapi-bearer-key"},
+func TestExchangeAPIKey(t *testing.T) {
+	testAPIKeyExchange(t, ExchangeAPIKey)
+}
+
+func TestLoginWithAPIKey(t *testing.T) {
+	testAPIKeyExchange(t, func(cfg *ConfigFile, configPath string) (string, error) {
+		SetConfigPath(configPath)
+		defer SetConfigPath("")
+		err := loginWithAPIKey(cfg, cfg.Auth.APIKey.AuthnURL, cfg.Auth.APIKey.Key)
+		if err != nil {
+			return "", err
+		}
+		return cfg.Auth.APIKey.Token, nil
+	})
+}
+
+func testAPIKeyExchange(t *testing.T, exchange func(*ConfigFile, string) (string, error)) {
+	t.Helper()
+	const secret = "synthetic-ngc-key-6907"
+	tests := []struct {
+		name      string
+		apiKey    string
+		status    int
+		body      string
+		readError error
+		wantToken string
+		wantErr   string
+	}{
+		{name: "bearer key skips HTTP", apiKey: "nvapi-bearer-key", wantToken: "nvapi-bearer-key"},
+		{name: "legacy key saves token", status: http.StatusOK, body: `{"token":"new-token"}`, wantToken: "new-token"},
+		{
+			name:    "credential echo is not read",
+			status:  http.StatusUnauthorized,
+			body:    `{"error":"invalid key","detail":"ApiKey ` + strings.Repeat(secret, 1024) + `"}`,
+			wantErr: "NGC token exchange failed (HTTP 401)",
+		},
+		{
+			name:      "failed response read error is not exposed",
+			status:    http.StatusBadGateway,
+			readError: errors.New("upstream rejected " + secret),
+			wantErr:   "NGC token exchange failed (HTTP 502)",
 		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiKey := tt.apiKey
+			if apiKey == "" {
+				apiKey = secret
+			}
+			cfg := &ConfigFile{Auth: ConfigAuth{APIKey: &ConfigAPIKey{
+				Key: apiKey, Token: "old-token", AuthnURL: "https://auth.example.test/token",
+			}}}
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, SaveConfigToPath(cfg, configPath))
+			before, err := os.ReadFile(configPath)
+			require.NoError(t, err)
+			body := strings.NewReader(tt.body)
+			var responseBody io.Reader = body
+			if tt.readError != nil {
+				responseBody = iotest.ErrReader(tt.readError)
+			}
+			requests := 0
+			originalClient := http.DefaultClient
+			http.DefaultClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				requests++
+				require.Equal(t, "ApiKey "+apiKey, req.Header.Get("Authorization"))
+				return &http.Response{
+					StatusCode: tt.status,
+					Status:     strconv.Itoa(tt.status) + " " + secret,
+					Body:       io.NopCloser(responseBody),
+				}, nil
+			})}
+			t.Cleanup(func() { http.DefaultClient = originalClient })
 
-	token, err := ExchangeAPIKey(cfg, configPath)
-	require.NoError(t, err)
-	require.Equal(t, "nvapi-bearer-key", token)
-	require.Equal(t, "nvapi-bearer-key", cfg.Auth.APIKey.Token)
-
-	loaded, err := LoadConfigFromPath(configPath)
-	require.NoError(t, err)
-	require.Equal(t, "nvapi-bearer-key", loaded.Auth.APIKey.Token)
+			token, err := exchange(cfg, configPath)
+			if tt.wantErr != "" {
+				require.EqualError(t, err, tt.wantErr)
+				require.Empty(t, token)
+				require.Equal(t, len(tt.body), body.Len(), "failed response body must not be read")
+				require.Equal(t, "old-token", cfg.Auth.APIKey.Token)
+				after, readErr := os.ReadFile(configPath)
+				require.NoError(t, readErr)
+				require.Equal(t, before, after)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tt.wantToken, token)
+				loaded, loadErr := LoadConfigFromPath(configPath)
+				require.NoError(t, loadErr)
+				require.Equal(t, tt.wantToken, loaded.Auth.APIKey.Token)
+			}
+			if tt.apiKey != "" {
+				require.Zero(t, requests)
+			} else {
+				require.Equal(t, 1, requests)
+			}
+		})
+	}
 }
 
 func TestIsNGCBearerAPIKey(t *testing.T) {

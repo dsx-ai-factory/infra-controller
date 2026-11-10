@@ -1079,12 +1079,21 @@ rest_image(
 core_global = all_values['global']
 nico_api_values = component_values(core_global, all_values['nico-api'])
 nico_api_dependencies = ['nico-local-config', 'nico-postgres', 'vault']
+bmc_proxy_values = component_values(core_global, all_values['nico-bmc-proxy'])
 
 if enable_observability:
     nico_api_values['tracing'] = {'enabled': True}
     api_env = nico_api_values.setdefault('env', {})
     if not api_env.get('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'):
         api_env['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'] = 'http://tempo.%s.svc.cluster.local:4317' % observability_namespace
+    bmc_proxy_values['configFiles']['nicoBmcProxyConfig'] += (
+        '\n[tracing]\nenabled = true\notlp_endpoint = %s\n' %
+        encode_json(api_env['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT']).strip()
+    )
+    # Tilt runs the Kea hook, not the standalone DHCP server, DNS, or PXE.
+    # Keep either explicit DHCP endpoint override ahead of the profile default.
+    if not nico_dhcp_values.get('otlpEndpoint') and not nico_dhcp_values.get('env', {}).get('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'):
+        nico_dhcp_values['otlpEndpoint'] = api_env['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT']
     nico_api_dependencies.append('tempo')
 
 if enable_dsx_exchange:
@@ -1130,7 +1139,7 @@ helm_chart(
     name='nico-bmc-proxy',
     chart=os.path.join(core_charts, 'nico-bmc-proxy'),
     namespace=core_namespace,
-    values=component_values(core_global, all_values['nico-bmc-proxy']),
+    values=bmc_proxy_values,
     resource_deps=['nico-api'],
     image_deps=['nico-bmc-proxy'],
     image_keys=[('image.repository', 'image.tag')],

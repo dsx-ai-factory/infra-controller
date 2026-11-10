@@ -444,6 +444,20 @@ pub(crate) async fn create_admin_vpc(api: &Api, vpc_vni: Option<u32>) -> Result<
         ));
     };
 
+    // Resolve the policy with the VNI reconciliation will store before changing VPCs or segments.
+    if let Some(admin) = api
+        .runtime_config
+        .fnn
+        .as_ref()
+        .and_then(|fnn| fnn.admin_vpc.as_ref())
+        .filter(|admin| admin.enabled)
+    {
+        admin
+            .routing_profile
+            .to_rpc(Some(vpc_vni))
+            .map_err(|error| CarbideError::FailedPrecondition(error.to_string()))?;
+    }
+
     let mut txn = api.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
 

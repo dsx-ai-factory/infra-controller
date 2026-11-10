@@ -92,6 +92,8 @@ spec:
         scale-test.nvidia.com/suite: {{ $item.name | quote }}
     spec:
       restartPolicy: Never
+      # The MAT namespace holds a Service per BMC: Service env vars would overflow exec.
+      enableServiceLinks: false
       serviceAccountName: {{ include "scale-test.fullname" $root }}
       automountServiceAccountToken: true
       {{- with $root.Values.nodeSelector }}

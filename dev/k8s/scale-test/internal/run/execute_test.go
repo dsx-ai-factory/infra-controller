@@ -5,6 +5,7 @@ package run
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -50,6 +51,21 @@ func TestPublishOrderPendingReleaseFinal(t *testing.T) {
 	final := d.CM.(*cmFake).written("r1-result")
 	if string(final["verdict"]) != `"passed"` {
 		t.Errorf("stored verdict = %s, want passed", final["verdict"])
+	}
+}
+
+// TestStagesAndInvariantsReachTheResult: a test's stages and invariants reach the result, also when it returns an error with them.
+func TestStagesAndInvariantsReachTheResult(t *testing.T) {
+	seq := &sequence{}
+	stages := []result.StageResult{{ID: "s", Status: result.StageUnresolved, Units: result.UnitCountsOf(1, 0, 0)}}
+	invs := []result.InvariantResult{{Name: "i", Held: true}}
+	res := Execute(deps(t, seq, held(seq)), fakeTest{run: func(RunCtx, *writer.Writer) (result.Outcome, error) {
+		o := result.OutcomeOf(result.Unresolved)
+		o.Stages, o.Invariants = stages, invs
+		return o, errors.New("the sends ended")
+	}})
+	if res.Verdict != result.Aborted || !reflect.DeepEqual(res.Stages, stages) || !reflect.DeepEqual(res.Invariants, invs) {
+		t.Errorf("result = %s, %+v, %+v; want aborted with the test's stages and invariants", res.Verdict, res.Stages, res.Invariants)
 	}
 }
 

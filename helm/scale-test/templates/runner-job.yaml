@@ -13,7 +13,7 @@
 {{- if le (int64 $deadline) (add (int64 $whole) 90) }}
 {{- fail "runner.activeDeadlineSeconds must exceed runner.wholeRunSeconds by more than the 90 s shutdown budget" }}
 {{- end }}
-# One fleet-up run, named runner-<runId> under the release so it never takes a
+# One fleet-up or ingestion run, named runner-<runId> under the release so it never takes a
 # test hook's name: a new runId is a new Job, and the finished one is kept
 # until then. This is a plain Job, not a helm test hook.
 apiVersion: batch/v1
@@ -34,6 +34,8 @@ spec:
         app.kubernetes.io/component: runner
     spec:
       restartPolicy: Never
+      # The MAT namespace holds a Service per BMC: Service env vars would overflow exec.
+      enableServiceLinks: false
       # Room for a cancelled run to drain, publish its result and release the lock.
       terminationGracePeriodSeconds: 120
       serviceAccountName: {{ $name }}
@@ -54,10 +56,10 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: fleet-up
+        - name: {{ $r.command }}
           image: {{ include "scale-test.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["/scale-test", "fleet-up", "--config", "/etc/scale-test/config.yaml"]
+          command: ["/scale-test", {{ $r.command | quote }}, "--config", "/etc/scale-test/config.yaml"]
           env:
             # The pod name is the run's execution ID.
             - name: SCALE_TEST_EXECUTION_ID

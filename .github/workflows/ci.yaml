@@ -1768,7 +1768,7 @@ jobs:
           fi
 
       - name: Run TruffleHog Scan
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/trufflehog-scan@9a9ce3a7770a8b53d2726afa920be3276bc3ddd7
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/trufflehog-scan@db3780bff4b2cbf90ba9117a63e41ddea066791b
         with:
           base: ${{ steps.scan-range.outputs.base }}
           head: ${{ steps.scan-range.outputs.head }}
@@ -2261,7 +2261,7 @@ jobs:
       # Same uv release the runtime image pins, so the lockfile resolves the
       # same way in both places.
       - name: Set up uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.13.6"
           enable-cache: false
@@ -2453,7 +2453,7 @@ jobs:
 
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@db3780bff4b2cbf90ba9117a63e41ddea066791b
         with:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_TOKEN }}
@@ -2462,6 +2462,7 @@ jobs:
             bluefield/charts/nico-dhcp-server
             bluefield/charts/nico-fmds
             bluefield/charts/nico-otelcol
+            bluefield/charts/nico-unbound-local
             helm
             helm/charts/nico-api
             helm/charts/nico-bmc-proxy
@@ -2502,7 +2503,7 @@ jobs:
 
       - name: Package and push Helm chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
         with:
           chart-path: helm
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2532,7 +2533,7 @@ jobs:
           template: 'true'
 
       - name: Run Helm unit tests
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@db3780bff4b2cbf90ba9117a63e41ddea066791b
         with:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_TOKEN }}
@@ -2564,6 +2565,9 @@ jobs:
 
       - name: Test Temporal/Keycloak HA Postgres resolution
         run: bash helm-prereqs/tests/preflight-ha-postgres-resolution_test.sh
+
+      - name: Test preflight error handling
+        run: bash helm-prereqs/tests/preflight-errors_test.sh
 
       - name: Test Temporal/Keycloak migration receipt
         run: bash helm-prereqs/tests/migrate-temporal-keycloak-db-receipt_test.sh
@@ -2598,6 +2602,9 @@ jobs:
       - name: Test KMIP client Secret
         run: bash helm-prereqs/tests/setup-kmip-client-secret_test.sh
 
+      - name: Test Keycloak token error redaction
+        run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_keycloak_token.py'
+
   # Waits for the nico chart push. NGC answers an upload with HTTP 409 while
   # another upload to the same namespace is updating its chart index, and the
   # CLI reports that as "already exists". `!cancelled()` still runs this job
@@ -2617,7 +2624,7 @@ jobs:
 
       - name: Package and push Helm prereqs chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
         with:
           chart-path: helm-prereqs
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2813,6 +2820,24 @@ jobs:
       artifact_pattern: 'bluefield-binaries-${{ github.run_id }}'
     secrets: inherit
 
+  build-bluefield-nico-unbound:
+    needs:
+      - prepare
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' }}
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      # public bases only: skip source login so anonymous nvcr pulls keep working
+      source_registry_host: ''
+      dockerfile_path: bluefield/containers/unbound/Dockerfile
+      image_name: ${{ needs.prepare.outputs.image_registry }}/nico-unbound
+      image_tag: ${{ needs.prepare.outputs.version }}
+      additional_tags: ${{ needs.prepare.outputs.image_registry }}/nico-unbound:${{ needs.prepare.outputs.major_minor_version }}-latest
+      platforms: linux/arm64
+      runner: linux-arm64-cpu4
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: false
+    secrets: inherit
+
   # ============================================================================
   # BUILD STAGE - Bluefield Helm Charts
   # ============================================================================
@@ -2868,6 +2893,22 @@ jobs:
           sudo apt-get install -y --no-install-recommends python3-yaml busybox
           /usr/bin/python3 -B bluefield/charts/nico-fmds/tests/test_listener_command.py
 
+      # nico-api renders the required values and helm-validate has no values-file
+      # input, so lint against the test fixture with the helm the preceding
+      # helm-validate steps installed; the chart's helm-unittest suites run in
+      # the "Run Helm unit tests" step.
+      - name: Validate nico-unbound-local chart
+        run: helm lint --strict bluefield/charts/nico-unbound-local -f bluefield/charts/nico-unbound-local/tests/values.yaml
+
+      # Execute the rendered nic-init command under busybox against a stub ip,
+      # as the nico-fmds listener test does, so the script's failure policy is
+      # proven rather than read.
+      - name: Test nico-unbound-local nic-init command
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml busybox
+          /usr/bin/python3 -B bluefield/charts/nico-unbound-local/tests/test_nic_init_command.py
+
       - name: Test site-controller OTEL configuration
         run: |
           sudo apt-get update
@@ -2894,7 +2935,7 @@ jobs:
 
       - name: Package and push nico-otelcol chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
         with:
           chart-path: bluefield/charts/nico-otelcol
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2907,7 +2948,7 @@ jobs:
 
       - name: Package and push nico-dpu-agent chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
         with:
           chart-path: bluefield/charts/nico-dpu-agent
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2920,7 +2961,7 @@ jobs:
 
       - name: Package and push nico-dhcp-server chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
         with:
           chart-path: bluefield/charts/nico-dhcp-server
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2933,9 +2974,22 @@ jobs:
 
       - name: Package and push nico-fmds chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
         with:
           chart-path: bluefield/charts/nico-fmds
+          chart-version: ${{ needs.prepare.outputs.helm_version }}
+          app-version: ${{ needs.prepare.outputs.version }}
+          lint: 'false'
+          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
+          ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
+          ngc-duplicate: verify
+          retries: 3
+
+      - name: Package and push nico-unbound-local chart
+        if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
+        with:
+          chart-path: bluefield/charts/nico-unbound-local
           chart-version: ${{ needs.prepare.outputs.helm_version }}
           app-version: ${{ needs.prepare.outputs.version }}
           lint: 'false'
@@ -2989,6 +3043,7 @@ jobs:
       - build-bluefield-forge-dpu-agent
       - build-bluefield-forge-dhcp-server
       - build-bluefield-carbide-fmds
+      - build-bluefield-nico-unbound
       - build-validate-bluefield-helm-charts
       - build-push-bluefield-helm-charts
       - lint-police
@@ -3118,7 +3173,7 @@ jobs:
     needs:
       - prepare
       - build-release-container-x86_64
-    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
     with:
       source: ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide
       source_tag: ${{ needs.prepare.outputs.version }}
@@ -3176,6 +3231,7 @@ jobs:
       - build-bluefield-forge-dpu-agent
       - build-bluefield-forge-dhcp-server
       - build-bluefield-carbide-fmds
+      - build-bluefield-nico-unbound
       - build-validate-bluefield-helm-charts
       - build-push-bluefield-helm-charts
       - security-secret-scan
@@ -3296,6 +3352,7 @@ jobs:
       - build-bluefield-forge-dpu-agent
       - build-bluefield-forge-dhcp-server
       - build-bluefield-carbide-fmds
+      - build-bluefield-nico-unbound
       - build-validate-bluefield-helm-charts
       - build-push-bluefield-helm-charts
 

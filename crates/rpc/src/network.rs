@@ -15,9 +15,31 @@
  * limitations under the License.
  */
 
-use carbide_network::virtualization::VpcVirtualizationType;
+use carbide_network::virtualization::{ExportPrefixMatchType, VpcVirtualizationType};
 
 use crate::{RpcDataConversionError, forge as rpc};
+
+impl From<rpc::ExportPrefixMatchType> for ExportPrefixMatchType {
+    /// Converts the wire enum without changing conditional-prefix matching semantics.
+    fn from(value: rpc::ExportPrefixMatchType) -> Self {
+        match value {
+            rpc::ExportPrefixMatchType::Ge => Self::Ge,
+            rpc::ExportPrefixMatchType::Le => Self::Le,
+            rpc::ExportPrefixMatchType::Exact => Self::Exact,
+        }
+    }
+}
+
+impl From<ExportPrefixMatchType> for rpc::ExportPrefixMatchType {
+    /// Preserves the shared matching mode in the public protobuf representation.
+    fn from(value: ExportPrefixMatchType) -> Self {
+        match value {
+            ExportPrefixMatchType::Ge => Self::Ge,
+            ExportPrefixMatchType::Le => Self::Le,
+            ExportPrefixMatchType::Exact => Self::Exact,
+        }
+    }
+}
 
 impl From<rpc::VpcVirtualizationType> for VpcVirtualizationType {
     fn from(v: rpc::VpcVirtualizationType) -> Self {
