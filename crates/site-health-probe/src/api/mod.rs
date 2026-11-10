@@ -36,9 +36,9 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use carbide_site_health_probe_api::metrics::{CONTRACT_VERSION, FilterError, gauge_labels};
 use carbide_site_health_probe_api::{
-    Component, ConfigResponse, CountResponse, ErrorBody, ErrorCode, ErrorDetail, Family, Filter,
-    MetricsInfo, ReadInfo, RestResource, RestSiteBinding, Source, SweepInfo, Unit, UnitType,
-    UnitsQuery, UnitsResponse,
+    Component, ConfigResponse, ConfigRest, CountResponse, ErrorBody, ErrorCode, ErrorDetail,
+    Family, Filter, MetricsInfo, ReadInfo, RestResource, RestSiteBinding, Source, SweepInfo,
+    TenantAllocation, Unit, UnitType, UnitsQuery, UnitsResponse,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -66,6 +66,8 @@ pub(crate) struct ApiState {
     /// The REST inventory reader runs, so `/v1/config` waits for its first
     /// site check.
     pub rest_inventory: bool,
+    /// The REST reader sweeps the site totals.
+    rest_totals: bool,
     /// Each family's reader interval.
     pub intervals: BTreeMap<Family, Duration>,
     pub caps: Capabilities,
@@ -86,8 +88,14 @@ impl ApiState {
             .iter()
             .map(|family| (*family, readers.devices.interval))
             .collect();
-        for family in [Family::RestTotals, Family::RestSiteMatch] {
-            intervals.insert(family, readers.rest_inventory.interval);
+        intervals.insert(Family::RestSiteMatch, readers.rest_inventory.interval);
+        if !state.rest.skip_totals {
+            intervals.insert(Family::RestTotals, readers.rest_inventory.interval);
+        }
+        if state.rest.tenant.is_some() {
+            for family in crate::readers::rest_instances::FAMILIES {
+                intervals.insert(family, readers.rest_inventory.interval);
+            }
         }
         let metrics = state.metrics.as_ref().map(|metrics| MetricsInfo {
             contract_version: CONTRACT_VERSION,
@@ -111,9 +119,11 @@ impl ApiState {
         Self {
             store,
             rest_inventory: readers.rest_inventory.enabled,
+            rest_totals: readers.rest_inventory.enabled && !state.rest.skip_totals,
             intervals,
             caps: Capabilities {
                 full_host_read: state.nico_api.host_read == HostReadMode::Full,
+                rest_fixture: readers.rest_inventory.enabled && state.rest.tenant.is_some(),
             },
             metrics,
         }
@@ -127,14 +137,24 @@ impl ApiState {
 
     /// The current snapshot of `family`, or 503 before its first sweep.
     fn current(&self, family: Family) -> Result<Arc<dyn AnySnapshot>, ApiError> {
-        self.store
-            .current(family)
-            .ok_or_else(|| ApiError::no_complete_sweep(family))
+        self.store.current(family).ok_or_else(|| {
+            let mut error = ApiError::no_complete_sweep(family);
+            if let Some((_, failure)) = self.store.last_attempt(family).and_then(|a| a.failure) {
+                error
+                    .detail
+                    .message
+                    .push_str(&format!(". Last attempt: {failure}"));
+            }
+            error
+        })
     }
 
     fn sweep_info(&self, family: Family, snap: &dyn AnySnapshot) -> SweepInfo {
         let meta = snap.meta();
+        let attempt = self.store.last_attempt(family);
         SweepInfo {
+            last_attempt_succeeded: attempt.as_ref().map(|a| a.failure.is_none()),
+            last_attempt_error: attempt.and_then(|a| a.failure).map(|(_, e)| e),
             snapshot_id: meta.snapshot_id(),
             family,
             sweep_start: DateTime::<Utc>::from(meta.start),
@@ -347,8 +367,8 @@ fn parse_query<T: serde::de::DeserializeOwned>(query: &str) -> Result<T, ApiErro
 }
 
 /// Whether the snapshot can answer the filter's needs: REST totals only
-/// where they exist. No snapshot has allocatability or update eligibility
-/// until the probe reads the compact host read.
+/// where they exist, and allocatability and update eligibility only from
+/// hosts read with the compact host read, when every host has the answer.
 fn check_needs(needs: &[Need], snap: &dyn AnySnapshot) -> Result<(), ApiError> {
     for need in needs {
         match need {
@@ -371,7 +391,18 @@ fn check_needs(needs: &[Need], snap: &dyn AnySnapshot) -> Result<(), ApiError> {
                 }
             }
             Need::CompactHostRead(field) => {
-                return Err(FilterError::compact_host_read(field).into());
+                let Some(data) = units_of(snap).filter(|data| data.compact_host_read) else {
+                    return Err(FilterError::compact_host_read(field).into());
+                };
+                // Snapshot-wide, as `host_predicates_known` publishes it,
+                // also for a query that names hosts.
+                if !data.host_predicate_known(field) {
+                    return Err(ApiError::unprocessable(
+                        ErrorCode::FieldUnavailable,
+                        Some(field),
+                        format!("{field} is unknown for a host: nico-api sent it no answer"),
+                    ));
+                }
             }
         }
     }
@@ -411,6 +442,14 @@ async fn count(
     let (query, _) = split_query(raw.as_deref(), &[])?;
     let filter: Filter = parse_query(&query)?;
     let spec = series_spec(&filter, &api.caps)?;
+    // No sweep will ever publish totals the reader does not read.
+    if spec.family == Family::RestTotals && !api.rest_totals {
+        return Err(ApiError::unprocessable(
+            ErrorCode::FieldUnavailable,
+            Some("resource"),
+            "REST totals are not read: the REST reader or its totals are disabled".to_string(),
+        ));
+    }
     let snap = api.current(spec.family)?;
     check_needs(&spec.needs, snap.as_ref())?;
     Ok(Json(CountResponse {
@@ -580,12 +619,12 @@ async fn units_query(
     list_units(&api, &query.filter, page).map(Json)
 }
 
-/// `/v1/config` parameters. They select firmware targets and the tenant
-/// allocation, which wait for their tests (#8154, #8152): accepted, so
-/// client filters stay valid, while `nicoApi` and `rest` stay null.
+/// `/v1/config` parameters. `instanceType` selects the tenant allocation.
+/// Firmware targets wait for their tests (#8154): accepted, so client
+/// filters stay valid, while `nicoApi` stays null.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[expect(dead_code, reason = "no config reader serves these filters yet")]
+#[expect(dead_code, reason = "no config reader serves the firmware filters yet")]
 struct ConfigQuery {
     vendor: Option<String>,
     model: Option<String>,
@@ -598,7 +637,7 @@ async fn config(
     RawQuery(raw): RawQuery,
 ) -> Result<Json<ConfigResponse>, ApiError> {
     let (query, _) = split_query(raw.as_deref(), &[])?;
-    let _: ConfigQuery = parse_query(&query)?;
+    let query: ConfigQuery = parse_query(&query)?;
     // The inventory reader's site check, with its own read times. No config
     // filter applies to it. With the reader off there is no check to wait
     // for: `restSite` is null, not an unknown check.
@@ -616,7 +655,20 @@ async fn config(
     };
     Ok(Json(ConfigResponse {
         nico_api: None,
-        rest: None,
+        rest: api.store.current(Family::ConfigRest).and_then(|snap| {
+            let allocation = data_of::<TenantAllocation>(snap.as_ref())?;
+            if query
+                .instance_type
+                .as_ref()
+                .is_some_and(|id| id != &allocation.instance_type)
+            {
+                return None;
+            }
+            Some(ConfigRest {
+                read: api.read_info(Family::ConfigRest, snap.as_ref()),
+                tenant_allocation: Some(allocation.clone()),
+            })
+        }),
         rest_site,
         metrics: api.metrics.clone(),
     }))

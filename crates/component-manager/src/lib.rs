@@ -13,6 +13,8 @@ pub mod compute_tray_manager;
 pub mod config;
 pub mod core_compute_manager;
 pub mod error;
+pub mod firmware_inventory;
+pub mod firmware_jobs;
 pub mod mock;
 pub mod nsm;
 pub mod nv_switch_manager;
@@ -28,7 +30,11 @@ pub use machine_info_provider::{
     MachineInfoProvider, MachineLocationError, MachineLocationObservation, MachineLocationTarget,
 };
 pub use nvos_update_manager::{NvosUpdateManager, NvosUpdateRequest};
-pub use rack_firmware_update_manager::{RackFirmwareUpdateManager, RackFirmwareUpdateRequest};
+pub use rack_firmware_update_manager::{
+    DeviceFirmwareExpectations, FirmwareExpectation, FirmwareExpectationError,
+    FirmwareExpectationStatus, RackFirmwareExpectationsRequest, RackFirmwareUpdateManager,
+    RackFirmwareUpdateRequest,
+};
 
 pub mod proto {
     #[allow(clippy::enum_variant_names)]

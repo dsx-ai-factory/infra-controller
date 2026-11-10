@@ -187,6 +187,8 @@ pub enum Family {
     Expected,
     HostFirmwareRequests,
     RestInstances,
+    /// Complete provider-scoped REST Machine rows for the configured site.
+    RestMachines,
     RestTotals,
     RestSiteMatch,
     RestTenantInstances,
@@ -292,6 +294,12 @@ impl Filter {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SweepInfo {
+    /// Newest completed source attempt, including failures newer than this snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt_succeeded: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Sanitized failure of the newest completed attempt, absent after success.
+    pub last_attempt_error: Option<String>,
     pub snapshot_id: String,
     pub family: Family,
     pub sweep_start: DateTime<Utc>,
@@ -348,6 +356,12 @@ pub struct UnitsResponse {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Unit {
+    /// NICo instance identity on REST instance rows, separate from the REST ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_instance_id: Option<String>,
+    /// Provider-view REST Machine evidence, present only on REST host rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rest_machine: Option<RestMachineFields>,
     pub id: String,
     #[serde(rename = "type")]
     pub unit_type: UnitType,
@@ -363,17 +377,50 @@ pub struct Unit {
     pub expected: Option<ExpectedFields>,
 }
 
+/// REST Machine identity and allocation evidence, without physical inventory.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct RestMachineFields {
+    /// NICo host identity corresponding to the REST Machine ID in `Unit.id`.
+    pub controller_id: String,
+    /// Assigned REST instance-type UUID, or null when none is assigned.
+    pub instance_type: Option<String>,
+    /// Current REST instance UUID, or null when unoccupied.
+    pub instance_id: Option<String>,
+    /// Current tenant UUID, or null when unassigned.
+    pub tenant_id: Option<String>,
+    /// Complete current labels, preserved when the runner changes its selector.
+    pub labels: BTreeMap<String, String>,
+    /// Provider-view usability, which alone does not prove a tenant grant.
+    pub is_usable_by_tenant: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct HostFields {
+    /// nico-api's name of the host's maker, such as `nvidia`, `dell` or
+    /// `lenovo`: from the explored report under the compact host read, from
+    /// DMI's system vendor without it. `null` for a maker DMI cannot name.
     pub vendor: Option<String>,
+    /// The explored report's model under the compact host read, DMI's
+    /// product name without it. A host without a report has none under the
+    /// compact read.
     pub model: Option<String>,
     pub instance_type: Option<String>,
+    /// From [`Self::version_source`]. The explored report may hold no BMC or
+    /// UEFI version, so the compact read can leave them `null`; firmware
+    /// checks read the full firmware inventory, not these.
     pub bmc_version: Option<String>,
     pub uefi_version: Option<String>,
     pub version_source: VersionSource,
+    /// When nico-api last wrote the explored report, for any reason. It is
+    /// not the time of the last successful exploration.
     pub report_at: Option<DateTime<Utc>>,
+    /// The `Type` of the explored report's last exploration error, such as
+    /// `Unauthorized`, or `other` for a type the probe does not know. Never
+    /// the error's text.
     pub report_error: Option<String>,
     /// `null` until the probe can read allocatability.
     pub allocatable: Option<bool>,
@@ -728,6 +775,10 @@ mod flat {
     #[serde(rename_all = "camelCase")]
     pub(super) struct CountResponse {
         count: u64,
+        #[serde(default)]
+        last_attempt_succeeded: Option<bool>,
+        #[serde(default)]
+        last_attempt_error: Option<String>,
         snapshot_id: String,
         family: Family,
         sweep_start: DateTime<Utc>,
@@ -741,6 +792,8 @@ mod flat {
             Self {
                 count: r.count,
                 sweep: SweepInfo {
+                    last_attempt_succeeded: r.last_attempt_succeeded,
+                    last_attempt_error: r.last_attempt_error,
                     snapshot_id: r.snapshot_id,
                     family: r.family,
                     sweep_start: r.sweep_start,
@@ -756,6 +809,10 @@ mod flat {
     #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
     #[serde(rename_all = "camelCase")]
     pub(super) struct UnitsResponse {
+        #[serde(default)]
+        last_attempt_succeeded: Option<bool>,
+        #[serde(default)]
+        last_attempt_error: Option<String>,
         snapshot_id: String,
         family: Family,
         sweep_start: DateTime<Utc>,
@@ -771,6 +828,8 @@ mod flat {
         fn from(r: UnitsResponse) -> Self {
             Self {
                 sweep: SweepInfo {
+                    last_attempt_succeeded: r.last_attempt_succeeded,
+                    last_attempt_error: r.last_attempt_error,
                     snapshot_id: r.snapshot_id,
                     family: r.family,
                     sweep_start: r.sweep_start,
@@ -944,6 +1003,8 @@ mod tests {
 
     fn sweep_info() -> SweepInfo {
         SweepInfo {
+            last_attempt_succeeded: None,
+            last_attempt_error: None,
             snapshot_id: "s-7".to_string(),
             family: Family::Host,
             sweep_start: t("2026-10-23T10:00:00Z"),
@@ -1132,6 +1193,8 @@ mod tests {
     #[test]
     fn units_response_json_golden() {
         let host = Unit {
+            controller_instance_id: None,
+            rest_machine: None,
             id: "fm100h".to_string(),
             unit_type: UnitType::Host,
             source: Source::NicoApi,
@@ -1218,6 +1281,8 @@ mod tests {
 
         // The other types' fields, each on a unit of its own.
         let unit = |unit_type| Unit {
+            controller_instance_id: None,
+            rest_machine: None,
             id: "u-1".to_string(),
             unit_type,
             source: Source::NicoApi,

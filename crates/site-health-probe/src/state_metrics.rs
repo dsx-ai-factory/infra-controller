@@ -31,8 +31,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use carbide_site_health_probe_api::metrics::{
-    EXPECTED_RECORDS, GAUGES, Gauge, HOST_FIRMWARE_REQUESTS, HOST_READ_MODE, HOSTS,
-    HOSTS_UPDATE_ELIGIBLE, IDENTITY_MISMATCHES, LAST_ATTEMPT_FAILED, NONE, PROCESS_START,
+    EXPECTED_RECORDS, GAUGES, Gauge, HOST_FIRMWARE_REQUESTS, HOST_PREDICATES_KNOWN, HOST_READ_MODE,
+    HOSTS, HOSTS_UPDATE_ELIGIBLE, IDENTITY_MISMATCHES, LAST_ATTEMPT_FAILED, NONE, PROCESS_START,
     REST_SITE_MATCH, REST_TOTALS, REST_TOTALS_AVAILABLE, SWEEP_COMPLETE, SWEEP_DURATION,
     SWEEP_RESULT_COMPLETE, SWEEP_RESULT_INCOMPLETE, SWEEP_START, SWEEPS, UNITS, UNKNOWN,
     UNKNOWN_STATES, UNRESOLVED_UNITS, flag_label, instance_type_label, model_label, wire,
@@ -45,7 +45,6 @@ use prometheus::proto::MetricFamily;
 use prometheus::{GaugeVec, Opts};
 use tokio::time::Instant;
 
-use crate::config::HostReadMode;
 use crate::readers::rest_inventory::{REST_RESOURCES, RestTotalsData, SiteMatchData};
 use crate::snapshot::{AnySnapshot, FailureKind, FamilySnapshot, Reader, SnapshotSink, UnitsData};
 use crate::state::store::{ALL_FAMILIES, SnapshotStore};
@@ -104,7 +103,6 @@ fn set(series: &mut Series, name: &'static str, labels: Vec<String>, value: f64)
 pub(crate) struct StateCollector {
     store: Arc<SnapshotStore>,
     process_start: f64,
-    host_read_mode: HostReadMode,
     /// Prototypes for `desc`; every scrape builds fresh vectors.
     prototypes: Vec<GaugeVec>,
     /// Label sets published so far and when they were last present.
@@ -117,15 +115,10 @@ fn gauge_vec(gauge: &Gauge) -> GaugeVec {
 }
 
 impl StateCollector {
-    pub(crate) fn new(
-        store: Arc<SnapshotStore>,
-        process_start: SystemTime,
-        host_read_mode: HostReadMode,
-    ) -> Self {
+    pub(crate) fn new(store: Arc<SnapshotStore>, process_start: SystemTime) -> Self {
         Self {
             store,
             process_start: unix_seconds(process_start),
-            host_read_mode,
             prototypes: GAUGES.iter().map(gauge_vec).collect(),
             seen: Mutex::new(HashMap::new()),
         }
@@ -135,19 +128,6 @@ impl StateCollector {
     fn series(&self) -> Series {
         let mut series = Series::new();
         set(&mut series, PROCESS_START.name, vec![], self.process_start);
-        let compact = self.host_read_mode == HostReadMode::Compact;
-        set(
-            &mut series,
-            HOST_READ_MODE.name,
-            vec!["full".into()],
-            f64::from(u8::from(!compact)),
-        );
-        set(
-            &mut series,
-            HOST_READ_MODE.name,
-            vec!["compact".into()],
-            f64::from(u8::from(compact)),
-        );
 
         for family in ALL_FAMILIES {
             if let Some(attempt) = self.store.last_attempt(family) {
@@ -246,6 +226,27 @@ pub(crate) fn family_series(family: Family, snap: &dyn AnySnapshot, series: &mut
             if let Some(data) = units_of(snap) {
                 unit_series(&data.units, series);
                 host_series(&data.units, series);
+                for (mode, on) in [
+                    ("full", !data.compact_host_read),
+                    ("compact", data.compact_host_read),
+                ] {
+                    set(
+                        series,
+                        HOST_READ_MODE.name,
+                        vec![mode.to_string()],
+                        f64::from(u8::from(on)),
+                    );
+                }
+                // A filter on a predicate is answered, and a summary may
+                // count the sweep, only when every host has it.
+                for predicate in ["allocatable", "updateEligible"] {
+                    set(
+                        series,
+                        HOST_PREDICATES_KNOWN.name,
+                        vec![predicate.to_string()],
+                        f64::from(u8::from(data.host_predicate_known(predicate))),
+                    );
+                }
             }
         }
         Family::Dpu => {
@@ -319,9 +320,9 @@ pub(crate) fn family_series(family: Family, snap: &dyn AnySnapshot, series: &mut
                 }
             }
         }
-        // Read by no reader until the firmware and instance tests (#8154,
-        // #8152).
-        Family::RestInstances
+        // Cached REST unit lists and config do not add count series.
+        Family::RestMachines
+        | Family::RestInstances
         | Family::RestTenantInstances
         | Family::ConfigNicoApi
         | Family::ConfigRest => {}
@@ -479,11 +480,12 @@ fn reader_of(family: Family) -> Option<Reader> {
         | Family::Instance
         | Family::Expected
         | Family::HostFirmwareRequests => Some(Reader::Devices),
-        Family::RestTotals | Family::RestSiteMatch => Some(Reader::RestInventory),
-        Family::RestInstances
-        | Family::RestTenantInstances
-        | Family::ConfigNicoApi
-        | Family::ConfigRest => None,
+        Family::RestTotals
+        | Family::RestSiteMatch
+        | Family::RestMachines
+        | Family::RestInstances
+        | Family::ConfigRest => Some(Reader::RestInventory),
+        Family::RestTenantInstances | Family::ConfigNicoApi => None,
     }
 }
 
@@ -540,7 +542,6 @@ mod tests {
             .register(Box::new(StateCollector::new(
                 Arc::clone(&store),
                 SystemTime::now(),
-                HostReadMode::Full,
             )))
             .expect("register");
         Harness {
@@ -613,6 +614,8 @@ mod tests {
 
     fn unit(unit_type: UnitType, id: &str, state: &str, stage: Stage) -> Unit {
         Unit {
+            controller_instance_id: None,
+            rest_machine: None,
             id: id.to_string(),
             unit_type,
             source: Source::NicoApi,
@@ -667,7 +670,11 @@ carbide_site_health_probe_expected_records{linked="true",type="host"} 1
 # TYPE carbide_site_health_probe_host_firmware_requests gauge
 carbide_site_health_probe_host_firmware_requests{initiator="manual",model="gb200"} 1
 carbide_site_health_probe_host_firmware_requests{initiator="unknown",model="r750"} 1
-# HELP carbide_site_health_probe_host_read_mode How host details are read (full, compact), one-hot.
+# HELP carbide_site_health_probe_host_predicates_known 1 when the current host snapshot has the predicate for every host (allocatable, updateEligible), else 0.
+# TYPE carbide_site_health_probe_host_predicates_known gauge
+carbide_site_health_probe_host_predicates_known{predicate="allocatable"} 0
+carbide_site_health_probe_host_predicates_known{predicate="updateEligible"} 0
+# HELP carbide_site_health_probe_host_read_mode How the current host snapshot was read (full, compact), one-hot.
 # TYPE carbide_site_health_probe_host_read_mode gauge
 carbide_site_health_probe_host_read_mode{mode="compact"} 0
 carbide_site_health_probe_host_read_mode{mode="full"} 1
@@ -859,7 +866,8 @@ carbide_site_health_probe_sweep_complete_timestamp_seconds [reader,family] Unix 
 carbide_site_health_probe_sweep_duration_seconds [reader,family] Duration of the sweep behind a family's current snapshot.
 carbide_site_health_probe_last_attempt_failed [reader,family,kind] Why the newest attempt to read a family failed (none, timeout, pushback, rpc, unresolved, decode), one-hot.
 carbide_site_health_probe_process_start_timestamp_seconds [] Unix time this probe process started.
-carbide_site_health_probe_host_read_mode [mode] How host details are read (full, compact), one-hot.
+carbide_site_health_probe_host_read_mode [mode] How the current host snapshot was read (full, compact), one-hot.
+carbide_site_health_probe_host_predicates_known [predicate] 1 when the current host snapshot has the predicate for every host (allocatable, updateEligible), else 0.
 "#;
 
     #[test]
@@ -872,7 +880,6 @@ carbide_site_health_probe_host_read_mode [mode] How host details are read (full,
             .register(Box::new(StateCollector::new(
                 Arc::clone(&store),
                 UNIX_EPOCH + Duration::from_secs(1_000_000),
-                HostReadMode::Full,
             )))
             .expect("register");
         let sink = CountingSink::new(Arc::clone(&store), &setup.meter);
@@ -1024,7 +1031,7 @@ carbide_site_health_probe_host_read_mode [mode] How host details are read (full,
             }),
         );
         sink.failed(Reader::Devices, Family::Dpu, FailureKind::Pushback, "slow");
-        let collector = StateCollector::new(Arc::clone(&store), UNIX_EPOCH, HostReadMode::Full);
+        let collector = StateCollector::new(Arc::clone(&store), UNIX_EPOCH);
         let descs: Vec<String> = collector
             .desc()
             .iter()
@@ -1304,7 +1311,7 @@ carbide_site_health_probe_host_read_mode [mode] How host details are read (full,
         );
         assert_eq!(
             samples(&out, "sweeps_total", &[]).len(),
-            4,
+            6,
             "enabled swept families times 2 results"
         );
 
@@ -1345,6 +1352,8 @@ carbide_site_health_probe_host_read_mode [mode] How host details are read (full,
             .iter()
             .take(500)
             .map(|u| Unit {
+                controller_instance_id: None,
+                rest_machine: None,
                 unit_type: UnitType::HostFirmwareRequest,
                 ..u.clone()
             })

@@ -46,6 +46,7 @@ use model::network_segment::NetworkSegmentType;
 use model::resource_pool::{ResourcePoolDef, ResourcePoolType};
 use model::test_support::ManagedHostConfig;
 use rpc::forge::forge_server::Forge;
+use rpc::{DiscoveryData, DiscoveryInfo, MachineDiscoveryInfo};
 use tonic::{Code, Request};
 
 use crate::test_support::builder::TestApiBuilder;
@@ -368,6 +369,7 @@ fn scout_test_allocation_request(
         }),
         metadata: None,
         allow_unhealthy_machine: false,
+        external_validation_request_id: None,
     }
 }
 
@@ -664,6 +666,446 @@ async fn test_discover_dpu_by_source_ip(
     .expect("DPU should exist");
     assert!(dpu_machine.network_config.loopback_ip.is_some());
     assert!(dpu_machine.network_config.loopback_ip_v6.is_some());
+    Ok(())
+}
+
+/// Define the IPv6 loopback pool as a small auto-assign prefix so DPU discovery
+/// can allocate an IPv6 underlay loopback alongside the default IPv4 pool.
+async fn define_loopback_ipv6_pool(env: &common::api_fixtures::TestEnv) {
+    let mut txn = env.pool.begin().await.unwrap();
+    db::resource_pool::define(
+        &mut txn,
+        model::resource_pool::common::LOOPBACK_IP_V6,
+        &ResourcePoolDef {
+            pool_type: ResourcePoolType::Ipv6,
+            prefix: Some("2001:db8::/125".to_string()),
+            ranges: vec![],
+            delegate_prefix_len: None,
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+}
+
+/// Create a host expected machine carrying one DPU loopback reservation. Direct
+/// discovery resolves the reservation globally by DPU OS/admin MAC, so only the child
+/// row and its foreign-key parent need to exist.
+async fn seed_reservation_host(
+    env: &common::api_fixtures::TestEnv,
+    host_bmc_mac: MacAddress,
+    reservation: model::expected_machine::DpuLoopbackReservation,
+) {
+    use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
+
+    let mut txn = env.pool.begin().await.unwrap();
+    db::expected_machine::create(
+        &mut txn,
+        ExpectedMachine {
+            id: None,
+            bmc_mac_address: host_bmc_mac,
+            data: ExpectedMachineData {
+                interfaces: reservation
+                    .interfaces()
+                    .chain([model::expected_machine::ExpectedInterface {
+                        mac_address: Some(reservation.dpu_oob_net0_mac_address),
+                        role: model::expected_machine::ExpectedInterfaceRole::DpuOs,
+                        ip_allocation: Some(
+                            model::expected_machine::ExpectedInterfaceIpAllocation::Fixed,
+                        ),
+                        fixed_ip: Some("192.0.2.200".parse().unwrap()),
+                        ..Default::default()
+                    }])
+                    .collect(),
+                ..Default::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+}
+
+/// Directly discover a DPU by its DHCP source IP, returning the created machine.
+async fn discover_dpu_by_source_ip(
+    env: &common::api_fixtures::TestEnv,
+    dpu: &model::test_support::DpuConfig,
+    hardware_info: HardwareInfo,
+) -> model::machine::Machine<carbide_uuid::machine::MachineId> {
+    let dhcp_response = env
+        .api
+        .discover_dhcp(Request::new(rpc::forge::DhcpDiscovery {
+            mac_address: dpu.oob_mac_address.to_string(),
+            relay_address: FIXTURE_DHCP_RELAY_ADDRESS.to_string(),
+            vendor_string: None,
+            link_address: None,
+            circuit_id: None,
+            remote_id: None,
+            desired_address: None,
+            address_family: None,
+            message_kind: None,
+            duid: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut req = Request::new(rpc::MachineDiscoveryInfo {
+        machine_interface_id: None,
+        discovery_data: Some(rpc::DiscoveryData::Info(
+            rpc::DiscoveryInfo::try_from(hardware_info).unwrap(),
+        )),
+        create_machine: true,
+        ..Default::default()
+    });
+    let dhcp_address: IpAddr = dhcp_response.address.parse().unwrap();
+    req.extensions_mut()
+        .insert::<Arc<ConnectionAttributes>>(Arc::new(ConnectionAttributes {
+            peer_address: SocketAddr::from((dhcp_address, 0)),
+            peer_certificates: vec![],
+        }));
+
+    let dpu_machine_id = env
+        .api
+        .discover_machine(req)
+        .await
+        .unwrap()
+        .into_inner()
+        .machine_id
+        .expect("DPU should be created");
+    db::machine::find_one(&env.pool, &dpu_machine_id, MachineSearchConfig::default())
+        .await
+        .unwrap()
+        .expect("DPU should exist")
+}
+
+/// Direct discovery claims the operator's reserved IPv4 and IPv6 loopbacks for a
+/// DPU matched by its OS/admin MAC, instead of auto-assigning from the pool.
+#[crate::sqlx_test]
+async fn test_direct_discovery_applies_dpu_loopback_reservation(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(secure_discovery_config()),
+    )
+    .await;
+    define_loopback_ipv6_pool(&env).await;
+
+    // Reservable (non-auto-assign) addresses the operator pins to this DPU.
+    let reserved_v4 = Ipv4Addr::new(172, 30, 0, 10);
+    let reserved_v6: Ipv6Addr = "2001:db8:1::10".parse()?;
+    let mut txn = env.pool.begin().await?;
+    db::resource_pool::populate(
+        env.api.common_pools.ethernet.pool_loopback_ip.as_ref(),
+        &mut txn,
+        vec![IpAddr::V4(reserved_v4)],
+        false,
+    )
+    .await?;
+    db::resource_pool::populate(
+        env.api.common_pools.ethernet.pool_loopback_ip_v6.as_ref(),
+        &mut txn,
+        vec![reserved_v6],
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+
+    let host_config = env.managed_host_config();
+    let dpu = host_config.get_and_assert_single_dpu();
+    seed_reservation_host(
+        &env,
+        "aa:bb:cc:dd:ee:10".parse()?,
+        model::expected_machine::DpuLoopbackReservation {
+            dpu_oob_net0_mac_address: dpu.oob_mac_address,
+            loopback_ipv4: Some(reserved_v4),
+            loopback_ipv6: Some(reserved_v6),
+        },
+    )
+    .await;
+
+    let dpu_machine = discover_dpu_by_source_ip(&env, dpu, HardwareInfo::from(dpu)).await;
+    assert_eq!(
+        dpu_machine.network_config.loopback_ip,
+        Some(IpAddr::V4(reserved_v4))
+    );
+    assert_eq!(dpu_machine.network_config.loopback_ip_v6, Some(reserved_v6));
+    let interfaces =
+        db::machine_interface::find_by_mac_address(&env.pool, dpu.oob_mac_address).await?;
+    assert!(
+        interfaces
+            .iter()
+            .flat_map(|i| &i.addresses)
+            .any(|address| *address == "192.0.2.200".parse::<IpAddr>().unwrap())
+    );
+    assert!(
+        interfaces
+            .iter()
+            .flat_map(|i| &i.addresses)
+            .all(|address| *address != IpAddr::V4(reserved_v4))
+    );
+    // Changing intent does not readdress this live DPU on rediscovery.
+    let mut txn = env.pool.begin().await?;
+    let mut expected =
+        db::expected_machine::find_by_bmc_mac_address(&mut *txn, "aa:bb:cc:dd:ee:10".parse()?)
+            .await?
+            .expect("reservation host exists");
+    expected
+        .data
+        .interfaces
+        .retain(|interface| !interface.role.is_dpu_loopback());
+    expected.data.replace_dpu_loopbacks = true;
+    db::expected_machine::update(&mut txn, &expected).await?;
+    txn.commit().await?;
+    let rediscovered = discover_dpu_by_source_ip(&env, dpu, HardwareInfo::from(dpu)).await;
+    assert_eq!(
+        rediscovered.network_config.loopback_ip,
+        dpu_machine.network_config.loopback_ip
+    );
+    assert_eq!(
+        rediscovered.network_config.loopback_ip_v6,
+        dpu_machine.network_config.loopback_ip_v6
+    );
+    // Restoring intent for an already-discovered OS MAC is accepted because
+    // the resource pool's owner is that DPU, without changing its addresses.
+    let mut expected = env
+        .api
+        .get_expected_machine(Request::new(rpc::forge::ExpectedMachineRequest {
+            bmc_mac_address: "aa:bb:cc:dd:ee:10".to_string(),
+            id: None,
+        }))
+        .await?
+        .into_inner();
+    expected.bmc_username = "ADMIN".to_string();
+    expected.bmc_password = "PASS".to_string();
+    expected.chassis_serial_number = "LOOPBACK-HOST".to_string();
+    expected.host_nics.extend(
+        model::expected_machine::DpuLoopbackReservation {
+            dpu_oob_net0_mac_address: dpu.oob_mac_address,
+            loopback_ipv4: Some(reserved_v4),
+            loopback_ipv6: Some(reserved_v6),
+        }
+        .interfaces()
+        .map(rpc::forge::ExpectedInterface::from),
+    );
+    env.api
+        .update_expected_machine(Request::new(expected))
+        .await?;
+    Ok(())
+}
+
+/// Preparation must not apply a declaration superseded before the creation
+/// transaction locks intent. A retry consumes the replacement reservation.
+#[crate::sqlx_test]
+async fn test_direct_discovery_retries_changed_loopback_reservation(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::expected_machine::DpuLoopbackReservation;
+    use model::resource_pool::ResourcePoolEntryState;
+
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(secure_discovery_config()),
+    )
+    .await;
+    let host_config = env.managed_host_config();
+    let dpu = host_config.get_and_assert_single_dpu();
+    let hardware_info = HardwareInfo::from(dpu);
+    let machine_id = from_hardware_info(&hardware_info)?;
+    let host_bmc_mac = "aa:bb:cc:dd:ee:30".parse()?;
+    let old_address = Ipv4Addr::new(172, 30, 0, 30);
+    let new_address = Ipv4Addr::new(172, 30, 0, 31);
+    let loopback_pool = env.api.common_pools.ethernet.pool_loopback_ip.as_ref();
+    let mut txn = env.pool.begin().await?;
+    db::resource_pool::populate(
+        loopback_pool,
+        &mut txn,
+        vec![IpAddr::V4(old_address), IpAddr::V4(new_address)],
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+    seed_reservation_host(
+        &env,
+        host_bmc_mac,
+        DpuLoopbackReservation {
+            dpu_oob_net0_mac_address: dpu.oob_mac_address,
+            loopback_ipv4: Some(old_address),
+            loopback_ipv6: None,
+        },
+    )
+    .await;
+    let interface_id = dpu_discover_dhcp(&env, &dpu.oob_mac_address.to_string()).await;
+    let remote_ip = "192.0.2.200".parse()?;
+
+    // The Integrated preparation reads existing pool ownership after capturing
+    // declaration intent. Wait for that query, then commit a replacement while
+    // preparation is suspended, without relying on scheduler timing.
+    let mut gate = env.pool.begin().await?;
+    sqlx::query("LOCK TABLE resource_pool IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *gate)
+        .await?;
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await?;
+    let discovery = env.api.discover_machine(discovery_request_from(
+        &hardware_info,
+        Some(interface_id),
+        remote_ip,
+    ));
+    tokio::pin!(discovery);
+    tokio::select! {
+        result = &mut discovery => panic!("discovery bypassed the preparation gate: {result:?}"),
+        _ = wait_for_blocked_query(&env.pool, gate_pid, "SELECT value FROM resource_pool") => {},
+    }
+    let mut writer = env.pool.begin().await?;
+    let mut expected = db::expected_machine::find_by_bmc_mac_address(&mut *writer, host_bmc_mac)
+        .await?
+        .expect("reservation host exists");
+    expected
+        .data
+        .interfaces
+        .retain(|interface| !interface.role.is_dpu_loopback());
+    expected.data.interfaces.extend(
+        DpuLoopbackReservation {
+            dpu_oob_net0_mac_address: dpu.oob_mac_address,
+            loopback_ipv4: Some(new_address),
+            loopback_ipv6: None,
+        }
+        .interfaces(),
+    );
+    expected.data.replace_dpu_loopbacks = true;
+    db::expected_machine::update(&mut writer, &expected).await?;
+    writer.commit().await?;
+    gate.commit().await?;
+
+    let error = tokio::time::timeout(Duration::from_secs(10), &mut discovery)
+        .await?
+        .expect_err("changed intent must defer creation");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(
+        error
+            .message()
+            .contains("DPU loopback reservation changed during preparation; retry")
+    );
+    assert!(
+        db::machine::find_one(&env.pool, &machine_id, MachineSearchConfig::default())
+            .await?
+            .is_none()
+    );
+    for address in [old_address, new_address] {
+        assert!(matches!(
+            db::resource_pool::find_value_in_pool(loopback_pool, &env.pool, &IpAddr::V4(address))
+                .await?
+                .expect("reserved address remains in the pool")
+                .state,
+            ResourcePoolEntryState::Free
+        ));
+    }
+
+    let retried = env
+        .api
+        .discover_machine(discovery_request_from(
+            &hardware_info,
+            Some(interface_id),
+            remote_ip,
+        ))
+        .await?
+        .into_inner();
+    assert_eq!(retried.machine_id, Some(machine_id));
+    let machine = db::machine::find_one(&env.pool, &machine_id, MachineSearchConfig::default())
+        .await?
+        .expect("retry creates the DPU");
+    assert_eq!(
+        machine.network_config.loopback_ip,
+        Some(IpAddr::V4(new_address))
+    );
+    for (address, state) in [
+        (old_address, ResourcePoolEntryState::Free),
+        (
+            new_address,
+            ResourcePoolEntryState::Allocated {
+                owner: machine_id.to_string(),
+                owner_type: model::resource_pool::OwnerType::Machine.to_string(),
+            },
+        ),
+    ] {
+        assert_eq!(
+            db::resource_pool::find_value_in_pool(loopback_pool, &env.pool, &IpAddr::V4(address))
+                .await?
+                .expect("reserved address remains in the pool")
+                .state,
+            state,
+            "retry must allocate only current intent: {address}"
+        );
+    }
+    Ok(())
+}
+
+/// Direct discovery uses the caller's MAC and leaves another DPU's reserved
+/// address untouched while allocating automatically for an undeclared MAC.
+#[crate::sqlx_test]
+async fn test_direct_discovery_does_not_use_another_mac_reservation(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::net::Ipv4Addr;
+
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(secure_discovery_config()),
+    )
+    .await;
+
+    // A reservation for a different DPU OS/admin MAC.
+    let reserved_v4 = Ipv4Addr::new(172, 30, 0, 20);
+    let mut txn = env.pool.begin().await?;
+    db::resource_pool::populate(
+        env.api.common_pools.ethernet.pool_loopback_ip.as_ref(),
+        &mut txn,
+        vec![IpAddr::V4(reserved_v4)],
+        false,
+    )
+    .await?;
+    txn.commit().await?;
+    seed_reservation_host(
+        &env,
+        "aa:bb:cc:dd:ee:20".parse()?,
+        model::expected_machine::DpuLoopbackReservation {
+            dpu_oob_net0_mac_address: "02:00:00:00:ff:ff".parse()?,
+            loopback_ipv4: Some(reserved_v4),
+            loopback_ipv6: None,
+        },
+    )
+    .await;
+
+    let host_config = env.managed_host_config();
+    let dpu = host_config.get_and_assert_single_dpu();
+    let hardware_info = HardwareInfo::from(dpu);
+
+    let dpu_machine = discover_dpu_by_source_ip(&env, dpu, hardware_info).await;
+    let loopback = dpu_machine
+        .network_config
+        .loopback_ip
+        .expect("DPU should still receive an automatic loopback");
+    assert_ne!(
+        loopback,
+        IpAddr::V4(reserved_v4),
+        "a different OS/admin MAC must not select another DPU's reservation"
+    );
+    // The automatic address comes from the default auto-assign pool prefix
+    // (172.20.0.0/24), not the reservable range the reservation targeted.
+    let IpAddr::V4(v4) = loopback else {
+        panic!("the IPv4 loopback pool must hand out an IPv4 address");
+    };
+    let [a, b, c, _] = v4.octets();
+    assert_eq!(
+        [a, b, c],
+        [172, 20, 0],
+        "the automatic loopback must come from the default auto-assign pool"
+    );
     Ok(())
 }
 
@@ -1317,6 +1759,17 @@ async fn test_dpu_rediscovery_locks_the_host_link_row_before_the_machines_rows(
     let host_machine_id = MachineId::from(mh.id);
     let dpu_interface = dpu_oob_interface(&env, dpu, dpu_machine_id).await?;
     let host_link = dpu_host_link(&env, dpu, mh.dpu_ids[0]).await?;
+    let original_loopback = dpu_machine(&env.pool, &dpu_machine_id)
+        .await?
+        .network_config
+        .loopback_ip
+        .expect("the ingested DPU has an Integrated loopback");
+    let used_before =
+        db::resource_pool::stats(&env.pool, model::resource_pool::common::LOOPBACK_IP)
+            .await?
+            .used;
+    // Remove only the published address. The reservation remains owned by
+    // this DPU, so rediscovery must repair the field without consuming another.
     clear_dpu_loopback_ip(&env.pool, &dpu_machine_id).await?;
     let version_before = dpu_machine(&env.pool, &dpu_machine_id)
         .await?
@@ -1351,10 +1804,22 @@ async fn test_dpu_rediscovery_locks_the_host_link_row_before_the_machines_rows(
         );
     }
 
+    // Release the interface gate, then reload configuration and capacity to
+    // distinguish reuse from a second successful allocation.
     blocker.rollback().await?;
     assert_eq!(rediscovery.await, dpu_machine_id);
     let dpu_machine = dpu_machine(&env.pool, &dpu_machine_id).await?;
-    assert!(dpu_machine.network_config.loopback_ip.is_some());
+    assert_eq!(
+        dpu_machine.network_config.loopback_ip,
+        Some(original_loopback)
+    );
+    assert_eq!(
+        db::resource_pool::stats(&env.pool, model::resource_pool::common::LOOPBACK_IP)
+            .await?
+            .used,
+        used_before,
+        "rediscovery must reuse the DPU's existing Integrated reservation",
+    );
     assert_eq!(
         dpu_machine.network_config.version.version_nr(),
         version_before.version_nr() + 1
@@ -1363,12 +1828,10 @@ async fn test_dpu_rediscovery_locks_the_host_link_row_before_the_machines_rows(
     Ok(())
 }
 
-/// A DPU rediscovery that fills a loopback address and the admin address
-/// repair of its host both take the host link row before the host machines
-/// row, so the one parked on the machines row holds the link row and the
-/// other waits behind it instead of deadlocking with it.
+/// A busy host makes loopback attachment roll back instead of waiting with a
+/// DPU lock. Admin repair and a later rediscovery must still finish together.
 #[crate::sqlx_test]
-async fn test_dpu_rediscovery_and_admin_address_repair_wait_instead_of_deadlocking(
+async fn test_dpu_rediscovery_retries_after_busy_group_without_blocking_admin_repair(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
@@ -1381,14 +1844,17 @@ async fn test_dpu_rediscovery_and_admin_address_repair_wait_instead_of_deadlocki
     let host_link = dpu_host_link(&env, dpu, mh.dpu_ids[0]).await?;
     assert!(host_link.primary_interface);
 
-    // Leave the host needing an admin address repair and the DPU a loopback
-    // fill, so both flows write the host machines row.
+    // Both callers need a write, but the DPU still owns its original loopback.
+    // Rejected attachment must return that value and leave the field empty.
     sqlx::query("DELETE FROM machine_interface_addresses WHERE interface_id = $1")
         .bind(host_link.id)
         .execute(&env.pool)
         .await?;
     clear_dpu_loopback_ip(&env.pool, &dpu_machine_id).await?;
-
+    let used_before =
+        db::resource_pool::stats(&env.pool, model::resource_pool::common::LOOPBACK_IP)
+            .await?
+            .used;
     let mut blocker = env.pool.begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *blocker)
@@ -1398,44 +1864,61 @@ async fn test_dpu_rediscovery_and_admin_address_repair_wait_instead_of_deadlocki
         .fetch_one(&mut *blocker)
         .await?;
 
-    // The rediscovery holds the host link row while it waits on the host
-    // machines row.
-    let rediscovery = dpu_discover_machine(&env, dpu, dpu_interface.id);
-    tokio::pin!(rediscovery);
-    let rediscovery_pid = tokio::select! {
-        result = &mut rediscovery => {
-            panic!("the rediscovery finished while the host machines row was held: {result:?}")
-        }
-        blocked = wait_for_blocked_query(&env.pool, blocker_pid, "machine_group_member_ids") => {
-            blocked
-        }
-    };
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        env.api.discover_machine(Request::new(MachineDiscoveryInfo {
+            machine_interface_id: Some(dpu_interface.id),
+            discovery_data: Some(DiscoveryData::Info(DiscoveryInfo::try_from(
+                HardwareInfo::from(dpu),
+            )?)),
+            create_machine: true,
+            ..Default::default()
+        })),
+    )
+    .await?
+    .expect_err("a busy group rejects this attachment");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("changed or is busy"));
+    assert!(
+        dpu_machine(&env.pool, &dpu_machine_id)
+            .await?
+            .network_config
+            .loopback_ip
+            .is_none()
+    );
+    assert_eq!(
+        db::resource_pool::stats(&env.pool, model::resource_pool::common::LOOPBACK_IP,)
+            .await?
+            .used,
+        used_before
+    );
+    let mut probe = env.pool.begin().await?;
+    assert!(
+        db::machine::try_lock_by_id_for_update(&mut probe, &dpu_machine_id).await?,
+        "failed attachment must release its partial DPU lock"
+    );
+    probe.rollback().await?;
 
-    // The repair queues on the host link row behind the rediscovery.
+    // Admin repair can now hold the interface and queue on the host; the
+    // failed discovery must not retain a DPU lock that would block its fanout.
     let repair =
         db::machine_interface::reconcile_admin_addresses_after_commit(&env.pool, &host_machine_id);
     tokio::pin!(repair);
     tokio::select! {
-        result = &mut rediscovery => {
-            panic!("the rediscovery finished while the host machines row was held: {result:?}")
-        }
-        result = &mut repair => {
-            panic!("the repair finished while the rediscovery held the host link row: {result:?}")
-        }
-        _ = wait_for_blocked_query(&env.pool, rediscovery_pid, "FOR UPDATE OF mi") => {}
+        result = &mut repair => panic!("repair bypassed the held host: {result:?}"),
+        _ = wait_for_blocked_query(&env.pool, blocker_pid, "UPDATE machines") => {},
     }
-
     let metrics = MetricsCapture::start();
     blocker.rollback().await?;
     let (rediscovered_machine_id, repaired) =
         tokio::time::timeout(Duration::from_secs(30), async {
-            tokio::join!(rediscovery, repair)
+            tokio::join!(
+                dpu_discover_machine(&env, dpu, dpu_interface.id),
+                &mut repair
+            )
         })
-        .await
-        .expect("both must finish once the host machines row is free");
+        .await?;
     assert_eq!(rediscovered_machine_id, dpu_machine_id);
-    // Either the queued repair or the rediscovery's own reconcile makes the
-    // repair, so only its success is asserted.
     repaired?;
     assert_eq!(
         metrics.counter_delta(
@@ -1453,7 +1936,6 @@ async fn test_dpu_rediscovery_and_admin_address_repair_wait_instead_of_deadlocki
             .loopback_ip
             .is_some()
     );
-
     Ok(())
 }
 

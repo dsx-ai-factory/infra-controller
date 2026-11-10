@@ -68,6 +68,7 @@ fn test_site_explorer(
         test_harness.test_meter.meter(),
         endpoint_exploration_service,
         endpoint_explorer.clone(),
+        Default::default(),
         api.common_pools().clone(),
         api.work_lock_manager_handle(),
         api.runtime_config.rack_profiles.clone(),

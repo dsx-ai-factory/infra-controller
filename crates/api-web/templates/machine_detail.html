@@ -395,6 +395,8 @@
 Missing BMC Data
 {% endif %}
 
+{{ firmware_inventory|safe }}
+
 <h3>Discovery Info</h3>
 <table class="detailsview">
 	<tr><th>Sys Vendor</th><td>{{ sys_vendor }}</td></tr>

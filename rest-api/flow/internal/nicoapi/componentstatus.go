@@ -46,6 +46,12 @@ func mapComputeStatus(raw string) types.ComponentOperationStatus {
 		head = raw[:i]
 	}
 
+	// The terminal firmware substate reports an error while retaining the same
+	// operation exclusions as active firmware recovery.
+	if raw == "NicFirmwareUpdating/Failed" {
+		return mappedStatus(types.PhaseError, raw, types.ComponentTypeCompute)
+	}
+
 	phase, ok := computePhaseByState[head]
 	if ok {
 		return mappedStatus(phase, raw, types.ComponentTypeCompute)
@@ -128,7 +134,7 @@ var computePhaseByState = map[string]types.Phase{
 	"PreAssignedMeasuring":  types.PhaseInitializing,
 	"PostAssignedMeasuring": types.PhaseInitializing,
 	"BomValidating":         types.PhaseInitializing,
-	"Assigned":              types.PhaseInUse,
+	"Assigned":              types.PhaseReady,
 	"WaitingForCleanup":     types.PhaseInUse,
 	"Reprovisioning":        types.PhaseInUse,
 	"HostReprovisioning":    types.PhaseInUse,
@@ -139,6 +145,7 @@ var computePhaseByState = map[string]types.Phase{
 	"RotatingHostUefi":      types.PhaseInUse,
 	"RotatingDpuUefi":       types.PhaseInUse,
 	"RotatingNicLockdown":   types.PhaseInUse,
+	"NicFirmwareUpdating":   types.PhaseInUse,
 	"Failed":                types.PhaseError,
 	"Decommissioning":       types.PhaseDeleting,
 	"ForceDeletion":         types.PhaseDeleting,
@@ -200,8 +207,7 @@ func decodeTaggedState(raw string) (string, bool) {
 
 // blockedOpsByType lists the operations Flow currently knows how to gate
 // per component type. When Phase != Ready, all of these are blocked;
-// Ready blocks none. Per-operation refinement (e.g. allowing power while
-// a compute is in Assigned/Provisioning) is deferred.
+// Ready blocks none. Per-operation refinement is deferred.
 var blockedOpsByType = map[types.ComponentType][]types.OperationType{
 	types.ComponentTypeCompute:    {types.OperationTypePowerControl, types.OperationTypeFirmwareControl},
 	types.ComponentTypeNVSwitch:   {types.OperationTypePowerControl, types.OperationTypeFirmwareControl},

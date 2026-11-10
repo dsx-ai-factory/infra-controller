@@ -112,10 +112,11 @@ fn spawn_bound_metadata_service(
 #[cfg(test)]
 mod tests {
     use carbide_host_support::agent_config::MachineIdentityConfig;
+    use carbide_instrument::testing::MetricsCapture;
     use http_body_util::{BodyExt, Empty};
     use hyper::body::Bytes;
     use hyper_util::rt::TokioIo;
-    use rpc::forge_tls_client::ForgeClientConfig;
+    use rpc::carbide_tls_client::CarbideClientConfig;
 
     use super::*;
     use crate::instrumentation::create_metrics;
@@ -129,7 +130,7 @@ mod tests {
                     .parse()
                     .expect("DPU ID"),
                 "http://127.0.0.1:1".to_string(),
-                Arc::new(ForgeClientConfig::default()),
+                Arc::new(CarbideClientConfig::default()),
                 MachineIdentityConfig::default(),
             )
             .expect("metadata state"),
@@ -162,6 +163,10 @@ mod tests {
         if !ipv6_loopback_available() {
             return;
         }
+        // The production router records HTTP metrics on the process-global
+        // meter; hold the capture lock so metric-asserting tests running in
+        // parallel do not count these requests.
+        let _metrics = MetricsCapture::start();
         let mut tasks = JoinSet::new();
         let cancel = CancellationToken::new();
         let address = spawn_metadata_service(

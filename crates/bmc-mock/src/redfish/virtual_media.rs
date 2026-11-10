@@ -76,6 +76,57 @@ impl VirtualMediaUpdate {
     }
 }
 
+/// A library user's handle to one configured virtual-media drive.
+///
+/// Redfish `InsertMedia` and `EjectMedia` hold the drive's operation lock from the
+/// request until the backend has applied or rejected the change. [`Self::lock`]
+/// takes the same lock, so an embedding application can read the published
+/// contents and act on the attached medium without an insert or eject changing it.
+#[derive(Clone, Debug)]
+pub struct VirtualMediaDrive {
+    device: Arc<DeviceState>,
+}
+
+impl VirtualMediaDrive {
+    /// The drive's configured identifier.
+    pub fn device_id(&self) -> &str {
+        &self.device.config.id
+    }
+
+    /// Waits until no insert or eject is in progress on this drive, then holds
+    /// off new ones until the guard is dropped.
+    pub async fn lock(&self) -> VirtualMediaGuard {
+        VirtualMediaGuard {
+            device: self.device.clone(),
+            _operation: self.device.operation.clone().lock_owned().await,
+        }
+    }
+
+    /// Like [`Self::lock`], but returns `None` at once while an insert or eject
+    /// is in progress, which may be waiting for a long backend operation.
+    pub fn try_lock(&self) -> Option<VirtualMediaGuard> {
+        let operation = self.device.operation.clone().try_lock_owned().ok()?;
+        Some(VirtualMediaGuard {
+            device: self.device.clone(),
+            _operation: operation,
+        })
+    }
+}
+
+/// Holds a drive's operation lock. The published contents cannot change while it lives.
+#[derive(Debug)]
+pub struct VirtualMediaGuard {
+    device: Arc<DeviceState>,
+    _operation: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl VirtualMediaGuard {
+    /// The contents Redfish publishes for the drive.
+    pub fn contents(&self) -> VirtualMediaContents {
+        self.device.media.lock().expect("mutex poisoned").clone()
+    }
+}
+
 #[derive(Debug)]
 struct DeviceState {
     config: DeviceConfig,
@@ -111,6 +162,12 @@ impl VirtualMediaState {
         self.devices
             .iter()
             .find(|device| device.config.id == device_id)
+    }
+
+    pub(crate) fn drive(&self, device_id: &str) -> Option<VirtualMediaDrive> {
+        self.find_device(device_id).map(|device| VirtualMediaDrive {
+            device: device.clone(),
+        })
     }
 }
 
@@ -440,6 +497,76 @@ mod tests {
             body.unwrap()["Image"],
             "first.iso",
             "failed eject retains committed contents"
+        );
+    }
+
+    #[tokio::test]
+    async fn library_drive_lock_excludes_insert_and_eject() {
+        let (requests, mut operations) = mpsc::unbounded_channel();
+        let (router, state) = crate::machine_router(
+            &host_info(HardwareType::DellPowerEdgeR750),
+            Arc::new(ControlledMediaCallbacks { requests }),
+            "test-host".to_owned(),
+            false,
+            MachineRouterOptions {
+                virtual_media_devices: Some(vec![DeviceConfig {
+                    id: "Cd".into(),
+                    name: "Virtual CD".into(),
+                    media_types: vec!["CD".into()],
+                }]),
+                ..Default::default()
+            },
+        );
+        let system = "System.Embedded.1";
+        assert!(state.virtual_media_drive(system, "Missing").is_none());
+        assert!(state.virtual_media_drive("Missing", "Cd").is_none());
+        let drive = state.virtual_media_drive(system, "Cd").unwrap();
+        assert_eq!(drive.device_id(), "Cd");
+        let insert = format!(
+            "/redfish/v1/Systems/{system}/VirtualMedia/Cd/Actions/VirtualMedia.InsertMedia"
+        );
+
+        // While the library holds the lock, an insert waits before reaching the backend.
+        let guard = drive.lock().await;
+        assert_eq!(guard.contents(), VirtualMediaContents::Empty);
+        let mut inserting = Box::pin(request(
+            &router,
+            Method::POST,
+            &insert,
+            Some(json!({"Image": "boot.iso"})),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(inserting.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(
+            operations.try_recv().is_err(),
+            "the insert waits for the lock"
+        );
+        drop(guard);
+
+        // While the backend applies the insert, the lock is unavailable.
+        let (update, reply) = tokio::select! {
+            result = &mut inserting => panic!("insert finished before its backend reply: {result:?}"),
+            operation = operations.recv() => operation.unwrap(),
+        };
+        assert!(
+            drive.try_lock().is_none(),
+            "an insert in progress holds the lock"
+        );
+        update.commit();
+        reply.send(Ok(())).unwrap();
+        assert_eq!(inserting.await.0, StatusCode::NO_CONTENT);
+        assert_eq!(
+            drive
+                .try_lock()
+                .expect("no operation in progress")
+                .contents(),
+            VirtualMediaContents::Inserted {
+                image: "boot.iso".into(),
+                write_protected: true,
+            }
         );
     }
 

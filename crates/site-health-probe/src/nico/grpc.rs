@@ -27,13 +27,13 @@ use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
 use forge_tls::client_config::ClientCert;
+use rpc::carbide_tls_client::{CarbideClientConfig, CarbideClientT, CarbideTlsClient};
 use rpc::forge::host_reprovisioning_list_response::HostReprovisioningListItem;
-use rpc::forge_tls_client::{ForgeClientConfig, ForgeClientT, ForgeTlsClient};
 use rpc::{forge, site_explorer};
 
 use crate::config::NicoApiStateConfig;
 use crate::gate::{CallError, classify_grpc};
-use crate::nico::host_read::{HostDetail, full_host_detail};
+use crate::nico::host_read::{HostDetail, compact_host_detail, full_host_detail};
 use crate::nico::{NicoApi, NicoConnector};
 use crate::probes::nicoapi::preflight_ca;
 
@@ -54,7 +54,7 @@ impl NicoConnector for GrpcConnector {
         preflight_ca(&self.cfg.tls.ca)
             .await
             .map_err(|e| CallError::Transport(format!("{e:#}")))?;
-        let mut client_config = ForgeClientConfig::new(
+        let mut client_config = CarbideClientConfig::new(
             self.cfg.tls.ca.clone(),
             Some(ClientCert {
                 cert_path: self.cfg.tls.cert.clone(),
@@ -66,7 +66,7 @@ impl NicoConnector for GrpcConnector {
         // A host page of 100 full machine records can outgrow tonic's 4 MiB
         // default.
         client_config.max_decoding_message_size = Some(self.cfg.max_decoding_message_size);
-        let client = ForgeTlsClient::new(&client_config)
+        let client = CarbideTlsClient::new(&client_config)
             .build(format!("https://{}", self.cfg.target))
             .await
             .map_err(|e| CallError::Transport(format!("dial: {e}")))?;
@@ -80,11 +80,11 @@ impl NicoConnector for GrpcConnector {
 /// which shares the connection. The client is `Send` but not `Sync`, so the
 /// shared original sits behind a mutex that is held only to clone it.
 struct GrpcNico {
-    client: Mutex<ForgeClientT>,
+    client: Mutex<CarbideClientT>,
 }
 
 impl GrpcNico {
-    fn client(&self) -> ForgeClientT {
+    fn client(&self) -> CarbideClientT {
         self.client
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -123,6 +123,23 @@ impl NicoApi for GrpcNico {
             .machines
             .into_iter()
             .map(full_host_detail)
+            .collect()
+    }
+
+    async fn host_states_by_ids(&self, ids: &[MachineId]) -> Result<Vec<HostDetail>, CallError> {
+        let request = forge::HostStatesByIdsRequest {
+            host_ids: ids.to_vec(),
+        };
+        let reply = self
+            .client()
+            .find_host_states_by_ids(request)
+            .await
+            .map_err(grpc)?;
+        reply
+            .into_inner()
+            .hosts
+            .into_iter()
+            .map(compact_host_detail)
             .collect()
     }
 

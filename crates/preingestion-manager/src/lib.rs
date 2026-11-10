@@ -426,6 +426,13 @@ async fn one_endpoint(
                 .set_ntp_servers(db, endpoint, set_at.as_ref(), *attempts)
                 .await?
         }
+        // The work list returns this endpoint again only once the explorer has
+        // written the refreshed report it asked for: decide on that report.
+        PreingestionState::FirmwareCheckRefreshWait => {
+            static_info
+                .check_firmware_versions_below_preingestion(db, endpoint, false)
+                .await?
+        }
         PreingestionState::RecheckVersionsAfterFailure { .. } => {
             static_info
                 .start_firmware_uploads_or_continue(db, endpoint, true)
@@ -508,6 +515,7 @@ async fn one_endpoint(
             reason: _,
             host_bmc_ip,
             pre_copy_powercycle,
+            ..
         } => {
             static_info
                 .in_bfb_recovery_needed(db, endpoint, host_bmc_ip, *pre_copy_powercycle)
@@ -518,6 +526,7 @@ async fn one_endpoint(
             host_bmc_ip,
             phase,
             post_install,
+            ..
         } => {
             static_info
                 .in_bfb_platform_powercycle(db, endpoint, host_bmc_ip, phase, *post_install)
@@ -527,6 +536,7 @@ async fn one_endpoint(
         PreingestionState::BfbCopyInProgress {
             started_at,
             host_bmc_ip,
+            ..
         } => {
             static_info
                 .in_bfb_copy_in_progress(db, endpoint, started_at, host_bmc_ip)
@@ -536,6 +546,7 @@ async fn one_endpoint(
         PreingestionState::BfbInstallationWait {
             started_at,
             host_bmc_ip,
+            ..
         } => {
             static_info
                 .in_bfb_installation_wait(db, endpoint, started_at, host_bmc_ip)
@@ -585,24 +596,55 @@ impl PreingestionManagerStatic {
 
     /// check_firmware_versions_below_preingestion will check if we actually need to do firmware upgrades before
     /// ingestion can happen, and either kick them off if so otherwise move on.
+    /// `repeat`: if true and the report is incomplete, park the endpoint in
+    /// `FirmwareCheckRefreshWait` and repeat the check once on a fresh report;
+    /// if false, decide on this report as it is. False from that state (this is
+    /// the fresh report), from the time-out-of-sync path for an already ingested
+    /// host, and whenever `firmware_global.autoupdate` is off (the outcome is
+    /// Complete regardless).
     async fn check_firmware_versions_below_preingestion(
         &self,
         db: &PgPool,
         endpoint: &ExploredEndpoint,
+        repeat: bool,
     ) -> PreingestionManagerResult<bool> {
         if self.start_rack_firmware(db, endpoint).await? {
             return Ok(false);
         }
+        let repeat = repeat && self.config.autoupdate;
 
         // First, we need to check if it's appropriate to upgrade at this point or wait until later.
+        // Every decision is logged at info; an incomplete report is deferred once.
         let fw_info = match self.find_fw_info_for_host(db, endpoint).await? {
             None => {
-                tracing::debug!(
-                    bmc_ip_address = %endpoint.address,
-                    "No matching firmware info found during preingestion check"
-                );
                 // No desired firmware description found for this host, nothing to do.
                 // This is the expected path for DPUs.
+                // A known vendor with no model may be a BMC still recovering from the
+                // reset this check follows: give it one refreshed report first. The
+                // model is resolved as the lookup resolves it (the explicit field,
+                // then the computed one).
+                let model = endpoint
+                    .report
+                    .model
+                    .clone()
+                    .or_else(|| endpoint.report.model());
+                if endpoint.report.vendor.is_some()
+                    && model.is_none()
+                    && !endpoint.report.is_dpu()
+                    && repeat
+                {
+                    self.defer_firmware_check(db, endpoint, "the report has no host model")
+                        .await?;
+                    return Ok(false);
+                }
+                tracing::info!(
+                    bmc_ip_address = %endpoint.address,
+                    vendor = ?endpoint.report.vendor,
+                    model = ?model,
+                    repeat,
+                    preingestion_state = ?endpoint.preingestion_state,
+                    "No host firmware definition matches this endpoint; firmware preingestion complete"
+                );
                 db.with_txn(|txn| {
                     db::explored_endpoints::set_preingestion_complete(endpoint.address, txn).boxed()
                 })
@@ -611,44 +653,96 @@ impl PreingestionManagerStatic {
             }
             Some(fw_info) => fw_info,
         };
+        let mut satisfied: Vec<String> = Vec::new();
+        let mut not_checked: Vec<String> = Vec::new();
         for (fwtype, desc) in &fw_info.components {
-            if let Some(min_preingestion) = &desc.preingest_upgrade_when_below
-                && let Some(current) = endpoint.find_version(&fw_info, *fwtype)
-            {
+            let Some(min_preingestion) = &desc.preingest_upgrade_when_below else {
+                continue;
+            };
+            let Some(inventory) = endpoint.find_inventory(&fw_info, *fwtype) else {
+                tracing::debug!(
+                    bmc_ip_address = %endpoint.address,
+                    firmware_type = ?fwtype,
+                    current_version_reported_as = desc
+                        .current_version_reported_as
+                        .as_ref()
+                        .map(|regex| regex.as_str())
+                        .unwrap_or("<none>"),
+                    "No inventory entry in the exploration report matches this component; its preingestion minimum cannot be checked"
+                );
+                not_checked.push(format!("{fwtype:?}: no matching inventory entry"));
+                continue;
+            };
+            let Some(current) = inventory.version.as_ref() else {
+                tracing::debug!(
+                    bmc_ip_address = %endpoint.address,
+                    firmware_type = ?fwtype,
+                    inventory_id = %inventory.id,
+                    "The matching inventory entry reports no version; this component's preingestion minimum cannot be checked"
+                );
+                not_checked.push(format!("{fwtype:?}: {} reports no version", inventory.id));
+                continue;
+            };
+            tracing::debug!(
+                bmc_ip_address = %endpoint.address,
+                firmware_type = ?fwtype,
+                inventory_id = %inventory.id,
+                ?min_preingestion,
+                ?current,
+                "Checking firmware version against preingestion minimum"
+            );
+
+            // The comparison fails only when one side has no numeric part: a
+            // placeholder such as "N/A" from a BMC that is still settling. That is
+            // not a satisfied minimum; treat it as a component that cannot be checked.
+            let Ok(cmp) = version_compare::compare(current, min_preingestion) else {
+                tracing::debug!(
+                    bmc_ip_address = %endpoint.address,
+                    firmware_type = ?fwtype,
+                    inventory_id = %inventory.id,
+                    ?current,
+                    ?min_preingestion,
+                    "The reported version cannot be compared with the preingestion minimum; this component cannot be checked"
+                );
+                not_checked.push(format!(
+                    "{fwtype:?}: {current} cannot be compared with {min_preingestion}"
+                ));
+                continue;
+            };
+            if cmp == version_compare::Cmp::Lt {
                 tracing::info!(
                     bmc_ip_address = %endpoint.address,
                     firmware_type = ?fwtype,
-                    ?min_preingestion,
-                    ?current,
-                    "Checking firmware version against preingestion minimum"
+                    "Starting firmware upload during preingestion check"
                 );
-
-                if version_compare::compare(current, min_preingestion)
-                    .is_ok_and(|c| c == version_compare::Cmp::Lt)
-                {
-                    tracing::info!(
-                        bmc_ip_address = %endpoint.address,
-                        firmware_type = ?fwtype,
-                        "Starting firmware upload during preingestion check"
-                    );
-                    // One or both of the versions are low enough to absolutely need upgrades first - do them both while we're at it.
-                    let delayed_upgrade = self
-                        .start_firmware_uploads_or_continue(db, endpoint, false)
-                        .await?;
-                    return Ok(delayed_upgrade);
-                } else {
-                    tracing::info!(
-                        bmc_ip_address = %endpoint.address,
-                        firmware_type = ?fwtype,
-                        "Firmware version satisfies preingestion minimum"
-                    );
-                }
+                // One or both of the versions are low enough to absolutely need upgrades first - do them both while we're at it.
+                let delayed_upgrade = self
+                    .start_firmware_uploads_or_continue(db, endpoint, false)
+                    .await?;
+                return Ok(delayed_upgrade);
+            } else {
+                tracing::debug!(
+                    bmc_ip_address = %endpoint.address,
+                    firmware_type = ?fwtype,
+                    "Firmware version satisfies preingestion minimum"
+                );
+                satisfied.push(format!("{fwtype:?} {current}"));
             }
         }
 
-        tracing::debug!(
+        // A component that could not be checked gets one refreshed report first.
+        if !not_checked.is_empty() && repeat {
+            self.defer_firmware_check(db, endpoint, &not_checked.join("; "))
+                .await?;
+            return Ok(false);
+        }
+        tracing::info!(
             bmc_ip_address = %endpoint.address,
-            "Firmware versions satisfy preingestion requirements; marking complete"
+            ?satisfied,
+            ?not_checked,
+            repeat,
+            preingestion_state = ?endpoint.preingestion_state,
+            "No listed component is below its preingestion minimum; firmware preingestion complete"
         );
         // Good enough for now at least, proceed with ingestion.
         db.with_txn(|txn| {
@@ -656,6 +750,36 @@ impl PreingestionManagerStatic {
         })
         .await??;
         Ok(false)
+    }
+
+    /// Moves the endpoint to `FirmwareCheckRefreshWait` until the explorer
+    /// writes one refreshed report. The waiting flag alone parks it: the
+    /// explorer's refresh-wait tier picks up this state within its budget.
+    async fn defer_firmware_check(
+        &self,
+        db: &PgPool,
+        endpoint: &ExploredEndpoint,
+        reason: &str,
+    ) -> PreingestionManagerResult<()> {
+        db.with_txn(|txn| {
+            async move {
+                db::explored_endpoints::set_preingestion_firmware_check_refresh_wait(
+                    endpoint.address,
+                    txn,
+                )
+                .await?;
+                db::explored_endpoints::set_waiting_for_explorer_refresh(endpoint.address, txn)
+                    .await
+            }
+            .boxed()
+        })
+        .await??;
+        tracing::info!(
+            bmc_ip_address = %endpoint.address,
+            reason,
+            "Exploration report is incomplete for the firmware check; waiting for one refreshed report"
+        );
+        Ok(())
     }
 
     /// start_firmware_uploads_or_continue will start a firmware upgrade if any of the endpoint's versions
@@ -1551,7 +1675,7 @@ impl PreingestionManagerStatic {
         match self.check_bmc_time_sync(db, endpoint).await {
             Ok(true) => {
                 // Time is in sync, proceed with firmware version check
-                self.check_firmware_versions_below_preingestion(db, endpoint)
+                self.check_firmware_versions_below_preingestion(db, endpoint, true)
                     .await
             }
             Ok(false) => {
@@ -1566,7 +1690,7 @@ impl PreingestionManagerStatic {
                         "BMC time is out of sync but the host is already ingested; skipping time-sync remediation"
                     );
                     return self
-                        .check_firmware_versions_below_preingestion(db, endpoint)
+                        .check_firmware_versions_below_preingestion(db, endpoint, false)
                         .await;
                 }
                 // The reset sequence powers off the host and resets the BMC,
@@ -2414,7 +2538,7 @@ impl PreingestionManagerStatic {
                             "BMC time is now in sync after reset"
                         );
                         let delayed_upgrade = self
-                            .check_firmware_versions_below_preingestion(db, endpoint)
+                            .check_firmware_versions_below_preingestion(db, endpoint, true)
                             .await?;
                         Ok(delayed_upgrade)
                     }
@@ -2821,6 +2945,7 @@ impl PreingestionManagerStatic {
                     *host_bmc_ip,
                     model::site_explorer::BfbPlatformPowercyclePhase::PowerOff,
                     false,
+                    endpoint.preingestion_state.bfb_target_mac(),
                     txn,
                 )
                 .boxed()
@@ -2846,6 +2971,13 @@ impl PreingestionManagerStatic {
 
         match phase {
             BfbPlatformPowercyclePhase::PowerOff => {
+                if self
+                    .validate_bfb_target(db, endpoint, *host_bmc_ip)
+                    .await?
+                    .is_none()
+                {
+                    return Ok(());
+                }
                 let redfish_client = match self
                     .redfish_client_pool
                     .create_client_for_ingested_host(*host_bmc_ip, db)
@@ -2891,6 +3023,7 @@ impl PreingestionManagerStatic {
                         *host_bmc_ip,
                         BfbPlatformPowercyclePhase::PowerOn,
                         post_install,
+                        endpoint.preingestion_state.bfb_target_mac(),
                         txn,
                     )
                     .boxed()
@@ -2898,6 +3031,8 @@ impl PreingestionManagerStatic {
                 .await??;
             }
             BfbPlatformPowercyclePhase::PowerOn => {
+                // Restore host power even if the DPU mapping changed after
+                // PowerOff. Validate the DPU again before resuming its recovery.
                 let redfish_client = match self
                     .redfish_client_pool
                     .create_client_for_ingested_host(*host_bmc_ip, db)
@@ -2943,6 +3078,7 @@ impl PreingestionManagerStatic {
                         *host_bmc_ip,
                         BfbPlatformPowercyclePhase::WaitingForDpuBmc,
                         post_install,
+                        endpoint.preingestion_state.bfb_target_mac(),
                         txn,
                     )
                     .boxed()
@@ -2957,6 +3093,14 @@ impl PreingestionManagerStatic {
                     .await
                 {
                     Ok(()) if post_install => {
+                        // Guard completion against a probe answered by a different device.
+                        if self
+                            .validate_bfb_target(db, endpoint, *host_bmc_ip)
+                            .await?
+                            .is_none()
+                        {
+                            return Ok(());
+                        }
                         tracing::info!(bmc_ip_address = %address, "DPU BMC online after post-install power-cycle, completing preingestion");
                         db.with_txn(|txn| {
                             async move {
@@ -2996,6 +3140,42 @@ impl PreingestionManagerStatic {
         Ok(())
     }
 
+    /// Check the persisted target before starting another external BFB action.
+    /// A legacy state has no identity to validate and must be explicitly requeued.
+    async fn validate_bfb_target(
+        &self,
+        db: &PgPool,
+        endpoint: &ExploredEndpoint,
+        host_bmc_ip: std::net::IpAddr,
+    ) -> Result<Option<mac_address::MacAddress>, DatabaseError> {
+        let expected = endpoint.preingestion_state.bfb_target_mac();
+        let current = db::machine_interface::find_by_ip(db, endpoint.address)
+            .await?
+            .map(|interface| interface.mac_address);
+        if let Some(mac) = expected
+            && current == Some(mac)
+        {
+            return Ok(Some(mac));
+        }
+
+        let reason = format!(
+            "BFB recovery target identity is missing or changed: expected {expected:?}, found {current:?}. \
+             Re-run `site-explorer copy-bfb-to-dpu-rshim` to validate the target and retry."
+        );
+        tracing::error!(bmc_ip_address = %endpoint.address, %reason, "BFB recovery target validation failed");
+        db.with_txn(|txn| {
+            async move {
+                db::explored_endpoints::set_preingestion_failed(endpoint.address, reason, txn)
+                    .await?;
+                db::explored_endpoints::set_pause_remediation(host_bmc_ip, false, txn).await?;
+                Ok::<(), DatabaseError>(())
+            }
+            .boxed()
+        })
+        .await??;
+        Ok(None)
+    }
+
     async fn start_bfb_copy(
         &self,
         db: &PgPool,
@@ -3009,34 +3189,24 @@ impl PreingestionManagerStatic {
             return Ok(());
         };
 
-        let interface = match db::machine_interface::find_by_ip(db, address).await? {
-            Some(interface) => interface,
-            None => {
-                tracing::error!(bmc_ip_address = %address, "no machine interface found for BFB copy, marking as failed");
-                db.with_txn(|txn| {
-                    db::explored_endpoints::set_preingestion_failed(
-                        address,
-                        "No machine interface found for this DPU. \
-                             Re-run `site-explorer copy-bfb-to-dpu-rshim` to retry."
-                            .to_string(),
-                        txn,
-                    )
-                    .boxed()
-                })
-                .await??;
-                return Ok(());
-            }
+        let Some(dpu_bmc_mac) = self.validate_bfb_target(db, endpoint, host_bmc_ip).await? else {
+            return Ok(());
         };
 
         let bmc_credential_key = CredentialKey::BmcCredentials {
             credential_type: BmcCredentialType::BmcRoot {
-                bmc_mac_address: interface.mac_address,
+                bmc_mac_address: dpu_bmc_mac,
             },
         };
 
         db.with_txn(|txn| {
-            db::explored_endpoints::set_preingestion_bfb_copy_in_progress(address, host_bmc_ip, txn)
-                .boxed()
+            db::explored_endpoints::set_preingestion_bfb_copy_in_progress(
+                address,
+                host_bmc_ip,
+                Some(dpu_bmc_mac),
+                txn,
+            )
+            .boxed()
         })
         .await??;
 
@@ -3112,6 +3282,7 @@ impl PreingestionManagerStatic {
                     db::explored_endpoints::set_preingestion_bfb_installation_wait(
                         endpoint.address,
                         *host_bmc_ip,
+                        endpoint.preingestion_state.bfb_target_mac(),
                         txn,
                     )
                     .boxed()
@@ -3169,6 +3340,7 @@ impl PreingestionManagerStatic {
                         "Restarting after orphaned copy state detected".to_string(),
                         *host_bmc_ip,
                         false,
+                        endpoint.preingestion_state.bfb_target_mac(),
                         txn,
                     )
                     .boxed()
@@ -3222,7 +3394,13 @@ impl PreingestionManagerStatic {
             return Ok(());
         }
 
-        if self.check_dpu_console_install_complete(db, endpoint).await {
+        let Some(dpu_bmc_mac) = self.validate_bfb_target(db, endpoint, *host_bmc_ip).await? else {
+            return Ok(());
+        };
+        if self
+            .check_dpu_console_install_complete(endpoint, dpu_bmc_mac)
+            .await
+        {
             tracing::info!(
                 bmc_ip_address = %endpoint.address,
                 "DPU installation complete, powercycling host"
@@ -3233,6 +3411,7 @@ impl PreingestionManagerStatic {
                     *host_bmc_ip,
                     model::site_explorer::BfbPlatformPowercyclePhase::PowerOff,
                     true,
+                    endpoint.preingestion_state.bfb_target_mac(),
                     txn,
                 )
                 .boxed()
@@ -3251,8 +3430,8 @@ impl PreingestionManagerStatic {
 
     async fn check_dpu_console_install_complete(
         &self,
-        db: &PgPool,
         endpoint: &ExploredEndpoint,
+        dpu_bmc_mac: mac_address::MacAddress,
     ) -> bool {
         const MARKERS: &[&str] = &[
             "login:",
@@ -3268,17 +3447,9 @@ impl PreingestionManagerStatic {
             return false;
         };
 
-        let interface = match db::machine_interface::find_by_ip(db, address).await {
-            Ok(Some(iface)) => iface,
-            _ => {
-                tracing::debug!(bmc_ip_address = %address, "no machine interface for console check");
-                return false;
-            }
-        };
-
         let key = CredentialKey::BmcCredentials {
             credential_type: BmcCredentialType::BmcRoot {
-                bmc_mac_address: interface.mac_address,
+                bmc_mac_address: dpu_bmc_mac,
             },
         };
 

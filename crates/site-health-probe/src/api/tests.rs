@@ -27,10 +27,13 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 use super::*;
-use crate::config::ReaderConfig;
+use crate::config::{HostReadMode, ReaderConfig};
 use crate::framework::{ObservationRecorder, Probe};
-use crate::gate::CallGate;
+use crate::gate::{CallGate, classify_grpc};
 use crate::nico::fake::{self, FakeConnector, FakeNico, FakeSite};
+use crate::nico::host_read::{
+    COMPACT_HOST_READ_MISSING, HOST_STATE_INCOMPLETE, Known, RETRY_COMPACT_AFTER_SWEEPS,
+};
 use crate::readers::devices::DevicesReader;
 use crate::snapshot::{FamilySnapshot, Reader, SnapshotSink, SweepMeta, UnitsData};
 use crate::state_metrics::StateCollector;
@@ -46,18 +49,43 @@ fn state_config() -> StateConfig {
 }
 
 fn harness() -> Harness {
-    let cfg = state_config();
+    harness_with(&state_config())
+}
+
+/// A harness whose config pins the full host read: allocatability and
+/// update eligibility filters fail before any sweep.
+fn full_read_harness() -> Harness {
+    let mut cfg = state_config();
+    cfg.nico_api.host_read = HostReadMode::Full;
+    harness_with(&cfg)
+}
+
+/// A full-read harness with a tenant fixture configured, so REST units are
+/// listed.
+fn rest_fixture_harness() -> Harness {
+    let mut cfg = state_config();
+    cfg.readers.rest_inventory.enabled = true;
+    cfg.nico_api.host_read = HostReadMode::Full;
+    cfg.rest.tenant = Some(crate::config::TenantAccount {
+        org: "tenant-org".into(),
+        tenant_id: "tenant-id".into(),
+        instance_type: "type-id".into(),
+        auth: Default::default(),
+    });
+    harness_with(&cfg)
+}
+
+fn harness_with(cfg: &StateConfig) -> Harness {
     let store = Arc::new(SnapshotStore::new(&cfg.paging));
     let registry = prometheus::Registry::new();
     registry
         .register(Box::new(StateCollector::new(
             Arc::clone(&store),
             SystemTime::now(),
-            cfg.nico_api.host_read,
         )))
         .expect("register");
     Harness {
-        router: router(ApiState::new(Arc::clone(&store), &cfg, SystemTime::now())),
+        router: router(ApiState::new(Arc::clone(&store), cfg, SystemTime::now())),
         store,
         registry,
     }
@@ -166,6 +194,8 @@ impl Harness {
 
 fn plain(unit_type: UnitType, id: &str, state: &str, stage: Stage) -> Unit {
     Unit {
+        controller_instance_id: None,
+        rest_machine: None,
         id: id.to_string(),
         unit_type,
         source: Source::NicoApi,
@@ -380,7 +410,7 @@ async fn count_and_units_agree_on_missing_model_and_instance_type() {
 
 #[tokio::test]
 async fn unsupported_combination_is_422() {
-    let h = harness();
+    let h = full_read_harness();
     small_fleet(&h);
     // Each row: status, error code, field ("-" when the error names none)
     // and the count query.
@@ -471,12 +501,64 @@ async fn unread_and_deferred_fields_are_field_unavailable() {
         "/v1/count?type=host&updateEligible=false",
         "/v1/units?type=host&updateEligible=false",
         "/v1/units?type=host&uefiVersion=u1",
+        // No tenant fixture is configured, so no sweep will ever list them.
         "/v1/units?type=instance&source=rest",
     ] {
         let reply = h.get(uri).await;
         assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY, "{uri}");
         assert_eq!(reply.code(), "field_unavailable", "{uri}");
     }
+}
+
+// A tenant fixture with the REST reader off never publishes, so it is no
+// pending first sweep.
+#[tokio::test]
+async fn rest_units_with_the_reader_disabled_are_422() {
+    let mut cfg = state_config();
+    cfg.readers.rest_inventory.enabled = false;
+    cfg.rest.tenant = Some(crate::config::TenantAccount {
+        org: "tenant-org".into(),
+        tenant_id: "tenant-id".into(),
+        instance_type: "type-id".into(),
+        auth: Default::default(),
+    });
+    let h = harness_with(&cfg);
+    for uri in [
+        "/v1/units?type=instance&source=rest",
+        "/v1/units?type=host&source=rest",
+    ] {
+        assert_eq!(
+            h.get(uri).await.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{uri}"
+        );
+    }
+}
+
+// With the totals or the REST reader off no sweep will publish them, so a
+// total is unavailable, not a pending first sweep.
+#[tokio::test]
+async fn rest_totals_with_totals_or_reader_off_are_422() {
+    for (enabled, skip_totals) in [(true, true), (false, false)] {
+        let mut cfg = state_config();
+        cfg.readers.rest_inventory.enabled = enabled;
+        cfg.rest.skip_totals = skip_totals;
+        let h = harness_with(&cfg);
+        for resource in ["machine", "instance", "rack", "tray"] {
+            let reply = h
+                .get(&format!("/v1/count?type=rest_total&resource={resource}"))
+                .await;
+            assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY, "{resource}");
+            assert_eq!(reply.code(), "field_unavailable", "{resource}");
+        }
+    }
+    // Totals on, first sweep pending: retry.
+    let mut cfg = state_config();
+    cfg.readers.rest_inventory.enabled = true;
+    let reply = harness_with(&cfg)
+        .get("/v1/count?type=rest_total&resource=machine")
+        .await;
+    assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
@@ -490,16 +572,18 @@ async fn no_complete_sweep_is_503() {
     }
 }
 
-/// A device sweep of a fake site into the harness store.
-async fn sweep_fake_site(h: &Harness, site: FakeSite) {
-    let reader = DevicesReader::new(
+/// A device reader of `nico` with host read `mode`, publishing into the
+/// harness store.
+fn devices_reader(h: &Harness, nico: &Arc<FakeNico>, mode: HostReadMode) -> DevicesReader {
+    DevicesReader::new(
         ReaderConfig {
             enabled: true,
             interval: Duration::from_secs(120),
             timeout: Duration::from_secs(600),
         },
         100,
-        Arc::new(FakeConnector(FakeNico::new(site))),
+        mode,
+        Arc::new(FakeConnector(Arc::clone(nico))),
         Arc::new(CallGate::new(
             "nico-api",
             1000.0,
@@ -508,11 +592,21 @@ async fn sweep_fake_site(h: &Harness, site: FakeSite) {
         )),
         Arc::clone(&h.store) as Arc<dyn SnapshotSink>,
         SystemTime::now(),
-    );
-    reader
+    )
+}
+
+/// A device sweep of a fake site into the harness store.
+async fn sweep_fake_site(h: &Harness, site: FakeSite) {
+    devices_reader(h, &FakeNico::new(site), HostReadMode::Full)
         .run(&ObservationRecorder::default())
         .await
         .expect("complete sweep");
+}
+
+/// The `host_read_mode` gauge as (full, compact).
+fn read_mode(h: &Harness) -> (f64, f64) {
+    let mode = |mode: &str| h.metric_sum("host_read_mode", &[("mode", mode.to_string())]);
+    (mode("full"), mode("compact"))
 }
 
 fn mixed_site() -> FakeSite {
@@ -546,6 +640,365 @@ fn mixed_site() -> FakeSite {
         },
     );
     site
+}
+
+#[tokio::test]
+async fn full_mode_keeps_unknown_allocatable() {
+    let h = harness();
+    let nico = FakeNico::new(mixed_site());
+    devices_reader(&h, &nico, HostReadMode::Full)
+        .run(&ObservationRecorder::default())
+        .await
+        .expect("complete sweep");
+    assert_eq!(nico.calls("find_host_states_by_ids"), 0);
+    let page = h.get("/v1/units?type=host").await.units();
+    assert_eq!(page.units.len(), 3);
+    for unit in &page.units {
+        let host = unit.host.as_ref().expect("host fields");
+        let missing = Some(COMPACT_HOST_READ_MISSING);
+        assert_eq!(
+            (host.allocatable, host.blocking_reason.as_deref()),
+            (None, missing)
+        );
+        assert_eq!(
+            (host.update_eligible, host.update_blocking_reason.as_deref()),
+            (None, missing)
+        );
+        assert_eq!(host.version_source, VersionSource::MachineRecord);
+    }
+    assert_eq!(
+        h.metric_sum("hosts", &[("allocatable", "unknown".to_string())]),
+        3.0
+    );
+    assert_eq!(read_mode(&h), (1.0, 0.0));
+    for predicate in ["allocatable", "updateEligible"] {
+        let known = h.metric_sum(
+            "host_predicates_known",
+            &[("predicate", predicate.to_string())],
+        );
+        assert_eq!(known, 0.0, "{predicate}");
+    }
+}
+
+#[tokio::test]
+async fn allocatable_filter_works_under_compact_and_422_under_full() {
+    for mode in [HostReadMode::Compact, HostReadMode::Full] {
+        let h = harness();
+        devices_reader(&h, &FakeNico::new(mixed_site()), mode)
+            .run(&ObservationRecorder::default())
+            .await
+            .expect("complete sweep");
+        // Of the Ready, initializing and failed hosts only the Ready one is
+        // allocatable, and none can take an update.
+        for (uri, field, want) in [
+            ("/v1/count?type=host&allocatable=true", "allocatable", 1),
+            ("/v1/units?type=host&allocatable=true", "allocatable", 1),
+            ("/v1/count?type=host&allocatable=false", "allocatable", 2),
+            (
+                "/v1/count?type=host&updateEligible=false",
+                "updateEligible",
+                3,
+            ),
+            (
+                "/v1/units?type=host&updateEligible=false",
+                "updateEligible",
+                3,
+            ),
+        ] {
+            let reply = h.get(uri).await;
+            if mode == HostReadMode::Full {
+                assert_eq!(
+                    (reply.status.as_u16(), reply.code(), reply.field()),
+                    (422, "field_unavailable", field),
+                    "{uri}"
+                );
+                continue;
+            }
+            let got = match uri.starts_with("/v1/count") {
+                true => reply.count(),
+                false => reply.units().units.len() as u64,
+            };
+            assert_eq!(got, want, "{uri}");
+        }
+        if mode == HostReadMode::Compact {
+            assert_eq!(read_mode(&h), (0.0, 1.0));
+            let filter = Filter {
+                allocatable: Some(true),
+                ..Filter::new(UnitType::Host)
+            };
+            let caps = Capabilities {
+                full_host_read: false,
+                rest_fixture: false,
+            };
+            let spec = series_spec(&filter, &caps).unwrap();
+            assert_eq!(h.metric_sum(spec.metric, &spec.matchers), 1.0);
+            let page = h.get("/v1/units?type=host&allocatable=true").await.units();
+            assert_eq!(page.units[0].id, fake::host_id(1).to_string());
+        }
+    }
+}
+
+/// A host whose row stops carrying a predicate must not drop out of that
+/// predicate's filters, which would read as a fall in a count. Counts and
+/// units of the predicate refuse (422), so does a query naming only hosts
+/// that kept the answer, and the other predicate is unaffected.
+#[tokio::test]
+async fn host_losing_an_answer_makes_its_predicate_unavailable() {
+    for field in ["allocatable", "updateEligible"] {
+        let other = if field == "allocatable" {
+            "updateEligible"
+        } else {
+            "allocatable"
+        };
+        let h = harness();
+        let nico = FakeNico::new(mixed_site());
+        let reader = devices_reader(&h, &nico, HostReadMode::Compact);
+        let rec = ObservationRecorder::default();
+        let known = |predicate: &str| {
+            h.metric_sum(
+                "host_predicates_known",
+                &[("predicate", predicate.to_string())],
+            )
+        };
+        reader.run(&rec).await.expect("sweep");
+        for value in ["true", "false"] {
+            let reply = h.get(&format!("/v1/count?type=host&{field}={value}")).await;
+            assert_eq!(reply.status.as_u16(), 200, "{field}={value} before");
+        }
+        assert_eq!((known(field), known(other)), (1.0, 1.0));
+
+        {
+            let mut site = nico.site.lock().unwrap();
+            let host = site.hosts.get_mut(&fake::host_id(1).to_string()).unwrap();
+            let unknown = Known::Unknown(HOST_STATE_INCOMPLETE);
+            match field {
+                "allocatable" => host.allocatable = unknown,
+                _ => host.update_eligible = unknown,
+            }
+        }
+        reader.run(&rec).await.expect("sweep");
+        assert_eq!((known(field), known(other)), (0.0, 1.0), "{field}");
+        for value in ["true", "false"] {
+            for route in ["count", "units"] {
+                let reply = h
+                    .get(&format!("/v1/{route}?type=host&{field}={value}"))
+                    .await;
+                assert_eq!(
+                    (reply.status.as_u16(), reply.code(), reply.field()),
+                    (422, "field_unavailable", field),
+                    "{route} {field}={value}"
+                );
+            }
+            // The other predicate still answers.
+            let reply = h.get(&format!("/v1/count?type=host&{other}={value}")).await;
+            assert_eq!(reply.status.as_u16(), 200, "{other}={value}");
+        }
+        // The predicate is unknown for the snapshot, as
+        // `host_predicates_known` says, whichever hosts a query names.
+        for id in [1, 2] {
+            let reply = h
+                .post(
+                    "/v1/units/query",
+                    json!({"type": "host", "ids": [fake::host_id(id).to_string()], field: true}),
+                )
+                .await;
+            assert_eq!(
+                (reply.status.as_u16(), reply.field()),
+                (422, field),
+                "{field} of host {id}"
+            );
+        }
+        let reply = h
+            .post(
+                "/v1/units/query",
+                json!({"type": "host", "ids": [fake::host_id(2).to_string()], other: true}),
+            )
+            .await;
+        assert_eq!(reply.status.as_u16(), 200, "{other} of host 2");
+    }
+}
+
+const FALLBACK_LOG: &str = "falling back to full host read";
+
+/// Under `auto`, `status` from the first compact read moves the reader to
+/// the full read, with one warning naming `code`.
+async fn auto_falls_back_on(status: tonic::Status, code: &str) {
+    let h = harness();
+    let nico = FakeNico::new(mixed_site());
+    let reader = devices_reader(&h, &nico, HostReadMode::Auto);
+    let rec = ObservationRecorder::default();
+    let logs = CapturedLogs::default();
+    let guard = logs.capture();
+    nico.fail_next("find_host_states_by_ids", classify_grpc(&status));
+    reader
+        .run(&rec)
+        .await
+        .expect("the batch is read again in full");
+    reader.run(&rec).await.expect("full sweep");
+    drop(guard);
+    assert_eq!(nico.calls("find_host_states_by_ids"), 1, "{code}");
+    assert_eq!(nico.calls("find_machines_by_ids"), 2, "{code}");
+    assert_eq!(read_mode(&h), (1.0, 0.0));
+    for unit in h.get("/v1/units?type=host").await.units().units {
+        let host = unit.host.expect("host fields");
+        assert_eq!(host.version_source, VersionSource::MachineRecord);
+        assert_eq!(host.allocatable, None);
+    }
+    let reply = h.get("/v1/count?type=host&allocatable=true").await;
+    assert_eq!((reply.status.as_u16(), reply.field()), (422, "allocatable"));
+    let text = logs.text();
+    assert_eq!(text.matches(FALLBACK_LOG).count(), 1, "{text}");
+    assert!(text.contains(code), "{text}");
+}
+
+#[tokio::test]
+async fn auto_falls_back_on_unimplemented() {
+    auto_falls_back_on(tonic::Status::unimplemented(""), "gRPC Unimplemented").await;
+}
+
+/// An older nico-api's RBAC denies a method it has no rule for.
+#[tokio::test]
+async fn auto_falls_back_on_permission_denied() {
+    auto_falls_back_on(
+        tonic::Status::permission_denied(""),
+        "gRPC PermissionDenied",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn auto_falls_back_after_earlier_success() {
+    let h = harness();
+    let nico = FakeNico::new(mixed_site());
+    let reader = devices_reader(&h, &nico, HostReadMode::Auto);
+    let rec = ObservationRecorder::default();
+    reader.run(&rec).await.expect("compact sweep");
+    assert_eq!(read_mode(&h), (0.0, 1.0));
+    assert_eq!(
+        h.get("/v1/count?type=host&allocatable=true").await.count(),
+        1
+    );
+
+    // nico-api rolls back to a version without the compact read.
+    nico.fail_next(
+        "find_host_states_by_ids",
+        classify_grpc(&tonic::Status::unimplemented("")),
+    );
+    reader.run(&rec).await.expect("full sweep");
+    assert_eq!(read_mode(&h), (1.0, 0.0));
+    let reply = h.get("/v1/count?type=host&allocatable=true").await;
+    assert_eq!((reply.status.as_u16(), reply.field()), (422, "allocatable"));
+    reader.run(&rec).await.expect("full sweep");
+    assert_eq!(nico.calls("find_host_states_by_ids"), 2);
+    assert_eq!(nico.calls("find_machines_by_ids"), 2);
+}
+
+/// PERMISSION_DENIED may be a rolling upgrade or an RBAC hiccup, so `auto`
+/// reads in full for a while and then reads compact again once nico-api
+/// answers. The warning is not repeated while it keeps failing the same way.
+#[tokio::test]
+async fn auto_recovers_the_compact_read_after_permission_denied() {
+    let h = harness();
+    let nico = FakeNico::new(mixed_site());
+    let reader = devices_reader(&h, &nico, HostReadMode::Auto);
+    let rec = ObservationRecorder::default();
+    let logs = CapturedLogs::default();
+    let guard = logs.capture();
+    let denied = || classify_grpc(&tonic::Status::permission_denied(""));
+    nico.fail_next("find_host_states_by_ids", denied());
+    reader.run(&rec).await.expect("full sweep");
+    assert_eq!(read_mode(&h), (1.0, 0.0));
+    for _ in 0..RETRY_COMPACT_AFTER_SWEEPS {
+        reader.run(&rec).await.expect("full sweep");
+        assert_eq!(read_mode(&h), (1.0, 0.0));
+    }
+    assert_eq!(nico.calls("find_host_states_by_ids"), 1, "no retry yet");
+
+    // The retry is denied again and waits again.
+    nico.fail_next("find_host_states_by_ids", denied());
+    reader.run(&rec).await.expect("full sweep");
+    assert_eq!(nico.calls("find_host_states_by_ids"), 2);
+    assert_eq!(read_mode(&h), (1.0, 0.0));
+    for _ in 0..RETRY_COMPACT_AFTER_SWEEPS {
+        reader.run(&rec).await.expect("full sweep");
+    }
+    assert_eq!(nico.calls("find_host_states_by_ids"), 2);
+
+    // nico-api answers the RPC again.
+    reader.run(&rec).await.expect("compact sweep");
+    drop(guard);
+    assert_eq!(nico.calls("find_host_states_by_ids"), 3);
+    assert_eq!(read_mode(&h), (0.0, 1.0));
+    assert_eq!(
+        h.get("/v1/count?type=host&allocatable=true").await.count(),
+        1
+    );
+    reader.run(&rec).await.expect("compact sweep");
+    assert_eq!(nico.calls("find_host_states_by_ids"), 4);
+    let text = logs.text();
+    assert_eq!(text.matches(FALLBACK_LOG).count(), 1, "{text}");
+    assert_eq!(text.matches("served again").count(), 1, "{text}");
+}
+
+/// UNIMPLEMENTED does not recover: the RPC does not exist.
+#[tokio::test]
+async fn auto_stays_on_the_full_read_after_unimplemented() {
+    let h = harness();
+    let nico = FakeNico::new(mixed_site());
+    let reader = devices_reader(&h, &nico, HostReadMode::Auto);
+    let rec = ObservationRecorder::default();
+    nico.fail_next(
+        "find_host_states_by_ids",
+        classify_grpc(&tonic::Status::unimplemented("")),
+    );
+    for _ in 0..3 * RETRY_COMPACT_AFTER_SWEEPS {
+        reader.run(&rec).await.expect("full sweep");
+    }
+    assert_eq!(nico.calls("find_host_states_by_ids"), 1);
+    assert_eq!(read_mode(&h), (1.0, 0.0));
+}
+
+/// `status` fails one sweep's host read like any call, without the full
+/// read, and the next sweep reads compact again.
+async fn fails_without_fallback(mode: HostReadMode, status: tonic::Status) {
+    let h = harness();
+    let nico = FakeNico::new(mixed_site());
+    let reader = devices_reader(&h, &nico, mode);
+    let rec = ObservationRecorder::default();
+    nico.fail_next("find_host_states_by_ids", classify_grpc(&status));
+    let failed = reader.run(&rec).await;
+    assert!(failed.is_err(), "{mode:?} {status:?}: the host read fails");
+    assert_eq!(nico.calls("find_machines_by_ids"), 0, "{mode:?} {status:?}");
+    let reply = h.get("/v1/count?type=host").await;
+    assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
+
+    reader
+        .run(&rec)
+        .await
+        .expect("the next sweep reads compact");
+    assert_eq!(nico.calls("find_host_states_by_ids"), 2);
+    assert_eq!(read_mode(&h), (0.0, 1.0), "{mode:?} {status:?}");
+}
+
+#[tokio::test]
+async fn compact_mode_never_falls_back() {
+    for status in [
+        tonic::Status::unimplemented(""),
+        tonic::Status::permission_denied(""),
+    ] {
+        fails_without_fallback(HostReadMode::Compact, status).await;
+    }
+}
+
+#[tokio::test]
+async fn auto_does_not_fall_back_on_other_errors() {
+    for status in [
+        tonic::Status::internal(""),
+        tonic::Status::invalid_argument(""),
+        tonic::Status::unauthenticated(""),
+    ] {
+        fails_without_fallback(HostReadMode::Auto, status).await;
+    }
 }
 
 #[tokio::test]
@@ -844,8 +1297,14 @@ async fn config_without_rest_reader_is_200_with_nulls() {
 
 /// A harness whose API and collector share `process_start`, with a
 /// declared metrics store and the given readers on.
-fn metrics_harness(devices: bool, rest_inventory: bool, process_start: SystemTime) -> Harness {
+fn metrics_harness(
+    devices: bool,
+    rest_inventory: bool,
+    skip_totals: bool,
+    process_start: SystemTime,
+) -> Harness {
     let mut cfg = state_config();
+    cfg.rest.skip_totals = skip_totals;
     cfg.readers.devices.enabled = devices;
     cfg.readers.rest_inventory.enabled = rest_inventory;
     cfg.readers.rest_inventory.interval = Duration::from_secs(60);
@@ -862,7 +1321,6 @@ fn metrics_harness(devices: bool, rest_inventory: bool, process_start: SystemTim
         .register(Box::new(StateCollector::new(
             Arc::clone(&store),
             process_start,
-            cfg.nico_api.host_read,
         )))
         .expect("register");
     Harness {
@@ -876,7 +1334,7 @@ fn metrics_harness(devices: bool, rest_inventory: bool, process_start: SystemTim
 async fn config_metrics_block_names_enabled_readers_and_the_process() {
     // A start time with a fraction, as a real process has.
     let process_start = UNIX_EPOCH + Duration::from_nanos(1_761_818_400_123_456_789);
-    let h = metrics_harness(true, false, process_start);
+    let h = metrics_harness(true, false, false, process_start);
     let reply = h.get("/v1/config").await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     let device_intervals: serde_json::Map<String, Value> = DEVICE_FAMILIES
@@ -906,15 +1364,20 @@ async fn config_metrics_block_names_enabled_readers_and_the_process() {
     );
     assert!(metrics.process_start_seconds.fract() > 0.0);
 
-    let h = metrics_harness(false, true, process_start);
-    site_match(&h, 1, SiteMatch::Match);
-    let metrics = config_reply(h.get("/v1/config").await)
-        .metrics
-        .expect("metrics");
-    assert_eq!(
-        metrics.reader_intervals_seconds,
-        BTreeMap::from([(Family::RestTotals, 60.0), (Family::RestSiteMatch, 60.0)])
-    );
+    for (skip_totals, want) in [
+        (
+            false,
+            BTreeMap::from([(Family::RestTotals, 60.0), (Family::RestSiteMatch, 60.0)]),
+        ),
+        (true, BTreeMap::from([(Family::RestSiteMatch, 60.0)])),
+    ] {
+        let h = metrics_harness(false, true, skip_totals, process_start);
+        site_match(&h, 1, SiteMatch::Match);
+        let metrics = config_reply(h.get("/v1/config").await)
+            .metrics
+            .expect("metrics");
+        assert_eq!(metrics.reader_intervals_seconds, want, "skip {skip_totals}");
+    }
 }
 
 #[tokio::test]
@@ -1022,9 +1485,11 @@ async fn rest_site_from_the_inventory_reader_without_upstream_text() {
         },
         rest.client(),
         Inventory {
+            tenant: None,
             provider_auth: rest.auth(),
             provider_org: "provider-org".to_string(),
             site_id: "site-1".to_string(),
+            totals: true,
         },
         Some(Arc::clone(&h.store) as Arc<dyn crate::snapshot::CensusView>),
         Arc::clone(&h.store) as Arc<dyn SnapshotSink>,
@@ -1117,7 +1582,7 @@ const FILTER_REPLIES: &[&str] = &[
     "/v1/count?type=host&uefiVersion=u1&allocatable=true => 422 field_unavailable \"uefiVersion\" exact host versions are not counted until the firmware tests (#8154)",
     "/v1/count?type=host&done=true => 422 unsupported_filter \"done\" done is a /v1/units filter",
     "/v1/count?type=host&source=nico-api => 200 count=12",
-    "/v1/count?type=host&source=rest => 422 unsupported_filter \"source\" type=host has no REST source",
+    "/v1/count?type=host&source=rest => 422 unsupported_filter \"source\" type=host has no REST count and needs a configured tenant fixture to list",
     "/v1/count?type=host&tenant=t => 422 unsupported_filter \"tenant\" tenant is not a filter of type=host",
     "/v1/count?type=host&status=x => 422 unsupported_filter \"status\" status is not a filter of type=host",
     "/v1/count?type=host&recordType=host => 422 unsupported_filter \"recordType\" recordType is not a filter of type=host",
@@ -1131,7 +1596,7 @@ const FILTER_REPLIES: &[&str] = &[
     "/v1/count?type=rack => 200 count=0",
     "/v1/count?type=instance => 200 count=0",
     "/v1/count?type=instance&stage=expected => 422 unsupported_filter \"stage\" type=instance has no expected records",
-    "/v1/count?type=instance&source=rest => 422 field_unavailable \"source\" the tenant's REST instances are not read until the instance tests (#8152)",
+    "/v1/count?type=instance&source=rest => 422 field_unavailable \"source\" REST instances are not counted and need a configured tenant fixture to list",
     "/v1/count?type=instance&tenant=t => 422 unsupported_filter \"tenant\" tenant is not a filter of type=instance",
     "/v1/count?type=expected_record => 422 unsupported_filter \"recordType\" type=expected_record needs recordType",
     "/v1/count?type=expected_record&recordType=host => 200 count=3",
@@ -1163,7 +1628,7 @@ const FILTER_REPLIES: &[&str] = &[
     "/v1/units?type=host&tenant=t => 422 unsupported_filter \"tenant\" tenant is not a filter of type=host",
     "/v1/units?type=instance&name=( => 400 invalid_param \"name\" name is not a regex: regex parse error:\n    (\n    ^\nerror: unclosed group",
     "/v1/units?type=instance&name=(&source=rest => 400 invalid_param \"name\" name is not a regex: regex parse error:\n    (\n    ^\nerror: unclosed group",
-    "/v1/units?type=instance&name=a&source=rest => 422 field_unavailable \"source\" the tenant's REST instances are not read until the instance tests (#8152)",
+    "/v1/units?type=instance&name=a&source=rest => 503 no_complete_sweep null no complete rest_instances sweep yet",
     "/v1/units?type=instance&name=.* => 200 units=0",
     "/v1/units?type=rest_total&resource=rack => 422 unsupported_filter \"type\" type=rest_total is a count, not units",
     "/v1/units?type=rest_total&name=x => 422 unsupported_filter \"name\" name is a filter of type=instance",
@@ -1185,7 +1650,7 @@ const FILTER_REPLIES: &[&str] = &[
 
 #[tokio::test]
 async fn filter_replies_golden() {
-    let h = harness();
+    let h = rest_fixture_harness();
     small_fleet(&h);
     for family in [
         Family::Switch,
@@ -1239,4 +1704,88 @@ async fn filter_replies_golden() {
         got.push((uri, line));
     }
     assert_eq!(got, want);
+}
+
+#[tokio::test]
+async fn rest_units_and_latest_attempt_evidence() {
+    let h = rest_fixture_harness();
+    for (kind, family) in [
+        (UnitType::Instance, Family::RestInstances),
+        (UnitType::Host, Family::RestMachines),
+    ] {
+        h.store.failed(
+            Reader::RestInventory,
+            family,
+            crate::snapshot::FailureKind::Timeout,
+            "bounded timeout",
+        );
+        let path = format!("/v1/units?type={}&source=rest", spec::wire(kind));
+        let first = h.get(&path).await;
+        assert_eq!(first.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            first.body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("bounded timeout")
+        );
+        let mut u = plain(kind, "rest-1", "Ready", Stage::Ready);
+        u.source = Source::Rest;
+        h.publish_units(family, 1, vec![u]);
+        let path = format!("/v1/units?type={}&source=rest", spec::wire(kind));
+        let before = h.get(&path).await.units();
+        assert_eq!(before.sweep.last_attempt_succeeded, Some(true));
+        h.store.failed(
+            Reader::RestInventory,
+            family,
+            crate::snapshot::FailureKind::Timeout,
+            "bounded timeout",
+        );
+        let after = h.get(&path).await.units();
+        assert_eq!(before.sweep.snapshot_id, after.sweep.snapshot_id);
+        assert_eq!(after.sweep.last_attempt_succeeded, Some(false));
+        assert_eq!(
+            after.sweep.last_attempt_error.as_deref(),
+            Some("bounded timeout")
+        );
+    }
+}
+
+#[tokio::test]
+async fn tenant_allocation_config_keeps_failure_evidence_and_scope() {
+    let h = harness();
+    h.publish(
+        Family::RestSiteMatch,
+        1,
+        crate::readers::rest_inventory::SiteMatchData {
+            result: SiteMatch::Match,
+        },
+    );
+    h.publish(
+        Family::ConfigRest,
+        1,
+        TenantAllocation {
+            tenant: "tenant-id".into(),
+            instance_type: "type-id".into(),
+            assigned: 5,
+            total: 5,
+            used: 1,
+            unused: 4,
+            unused_usable: 3,
+        },
+    );
+    for failed in [false, true] {
+        if failed {
+            h.store.failed(
+                Reader::RestInventory,
+                Family::ConfigRest,
+                crate::snapshot::FailureKind::Timeout,
+                "bounded timeout",
+            );
+        }
+        let reply = h.get("/v1/config?instanceType=type-id").await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(reply.body["rest"]["tenantAllocation"]["unusedUsable"], 3);
+        assert_eq!(!reply.body["rest"]["lastAttemptError"].is_null(), failed);
+        assert!(h.get("/v1/config?instanceType=other").await.body["rest"].is_null());
+    }
 }

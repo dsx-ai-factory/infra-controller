@@ -21,6 +21,9 @@
 #   source ./preflight.sh
 #
 # Also sourced automatically at the start of every setup.sh run.
+# -y accepts routine prompts. To bypass ordinary preflight errors explicitly,
+# run bash ./preflight.sh --ignore-preflight-errors. Database safety errors
+# always stop preflight.
 #
 # Checks (in order — fails fast so the most actionable issues appear first):
 #   1. Environment variables:    presence and format
@@ -50,7 +53,7 @@
 #                           auth/not-found/transport findings are warnings.
 #
 # Exit codes:
-#   0 — all checks passed (or user chose to continue despite issues)
+#   0 — checks passed, warnings accepted, or ordinary errors explicitly ignored
 #   1 — hard failure or user declined to continue
 # =============================================================================
 
@@ -86,6 +89,7 @@ _SOURCED=false
 # setup.sh has consumed its own args, so this block is a no-op there.
 # ---------------------------------------------------------------------------
 if ! ${_SOURCED}; then
+    IGNORE_PREFLIGHT_ERRORS=false
     # DPF is on by default; derive INSTALL_DPF from env, then let flags override.
     INSTALL_DPF="${INSTALL_DPF:-${NICO_INSTALL_DPF:-true}}"
     [[ "${NICO_SKIP_DPF:-false}" == "true" ]] && INSTALL_DPF=false
@@ -100,6 +104,7 @@ if ! ${_SOURCED}; then
             --skip-rms)       INSTALL_RMS=false ;;
             --install-rms)    INSTALL_RMS=true ;;
             -y|--yes)         AUTO_YES=true ;;
+            --ignore-preflight-errors) IGNORE_PREFLIGHT_ERRORS=true ;;
             --core-values)    CORE_VALUES="$2"; shift ;;
             --metallb-config) METALLB_CONFIG="$2"; shift ;;
             *) ;;  # ignore unknown args when run standalone
@@ -110,7 +115,7 @@ fi
 
 ERRORS=()
 WARNINGS=()
-# Errors that neither -y nor answering y at the prompt can skip.
+# Errors that --ignore-preflight-errors cannot skip.
 BLOCKING_ERRORS=()
 
 _CORE_VALUES_CFG="${CORE_VALUES:-${SCRIPT_DIR}/values/nico-core.yaml}"
@@ -1552,25 +1557,15 @@ if [[ ${#ERRORS[@]} -eq 0 ]]; then
     if ${_SOURCED}; then return 0; else exit 0; fi
 fi
 
-# Hard errors — default abort
+# Hard errors require an explicit override; database safety errors always abort.
 if [[ ${#BLOCKING_ERRORS[@]} -gt 0 ]]; then
-    echo "  The database errors above stop setup, even with -y. Fix them and re-run setup.sh."
+    echo "  The database errors above stop setup, even with --ignore-preflight-errors. Fix them and re-run setup.sh."
     if ${_SOURCED}; then return 1; else exit 1; fi
 fi
-if [[ "${AUTO_YES:-false}" == "true" ]]; then
-    echo "  Errors above noted — continuing (-y flag set). Things may fail."
+if [[ "${IGNORE_PREFLIGHT_ERRORS:-false}" == "true" ]]; then
+    echo "  Errors above ignored — continuing (--ignore-preflight-errors set). Setup may fail."
     if ${_SOURCED}; then return 0; else exit 0; fi
 fi
 
-echo ""
-echo "  The issues above will likely cause setup to fail."
-echo ""
-read -r -p "  ➤  Continue anyway at your own risk? [y/N]: " _reply
-echo ""
-if [[ "${_reply:-N}" =~ ^[Yy]$ ]]; then
-    echo "  Continuing — good luck."
-    if ${_SOURCED}; then return 0; else exit 0; fi
-fi
-
-echo "  Fix the issues above and re-run setup.sh."
+echo "  Fix the errors above and re-run setup.sh, or pass --ignore-preflight-errors to continue explicitly."
 if ${_SOURCED}; then return 1; else exit 1; fi

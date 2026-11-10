@@ -189,6 +189,11 @@ fn build_tracer_provider(
     exporter: opentelemetry_otlp::SpanExporter,
 ) -> opentelemetry_sdk::trace::SdkTracerProvider {
     opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        // Follow the caller's sampling decision; requests without a parent
+        // carry unsampled context without sending new traces to the collector.
+        .with_sampler(opentelemetry_sdk::trace::Sampler::ParentBased(Box::new(
+            opentelemetry_sdk::trace::Sampler::AlwaysOff,
+        )))
         .with_batch_exporter(exporter)
         .with_resource(
             Resource::builder()

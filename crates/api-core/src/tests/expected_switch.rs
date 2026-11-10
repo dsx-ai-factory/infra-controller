@@ -20,9 +20,9 @@ use carbide_uuid::rack::RackId;
 use common::api_fixtures::create_test_env;
 use common::api_fixtures::site_explorer::create_expected_switches;
 use mac_address::MacAddress;
+use rpc::carbide_api_client::EXPECTED_SWITCH_UPDATE_MASK_HEADER;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{ExpectedSwitchList, ExpectedSwitchRequest};
-use rpc::forge_api_client::EXPECTED_SWITCH_UPDATE_MASK_HEADER;
 
 use crate::tests::common;
 

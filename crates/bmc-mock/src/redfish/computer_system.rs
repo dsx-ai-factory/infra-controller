@@ -233,10 +233,12 @@ pub(crate) struct SingleSystemConfig<C: Callbacks> {
 }
 
 pub(crate) struct Config<C: Callbacks> {
-    pub(crate) systems: Vec<SingleSystemConfig<C>>,
+    /// None means unsupported; Some(empty) serves an empty collection.
+    pub(crate) systems: Option<Vec<SingleSystemConfig<C>>>,
 }
 
 pub struct SystemState<C: Callbacks> {
+    collection_available: bool,
     systems: Vec<SingleSystemState<C>>,
 }
 
@@ -398,7 +400,13 @@ impl<C: Callbacks> SystemState<C> {
     }
 
     pub(crate) fn from_config(config: Config<C>, options: &MachineRouterOptions) -> Self {
-        Self::from_configs(config.systems, options.virtual_media_devices.clone())
+        match config.systems {
+            Some(systems) => Self::from_configs(systems, options.virtual_media_devices.clone()),
+            None => Self {
+                collection_available: false,
+                systems: vec![],
+            },
+        }
     }
 
     pub(crate) fn systems(&self) -> &[SingleSystemState<C>] {
@@ -507,7 +515,10 @@ impl<C: Callbacks> SystemState<C> {
                 SingleSystemState::new(config, virtual_media)
             })
             .collect();
-        Self { systems }
+        Self {
+            collection_available: true,
+            systems,
+        }
     }
 
     pub(crate) fn controlled_system(&self) -> Option<&SingleSystemState<C>> {
@@ -857,9 +868,7 @@ impl<C: Callbacks> SingleSystemState<C> {
 }
 
 async fn get_system_collection<C: Callbacks>(State(state): State<BmcState<C>>) -> Response {
-    // Delta power shelves serve no `Systems` collection at all (the endpoint
-    // 404s), which is the condition site-explorer's Delta path handles.
-    if !state.exposes_computer_systems {
+    if !state.system_state.collection_available {
         return http::not_found();
     }
     let members = state
@@ -1093,7 +1102,10 @@ async fn patch_settings<C: Callbacks>(
         }
         system_state.apply_boot_source_override(boot);
     }
-    if matches!(state.bmc_vendor, redfish::oem::BmcVendor::Ami) {
+    if matches!(
+        state.service_root_state.vendor,
+        redfish::oem::BmcVendor::Ami
+    ) {
         http::ok_no_content()
     } else {
         json!({}).into_ok_response()
@@ -1281,7 +1293,10 @@ async fn patch_boot_option_settings<C: Callbacks>(
     if !system_state.patch_boot_option(&boot_option_id, patch_request) {
         return http::not_found();
     }
-    if matches!(state.bmc_vendor, redfish::oem::BmcVendor::Ami) {
+    if matches!(
+        state.service_root_state.vendor,
+        redfish::oem::BmcVendor::Ami
+    ) {
         http::ok_no_content()
     } else {
         json!({}).into_ok_response()
@@ -1676,6 +1691,51 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn unsupported_and_empty_systems_collections_are_distinct() {
+        for (systems, status) in [
+            (None, StatusCode::NOT_FOUND),
+            (Some(vec![]), StatusCode::OK),
+        ] {
+            let (_router, state) = create_test_bmc(
+                &host_info(HardwareType::DeltaPowerShelf),
+                TestBmcConfig::default(),
+                "test-host-id".into(),
+                false,
+                MachineRouterOptions::default(),
+            );
+            let state = BmcState {
+                system_state: Arc::new(SystemState::from_config(
+                    Config { systems },
+                    &MachineRouterOptions::default(),
+                )),
+                ..state
+            };
+            let router = Router::new()
+                .route(
+                    "/redfish/v1/Systems",
+                    get(get_system_collection::<TestCallbacks>),
+                )
+                .with_state(state);
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .uri("/redfish/v1/Systems")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            if status == StatusCode::OK {
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let collection: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(collection["Members"], json!([]));
+                assert_eq!(collection["Members@odata.count"], 0);
+            }
+        }
     }
 
     #[tokio::test]

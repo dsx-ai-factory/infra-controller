@@ -52,7 +52,7 @@ pub(crate) struct TerminateOptions {
 #[command(after_long_help = "\
 EXAMPLES:
 
-Start maintenance on a full rack (all activities, all components):
+Start maintenance on a full rack (all non-power activities, all components):
     $ nico-admin-cli rack maintenance start --rack 12345678-1234-5678-90ab-cdef01234567
 
 Run only a firmware upgrade on specific machines:
@@ -94,7 +94,7 @@ pub(crate) struct MaintenanceOptions {
 
     #[clap(
         long,
-        help = "Maintenance activities to perform: firmware-upgrade, nvos-update, configure-nmx-cluster, power-sequence (omit for all)",
+        help = "Activities: firmware-upgrade, nvos-update, power-sequence, configure-nmx-cluster (execution order). Omit for all except power-sequence; select power-sequence explicitly to reboot all rack compute hosts before NMX-C configuration",
         num_args = 1..,
         value_delimiter = ','
     )]

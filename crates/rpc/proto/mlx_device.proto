@@ -268,6 +268,10 @@ message MlxDeviceInfo {
   string status = 12;
   // base_guid is the base GUID reported by MFT, if available.
   optional string base_guid = 13;
+  // Firmware version reported by the Linux RDMA driver for this PCI device.
+  // Absent when the driver fact is unavailable or ambiguous. An installed
+  // version alone does not substitute for this post-activation observation.
+  optional string fw_version_running = 14;
 }
 
 // DeviceFilterSet represents a collection of filters that must all match.
@@ -435,6 +439,15 @@ message FirmwareSpec {
   string psid = 2;
   // version is the target firmware version string (e.g., "32.43.1014").
   string version = 3;
+}
+
+// Transport selected once for a checked NIC firmware operation. Original
+// sources and expected digests stay immutable in either mode.
+enum FirmwareDeliveryMode {
+  // Compatibility default: anonymous HTTP(S) from the saved original source.
+  FIRMWARE_DELIVERY_MODE_DIRECT = 0;
+  // Authenticated Core artifact GETs; errors never permit an origin fallback.
+  FIRMWARE_DELIVERY_MODE_SITE_CACHE = 1;
 }
 
 // FlashSpec specifies the source locations and caching options for

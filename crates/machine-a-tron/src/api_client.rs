@@ -31,9 +31,9 @@ use rpc::forge::machine_cleanup_info::CleanupStepResult;
 use rpc::forge::{
     ConfigSetting, ExpectedInterface, ExpectedMachine, ExpectedPowerShelf, ExpectedRack,
     ExpectedRackGroup, ExpectedRackGroupRequest, ExpectedRackRequest, ExpectedSwitch,
-    MachinesByIdsRequest, SetDynamicConfigRequest,
+    SetDynamicConfigRequest,
 };
-use rpc::protos::forge_api_client::ForgeApiClient;
+use rpc::protos::carbide_api_client::CarbideApiClient;
 
 use crate::MachineConfig;
 use crate::status::DeviceKind;
@@ -59,10 +59,10 @@ pub struct MockDiscoveryData {
 }
 
 #[derive(Debug, Clone)]
-pub struct ApiClient(pub ForgeApiClient);
+pub struct ApiClient(pub CarbideApiClient);
 
-impl From<ForgeApiClient> for ApiClient {
-    fn from(value: ForgeApiClient) -> Self {
+impl From<CarbideApiClient> for ApiClient {
+    fn from(value: CarbideApiClient) -> Self {
         ApiClient(value)
     }
 }
@@ -169,6 +169,7 @@ impl ExpectedRecord {
                 id: None,
                 host_nics: interfaces,
                 replace_host_nics: false,
+                replace_dpu_loopbacks: false,
                 rack_id,
                 default_pause_ingestion_and_poweron: None,
                 #[allow(deprecated)]
@@ -326,23 +327,6 @@ impl ApiClient {
         Ok(out)
     }
 
-    pub async fn get_machines(
-        &self,
-        machine_ids: Vec<MachineId>,
-    ) -> ClientApiResult<Vec<rpc::Machine>> {
-        let request = MachinesByIdsRequest {
-            machine_ids,
-            include_history: false,
-        };
-        let out = self
-            .0
-            .find_machines_by_ids(request)
-            .await
-            .map_err(ClientApiError::InvocationError)?;
-
-        Ok(out.machines)
-    }
-
     pub async fn record_dpu_network_status(
         &self,
         DpuNetworkStatusArgs {
@@ -387,6 +371,7 @@ impl ApiClient {
                 dpu_extension_services: vec![],
                 astra_config_status: None,
                 lldp: None,
+                lldp_snapshot_fingerprint: None,
             })
             .await
             .map_err(ClientApiError::InvocationError)
@@ -405,6 +390,8 @@ impl ApiClient {
                 allow_delete_with_orphaned_dpf_crds: false,
                 delete_bmc_suppressions: false,
                 delete_retained_boot_interfaces: false,
+                allow_delete_with_instance_type: true,
+                allow_delete_with_instance: true,
                 release_preserved_addresses: false,
                 wait_for_instance_dpu: false,
             })
@@ -773,6 +760,7 @@ mod tests {
                         id: None,
                         host_nics: vec![nic],
                         replace_host_nics: false,
+                        replace_dpu_loopbacks: false,
                         rack_id: Some(rack_id.clone()),
                         default_pause_ingestion_and_poweron: None,
                         #[allow(deprecated)]
@@ -807,6 +795,7 @@ mod tests {
                         id: None,
                         host_nics: Vec::new(),
                         replace_host_nics: false,
+                        replace_dpu_loopbacks: false,
                         rack_id: None,
                         default_pause_ingestion_and_poweron: None,
                         #[allow(deprecated)]
@@ -899,5 +888,106 @@ mod tests {
             ],
             ExpectedRecord::into_requests,
         );
+    }
+}
+
+#[cfg(test)]
+mod force_delete_tests {
+    use std::convert::Infallible;
+
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use hyper::body::Incoming;
+    use hyper::server::conn::http2;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use prost::Message;
+    use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
+    use rpc::forge::{AdminForceDeleteMachineRequest, AdminForceDeleteMachineResponse, BuildInfo};
+    use tokio::net::TcpListener;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn cleanup_authorizes_deleting_the_simulated_attached_instance() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock Core listener binds");
+        let address = listener.local_addr().expect("mock listener has an address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("mock accepts the client");
+            http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(stream), service_fn(mock_force_delete))
+                .await
+                .expect("mock serves the cleanup RPC");
+        });
+
+        let client_config = CarbideClientConfig::default();
+        let client = CarbideApiClient::new(&ApiConfig::new(
+            &format!("http://{address}"),
+            &client_config,
+        ));
+        let result = ApiClient(client)
+            .force_delete_machine("simulated-machine".to_string())
+            .await;
+
+        server.abort();
+        assert!(
+            server
+                .await
+                .expect_err("mock remains available")
+                .is_cancelled(),
+            "mock cleanup server must only be stopped by the test"
+        );
+        result.expect("explicit cleanup deletes its simulated Machine and attached Instance");
+    }
+
+    async fn mock_force_delete(
+        request: Request<Incoming>,
+    ) -> Result<Response<Full<Bytes>>, Infallible> {
+        if request.uri().path() == rpc::service_path!("Version") {
+            return Ok(grpc_response(BuildInfo::default()));
+        }
+        assert_eq!(
+            request.uri().path(),
+            rpc::service_path!("AdminForceDeleteMachine")
+        );
+        let body = request
+            .into_body()
+            .collect()
+            .await
+            .expect("cleanup request body is readable")
+            .to_bytes();
+        let request = AdminForceDeleteMachineRequest::decode(
+            body.get(5..).expect("cleanup request has a gRPC frame"),
+        )
+        .expect("cleanup request decodes");
+
+        if request.allow_delete_with_instance {
+            Ok(grpc_response(AdminForceDeleteMachineResponse::default()))
+        } else {
+            Ok(Response::builder()
+                .header("content-type", "application/grpc")
+                .header("grpc-status", "9")
+                .header(
+                    "grpc-message",
+                    "attached instance requires explicit deletion authorization",
+                )
+                .body(Full::new(Bytes::new()))
+                .expect("rejection response is valid"))
+        }
+    }
+
+    fn grpc_response(message: impl Message) -> Response<Full<Bytes>> {
+        let mut data = Vec::with_capacity(5 + message.encoded_len());
+        data.push(0);
+        data.extend_from_slice(&(message.encoded_len() as u32).to_be_bytes());
+        message.encode(&mut data).expect("mock response encodes");
+        Response::builder()
+            .header("content-type", "application/grpc")
+            .header("grpc-status", "0")
+            .body(Full::new(Bytes::from(data)))
+            .expect("success response is valid")
     }
 }

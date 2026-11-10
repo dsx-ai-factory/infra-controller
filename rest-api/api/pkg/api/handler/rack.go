@@ -802,7 +802,7 @@ func (pcrh UpdateRackPowerStateHandler) Handle(c echo.Context) error {
 
 // ~~~~~ Batch Update Rack Power State Handler ~~~~~ //
 
-// BatchUpdateRackPowerStateHandler is the API Handler for power controlling Racks with optional filters
+// BatchUpdateRackPowerStateHandler is the API Handler for power controlling explicitly named Racks.
 type BatchUpdateRackPowerStateHandler struct {
 	dbSession *cdb.Session
 	tc        tClient.Client
@@ -822,7 +822,9 @@ func NewBatchUpdateRackPowerStateHandler(dbSession *cdb.Session, tc tClient.Clie
 
 // Handle godoc
 // @Summary Power control Racks
-// @Description Power control Racks with optional filters (On, Off, Cycle, ForceOff, ForceCycle, ACPowerCycle). If no filter is specified, targets all racks in the Site.
+// @Description Power control explicitly named Racks (On, Off, Cycle, ForceOff, ForceCycle, ACPowerCycle). Provide a nonempty filter.names list.
+// @Description An omitted, null, or empty filter, including an empty names list, is rejected before task creation.
+// @Description For a site-wide operation, list every intended rack.
 // @Tags rack
 // @Accept json
 // @Produce json
@@ -903,7 +905,7 @@ func (pcrbh BatchUpdateRackPowerStateHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	// Build TargetSpec from filter (nil filter = all racks)
+	// Build TargetSpec from the explicit rack-name filter.
 	targetSpec := request.Filter.ToTargetSpec()
 
 	flowResp, proxyErr := common.ExecutePowerControlWorkflow(ctx, logger, stc, targetSpec, request.State,
@@ -1050,7 +1052,7 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 
 // ~~~~~ Batch Update Rack Firmware Handler ~~~~~ //
 
-// BatchUpdateRackFirmwareHandler is the API Handler for firmware upgrading Racks with optional filters
+// BatchUpdateRackFirmwareHandler is the API Handler for firmware upgrading explicitly named Racks.
 type BatchUpdateRackFirmwareHandler struct {
 	dbSession *cdb.Session
 	tc        tClient.Client
@@ -1070,7 +1072,9 @@ func NewBatchUpdateRackFirmwareHandler(dbSession *cdb.Session, tc tClient.Client
 
 // Handle godoc
 // @Summary Firmware update Racks
-// @Description Update firmware on Racks with optional name filter. If no filter is specified, targets all racks in the Site.
+// @Description Update firmware on explicitly named Racks. Provide a nonempty filter.names list.
+// @Description An omitted, null, or empty filter, including an empty names list, is rejected before task creation.
+// @Description For a site-wide update, list every intended rack.
 // @Tags rack
 // @Accept json
 // @Produce json
@@ -1151,7 +1155,7 @@ func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	// Build TargetSpec from filter (nil filter = all racks)
+	// Build TargetSpec from the explicit rack-name filter.
 	targetSpec := request.Filter.ToTargetSpec()
 
 	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, request.Version,
@@ -1304,7 +1308,7 @@ func (burh BringUpRackHandler) Handle(c echo.Context) error {
 
 // ~~~~~ Batch Bring Up Rack Handler ~~~~~ //
 
-// BatchBringUpRackHandler is the API Handler for bringing up Racks with optional filters
+// BatchBringUpRackHandler is the API Handler for bringing up explicitly named Racks.
 type BatchBringUpRackHandler struct {
 	dbSession *cdb.Session
 	tc        tClient.Client
@@ -1324,7 +1328,9 @@ func NewBatchBringUpRackHandler(dbSession *cdb.Session, tc tClient.Client, scp *
 
 // Handle godoc
 // @Summary Bring up Racks
-// @Description Bring up Racks with optional filters. If no filter is specified, targets all racks in the Site.
+// @Description Bring up explicitly named Racks. Provide a nonempty filter.names list.
+// @Description An omitted, null, or empty filter, including an empty names list, is rejected before task creation.
+// @Description For a site-wide operation, list every intended rack.
 // @Tags rack
 // @Accept json
 // @Produce json
@@ -1405,7 +1411,7 @@ func (bbuh BatchBringUpRackHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
 	}
 
-	// Build TargetSpec from filter (nil filter = all racks)
+	// Build TargetSpec from the explicit rack-name filter.
 	targetSpec := request.Filter.ToTargetSpec()
 
 	description := request.Description
