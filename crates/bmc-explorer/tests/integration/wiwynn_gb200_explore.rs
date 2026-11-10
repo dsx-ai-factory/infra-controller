@@ -21,6 +21,62 @@ use tokio::test;
 use crate::common;
 
 #[test]
+async fn chassis_serial_comes_from_tray_assembly_on_new_firmware() {
+    let h = test_support::wiwynn_gb200_bmc().await;
+    let chassis = h.service_root.chassis().await.unwrap().unwrap();
+    let members = chassis.members().await.unwrap();
+    let chassis = members
+        .iter()
+        .find(|chassis| chassis.raw().id == "Chassis_0")
+        .unwrap();
+    let board_serial = chassis.hardware_id().serial_number.unwrap().to_string();
+    let assembly = chassis.assembly().await.unwrap().unwrap();
+    let assemblies = assembly.assemblies().await.unwrap();
+    assert_eq!(
+        assemblies[0].hardware_id().model.unwrap().into_inner(),
+        "Titania-Bianca Compute Tray PDB"
+    );
+    let tray_serial = assemblies[0]
+        .hardware_id()
+        .serial_number
+        .unwrap()
+        .to_string();
+    assert_ne!(tray_serial, board_serial);
+    assert_eq!(
+        assemblies[1]
+            .hardware_id()
+            .serial_number
+            .unwrap()
+            .to_string(),
+        board_serial
+    );
+
+    let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())
+        .await
+        .unwrap();
+    assert_eq!(
+        report
+            .systems
+            .iter()
+            .find(|system| system.id == "System_0")
+            .unwrap()
+            .serial_number
+            .as_deref(),
+        Some(board_serial.as_str())
+    );
+    assert_eq!(
+        report
+            .chassis
+            .iter()
+            .find(|chassis| chassis.id == "Chassis_0")
+            .unwrap()
+            .serial_number
+            .as_deref(),
+        Some(tray_serial.as_str())
+    );
+}
+
+#[test]
 async fn chassis_position_remains_the_source_for_gb200() {
     let h = test_support::wiwynn_gb200_bmc_at_rack_position(11).await;
     let report = nv_generate_exploration_report(h.service_root, &common::explorer_config())

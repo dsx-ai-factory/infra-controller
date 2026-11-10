@@ -165,6 +165,7 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
                 model.is_some_and(|model| {
                     hw::vera_rubin::chassis_assembly_serial_model(model.into_inner())
                 }) || model == Some(AssemblyModel::new("GB200 NVL"))
+                    || model == Some(AssemblyModel::new("Titania-Bianca Compute Tray PDB"))
             })
         },
         // BlueField-3 DPU (Tested on BF-25.10-9 firmware) has issue
