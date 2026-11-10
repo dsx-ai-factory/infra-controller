@@ -7691,6 +7691,8 @@ path = "credentials.yaml"
                 "ssh-console.nico-system.svc.cluster.local:1079",
             ),
             ("{{ .Values.tracing.enabled }}", "false"),
+            // Twice the `requestTimeoutSecs` value rendered above.
+            ("{{ $certDeadline }}", "240"),
             ("{{ . | quote }}", r#""/tmp/test.pem""#),
         ] {
             config = config.replace(template, rendered);
