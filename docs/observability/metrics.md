@@ -127,9 +127,15 @@ exposes `carbide_hosts_usable_count` and `carbide_gpus_usable_count` showing hos
 GPUs available for allocation. The `carbide_available_ips_count` metric tracks IP
 address pool exhaustion.
 
-For multi-tenant deployments, `carbide_resource_pool_*` metrics break down capacity by
-resource pool. Watch for pools approaching zero availability before tenants start seeing
-allocation failures.
+The `carbide_resourcepool_free_count` and `carbide_resourcepool_used_count` gauges
+report available and allocated values, respectively, for each resource pool, identified
+by the `pool` label. Watch for pools approaching zero availability before tenants start
+seeing allocation failures.
+
+These counts are absent before the first successful statistics check, after a failed
+check, or when the data is too old. Also monitor `carbide_resourcepool_stats_available`
+and `carbide_resourcepool_stats_fresh` to check whether pool data is available and up
+to date. See the [metrics reference](core_metrics.md) for their meanings.
 
 ### Health: "What's broken right now?"
 
