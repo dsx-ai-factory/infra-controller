@@ -559,6 +559,24 @@ class ResultTests(unittest.TestCase):
                     skipped_jobs=case["skipped_jobs"],
                 )
 
+    def test_merge_group_expects_pr_build(self) -> None:
+        job_results, environment = _build_result_context(
+            "rest", pull_request=False, skipped_jobs={"build-and-push"}
+        )
+        environment["GITHUB_REF"] = "refs/heads/gh-readonly-queue/main/pr-4575"
+        environment["GITHUB_EVENT_NAME"] = "merge_group"
+
+        self.assertEqual(
+            result_errors(job_results, "rest", environment=environment), []
+        )
+
+        job_results["build-and-push"]["result"] = "success"
+        job_results["build-and-push-pr"]["result"] = "skipped"
+        self.assertIn(
+            "`build-and-push-pr` was unexpectedly skipped",
+            result_errors(job_results, "rest", environment=environment)[0],
+        )
+
     def test_migration_police_still_runs_when_core_does_not(self) -> None:
         job_results, environment = _build_result_context(
             "core",
