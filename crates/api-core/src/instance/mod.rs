@@ -2746,8 +2746,11 @@ pub(crate) async fn batch_allocate_instances(
             request.config.nvlink.clone(),
         ));
 
-        let (updated_spx_config, targets) =
-            allocate_spx_port_mac(&request.config.spxconfig, mh_snapshot)?;
+        let (updated_spx_config, targets) = allocate_spx_port_mac(
+            &request.config.spxconfig,
+            mh_snapshot,
+            api.runtime_config.is_partial_multiplane_enabled(),
+        )?;
         spx_config_updates.push((instance_id, spx_config_version, updated_spx_config));
         firmware_targets.insert(instance_id, targets);
     }
@@ -3024,15 +3027,19 @@ pub(crate) fn sort_spx_by_slot(
 /// it owns, such as `eth_r0_p0` or `eth_r0_p4`. That name identifies the card's
 /// half of the rail: `eth_r0_p0` owns `_p0` through `_p3`, and `eth_r0_p4` owns
 /// `_p4` through `_p7`. The card is functional while at least one of those four
-/// planes reports `maintenance_mode` false in the DPU's readback.
+/// planes reports `maintenance_mode` false in a readback that acknowledges the
+/// host's current desired revision for that plane.
 ///
-/// Anything leaving a plane unproven reports the card as unusable, whether that
-/// is a missing readback or a registration carrying no declared name. Legacy
+/// Anything leaving a plane unproven reports the card as unusable: a missing
+/// readback, a registration carrying no declared name, a readback superseded by
+/// a newer request, or a drain request still waiting to be applied. Legacy
 /// inventory, which registers an indexed `CX_n` locator and declares no logical
-/// interfaces, has no planes to drain and is exempt.
+/// interfaces, has no planes to drain and is exempt. A site that does not run
+/// partial multiplane cannot drain planes individually, so it is exempt too.
 pub(crate) fn check_spx_interface_functional_planes(
     spx_interface: &DpaInterface,
     mh_snapshot: &ManagedHostStateSnapshot,
+    partial_multiplane_enabled: bool,
 ) -> bool {
     /// Planes owned by one Astra card, which is half of a rail's eight.
     const PLANES_PER_CARD: u8 = 4;
@@ -3046,6 +3053,12 @@ pub(crate) fn check_spx_interface_functional_planes(
     // Legacy inventory registers an indexed `CX_n` locator and declares no
     // logical interfaces, so such a card has no planes to drain or observe.
     if astra_nic_mappings_for_dpu_pci_address_prefix(dpu_pci_address_prefix).is_empty() {
+        return true;
+    }
+
+    // Draining individual planes requires partial multiplane, so a site without
+    // it has no per-plane maintenance state for admission to consult.
+    if !partial_multiplane_enabled {
         return true;
     }
 
@@ -3079,19 +3092,51 @@ pub(crate) fn check_spx_interface_functional_planes(
         return false;
     };
 
+    let declared_planes = mh_snapshot
+        .host_snapshot
+        .spx_multiplane
+        .as_ref()
+        .map(|spx_multiplane| &spx_multiplane.interfaces);
+
     let first_plane = plane / PLANES_PER_CARD * PLANES_PER_CARD;
-    (first_plane..first_plane + PLANES_PER_CARD).any(|plane| {
+    let functional = (first_plane..first_plane + PLANES_PER_CARD).any(|plane| {
+        let plane_name = format!("eth_r{rail}_p{plane}");
+        // An operator can drain a plane between the agent applying maintenance
+        // and this DPU publishing the result, so a readback only proves the
+        // plane usable while it acknowledges the current desired revision and
+        // no newer request is still waiting to be applied.
+        let Some(declared_plane) = declared_planes.and_then(|planes| planes.get(&plane_name))
+        else {
+            return false;
+        };
+        if declared_plane.cfg_maintenance_mode == Some(true) {
+            return false;
+        }
         spx_multiplane_status
             .interfaces
-            .get(&format!("eth_r{rail}_p{plane}"))
-            .is_some_and(|observation| observation.maintenance_mode == Some(false))
-    })
+            .get(&plane_name)
+            .is_some_and(|observation| {
+                observation.revision == declared_plane.revision
+                    && observation.maintenance_mode == Some(false)
+            })
+    });
+
+    if !functional {
+        tracing::error!(
+            dpa_interface_id = %spx_interface.id,
+            pci_name = %spx_interface.pci_name,
+            interface_name = ?spx_interface.interface_name,
+            "No plane of this SPX interface reports a current readback out of maintenance"
+        );
+    }
+    functional
 }
 
 /// Binds SPX attachments to DPA rows and returns the selected rows' firmware evidence.
 pub(crate) fn allocate_spx_port_mac(
     spx_config: &InstanceSpxConfig,
     mh_snapshot: &ManagedHostStateSnapshot,
+    partial_multiplane_enabled: bool,
 ) -> CarbideResult<(InstanceSpxConfig, Vec<NicFirmwareAllocationTarget>)> {
     let mut updated_spx_config = spx_config.clone();
     let mut targets = Vec::with_capacity(spx_config.spx_attachments.len());
@@ -3140,7 +3185,11 @@ pub(crate) fn allocate_spx_port_mac(
                 // We need to check to make sure this NIC has at least one functional plane.
                 // Call the check_spx_interface_functional_planes routine to check this.
                 // We need to pass in the spx_interface and mh_snapshot to the check_spx_interface_functional_planes routine.
-                if !check_spx_interface_functional_planes(spx_interface, mh_snapshot) {
+                if !check_spx_interface_functional_planes(
+                    spx_interface,
+                    mh_snapshot,
+                    partial_multiplane_enabled,
+                ) {
                     tracing::error!(
                         dpa_interface_id = %spx_interface.id,
                         "SPX interface has no functional planes",
@@ -3197,7 +3246,7 @@ mod tests {
     use model::instance::config::spx::InstanceSpxAttachment;
     use model::machine::astra::ASTRA_NIC_MAPPINGS;
     use model::machine::spx_multiplane::{
-        MachineSpxMultiplaneObservation, MachineSpxMultiplaneStatus,
+        MachineSpxMultiplaneInterface, MachineSpxMultiplaneObservation, MachineSpxMultiplaneStatus,
     };
     use model::test_support::machine_snapshot::managed_host_state_snapshot;
 
@@ -3273,16 +3322,32 @@ mod tests {
         cards
     }
 
-    /// Observations for all 32 Astra planes, in maintenance except for the
-    /// listed plane names. `netdev` carries the logical name the agent made
-    /// primary, which admission must not depend on.
-    fn astra_multiplane_status(available_planes: &[String]) -> MachineSpxMultiplaneStatus {
+    /// Host-desired state applying one declaration to all 32 planes. A
+    /// `ConfigVersion` carries a timestamp, so observations only acknowledge a
+    /// declaration built from the same value.
+    fn astra_declared_planes(
+        declared_plane: MachineSpxMultiplaneInterface,
+    ) -> MachineSpxMultiplane {
+        MachineSpxMultiplane {
+            interfaces: (0..ASTRA_NIC_MAPPINGS.len())
+                .map(|plane| (astra_plane_name(plane), declared_plane.clone()))
+                .collect(),
+        }
+    }
+
+    /// Observations for all 32 Astra planes at the acknowledged revision, in
+    /// maintenance except for the listed plane names. `netdev` carries the
+    /// logical name the agent made primary, which admission must not depend on.
+    fn astra_multiplane_status(
+        revision: ConfigVersion,
+        available_planes: &[String],
+    ) -> MachineSpxMultiplaneStatus {
         let interfaces = (0..ASTRA_NIC_MAPPINGS.len())
             .map(|plane| {
                 let logical_ifname = astra_plane_name(plane);
                 let observation = MachineSpxMultiplaneObservation {
                     maintenance_mode: Some(!available_planes.contains(&logical_ifname)),
-                    revision: ConfigVersion::initial(),
+                    revision,
                     netdev: Some(logical_ifname.clone()),
                     error: None,
                     observed_at: chrono::Utc::now(),
@@ -3304,8 +3369,16 @@ mod tests {
         // and registered under that lane's declared logical name.
         let cards = astra_cards();
 
+        // Declarations and observations share one revision, so every readback
+        // below acknowledges the host's current desired state.
+        let revision = ConfigVersion::initial();
         let mut snapshot = managed_host_state_snapshot();
         let machine_id = snapshot.host_snapshot.id;
+        snapshot.host_snapshot.spx_multiplane =
+            Some(astra_declared_planes(MachineSpxMultiplaneInterface {
+                revision,
+                ..Default::default()
+            }));
         snapshot.dpa_interface_snapshots = cards
             .iter()
             .enumerate()
@@ -3359,8 +3432,111 @@ mod tests {
             |available_planes| {
                 let mut snapshot = snapshot.clone();
                 snapshot.dpu_snapshots[0].status.spx_multiplane_status = available_planes
-                    .map(|available_planes| astra_multiplane_status(&available_planes));
-                allocate_spx_port_mac(&config, &snapshot)
+                    .map(|available_planes| astra_multiplane_status(revision, &available_planes));
+                allocate_spx_port_mac(&config, &snapshot, true)
+                    .map(|(bound, _)| bound.spx_attachments.len())
+                    .map_err(|error| match error {
+                        CarbideError::InvalidArgument(message) => message,
+                        error => panic!("unexpected mapper error: {error}"),
+                    })
+            },
+        );
+
+        // A site without partial multiplane never drains planes individually,
+        // so the same fully drained readback must still admit every card.
+        snapshot.dpu_snapshots[0].status.spx_multiplane_status =
+            Some(astra_multiplane_status(revision, &[]));
+        let (bound, _) = allocate_spx_port_mac(&config, &snapshot, false).unwrap();
+        assert_eq!(bound.spx_attachments.len(), cards.len());
+    }
+
+    /// An operator can drain a plane between the agent applying maintenance and
+    /// the DPU publishing the result, so a healthy readback that no longer
+    /// matches the host's desired revision describes hardware that may already
+    /// be drained. Admission must treat it as unproven rather than available.
+    #[test]
+    fn spx_binding_rejects_astra_planes_superseded_by_a_newer_maintenance_request() {
+        const DEVICE: &str = "NVIDIA Dual ConnectX-9 SuperNIC";
+
+        let cards = astra_cards();
+        let mut snapshot = managed_host_state_snapshot();
+        let machine_id = snapshot.host_snapshot.id;
+        snapshot.dpa_interface_snapshots = cards
+            .iter()
+            .enumerate()
+            .map(|(card, (pci_name, interface_name))| DpaInterface {
+                interface_type: DpaInterfaceType::Astra,
+                interface_name: Some(interface_name.clone()),
+                ..spx_interface(
+                    machine_id,
+                    DEVICE,
+                    pci_name,
+                    &format!("02:11:22:33:44:{card:02x}"),
+                )
+            })
+            .collect();
+        let config = InstanceSpxConfig {
+            spx_attachments: (0..cards.len() as u32)
+                .map(|device_instance| spx_attachment(DEVICE, device_instance))
+                .collect(),
+        };
+
+        // Every plane reports out of maintenance at one fixed revision, so only
+        // the host's desired state can account for the rejections below.
+        let revision = ConfigVersion::initial();
+        let every_plane = (0..ASTRA_NIC_MAPPINGS.len())
+            .map(astra_plane_name)
+            .collect::<Vec<_>>();
+        snapshot.dpu_snapshots[0].status.spx_multiplane_status =
+            Some(astra_multiplane_status(revision, &every_plane));
+        // Attachments bind highest index first, so the last card fails first.
+        let first_bound = snapshot.dpa_interface_snapshots.last().unwrap().id;
+        let drained = format!("SPX interface {first_bound} has no functional planes");
+
+        check_cases(
+            [
+                Case {
+                    scenario: "readback acknowledges the current revision",
+                    input: MachineSpxMultiplaneInterface {
+                        revision,
+                        ..Default::default()
+                    },
+                    expect: Yields(cards.len()),
+                },
+                Case {
+                    scenario: "newer drain request supersedes every readback",
+                    input: MachineSpxMultiplaneInterface {
+                        cfg_maintenance_mode: Some(true),
+                        revision: revision.increment(),
+                        ..Default::default()
+                    },
+                    expect: FailsWith(drained.clone()),
+                },
+                // A drain already acknowledged leaves the revision current, so
+                // intent alone has to withhold the plane.
+                Case {
+                    scenario: "drain requested at the acknowledged revision",
+                    input: MachineSpxMultiplaneInterface {
+                        cfg_maintenance_mode: Some(true),
+                        revision,
+                        ..Default::default()
+                    },
+                    expect: FailsWith(drained.clone()),
+                },
+                // Only the revision moved, without any maintenance request.
+                Case {
+                    scenario: "unapplied declaration change supersedes readbacks",
+                    input: MachineSpxMultiplaneInterface {
+                        revision: revision.increment(),
+                        ..Default::default()
+                    },
+                    expect: FailsWith(drained),
+                },
+            ],
+            |declared_plane| {
+                let mut snapshot = snapshot.clone();
+                snapshot.host_snapshot.spx_multiplane = Some(astra_declared_planes(declared_plane));
+                allocate_spx_port_mac(&config, &snapshot, true)
                     .map(|(bound, _)| bound.spx_attachments.len())
                     .map_err(|error| match error {
                         CarbideError::InvalidArgument(message) => message,
@@ -3378,8 +3554,16 @@ mod tests {
         const DEVICE: &str = "NVIDIA Dual ConnectX-9 SuperNIC";
 
         let cards = astra_cards();
+        // Declarations and observations share one revision, so every readback
+        // below acknowledges the host's current desired state.
+        let revision = ConfigVersion::initial();
         let mut snapshot = managed_host_state_snapshot();
         let machine_id = snapshot.host_snapshot.id;
+        snapshot.host_snapshot.spx_multiplane =
+            Some(astra_declared_planes(MachineSpxMultiplaneInterface {
+                revision,
+                ..Default::default()
+            }));
         snapshot.dpa_interface_snapshots = cards
             .iter()
             .enumerate()
@@ -3399,7 +3583,7 @@ mod tests {
             .map(astra_plane_name)
             .collect::<Vec<_>>();
         snapshot.dpu_snapshots[0].status.spx_multiplane_status =
-            Some(astra_multiplane_status(&every_plane));
+            Some(astra_multiplane_status(revision, &every_plane));
         let config = InstanceSpxConfig {
             spx_attachments: (0..cards.len() as u32)
                 .map(|device_instance| spx_attachment(DEVICE, device_instance))
@@ -3408,7 +3592,8 @@ mod tests {
 
         // Attachments bind highest index first, so the last card fails first.
         let first_bound = snapshot.dpa_interface_snapshots.last().unwrap().id;
-        let Err(CarbideError::InvalidArgument(message)) = allocate_spx_port_mac(&config, &snapshot)
+        let Err(CarbideError::InvalidArgument(message)) =
+            allocate_spx_port_mac(&config, &snapshot, true)
         else {
             panic!("an undeclared astra card must not bind");
         };
@@ -3453,7 +3638,7 @@ mod tests {
                 .collect(),
         };
 
-        let (bound, targets) = allocate_spx_port_mac(&config, &snapshot).unwrap();
+        let (bound, targets) = allocate_spx_port_mac(&config, &snapshot, true).unwrap();
         assert_eq!(bound.spx_attachments.len(), CARDS as usize);
         assert_eq!(targets.len(), CARDS as usize);
         assert!(
@@ -3509,7 +3694,7 @@ mod tests {
                         spx_attachment(device, device_instance),
                     ],
                 };
-                allocate_spx_port_mac(&config, &snapshot)
+                allocate_spx_port_mac(&config, &snapshot, true)
                     .map(|_| ())
                     .map_err(|error| match error {
                         CarbideError::InvalidArgument(message) => message,
@@ -3546,7 +3731,7 @@ mod tests {
             ],
         };
 
-        let (bound, targets) = allocate_spx_port_mac(&config, &snapshot).unwrap();
+        let (bound, targets) = allocate_spx_port_mac(&config, &snapshot, true).unwrap();
         let expected = InstanceSpxConfig {
             spx_attachments: vec![
                 InstanceSpxAttachment {

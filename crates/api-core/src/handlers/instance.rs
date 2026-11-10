@@ -1885,7 +1885,14 @@ pub(crate) async fn update_instance_config(
         spx_config = ?config.spxconfig,
         "Updating instance SPX configuration",
     );
-    update_instance_spx_config(&mh_snapshot, instance, &mut config.spxconfig, &mut txn).await?;
+    update_instance_spx_config(
+        &mh_snapshot,
+        instance,
+        &mut config.spxconfig,
+        api.runtime_config.is_partial_multiplane_enabled(),
+        &mut txn,
+    )
+    .await?;
 
     db::instance::update_config(&mut txn, instance.id, expected_version, config, metadata).await?;
 
@@ -2742,6 +2749,7 @@ async fn update_instance_spx_config(
     mh_snapshot: &ManagedHostStateSnapshot,
     instance: &InstanceSnapshot,
     spxcfg: &mut InstanceSpxConfig,
+    partial_multiplane_enabled: bool,
     txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
 ) -> Result<(), CarbideError> {
     let mid = instance.machine_id;
@@ -2786,7 +2794,8 @@ async fn update_instance_spx_config(
     validate_spx_partition_ownership(txn, &instance.config.tenant.tenant_organization_id, spxcfg)
         .await?;
 
-    let (spx_config_with_ports, targets) = allocate_spx_port_mac(spxcfg, &mh_snapshot)?;
+    let (spx_config_with_ports, targets) =
+        allocate_spx_port_mac(spxcfg, &mh_snapshot, partial_multiplane_enabled)?;
     if let Some(snapshot) = &instance.nic_firmware_snapshot {
         snapshot
             .validate_bindings(&targets)
