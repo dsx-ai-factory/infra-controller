@@ -41546,8 +41546,14 @@ type HostLifecycleProfile struct {
 	// If true, do not lock down the server as part of host lifecycle management. If unset or false, preserve
 	// the default behavior of locking down the server after configuring the BIOS.
 	DisableLockdown *bool `protobuf:"varint,1,opt,name=disable_lockdown,json=disableLockdown,proto3,oneof" json:"disable_lockdown,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// If true, designate the machine to retain HBN config on boot even if NICo
+	// is unavailable. The machine must declare a DPU BMC and a DPU OS interface,
+	// and the host BMC and both DPU interfaces must then use a fixed or retained
+	// IP allocation. A machine whose dpu_policy attaches no DPU declares neither.
+	// If unset or false, the machine does not retain the configuration.
+	RetainHbnConfigOnBoot *bool `protobuf:"varint,2,opt,name=retain_hbn_config_on_boot,json=retainHbnConfigOnBoot,proto3,oneof" json:"retain_hbn_config_on_boot,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *HostLifecycleProfile) Reset() {
@@ -41583,6 +41589,13 @@ func (*HostLifecycleProfile) Descriptor() ([]byte, []int) {
 func (x *HostLifecycleProfile) GetDisableLockdown() bool {
 	if x != nil && x.DisableLockdown != nil {
 		return *x.DisableLockdown
+	}
+	return false
+}
+
+func (x *HostLifecycleProfile) GetRetainHbnConfigOnBoot() bool {
+	if x != nil && x.RetainHbnConfigOnBoot != nil {
+		return *x.RetainHbnConfigOnBoot
 	}
 	return false
 }
@@ -71027,6 +71040,7 @@ type PatchExpectedMachineRequest struct {
 	// default_pause_ingestion_and_poweron, bmc_retain_credentials, dpu_mode,
 	// bmc_ip_address, bmc_ip_allocation, host_nics,
 	// host_lifecycle_profile.disable_lockdown,
+	// host_lifecycle_profile.retain_hbn_config_on_boot,
 	// metadata.name, metadata.description, metadata.labels.
 	//
 	// Unselected values are ignored. Selected values replace the stored field,
@@ -71034,7 +71048,8 @@ type PatchExpectedMachineRequest struct {
 	// A selected `bmc_ip_address` must be present: an empty string clears it,
 	// otherwise it must parse as IPv4 or IPv6. Selected optional booleans and
 	// enums must be present. False disables the selected setting; for
-	// `disable_lockdown`, it restores lockdown. `DPU_MODE_UNSPECIFIED` resets to
+	// `disable_lockdown`, it restores lockdown; for `retain_hbn_config_on_boot`, it removes the
+	// retain-hbn-config-on-boot designation. `DPU_MODE_UNSPECIFIED` resets to
 	// site inheritance. Selecting only `bmc_ip_address` preserves the merged
 	// allocation policy; an address incompatible with that policy is rejected.
 	// Select `bmc_ip_allocation` with `BMC_IP_ALLOCATION_TYPE_UNSPECIFIED` to
@@ -82723,10 +82738,12 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x05_roleB\x10\n" +
 	"\x0e_ip_allocationB\x12\n" +
 	"\x10_physical_ifnameB\x11\n" +
-	"\x0f_logical_ifname\"[\n" +
+	"\x0f_logical_ifname\"\xb8\x01\n" +
 	"\x14HostLifecycleProfile\x12.\n" +
-	"\x10disable_lockdown\x18\x01 \x01(\bH\x00R\x0fdisableLockdown\x88\x01\x01B\x13\n" +
-	"\x11_disable_lockdown\"\xf8\f\n" +
+	"\x10disable_lockdown\x18\x01 \x01(\bH\x00R\x0fdisableLockdown\x88\x01\x01\x12=\n" +
+	"\x19retain_hbn_config_on_boot\x18\x02 \x01(\bH\x01R\x15retainHbnConfigOnBoot\x88\x01\x01B\x13\n" +
+	"\x11_disable_lockdownB\x1c\n" +
+	"\x1a_retain_hbn_config_on_boot\"\xf8\f\n" +
 	"\x0fExpectedMachine\x12&\n" +
 	"\x0fbmc_mac_address\x18\x01 \x01(\tR\rbmcMacAddress\x12!\n" +
 	"\fbmc_username\x18\x02 \x01(\tR\vbmcUsername\x12!\n" +

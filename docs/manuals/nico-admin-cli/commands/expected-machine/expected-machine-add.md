@@ -18,7 +18,8 @@ nico-admin-cli expected-machine add
 [--default_pause_ingestion_and_poweron] [--dpf-enabled]
 [--extended] [--bmc-ip-address]
 [--bmc-retain-credentials] [--dpu-policy]
-[--bmc-ip-allocation] [--disable-lockdown] [--sort-by]
+[--bmc-ip-allocation] [--disable-lockdown]
+[--retain-hbn-config-on-boot] [--sort-by]
 [-h|--help]
 ```
 
@@ -197,6 +198,21 @@ behavior of locking down the server after configuring the BIOS.
 >
 > - false
 
+`--retain-hbn-config-on-boot <RETAIN_HBN_CONFIG_ON_BOOT>`
+
+If true, designate the machine to retain its HBN config on boot. This allows
+the machine to boot while NICO's DHCP and gRPC services are unavailable. The
+machine must declare a DPU BMC and a DPU OS interface, and the host BMC
+and both DPU interfaces must then use a fixed or retained IP allocation.
+A machine whose DPU policy attaches no DPU declares neither. If unset or
+false, the machine will need NICo to be up in order to boot.
+
+*Possible values:*
+
+> - true
+>
+> - false
+
 `--sort-by <SORT_BY> [default: primary-id]`
 
 Sort output by specified field
@@ -221,6 +237,7 @@ nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-us
 nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 --interfaces '[{"mac_address":"00:11:22:33:44:55","role":"host_bmc","ip_allocation":"retained"}]'
 nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 --interfaces '[{"mac_address":"02:00:00:00:20:01","role":"dpu_os","ip_allocation":"fixed","fixed_ip":"192.0.2.10"},{"mac_address":"02:00:00:00:20:01","role":"dpu_loopback","fixed_ip":"198.51.100.20"}]'
 nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 --bmc-ip-allocation retained
+nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 --retain-hbn-config-on-boot true --interfaces '[{"mac_address":"00:11:22:33:44:55","role":"host_bmc","ip_allocation":"retained"}]'
 ```
 
 ---
