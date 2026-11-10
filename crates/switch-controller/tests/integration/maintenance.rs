@@ -60,7 +60,8 @@ fn cm_power_action(operation: SwitchMaintenanceOperation) -> SystemPowerControl 
             SystemPowerControl::GracefulShutdown
         }
         SwitchMaintenanceOperation::PowerOff { graceful: false } => SystemPowerControl::ForceOff,
-        SwitchMaintenanceOperation::Reset => SystemPowerControl::ForceRestart,
+        SwitchMaintenanceOperation::Reset { graceful: false } => SystemPowerControl::ForceRestart,
+        SwitchMaintenanceOperation::Reset { graceful: true } => SystemPowerControl::GracefulRestart,
         SwitchMaintenanceOperation::ReconfigureCertificate => SystemPowerControl::On,
     }
 }
@@ -240,6 +241,151 @@ async fn ready_state_does_not_invoke_power_control(
     );
 
     Ok(())
+}
+
+#[sqlx_test]
+async fn reset_preserves_restart_intent_through_queue_and_controller_reload(pool: sqlx::PgPool) {
+    let env = ControllerEnv::new(pool.clone()).await;
+    let switch_id = new_switch(&env, None, None).await.unwrap();
+    let rack = env
+        .harness
+        .create_rack(RackProfileId::new(TEST_RMS_RACK_PROFILE_ID))
+        .await;
+    let bmc_mac_address = load_switch(&env, &switch_id).await.bmc_mac_address.unwrap();
+    for key in [
+        CredentialKey::BmcCredentials {
+            credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
+        },
+        CredentialKey::SwitchNvosAdmin { bmc_mac_address },
+    ] {
+        env.test_credential_manager
+            .set_credentials(
+                &key,
+                &Credentials::UsernamePassword {
+                    username: "admin".into(),
+                    password: "password".into(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let mut txn = pool.begin().await.unwrap();
+    set_switch_rack_id(&mut txn, &switch_id, &rack.id)
+        .await
+        .unwrap();
+    set_switch_controller_state(&mut txn, &switch_id, SwitchControllerState::Ready)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+
+    for (graceful, expected) in [
+        (true, rms::PowerOperation::GracefulRestart),
+        (false, rms::PowerOperation::ForceRestart),
+    ] {
+        let operation = SwitchMaintenanceOperation::Reset { graceful };
+        request_switch_maintenance_via_cm(&env, &switch_id, operation).await;
+        if !graceful {
+            // Persist a predecessor request directly, without using the new Rust serializer.
+            sqlx::query("UPDATE switches SET switch_maintenance_requested = $1 WHERE id = $2")
+                .bind(serde_json::json!({
+                    "requested_at": "2026-10-01T00:00:00Z",
+                    "initiator": "component-manager",
+                    "operation": { "operation": "reset" }
+                }))
+                .bind(switch_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let queued = load_switch(&env, &switch_id).await;
+        assert_eq!(queued.controller_state.value, SwitchControllerState::Ready);
+        let request = queued.switch_maintenance_requested.unwrap();
+        assert_eq!(request.operation, operation);
+
+        if graceful {
+            let rejected = env
+                .api
+                .component_power_control(Request::new(ComponentPowerControlRequest {
+                    target: Some(Target::SwitchIds(SwitchIdList {
+                        ids: vec![switch_id],
+                    })),
+                    action: SystemPowerControl::AcPowercycle as i32,
+                    bypass_state_controller: false,
+                    credential_overrides: None,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(rejected.results.len(), 1);
+            assert_eq!(
+                rejected.results[0].status,
+                rpc::forge::ComponentManagerStatusCode::InternalError as i32
+            );
+            assert!(
+                rejected.results[0]
+                    .error
+                    .contains("does not support AC power cycle")
+            );
+            let unchanged = load_switch(&env, &switch_id).await;
+            assert_eq!(
+                unchanged.switch_maintenance_requested,
+                Some(request.clone())
+            );
+            assert_eq!(
+                unchanged.controller_state.value,
+                SwitchControllerState::Ready
+            );
+            assert!(
+                env.rms_sim
+                    .submitted_batch_set_power_state_requests()
+                    .await
+                    .is_empty()
+            );
+        }
+
+        env.run_switch_controller_iteration().await;
+        assert_eq!(
+            load_switch(&env, &switch_id).await.controller_state.value,
+            SwitchControllerState::maintenance_for_request(request)
+        );
+        env.rms_sim
+            .queue_batch_set_power_state_response(Ok(rms::BatchSetPowerStateResponse {
+                response: Some(rms::NodeBatchResponse {
+                    status: rms::ReturnCode::Success as i32,
+                    ..Default::default()
+                }),
+            }))
+            .await;
+        run_switch_controller_with_services(
+            pool.clone(),
+            env.api.work_lock_manager_handle(),
+            services_with_component_manager(&env).await,
+        )
+        .await;
+        let completed = load_switch(&env, &switch_id).await;
+        assert_eq!(
+            completed.controller_state.value,
+            SwitchControllerState::Ready
+        );
+        assert!(completed.switch_maintenance_requested.is_none());
+        let calls = env.rms_sim.submitted_batch_set_power_state_requests().await;
+        assert_eq!(calls.last().unwrap().operation, expected as i32);
+        for _ in 0..2 {
+            env.run_switch_controller_iteration().await;
+        }
+        assert_eq!(
+            env.rms_sim
+                .submitted_batch_set_power_state_requests()
+                .await
+                .len(),
+            calls.len(),
+            "completed reset must not be dispatched again"
+        );
+        assert_eq!(
+            load_switch(&env, &switch_id).await.controller_state.value,
+            SwitchControllerState::Ready
+        );
+    }
 }
 
 #[sqlx_test]

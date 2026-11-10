@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 use std::future::{Future, poll_fn};
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::task::Poll;
@@ -266,10 +267,133 @@ async fn integrated_dpu_preparation_has_no_provider_reservation(
         &env.api.resource_pool_registry,
         &env.common_pools,
         machine_id,
+        None,
         &env.api.cancel_token,
     )
     .await?;
     assert!(!prepared.has_provider_reservation());
+    Ok(())
+}
+
+/// New DPUs use the requested manual value, while an already-owned value wins
+/// even before a machine row exists. Repair must keep that ownership after an
+/// operator changes the declaration.
+#[crate::sqlx_test]
+async fn integrated_dpu_requested_loopback_preserves_existing_ownership(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let env = api_fixtures::create_test_env(database).await;
+    let first: Ipv4Addr = "192.0.2.10".parse()?;
+    let owned: Ipv4Addr = "192.0.2.11".parse()?;
+    let replacement: Ipv4Addr = "192.0.2.12".parse()?;
+    let pool = env.common_pools.ethernet.pool_loopback_ip.as_ref();
+    let mut setup = env.pool.begin().await?;
+    db::resource_pool::populate(
+        pool,
+        &mut setup,
+        vec![
+            IpAddr::V4(first),
+            IpAddr::V4(owned),
+            IpAddr::V4(replacement),
+        ],
+        false,
+    )
+    .await?;
+    setup.commit().await?;
+
+    for (machine_id, prior_allocation, requested, expected) in [
+        (
+            "fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80",
+            None,
+            first,
+            first,
+        ),
+        (
+            "fm100ds27v4uuq7sgs4gsjummskt0b3tedugtpevjrbfh6su081n9jufcq0",
+            Some(owned),
+            replacement,
+            owned,
+        ),
+    ] {
+        let machine_id: MachineId = machine_id.parse()?;
+        if let Some(address) = prior_allocation {
+            let mut txn = env.pool.begin().await?;
+            db::resource_pool::allocate(
+                pool,
+                &mut txn,
+                OwnerType::Machine,
+                &machine_id.to_string(),
+                Some(IpAddr::V4(address)),
+            )
+            .await?;
+            txn.commit().await?;
+        }
+        let prepared = PreparedDpuLoopback::prepare(
+            &env.pool,
+            &env.api.resource_pool_registry,
+            &env.common_pools,
+            machine_id,
+            Some(requested),
+            &env.api.cancel_token,
+        )
+        .await?;
+        assert!(!prepared.has_provider_reservation());
+        let mut txn = env.pool.begin().await?;
+        db::machine_interface::lock_all_admin_segments_for_allocation(&mut txn).await?;
+        prepared.check_identity(&mut txn).await?;
+        db::machine::create(
+            &mut txn,
+            Some(&env.common_pools),
+            &machine_id,
+            ManagedHostState::Created,
+            None,
+            CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+        prepared.attach(&mut txn, true).await?;
+        txn.commit().await?;
+        prepared.cancel(&env.pool).await?;
+        let (mut config, version) = db::machine::get_network_config(&env.pool, &machine_id)
+            .await?
+            .take();
+        assert_eq!(config.loopback_ip, Some(IpAddr::V4(expected)));
+
+        config.loopback_ip = None;
+        let mut txn = env.pool.begin().await?;
+        assert_eq!(
+            db::machine::try_update_network_config(&mut txn, &machine_id, version, &config).await?,
+            db::ConditionalWrite::Applied(()),
+        );
+        txn.commit().await?;
+        let repair = PreparedDpuLoopback::prepare(
+            &env.pool,
+            &env.api.resource_pool_registry,
+            &env.common_pools,
+            machine_id,
+            Some(replacement),
+            &env.api.cancel_token,
+        )
+        .await?;
+        let mut txn = env.pool.begin().await?;
+        repair.check_identity(&mut txn).await?;
+        repair.attach(&mut txn, false).await?;
+        txn.commit().await?;
+        repair.cancel(&env.pool).await?;
+        assert_eq!(
+            db::machine::get_network_config(&env.pool, &machine_id)
+                .await?
+                .value
+                .loopback_ip,
+            Some(IpAddr::V4(expected)),
+        );
+    }
+    assert!(matches!(
+        db::resource_pool::find_value_in_pool(pool, &env.pool, &IpAddr::V4(replacement))
+            .await?
+            .expect("unused replacement address")
+            .state,
+        model::resource_pool::ResourcePoolEntryState::Free,
+    ));
     Ok(())
 }
 
@@ -357,7 +481,7 @@ async fn remote_dpu_discovery_and_site_repair_reuse_a_lost_reply(
         let cleared_version = db::machine::get_network_config(&fixture.env.pool, &inputs.machine_id).await?.version;
         let reused = PreparedDpuLoopback::prepare(
             &fixture.env.pool, &fixture.env.api.resource_pool_registry,
-            &fixture.env.common_pools, inputs.machine_id, &fixture.cancel,
+            &fixture.env.common_pools, inputs.machine_id, None, &fixture.cancel,
         ).await?;
         assert!(!reused.has_provider_reservation(), "attached ownership needs no provider admission deadline");
         let found = fixture.env.api.find_ip_address(Request::new(forge::FindIpAddressRequest {
@@ -524,7 +648,7 @@ async fn remote_dpu_discovery_rechecks_host_link_after_preparation(
         let mut txn = fixture.env.pool.begin().await?;
         let host_interface = db::machine_interface::find_one(&mut *txn, host_interface_id).await?;
         db::machine::get_or_create(
-            &mut txn, Some(&fixture.env.common_pools), &host_id, &host_interface,
+            &mut txn, Some(&fixture.env.common_pools), &host_id, &host_interface, None,
         ).await?;
         txn.commit().await?;
         assert!(db::machine_interface::mac_address_has_machine(&fixture.env.pool, host_mac).await?);
@@ -622,7 +746,7 @@ async fn remote_dpu_stale_force_delete_preserves_same_id_replacement(
             fixture.remote(LOOPBACK_IP).reconcile(original.allocation_id, &fixture.cancel).await?;
             let prepared = PreparedDpuLoopback::prepare(
                 &fixture.env.pool, &fixture.env.api.resource_pool_registry,
-                &fixture.env.common_pools, inputs.machine_id, &fixture.cancel,
+                &fixture.env.common_pools, inputs.machine_id, None, &fixture.cancel,
             ).await?;
             assert!(prepared.has_provider_reservation(), "a new provider assignment retains bounded admission");
             prepared.check_identity(&mut replacement_txn).await?;
@@ -787,6 +911,7 @@ async fn remote_dpu_lookup_cancellation_stops_pool_wait(database: PgPool) -> eyr
                 &fixture.env.api.resource_pool_registry,
                 &fixture.env.common_pools,
                 inputs.machine_id,
+                None,
                 &cancel,
             ));
             assert!(

@@ -206,6 +206,7 @@ async fn machine_flags_select_only_supplied_fields() {
                 dpu_mode: Some(forge::DpuMode::Unspecified as i32),
                 bmc_ip_allocation: Some(forge::BmcIpAllocationType::Auto as i32),
                 metadata: Some(forge::Metadata::default()),
+                replace_dpu_loopbacks: true,
                 ..Default::default()
             },
         },
@@ -243,6 +244,7 @@ async fn machine_flags_select_only_supplied_fields() {
             paths: &["host_nics"],
             expected: forge::ExpectedMachine {
                 id: Some(rpc_id()),
+                replace_dpu_loopbacks: true,
                 host_nics: vec![
                     forge::ExpectedInterface {
                         mac_address: Some("00:11:22:33:44:66".to_string()),
@@ -299,10 +301,12 @@ async fn machine_files_preserve_their_metadata_and_interface_selection_contract(
         scenario: &'static str,
         filename: &'static str,
         paths: &'static [&'static str],
+        replace_dpu_loopbacks: bool,
     }
     for case in [
         Case {
             scenario: "omitted metadata clears its leaves while omitted interfaces preserve",
+            replace_dpu_loopbacks: false,
             filename: concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/testdata/expected-machine-patch-omitted.json"
@@ -318,6 +322,7 @@ async fn machine_files_preserve_their_metadata_and_interface_selection_contract(
         },
         Case {
             scenario: "null metadata clears its leaves and an empty interface list replaces",
+            replace_dpu_loopbacks: true,
             filename: concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/testdata/expected-machine-patch-empty.json"
@@ -350,6 +355,7 @@ async fn machine_files_preserve_their_metadata_and_interface_selection_contract(
                 bmc_password: "file-password".to_string(),
                 chassis_serial_number: "FILE-001".to_string(),
                 metadata: Some(forge::Metadata::default()),
+                replace_dpu_loopbacks: case.replace_dpu_loopbacks,
                 ..Default::default()
             }),
             "{}",
@@ -561,6 +567,7 @@ async fn unsupported_machine_patches_use_the_original_read_merge_update() {
                 }),
                 host_nics: Vec::new(),
                 replace_host_nics: true,
+                replace_dpu_loopbacks: true,
                 #[allow(deprecated)]
                 dpf_enabled: true,
                 is_dpf_enabled: None,

@@ -2759,3 +2759,564 @@ async fn test_machine_creator_rejects_unexpected_host(
 
     Ok(())
 }
+
+#[sqlx_test]
+async fn test_zero_dpu_loopback_reservations_follow_host_policy(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::expected_machine::DpuLoopbackReservation;
+    use model::resource_pool::ResourcePoolEntryState;
+
+    let env = Env::new(pool).await;
+    let common_pools = env.api().common_pools();
+    let loopback_pool = common_pools.ethernet.pool_loopback_ip.as_ref();
+
+    for (scenario, policy, site_policy, suffix, should_create) in [
+        ("managed", HostDpuPolicy::Manage, None, 30, false),
+        ("host Nic", HostDpuPolicy::Nic, None, 31, true),
+        ("host Ignore", HostDpuPolicy::Ignore, None, 32, true),
+        (
+            "inherited Nic",
+            HostDpuPolicy::Manage,
+            Some(HostDpuPolicy::Nic),
+            33,
+            true,
+        ),
+        (
+            "inherited Ignore",
+            HostDpuPolicy::Manage,
+            Some(HostDpuPolicy::Ignore),
+            34,
+            true,
+        ),
+    ] {
+        let creator = machine_creator(
+            &env,
+            SiteExplorerConfig {
+                dpu_policy: site_policy,
+                ..machine_creator_config()
+            },
+        );
+        let reservation = DpuLoopbackReservation {
+            dpu_oob_net0_mac_address: DpuConfig::default().oob_mac_address,
+            loopback_ipv4: Some(std::net::Ipv4Addr::new(192, 0, 2, suffix)),
+            loopback_ipv6: None,
+        };
+        let host = ManagedHostConfig {
+            dpus: vec![],
+            ..ManagedHostConfig::default()
+        }
+        .with_expected_machine_data(ExpectedMachineData {
+            dpu_policy: policy,
+            serial_number: format!("LOOPBACK-POLICY-{suffix}"),
+            interfaces: reservation.interfaces().collect(),
+            ..Default::default()
+        });
+        let expected = expected_machine(&host);
+        let address = IpAddr::V4(reservation.loopback_ipv4.unwrap());
+        let mut txn = env.pool.begin().await?;
+        db::resource_pool::populate(loopback_pool, &mut txn, vec![address], false).await?;
+        db::expected_machine::create(&mut txn, expected.clone()).await?;
+        txn.commit().await?;
+        let mut fixture = explored_host_fixture(&env, &host).await;
+
+        let result = creator
+            .create_managed_host(
+                &fixture.host,
+                &mut fixture.host_report,
+                Some(&expected),
+                &env.pool,
+            )
+            .await;
+        if should_create {
+            assert!(result?, "{scenario} should allow zero-DPU ingestion");
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("DPU loopback declarations exist but discovery reported no DPUs"),
+                "{scenario} must reject unmatched reservations"
+            );
+        }
+
+        let mut txn = env.pool.begin().await?;
+        let host_id = db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(
+            &mut txn,
+            host.bmc_mac_address,
+        )
+        .await?;
+        assert_eq!(host_id.is_some(), should_create, "{scenario}");
+        if let Some(host_id) = host_id {
+            assert!(
+                db::machine::find_one(
+                    &mut *txn,
+                    &host_id,
+                    MachineSearchConfig {
+                        include_predicted_host: true,
+                        ..Default::default()
+                    },
+                )
+                .await?
+                .is_some(),
+                "{scenario} must persist the host"
+            );
+        }
+        assert_eq!(
+            db::expected_dpu_loopback_reservation::find_for_machine(
+                &mut *txn,
+                host.bmc_mac_address,
+            )
+            .await?,
+            vec![reservation],
+            "{scenario} must preserve reservation intent"
+        );
+        assert!(matches!(
+            db::resource_pool::find_value_in_pool(loopback_pool, &mut *txn, &address)
+                .await?
+                .unwrap()
+                .state,
+            ResourcePoolEntryState::Free
+        ));
+        txn.commit().await?;
+    }
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use model::expected_machine::{DpuLoopbackReservation, ExpectedMachine};
+    use model::hardware_info::HardwareInfo;
+    use model::machine::machine_id::from_hardware_info;
+
+    let env = Env::new(pool).await;
+    let creator = machine_creator(&env, machine_creator_config());
+
+    let dpu_a = DpuConfig::with_serial("SER-DPU-A".to_string());
+    let dpu_b = DpuConfig::with_serial("SER-DPU-B".to_string());
+    let mock_host = ManagedHostConfig::default().with_dpus(vec![dpu_b.clone(), dpu_a.clone()]);
+    let mut fixture = explored_host_fixture(&env, &mock_host).await;
+
+    // Reservable (non-auto-assign) addresses, one IPv4 + one IPv6 per DPU.
+    let a_v4 = Ipv4Addr::new(172, 30, 0, 10);
+    let a_v6: Ipv6Addr = "2001:db8:1::a".parse()?;
+    let b_v4 = Ipv4Addr::new(172, 30, 0, 11);
+    let b_v6: Ipv6Addr = "2001:db8:1::b".parse()?;
+    let common_pools = env.api().common_pools();
+    let mut txn = env.pool.begin().await?;
+    db::resource_pool::populate(
+        common_pools.ethernet.pool_loopback_ip.as_ref(),
+        &mut txn,
+        vec![IpAddr::V4(a_v4), IpAddr::V4(b_v4)],
+        false,
+    )
+    .await?;
+    db::resource_pool::populate(
+        common_pools.ethernet.pool_loopback_ip_v6.as_ref(),
+        &mut txn,
+        vec![a_v6, b_v6],
+        false,
+    )
+    .await?;
+
+    // Persist the host expected machine with a reservation per DPU OS/admin MAC. Site
+    // Explorer resolves them from the database, not the passed-in snapshot.
+    db::expected_machine::create(
+        &mut txn,
+        ExpectedMachine {
+            id: None,
+            bmc_mac_address: mock_host.bmc_mac_address,
+            data: ExpectedMachineData {
+                interfaces: [
+                    DpuLoopbackReservation {
+                        dpu_oob_net0_mac_address: dpu_a.oob_mac_address,
+                        loopback_ipv4: Some(a_v4),
+                        loopback_ipv6: Some(a_v6),
+                    },
+                    DpuLoopbackReservation {
+                        dpu_oob_net0_mac_address: dpu_b.oob_mac_address,
+                        loopback_ipv4: Some(b_v4),
+                        loopback_ipv6: Some(b_v6),
+                    },
+                ]
+                .iter()
+                .flat_map(DpuLoopbackReservation::interfaces)
+                .collect(),
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+    txn.commit().await?;
+
+    let saved_dpus = fixture.host.dpus.clone();
+    for (ambiguous, diagnostic) in [(false, "0 matching DPUs"), (true, "2 matching DPUs")] {
+        fixture.host.dpus = saved_dpus.clone();
+        for dpu in &mut fixture.host.dpus {
+            let report = Arc::make_mut(&mut dpu.report);
+            for system in &mut report.systems {
+                if ambiguous {
+                    system
+                        .ethernet_interfaces
+                        .push(model::site_explorer::EthernetInterface {
+                            id: Some("oob_duplicate".to_string()),
+                            mac_address: Some(dpu_a.oob_mac_address),
+                            ..Default::default()
+                        });
+                } else {
+                    system.ethernet_interfaces.clear();
+                }
+            }
+        }
+        let error = creator
+            .create_managed_host(
+                &fixture.host,
+                &mut fixture.host_report,
+                Some(&expected_machine(&mock_host)),
+                &env.pool,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(diagnostic));
+        assert!(
+            db::machine::find_one(
+                &env.pool,
+                &from_hardware_info(&HardwareInfo::from(&dpu_a))?,
+                MachineSearchConfig {
+                    include_dpus: true,
+                    ..Default::default()
+                }
+            )
+            .await?
+            .is_none()
+        );
+    }
+    fixture.host.dpus = saved_dpus;
+
+    assert!(
+        creator
+            .create_managed_host(
+                &fixture.host,
+                &mut fixture.host_report,
+                Some(&expected_machine(&mock_host)),
+                &env.pool,
+            )
+            .await?
+    );
+
+    // Each DPU machine holds the pair selected by its OS/admin MAC.
+    let search = MachineSearchConfig {
+        include_dpus: true,
+        ..Default::default()
+    };
+    for (dpu, expected_v4, expected_v6) in [(&dpu_a, a_v4, a_v6), (&dpu_b, b_v4, b_v6)] {
+        let dpu_id = from_hardware_info(&HardwareInfo::from(dpu))?;
+        let machine = db::machine::find_one(&env.pool, &dpu_id, search.clone())
+            .await?
+            .unwrap_or_else(|| panic!("DPU {} must exist", dpu.serial));
+        assert_eq!(
+            machine.network_config.loopback_ip,
+            Some(IpAddr::V4(expected_v4)),
+            "DPU {} must receive its reserved IPv4 loopback",
+            dpu.serial,
+        );
+        assert_eq!(
+            machine.network_config.loopback_ip_v6,
+            Some(expected_v6),
+            "DPU {} must receive its reserved IPv6 loopback",
+            dpu.serial,
+        );
+    }
+
+    // Future ingestion declarations must neither readdress existing DPUs nor
+    // prevent the ordinary repair of their interface ownership.
+    let future_address = Ipv4Addr::new(172, 30, 0, 12);
+    let mut txn = env.pool.begin().await?;
+    db::resource_pool::populate(
+        common_pools.ethernet.pool_loopback_ip.as_ref(),
+        &mut txn,
+        vec![IpAddr::V4(future_address)],
+        false,
+    )
+    .await?;
+    let mut expected =
+        db::expected_machine::find_by_bmc_mac_address(&mut *txn, mock_host.bmc_mac_address)
+            .await?
+            .expect("reservation host exists");
+    expected
+        .data
+        .interfaces
+        .retain(|interface| !interface.role.is_dpu_loopback());
+    expected.data.interfaces.extend(
+        DpuLoopbackReservation {
+            dpu_oob_net0_mac_address: DpuConfig::default().oob_mac_address,
+            loopback_ipv4: Some(future_address),
+            loopback_ipv6: None,
+        }
+        .interfaces(),
+    );
+    expected.data.replace_dpu_loopbacks = true;
+    db::expected_machine::update(&mut txn, &expected).await?;
+    let prediction =
+        db::predicted_machine_interface::find_by_mac_address(&mut txn, dpu_a.oob_mac_address)
+            .await?
+            .expect("creation records DPU OS interface ownership");
+    db::predicted_machine_interface::delete(&prediction, &mut txn).await?;
+    txn.commit().await?;
+
+    assert!(
+        !creator
+            .create_managed_host(
+                &fixture.host,
+                &mut fixture.host_report,
+                Some(&expected_machine(&mock_host)),
+                &env.pool,
+            )
+            .await?,
+        "creation skips an ingested host without consuming future declarations"
+    );
+    let mut endpoints = vec![(fixture.host.host_bmc_ip, fixture.host_report.clone())];
+    endpoints.extend(
+        fixture
+            .host
+            .dpus
+            .iter()
+            .map(|dpu| (dpu.bmc_ip, (*dpu.report).clone())),
+    );
+    let mut txn = env.pool.begin().await?;
+    assert!(
+        db::predicted_machine_interface::find_by_mac_address(&mut txn, dpu_a.oob_mac_address)
+            .await?
+            .is_none(),
+        "creation leaves existing DPU ownership to the independent reconciler"
+    );
+    for (address, report) in &endpoints {
+        db::explored_endpoints::insert(*address, report, false, &mut txn).await?;
+        db::explored_endpoints::set_preingestion_complete(*address, &mut txn).await?;
+    }
+    db::explored_endpoints::request_exploration_for_addresses(
+        &[fixture.host.host_bmc_ip],
+        &mut txn,
+    )
+    .await?;
+    txn.commit().await?;
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            create_machines: Arc::new(false.into()),
+            ..Default::default()
+        },
+    );
+    explorer.insert_endpoints(endpoints);
+    explorer.run_single_iteration().await?;
+
+    let mut txn = env.pool.begin().await?;
+    assert_eq!(
+        db::predicted_machine_interface::find_by_mac_address(&mut txn, dpu_a.oob_mac_address)
+            .await?
+            .expect("repair restores DPU OS interface ownership")
+            .machine_id,
+        from_hardware_info(&HardwareInfo::from(&dpu_a))?,
+    );
+    for (dpu, expected_v4, expected_v6) in [(&dpu_a, a_v4, a_v6), (&dpu_b, b_v4, b_v6)] {
+        let machine = db::machine::find_one(
+            &mut *txn,
+            &from_hardware_info(&HardwareInfo::from(dpu))?,
+            search.clone(),
+        )
+        .await?
+        .expect("repair preserves both DPUs");
+        assert_eq!(
+            machine.network_config.loopback_ip,
+            Some(IpAddr::V4(expected_v4))
+        );
+        assert_eq!(machine.network_config.loopback_ip_v6, Some(expected_v6));
+    }
+    assert!(matches!(
+        db::resource_pool::find_value_in_pool(
+            common_pools.ethernet.pool_loopback_ip.as_ref(),
+            &mut *txn,
+            &IpAddr::V4(future_address),
+        )
+        .await?
+        .expect("future reserved address remains in the pool")
+        .state,
+        model::resource_pool::ResourcePoolEntryState::Free
+    ));
+    txn.commit().await?;
+
+    Ok(())
+}
+
+/// Preparation must recheck the complete host reservation set, including a
+/// sibling declaration added or removed while allocation preparation waits.
+#[sqlx_test]
+async fn test_machine_creator_retries_changed_loopback_reservation_set(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::net::Ipv4Addr;
+
+    use model::expected_machine::DpuLoopbackReservation;
+    use model::resource_pool::{OwnerType, ResourcePoolEntryState};
+
+    let env = Env::new(pool).await;
+    let creator = machine_creator(&env, machine_creator_config());
+    let common_pools = env.api().common_pools();
+    let loopback_pool = common_pools.ethernet.pool_loopback_ip.as_ref();
+
+    for (change, initially_reserved, address_suffix) in
+        [("added", false, 40), ("removed", true, 42)]
+    {
+        let host = ManagedHostConfig::default().with_dpu_count(2);
+        let mut fixture = explored_host_fixture(&env, &host).await;
+        let a_address = Ipv4Addr::new(172, 30, 0, address_suffix);
+        let b_address = Ipv4Addr::new(172, 30, 0, address_suffix + 1);
+        let reservations = [
+            DpuLoopbackReservation {
+                dpu_oob_net0_mac_address: host.dpus[0].oob_mac_address,
+                loopback_ipv4: Some(a_address),
+                loopback_ipv6: None,
+            },
+            DpuLoopbackReservation {
+                dpu_oob_net0_mac_address: host.dpus[1].oob_mac_address,
+                loopback_ipv4: Some(b_address),
+                loopback_ipv6: None,
+            },
+        ];
+        let initial = &reservations[..if initially_reserved { 2 } else { 1 }];
+        let replacement = &reservations[..if initially_reserved { 1 } else { 2 }];
+        let mut expected = expected_machine(&host);
+        expected.data.interfaces = initial
+            .iter()
+            .flat_map(DpuLoopbackReservation::interfaces)
+            .collect();
+        let mut txn = env.pool.begin().await?;
+        db::resource_pool::populate(
+            loopback_pool,
+            &mut txn,
+            vec![IpAddr::V4(a_address), IpAddr::V4(b_address)],
+            false,
+        )
+        .await?;
+        db::expected_machine::create(&mut txn, expected.clone()).await?;
+        txn.commit().await?;
+
+        let error = {
+            // Both ownership lookups happen after capturing host intent. The
+            // database gate proves the edit commits during preparation.
+            let mut gate = env.pool.begin().await?;
+            sqlx::query("LOCK TABLE resource_pool IN ACCESS EXCLUSIVE MODE")
+                .execute(&mut *gate)
+                .await?;
+            let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *gate)
+                .await?;
+            let creation = creator.create_managed_host(
+                &fixture.host,
+                &mut fixture.host_report,
+                Some(&expected),
+                &env.pool,
+            );
+            tokio::pin!(creation);
+            tokio::select! {
+                result = &mut creation => panic!("creation bypassed the preparation gate: {result:?}"),
+                _ = wait_for_blocked_queries(&env.pool, gate_pid, "SELECT value FROM resource_pool", 2) => {},
+            }
+            let mut writer = env.pool.begin().await?;
+            let mut updated = expected.clone();
+            updated.data.interfaces = replacement
+                .iter()
+                .flat_map(DpuLoopbackReservation::interfaces)
+                .collect();
+            updated.data.replace_dpu_loopbacks = true;
+            db::expected_machine::update(&mut writer, &updated).await?;
+            writer.commit().await?;
+            gate.commit().await?;
+
+            tokio::time::timeout(Duration::from_secs(10), creation)
+                .await?
+                .expect_err("changed host intent must defer creation")
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("DPU loopback declarations changed during preparation; retry creation"),
+            "{change}: {error}"
+        );
+        for machine_id in fixture.dpu_machine_ids.values() {
+            assert!(
+                db::machine::find_one(&env.pool, machine_id, MachineSearchConfig::default())
+                    .await?
+                    .is_none(),
+                "{change}: failed creation must not persist either DPU"
+            );
+        }
+        assert!(host_links(&env.pool, &host).await?.is_empty());
+        for address in [a_address, b_address] {
+            assert!(matches!(
+                db::resource_pool::find_value_in_pool(
+                    loopback_pool,
+                    &env.pool,
+                    &IpAddr::V4(address),
+                )
+                .await?
+                .expect("reserved address remains in the pool")
+                .state,
+                ResourcePoolEntryState::Free
+            ));
+        }
+
+        assert!(
+            creator
+                .create_managed_host(
+                    &fixture.host,
+                    &mut fixture.host_report,
+                    Some(&expected),
+                    &env.pool,
+                )
+                .await?,
+            "{change}: retry must consume the current reservation set"
+        );
+        for (index, address, reserved) in
+            [(0, a_address, true), (1, b_address, !initially_reserved)]
+        {
+            let machine_id = fixture.dpu_machine_ids[&index];
+            let machine =
+                db::machine::find_one(&env.pool, &machine_id, MachineSearchConfig::default())
+                    .await?
+                    .expect("retry creates both DPUs");
+            let allocated = machine
+                .network_config
+                .loopback_ip
+                .expect("each DPU receives a loopback");
+            let expected_state = if reserved {
+                assert_eq!(allocated, IpAddr::V4(address), "{change}");
+                ResourcePoolEntryState::Allocated {
+                    owner: machine_id.to_string(),
+                    owner_type: OwnerType::Machine.to_string(),
+                }
+            } else {
+                assert_ne!(allocated, IpAddr::V4(address), "{change}");
+                ResourcePoolEntryState::Free
+            };
+            assert_eq!(
+                db::resource_pool::find_value_in_pool(
+                    loopback_pool,
+                    &env.pool,
+                    &IpAddr::V4(address),
+                )
+                .await?
+                .expect("reserved address remains in the pool")
+                .state,
+                expected_state,
+                "{change}: retry must allocate only current intent"
+            );
+        }
+    }
+    Ok(())
+}
