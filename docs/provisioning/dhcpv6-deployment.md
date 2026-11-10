@@ -146,8 +146,12 @@ Retained-file recovery requires operator-provided storage and a single writer.
 A custom `serve-retry-continue` policy permits in-process retries, but still
 cannot bypass a refused retirement. Delayed RENEW or REBIND with the previous DUID or IAID is dropped with
 `stale_lease_identity` and does not extend or replace the new owner's lease.
-The receive-side drop sends no reply; refusal in the native existing-lease path
-can return an IA-scoped failure. Inspect the `reason` label on
+The identity check also applies to expired, released, and reclaimed rows.
+A new boot stage must use SOLICIT/REQUEST or Rapid Commit to acquire ownership.
+The receive-side drop sends no reply; a client that only retries RENEW/REBIND
+recovers when it restarts discovery, according to its fallback policy and
+remaining valid lifetime (the chart default is 7200 seconds). Refusal in the
+native existing-lease path can return an IA-scoped failure. Inspect the `reason` label on
 `carbide_dhcp_v6_requests_dropped_total` when diagnosing retries across boot stages.
 
 The IPv6 memfile writer closes and truncates a failed append to its previous

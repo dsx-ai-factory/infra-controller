@@ -6,7 +6,8 @@ tags: ["unreleased", "deployment", "provisioning"]
 
 ### DHCPv6 firmware-to-OS lease handoff
 
-DHCPv6 can transfer Core's selected address between firmware and OS clients with
+[DHCPv6 firmware-to-OS handoff](https://github.com/dsx-ai-factory/infra-controller/pull/7934)
+can transfer Core's selected address between firmware and OS clients with
 different DUIDs or IAIDs on the same NIC. The stored MAC and subnet must match.
 REQUEST or jointly enabled Rapid Commit persists the new owner; ordinary
 SOLICIT preserves the previous owner. Stale renewals cannot restore the previous

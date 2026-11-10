@@ -1874,6 +1874,10 @@ int lease6_expire(CalloutHandle &handle) {
         reclaimed->fqdn_fwd_ = false;
         reclaimed->fqdn_rev_ = false;
         reclaimed->state_ = Lease::STATE_EXPIRED_RECLAIMED;
+        if (reclaimed->getContext()) {
+          reclaimed->extended_info_action_ = Lease6::ACTION_DELETE;
+          reclaimed->setContext(isc::data::ElementPtr());
+        }
         leases.updateLease6(reclaimed);
       }
     }
