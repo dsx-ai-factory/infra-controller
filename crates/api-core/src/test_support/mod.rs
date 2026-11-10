@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use carbide_secrets::credentials::CredentialManager;
 use db::work_lock_manager::WorkLockManagerHandle;
+pub use ib_fabric::ib_fabric_test_manager;
 use model::resource_pool::common::CommonPools;
 pub use rpc;
 use tokio::task::JoinSet;
