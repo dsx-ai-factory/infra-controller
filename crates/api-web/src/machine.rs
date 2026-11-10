@@ -1255,6 +1255,7 @@ pub(super) async fn detail(
     {
         Ok(results) => {
             let mut runs = Vec::new();
+            // reverse to show most recent runs first
             for vr in results.runs.into_iter().rev() {
                 let active_id = vr.validation_id.filter(|_| vr.end_time.is_none());
                 let mut run = ValidationRun::from(vr);

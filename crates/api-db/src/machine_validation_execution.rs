@@ -66,17 +66,27 @@ impl crate::machine::MachineRowLockItem for StaleMachineValidationAttempt {
     }
 }
 
+/// One execution attempt joined with its validation run item's test ID.
 #[derive(sqlx::FromRow)]
 pub struct ValidationAttempt {
+    /// Test ID from the owning run item.
     pub test_id: String,
+    /// Unique ID of this execution attempt.
     pub attempt_id: MachineValidationAttemptId,
+    /// Attempt number within the owning run item.
     pub attempt_number: i32,
+    /// Whether the attempt state is `Success`, `Failed`, or `Skipped`.
     pub terminal: bool,
+    /// Attempt start time, if recorded.
     pub started_at: Option<DateTime<Utc>>,
+    /// Attempt end time, if recorded.
     pub ended_at: Option<DateTime<Utc>>,
+    /// Persisted exit code, if recorded.
     pub exit_code: Option<i32>,
 }
 
+/// Returns every attempt for every item in the run, in unspecified order.
+/// Includes earlier attempts, not only each item's latest attempt.
 pub async fn find_attempts_by_run_id(
     txn: impl DbReader<'_>,
     run_id: &MachineValidationId,
