@@ -765,8 +765,8 @@ Change the Tenant's default VPC routing profile at one Site.
 
 The Tenant must have no active FNN VPCs when changing the profile.
 
-Org must have an Infrastructure Provider entity, and the specified Tenant must have a Tenant Account linking it to the Infrastructure Provider.
-Infrastructure Provider must be the owner of the site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+Org must have an Infrastructure Provider entity, and the specified Tenant must have a Ready Tenant Account linking it to the Infrastructure Provider.
+Infrastructure Provider must be the owner of the Site, and the Site must be Registered with native networking enabled. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Provider Org

@@ -376,6 +376,7 @@ func (h GetVPCRoutingProfileDefinitionHandler) Handle(c echo.Context) error {
 
 	profile, profileErr := getNamedRoutingProfile(ctx, stc, profileName)
 	if profileErr != nil {
+		logAPIError(logger, profileErr, "failed to retrieve routing profile definition")
 		return cutil.NewAPIErrorResponse(c, profileErr.Code, profileErr.Message, nil)
 	}
 
@@ -483,6 +484,7 @@ func (h GetAllVPCRoutingProfileDefinitionHandler) Handle(c echo.Context) error {
 	var names corev1.RoutingProfileNameList
 	apiErr = common.ExecuteCoreGRPC(ctx, stc, corev1.Forge_FindRoutingProfileNames_FullMethodName, req.ToProto(), &names, "")
 	if apiErr != nil {
+		logAPIError(logger, apiErr, "failed to query routing profile names")
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 	}
 
@@ -496,6 +498,7 @@ func (h GetAllVPCRoutingProfileDefinitionHandler) Handle(c echo.Context) error {
 	selected := names.Names[start:min(start+*page.Limit, total)]
 	profiles, apiErr := findNamedRoutingProfiles(ctx, stc, selected)
 	if apiErr != nil {
+		logAPIError(logger, apiErr, "failed to retrieve routing profile definitions")
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
 	}
 
@@ -575,6 +578,7 @@ func (h vpcRoutingProfileHandler) authorizeProfileDefinition(ctx context.Context
 			TenantOrganizationId: tenant.Org,
 		}, &current, "")
 		if apiErr != nil {
+			logAPIError(logger, apiErr, "failed to retrieve Tenant for routing profile authorization")
 			return nil, 0, apiErr
 		}
 
@@ -591,6 +595,7 @@ func (h vpcRoutingProfileHandler) authorizeProfileDefinition(ctx context.Context
 			if profileErr.Code == http.StatusNotFound {
 				profileErr = cutil.NewAPIError(http.StatusInternalServerError, "Tenant default routing profile was not found on Site", nil)
 			}
+			logAPIError(logger, profileErr, "failed to retrieve Tenant default routing profile")
 			return nil, 0, profileErr
 		}
 

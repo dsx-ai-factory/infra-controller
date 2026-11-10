@@ -828,8 +828,8 @@ paths:
 
         The Tenant must have no active FNN VPCs when changing the profile.
 
-        Org must have an Infrastructure Provider entity, and the specified Tenant must have a Tenant Account linking it to the Infrastructure Provider.
-        Infrastructure Provider must be the owner of the site. User must have authorization role with `PROVIDER_ADMIN` suffix.
+        Org must have an Infrastructure Provider entity, and the specified Tenant must have a Ready Tenant Account linking it to the Infrastructure Provider.
+        Infrastructure Provider must be the owner of the Site, and the Site must be Registered with native networking enabled. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
         required: true
         content:
@@ -23018,6 +23018,39 @@ components:
       title: VpcRoutingProfileDefinition
       type: object
       description: Full named base definition from the selected Site, before VPC overrides or effective defaults.
+      examples:
+        - name: tenant-edge
+          config:
+            routeTargetImports:
+              - asn: 64512
+                vni: 10100
+                vniSelf: false
+            routeTargetsOnExports:
+              - asn: 64513
+                vni: 10200
+                vniSelf: false
+            leakDefaultRouteFromUnderlay: false
+            leakTenantHostRoutesToUnderlay: true
+            tenantLeakCommunitiesAccepted: false
+            acceptedLeaksFromUnderlay:
+              - 192.0.2.0/24
+            allowedAnycastPrefixes:
+              - 198.51.100.0/24
+            internal: false
+            accessTier: 2
+            tenantPrefixOverlapEligible: false
+        - name: tenant-default
+          config:
+            routeTargetImports: null
+            routeTargetsOnExports: []
+            leakDefaultRouteFromUnderlay: false
+            leakTenantHostRoutesToUnderlay: null
+            tenantLeakCommunitiesAccepted: null
+            acceptedLeaksFromUnderlay: []
+            allowedAnycastPrefixes: null
+            internal: null
+            accessTier: 1
+            tenantPrefixOverlapEligible: false
       required:
         - name
         - config
@@ -23030,6 +23063,21 @@ components:
     VpcRoutingProfileDefinitionConfig:
       title: VpcRoutingProfileDefinitionConfig
       description: Configured properties of a named profile. Null means unset; explicit false, zero, and empty arrays are preserved.
+      examples:
+        - internal: null
+          accessTier: null
+          tenantPrefixOverlapEligible: false
+        - internal: false
+          accessTier: 0
+          tenantPrefixOverlapEligible: false
+          routeTargetImports:
+            - asn: 64512
+              vni: 0
+              vniSelf: false
+          routeTargetsOnExports: []
+          leakDefaultRouteFromUnderlay: false
+          acceptedLeaksFromUnderlay: []
+          allowedAnycastPrefixes: []
       x-go-has-nullable-required-properties: true
       x-go-nullable-required-properties:
         - internal
