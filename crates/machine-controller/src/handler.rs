@@ -14176,12 +14176,7 @@ async fn do_ipmi_restart(
     let bmc_address = resolve_ipmi_address(ip, ctx).await?;
     ctx.services
         .ipmi_tool
-        .restart(
-            machine.id.as_machine_id(),
-            bmc_address,
-            false,
-            &credential_key,
-        )
+        .restart(bmc_address, false, &credential_key)
         .await
         .map_err(|e| {
             StateHandlerError::GenericError(eyre!("IPMI restart failed for {}: {}", machine.id, e))

@@ -38,7 +38,6 @@ use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialReader, Credentials,
 };
-use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use mac_address::MacAddress;
 use nv_redfish::Bmc;
 use nv_redfish::bmc_http::BmcCredentials;
@@ -219,15 +218,8 @@ impl Target {
             ))),
             None,
         );
-        // The machine id only labels ipmitool errors; the validator has no machine record.
-        let machine_id = MachineId::new(
-            MachineIdSource::ProductBoardChassisSerial,
-            [0; 32],
-            MachineType::Host,
-        );
         Arc::new(EndpointIpmiOps::new(
             tool,
-            machine_id,
             SocketAddr::new(self.address.ip(), carbide_ipmi::DEFAULT_IPMI_PORT),
             credential_key(),
         ))
