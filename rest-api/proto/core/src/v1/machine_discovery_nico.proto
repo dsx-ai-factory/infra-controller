@@ -220,11 +220,11 @@ message Gpu {
   string total_memory = 6;
   string frequency = 7;
   string pci_bus_id = 8;
-  GpuPlatformInfo platform_info = 9;
   // PCI device id (upper 16 bits of nvidia-smi `pci.device_id`), e.g. "0x2330".
   // Declared before platform_info on purpose: scout deserializes nvidia-smi CSV
   // output positionally, so field order must match the --query-gpu order.
   string pci_device_id = 10;
+  GpuPlatformInfo platform_info = 9;
 }
 
 // A single physical memory device (DIMM). Deprecated in favor of

@@ -36,6 +36,8 @@ type MachineInfiniBandInterface struct {
 	Description NullableString `json:"description,omitempty"`
 	// Slot number of the Machine's InfiniBandInterface
 	Slot NullableString `json:"slot,omitempty"`
+	// PCI device ID of the Machine's InfiniBandInterface
+	DeviceId NullableString `json:"deviceId,omitempty"`
 }
 
 // NewMachineInfiniBandInterface instantiates a new MachineInfiniBandInterface object
@@ -345,6 +347,49 @@ func (o *MachineInfiniBandInterface) UnsetSlot() {
 	o.Slot.Unset()
 }
 
+// GetDeviceId returns the DeviceId field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *MachineInfiniBandInterface) GetDeviceId() string {
+	if o == nil || IsNil(o.DeviceId.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.DeviceId.Get()
+}
+
+// GetDeviceIdOk returns a tuple with the DeviceId field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *MachineInfiniBandInterface) GetDeviceIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DeviceId.Get(), o.DeviceId.IsSet()
+}
+
+// HasDeviceId returns a boolean if a field has been set.
+func (o *MachineInfiniBandInterface) HasDeviceId() bool {
+	if o != nil && o.DeviceId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDeviceId gets a reference to the given NullableString and assigns it to the DeviceId field.
+func (o *MachineInfiniBandInterface) SetDeviceId(v string) {
+	o.DeviceId.Set(&v)
+}
+
+// SetDeviceIdNil sets the value for DeviceId to be an explicit nil
+func (o *MachineInfiniBandInterface) SetDeviceIdNil() {
+	o.DeviceId.Set(nil)
+}
+
+// UnsetDeviceId ensures that no value is present for DeviceId, not even an explicit nil
+func (o *MachineInfiniBandInterface) UnsetDeviceId() {
+	o.DeviceId.Unset()
+}
+
 func (o MachineInfiniBandInterface) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -375,6 +420,9 @@ func (o MachineInfiniBandInterface) ToMap() (map[string]interface{}, error) {
 	}
 	if o.Slot.IsSet() {
 		toSerialize["slot"] = o.Slot.Get()
+	}
+	if o.DeviceId.IsSet() {
+		toSerialize["deviceId"] = o.DeviceId.Get()
 	}
 	return toSerialize, nil
 }
