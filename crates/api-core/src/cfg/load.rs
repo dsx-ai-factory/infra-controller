@@ -582,6 +582,7 @@ mod tests {
     use tracing_subscriber::prelude::*;
 
     use super::*;
+    use crate::cfg::file::BmcBackend;
     use crate::logging::stream::{LogStream, LogStreamLayer};
 
     #[derive(Clone, Copy)]
@@ -821,6 +822,33 @@ selections = { power = "standard" }"#
                         => FailsWith("invalid bmc_driver_rules configuration: unknown power driver no-such-driver".to_string()),
                     "[[bmc_driver_rules]]\nid = \"lenovo-xcc3\"\nselections = { power = \"standard\" }"
                         => FailsWith("invalid bmc_driver_rules configuration: rule id lenovo-xcc3 is used more than once".to_string()),
+                }
+            );
+            Ok(())
+        })
+    }
+
+    /// Existing configurations keep libredfish, and only the two clients parse.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn bmc_backend_defaults_to_libredfish() {
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |settings| {
+                    jail.create_file(
+                        "config.toml",
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    ).unwrap();
+                    parse_carbide_config(Path::new("config.toml"), None)
+                        .map(|config| config.bmc_backend)
+                        .map_err(|error| format!("{error:#}"))
+                };
+                "BMC backend" {
+                    "" => Yields(BmcBackend::Libredfish),
+                    "bmc_backend = \"drivers\"" => Yields(BmcBackend::Drivers),
+                    "bmc_backend = \"redfish\"" => FailsWith(
+                        "failed to load configuration files: unknown variant: found `redfish`, expected ``libredfish` or `drivers`` for key \"default.bmc_backend\" in config.toml TOML file".to_string(),
+                    ),
                 }
             );
             Ok(())

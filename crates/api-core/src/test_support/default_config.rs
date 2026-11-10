@@ -39,7 +39,7 @@ use model::resource_pool::{self};
 use regex::Regex;
 
 use crate::cfg::file::{
-    AuthConfig, CarbideConfig, DpaInterfaceStateControllerConfig, DpfInterfaceIdentity,
+    AuthConfig, BmcBackend, CarbideConfig, DpaInterfaceStateControllerConfig, DpfInterfaceIdentity,
     DpuConfig as InitialDpuConfig, DsxExchangeEventBusConfig, EwEthersConfig,
     ExtensionServiceStateControllerConfig, FnnConfig, HostInterceptBridging,
     HostRepresentorBridgingConfig, IbPartitionStateControllerConfig, KmsConfig, ListenMode,
@@ -297,6 +297,7 @@ pub fn get() -> CarbideConfig {
         },
         host_models: host_firmware_example(),
         bmc_driver_rules: Vec::new(),
+        bmc_backend: BmcBackend::default(),
         firmware_global: FirmwareGlobal::test_default(),
         machine_updater: MachineUpdater {
             instance_autoreboot_period: None,
