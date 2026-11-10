@@ -3055,6 +3055,12 @@ pub(crate) fn check_spx_interface_functional_planes(
         .first()
         .and_then(|dpu_snapshot| dpu_snapshot.status.spx_multiplane_status.as_ref())
     else {
+        tracing::error!(
+            dpa_interface_id = %spx_interface.id,
+            pci_name = %spx_interface.pci_name,
+            dpu_snapshot_count = mh_snapshot.dpu_snapshots.len(),
+            "No DPU reported SPX plane maintenance for this host, so no plane can be proven out of maintenance"
+        );
         return false;
     };
     // Registration carries the declared name of the card's first plane, and an
@@ -3064,6 +3070,12 @@ pub(crate) fn check_spx_interface_functional_planes(
         .as_deref()
         .and_then(MachineSpxMultiplane::interface_coordinates)
     else {
+        tracing::error!(
+            dpa_interface_id = %spx_interface.id,
+            pci_name = %spx_interface.pci_name,
+            interface_name = ?spx_interface.interface_name,
+            "SPX interface carries no canonical declared plane name, so its planes cannot be found"
+        );
         return false;
     };
 
