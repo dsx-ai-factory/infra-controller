@@ -26,9 +26,9 @@ use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     KeyUsagePurpose,
 };
+use rpc::carbide_api_client::CarbideApiClient;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use rpc::forge::find_bmc_ips_request::LookupBy;
-use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use tokio::task::JoinSet;
 use tokio_rustls::rustls::pki_types::CertificateDer;
 use tokio_util::sync::CancellationToken;
@@ -59,7 +59,7 @@ pub(super) enum CredentialSummary {
 }
 
 pub(super) fn test_state_with_config(config: &str) -> BmcProxyState {
-    let client_config = ForgeClientConfig::default();
+    let client_config = CarbideClientConfig::default();
     let api_config = ApiConfig::new("https://example.com", &client_config);
     let config = Arc::new(crate::Config::parse(config).expect("test config should parse"));
 
@@ -78,7 +78,7 @@ pub(super) fn test_state_with_config(config: &str) -> BmcProxyState {
                 .expect("test HTTP clients build"),
         ),
         config,
-        api_client: ForgeApiClient::new(&api_config),
+        api_client: CarbideApiClient::new(&api_config),
         credential_cache: idle_bounded_cache(CREDENTIAL_CACHE_IDLE_TTL),
         ip_cache: bounded_cache(IP_CACHE_TTL),
         admission,
