@@ -214,6 +214,49 @@ async fn setup_test_db(copts: &PgConnectOptions, args: &TestArgs) {
         .expect("failed to close setup connection");
 }
 
+/// Refuse to run when the server cannot serve this process's pool, and warn
+/// when it has no room for the other test binaries.
+///
+/// Exhausting the server does not look like a connection problem. The pool
+/// hands the failure to whichever query asked for a connection next, so the
+/// suite reports a scatter of assertion failures across subsystems the run
+/// never touched, each of which passes on its own. Checking the limit once, up
+/// front, turns that cascade into a single message naming the real cause.
+///
+/// The server limit is a property of the server, not of this process: `cargo
+/// test` runs test binaries concurrently and each one opens its own pool, so a
+/// server that fits one budget exactly still fails the suite.
+async fn check_server_connection_limit(pool: &PgPool, max_connections: u32) {
+    let server_max: u32 = sqlx::query_scalar::<_, String>("SHOW max_connections")
+        .fetch_one(pool)
+        .await
+        .expect("cannot read max_connections from the server at DATABASE_URL")
+        .parse()
+        .expect("the server reported a non-integer max_connections");
+
+    assert!(
+        server_max >= max_connections,
+        "the PostgreSQL at DATABASE_URL allows {server_max} connections, but this \
+         test process alone may open {max_connections}. Start the server with a \
+         higher limit (rest-api/Makefile's postgres-up passes -c max_connections), \
+         or lower this process's budget with NICO_TEST_MAX_PG_CONNECTIONS."
+    );
+
+    // Several test binaries run at once, each with its own pool of this size.
+    // A server that only just fits one of them exhausts partway through the
+    // suite, which is the failure this check exists to stop being mysterious.
+    if server_max < max_connections.saturating_mul(4) {
+        eprintln!(
+            "warning: the PostgreSQL at DATABASE_URL allows {server_max} connections \
+             and this test process may open {max_connections}. Test binaries run \
+             concurrently, each with its own pool, so the suite may still exhaust the \
+             server and fail with unrelated-looking assertion errors. Raise the server \
+             limit (rest-api/Makefile's postgres-up) or lower \
+             NICO_TEST_MAX_PG_CONNECTIONS."
+        );
+    }
+}
+
 async fn init_pool() -> PgPool {
     let max_connections = match std::env::var("NICO_TEST_MAX_PG_CONNECTIONS") {
         Ok(value) => {
@@ -235,6 +278,8 @@ async fn init_pool() -> PgPool {
         .max_connections(max_connections)
         .after_release(|_conn, _| Box::pin(async move { Ok(false) }))
         .connect_lazy_with(opts);
+
+    check_server_connection_limit(&root_pool, max_connections).await;
 
     if let Some(template_db) = PREPARED_TEMPLATE_DB.as_deref() {
         validate_template_name(&root_pool, template_db)

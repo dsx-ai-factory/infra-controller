@@ -76,6 +76,18 @@ make ensure-postgres       # Start if absent and wait until ready
 make migrate               # Apply migrations to the test database
 ```
 
+`postgres-up` starts the server with `max_connections=1000`
+(`POSTGRES_MAX_CONNECTIONS`). The Rust test harness opens one pool per test
+process, and test binaries run concurrently, so the PostgreSQL default of 100
+is not enough for the full suite. Against a server that small the run fails
+with a scatter of unrelated-looking assertion errors rather than a connection
+error, and each of those tests passes on its own.
+
+Against a server you do not control, lower the per-process budget instead with
+`NICO_TEST_MAX_PG_CONNECTIONS` (an integer from 5 through 900, default 50). The
+harness reads the server's limit at startup and refuses to run, naming both
+knobs, when it cannot serve the configured budget.
+
 Use testify `assert`/`require`. Organize tests by the production function or
 method: one top-level `Test<Function>` or `Test<Receiver>_<Method>`, with scenarios
 in a table executed as named `t.Run` subtests. Do not create scenario-specific
