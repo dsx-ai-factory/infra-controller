@@ -883,8 +883,9 @@ async fn factory_reset_bmc(
     .is_some()
     {
         let mut txn = ctx.services.db_pool.begin().await?;
-        // Completed BMCs never reach this handler. A remaining suppression
-        // therefore marks an attempt whose success was not recorded.
+        // If there is a suppression present for a BMC not marked complete, that means
+        // we couldn't verify the factory reset request went through. Delete the
+        // suppression so we can retry.
         db::bmc_suppression::delete(
             &mut txn,
             mac,
@@ -892,6 +893,7 @@ async fn factory_reset_bmc(
             BmcSuppressionSource::Decommissioning,
         )
         .await?;
+        // Trigger a DHCP server restart to clear its cache and restore DHCP for this BMC.
         db::machine_interface::record_deletion(&mut txn).await?;
         return Ok(StateHandlerOutcome::wait_and_requeue(format!(
             "restoring DHCP after an unresolved factory reset for BMC {}",
@@ -899,6 +901,7 @@ async fn factory_reset_bmc(
         ))
         .with_txn(txn));
     }
+    // Create client first to ensure BMC is reachable before suppressing DHCP.
     let client = ctx
         .services
         .create_redfish_client_from_machine(machine)
@@ -914,11 +917,10 @@ async fn factory_reset_bmc(
         },
     )
     .await?;
+    // Trigger a DHCP server restart to clear its cache so it honors the new suppression.
     db::machine_interface::record_deletion(&mut txn).await?;
     txn.commit().await?;
 
-    // Suppression is the durable attempt marker. Use the verified client in
-    // this tick, without holding a transaction while Redfish responds.
     client
         .bmc_reset_to_defaults()
         .await
