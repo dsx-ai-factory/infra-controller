@@ -403,9 +403,9 @@ mod tests {
     use hyper_util::rt::{TokioExecutor, TokioIo};
     use prost::Message;
     use rpc::admin_cli::OutputFormat;
+    use rpc::carbide_api_client::CarbideApiClient;
+    use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
     use rpc::forge::{BuildInfo, Sku, SkuIdList, SkuList};
-    use rpc::forge_api_client::ForgeApiClient;
-    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
     use tokio::net::TcpListener;
 
     use crate::async_write::CapturedOutput;
@@ -470,13 +470,13 @@ mod tests {
             .expect("mock sku listener binds");
         let address = listener.local_addr().expect("mock listener has an address");
         let request_timeout = Duration::from_secs(5);
-        let client_config = ForgeClientConfig {
+        let client_config = CarbideClientConfig {
             request_timeout: Some(request_timeout),
             ..Default::default()
         };
         let mut captured = CapturedOutput::new();
         let ctx = RuntimeContext {
-            api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+            api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
                 &format!("http://{address}"),
                 &client_config,
             ))),
