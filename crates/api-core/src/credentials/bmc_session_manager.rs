@@ -66,10 +66,11 @@
 //! any subsequent mint for the same BMC short-circuits with
 //! [`BmcSessionError::AvoidLockout`] rather than attempting another login
 //! (which could exhaust the BMC root account's retry budget). The breaker
-//! is cleared by:
+//! is cleared or moved to a single half-open probe by:
 //!   * a successful mint (online recovery),
 //!   * a stored per-BMC credential that no longer matches the one that tripped
-//!     the breaker, whichever component wrote it (checked on the next mint),
+//!     the breaker, whichever component wrote it, allowing one probe on the
+//!     next mint,
 //!   * [`BmcSessionManager::flush_mac`] (credentials deleted), or
 //!   * [`BmcSessionManager::note_credentials_updated`] (credentials set or
 //!     rotated).
@@ -333,8 +334,12 @@ struct LockoutState {
     /// A hash of the stored credential that produced the unauthorized responses, never the
     /// credential itself; used to notice that any writer has since replaced the stored credential.
     rejected_credential_fingerprint: Option<u64>,
+    /// True while the breaker allows a single probe with a credential that changed after
+    /// the trip. The next unauthorized response re-trips without waiting for the threshold;
+    /// a successful mint clears the state.
+    half_open_probe: bool,
     /// `Some(when)` once the breaker has tripped; subsequent rotate calls
-    /// short-circuit until the state is cleared.
+    /// short-circuit until the state is cleared or moves to a half-open probe.
     tripped_at: Option<Instant>,
 }
 
@@ -524,9 +529,15 @@ impl BmcSessionManager {
                     return Err(lockout_err);
                 }
 
-                self.clear_lockout(bmc_mac).await;
+                let creds_fingerprint = credential_fingerprint(&creds);
+                if let Some(state) = self.lockouts.lock().await.get_mut(&bmc_mac) {
+                    state.tripped_at = None;
+                    state.half_open_probe = true;
+                    state.rejected_credential_fingerprint = Some(creds_fingerprint);
+                    carbide_instrument::emit(BmcSessionLockoutBreakerCleared::new(bmc_mac));
+                }
                 tracing::info!(
-                    %bmc_mac,
+                    bmc_mac_address = %bmc_mac,
                     "Stored BMC credential changed since the lockout breaker tripped; attempting one login"
                 );
                 creds
@@ -859,12 +870,17 @@ impl BmcSessionManager {
             consecutive_unauthorized: 0,
             last_status: status,
             rejected_credential_fingerprint: None,
+            half_open_probe: false,
             tripped_at: None,
         });
+        let half_open_probe = entry.half_open_probe;
         entry.consecutive_unauthorized = entry.consecutive_unauthorized.saturating_add(1);
         entry.last_status = status;
         entry.rejected_credential_fingerprint = Some(rejected_credential_fingerprint);
-        if entry.consecutive_unauthorized >= self.lockout_threshold && entry.tripped_at.is_none() {
+        if (half_open_probe || entry.consecutive_unauthorized >= self.lockout_threshold)
+            && entry.tripped_at.is_none()
+        {
+            entry.half_open_probe = false;
             entry.tripped_at = Some(Instant::now());
             carbide_instrument::emit(BmcSessionLockoutBreakerTripped::new(
                 bmc_mac,
@@ -905,6 +921,7 @@ impl BmcSessionManager {
                 consecutive_unauthorized: consecutive_unauthorized.max(1),
                 last_status,
                 rejected_credential_fingerprint,
+                half_open_probe: false,
                 tripped_at: Some(Instant::now()),
             },
         );
@@ -2262,114 +2279,155 @@ mod tests {
         }
     }
 
-    /// A credential replacement clears a tripped breaker without an API Core notification,
-    /// because Site Explorer, rotation, and operators can all repair the shared credential store.
+    /// Credential-store mutations preserve a tripped breaker unless a changed credential earns
+    /// one half-open probe, whose first unauthorized response must immediately re-trip it.
     #[tokio::test]
-    async fn breaker_clears_when_stored_credential_changes_without_notification() {
+    async fn tripped_breaker_handles_stored_credential_mutations() {
+        #[derive(Clone, Copy)]
+        enum CredentialMutation {
+            Changed,
+            Unchanged,
+            Missing,
+            ChangedThenUnauthorized,
+        }
+
+        struct BreakerMutationCase {
+            scenario: &'static str,
+            mutation: CredentialMutation,
+        }
+
         let _metrics = MetricsCapture::start();
-        // Seed credential A and trip the breaker on its rejected fingerprint.
-        let (manager, credential_manager, _store) =
-            manager_with_mutable_credentials(TEST_LOCKOUT_THRESHOLD);
-        let bmc_mac = mac(0xF3);
-        let key = bmc_root_key(bmc_mac);
-        let credential_a = test_credentials("credential-a");
-        credential_manager
-            .set_credentials(&key, &credential_a)
-            .await
-            .expect("seed credential A");
-        trip_breaker_with_credentials(&manager, bmc_mac, &credential_a).await;
+        for (case_index, case) in [
+            // A changed credential earns one probe, proven by reaching the Redfish transport.
+            BreakerMutationCase {
+                scenario: "changed_credential_attempts_login",
+                mutation: CredentialMutation::Changed,
+            },
+            // Rewriting the rejected credential leaves the breaker tripped, because retrying an
+            // unchanged password would only consume the BMC account's lockout budget.
+            BreakerMutationCase {
+                scenario: "unchanged_credential_remains_locked_out",
+                mutation: CredentialMutation::Unchanged,
+            },
+            // Removing the rejected credential leaves the breaker tripped and hides credential
+            // absence, because a tripped BMC must not resume login attempts until a replacement
+            // is available.
+            BreakerMutationCase {
+                scenario: "missing_credential_remains_locked_out",
+                mutation: CredentialMutation::Missing,
+            },
+            // A changed credential that receives one probe 401 re-trips before the following mint.
+            BreakerMutationCase {
+                scenario: "changed_credential_probe_unauthorized_retrips",
+                mutation: CredentialMutation::ChangedThenUnauthorized,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Seed credential A and trip the breaker on its rejected fingerprint.
+            let (manager, credential_manager, _store) =
+                manager_with_mutable_credentials(TEST_LOCKOUT_THRESHOLD);
+            let bmc_mac = mac(0xF3 + case_index as u8);
+            let key = bmc_root_key(bmc_mac);
+            let credential_a = test_credentials("credential-a");
+            let credential_b = test_credentials("credential-b");
+            credential_manager
+                .set_credentials(&key, &credential_a)
+                .await
+                .expect("seed credential A");
+            trip_breaker_with_credentials(&manager, bmc_mac, &credential_a).await;
 
-        // Replace the stored credential directly, without notifying the session manager.
-        let credential_b = test_credentials("credential-b");
-        credential_manager
-            .set_credentials(&key, &credential_b)
-            .await
-            .expect("replace credential A with credential B");
-        let bmc_addr = "127.0.0.1:1".parse().unwrap();
-        let err = manager
-            .mint_session("svc-changed", bmc_mac, bmc_addr)
-            .await
-            .expect_err("the unreachable test address cannot mint a session");
+            // Apply the case's credential-store mutation without notifying the session manager.
+            match case.mutation {
+                CredentialMutation::Changed | CredentialMutation::ChangedThenUnauthorized => {
+                    // Replace the stored credential directly, without notifying the session manager.
+                    credential_manager
+                        .set_credentials(&key, &credential_b)
+                        .await
+                        .expect("replace credential A with credential B");
+                }
+                CredentialMutation::Unchanged => {
+                    // Rewrite the same credential directly, without notifying the session manager.
+                    credential_manager
+                        .set_credentials(&key, &credential_a)
+                        .await
+                        .expect("rewrite credential A");
+                }
+                CredentialMutation::Missing => {
+                    // Delete the credential directly, without flush_mac or any breaker notification.
+                    credential_manager
+                        .delete_credentials(&key)
+                        .await
+                        .expect("delete credential A");
+                }
+            }
 
-        // A Redfish transport error proves the changed credential reached the login path.
-        assert!(
-            matches!(err, BmcSessionError::Redfish { .. }),
-            "a changed credential must attempt a login instead of returning AvoidLockout: {err:?}"
-        );
-        assert!(
-            manager.check_not_locked_out(bmc_mac).await.is_none(),
-            "the stale breaker state must be cleared before the login attempt"
-        );
-    }
+            let bmc_addr = "127.0.0.1:1".parse().unwrap();
+            let first_error = manager
+                .mint_session(case.scenario, bmc_mac, bmc_addr)
+                .await
+                .expect_err("the test case must not mint a session");
 
-    /// Rewriting the rejected credential leaves the breaker tripped, because retrying an
-    /// unchanged password would only consume the BMC account's lockout budget.
-    #[tokio::test]
-    async fn breaker_stays_tripped_when_stored_credential_is_unchanged() {
-        let _metrics = MetricsCapture::start();
-        // Seed credential A and trip the breaker on its rejected fingerprint.
-        let (manager, credential_manager, _store) =
-            manager_with_mutable_credentials(TEST_LOCKOUT_THRESHOLD);
-        let bmc_mac = mac(0xF4);
-        let key = bmc_root_key(bmc_mac);
-        let credential_a = test_credentials("credential-a");
-        credential_manager
-            .set_credentials(&key, &credential_a)
-            .await
-            .expect("seed credential A");
-        trip_breaker_with_credentials(&manager, bmc_mac, &credential_a).await;
+            match case.mutation {
+                CredentialMutation::Changed => {
+                    // A Redfish transport error proves the changed credential reached the login path.
+                    // The stale breaker state must move half-open before the login attempt.
+                    assert!(
+                        matches!(first_error, BmcSessionError::Redfish { .. }),
+                        "{}: changed credentials must reach the login path: {first_error:?}",
+                        case.scenario
+                    );
+                }
+                CredentialMutation::Unchanged => {
+                    // AvoidLockout, rather than the test address's Redfish error, proves no login was tried.
+                    assert!(
+                        matches!(first_error, BmcSessionError::AvoidLockout { .. }),
+                        "{}: unchanged credentials must not reach the login path: {first_error:?}",
+                        case.scenario
+                    );
+                }
+                CredentialMutation::Missing => {
+                    // The tripped state masks MissingRootCredentials and remains authoritative.
+                    assert!(
+                        matches!(first_error, BmcSessionError::AvoidLockout { .. }),
+                        "{}: missing credentials must remain masked by AvoidLockout: {first_error:?}",
+                        case.scenario
+                    );
+                }
+                CredentialMutation::ChangedThenUnauthorized => {
+                    assert!(
+                        matches!(first_error, BmcSessionError::Redfish { .. }),
+                        "{}: changed credentials must reach the login path: {first_error:?}",
+                        case.scenario
+                    );
 
-        // Rewrite the same credential directly, without notifying the session manager.
-        credential_manager
-            .set_credentials(&key, &credential_a)
-            .await
-            .expect("rewrite credential A");
-        let bmc_addr = "127.0.0.1:1".parse().unwrap();
-        let err = manager
-            .mint_session("svc-unchanged", bmc_mac, bmc_addr)
-            .await
-            .expect_err("the unchanged credential must remain blocked");
+                    // The unreachable test address cannot return 401, so simulate the probe response.
+                    let retrip = manager
+                        .record_unauthorized(
+                            bmc_mac,
+                            401,
+                            super::credential_fingerprint(&credential_b),
+                        )
+                        .await;
+                    assert!(
+                        matches!(retrip, Some(BmcSessionError::AvoidLockout { .. })),
+                        "{}: the probe's first 401 must immediately re-trip",
+                        case.scenario
+                    );
 
-        // AvoidLockout, rather than the test address's Redfish error, proves no login was tried.
-        assert!(
-            matches!(err, BmcSessionError::AvoidLockout { .. }),
-            "an unchanged credential must not reach the login path: {err:?}"
-        );
-    }
-
-    /// Removing the rejected credential leaves the breaker tripped and hides credential absence,
-    /// because a tripped BMC must not resume login attempts until a replacement is available.
-    #[tokio::test]
-    async fn breaker_stays_tripped_when_stored_credential_is_missing() {
-        let _metrics = MetricsCapture::start();
-        // Seed credential A and trip the breaker on its rejected fingerprint.
-        let (manager, credential_manager, _store) =
-            manager_with_mutable_credentials(TEST_LOCKOUT_THRESHOLD);
-        let bmc_mac = mac(0xF5);
-        let key = bmc_root_key(bmc_mac);
-        let credential_a = test_credentials("credential-a");
-        credential_manager
-            .set_credentials(&key, &credential_a)
-            .await
-            .expect("seed credential A");
-        trip_breaker_with_credentials(&manager, bmc_mac, &credential_a).await;
-
-        // Delete the credential directly, without flush_mac or any breaker notification.
-        credential_manager
-            .delete_credentials(&key)
-            .await
-            .expect("delete credential A");
-        let bmc_addr = "127.0.0.1:1".parse().unwrap();
-        let err = manager
-            .mint_session("svc-missing", bmc_mac, bmc_addr)
-            .await
-            .expect_err("a missing credential must remain blocked by the breaker");
-
-        // The tripped state masks MissingRootCredentials and remains authoritative.
-        assert!(
-            matches!(err, BmcSessionError::AvoidLockout { .. }),
-            "missing credentials behind a tripped breaker must still return AvoidLockout: {err:?}"
-        );
+                    let next_error = manager
+                        .mint_session(case.scenario, bmc_mac, bmc_addr)
+                        .await
+                        .expect_err("the mint after a rejected probe must remain blocked");
+                    assert!(
+                        matches!(next_error, BmcSessionError::AvoidLockout { .. }),
+                        "{}: the mint after the rejected probe must return AvoidLockout: {next_error:?}",
+                        case.scenario
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

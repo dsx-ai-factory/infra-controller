@@ -618,6 +618,8 @@ impl BmcEndpointExplorer {
     /// other credential NICo expects the BMC to accept, so it is tried once before the caller
     /// resumes its intermittent-unauthorized handling.
     /// This helper enforces that it runs only for the first response in each unauthorized sequence.
+    /// Credential lookup failures are returned because no login was attempted and the next cycle
+    /// must remain eligible to retry recovery from the start of the sequence.
     async fn try_sitewide_credentials_when_stored_credential_is_stale(
         &self,
         bmc_ip_address: SocketAddr,
@@ -626,16 +628,16 @@ impl BmcEndpointExplorer {
         vendor: RedfishVendor,
         expected: Option<&ExpectedEntity>,
         previous_unauthorized_count: u32,
-    ) -> Option<Credentials> {
+    ) -> Result<Option<Credentials>, EndpointExplorationError> {
         // The stored password does not change between cycles, so only the first unauthorized
         // response can learn anything; later cycles would only spend lockout budget.
         if previous_unauthorized_count != 0 {
-            return None;
+            return Ok(None);
         }
 
         // Retained credentials intentionally differ from the site-wide password.
         if expected.map(|e| e.bmc_credentials_data().retain_credentials) == Some(true) {
-            return None;
+            return Ok(None);
         }
 
         // Load the live site-wide password so an identical stored credential is not retried.
@@ -648,7 +650,9 @@ impl BmcEndpointExplorer {
                     error = %error,
                     "Failed to load current sitewide BMC credential version for stale credential recovery"
                 );
-                return None;
+                // A failed lookup made no login attempt, so propagating it lets the next cycle
+                // retry from zero without consuming the one recovery chance.
+                return Err(error);
             }
         };
         let sitewide_credentials = match self
@@ -665,7 +669,9 @@ impl BmcEndpointExplorer {
                     error = %error,
                     "Failed to load current sitewide BMC root credential for stale credential recovery"
                 );
-                return None;
+                // A failed lookup made no login attempt, so propagating it lets the next cycle
+                // retry from zero without consuming the one recovery chance.
+                return Err(error);
             }
         };
         let Credentials::UsernamePassword {
@@ -677,7 +683,7 @@ impl BmcEndpointExplorer {
             ..
         } = &sitewide_credentials;
         if stored_password == sitewide_password {
-            return None;
+            return Ok(None);
         }
 
         // Replace the rejected per-BMC entry only after the site-wide credential authenticates.
@@ -691,7 +697,7 @@ impl BmcEndpointExplorer {
                     %bmc_mac_address,
                     "Stale per-BMC credential was replaced with the sitewide BMC root credential"
                 );
-                Some(credentials)
+                Ok(Some(credentials))
             }
             Err(error) => {
                 tracing::warn!(
@@ -700,7 +706,52 @@ impl BmcEndpointExplorer {
                     error = %error,
                     "Sitewide BMC root credential did not recover the rejected per-BMC credential"
                 );
-                None
+                Ok(None)
+            }
+        }
+    }
+
+    /// Treats a 401 immediately after successful credential validation as intermittent because the
+    /// BMC may transiently reject a later report request even though the credential just worked.
+    fn classify_unauthorized_as_intermittent(
+        &self,
+        bmc_ip_address: SocketAddr,
+        bmc_mac_address: MacAddress,
+        previous_count: u32,
+        details: String,
+        response_body: Option<String>,
+        response_code: Option<u16>,
+    ) -> EndpointExplorationError {
+        const MAX_AUTH_RETRIES: u32 = 5;
+
+        let consecutive_count = previous_count + 1;
+
+        if consecutive_count > MAX_AUTH_RETRIES {
+            tracing::warn!(
+                %bmc_ip_address,
+                %bmc_mac_address,
+                reason = %details,
+                consecutive_unauthorized_count = consecutive_count,
+                "BMC unauthorized error persisted - escalating to Unauthorized"
+            );
+            EndpointExplorationError::Unauthorized {
+                details,
+                response_body,
+                response_code,
+            }
+        } else {
+            tracing::warn!(
+                %bmc_ip_address,
+                %bmc_mac_address,
+                reason = %details,
+                consecutive_unauthorized_count = consecutive_count,
+                "BMC unauthorized error - treating as intermittent"
+            );
+            EndpointExplorationError::IntermittentUnauthorized {
+                details,
+                response_body,
+                response_code,
+                consecutive_count,
             }
         }
     }
@@ -933,47 +984,42 @@ impl EndpointExplorer for BmcEndpointExplorer {
                                 expected,
                                 previous_count,
                             )
-                            .await;
+                            .await?;
                         if let Some(credentials) = recovered_credentials {
-                            self.generate_exploration_report(
-                                bmc_ip_address,
-                                BmcAccess::Direct(credentials),
-                                boot_interface,
-                            )
-                            .await?
-                        } else {
-                            const MAX_AUTH_RETRIES: u32 = 5;
-
-                            let consecutive_count = previous_count + 1;
-
-                            if consecutive_count > MAX_AUTH_RETRIES {
-                                tracing::warn!(
-                                    %bmc_ip_address,
-                                    %bmc_mac_address,
-                                    reason = %details,
-                                    consecutive_unauthorized_count = consecutive_count,
-                                    "BMC unauthorized error persisted - escalating to Unauthorized"
-                                );
-                                return Err(EndpointExplorationError::Unauthorized {
+                            match self
+                                .generate_exploration_report(
+                                    bmc_ip_address,
+                                    BmcAccess::Direct(credentials),
+                                    boot_interface,
+                                )
+                                .await
+                            {
+                                Ok(report) => report,
+                                Err(EndpointExplorationError::Unauthorized {
                                     details,
                                     response_body,
                                     response_code,
-                                });
+                                }) => {
+                                    return Err(self.classify_unauthorized_as_intermittent(
+                                        bmc_ip_address,
+                                        bmc_mac_address,
+                                        previous_count,
+                                        details,
+                                        response_body,
+                                        response_code,
+                                    ));
+                                }
+                                Err(error) => return Err(error),
                             }
-
-                            tracing::warn!(
-                                %bmc_ip_address,
-                                %bmc_mac_address,
-                                reason = %details,
-                                consecutive_unauthorized_count = consecutive_count,
-                                "BMC unauthorized error - treating as intermittent"
-                            );
-                            return Err(EndpointExplorationError::IntermittentUnauthorized {
+                        } else {
+                            return Err(self.classify_unauthorized_as_intermittent(
+                                bmc_ip_address,
+                                bmc_mac_address,
+                                previous_count,
                                 details,
                                 response_body,
                                 response_code,
-                                consecutive_count,
-                            });
+                            ));
                         }
                     }
                     Err(e) => return Err(e),
@@ -2082,11 +2128,19 @@ mod tests {
     /// retained credentials, because each extra login spends the BMC's lockout budget.
     #[tokio::test(start_paused = true)]
     async fn stale_credential_fallback_respects_unauthorized_sequence_and_retention() {
+        #[derive(Clone, Copy)]
+        enum ExpectedRecovery {
+            SitewideCredential,
+            None,
+            LookupError,
+        }
+
         struct StaleCredentialCase {
             scenario: &'static str,
             previous_unauthorized_count: u32,
             retain_credentials: bool,
-            expected_sitewide_recovery: bool,
+            sitewide_lookup_fails: bool,
+            expected_recovery: ExpectedRecovery,
         }
 
         let _metrics_window = MetricsCapture::start();
@@ -2096,21 +2150,32 @@ mod tests {
                 scenario: "first_unauthorized_tries_sitewide_once",
                 previous_unauthorized_count: 0,
                 retain_credentials: false,
-                expected_sitewide_recovery: true,
+                sitewide_lookup_fails: false,
+                expected_recovery: ExpectedRecovery::SitewideCredential,
             },
             // A later response cannot learn more from the unchanged password, so it attempts nothing.
             StaleCredentialCase {
                 scenario: "later_unauthorized_does_not_try_sitewide",
                 previous_unauthorized_count: 1,
                 retain_credentials: false,
-                expected_sitewide_recovery: false,
+                sitewide_lookup_fails: false,
+                expected_recovery: ExpectedRecovery::None,
             },
             // A retained credential is intentionally distinct, so even the first response cannot replace it.
             StaleCredentialCase {
                 scenario: "retained_credential_never_tries_sitewide",
                 previous_unauthorized_count: 0,
                 retain_credentials: true,
-                expected_sitewide_recovery: false,
+                sitewide_lookup_fails: false,
+                expected_recovery: ExpectedRecovery::None,
+            },
+            // A store outage must not consume the one recovery chance because no login was attempted.
+            StaleCredentialCase {
+                scenario: "sitewide_lookup_failure_preserves_recovery_chance",
+                previous_unauthorized_count: 0,
+                retain_credentials: false,
+                sitewide_lookup_fails: true,
+                expected_recovery: ExpectedRecovery::LookupError,
             },
         ] {
             // Start each case with hardware on site-wide and a rejected stale per-BMC entry.
@@ -2126,6 +2191,14 @@ mod tests {
                 .set_credentials(&fixture.per_bmc_credential_key, &stale_credentials)
                 .await
                 .expect("seed a stale per-BMC credential");
+
+            if case.sitewide_lookup_fails {
+                fixture
+                    .credential_manager
+                    .delete_credentials(&fixture.sitewide_credential_key)
+                    .await
+                    .expect("remove the site-wide credential");
+            }
 
             let expected = case.retain_credentials.then(|| {
                 ExpectedEntity::PowerShelf(ExpectedPowerShelf {
@@ -2156,20 +2229,32 @@ mod tests {
 
             // Check the branch-owned result, credential write, and exact simulated auth traffic.
             let sitewide_credentials = Credentials::new(fixture.username, SITEWIDE_PASSWORD);
-            let expected_recovered = if case.expected_sitewide_recovery {
-                Some(sitewide_credentials.clone())
-            } else {
-                None
-            };
-            assert_eq!(recovered, expected_recovered, "{}", case.scenario);
+            match case.expected_recovery {
+                ExpectedRecovery::SitewideCredential => assert_eq!(
+                    recovered.expect("site-wide lookup should succeed"),
+                    Some(sitewide_credentials.clone()),
+                    "{}",
+                    case.scenario
+                ),
+                ExpectedRecovery::None => assert_eq!(
+                    recovered.expect("site-wide lookup should succeed"),
+                    None,
+                    "{}",
+                    case.scenario
+                ),
+                ExpectedRecovery::LookupError => assert!(
+                    recovered.is_err(),
+                    "{}: a missing site-wide credential must propagate an error",
+                    case.scenario
+                ),
+            }
 
-            let expected_attempts = if case.expected_sitewide_recovery {
-                vec![RedfishSimAuthAttempt {
+            let expected_attempts = match case.expected_recovery {
+                ExpectedRecovery::SitewideCredential => vec![RedfishSimAuthAttempt {
                     credentials: sitewide_credentials.clone(),
                     authorized: true,
-                }]
-            } else {
-                Vec::new()
+                }],
+                ExpectedRecovery::None | ExpectedRecovery::LookupError => Vec::new(),
             };
             let auth_attempts = fixture.sim.auth_attempts();
             assert_eq!(
@@ -2179,10 +2264,9 @@ mod tests {
                 case.scenario
             );
 
-            let expected_stored_credentials = if case.expected_sitewide_recovery {
-                sitewide_credentials
-            } else {
-                stale_credentials
+            let expected_stored_credentials = match case.expected_recovery {
+                ExpectedRecovery::SitewideCredential => sitewide_credentials,
+                ExpectedRecovery::None | ExpectedRecovery::LookupError => stale_credentials,
             };
             assert_eq!(
                 fixture
@@ -2201,6 +2285,7 @@ mod tests {
     /// attempt, because a duplicate login cannot recover a transient rejection or genuine lockout.
     #[tokio::test(start_paused = true)]
     async fn rejected_current_sitewide_credential_preserves_original_unauthorized() {
+        let _metrics = MetricsCapture::start();
         // Prepare matching stored and site-wide credentials, then make the fake BMC reject them.
         let fixture = prepare_reingestion_fixture(DpuGeneration {
             product: "BlueField-3 DPU",
@@ -2236,7 +2321,8 @@ mod tests {
                 None,
                 0,
             )
-            .await;
+            .await
+            .expect("site-wide credential lookup should succeed");
         assert!(
             recovered.is_none(),
             "an identical site-wide password must not be retried"
