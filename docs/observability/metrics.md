@@ -155,10 +155,14 @@ with BMCs or switches.
 
 ### Firmware management
 
-Firmware update metrics track the upgrade queue and active operations.
-`carbide_firmware_queue_length` shows pending updates while
-`carbide_firmware_active_updates` shows concurrent operations. The pre-ingestion manager
-metrics (`carbide_preingestion_*`) track firmware image preparation.
+Host firmware metrics count machines rather than operations.
+`carbide_pending_host_firmware_update_count` is the number of hosts the drift
+query currently selects as needing firmware work, and
+`carbide_active_host_firmware_update_count` is the number of hosts whose
+top-level state is `HostReprovision`; assigned-host firmware substates are not
+included. See the [host firmware guide](../operations/firmware-updates/host-firmware.md)
+for the full metric table. The pre-ingestion manager metrics
+(`carbide_preingestion_*`) track firmware image preparation.
 
 ### API performance
 
