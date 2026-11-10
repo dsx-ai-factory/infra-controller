@@ -177,12 +177,25 @@ pub async fn find_upgrade_in_progress(
         .map_err(|e| DatabaseError::new("find_upgrade_in_progress", e))
 }
 
+/// `find_completed_updates` locks machines whose host request has cleared but
+/// whose `host-fw-update` health report still needs completion cleanup.
+///
+/// Callers must keep a transaction open through report removal and completion
+/// writes. `FOR NO KEY UPDATE` blocks [`trigger_host_reprovisioning_request`]
+/// while allowing foreign key checks that reference the machine.
+///
+/// At Read Committed isolation, selection waits for conflicting row locks and
+/// rechecks updated rows after waiting. Only candidates visible in the statement
+/// snapshot are considered. This statement locks candidates in machine ID order,
+/// as [`crate::machine::find_ids_by_instance_type_id`] does when `for_update` is
+/// true, so ID-ordered selections acquire shared rows consistently.
 pub async fn find_completed_updates(
     txn: &mut PgConnection,
 ) -> Result<Vec<HostMachineId>, DatabaseError> {
     let query = r#"SELECT id FROM machines
                     WHERE host_reprovisioning_requested IS NULL
-                            AND coalesce(health_reports, '{"merges": {}}'::jsonb)->'merges' ? 'host-fw-update' = TRUE"#;
+                            AND coalesce(health_reports, '{"merges": {}}'::jsonb)->'merges' ? 'host-fw-update' = TRUE
+                    ORDER BY id FOR NO KEY UPDATE"#;
     sqlx::query_as::<_, HostMachineId>(query)
         .fetch_all(txn)
         .await

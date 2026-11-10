@@ -78,6 +78,9 @@ use super::{DatabaseError, ObjectFilter, Transaction, queries};
 use crate::db_read::DbReader;
 use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseResult};
 
+mod creation_identity;
+pub use creation_identity::MachineCreationIdentity;
+
 #[derive(Serialize)]
 struct ReprovisionRequestRestart {
     pub update_firmware: bool,
@@ -348,6 +351,34 @@ pub async fn lock_by_id_for_update(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     Ok(())
+}
+
+/// `try_lock_group_for_update` tries a host and its DPUs in machine-row order.
+/// Some network writers already hold the host, so waiting here while holding
+/// a DPU could deadlock with their group version update.
+///
+/// Returns false if a member is missing or busy. Both outcomes retain any
+/// acquired locks; on false, roll back the whole transaction before retrying.
+/// Finish interface writes first and retain successful locks through commit.
+pub async fn try_lock_group_for_update(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+) -> Result<bool, DatabaseError> {
+    let query = "SELECT id FROM machine_group_member_ids($1)";
+    let machine_ids: Vec<MachineId> = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if machine_ids.is_empty() {
+        return Ok(false);
+    }
+    for member_id in MachineRowLockOrderIter::new(machine_ids) {
+        if !try_lock_by_id_for_update(txn, &member_id).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Locks a machine without waiting for another writer. Returns false when the
@@ -825,13 +856,23 @@ pub async fn find_machine_ids_by_mac_addresses(
 /// Finds the machine with this address in either loopback field.
 /// Both fields are serialized from typed IP addresses, so their stored text
 /// matches `IpAddr::to_string()`.
+/// Attached remote IPv4 ownership also identifies the machine while its
+/// configuration field needs repair. Pending provider reservations do not.
 pub async fn find_by_loopback_ip(
     txn: impl DbReader<'_>,
     loopback_ip: IpAddr,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     lazy_static! {
         static ref query: String = format!(
-            "{} WHERE m.network_config->>'loopback_ip' = $1 OR m.network_config->>'loopback_ip_v6' = $1",
+            "{} WHERE m.network_config->>'loopback_ip' = $1 OR m.network_config->>'loopback_ip_v6' = $1
+                OR m.id IN (
+                    SELECT owner_id FROM resource_pool_allocations
+                    WHERE pool_name = 'lo-ip' AND owner_type = 'machine'
+                      AND binding_id IS NOT NULL AND state = 'attached'
+                      AND result->>'status' = 'allocated'
+                      AND result->'result'->'value'->>'kind' = 'ip_address'
+                      AND result->'result'->'value'->>'value' = $1
+                )",
             JSON_MACHINE_SNAPSHOT_QUERY.deref()
         );
     }
@@ -1249,6 +1290,23 @@ impl DpuHostAssociations {
     }
 }
 
+/// `find_states_by_ids` reads each machine's own controller state without loading
+/// the full machine snapshot. Results contain one row per existing requested
+/// machine, sorted by ID.
+/// Missing IDs are omitted; a query or state-decoding error fails the whole read.
+pub async fn find_states_by_ids(
+    conn: impl DbReader<'_>,
+    machine_ids: &[MachineId],
+) -> DatabaseResult<Vec<(MachineId, ManagedHostState)>> {
+    let query = "SELECT id, controller_state FROM machines WHERE id = ANY($1) ORDER BY id";
+    let rows: Vec<(MachineId, sqlx::types::Json<ManagedHostState>)> = sqlx::query_as(query)
+        .bind(machine_ids)
+        .fetch_all(conn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(rows.into_iter().map(|(id, state)| (id, state.0)).collect())
+}
+
 /// Return the [`ManagedHostState`] for a machine given its id without returning the whole snapshot.
 pub async fn lookup_managed_host_state(
     conn: impl DbReader<'_>,
@@ -1397,8 +1455,9 @@ impl From<MachineObservationNotCurrent> for DatabaseError {
 
 /// Stores a network observation when its timestamp is at least as recent as the
 /// stored one, or no timestamp is stored. Compares both JSON timestamps at
-/// PostgreSQL's microsecond precision. Returns `NotApplied` for a missing
-/// machine or rejected timestamp.
+/// PostgreSQL's microsecond precision. The server-owned accepted LLDP
+/// fingerprint is preserved from the locked row. Returns `NotApplied` for a
+/// missing machine or rejected timestamp.
 pub async fn update_network_status_observation(
     txn: &mut PgConnection,
     machine_id: &DpuMachineId,
@@ -1406,11 +1465,21 @@ pub async fn update_network_status_observation(
 ) -> Result<ConditionalWrite<(), MachineObservationNotCurrent>, DatabaseError> {
     // Parse both timestamps from JSON so they round alike. SQLx truncates
     // separately bound timestamps to microseconds.
-    let query = "UPDATE machines SET network_status_observation = $1::json WHERE id = $2 AND
+    let query = "UPDATE machines SET network_status_observation =
+                    ($1::jsonb - 'accepted_lldp_snapshot_fingerprint')
+                    || CASE
+                        WHEN network_status_observation ? 'accepted_lldp_snapshot_fingerprint'
+                        THEN jsonb_build_object(
+                            'accepted_lldp_snapshot_fingerprint',
+                            network_status_observation->'accepted_lldp_snapshot_fingerprint'
+                        )
+                        ELSE '{}'::jsonb
+                    END
+                WHERE id = $2 AND
                 (
                     (network_status_observation->>'observed_at' IS NULL)
                     OR ((network_status_observation->>'observed_at')::timestamp
-                        <= ($1::json->>'observed_at')::timestamp)
+                        <= ($1::jsonb->>'observed_at')::timestamp)
                 ) RETURNING id";
     let updated: Option<(MachineId,)> = sqlx::query_as(query)
         .bind(sqlx::types::Json(&observation))
@@ -1426,6 +1495,66 @@ pub async fn update_network_status_observation(
     debug_failed_machine_status_update(txn, machine_id, "network_status_observation", observation)
         .await;
     Ok(ConditionalWrite::NotApplied(MachineObservationNotCurrent))
+}
+
+/// Stores the accepted fingerprint. Call in the same transaction as the
+/// corresponding neighbor replacement.
+pub async fn update_accepted_lldp_snapshot_fingerprint(
+    txn: &mut PgConnection,
+    machine_id: &DpuMachineId,
+    fingerprint: &[u8],
+) -> Result<(), DatabaseError> {
+    let query = r#"
+        UPDATE machines
+        SET network_status_observation = jsonb_set(
+            network_status_observation,
+            '{accepted_lldp_snapshot_fingerprint}',
+            $1::jsonb,
+            true
+        )
+        WHERE id = $2
+          AND network_status_observation IS NOT NULL
+    "#;
+    let result = sqlx::query(query)
+        .bind(sqlx::types::Json(fingerprint))
+        .bind(machine_id)
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+
+    if result.rows_affected() == 0 {
+        return Err(DatabaseError::NotFoundError {
+            kind: "machine network status observation",
+            id: machine_id.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Returns the accepted fingerprint while locking the machine row for the
+/// caller's transaction.
+pub async fn lock_accepted_lldp_snapshot_fingerprint(
+    txn: &mut PgConnection,
+    machine_id: &DpuMachineId,
+) -> Result<Option<Vec<u8>>, DatabaseError> {
+    let query = r#"
+        SELECT network_status_observation->'accepted_lldp_snapshot_fingerprint'
+        FROM machines
+        WHERE id = $1
+        FOR UPDATE
+    "#;
+    let fingerprint: Option<Option<sqlx::types::Json<Vec<u8>>>> = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+
+    fingerprint
+        .map(|value| value.map(|json| json.0))
+        .ok_or_else(|| DatabaseError::NotFoundError {
+            kind: "machine",
+            id: machine_id.to_string(),
+        })
 }
 
 /// `ExtensionServiceObservationNotCurrent` means the conditional observation
@@ -2016,7 +2145,7 @@ pub async fn try_update_network_config(
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
 ) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
-    try_update_network_config_inner(txn, machine_id, expected_version, new_state, false).await
+    try_update_network_config_inner(txn, machine_id, expected_version, new_state, false, None).await
 }
 
 async fn try_update_network_config_unless_force_deleting(
@@ -2025,7 +2154,30 @@ async fn try_update_network_config_unless_force_deleting(
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
 ) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
-    try_update_network_config_inner(txn, machine_id, expected_version, new_state, true).await
+    try_update_network_config_inner(txn, machine_id, expected_version, new_state, true, None).await
+}
+
+/// `try_update_network_config_for_created` writes network configuration only
+/// to the same machine row and version. ForceDeletion, replacement rows,
+/// missing rows, and changed versions return `NotApplied`.
+/// The caller attaches allocations separately in the same transaction and
+/// rolls back both changes if this write does not apply.
+pub async fn try_update_network_config_for_created(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+    created: DateTime<Utc>,
+    expected_version: ConfigVersion,
+    new_state: &ManagedHostNetworkConfig,
+) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
+    try_update_network_config_inner(
+        txn,
+        machine_id,
+        expected_version,
+        new_state,
+        true,
+        Some(created),
+    )
+    .await
 }
 
 async fn is_force_deleting_or_deleted(
@@ -2048,6 +2200,7 @@ async fn try_update_network_config_inner(
     expected_version: ConfigVersion,
     new_state: &ManagedHostNetworkConfig,
     reject_force_deletion: bool,
+    expected_created: Option<DateTime<Utc>>,
 ) -> Result<ConditionalWrite<(), MachineNetworkConfigNotCurrent>, DatabaseError> {
     let next_version = expected_version.increment();
 
@@ -2057,6 +2210,7 @@ async fn try_update_network_config_inner(
     let target_query = "UPDATE machines SET network_config_version=$1, network_config=$2::json
             WHERE id=$3 AND network_config_version=$4
               AND (NOT $5 OR controller_state != $6::jsonb)
+              AND ($7::timestamptz IS NULL OR created = $7)
             RETURNING id";
     let target_result: Result<MachineId, _> = sqlx::query_as(target_query)
         .bind(next_version)
@@ -2065,6 +2219,7 @@ async fn try_update_network_config_inner(
         .bind(expected_version)
         .bind(reject_force_deletion)
         .bind(sqlx::types::Json(&ManagedHostState::ForceDeletion))
+        .bind(expected_created)
         .fetch_one(&mut *txn)
         .await;
 
@@ -3521,69 +3676,6 @@ pub async fn find_dpu_infos(txn: &mut PgConnection) -> Result<Vec<DpuInfo>, Data
         .collect()
 }
 
-/// Allocate a value from the loopback IP resource pool.
-///
-/// Reuses the DPU's existing reservation before allocating a new value, so a
-/// surviving pool ownership record and a missing `network_config.loopback_ip`
-/// field cannot give one DPU two `lo-ip` values. A duplicate reservation for
-/// the same owner is reported as inconsistent state rather than picking one.
-///
-/// If the pool exists but is empty or has en error, return that.
-pub async fn allocate_loopback_ip(
-    common_pools: &CommonPools,
-    txn: &mut PgConnection,
-    owner_id: &str,
-) -> Result<IpAddr, DatabaseError> {
-    let pool = &common_pools.ethernet.pool_loopback_ip;
-
-    if let Some(value) = crate::resource_pool::find_owned_allocation(
-        pool,
-        txn,
-        resource_pool::OwnerType::Machine,
-        owner_id,
-    )
-    .await?
-    {
-        return Ok(value);
-    }
-
-    match crate::resource_pool::allocate(
-        pool,
-        txn,
-        resource_pool::OwnerType::Machine,
-        owner_id,
-        None,
-    )
-    .await
-    {
-        Ok(val) => Ok(val),
-        Err(
-            error @ crate::resource_pool::ResourcePoolDatabaseError::ResourcePool(
-                ResourcePoolError::Empty,
-            ),
-        ) => {
-            crate::resource_pool::emit_allocation_failure(
-                pool.value_type,
-                owner_id,
-                false,
-                "lo-ip",
-                &error,
-            );
-            Err(DatabaseError::ResourceExhausted("pool lo-ip".to_string()))
-        }
-        Err(err) => {
-            crate::resource_pool::emit_allocation_failure(
-                pool.value_type,
-                owner_id,
-                false,
-                "lo-ip",
-                &err,
-            );
-            Err(err.into())
-        }
-    }
-}
-
 /// Allocates one IPv6 underlay loopback when `lo-ip-v6` is configured.
 /// `None` preserves IPv4-only sites where the optional pool is absent;
 /// exhaustion remains an error so a configured site cannot silently leave a
@@ -4981,6 +5073,7 @@ mod test {
                     observed_at,
                 }),
                 fabric_interfaces: Vec::new(),
+                accepted_lldp_snapshot_fingerprint: None,
             }),
             dpu_agent_health_report: Some(HealthReport {
                 source: HealthReport::DPU_AGENT_SOURCE.to_string(),
@@ -6684,6 +6777,7 @@ mod test {
             agent_version_superseded_at: None,
             instance_network_observation: None,
             fabric_interfaces: Vec::new(),
+            accepted_lldp_snapshot_fingerprint: None,
         };
         assert!(matches!(
             super::update_network_status_observation(writer.as_mut(), &dpu_id, &observation)
@@ -7278,6 +7372,7 @@ mod test {
                 agent_version_superseded_at: None,
                 instance_network_observation: None,
                 fabric_interfaces: Vec::new(),
+                accepted_lldp_snapshot_fingerprint: None,
             };
             let mut txn = pool.begin().await?;
             let result =
@@ -7294,6 +7389,84 @@ mod test {
                     .await?;
             assert_eq!(Some(persisted.0), expected, "{}", case.scenario);
         }
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn network_observation_update_preserves_server_owned_lldp_fingerprint(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use carbide_uuid::machine::DpuMachineId;
+        use chrono::{DateTime, Duration, Utc};
+        use model::machine::network::MachineNetworkStatusObservation;
+
+        use super::{update_accepted_lldp_snapshot_fingerprint, update_network_status_observation};
+        use crate::ConditionalWrite::Applied;
+
+        let machine_id: DpuMachineId =
+            "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng".parse()?;
+        let observed_at = DateTime::<Utc>::from_timestamp(1_722_000_000, 0).unwrap();
+        let fingerprint_a = vec![0x0a; 32];
+        let fingerprint_b = vec![0x0b; 32];
+
+        let mut txn = pool.begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &machine_id,
+            ManagedHostState::Ready,
+            None,
+            2,
+        )
+        .await?;
+        let initial = MachineNetworkStatusObservation {
+            machine_id,
+            agent_version: Some("initial-agent".to_string()),
+            observed_at,
+            network_config_version: None,
+            client_certificate_expiry: None,
+            agent_version_superseded_at: None,
+            instance_network_observation: None,
+            fabric_interfaces: Vec::new(),
+            accepted_lldp_snapshot_fingerprint: None,
+        };
+        assert_eq!(
+            update_network_status_observation(txn.as_mut(), &machine_id, &initial).await?,
+            Applied(())
+        );
+        update_accepted_lldp_snapshot_fingerprint(txn.as_mut(), &machine_id, &fingerprint_a)
+            .await?;
+        txn.commit().await?;
+
+        let newer = MachineNetworkStatusObservation {
+            machine_id,
+            agent_version: Some("newer-agent".to_string()),
+            observed_at: observed_at + Duration::seconds(1),
+            network_config_version: None,
+            client_certificate_expiry: None,
+            agent_version_superseded_at: None,
+            instance_network_observation: None,
+            fabric_interfaces: Vec::new(),
+            accepted_lldp_snapshot_fingerprint: Some(fingerprint_b),
+        };
+        let mut txn = pool.begin().await?;
+        assert_eq!(
+            update_network_status_observation(txn.as_mut(), &machine_id, &newer).await?,
+            Applied(())
+        );
+        txn.commit().await?;
+
+        let persisted: sqlx::types::Json<MachineNetworkStatusObservation> =
+            sqlx::query_scalar("SELECT network_status_observation FROM machines WHERE id = $1")
+                .bind(machine_id)
+                .fetch_one(&pool)
+                .await?;
+        let persisted = persisted.0;
+        assert_eq!(persisted.agent_version.as_deref(), Some("newer-agent"));
+        assert_eq!(
+            persisted.accepted_lldp_snapshot_fingerprint,
+            Some(fingerprint_a)
+        );
         Ok(())
     }
 
@@ -8813,65 +8986,6 @@ mod test {
         let stats = crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?;
         assert_eq!(stats.used, 1);
         assert_eq!(stats.free, 0);
-        Ok(())
-    }
-
-    /// A surviving `lo-ip` pool reservation must satisfy the next allocation for
-    /// the same DPU. Otherwise a cleared `network_config.loopback_ip` field lets
-    /// one DPU consume a second IPv4 loopback, matching the IPv6 reuse contract.
-    #[crate::sqlx_test]
-    async fn ipv4_loopback_reservation_is_reused_and_leaves_one_owned_entry(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let common_pools = common_pools(&pool, None).await?;
-        let dpu_id =
-            MachineId::from_str("fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80")?;
-
-        let mut txn = pool.begin().await?;
-        let allocated =
-            super::allocate_loopback_ip(&common_pools, txn.as_mut(), &dpu_id.to_string()).await?;
-        let reused =
-            super::allocate_loopback_ip(&common_pools, txn.as_mut(), &dpu_id.to_string()).await?;
-        assert_eq!(allocated, reused);
-
-        let stats = crate::resource_pool::stats(txn.as_mut(), LOOPBACK_IP).await?;
-        assert_eq!(stats.used, 1);
-        txn.rollback().await?;
-        Ok(())
-    }
-
-    /// Two `lo-ip` rows owned by one DPU is corrupted state: allocation must
-    /// surface it as inconsistent rather than silently hand back one value and
-    /// leave the DPU still owning a second.
-    #[crate::sqlx_test]
-    async fn ipv4_loopback_rejects_multiple_reservations_for_one_dpu(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let common_pools = common_pools(&pool, None).await?;
-        let dpu_id =
-            MachineId::from_str("fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80")?;
-        let owner_id = dpu_id.to_string();
-
-        let mut txn = pool.begin().await?;
-        // Seed two reservations for the same owner so the ownership lookup sees
-        // more than one owned value.
-        for _ in 0..2 {
-            crate::resource_pool::allocate(
-                &common_pools.ethernet.pool_loopback_ip,
-                txn.as_mut(),
-                model::resource_pool::OwnerType::Machine,
-                &owner_id,
-                None,
-            )
-            .await?;
-        }
-
-        let error = super::allocate_loopback_ip(&common_pools, txn.as_mut(), &owner_id)
-            .await
-            .expect_err("two lo-ip values owned by one DPU must be rejected as inconsistent state");
-        assert!(matches!(error, crate::DatabaseError::FailedPrecondition(_)));
-
-        txn.rollback().await?;
         Ok(())
     }
 

@@ -148,6 +148,9 @@ pub(super) struct MachineStateMachine {
     bmc_recovery: BmcDhcpRecovery,
     bmc_injection: Arc<InjectionStore>,
     power_cycle_deadline: Option<Instant>,
+    /// The command completed by the next PowerOn observation. Cancelled power
+    /// transitions discard it; an ordinary startup has no originating command.
+    power_on_command: Option<ResourceResetType>,
     machine_on_deadline: Option<Instant>,
     /// `Timer::OsReady`: the booting host asks for DHCP when this passes.
     os_ready_deadline: Option<Instant>,
@@ -459,11 +462,11 @@ impl MachineStateMachine {
             actions: actions.into_iter().collect(),
             bmc_mock: None,
             bmc_state: None,
-            bmc_recovery: BmcDhcpRecovery::with_renewal(
-                app_context.app_config.bmc_dhcp_renewal_interval,
-            ),
+            bmc_recovery: app_context
+                .bmc_dhcp_recovery(app_context.app_config.bmc_dhcp_renewal_interval),
             bmc_injection: Arc::new(InjectionStore::new()),
             power_cycle_deadline: None,
+            power_on_command: None,
             machine_on_deadline: None,
             os_ready_deadline: None,
             power_off_deadline: None,
@@ -516,9 +519,8 @@ impl MachineStateMachine {
             bmc_dhcp_info: None,
             bmc_mock: None,
             bmc_state: None,
-            bmc_recovery: BmcDhcpRecovery::with_renewal(
-                app_context.app_config.bmc_dhcp_renewal_interval,
-            ),
+            bmc_recovery: app_context
+                .bmc_dhcp_recovery(app_context.app_config.bmc_dhcp_renewal_interval),
             bmc_injection: Arc::new(InjectionStore::new()),
             machine_dhcp_info: None,
             machine_interface_id: None,
@@ -530,6 +532,7 @@ impl MachineStateMachine {
             agent_polling_deadline: None,
             first_run_delay: Some(first_run_offset(config.run_interval_idle)),
             power_cycle_deadline: None,
+            power_on_command: None,
             installed_os,
             dpu_os_generation: 0,
             machine_info,
@@ -765,8 +768,15 @@ impl MachineStateMachine {
                     Err(_) => return Some(self.config.run_interval_working),
                 },
                 FsmAction::BmcEvent(event) => {
+                    let completed_command = match event {
+                        BmcEvent::PowerOn => self.power_on_command.take(),
+                        BmcEvent::BootCompleted => None,
+                    };
                     if let Some(bmc_state) = &self.bmc_state {
-                        bmc_state.on_event(event)
+                        bmc_state.on_event(event);
+                        if let Some(command) = completed_command {
+                            bmc_state.record_power_command_completed(command);
+                        }
                     }
                     let dpu_power_on = matches!(event, BmcEvent::PowerOn)
                         && matches!(self.machine_info, MachineInfo::Dpu(_));
@@ -943,6 +953,7 @@ impl MachineStateMachine {
             );
 
             self.machine_on_deadline = None;
+            self.power_on_command = None;
             self.os_ready_deadline = None;
             self.power_off_deadline = None;
             self.power_cycle_deadline = None;
@@ -1531,9 +1542,16 @@ impl MachineStateMachine {
     ) -> Result<(), ActionError> {
         use ResourceResetType::*;
         match request {
-            On | ForceOn => self.fsm_event(Event::PowerOn),
+            On | ForceOn => {
+                let previous_power = self.fsm.power_state();
+                self.fsm_event(Event::PowerOn);
+                if self.fsm.power_state() != previous_power {
+                    self.power_on_command = Some(request);
+                }
+            }
             GracefulRestart | ForceRestart | PowerCycle | FullPowerCycle => {
-                self.fsm_event(Event::PowerCycle)
+                self.fsm_event(Event::PowerCycle);
+                self.power_on_command = Some(request);
             }
             GracefulShutdown => self.fsm_event(Event::PowerOffGraceful),
             ForceOff => self.fsm_event(Event::PowerOff),
@@ -1948,6 +1966,54 @@ mod tests {
         state_machine.set_installed_os(OsImage::DpuAgent);
 
         (router, bmc_state, state_machine, bmc_command_rx)
+    }
+
+    #[tokio::test]
+    async fn power_on_completion_preserves_the_originating_command() {
+        let (_, _, mut machine, _) = dpu_with_bmc(None);
+        machine.fsm = MachineFsm::init(false, false)
+            .0
+            .event(Event::DhcpComplete)
+            .0;
+        machine.actions.clear();
+
+        for command in [
+            ResourceResetType::On,
+            ResourceResetType::ForceRestart,
+            ResourceResetType::PowerCycle,
+        ] {
+            machine.set_system_power(command).unwrap();
+            assert!(machine.process_actions().await.is_none());
+            if command != ResourceResetType::On {
+                machine.fsm_event(Event::TimerAlert(Timer::PowerCycle));
+                assert!(machine.process_actions().await.is_none());
+            }
+            assert_eq!(machine.power_on_command, Some(command));
+
+            machine.fsm_event(Event::TimerAlert(Timer::MachineOn));
+            // A redundant On must not replace the restart awaiting completion.
+            machine.set_system_power(ResourceResetType::On).unwrap();
+            // The original command survives until its PowerOn action is applied.
+            assert_eq!(machine.power_on_command, Some(command));
+            assert!(machine.process_actions().await.is_none());
+            assert_eq!(machine.power_on_command, None);
+        }
+
+        machine
+            .set_system_power(ResourceResetType::ForceRestart)
+            .unwrap();
+        assert!(machine.set_system_power(ResourceResetType::Nmi).is_err());
+        assert_eq!(
+            machine.power_on_command,
+            Some(ResourceResetType::ForceRestart)
+        );
+        machine
+            .set_system_power(ResourceResetType::ForceOff)
+            .unwrap();
+        assert_eq!(
+            machine.power_on_command, None,
+            "power-off cancels the restart"
+        );
     }
 
     /// A BFB install accepted by the DPU's BMC restarts the DPU, and on that

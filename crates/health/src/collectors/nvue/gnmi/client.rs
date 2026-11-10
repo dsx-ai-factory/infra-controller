@@ -639,7 +639,10 @@ mod tests {
     use crate::collectors::nvue::gnmi::sample_processor::{
         GnmiSampleProcessor, NVUE_GNMI_SAMPLE_STREAM_ID,
     };
-    use crate::collectors::nvue::gnmi::subscriber::{GnmiStreamMetrics, spawn_gnmi_collector};
+    use crate::collectors::nvue::gnmi::subscriber::{
+        GnmiCollectorSettings, GnmiStreamMetrics, spawn_gnmi_collector,
+        spawn_gnmi_collector_with_settings,
+    };
     use crate::config::{
         NvueGnmiConfig, NvueGnmiMetricConfig, NvueGnmiMetricOutput, NvueGnmiResponseKeyLabel,
         NvueGnmiSubscriptionConfig, NvueGnmiSubscriptionMode,
@@ -1415,6 +1418,7 @@ mod tests {
         subscriptions: &mut mpsc::Receiver<ControlledSubscription>,
         service: &TestGnmiService,
         sink: &RecordingMetricSink,
+        sockets: &AtomicUsize,
     ) {
         for stream_index in 0..3 {
             for retry in 0..2 {
@@ -1426,9 +1430,10 @@ mod tests {
                     tonic::Code::Unavailable
                 };
 
+                // The replacement may open before the server observes this RPC end.
+                // Check the count after receiving the replacement; `fail` still
+                // awaits this RPC's completion.
                 old.fail(code).await;
-
-                assert_eq!(service.active_requests.load(Ordering::SeqCst), 2);
 
                 if stream_index == 1 {
                     streams[0]
@@ -1447,11 +1452,31 @@ mod tests {
                     "reconnect must preserve requested paths and mode"
                 );
 
-                assert_eq!(service.active_requests.load(Ordering::SeqCst), 3);
+                assert_eq!(
+                    service.active_requests.load(Ordering::SeqCst),
+                    3,
+                    "active RPCs after reconnect for stream {stream_index}, retry {retry}"
+                );
 
                 replacement
                     .publish(sink, &format!("recovered-{stream_index}-{retry}"))
                     .await;
+
+                // Each stream uses a fresh client and one socket. Allow the old
+                // socket to close independently of the replacement opening.
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while sockets.load(Ordering::SeqCst) != 3 {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "expected 3 live sockets after stream {stream_index} recovery {retry}: sockets={}, active_requests={}",
+                        sockets.load(Ordering::SeqCst),
+                        service.active_requests.load(Ordering::SeqCst),
+                    )
+                });
 
                 streams.insert(stream_index, replacement);
             }
@@ -1494,9 +1519,12 @@ mod tests {
         config.paths.platform_general_enabled = false;
         config.paths.leak_sensors_enabled = true;
 
-        let collector = spawn_gnmi_collector(
+        let collector = spawn_gnmi_collector_with_settings(
             &endpoint,
-            &config,
+            GnmiCollectorSettings {
+                gnmi_config: &config,
+                initial_retry_delay: Duration::from_millis(10),
+            },
             credentials.clone(),
             registry,
             Some(sink.clone()),
@@ -1522,7 +1550,8 @@ mod tests {
 
         streams.sort_by_key(ControlledSubscription::stream_index);
 
-        assert_post_sync_reconnections(&mut streams, &mut subscriptions, service, &sink).await;
+        assert_post_sync_reconnections(&mut streams, &mut subscriptions, service, &sink, sockets)
+            .await;
 
         streams[2].fail(tonic::Code::Unauthenticated).await;
 
@@ -1725,9 +1754,12 @@ mod tests {
             })),
         );
 
-        let collector = spawn_gnmi_collector(
+        let collector = spawn_gnmi_collector_with_settings(
             &endpoint,
-            &config,
+            GnmiCollectorSettings {
+                gnmi_config: &config,
+                initial_retry_delay: Duration::from_millis(10),
+            },
             Arc::new(DelayedRefreshProvider::default()),
             registry,
             Some(sink),

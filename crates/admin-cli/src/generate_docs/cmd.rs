@@ -409,8 +409,8 @@ fn plain_cli_syntax(line: &str) -> String {
         .replace("\\`", "`")
 }
 
-/// Use Clap's usage for commands whose required arguments, selector groups, or
-/// explicit usage are not preserved by `clap_mangen`.
+/// Use Clap's usage for commands whose required or repeated arguments, selector
+/// groups, or explicit usage are not preserved by `clap_mangen`.
 fn uses_clap_synopsis(path: &[String]) -> bool {
     matches!(
         (
@@ -418,6 +418,7 @@ fn uses_clap_synopsis(path: &[String]) -> bool {
             path.get(2).map(String::as_str),
         ),
         (Some("machine-validation"), Some("logs"))
+            | (Some("machine"), Some("states"))
             | (Some("firmware"), Some("nic"))
             | (Some("spx-maintenance"), _)
             | (
@@ -697,6 +698,23 @@ An inline `HostInband` value and `mac=<mac>` selector.
         assert_eq!(
             command.clone().render_usage().to_string(),
             "Usage: nico-admin-cli firmware nic profile update [OPTIONS] --if-version-match <VERSION> <ID>"
+        );
+    }
+
+    #[test]
+    fn machine_states_synopsis_preserves_repeated_optional_ids() {
+        let root = command_tree();
+        let path = [BIN, "machine", "states"].map(String::from);
+        let command = path[1..].iter().fold(&root, |command, name| {
+            command
+                .find_subcommand(name)
+                .expect("machine states exists in the CLI tree")
+        });
+
+        assert!(uses_clap_synopsis(&path));
+        assert_eq!(
+            command.clone().render_usage().to_string(),
+            "Usage: nico-admin-cli machine states [OPTIONS] [MACHINE_ID]..."
         );
     }
 

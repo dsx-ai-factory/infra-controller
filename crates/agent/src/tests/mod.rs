@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 mod bootstrap_ca;
-mod common;
+pub(crate) mod common;
 pub(crate) use common::{respond, respond_then_stall_before_trailers};
 mod full;
 mod lldp_collector;

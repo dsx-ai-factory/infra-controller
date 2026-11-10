@@ -116,14 +116,16 @@ func (r *APIRackGetRequest) Validate() error {
 
 // ========== Rack Filter (for batch operations) ==========
 
-// RackFilter specifies which racks to target in a batch operation.
-// If nil or empty, the operation targets all racks in the site.
+// RackFilter selects explicitly named racks for a batch operation.
+// A valid request requires a nonempty Names list. Flow rejects omitted
+// or empty filters before creating tasks.
 type RackFilter struct {
 	Names []string `json:"names,omitempty"`
 }
 
-// ToTargetSpec converts the filter to an Flow OperationTargetSpec.
-// Handles nil receiver gracefully (targets all racks).
+// ToTargetSpec converts the filter to a Flow OperationTargetSpec.
+// A nil receiver or empty Names list produces an identifier-less target,
+// which Flow rejects during task submission.
 func (f *RackFilter) ToTargetSpec() *flowv1.OperationTargetSpec {
 	var rackTargets []*flowv1.RackTarget
 
@@ -257,6 +259,8 @@ type APIRack struct {
 	Description  string `json:"description"`
 	// OperationStatus is the operability phase aggregated from trays.
 	OperationStatus string `json:"operationStatus"`
+	// OperationStatusDetails is null when the upstream does not provide counts.
+	OperationStatusDetails *APIRackOperationStatusDetails `json:"operationStatusDetails"`
 	// NVLinkDomainIDs identifies the NVLink Domains containing the Rack.
 	// It is empty when the Rack is not assigned to an NVLink Domain.
 	NVLinkDomainIDs []string            `json:"nvLinkDomainIds"`
@@ -274,6 +278,11 @@ func (ar *APIRack) FromProto(protoRack *flowv1.Rack, includeComponents bool) {
 
 	ar.ID = protoRack.GetExternalId()
 	ar.OperationStatus = enumOr(ProtoToAPIPhaseName, protoRack.GetOperationStatus(), "Unknown")
+	ar.OperationStatusDetails = nil
+	if protoRack.GetOperationStatusDetails().GetTrayCountsByType() != nil {
+		ar.OperationStatusDetails = &APIRackOperationStatusDetails{}
+		ar.OperationStatusDetails.FromProto(protoRack.GetOperationStatusDetails())
+	}
 	// Get info from DeviceInfo
 	if protoRack.GetInfo() != nil {
 		info := protoRack.GetInfo()

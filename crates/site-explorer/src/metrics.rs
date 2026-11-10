@@ -395,8 +395,8 @@ pub(crate) enum SiteExplorerIterationFinished {
 pub(crate) enum ManagedHostCreationOutcome {
     /// A host machine and its DPU machines were created.
     Created,
-    /// Every DPU already had a machine; the host's links were repaired in place.
-    Repaired,
+    /// The host already exists or its interfaces are owned and need no creation.
+    SkippedExisting,
     /// No `expected_machines` record matched the host.
     SkippedUnexpected,
     Failed,
@@ -433,8 +433,8 @@ pub(crate) enum ManagedHostCreationFinished {
         dpu_count: usize,
     },
 
-    #[event(labels(outcome = ManagedHostCreationOutcome::Repaired), log = off)]
-    Repaired {
+    #[event(labels(outcome = ManagedHostCreationOutcome::SkippedExisting), log = off)]
+    SkippedExisting {
         #[observation]
         latency: Duration,
     },
@@ -781,6 +781,29 @@ pub(crate) struct BmcResetTimestampPersistenceFailed {
     pub(crate) method: BmcResetMethod,
     #[context]
     pub(crate) bmc_ip_address: IpAddr,
+    #[context]
+    pub(crate) error: String,
+}
+
+/// A managed host committed, or an exploration revisited it, but its admin
+/// addresses could not be reconciled. After a transient failure the host's
+/// BMC endpoint is flagged for exploration, so the next Site Explorer
+/// iteration revisits the host and retries the repair. Until then a dormant
+/// link may keep a DHCP address and the host's network config version is
+/// not bumped.
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "site_explorer_host_admin_address_reconcile_failed",
+    metric_name = "carbide_site_explorer_host_admin_address_reconcile_failures_total",
+    component = "site-explorer",
+    log = warn,
+    metric = counter,
+    message = "Host admin address reconciliation failed for a managed host",
+    describe = "Number of host admin address reconciliations that failed after Site Explorer committed or revisited a managed host"
+)]
+pub(crate) struct SiteExplorerHostAdminAddressReconcileFailed {
+    #[context]
+    pub(crate) host_machine_id: HostMachineId,
     #[context]
     pub(crate) error: String,
 }
@@ -1605,10 +1628,10 @@ mod tests {
                     histogram_count_delta: 1,
                 },
             }
-            "a repaired host is metric-only" {
+            "an existing DPU-backed host is metric-only" {
                 ManagedHostCreationCase {
-                    event: ManagedHostCreationFinished::Repaired { latency },
-                    outcome: "repaired",
+                    event: ManagedHostCreationFinished::SkippedExisting { latency },
+                    outcome: "skipped_existing",
                 } => ManagedHostCreationObservation {
                     log_count: 0,
                     level: None,

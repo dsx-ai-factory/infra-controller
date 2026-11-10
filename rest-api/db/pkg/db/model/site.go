@@ -478,7 +478,7 @@ func (ssd SiteSQLDAO) Update(ctx context.Context, tx *db.Tx, input SiteUpdateInp
 			if commitInternalTx {
 				tx.Commit()
 			} else {
-				tx.Rollback()
+				db.RollbackTx(ctx, tx, &commitInternalTx)
 			}
 		}()
 	}

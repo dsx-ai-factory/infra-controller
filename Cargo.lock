@@ -790,6 +790,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "bmc-driver-validator"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "bmc-drivers",
+ "bmc-explorer",
+ "bmc-platform",
+ "bmc-runtime",
+ "carbide-ipmi",
+ "carbide-redfish",
+ "carbide-secrets",
+ "carbide-uuid",
+ "clap",
+ "colored",
+ "futures",
+ "libc",
+ "mac_address",
+ "nv-redfish",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "strum",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "bmc-drivers"
 version = "0.1.0"
 dependencies = [
@@ -801,6 +829,7 @@ dependencies = [
  "carbide-test-support",
  "carbide-utils",
  "hex",
+ "mac_address",
  "nv-redfish",
  "serde",
  "serde_json",
@@ -818,6 +847,7 @@ dependencies = [
  "axum",
  "bmc-explorer",
  "bmc-mock",
+ "bmc-platform",
  "bmc-vendor",
  "carbide-api-model",
  "carbide-instrument",
@@ -1224,6 +1254,8 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "bmc-drivers",
+ "bmc-explorer",
  "bmc-vendor",
  "byteorder",
  "carbide-api-db",
@@ -1512,6 +1544,7 @@ dependencies = [
  "base64",
  "bmc-vendor",
  "carbide-health-report",
+ "carbide-instrument",
  "carbide-ipxe-renderer",
  "carbide-libmlx-model",
  "carbide-macros",
@@ -2168,6 +2201,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-dpf",
  "carbide-machine-controller",
+ "carbide-test-support",
  "carbide-uuid",
  "config-version",
  "futures",
@@ -2284,6 +2318,7 @@ dependencies = [
  "criterion",
  "dashmap",
  "figment",
+ "flate2",
  "futures",
  "http",
  "http-body-util",
@@ -3372,6 +3407,7 @@ dependencies = [
  "dns-record",
  "eyre",
  "hickory-resolver",
+ "http-body-util",
  "hyper",
  "hyper-rustls",
  "hyper-util",
@@ -3382,6 +3418,8 @@ dependencies = [
  "mac_address",
  "nonempty",
  "once_cell",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "p256 0.14.0",
  "prettytable-rs",
  "prost",
@@ -3405,8 +3443,10 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "tower",
+ "tower-http 0.7.0",
  "trace-propagation",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "tryhard",
  "uuid",
@@ -3590,6 +3630,7 @@ dependencies = [
  "carbide-network",
  "carbide-rack",
  "carbide-redfish",
+ "carbide-resource-pool",
  "carbide-rpc",
  "carbide-secrets",
  "carbide-site-explorer",
@@ -3688,6 +3729,7 @@ dependencies = [
  "carbide-redfish",
  "carbide-test-support",
  "carbide-utils",
+ "chrono",
  "config-version",
  "itertools 0.14.0",
  "libredfish",
@@ -13034,18 +13076,18 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.7"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f31141ce3fc3e300ae89b78c0dd67f9708061d1d2eda54b8209346fd6be9a92c"
+checksum = "e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a"
 dependencies = [
  "rustls-pki-types",
 ]
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.7"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52f5ee44c96cf55f1b349600768e3ece3a8f26010c05265ab73f945bb1a2eb9d"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
 dependencies = [
  "rustls-pki-types",
 ]

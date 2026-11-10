@@ -104,3 +104,23 @@ selector:
   matchLabels:
     app.kubernetes.io/metrics: {{ .name }}
 {{- end }}
+
+{{/*
+Whether a credentials Secret is configured. secretName and key are required
+together.
+*/}}
+{{- define "nico-dsx-exchange-consumer.credentialsEnabled" -}}
+{{- $c := .Values.credentials | default dict -}}
+{{- if and $c.secretName (not $c.key) -}}
+{{- fail "credentials.key is required when credentials.secretName is set" -}}
+{{- end -}}
+{{- if and $c.key (not $c.secretName) -}}
+{{- fail "credentials.secretName is required when credentials.key is set" -}}
+{{- end -}}
+{{- if and $c.secretName $c.key -}}true{{- end -}}
+{{- end }}
+
+{{/* Path of the credentials file inside the container. */}}
+{{- define "nico-dsx-exchange-consumer.credentialsFilePath" -}}
+{{- printf "%s/%s" (.Values.credentials.mountPath | trimSuffix "/") .Values.credentials.key -}}
+{{- end }}

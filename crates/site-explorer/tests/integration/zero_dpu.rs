@@ -79,6 +79,7 @@ async fn init(pool: PgPool) -> ZeroDpuEnv {
             test_harness.test_meter.meter(),
             endpoint_exploration_service,
             endpoint_explorer.clone(),
+            Default::default(),
             api.common_pools().clone(),
             api.work_lock_manager_handle(),
             api.runtime_config.rack_profiles.clone(),
@@ -800,6 +801,112 @@ async fn test_exploration_refreshes_pending_predicted_boot_interface_id(
     Ok(())
 }
 
+/// Existing zero-DPU hosts gain reported NICs independently of the creation
+/// flag, the creation cap, and the presence of an ExpectedMachine entry.
+#[sqlx_test]
+async fn test_zero_dpu_interface_refresh_is_independent_of_creation_policy(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = init(pool).await;
+    let host = zero_dpu_host();
+    register_zero_dpu_expected_machine(&env, &host).await?;
+    let response = env
+        .api()
+        .discover_dhcp(
+            rpc::forge::DhcpDiscovery::builder(
+                host.bmc_mac_address,
+                env.underlay_segment.relay_address,
+            )
+            .vendor_string("SomeVendor")
+            .tonic_request(),
+        )
+        .await?
+        .into_inner();
+    let bmc_ip = response.address.parse()?;
+    env.site_explorer
+        .insert_endpoint_result(bmc_ip, Ok(host.clone().into()));
+    env.site_explorer.run_single_iteration().await?;
+    let mut txn = env.pool.begin().await?;
+    db::explored_endpoints::set_preingestion_complete(bmc_ip, txn.as_mut()).await?;
+    txn.commit().await?;
+    env.site_explorer.run_single_iteration().await?;
+    let mut txn = env.pool.begin().await?;
+    let original =
+        db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), host.non_dpu_macs[0])
+            .await?
+            .expect("initial creation predicted the host NIC");
+    txn.rollback().await?;
+
+    for (scenario, creation_enabled, remove_expected, suffix) in [
+        ("creation disabled", false, false, 0x81),
+        ("zero creation cap", true, false, 0x82),
+        (
+            "expected machine removed with a zero creation cap",
+            true,
+            true,
+            0x83,
+        ),
+    ] {
+        if remove_expected {
+            let mut txn = env.pool.begin().await?;
+            db::expected_machine::delete_by_mac(txn.as_mut(), host.bmc_mac_address).await?;
+            txn.commit().await?;
+        }
+        let mac_address = MacAddress::new([0x02, 0, 0, 0, 0, suffix]);
+        let mut report: model::site_explorer::EndpointExplorationReport = host.clone().into();
+        report.systems[0]
+            .ethernet_interfaces
+            .push(model::site_explorer::EthernetInterface {
+                id: Some("NIC.Additional.1".to_string()),
+                mac_address: Some(mac_address),
+                ..Default::default()
+            });
+        let explorer = super::env::test_site_explorer(
+            &env.test_harness,
+            SiteExplorerConfig {
+                explorations_per_run: 1,
+                create_machines: Arc::new(creation_enabled.into()),
+                machines_created_per_run: 0,
+                ..Default::default()
+            },
+        );
+        explorer.insert_endpoint_result(bmc_ip, Ok(report));
+        explorer.run_single_iteration().await?;
+
+        let mut txn = env.pool.begin().await?;
+        let prediction =
+            db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), mac_address)
+                .await?
+                .expect("the reconciler must add the reported NIC");
+        assert_eq!(prediction.machine_id, original.machine_id, "{scenario}");
+        assert_eq!(
+            prediction.boot_interface_id.as_deref(),
+            Some("NIC.Additional.1"),
+            "{scenario}"
+        );
+        let original_after = db::predicted_machine_interface::find_by_mac_address(
+            txn.as_mut(),
+            original.mac_address,
+        )
+        .await?
+        .expect("the original prediction is preserved");
+        assert_eq!(original_after.id, original.id, "{scenario}");
+        assert_eq!(
+            original_after.primary_interface, original.primary_interface,
+            "{scenario}"
+        );
+        let machine_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM machines")
+            .fetch_one(txn.as_mut())
+            .await?;
+        assert_eq!(
+            machine_count, 1,
+            "{scenario}: a refresh must not create another machine"
+        );
+        txn.rollback().await?;
+    }
+    Ok(())
+}
+
 /// A BMC may report onboard System interfaces first and learn the declared
 /// boot NIC later through supplemental adapter-Port inventory. The refresh
 /// must add that hardware-discovered NIC to the existing predicted host and
@@ -912,6 +1019,7 @@ async fn test_exploration_refresh_adds_declared_adapter_port_to_predicted_host(
         .retain(|interface| interface.mac_address != Some(system_macs[0]));
     refreshed_report.chassis[0].network_adapters[0].port_mac_addresses =
         vec![declared_port_mac, unrelated_port_mac];
+    env.create_machines.store(false, Ordering::Relaxed);
     env.site_explorer
         .insert_endpoint_result(host_bmc_ip, Ok(refreshed_report));
     env.site_explorer.run_single_iteration().await?;

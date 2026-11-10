@@ -190,13 +190,39 @@ impl Attempt {
     }
 }
 
-/// The run result of a sweep: a failure naming the families it could not
-/// publish, so the reader's `up` gauge drops.
-pub(crate) fn incomplete(failed: &[Family]) -> eyre::Result<()> {
-    if failed.is_empty() {
-        Ok(())
-    } else {
-        Err(eyre!("incomplete sweep: {failed:?}"))
+/// The families a sweep could not publish, and whether every lost read timed
+/// out. It becomes the sweep's run error: nothing failed is success, a set
+/// that is only timeouts is a timeout, and any other failure is a generic
+/// incomplete sweep. A sweep held up only by call timeouts is a slow nico-api,
+/// which the scheduler counts apart from a down one; a non-timeout failure in
+/// the same sweep keeps the louder failure outcome.
+#[derive(Default)]
+pub(crate) struct Incomplete {
+    failed: Vec<Family>,
+    timeouts: usize,
+}
+
+impl Incomplete {
+    /// Records a family that kept its last snapshot this sweep. `kind` is its
+    /// failure kind, or `None` when a late delivery was dropped after the
+    /// sweep had already timed out.
+    pub(crate) fn record(&mut self, family: Family, kind: Option<FailureKind>) {
+        self.failed.push(family);
+        if kind == Some(FailureKind::Timeout) {
+            self.timeouts += 1;
+        }
+    }
+
+    /// The run error. A timeout family kind comes only from
+    /// `CallError::Timeout`, so the typed timeout carries no upstream text.
+    pub(crate) fn finish(self) -> eyre::Result<()> {
+        if self.failed.is_empty() {
+            Ok(())
+        } else if self.timeouts == self.failed.len() {
+            Err(eyre::Report::new(CallError::Timeout).wrap_err("reader sweep timed out"))
+        } else {
+            Err(eyre!("incomplete sweep: {:?}", self.failed))
+        }
     }
 }
 
@@ -238,5 +264,31 @@ mod tests {
         // The next sweep starts open.
         attempt.begin();
         assert!(attempt.deliver(&sink, &meta, Family::RestSiteMatch, Ok(())));
+    }
+
+    #[test]
+    fn only_all_timeouts_report_a_typed_timeout() {
+        let typed_timeout = |err: &eyre::Report| {
+            err.chain()
+                .any(|cause| matches!(cause.downcast_ref::<CallError>(), Some(CallError::Timeout)))
+        };
+        // A sweep reads as a timeout only when every lost family timed out: a
+        // mixed failure, or an unknown kind, keeps the generic failure, so no
+        // typed timeout reaches the scheduler.
+        let cases: [([Option<FailureKind>; 2], bool); 3] = [
+            (
+                [Some(FailureKind::Timeout), Some(FailureKind::Timeout)],
+                true,
+            ),
+            ([Some(FailureKind::Timeout), Some(FailureKind::Rpc)], false),
+            ([Some(FailureKind::Timeout), None], false),
+        ];
+        for (kinds, want) in cases {
+            let mut incomplete = Incomplete::default();
+            incomplete.record(Family::Host, kinds[0]);
+            incomplete.record(Family::Dpu, kinds[1]);
+            let err = incomplete.finish().expect_err("incomplete sweep");
+            assert_eq!(typed_timeout(&err), want, "{kinds:?}");
+        }
     }
 }

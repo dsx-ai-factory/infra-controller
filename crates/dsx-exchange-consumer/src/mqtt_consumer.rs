@@ -167,7 +167,8 @@ async fn build_credentials_provider(
                 .map_err(|e| DsxConsumerError::Secrets(e.to_string()))?
                 .ok_or_else(|| {
                     DsxConsumerError::Secrets(format!(
-                        "Missing MQTT credentials for {}",
+                        "Missing MQTT credentials for {}: none of the environment, file, or Vault \
+                         sources provides it",
                         credential_key.to_key_str()
                     ))
                 })?;

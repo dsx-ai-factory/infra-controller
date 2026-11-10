@@ -68,6 +68,20 @@ type Store interface {
 	// that RPC callers must translate, not a gRPC status.
 	ListPowerTasksForRack(ctx context.Context, rackID uuid.UUID) ([]taskdef.PowerTaskDetails, error)
 
+	// ListFirmwareTasksForRack returns Waiting, Pending, and Running firmware
+	// tasks for the exact rack, ordered by creation time then UUID, ascending.
+	// Recorded UUID/type selections survive without inventory lookup; UUIDs
+	// within each type are sorted and unique, with empty groups retained.
+	// Target metadata excludes raw manifests, artifact URLs and authentication;
+	// reports and free-form descriptions/messages are absent from the projection.
+	// No matches returns a non-nil empty slice. The read joins a transaction
+	// established by RunInTransaction, or uses the store connection otherwise.
+	// Errors return no tasks: *taskcommon.FirmwareTaskLimitError above
+	// MaxFirmwareTasksPerRack rows, ctx.Err() after query cancellation/expiry,
+	// or sanitized Internal for other read/conversion failures. This internal
+	// reader has no RPC consumer; transport callers must translate the limit error.
+	ListFirmwareTasksForRack(ctx context.Context, rackID uuid.UUID) ([]taskdef.FirmwareTaskDetails, error)
+
 	// ListTaskContextForRack returns nonterminal metadata ordered by creation
 	// time then UUID. It joins the current transaction and excludes operation
 	// payloads/reports. Overflow returns TaskContextLimitError and no rows;

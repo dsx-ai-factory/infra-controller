@@ -31,7 +31,7 @@ use db::{self, ConditionalWrite, ObjectColumnFilter, network_security_group};
 use model::resource_pool;
 use model::tenant::{InvalidTenantOrg, Tenant};
 use model::vpc::{
-    ChangeVpcRoutingProfile, NewVpc, RouteTargetConfigError, UpdateVpc, UpdateVpcVirtualization,
+    ChangeVpcRoutingProfile, NewVpc, UpdateVpc, UpdateVpcVirtualization,
     VpcRoutingProfileOverrides, VpcStatus, VpcVirtualizationTypeCapabilities,
 };
 use sqlx::PgConnection;
@@ -215,9 +215,12 @@ async fn create_vpc(
                 let mut new_vpc = admission.new_vpc;
                 // Configured VPCs store the assigned value in config as well as status.
                 new_vpc.vni = Some(vni);
-                rpc::Vpc::from(
+                // Resolve the selected profile before committing its allocated VNI.
+                vpc_to_rpc(
                     db::vpc::persist(new_vpc, VpcStatus { vni: Some(vni) }, &mut txn).await?,
-                )
+                    api.runtime_config.fnn.as_ref(),
+                    EffectiveProfileErrorPolicy::Reject(RouteTargetResolutionSource::ServerState),
+                )?
             }
         };
         txn.commit().await?;
@@ -1473,10 +1476,9 @@ enum EffectiveProfileErrorPolicy {
     OmitRetained,
 }
 
-/// Maps route-target failures according to the source of the values that made
-/// the target unencodable.
+/// Maps route-target and prefix-rule failures according to the source of their invalid values.
 fn route_target_resolution_error(
-    error: RouteTargetConfigError,
+    error: impl std::fmt::Display,
     source: RouteTargetResolutionSource,
 ) -> CarbideError {
     match source {
@@ -1507,7 +1509,14 @@ fn validate_requested_route_targets(
     ]
     .into_iter()
     .flatten()
-    {
+    .chain(
+        overrides
+            .route_targets_on_exports_by_prefix
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|entry| entry.route_targets.as_slice()),
+    ) {
         for target in targets {
             target
                 .resolve(vpc_vni)

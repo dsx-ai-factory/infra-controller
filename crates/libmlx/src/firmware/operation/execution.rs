@@ -759,7 +759,6 @@ mod tests {
     /// saving a tool failure, not rely on callback fixtures supplying them.
     #[tokio::test]
     async fn run_operation_redacts_profile_credentials_in_the_persisted_receipt() {
-        use std::os::unix::fs::PermissionsExt;
         use std::time::Duration;
 
         use crate::runner::{HELLO, Request, Response};
@@ -821,25 +820,8 @@ printf '{frame_prefix}%s' '{response}'
             hello = std::str::from_utf8(HELLO).unwrap(),
         );
         let helper = directory.join("query-failure-helper");
-        // Keep writable executable descriptors out of concurrent test forks.
-        let status = tokio::time::timeout(
-            Duration::from_secs(10),
-            tokio::process::Command::new("/bin/sh")
-                .args([
-                    "-c",
-                    "set -eu; umask 077; printf '%s' \"$2\" > \"$1\"",
-                    "fixture-writer",
-                ])
-                .arg(&helper)
-                .arg(contents)
-                .kill_on_drop(true)
-                .status(),
-        )
-        .await
-        .expect("fixture writer completes within its watchdog")
-        .expect("write fake supervisor");
-        assert!(status.success());
-        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::runner::write_fixture_executables(directory, &[("query-failure-helper", &contents)])
+            .await;
         let (_cancellation, cancellation) = watch::channel(None);
         tokio::time::timeout(
             Duration::from_secs(10),

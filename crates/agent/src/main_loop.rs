@@ -29,7 +29,7 @@ use ::rpc::forge::ManagedHostNetworkConfigResponse;
 use ::rpc::forge_tls_client::ForgeClientConfig;
 use ::rpc::{forge as rpc, forge_tls_client};
 use carbide_host_support::agent_config::AgentConfig;
-use carbide_host_support::lldp_snapshot_cache::LldpSnapshotCache;
+use carbide_host_support::lldp_snapshot_cache::classify_against_accepted_snapshot;
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_rpc_utils::dhcp::{DhcpTimestamps, DhcpTimestampsFilePath};
 use carbide_systemd::systemd;
@@ -488,7 +488,6 @@ pub(super) async fn setup_and_run(
         ca_republish_time: std::time::Instant::now(),
         started_at: std::time::Instant::now(),
         inventory_updater_config,
-        lldp_cache: LldpSnapshotCache::new(),
         latest_lldp,
         options,
         agent_config,
@@ -572,7 +571,6 @@ struct MainLoop {
     inventory_updater_time: std::time::Instant,
     ca_republish_time: std::time::Instant,
     inventory_updater_config: MachineInventoryUpdaterConfig,
-    lldp_cache: LldpSnapshotCache,
     latest_lldp: carbide_host_support::lldp_collector_task::LatestLldpCollection,
     options: command_line::RunOptions,
     agent_config: AgentConfig,
@@ -768,6 +766,7 @@ impl CurrentNetworkVersion {
         config.dpu_extension_services.clear();
         config.astra_config = None;
         config.use_admin_network_changed = None;
+        config.accepted_lldp_snapshot_fingerprint = None;
 
         // DHCP is reconciled before this HBN skip decision on every iteration.
         config.ntp_servers.clear();
@@ -867,7 +866,7 @@ impl CurrentNetworkVersion {
         Self::normalize_security_group_rule_order(&mut config.network_security_policy_overrides);
 
         if let Some(routing_profile) = &mut config.routing_profile {
-            Self::normalize_routing_profile(routing_profile);
+            crate::service_network::normalize_routing_profile(routing_profile);
         }
     }
 
@@ -884,7 +883,7 @@ impl CurrentNetworkVersion {
         interface.vpc_peer_vnis.sort_unstable();
 
         if let Some(routing_profile) = &mut interface.vpc_routing_profile {
-            Self::normalize_routing_profile(routing_profile);
+            crate::service_network::normalize_routing_profile(routing_profile);
         }
         if let Some(routing_profile) = &mut interface.interface_routing_profile {
             Self::sort_prefix_entries(&mut routing_profile.allowed_anycast_prefixes);
@@ -895,23 +894,6 @@ impl CurrentNetworkVersion {
             }
             Self::normalize_security_group_rule_order(&mut network_security_group.rules);
         }
-    }
-
-    /// `normalize_routing_profile` sorts collections whose order does not
-    /// change routing behavior.
-    fn normalize_routing_profile(routing_profile: &mut rpc::RoutingProfile) {
-        routing_profile
-            .route_target_imports
-            .sort_by_key(|route_target| {
-                (route_target.asn, route_target.vni, route_target.vni_self)
-            });
-        routing_profile
-            .route_targets_on_exports
-            .sort_by_key(|route_target| {
-                (route_target.asn, route_target.vni, route_target.vni_self)
-            });
-        Self::sort_prefix_entries(&mut routing_profile.accepted_leaks_from_underlay);
-        Self::sort_prefix_entries(&mut routing_profile.allowed_anycast_prefixes);
     }
 
     /// `normalize_security_group_rule` sorts the resolved source and
@@ -1148,6 +1130,7 @@ impl MainLoop {
             dpu_extension_services: vec![],
             astra_config_status: None,
             lldp: None,
+            lldp_snapshot_fingerprint: None,
         };
 
         // `read` does not block
@@ -1166,6 +1149,8 @@ impl MainLoop {
 
                 let tenant_peers = ethernet_virtualization::tenant_peers(&conf);
                 let mut should_check_ipv6_unicast = false;
+                // Stays `None` when HBN is down and the DHCP update is skipped.
+                let mut dhcp_server_update = None;
                 if self.is_hbn_up {
                     // First thing is to read the existing HBN version and properly set the hbn device names
                     // associated with that version.
@@ -1371,20 +1356,20 @@ impl MainLoop {
                         &update_result,
                         &dhcp_result,
                     );
-                    match (update_result, dhcp_result) {
+                    match (update_result, &dhcp_result) {
                         (Ok(hbn_changed), Ok(dhcp_changed)) if !version_recorded => {
                             // Leave an obsolete successful apply pending so the next iteration
                             // reconciles the latest cached response. Retain its change flags for the
                             // post-config health wait and active loop period.
                             has_changed_hbn_config = hbn_changed;
-                            has_changed_configs = hbn_changed || dhcp_changed;
+                            has_changed_configs = hbn_changed || *dhcp_changed;
                             tracing::info!(
                                 "Desired network configuration changed during the update"
                             );
                         }
                         (Ok(hbn_changed), Ok(dhcp_changed)) => {
                             has_changed_hbn_config = hbn_changed;
-                            has_changed_configs = hbn_changed || dhcp_changed;
+                            has_changed_configs = hbn_changed || *dhcp_changed;
                             hbn_dhcp_applied_ok = true;
                             if self.options.agent_platform_type.is_dpu_os()
                                 && let Err(err) = mtu::ensure().await
@@ -1449,6 +1434,7 @@ impl MainLoop {
                             status_out.network_config_error = Some(err.to_string());
                         }
                     }
+                    dhcp_server_update = Some(dhcp_result.map(|_| ()));
 
                     if let Some(result) = astra_config_status {
                         set_astra_config_status(
@@ -1489,7 +1475,7 @@ impl MainLoop {
                 // It will guarantee that the Instance Config that is acknowledged to
                 // carbide via the status message is actually visible to the tenant via
                 // FMDS
-                let fmds_applied_ok = self
+                let fmds_update = self
                     .fmds_updater
                     .update(instance_data.clone(), Some(conf.clone()))
                     .await;
@@ -1500,7 +1486,7 @@ impl MainLoop {
                 // mode, which has no readiness probe wired up.
                 if self.options.agent_platform_type.is_containerized()
                     && hbn_dhcp_applied_ok
-                    && fmds_applied_ok
+                    && fmds_update.is_ok()
                 {
                     self.health_controller.set_ready(true);
                 }
@@ -1537,6 +1523,8 @@ impl MainLoop {
                             min_healthy_links,
                             hbn_device_names: &self.hbn_device_names,
                             has_changed_hbn_config,
+                            dhcp_server_update: dhcp_server_update.as_ref(),
+                            fmds_update: &fmds_update,
                         }
                         .health_check()
                         .await
@@ -1595,24 +1583,21 @@ impl MainLoop {
                 // Absent until the collector task finishes its first attempt.
                 // The status push still happens; it just carries no LLDP, which
                 // is a legal wire state and is what an unobserved topology is.
-                let lldp = self
-                    .latest_lldp
-                    .latest()
-                    .map(|collected| self.lldp_cache.classify(collected));
-                status_out.lldp = lldp.clone();
-
-                if record_network_status(
+                if let Some(lldp) = self.latest_lldp.latest().map(|collected| {
+                    classify_against_accepted_snapshot(
+                        collected,
+                        conf.accepted_lldp_snapshot_fingerprint.as_deref(),
+                    )
+                }) {
+                    status_out.lldp = Some(lldp.report);
+                    status_out.lldp_snapshot_fingerprint = lldp.snapshot_fingerprint;
+                }
+                let _ = record_network_status(
                     status_out,
                     &self.forge_api_server,
                     &self.forge_client_config,
                 )
-                .await
-                .is_ok()
-                    && let Some(lldp) = lldp
-                {
-                    // The cache advances only once nico-api has the report
-                    self.lldp_cache.confirm_reported(lldp);
-                }
+                .await;
                 self.seen_blank = false;
             }
             None => {
@@ -2009,7 +1994,7 @@ fn fmds_reply_routes(
     Ok(routes)
 }
 
-/// Push the DPU's network status to nico-api.
+/// Reports DPU network status to Core.
 async fn record_network_status(
     status: rpc::DpuNetworkStatus,
     forge_api: &str,
@@ -2029,8 +2014,11 @@ async fn record_network_status(
             return Err(err.into());
         }
     };
-    let request = tonic::Request::new(status);
-    match client.record_dpu_network_status(request).await {
+
+    match client
+        .record_dpu_network_status(tonic::Request::new(status))
+        .await
+    {
         Ok(_) => {
             NetworkStatus::Succeeded.emit();
             Ok(())

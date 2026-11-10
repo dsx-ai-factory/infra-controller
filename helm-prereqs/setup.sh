@@ -146,7 +146,8 @@
 #   export NICO_REST_IMAGE_TAG=<tag>       # unless using --skip-rest
 #   export REGISTRY_PULL_SECRET=<secret>  # optional
 #   ./setup.sh                          # prompts before deploying NICo Core and NICo REST
-#   ./setup.sh -y                       # skip all prompts, deploy everything automatically
+#   ./setup.sh -y                       # accept routine prompts; failed preflight checks still stop setup
+#   ./setup.sh -y --ignore-preflight-errors  # explicitly bypass ordinary preflight errors (database safety checks still stop setup)
 #   ./setup.sh --skip-core              # skip Phase 6 NICo Core (print command, deploy manually)
 #   ./setup.sh --skip-rest              # skip Phase 7 NICo REST entirely (no repo needed)
 #   ./setup.sh --skip-rms               # skip the Rack Manager Service (installed by default otherwise)
@@ -200,6 +201,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
 AUTO_YES=false
+IGNORE_PREFLIGHT_ERRORS=false
 SKIP_CORE=false
 SKIP_REST=false
 # DPF (DOCA Platform Framework) DPU provisioning installs by DEFAULT. Opt out
@@ -221,6 +223,7 @@ SITE_OVERLAY=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -y)             AUTO_YES=true  ;;
+        --ignore-preflight-errors) IGNORE_PREFLIGHT_ERRORS=true ;;
         --skip-core)    SKIP_CORE=true ;;
         --skip-rest)    SKIP_REST=true ;;
         --install-dpf)  INSTALL_DPF=true ;;   # explicit; DPF is the default
@@ -250,17 +253,18 @@ while [[ $# -gt 0 ]]; do
             SITE_OVERLAY="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
             [[ ! -d "${SITE_OVERLAY}" ]] && { echo "Error: --site-overlay directory not found: $2"; exit 1; }
             shift ;;
-        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--flow-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
+        *) echo "Usage: $0 [-y] [--ignore-preflight-errors] [--skip-core] [--skip-rest] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--flow-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
     esac
     shift
 done
 
 # ---------------------------------------------------------------------------
 # Pre-flight checks — env vars, tools, config files. Resolves NICO_REST_DIR
-# (in-tree rest-api/) and NICO_REST_HELM_DIR (in-tree helm/rest/). Exits 1 if
-# user declines to continue.
+# (in-tree rest-api/) and NICO_REST_HELM_DIR (in-tree helm/rest/). Failed checks
+# stop setup unless --ignore-preflight-errors permits them; database safety
+# checks always stop setup.
 # ---------------------------------------------------------------------------
-export AUTO_YES SKIP_CORE SKIP_REST INSTALL_DPF INSTALL_RMS
+export AUTO_YES IGNORE_PREFLIGHT_ERRORS SKIP_CORE SKIP_REST INSTALL_DPF INSTALL_RMS
 # Validate INSTALL_DPF BEFORE sourcing preflight — preflight gates its DPF
 # checks on INSTALL_DPF==true, so a garbage NICO_INSTALL_DPF would otherwise
 # silently skip those checks before erroring here.
@@ -2930,28 +2934,33 @@ echo "NICo REST site-agent deployed and bootstrap complete (FLOW_GRPC_ENABLED=${
 # fails for any transient reason the NicoClient stays nil permanently and
 # all inventory activities panic.  Detect failure and restart the pod so it
 # gets a fresh attempt with the same correct config.
-echo "Verifying site-agent NICo Core gRPC connection..."
-_CONNECTED=false
-for _i in $(seq 1 24); do
-    _POD="$(kubectl get pods -n nico-rest \
-        -l "app.kubernetes.io/name=nico-rest-site-agent" \
-        -o name 2>/dev/null | head -1 || true)"
-    if [ -n "${_POD}" ] && \
-       kubectl logs -n nico-rest "${_POD}" --since=5m 2>/dev/null \
-           | grep -q "NicoClient: successfully connected to server"; then
-        _CONNECTED=true
-        echo "Site-agent successfully connected to NICo Core gRPC"
-        break
-    fi
-    echo "  Waiting for gRPC connection (${_i}/24)..."
-    sleep 5
-done
+_wait_for_site_agent_connection() {
+    local _i _pod
+    for _i in $(seq 1 24); do
+        _pod="$(kubectl get pods -n nico-rest \
+            -l "app.kubernetes.io/name=nico-rest-site-agent" \
+            -o name 2>/dev/null | head -1 || true)"
+        # Consume the log stream so pipefail cannot mistake SIGPIPE for failure.
+        if [ -n "${_pod}" ] && \
+           kubectl logs -n nico-rest "${_pod}" --since=5m 2>/dev/null \
+               | grep -F "CoreGrpcClient: Successfully connected to server" >/dev/null; then
+            echo "Site-agent successfully connected to NICo Core gRPC"
+            return 0
+        fi
+        echo "  Waiting for gRPC connection (${_i}/24)..."
+        sleep 5
+    done
+    return 1
+}
 
-if [ "${_CONNECTED}" = "false" ]; then
+echo "Verifying site-agent NICo Core gRPC connection..."
+if ! _wait_for_site_agent_connection; then
     echo "WARNING: site-agent did not confirm gRPC connection — restarting pod for retry..."
     kubectl rollout restart statefulset/nico-rest-site-agent -n nico-rest
     kubectl rollout status statefulset/nico-rest-site-agent -n nico-rest --timeout=120s
-    echo "Site-agent pod restarted — gRPC connection will be retried"
+    if ! _wait_for_site_agent_connection; then
+        echo "WARNING: Could not confirm the site-agent's NICo Core gRPC connection after restart. Setup will continue; verify connectivity manually." >&2
+    fi
 fi
 
 echo ""

@@ -1,0 +1,28 @@
+{{- if or .Values.journal.enabled .Values.persistence.create .Values.runner.enabled }}
+{{- if not .Values.persistence.storageClass }}
+{{- fail "persistence.storageClass is required when the run-data claim is created (journal.enabled, persistence.create or runner.enabled)" }}
+{{- end }}
+# Shared ReadWriteOnce run-data volume. The journal proof writes a run journal
+# here and the fleet-up runner its journal and result.json, so it is created
+# when either is enabled or a claim is requested on its own.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "scale-test.runDataClaim" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scale-test.labels" . | nindent 4 }}
+    app.kubernetes.io/component: run-data
+  {{- if .Values.runner.enabled }}
+  annotations:
+    # A runner's journal and result.json outlive the release.
+    helm.sh/resource-policy: keep
+  {{- end }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.persistence.storageClass | quote }}
+  resources:
+    requests:
+      storage: {{ required "persistence.size is required when the run-data claim is created" .Values.persistence.size | quote }}
+{{- end }}

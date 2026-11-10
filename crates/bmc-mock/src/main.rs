@@ -351,6 +351,7 @@ impl LibvirtArgs {
                 ("Cd".to_string(), "sdb".to_string()),
                 ("ConfigCd".to_string(), "sdc".to_string()),
             ]),
+            restart_loads_persistent_definition: false,
         }
     }
 }

@@ -8,6 +8,7 @@ use bmc_platform::{
     IdentityMatcher, ManagerIdentity, MatchPattern, Precedence, ServiceRootIdentity,
     SystemIdentity,
 };
+use mac_address::MacAddress;
 
 use super::*;
 
@@ -22,6 +23,7 @@ fn identity() -> PlatformIdentity {
             id: "BMC_0".to_string(),
             model: Some("OpenBMC".to_string()),
             firmware: Some("1.2.3".to_string()),
+            mac_addresses: vec![bmc_mac()],
         }),
         system: Some(SystemIdentity {
             id: "System_0".to_string(),
@@ -54,6 +56,17 @@ fn vendor(value: &str) -> IdentityMatcher {
     IdentityMatcher::new(
         IdentityField::ServiceRootVendor,
         MatchPattern::Exact(value.to_string()),
+    )
+}
+
+fn bmc_mac() -> MacAddress {
+    "C4:5A:B1:C8:38:0D".parse().expect("fixture MAC parses")
+}
+
+fn this_bmc() -> IdentityMatcher {
+    IdentityMatcher::new(
+        IdentityField::ManagerMacAddress,
+        MatchPattern::MacAddress(bmc_mac()),
     )
 }
 
@@ -181,12 +194,40 @@ fn rule_validation_rejects_malformed_declarations() {
                 rule("duplicate", [model("GB300")]),
                 rule("duplicate", [model("GB300")]),
             ],
-            RuleError::DuplicateId,
+            RuleError::DuplicateId {
+                id: "duplicate".to_string(),
+            },
         ),
         (
             vec![Rule::new("empty", [model("GB300")])],
             RuleError::EmptyRule {
                 id: "empty".to_string(),
+            },
+        ),
+        (
+            invalid(IdentityMatcher::new(
+                IdentityField::SystemModel,
+                MatchPattern::MacAddress(bmc_mac()),
+            )),
+            RuleError::MacAddressPatternMismatch {
+                id: "invalid".to_string(),
+                field: IdentityField::SystemModel,
+            },
+        ),
+        (
+            invalid(IdentityMatcher::new(
+                IdentityField::ManagerMacAddress,
+                MatchPattern::Exact("C4:5A:B1:C8:38:0D".to_string()),
+            )),
+            RuleError::MacAddressPatternMismatch {
+                id: "invalid".to_string(),
+                field: IdentityField::ManagerMacAddress,
+            },
+        ),
+        (
+            invalid(this_bmc()),
+            RuleError::MacAddressInCompiledRule {
+                id: "invalid".to_string(),
             },
         ),
     ];
@@ -201,12 +242,14 @@ fn highest_ranked_rule_selects_the_capability() {
         IdentityField::ServiceRootOemKey,
         MatchPattern::Exact("Nvidia".to_string()),
     );
-    let overrides = r#"
-        [[rules]]
+    let site: Rule = toml::from_str(
+        r#"
         id = "site"
         matchers = [{ field = "system_model", pattern = { kind = "contains", value = "GB300" } }]
         selections = { power = "unsupported" }
-    "#;
+    "#,
+    )
+    .expect("override rule deserializes");
     let cases = [
         (
             "higher precedence wins",
@@ -227,10 +270,23 @@ fn highest_ranked_rule_selects_the_capability() {
             CapabilitySelection::Unsupported,
         ),
         (
-            "TOML overrides outrank built-ins",
-            Rules::with_overrides(vec![rule("vendor", [vendor("NVIDIA")])], overrides),
+            "overrides outrank built-ins",
+            Rules::with_overrides(vec![rule("vendor", [vendor("NVIDIA")])], [site]),
             "site",
             CapabilitySelection::Unsupported,
+        ),
+        (
+            "an override naming the BMC outranks one with more matchers",
+            Rules::with_overrides(
+                Vec::new(),
+                [
+                    Rule::new("site-class", [vendor("NVIDIA"), model("GB300")])
+                        .unsupported([Capability::Power]),
+                    rule("site-this-bmc", [this_bmc()]),
+                ],
+            ),
+            "site-this-bmc",
+            CapabilitySelection::Standard,
         ),
     ];
     for (scenario, rules, winner, selection) in cases {
@@ -251,13 +307,6 @@ fn highest_ranked_rule_selects_the_capability() {
     }
 }
 
-#[test]
-fn malformed_overrides_are_rejected() {
-    assert!(matches!(
-        Rules::with_overrides(vec![rule("vendor", [vendor("NVIDIA")])], "rules = 1"),
-        Err(RuleError::InvalidOverrides(_))
-    ));
-}
 #[test]
 fn capabilities_resolve_independently_across_rules() {
     let rules = Rules::new(vec![

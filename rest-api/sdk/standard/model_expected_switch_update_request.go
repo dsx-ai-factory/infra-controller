@@ -37,7 +37,7 @@ type ExpectedSwitchUpdateRequest struct {
 	NvOsUsername NullableString `json:"nvOsUsername,omitempty"`
 	// NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
 	NvOsPassword NullableString `json:"nvOsPassword,omitempty"`
-	// Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array is rejected because a switch must keep at least one NVOS port. Mark one entry primary to choose eth0. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
+	// Replace the Expected Switch's NVOS ethernet port set, including its optional static IP address. Omission or null preserves the stored ports and address; an empty array is rejected because a switch must keep at least one NVOS port. A supplied list without an ipAddress clears the previous NVOS address. Mark one entry primary to choose eth0. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
 	NvosInterfaces []NvosInterface `json:"nvosInterfaces,omitempty"`
 	// Deprecated and ignored. Omitted, null, empty, and nonempty values all leave stored ports and primary selection unchanged. Use `nvosInterfaces` to replace ports. Supplying both fields is allowed; only `nvosInterfaces` takes effect.
 	// Deprecated
@@ -385,9 +385,9 @@ func (o *ExpectedSwitchUpdateRequest) UnsetNvOsPassword() {
 	o.NvOsPassword.Unset()
 }
 
-// GetNvosInterfaces returns the NvosInterfaces field value if set, zero value otherwise.
+// GetNvosInterfaces returns the NvosInterfaces field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *ExpectedSwitchUpdateRequest) GetNvosInterfaces() []NvosInterface {
-	if o == nil || IsNil(o.NvosInterfaces) {
+	if o == nil {
 		var ret []NvosInterface
 		return ret
 	}
@@ -902,7 +902,7 @@ func (o ExpectedSwitchUpdateRequest) ToMap() (map[string]interface{}, error) {
 	if o.NvOsPassword.IsSet() {
 		toSerialize["nvOsPassword"] = o.NvOsPassword.Get()
 	}
-	if !IsNil(o.NvosInterfaces) {
+	if o.NvosInterfaces != nil {
 		toSerialize["nvosInterfaces"] = o.NvosInterfaces
 	}
 	if !IsNil(o.NvosMacAddresses) {

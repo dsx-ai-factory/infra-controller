@@ -124,6 +124,7 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
         );
         x.perm("AttachNetworkSegmentToVpc", vec![ForgeAdminCLI]);
+        x.perm("AddNetworkSegmentPrefix", vec![ForgeAdminCLI]);
         x.perm(
             "DeleteNetworkSegment",
             vec![ForgeAdminCLI, Machineatron, SiteAgent],
@@ -300,6 +301,7 @@ impl InternalRBACRules {
             ],
         );
         x.perm("FindHostStatesByIds", vec![ForgeAdminCLI, SiteHealthProbe]);
+        x.perm("FindMachineStatesByIds", vec![ForgeAdminCLI]);
         x.perm("FindConnectedDevicesByDpuMachineIds", vec![ForgeAdminCLI]);
         x.perm("FindMachineIdsByBmcIps", vec![ForgeAdminCLI, Flow]);
         x.perm("FindMachineHealthHistories", vec![ForgeAdminCLI, SiteAgent]);
@@ -332,6 +334,7 @@ impl InternalRBACRules {
         x.perm("GetSiteExplorerLastRun", vec![ForgeAdminCLI, Machineatron]);
         x.perm("ClearSiteExplorationError", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("IsBmcInManagedHost", vec![ForgeAdminCLI]);
+        x.perm("FindBmcDriverSelection", vec![ForgeAdminCLI]);
         x.perm("Explore", vec![ForgeAdminCLI, Flow]);
         x.perm("ReExploreEndpoint", vec![ForgeAdminCLI, Flow, SiteAgent]);
         x.perm("RefreshEndpointReport", vec![ForgeAdminCLI, Flow]);
@@ -828,9 +831,14 @@ impl InternalRBACRules {
             vec![ForgeAdminCLI, SiteAgent],
         );
         x.perm("TriggerMachineAttestation", vec![ForgeAdminCLI, SiteAgent]);
-        x.perm("CancelMachineAttestation", vec![ForgeAdminCLI, SiteAgent]);
-        x.perm("ListAttestationMachines", vec![ForgeAdminCLI, SiteAgent]);
-        x.perm("GetAttestationMachine", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("WaiveAttestation", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("FailAttestation", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("ListAttestation", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("GetAttestation", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm(
+            "ListMachineAttestationStatuses",
+            vec![ForgeAdminCLI, SiteAgent],
+        );
         x.perm("CreateAttestationProfile", vec![ForgeAdminCLI]);
         x.perm("UpdateAttestationProfile", vec![ForgeAdminCLI]);
         x.perm("DeleteAttestationProfile", vec![ForgeAdminCLI]);
@@ -1336,6 +1344,46 @@ mod rbac_rule_tests {
         );
     }
 
+    /// Prefix mutation is operator-only even though existing segment creation
+    /// also permits site-agent callers. Missing authentication never grants it.
+    #[test]
+    fn add_network_segment_prefix_operator_permissions() {
+        // Check the whole grant set, including the absence of Machineatron.
+        assert_eq!(
+            INTERNAL_RBAC_RULES.perms["AddNetworkSegmentPrefix"].principals,
+            RuleInfo::new(vec![ForgeAdminCLI]).principals,
+        );
+        check_values(
+            [
+                Check {
+                    scenario: "operator certificate",
+                    input: vec![Principal::ExternalUser(ExternalUserInfo::new(
+                        None,
+                        "nico-cli-client".to_string(),
+                        None,
+                    ))],
+                    expect: true,
+                },
+                // Do not inherit the broader CreateNetworkSegment permission list.
+                Check {
+                    scenario: "site agent cannot append infrastructure prefixes",
+                    input: vec![Principal::SpiffeServiceIdentifier(
+                        "elektra-site-agent".to_string(),
+                    )],
+                    expect: false,
+                },
+                Check {
+                    scenario: "unauthenticated",
+                    input: vec![],
+                    expect: false,
+                },
+            ],
+            |principals| {
+                InternalRBACRules::allowed_from_static("AddNetworkSegmentPrefix", &principals)
+            },
+        );
+    }
+
     #[test]
     fn vpc_allocation_operation_permissions() {
         // Operator certificates map to ExternalUser; its group label is not
@@ -1546,6 +1594,34 @@ mod rbac_rule_tests {
             "SetMaintenance",
             std::slice::from_ref(&probe),
         ));
+    }
+
+    /// Compact machine states belong to the admin CLI, not MaT or the site probe.
+    #[test]
+    fn find_machine_states_by_ids_permissions() {
+        assert_eq!(
+            INTERNAL_RBAC_RULES.perms["FindMachineStatesByIds"].principals,
+            RuleInfo::new(vec![ForgeAdminCLI]).principals,
+        );
+        let service = |name: &str| vec![Principal::SpiffeServiceIdentifier(name.to_string())];
+        let admin_cli = vec![Principal::ExternalUser(ExternalUserInfo::new(
+            None,
+            "nico-cli-client".into(),
+            None,
+        ))];
+        value_scenarios!(
+            run = |principals: Vec<Principal>| {
+                InternalRBACRules::allowed_from_static("FindMachineStatesByIds", &principals)
+            };
+            "operator state reader" {
+                admin_cli => true,
+            }
+            "other services and no principal" {
+                service("machine-a-tron") => false,
+                service("nico-site-health-probe") => false,
+                vec![] => false,
+            }
+        );
     }
 
     /// The compact host read is for operators and the probe only.

@@ -343,6 +343,11 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
             config.deprecated_rack_management_enabled.is_some(),
             None,
         ),
+        (
+            "site_explorer.explore_mode",
+            config.site_explorer.deprecated_explore_mode.is_some(),
+            None,
+        ),
     ]
     .into_iter()
     .filter(|(_, is_set, _)| *is_set)
@@ -414,6 +419,9 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
     config.validate_resource_pool_backends()?;
     config.api_admission_control.validate()?;
     config.validate_admin_lock_admission_permits()?;
+    config
+        .driver_rules()
+        .wrap_err("invalid bmc_driver_rules configuration")?;
     config
         .firmware_global
         .downloads
@@ -759,6 +767,62 @@ request_timeout_seconds = 5"#
         })
     }
 
+    /// Loads BMC driver rule overrides and rejects any the drivers cannot
+    /// serve before activating Core.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn bmc_driver_rules_are_loaded_and_validated() {
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |settings| {
+                    jail.create_file(
+                        "config.toml",
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    ).unwrap();
+                    parse_carbide_config(Path::new("config.toml"), None)
+                        .map(|config| {
+                            config
+                                .bmc_driver_rules
+                                .iter()
+                                .map(|rule| rule.id.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .map_err(|error| format!("{error:#}"))
+                };
+                "BMC driver rule overrides" {
+                    "" => Yields(Vec::new()),
+                    r#"[[bmc_driver_rules]]
+id = "site-xcc3"
+matchers = [{ field = "manager_model", pattern = { kind = "exact", value = "XCC3" } }]
+selections = { boot_order = "lenovo-xcc3-boot-order" }"#
+                        => Yields(vec!["site-xcc3".to_string()]),
+                    r#"[[bmc_driver_rules]]
+id = "site-one-bmc"
+matchers = [{ field = "manager_mac_address", pattern = { kind = "mac_address", value = "c4-5a-b1-c8-38-0d" } }]
+selections = { power = "standard" }"#
+                        => Yields(vec!["site-one-bmc".to_string()]),
+                    r#"[[bmc_driver_rules]]
+id = "site-one-bmc"
+matchers = [{ field = "manager_mac_address", pattern = { kind = "mac_address", value = "not-a-mac" } }]
+selections = { power = "standard" }"#
+                        => FailsWith(
+                            "failed to load configuration files: invalid MAC address not-a-mac: invalid length".to_string(),
+                        ),
+                    // A misspelled key inside a rule follows the same unknown-field policy.
+                    "[[bmc_driver_rules]]\nid = \"site\"\nselections = { power = \"standard\" }\nquirk = []"
+                        => Yields(vec!["site".to_string()]),
+                    "deny_unknown_fields = true\n[[bmc_driver_rules]]\nid = \"site\"\nselections = { power = \"standard\" }\nquirk = []"
+                        => FailsWith("failed to load configuration files: unknown configuration fields: bmc_driver_rules.0.quirk (configuration)".to_string()),
+                    "[[bmc_driver_rules]]\nid = \"site\"\nselections = { power = \"no-such-driver\" }"
+                        => FailsWith("invalid bmc_driver_rules configuration: unknown power driver no-such-driver".to_string()),
+                    "[[bmc_driver_rules]]\nid = \"lenovo-xcc3\"\nselections = { power = \"standard\" }"
+                        => FailsWith("invalid bmc_driver_rules configuration: rule id lenovo-xcc3 is used more than once".to_string()),
+                }
+            );
+            Ok(())
+        })
+    }
+
     /// Validates the NIC cache budget through the production loader, including
     /// existing configurations that omit the new setting.
     #[test]
@@ -828,6 +892,14 @@ request_timeout_seconds = 5"#
     #[allow(clippy::result_large_err)]
     fn route_targets_are_validated_during_startup_loading() {
         figment::Jail::expect_with(|jail| {
+            // Put 257 valid targets in one prefix rule to exercise configured-pair admission.
+            let oversized_targets = (0..=256)
+                .map(|vni| format!("{{ asn = 64512, vni = {vni} }}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let oversized_conditional_exports = format!(
+                "[fnn.routing_profiles.OVERSIZED]\nroute_targets_on_exports_by_prefix = [{{ prefix = \"0.0.0.0/0\", route_targets = [{oversized_targets}] }}]"
+            );
             scenarios!(
                 run = |(name, settings)| {
                     // Parse each invalid profile through the same deferred loader used at startup.
@@ -860,6 +932,39 @@ route_target_imports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
             route_targets_on_exports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
                     ) => FailsWith(
                         "fnn.routing_profiles.INVALID.route_targets_on_exports[0] is invalid: route target cannot specify both vni and vni_self".to_string(),
+                    ),
+                    // Admin conditional rules must reject ineffective target lists at startup.
+                    (
+                        "admin-conditional-exports",
+                        r#"[fnn.admin_vpc]
+enabled = true
+[fnn.admin_vpc.routing_profile]
+route_targets_on_exports_by_prefix = [{ prefix = "::/0", route_targets = [] }]"#,
+                    ) => FailsWith(
+                        "fnn.admin_vpc.routing_profile.route_targets_on_exports_by_prefix is invalid: route_targets must contain at least one route target".to_string(),
+                    ),
+                    // Named profiles must validate the match mode as well as nested targets.
+                    (
+                        "named-conditional-exports",
+                        r#"[fnn.routing_profiles.INVALID]
+            route_targets_on_exports_by_prefix = [{ prefix = "0.0.0.0/0", match_type = "exact", max_prefix_length = 0, route_targets = [{ asn = 64512, vni = 100 }] }]"#,
+                    ) => FailsWith(
+                        "fnn.routing_profiles.INVALID.route_targets_on_exports_by_prefix is invalid: max_prefix_length is only accepted with match_type = le".to_string(),
+                    ),
+                    // A valid prefix rule must not bypass semantic validation of its nested target.
+                    (
+                        "named-conditional-target",
+                        r#"[fnn.routing_profiles.INVALID]
+            route_targets_on_exports_by_prefix = [{ prefix = "0.0.0.0/0", match_type = "exact", route_targets = [{ asn = 429000000, vni = 0, vni_self = true }] }]"#,
+                    ) => FailsWith(
+                        "fnn.routing_profiles.INVALID.route_targets_on_exports_by_prefix[0].route_targets[0] is invalid: route target cannot specify both vni and vni_self".to_string(),
+                    ),
+                    // Startup must count targets within a rule rather than only prefix entries.
+                    (
+                        "named-conditional-pair-limit",
+                        oversized_conditional_exports.as_str(),
+                    ) => FailsWith(
+                        "fnn.routing_profiles.OVERSIZED.route_targets_on_exports_by_prefix is invalid: route_targets_on_exports_by_prefix exceeds 256 prefix/route-target pairs".to_string(),
                     ),
                 }
             );
@@ -1000,10 +1105,11 @@ route_target_imports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
 
     #[test]
     #[allow(clippy::result_large_err)]
-    fn legacy_rack_management_key_is_accepted_warned_and_omitted() {
+    fn legacy_keys_without_a_replacement_are_accepted_warned_and_omitted() {
         figment::Jail::expect_with(|jail| {
             let config_text = format!(
-                "{}\ndeny_unknown_fields = true\nrack_management_enabled = true\n",
+                "{}\ndeny_unknown_fields = true\nrack_management_enabled = true\n\
+                 [site_explorer]\nexplore_mode = \"libredfish\"\n",
                 include_str!("test_data/min_config.toml")
             );
             jail.create_file("config.toml", &config_text)?;
@@ -1017,22 +1123,32 @@ route_target_imports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
             .expect("strict configuration with the deprecated key must load");
 
             assert_eq!(config.deprecated_rack_management_enabled, Some(true));
+            assert_eq!(
+                config.site_explorer.deprecated_explore_mode.as_deref(),
+                Some("libredfish")
+            );
             let serialized =
                 toml::to_string(config.as_ref()).expect("loaded configuration must serialize");
             assert!(!serialized.contains("rack_management_enabled"));
+            assert!(!serialized.contains("explore_mode"));
 
-            let warning = std::iter::from_fn(|| logs.try_recv().ok())
-                .find(|line| line.message == "Ignoring deprecated configuration key")
-                .expect("deprecated key warning");
-            assert_eq!(warning.level, "WARN");
+            let warnings = std::iter::from_fn(|| logs.try_recv().ok())
+                .filter(|line| line.message == "Ignoring deprecated configuration key")
+                .collect::<Vec<_>>();
             assert_eq!(
-                warning.fields.get("config_key").map(String::as_str),
-                Some("rack_management_enabled")
+                warnings
+                    .iter()
+                    .map(|line| line.fields.get("config_key").map(String::as_str))
+                    .collect::<Vec<_>>(),
+                vec![
+                    Some("rack_management_enabled"),
+                    Some("site_explorer.explore_mode"),
+                ]
             );
-            assert_eq!(
-                warning.fields.get("config_source").map(String::as_str),
-                Some("config.toml")
-            );
+            assert!(warnings.iter().all(|line| {
+                line.level == "WARN"
+                    && line.fields.get("config_source").map(String::as_str) == Some("config.toml")
+            }));
             Ok(())
         })
     }
