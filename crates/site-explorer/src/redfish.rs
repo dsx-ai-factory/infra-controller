@@ -384,9 +384,7 @@ impl RedfishClient {
                 complete
             })
             .await
-            .map_err(|err| EndpointExplorationError::Other {
-                details: format!("Cannot Redfish service root: {err}"),
-            })?;
+            .map_err(map_service_root_error)?;
 
         let mut report = bmc_explorer::nv_generate_exploration_report(
             service_root,
@@ -874,6 +872,31 @@ fn record_evaluated_boot_interface(
     }
 }
 
+/// Maps service-root authentication failures to `Unauthorized` so established-endpoint
+/// exploration can run stale-credential recovery.
+///
+/// `/redfish/v1` is anonymous on a BMC, so a direct-mode 401 here is rare. Through
+/// nico-bmc-proxy it carries a rejected stored credential and must remain recognizable.
+fn map_service_root_error(err: carbide_redfish::nv_redfish::Error) -> EndpointExplorationError {
+    use carbide_redfish::nv_redfish::{BmcError, Error};
+
+    match err {
+        Error::Bmc(BmcError::InvalidResponse { url, status, text })
+            if status == http::StatusCode::UNAUTHORIZED
+                || status == http::StatusCode::FORBIDDEN =>
+        {
+            EndpointExplorationError::Unauthorized {
+                details: format!("HTTP {status} at service root ({url})"),
+                response_body: Some(text),
+                response_code: Some(status.as_u16()),
+            }
+        }
+        err => EndpointExplorationError::Other {
+            details: format!("Cannot Redfish service root: {err}"),
+        },
+    }
+}
+
 fn map_nv_redfish_explore_error(
     err: bmc_explorer::Error<carbide_redfish::nv_redfish::RedfishBmc>,
 ) -> EndpointExplorationError {
@@ -966,7 +989,7 @@ mod tests {
 
     use arc_swap::ArcSwap;
     use carbide_redfish::libredfish::test_support::RedfishSim;
-    use carbide_redfish::nv_redfish::NvRedfishClientPool;
+    use carbide_redfish::nv_redfish::{BmcError, Error as NvError, NvRedfishClientPool};
     use carbide_secrets::credentials::Credentials;
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, check_cases_async, value_scenarios};
@@ -976,8 +999,8 @@ mod tests {
 
     use super::{
         BmcAccess, BmcCredentialType, BootInterfaceTarget, CredentialKey, EndpointExplorationError,
-        EstablishedBmc, MachineSetupStatus, ProxiedPools, RedfishClient, nv_bmc_explore_config,
-        record_evaluated_boot_interface,
+        EstablishedBmc, MachineSetupStatus, ProxiedPools, RedfishClient, map_service_root_error,
+        nv_bmc_explore_config, record_evaluated_boot_interface,
     };
 
     fn test_addr() -> SocketAddr {
@@ -988,6 +1011,85 @@ mod tests {
         let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
         let nv_pool = Arc::new(NvRedfishClientPool::new(proxy_address));
         RedfishClient::new(sim, nv_pool, None)
+    }
+
+    /// Verifies only service-root authentication responses become `Unauthorized`,
+    /// preserving all other nv-redfish failures as the existing generic error.
+    #[test]
+    fn service_root_errors_preserve_credential_rejections() {
+        struct ServiceRootErrorCase {
+            scenario: &'static str,
+            error: NvError,
+            expected_unauthorized_code: Option<u16>,
+        }
+
+        let url = || {
+            "https://192.0.2.1/redfish/v1"
+                .parse()
+                .expect("valid service-root URL")
+        };
+        let cases = [
+            // HTTP 401 directly proves that the credential used for the service root was rejected.
+            ServiceRootErrorCase {
+                scenario: "unauthorized service root",
+                error: NvError::Bmc(BmcError::InvalidResponse {
+                    url: url(),
+                    status: http::StatusCode::UNAUTHORIZED,
+                    text: "unauthorized".to_string(),
+                }),
+                expected_unauthorized_code: Some(401),
+            },
+            // HTTP 403 is the other authentication refusal already recognized by exploration.
+            ServiceRootErrorCase {
+                scenario: "forbidden service root",
+                error: NvError::Bmc(BmcError::InvalidResponse {
+                    url: url(),
+                    status: http::StatusCode::FORBIDDEN,
+                    text: "forbidden".to_string(),
+                }),
+                expected_unauthorized_code: Some(403),
+            },
+            // An upstream 502 says the service root failed, not that the stored credential is bad.
+            ServiceRootErrorCase {
+                scenario: "service-root gateway failure",
+                error: NvError::Bmc(BmcError::InvalidResponse {
+                    url: url(),
+                    status: http::StatusCode::BAD_GATEWAY,
+                    text: "gateway failure".to_string(),
+                }),
+                expected_unauthorized_code: None,
+            },
+            // Invalid JSON remains a generic service-root failure with no authentication meaning.
+            ServiceRootErrorCase {
+                scenario: "service-root JSON failure",
+                error: NvError::Json(
+                    serde_json::from_str::<bool>("invalid").expect_err("JSON must be invalid"),
+                ),
+                expected_unauthorized_code: None,
+            },
+        ];
+
+        for case in cases {
+            // Map through the production helper and inspect the endpoint-level classification.
+            let mapped = map_service_root_error(case.error);
+
+            // Only the two authentication statuses may enter stale-credential recovery.
+            match (mapped, case.expected_unauthorized_code) {
+                (
+                    EndpointExplorationError::Unauthorized { response_code, .. },
+                    Some(expected_code),
+                ) => {
+                    assert_eq!(response_code, Some(expected_code), "{}", case.scenario);
+                }
+                (EndpointExplorationError::Other { .. }, None) => {}
+                (other, expected) => {
+                    panic!(
+                        "{}: expected Unauthorized code {expected:?}, got {other:?}",
+                        case.scenario
+                    );
+                }
+            }
+        }
     }
 
     #[test]

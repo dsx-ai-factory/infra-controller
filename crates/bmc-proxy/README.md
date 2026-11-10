@@ -482,9 +482,11 @@ sets `max_in_flight` or has a breaker, or `max_in_flight_per_bmc` is set;
 otherwise it is sent at once. The proxy looks up the BMC's
 credentials first, so a request for an address nico-api has no BMC
 credentials for gets `502` without taking a slot or a place in a queue. A
-request holds its slot until the proxy has passed the whole response on to
-the caller, or the exchange has failed; a replay with fresh credentials keeps
-the same slot. From the moment it gets the slot, it holds it no longer than
+credential lookup that nico-api marks as rejected by the BMC instead gets
+`401`, allowing the caller to handle stale credentials as it would in direct
+mode. A request holds its slot until the proxy has passed the whole response
+on to the caller, or the exchange has failed; a replay with fresh credentials
+keeps the same slot. From the moment it gets the slot, it holds it no longer than
 its exchange with the BMC can take, though: twice its class's budget, for a
 first attempt and a replay, or its class's budget and its own for a streamed
 upload. Past that, the slot goes to the next waiting request, so a caller
@@ -718,7 +720,8 @@ Serials pass unchanged after quote decoding and match discovered product,
 board or chassis serials exactly.
 
 Missing, malformed or unmatched targets return `400`; nico-api lookup failures
-return `502`. Malformed quoting reports `malformed quoted value in forwarded header`.
+return `502`, except a BMC credential rejection marked by nico-api returns `401`.
+Malformed quoting reports `malformed quoted value in forwarded header`.
 Non-text header values are skipped.
 
 The proxy performs authentication, credential lookup, and backend authentication.

@@ -29,7 +29,7 @@ use carbide_uuid::switch::SwitchId;
 use mac_address::MacAddress;
 use moka::future::Cache as MokaCache;
 use rpc::carbide_api_client::CarbideApiClient;
-use rpc::forge;
+use rpc::{BMC_CREDENTIAL_REJECTED_METADATA_KEY, forge};
 
 use crate::metrics::SwitchProbeDenied;
 use crate::proxy::BmcProxyError;
@@ -286,12 +286,34 @@ async fn bmc_credentials(
     mac_address: MacAddress,
     api_client: &CarbideApiClient,
 ) -> Result<BmcCredentials, BmcProxyError> {
-    api_client
+    let response = api_client
         .get_bmc_credentials(forge::GetBmcCredentialsRequest {
             mac_addr: mac_address.to_string(),
         })
-        .await
-        .map_err(|e| BmcProxyError::Api(e.to_string()))?
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(status) => {
+            // Read the structured marker before formatting the status because
+            // tonic's Display implementation does not include metadata.
+            if let Some(marker) = status.metadata().get(BMC_CREDENTIAL_REJECTED_METADATA_KEY) {
+                if let Some(http_status) = marker
+                    .to_str()
+                    .ok()
+                    .and_then(|value| value.parse::<u16>().ok())
+                {
+                    return Err(BmcProxyError::BmcCredentialRejected { ip, http_status });
+                }
+                tracing::warn!(
+                    bmc_ip_address = %ip,
+                    metadata_value = ?marker,
+                    "nico-api returned an invalid BMC credential rejection status; treating it as a generic API failure"
+                );
+            }
+            return Err(BmcProxyError::Api(status.to_string()));
+        }
+    };
+    response
         .credentials
         .ok_or(BmcProxyError::NoCredentials(ip))?
         .try_into()
