@@ -18,8 +18,8 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::str::FromStr;
 
+use ::rpc::carbide_tls_client::{self, ApiConfig, CarbideClientConfig, CarbideClientT};
 use ::rpc::forge::{self as rpc};
-use ::rpc::forge_tls_client::{self, ApiConfig, ForgeClientConfig, ForgeClientT};
 use carbide_uuid::machine::MachineId;
 use forge_tls::client_config::ClientCert;
 use health_report::{
@@ -95,8 +95,8 @@ pub(crate) async fn create_forge_client(
     client_cert: String,
     client_key: String,
     api_url: String,
-) -> Result<ForgeClientT, ReportingError> {
-    let client_config = ForgeClientConfig::new(
+) -> Result<CarbideClientT, ReportingError> {
+    let client_config = CarbideClientConfig::new(
         root_ca,
         Some(ClientCert {
             cert_path: client_cert,
@@ -106,14 +106,14 @@ pub(crate) async fn create_forge_client(
 
     let api_config = ApiConfig::new(&api_url, &client_config);
 
-    let client = forge_tls_client::ForgeTlsClient::retry_build(&api_config)
+    let client = carbide_tls_client::CarbideTlsClient::retry_build(&api_config)
         .await
         .map_err(|err| ReportingError::ApiConnectFailed(err.to_string()))?;
     Ok(client)
 }
 
 async fn send_one_report(
-    client: &mut ForgeClientT,
+    client: &mut CarbideClientT,
     machine_id: &mut String,
     report: &HealthReport,
 ) -> Result<(), ReportingError> {
@@ -140,7 +140,7 @@ async fn send_one_report(
 }
 
 pub(crate) async fn send_health_alerts(
-    client: &mut ForgeClientT,
+    client: &mut CarbideClientT,
     events: &VecDeque<Event>,
     pipeline: &str,
     file_name: &str,

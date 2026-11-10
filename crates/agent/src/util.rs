@@ -30,10 +30,10 @@ use hickory_resolver::proto::rr::Name;
 use hyper::service::Service;
 use rand::RngExt;
 use resolv_conf::Config;
+use rpc::carbide_tls_client::CarbideClientT;
 use rpc::forge::{
     InstancePhoneHomeLastContactRequest, ManagedHostNetworkConfigRequest, VersionRequest,
 };
-use rpc::forge_tls_client::ForgeClientT;
 use rpc::{Instance, Timestamp, forge_resolver};
 
 use crate::command_line::AgentPlatformType;
@@ -261,7 +261,7 @@ pub fn read_saved_nameservers() -> Result<Vec<IpAddr>, eyre::Report> {
 
 // get_instance finds the instance associated with this dpu
 pub async fn get_instance(
-    client: &mut ForgeClientT,
+    client: &mut CarbideClientT,
     dpu_machine_id: &MachineId,
 ) -> Result<Option<Instance>, eyre::Error> {
     let request = tonic::Request::new(*dpu_machine_id);
@@ -279,7 +279,7 @@ pub async fn get_instance(
     Ok(instances.first().cloned())
 }
 
-pub async fn get_sitename(client: &mut ForgeClientT) -> Result<Option<String>, eyre::Error> {
+pub async fn get_sitename(client: &mut CarbideClientT) -> Result<Option<String>, eyre::Error> {
     let request = tonic::Request::new(VersionRequest {
         display_config: true,
     });
@@ -304,7 +304,7 @@ pub async fn get_sitename(client: &mut ForgeClientT) -> Result<Option<String>, e
 
 // Use grpc call GetPeriodicDpuConfig and return the retrieved info
 pub async fn get_periodic_dpu_config(
-    client: &mut ForgeClientT,
+    client: &mut CarbideClientT,
     dpu_machine_id: &MachineId,
 ) -> Result<rpc::forge::ManagedHostNetworkConfigResponse, eyre::Error> {
     let request = tonic::Request::new(ManagedHostNetworkConfigRequest {
@@ -326,7 +326,7 @@ pub async fn get_periodic_dpu_config(
 
 // phone_home returns the timestamp returned from Carbide as a string
 pub async fn phone_home(
-    client: &mut ForgeClientT,
+    client: &mut CarbideClientT,
     dpu_machine_id: &MachineId,
 ) -> Result<Timestamp, eyre::Error> {
     let Some(instance) = get_instance(client, dpu_machine_id).await? else {
