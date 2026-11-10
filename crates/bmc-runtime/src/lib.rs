@@ -15,8 +15,9 @@
  * limitations under the License.
  */
 
-//! Runtime-owned BMC endpoint wiring over a resolved driver selection, and
-//! the status of asynchronous work drivers hand back.
+//! Runtime-owned BMC endpoint wiring over a resolved driver selection, the
+//! platform identity that selection matches on, projected from a stored
+//! exploration report, and the status of asynchronous work drivers hand back.
 
 mod capabilities;
 mod connection;
