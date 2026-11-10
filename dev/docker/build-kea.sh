@@ -41,8 +41,12 @@ for entry in $libraries; do
     # Runtime must use the matching ISC dependencies, not the Meson build tree.
     patchelf --remove-rpath "build/src/lib/$entry"
     # Keep every exported strong symbol from both pinned ISC libraries.
-    nm -D --defined-only "$build_dir/package/usr/lib/$multiarch/$library" | awk '$2 ~ /^[TDBR]$/ {print $3}' | LC_ALL=C sort > "$build_dir/stock.symbols"
-    nm -D --defined-only "build/src/lib/$entry" | awk '$2 ~ /^[TDBR]$/ {print $3}' | LC_ALL=C sort > "$build_dir/patched.symbols"
+    nm -D --defined-only "$build_dir/package/usr/lib/$multiarch/$library" > "$build_dir/stock.nm"
+    nm -D --defined-only "build/src/lib/$entry" > "$build_dir/patched.nm"
+    awk '$2 ~ /^[TDBR]$/ {print $3}' "$build_dir/stock.nm" | LC_ALL=C sort > "$build_dir/stock.symbols"
+    awk '$2 ~ /^[TDBR]$/ {print $3}' "$build_dir/patched.nm" | LC_ALL=C sort > "$build_dir/patched.symbols"
+    test -s "$build_dir/stock.symbols"
+    test -s "$build_dir/patched.symbols"
     LC_ALL=C comm -23 "$build_dir/stock.symbols" "$build_dir/patched.symbols" > "$build_dir/missing.symbols"
     test ! -s "$build_dir/missing.symbols" || { cat "$build_dir/missing.symbols" >&2; exit 1; }
 done
