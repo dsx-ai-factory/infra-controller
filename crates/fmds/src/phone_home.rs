@@ -154,12 +154,12 @@ async fn attempt_phone_home(state: &Arc<FmdsState>) -> Result<PhoneHomeSuccess, 
             source: eyre!("rate limit exceeded for phone_home; {}\n", e),
         })?;
 
-    let forge_client_config = state
-        .forge_client_config
+    let carbide_client_config = state
+        .carbide_client_config
         .as_ref()
         .ok_or_else(|| eyre!("phone_home not configured: no forge client config"))?;
 
-    let mut client = create_forge_client(&state.forge_api, forge_client_config).await?;
+    let mut client = create_forge_client(&state.forge_api, carbide_client_config).await?;
 
     let machine_id = state
         .machine_id

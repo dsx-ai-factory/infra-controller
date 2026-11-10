@@ -1552,7 +1552,7 @@ fn mock_core(state: Arc<Mutex<State>>) -> Router {
             ::rpc::service_path!("FindInterfaces"),
             post(handle_find_interfaces),
         )
-        // ForgeApiClient needs a working Version route for connection retrying
+        // CarbideApiClient needs a working Version route for connection retrying
         .route(::rpc::service_path!("Version"), post(handle_version))
         .fallback(handler)
         .with_state(state)

@@ -535,7 +535,7 @@ enum DeviceFirmwareProgress {
         failed: usize,
     },
     Failed {
-        failed: usize,
+        failed_device_ids: Vec<String>,
         total: usize,
     },
     Completed {
@@ -994,19 +994,23 @@ fn power_shelf_firmware_outcome(
     }
 }
 
-fn summarize_firmware_outcomes(outcomes: &[DeviceFirmwareOutcome]) -> DeviceFirmwareProgress {
+fn summarize_firmware_outcomes(
+    outcomes: &[(String, DeviceFirmwareOutcome)],
+) -> DeviceFirmwareProgress {
     let total = outcomes.len();
     let completed = outcomes
         .iter()
-        .filter(|outcome| matches!(outcome, DeviceFirmwareOutcome::Completed))
+        .filter(|(_, outcome)| matches!(outcome, DeviceFirmwareOutcome::Completed))
         .count();
-    let failed = outcomes
+    let mut failed_device_ids = outcomes
         .iter()
-        .filter(|outcome| matches!(outcome, DeviceFirmwareOutcome::Failed))
-        .count();
+        .filter(|(_, outcome)| matches!(outcome, DeviceFirmwareOutcome::Failed))
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    let failed = failed_device_ids.len();
     let pending = outcomes
         .iter()
-        .filter(|outcome| matches!(outcome, DeviceFirmwareOutcome::Waiting))
+        .filter(|(_, outcome)| matches!(outcome, DeviceFirmwareOutcome::Waiting))
         .count();
     if pending > 0 {
         return DeviceFirmwareProgress::Waiting {
@@ -1017,9 +1021,30 @@ fn summarize_firmware_outcomes(outcomes: &[DeviceFirmwareOutcome]) -> DeviceFirm
         };
     }
     if failed > 0 {
-        return DeviceFirmwareProgress::Failed { failed, total };
+        failed_device_ids.sort();
+        return DeviceFirmwareProgress::Failed {
+            failed_device_ids,
+            total,
+        };
     }
     DeviceFirmwareProgress::Completed { completed, total }
+}
+
+/// Retains the MAC identity for older NVOS job entries without a managed ID.
+fn failed_nvos_switch_ids(job: &model::rack::NvosUpdateJob) -> Vec<String> {
+    let mut ids = job
+        .all_switches()
+        .filter(|switch| switch.status == "failed")
+        .map(|switch| {
+            if switch.node_id.is_empty() {
+                format!("MAC {}", switch.mac)
+            } else {
+                switch.node_id.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids
 }
 
 async fn load_scoped_switches(
@@ -1128,7 +1153,7 @@ async fn evaluate_firmware_progress_from_devices(
         if outcome == DeviceFirmwareOutcome::Waiting {
             pending_device_ids.push(machine.id.to_string());
         }
-        outcomes.push(outcome);
+        outcomes.push((machine.id.to_string(), outcome));
     }
     let mut submitted_switches = HashSet::new();
     let mut submitted_shelves = HashSet::new();
@@ -1155,7 +1180,7 @@ async fn evaluate_firmware_progress_from_devices(
         if outcome == DeviceFirmwareOutcome::Waiting {
             pending_device_ids.push(switch.id.to_string());
         }
-        outcomes.push(outcome);
+        outcomes.push((switch.id.to_string(), outcome));
     }
     for power_shelf in &power_shelves {
         if ingestion_job.is_some() && !submitted_shelves.contains(&power_shelf.id) {
@@ -1165,7 +1190,7 @@ async fn evaluate_firmware_progress_from_devices(
         if outcome == DeviceFirmwareOutcome::Waiting {
             pending_device_ids.push(power_shelf.id.to_string());
         }
-        outcomes.push(outcome);
+        outcomes.push((power_shelf.id.to_string(), outcome));
     }
     pending_device_ids.sort();
     Ok((summarize_firmware_outcomes(&outcomes), pending_device_ids))
@@ -3075,7 +3100,10 @@ pub async fn handle_maintenance(
                         ))
                         .with_txn(txn))
                     }
-                    DeviceFirmwareProgress::Failed { failed, total } => {
+                    DeviceFirmwareProgress::Failed {
+                        failed_device_ids,
+                        total,
+                    } => {
                         let should_cleanup_token = explicit_nvos_config_json(scope).is_some();
                         let now = chrono::Utc::now();
                         job.status = Some(FirmwareProgressState::Failed);
@@ -3083,8 +3111,10 @@ pub async fn handle_maintenance(
                             job.completed_at = Some(now);
                         }
                         let cause = format!(
-                            "firmware upgrade failed: {}/{} devices failed",
-                            failed, total
+                            "firmware upgrade failed: {}/{} devices failed; failed devices: [{}]",
+                            failed_device_ids.len(),
+                            total,
+                            failed_device_ids.join(", ")
                         );
 
                         // Persist the device status updates already accumulated in this
@@ -3624,10 +3654,8 @@ pub async fn handle_maintenance(
                     .all_switches()
                     .filter(|switch| switch.status == "completed")
                     .count();
-                let failed = job
-                    .all_switches()
-                    .filter(|switch| switch.status == "failed")
-                    .count();
+                let failed_switch_ids = failed_nvos_switch_ids(&job);
+                let failed = failed_switch_ids.len();
 
                 let password_updates_completed = job
                     .all_switches()
@@ -3653,7 +3681,12 @@ pub async fn handle_maintenance(
                         state.config.maintenance_requested = None;
                         db_rack::update(txn.as_mut(), id, &state.config).await?;
                     }
-                    let cause = format!("NVOS update failed: {}/{} switches failed", failed, total);
+                    let cause = format!(
+                        "NVOS update failed: {}/{} switches failed; failed switches: [{}]",
+                        failed,
+                        total,
+                        failed_switch_ids.join(", ")
+                    );
                     tracing::warn!(rack_id = %id, %cause, "Rack maintenance failed, transitioning to Error");
                     return Ok(StateHandlerOutcome::transition(RackState::Error {
                         certificate_failure: None,
@@ -3849,9 +3882,9 @@ mod tests {
 
     use super::{
         DeviceFirmwareOutcome, DeviceFirmwareProgress, compute_reset_start,
-        delete_rack_maintenance_access_token, explicit_nvos_config_json, filter_inventory_by_scope,
-        first_maintenance_state, next_state_after_firmware, next_state_after_nvos,
-        next_state_if_activity_not_requested, profile_hardware_type_or_any,
+        delete_rack_maintenance_access_token, explicit_nvos_config_json, failed_nvos_switch_ids,
+        filter_inventory_by_scope, first_maintenance_state, next_state_after_firmware,
+        next_state_after_nvos, next_state_if_activity_not_requested, profile_hardware_type_or_any,
         summarize_firmware_outcomes, validate_complete_nmx_fabric_inventory,
     };
 
@@ -4142,15 +4175,43 @@ mod tests {
     }
 
     #[test]
+    fn nvos_failure_identities_preserve_legacy_mac_and_exclude_successful_peers() {
+        let job = model::rack::NvosUpdateJob {
+            switches: vec![
+                model::rack::NvosUpdateSwitchStatus {
+                    node_id: "switch-b".into(),
+                    status: "failed".into(),
+                    ..Default::default()
+                },
+                model::rack::NvosUpdateSwitchStatus {
+                    mac: "00:11:22:33:44:55".into(),
+                    status: "failed".into(),
+                    ..Default::default()
+                },
+                model::rack::NvosUpdateSwitchStatus {
+                    node_id: "switch-a".into(),
+                    status: "completed".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            failed_nvos_switch_ids(&job),
+            vec!["MAC 00:11:22:33:44:55", "switch-b"]
+        );
+    }
+
+    #[test]
     fn test_summarize_firmware_outcomes_from_controller_states() {
         check_values(
             [
                 Check {
                     scenario: "any waiting keeps rack waiting",
                     input: vec![
-                        DeviceFirmwareOutcome::Completed,
-                        DeviceFirmwareOutcome::Waiting,
-                        DeviceFirmwareOutcome::Failed,
+                        ("machine-a".into(), DeviceFirmwareOutcome::Completed),
+                        ("switch-a".into(), DeviceFirmwareOutcome::Waiting),
+                        ("shelf-a".into(), DeviceFirmwareOutcome::Failed),
                     ],
                     expect: DeviceFirmwareProgress::Waiting {
                         pending: 1,
@@ -4162,8 +4223,8 @@ mod tests {
                 Check {
                     scenario: "all completed advances",
                     input: vec![
-                        DeviceFirmwareOutcome::Completed,
-                        DeviceFirmwareOutcome::Completed,
+                        ("machine-a".into(), DeviceFirmwareOutcome::Completed),
+                        ("switch-a".into(), DeviceFirmwareOutcome::Completed),
                     ],
                     expect: DeviceFirmwareProgress::Completed {
                         completed: 2,
@@ -4171,14 +4232,15 @@ mod tests {
                     },
                 },
                 Check {
-                    scenario: "any failed without waiting errors",
+                    scenario: "terminal failures retain sorted identities without completed peers",
                     input: vec![
-                        DeviceFirmwareOutcome::Completed,
-                        DeviceFirmwareOutcome::Failed,
+                        ("machine-a".into(), DeviceFirmwareOutcome::Completed),
+                        ("switch-b".into(), DeviceFirmwareOutcome::Failed),
+                        ("shelf-a".into(), DeviceFirmwareOutcome::Failed),
                     ],
                     expect: DeviceFirmwareProgress::Failed {
-                        failed: 1,
-                        total: 2,
+                        failed_device_ids: vec!["shelf-a".into(), "switch-b".into()],
+                        total: 3,
                     },
                 },
             ],

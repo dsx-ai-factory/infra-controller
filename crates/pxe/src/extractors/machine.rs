@@ -17,9 +17,9 @@
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use forge_tls::client_config::ClientCert;
+use rpc::carbide_tls_client;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use rpc::forge::CloudInitInstructionsRequest;
-use rpc::forge_tls_client;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 
 use crate::common::{AppState, Machine};
 use crate::rpc_error::PxeRequestError;
@@ -31,7 +31,7 @@ impl FromRequestParts<AppState> for Machine {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let client_config = ForgeClientConfig::new(
+        let client_config = CarbideClientConfig::new(
             state.runtime_config.forge_root_ca_path.clone(),
             Some(ClientCert {
                 cert_path: state.runtime_config.server_cert_path.clone(),
@@ -40,7 +40,7 @@ impl FromRequestParts<AppState> for Machine {
         );
         let api_config = ApiConfig::new(&state.runtime_config.internal_api_url, &client_config);
 
-        let mut client = forge_tls_client::ForgeTlsClient::retry_build(&api_config)
+        let mut client = carbide_tls_client::CarbideTlsClient::retry_build(&api_config)
             .await
             .map_err(|err| {
                 tracing::error!(

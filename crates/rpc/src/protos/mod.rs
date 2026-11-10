@@ -237,8 +237,8 @@ pub mod firmware_supervisor {
 
 #[allow(clippy::all, deprecated)]
 #[rustfmt::skip]
-pub mod forge_api_client {
-    include!(concat!(env!("OUT_DIR"), "/forge_api_client.rs"));
+pub mod carbide_api_client {
+    include!(concat!(env!("OUT_DIR"), "/carbide_api_client.rs"));
 }
 
 #[allow(clippy::all)]

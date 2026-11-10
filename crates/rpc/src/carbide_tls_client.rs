@@ -38,9 +38,9 @@ use tryhard::backoff_strategies::FixedBackoff;
 use tryhard::{NoOnRetry, RetryFutureConfig};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
+use crate::carbide_tls_client::ConfigurationError::CouldNotReadRootCa;
 use crate::forge::VersionRequest;
 use crate::forge_resolver::resolver::ResolverError;
-use crate::forge_tls_client::ConfigurationError::CouldNotReadRootCa;
 use crate::node_jwt::{BearerAuthService, NodeJwtMinter, NodeTokenProvider};
 use crate::protos::forge::forge_client::ForgeClient;
 use crate::protos::nmx_c::nmx_controller_client::NmxControllerClient;
@@ -66,11 +66,11 @@ fn format_error_chain<E: std::error::Error + ?Sized>(err: &E) -> String {
 }
 
 /// Concrete, non-trait-object wrapper around a transport-level `tower::BoxError` (which includes
-/// a request having hit `REQUEST_TIMEOUT`). `ForgeClientT`/`NmxCClientT` carry this as their
+/// a request having hit `REQUEST_TIMEOUT`). `CarbideClientT`/`NmxCClientT` carry this as their
 /// `BoxCloneService` error type instead of a bare `tower::BoxError` (`Box<dyn Error + Send +
 /// Sync>`) alias, because that raw trait-object alias trips a known rustc/async_trait HRTB
 /// inference bug ("implementation of `From` is not general enough", rust-lang/rust#102211) in
-/// every `#[async_trait]` fn that returns `Result<ForgeClientT, _>` (e.g.
+/// every `#[async_trait]` fn that returns `Result<CarbideClientT, _>` (e.g.
 /// `ConnectionProvider::provide_connection`). A concrete newtype sidesteps it.
 #[derive(Debug)]
 pub struct TransportError(tower::BoxError);
@@ -102,7 +102,7 @@ pub type NmxCClientT = NmxControllerClient<
     BoxCloneService<hyper::Request<Body>, hyper::Response<Body>, TransportError>,
 >;
 
-pub type ForgeClientT =
+pub type CarbideClientT =
     ForgeClient<BoxCloneService<hyper::Request<Body>, hyper::Response<Body>, TransportError>>;
 
 /// HTTP/2 GETs confined to one configured Core origin.
@@ -111,12 +111,12 @@ pub type ForgeClientT =
 /// the client's certificate or node-auth token to a different authority.
 /// Responses are returned unchanged, including redirects; callers must bound
 /// response-body consumption separately from the transport's header deadline.
-pub struct ForgeHttpClient {
+pub struct CarbideHttpClient {
     origin: Uri,
     service: BoxCloneService<hyper::Request<Body>, hyper::Response<Body>, TransportError>,
 }
 
-impl ForgeHttpClient {
+impl CarbideHttpClient {
     /// Sends one GET to the configured scheme and authority without following
     /// redirects. The supplied path cannot replace that authenticated origin.
     pub async fn get(
@@ -149,7 +149,7 @@ impl ForgeHttpClient {
 /// Default ceiling on connection acquisition + time-to-response-headers for a Core HTTP/2
 /// request, applied at the transport layer so a connection that's accepted but never answered
 /// can't block a caller (and its admission-retry budget) forever. Overridable via
-/// [`ForgeClientConfig::request_timeout`] for callers that need to exceed it (e.g. a
+/// [`CarbideClientConfig::request_timeout`] for callers that need to exceed it (e.g. a
 /// server-side `pending_timeout` configured above this default -- see that field's doc comment).
 ///
 /// Doesn't bound the body/trailer phase after headers arrive, and the HTTP/2 keepalive PING
@@ -165,7 +165,7 @@ pub const DEFAULT_DOMAIN: &str = "forge.local";
 const VRF_NAME: &str = "mgmt";
 
 #[derive(Clone, Debug, Default)]
-pub struct ForgeClientConfig {
+pub struct CarbideClientConfig {
     pub root_ca_path: String,
     pub client_cert: Option<ClientCert>,
     pub enforce_tls: bool,
@@ -179,7 +179,7 @@ pub struct ForgeClientConfig {
     /// longer than the client's default transport timeout, which would otherwise cancel the
     /// call before the server's own deadline.
     ///
-    /// [`ForgeClientConfig::new`] seeds this from `FORGE_CLIENT_REQUEST_TIMEOUT_SECS` (whole
+    /// [`CarbideClientConfig::new`] seeds this from `FORGE_CLIENT_REQUEST_TIMEOUT_SECS` (whole
     /// seconds; zero and non-numeric values are rejected -- logged and ignored, falling back to
     /// [`REQUEST_TIMEOUT`] -- since a zero timeout would fail every request immediately). A
     /// value assigned directly to this field after construction takes precedence over the
@@ -196,11 +196,11 @@ pub struct ForgeClientConfig {
     pub node_token_provider: Option<Arc<dyn NodeTokenProvider>>,
     /// Fail the connection when the configured client certificate or key
     /// does not load, instead of connecting without a client certificate.
-    /// Off by default. See [`ForgeClientConfig::require_client_cert`].
+    /// Off by default. See [`CarbideClientConfig::require_client_cert`].
     pub require_client_cert: bool,
 }
 
-impl ForgeClientConfig {
+impl CarbideClientConfig {
     pub fn new(root_ca_path: String, client_cert: Option<ClientCert>) -> Self {
         let mut disabled = std::env::var("DISABLE_TLS_ENFORCEMENT").is_ok();
         if client_cert.is_none() {
@@ -260,7 +260,7 @@ impl ForgeClientConfig {
     /// Restores server-certificate validation on a config built without a
     /// client certificate.
     ///
-    /// [`ForgeClientConfig::new`] disables TLS enforcement whenever
+    /// [`CarbideClientConfig::new`] disables TLS enforcement whenever
     /// `client_cert` is `None`, which predates node-auth: back then "no client
     /// cert" meant "no credentials at all", and such callers were not expected
     /// to reach the API over verified TLS. A node-token client does hold
@@ -365,7 +365,7 @@ impl ForgeClientConfig {
             ..self
         };
 
-        log::debug!("ForgeClientConfig {res:?}");
+        log::debug!("CarbideClientConfig {res:?}");
 
         Ok(res)
     }
@@ -497,15 +497,15 @@ impl Default for RetryConfig {
 pub struct ApiConfig<'a> {
     pub url: &'a str,
     pub additional_urls: &'a [String],
-    pub client_config: &'a ForgeClientConfig,
+    pub client_config: &'a CarbideClientConfig,
     pub retry_config: RetryConfig,
 }
 
 impl<'a> ApiConfig<'a> {
     // new creates a new ApiConfig, for the given
-    // Carbide API URL and ForgeClientConfig, with
+    // Carbide API URL and CarbideClientConfig, with
     // a default retry configuration.
-    pub fn new(url: &'a str, client_config: &'a ForgeClientConfig) -> Self {
+    pub fn new(url: &'a str, client_config: &'a CarbideClientConfig) -> Self {
         Self {
             url,
             additional_urls: &[],
@@ -517,7 +517,7 @@ impl<'a> ApiConfig<'a> {
     pub fn new_with_multiple_urls(
         url: &'a str,
         additional_urls: &'a [String],
-        client_config: &'a ForgeClientConfig,
+        client_config: &'a CarbideClientConfig,
         retry_config: RetryConfig,
     ) -> Self {
         Self {
@@ -562,28 +562,28 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub struct ForgeTlsClient<'a> {
-    forge_client_config: &'a ForgeClientConfig,
+pub struct CarbideTlsClient<'a> {
+    carbide_client_config: &'a CarbideClientConfig,
 }
 
-impl<'a> ForgeTlsClient<'a> {
-    pub fn new(forge_client_config: &'a ForgeClientConfig) -> Self {
+impl<'a> CarbideTlsClient<'a> {
+    pub fn new(carbide_client_config: &'a CarbideClientConfig) -> Self {
         Self {
-            forge_client_config,
+            carbide_client_config,
         }
     }
 
-    /// retry_build creates a new ForgeTlsClient from
-    /// the given API URL and ForgeClientConfig, then attempts to build
+    /// retry_build creates a new CarbideTlsClient from
+    /// the given API URL and CarbideClientConfig, then attempts to build
     /// and return a client, integrating retries into the
     /// building attempts.
-    pub async fn retry_build(api_config: &ApiConfig<'a>) -> ForgeTlsClientResult<ForgeClientT> {
-        // In the retrying function, if the ForgeTlsClient just fails to even build, return _that_
+    pub async fn retry_build(api_config: &ApiConfig<'a>) -> CarbideTlsClientResult<CarbideClientT> {
+        // In the retrying function, if the CarbideTlsClient just fails to even build, return _that_
         // error early by putting it in the Ok(Err(e)) variant, so that tryhard doesn't keep
         // retrying a configuration error.
-        let result: Result<Result<ForgeClientT, ForgeTlsClientError>, ForgeTlsClientError> =
+        let result: Result<Result<CarbideClientT, CarbideTlsClientError>, CarbideTlsClientError> =
             tryhard::retry_fn(|| async move {
-                let mut client = match ForgeTlsClient::new(api_config.client_config)
+                let mut client = match CarbideTlsClient::new(api_config.client_config)
                     .build(api_config.url)
                     .await
                 {
@@ -605,7 +605,7 @@ impl<'a> ForgeTlsClient<'a> {
                             "Failed to connect client to Forge API; retrying",
                         );
                     })
-                    .map_err(|e| ForgeTlsClientError::Connection(format_error_chain(&e)))?;
+                    .map_err(|e| CarbideTlsClientError::Connection(format_error_chain(&e)))?;
 
                 // ok, ok
                 Ok(Ok(client))
@@ -638,11 +638,12 @@ impl<'a> ForgeTlsClient<'a> {
     /// connection establishment internally.
     /// However using a fresh client could avoid getting a stale connection from
     /// a pool.
-    pub async fn build<S: AsRef<str>>(&self, url: S) -> ForgeTlsClientResult<ForgeClientT> {
-        let ForgeHttpClient { origin, service } = self.build_http(url).await?;
+    pub async fn build<S: AsRef<str>>(&self, url: S) -> CarbideTlsClientResult<CarbideClientT> {
+        let CarbideHttpClient { origin, service } = self.build_http(url).await?;
         let mut forge_client = ForgeClient::with_origin(service, origin);
 
-        if let Some(max_decoding_message_size) = self.forge_client_config.max_decoding_message_size
+        if let Some(max_decoding_message_size) =
+            self.carbide_client_config.max_decoding_message_size
         {
             forge_client = forge_client.max_decoding_message_size(max_decoding_message_size);
         }
@@ -655,7 +656,10 @@ impl<'a> ForgeTlsClient<'a> {
     /// Each build rereads configured certificate and root files. TLS, node-auth,
     /// resolver, VRF, proxy, tracing and request-header deadlines follow the same
     /// configuration as `build`. No connection is made until the first request.
-    pub async fn build_http<S: AsRef<str>>(&self, url: S) -> ForgeTlsClientResult<ForgeHttpClient> {
+    pub async fn build_http<S: AsRef<str>>(
+        &self,
+        url: S,
+    ) -> CarbideTlsClientResult<CarbideHttpClient> {
         let uri = Uri::from_str(url.as_ref()).map_err(|e| ConfigurationError::InvalidUri {
             uri_string: url.as_ref().to_string(),
             error: e,
@@ -670,7 +674,7 @@ impl<'a> ForgeTlsClient<'a> {
         // — a plaintext one skips TLS setup entirely while `BearerAuthService`
         // below still stamps the token. `DISABLE_TLS_ENFORCEMENT` is honored
         // for parity with the rest of this config so local development works.
-        if self.forge_client_config.node_token_provider.is_some()
+        if self.carbide_client_config.node_token_provider.is_some()
             && std::env::var("DISABLE_TLS_ENFORCEMENT").is_err()
         {
             if uri.scheme() != Some(&tonic::codegen::http::uri::Scheme::HTTPS) {
@@ -679,7 +683,7 @@ impl<'a> ForgeTlsClient<'a> {
                 }
                 .into());
             }
-            if !self.forge_client_config.enforce_tls {
+            if !self.carbide_client_config.enforce_tls {
                 return Err(ConfigurationError::BearerTokenWithoutTlsEnforcement {
                     uri_string: url.as_ref().to_string(),
                 }
@@ -709,16 +713,16 @@ impl<'a> ForgeTlsClient<'a> {
         // so the boxed service type is identical in both modes.
         let hyper_client = BearerAuthService::new(
             hyper_client,
-            self.forge_client_config.node_token_provider.clone(),
+            self.carbide_client_config.node_token_provider.clone(),
         );
         let request_timeout = self
-            .forge_client_config
+            .carbide_client_config
             .request_timeout
             .unwrap_or(REQUEST_TIMEOUT);
         let hyper_client =
             crate::grpc_client_tracing::traced_transport(hyper_client, request_timeout);
 
-        Ok(ForgeHttpClient {
+        Ok(CarbideHttpClient {
             origin: uri,
             service: hyper_client,
         })
@@ -727,7 +731,7 @@ impl<'a> ForgeTlsClient<'a> {
     pub async fn build_https_client<S: AsRef<str>>(
         &self,
         url: S,
-    ) -> ForgeHttpsClientResult<hyper_rustls::HttpsConnector<ForgeHttpConnector>> {
+    ) -> CarbideHttpsClientResult<hyper_rustls::HttpsConnector<ForgeHttpConnector>> {
         let mut roots = RootCertStore::empty();
         let uri = Uri::from_str(url.as_ref()).map_err(|e| ConfigurationError::InvalidUri {
             uri_string: url.as_ref().to_string(),
@@ -741,7 +745,7 @@ impl<'a> ForgeTlsClient<'a> {
         {
             // TODO: by reading the pemfile every time, we're automatically getting hot-reload
             // TODO: -- but we could use inotify in order to make this more performant.
-            match tokio::fs::read(&self.forge_client_config.root_ca_path).await {
+            match tokio::fs::read(&self.carbide_client_config.root_ca_path).await {
                 Ok(pem_file) => {
                     let mut cert_cursor = std::io::Cursor::new(&pem_file[..]);
                     let (_added, _ignored) = roots.add_parsable_certificates(
@@ -750,14 +754,14 @@ impl<'a> ForgeTlsClient<'a> {
                 }
                 Err(error) => {
                     return Err(CouldNotReadRootCa {
-                        path: self.forge_client_config.root_ca_path.clone(),
+                        path: self.carbide_client_config.root_ca_path.clone(),
                         error,
                     }
                     .into());
                 }
             }
 
-            if let Some(cert_expiry) = self.forge_client_config.client_cert_expiry() {
+            if let Some(cert_expiry) = self.carbide_client_config.client_cert_expiry() {
                 let start = SystemTime::now();
                 let current_time = start
                     .duration_since(UNIX_EPOCH)
@@ -787,11 +791,11 @@ impl<'a> ForgeTlsClient<'a> {
 
         let tls = {
             let builder = || {
-                if self.forge_client_config.enforce_tls {
+                if self.carbide_client_config.enforce_tls {
                     base_config_builder().with_root_certificates(roots)
                 } else {
                     #[cfg(feature = "test-support")]
-                    let verifier = if self.forge_client_config.suppress_insecure_tls_warning {
+                    let verifier = if self.carbide_client_config.suppress_insecure_tls_warning {
                         DummyTlsVerifier::new_for_tests()
                     } else {
                         DummyTlsVerifier::new_for_prod()
@@ -804,11 +808,11 @@ impl<'a> ForgeTlsClient<'a> {
                 }
             };
 
-            if let Some((certs, key)) = self.forge_client_config.read_client_cert() {
+            if let Some((certs, key)) = self.carbide_client_config.read_client_cert() {
                 builder()
                     .with_client_auth_cert(certs, key)
                     .map_err(ConfigurationError::InvalidClientCert)?
-            } else if self.forge_client_config.require_client_cert {
+            } else if self.carbide_client_config.require_client_cert {
                 return Err(ConfigurationError::ClientCertNotLoaded.into());
             } else {
                 builder().with_no_client_auth()
@@ -830,15 +834,15 @@ impl<'a> ForgeTlsClient<'a> {
         );
         // Five seconds is the default, but setting anyway for documentation and future proofing
         let mut resolver_opts = ForgeResolverOpts::default().timeout(Duration::from_secs(5));
-        if self.forge_client_config.use_mgmt_vrf {
+        if self.carbide_client_config.use_mgmt_vrf {
             resolver_opts = resolver_opts.use_mgmt_vrf();
         }
         let resolver = ForgeResolver::with_config_and_options(resolver_config, resolver_opts);
         let mut http = ForgeHttpConnector::new_with_resolver(resolver);
-        if self.forge_client_config.use_mgmt_vrf {
+        if self.carbide_client_config.use_mgmt_vrf {
             http.set_interface("mgmt".to_string());
         }
-        http.set_socks5_proxy(self.forge_client_config.socks_proxy.clone());
+        http.set_socks5_proxy(self.carbide_client_config.socks_proxy.clone());
         http.enforce_http(false);
 
         // Configure the TCP timeout; ForgeHttpConnector::set_connect_timeout
@@ -868,10 +872,10 @@ impl<'a> ForgeTlsClient<'a> {
         http.set_keepalive_interval(Some(Duration::from_secs(4)));
         http.set_keepalive_retries(Some(3)); // initial probe at 20s, then 24s, 28s and 32s
 
-        http.set_connect_retries_max(self.forge_client_config.connect_retries_max);
-        http.set_connect_retries_interval(self.forge_client_config.connect_retries_interval);
+        http.set_connect_retries_max(self.carbide_client_config.connect_retries_max);
+        http.set_connect_retries_interval(self.carbide_client_config.connect_retries_interval);
 
-        let require_cert = self.forge_client_config.require_client_cert;
+        let require_cert = self.carbide_client_config.require_client_cert;
         let connector = tower::ServiceBuilder::new()
             .layer_fn(move |s| {
                 let tls = tls.clone();
@@ -902,7 +906,7 @@ impl<'a> ForgeTlsClient<'a> {
     pub async fn build_nmx_c_client<S: AsRef<str>>(
         &self,
         url: S,
-    ) -> ForgeTlsClientResult<NmxCClientT> {
+    ) -> CarbideTlsClientResult<NmxCClientT> {
         let uri = Uri::from_str(url.as_ref()).map_err(|e| ConfigurationError::InvalidUri {
             uri_string: url.as_ref().to_string(),
             error: e,
@@ -925,7 +929,7 @@ impl<'a> ForgeTlsClient<'a> {
             .timer(TokioTimer::new())
             .build(connector);
         let request_timeout = self
-            .forge_client_config
+            .carbide_client_config
             .request_timeout
             .unwrap_or(REQUEST_TIMEOUT);
         let hyper_client =
@@ -933,7 +937,8 @@ impl<'a> ForgeTlsClient<'a> {
 
         let mut nmx_c_client = NmxControllerClient::with_origin(hyper_client, uri);
 
-        if let Some(max_decoding_message_size) = self.forge_client_config.max_decoding_message_size
+        if let Some(max_decoding_message_size) =
+            self.carbide_client_config.max_decoding_message_size
         {
             nmx_c_client = nmx_c_client.max_decoding_message_size(max_decoding_message_size);
         }
@@ -943,13 +948,13 @@ impl<'a> ForgeTlsClient<'a> {
 
     pub async fn retry_build_nmx_c(
         api_config: &ApiConfig<'a>,
-    ) -> ForgeTlsClientResult<NmxCClientT> {
-        // In the retrying function, if the ForgeTlsClient just fails to even build, return _that_
+    ) -> CarbideTlsClientResult<NmxCClientT> {
+        // In the retrying function, if the CarbideTlsClient just fails to even build, return _that_
         // error early by putting it in the Ok(Err(e)) variant, so that tryhard doesn't keep
         // retrying a configuration error.
-        let result: Result<Result<NmxCClientT, ForgeTlsClientError>, ForgeTlsClientError> =
+        let result: Result<Result<NmxCClientT, CarbideTlsClientError>, CarbideTlsClientError> =
             tryhard::retry_fn(|| async move {
-                let mut client = match ForgeTlsClient::new(api_config.client_config)
+                let mut client = match CarbideTlsClient::new(api_config.client_config)
                     .build_nmx_c_client(api_config.url)
                     .await
                 {
@@ -977,7 +982,7 @@ impl<'a> ForgeTlsClient<'a> {
                             "Failed to connect client to NMX-C API; retrying",
                         );
                     })
-                    .map_err(|e| ForgeTlsClientError::Connection(format_error_chain(&e)))?;
+                    .map_err(|e| CarbideTlsClientError::Connection(format_error_chain(&e)))?;
 
                 // ok, ok
                 Ok(Ok(client))
@@ -1002,7 +1007,7 @@ impl<'a> ForgeTlsClient<'a> {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum ForgeTlsClientError {
+pub enum CarbideTlsClientError {
     #[error("ConnectError error: {0}")]
     Connection(String),
     #[error("configuration error: {0}")]
@@ -1037,14 +1042,14 @@ pub enum ConfigurationError {
     Resolver(#[from] ResolverError),
 }
 
-impl From<ForgeTlsClientError> for tonic::Status {
-    fn from(value: ForgeTlsClientError) -> Self {
+impl From<CarbideTlsClientError> for tonic::Status {
+    fn from(value: CarbideTlsClientError) -> Self {
         tonic::Status::unavailable(value.to_string())
     }
 }
 
-pub type ForgeTlsClientResult<T> = Result<T, ForgeTlsClientError>;
-pub type ForgeHttpsClientResult<T> = Result<T, ForgeTlsClientError>;
+pub type CarbideTlsClientResult<T> = Result<T, CarbideTlsClientError>;
+pub type CarbideHttpsClientResult<T> = Result<T, CarbideTlsClientError>;
 
 #[cfg(test)]
 mod tests {
@@ -1072,7 +1077,7 @@ mod tests {
                 "request captured".into(),
             )))
         });
-        let mut client = ForgeHttpClient {
+        let mut client = CarbideHttpClient {
             origin: "https://core.example.test:1079".parse().unwrap(),
             service: service.boxed_clone(),
         };
@@ -1096,7 +1101,7 @@ mod tests {
 
     /// Writes a self-signed root CA and client cert pair into `dir` and returns
     /// a config that points at them.
-    fn config_with_client_cert(dir: &std::path::Path) -> ForgeClientConfig {
+    fn config_with_client_cert(dir: &std::path::Path) -> CarbideClientConfig {
         let path = |name: &str| dir.join(name).display().to_string();
         let key = rcgen::KeyPair::generate().unwrap();
         let cert = rcgen::CertificateParams::default()
@@ -1105,7 +1110,7 @@ mod tests {
         std::fs::write(path("ca.crt"), cert.pem()).unwrap();
         std::fs::write(path("tls.crt"), cert.pem()).unwrap();
         std::fs::write(path("tls.key"), key.serialize_pem()).unwrap();
-        let mut config = ForgeClientConfig::new(
+        let mut config = CarbideClientConfig::new(
             path("ca.crt"),
             Some(ClientCert {
                 cert_path: path("tls.crt"),
@@ -1126,7 +1131,7 @@ mod tests {
         let required = config.clone().require_client_cert();
         let url = "https://127.0.0.1:1";
         let build =
-            |config| async move { ForgeTlsClient::new(config).build_https_client(url).await };
+            |config| async move { CarbideTlsClient::new(config).build_https_client(url).await };
 
         assert!(build(&required).await.is_ok(), "the pair loads");
         std::fs::remove_file(path("tls.key")).unwrap();
@@ -1153,7 +1158,7 @@ mod tests {
         let connect = |config| {
             let (url, uri) = (url.clone(), url.parse::<Uri>().unwrap());
             async move {
-                let connector = ForgeTlsClient::new(config)
+                let connector = CarbideTlsClient::new(config)
                     .build_https_client(url)
                     .await
                     .unwrap();
@@ -1211,7 +1216,7 @@ mod tests {
     /// The public wrapper's version probe and RPC each propagate their own
     /// client span, and neither span is retained by the pooled HTTP/2 connection.
     #[tokio::test]
-    async fn forge_api_client_traces_each_wire_request() {
+    async fn carbide_api_client_traces_each_wire_request() {
         use http_body_util::StreamBody;
         use hyper::body::{Bytes, Frame};
         use hyper_util::rt::TokioIo;
@@ -1262,8 +1267,9 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let config = ForgeClientConfig::default();
-        let client = crate::forge_api_client::ForgeApiClient::new(&ApiConfig::new(&url, &config));
+        let config = CarbideClientConfig::default();
+        let client =
+            crate::carbide_api_client::CarbideApiClient::new(&ApiConfig::new(&url, &config));
         tokio::time::timeout(
             Duration::from_secs(5),
             async {
@@ -1317,7 +1323,7 @@ mod tests {
             return;
         }
 
-        let config = ForgeClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None);
+        let config = CarbideClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None);
         assert!(
             !config.enforce_tls,
             "a config without a client cert starts out unenforced"
@@ -1357,7 +1363,7 @@ mod tests {
             if let Some(contents) = contents {
                 std::fs::write(&path, contents).unwrap();
             }
-            let config = ForgeClientConfig::new(path.to_string_lossy().into_owned(), None);
+            let config = CarbideClientConfig::new(path.to_string_lossy().into_owned(), None);
             assert_eq!(config.root_ca_is_usable(), expected, "{name}");
         }
     }
@@ -1382,7 +1388,7 @@ mod tests {
             return;
         }
 
-        let config = ForgeClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None)
+        let config = CarbideClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None)
             .with_token_provider(Arc::new(FixedToken));
 
         assert!(
@@ -1401,10 +1407,10 @@ mod tests {
             return;
         }
 
-        let config = ForgeClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None)
+        let config = CarbideClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None)
             .with_token_provider(Arc::new(FixedToken));
 
-        let error = ForgeTlsClient::new(&config)
+        let error = CarbideTlsClient::new(&config)
             .build("http://carbide-api.local:8080")
             .await
             .expect_err("a token client must refuse a plaintext endpoint");
@@ -1426,13 +1432,13 @@ mod tests {
             return;
         }
 
-        let mut config = ForgeClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None)
+        let mut config = CarbideClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None)
             .with_token_provider(Arc::new(FixedToken));
         // Exactly what a caller ordering the builders the other way round, or
         // assigning the public field, would end up with.
         config.enforce_tls = false;
 
-        let error = ForgeTlsClient::new(&config)
+        let error = CarbideTlsClient::new(&config)
             .build("https://carbide-api.local:8080")
             .await
             .expect_err("an unverified token client must be refused");
@@ -1447,12 +1453,12 @@ mod tests {
     /// scoped to the scheme, not to token clients in general.
     #[tokio::test]
     async fn bearer_tokens_are_allowed_over_https() {
-        let config = ForgeClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None)
+        let config = CarbideClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None)
             .with_token_provider(Arc::new(FixedToken));
 
         // Reaching a root-CA read means the plaintext guard let it through;
         // the file itself need not exist in a unit test.
-        let result = ForgeTlsClient::new(&config)
+        let result = CarbideTlsClient::new(&config)
             .build("https://carbide-api.local:8080")
             .await;
 
@@ -1599,10 +1605,10 @@ mod tests {
     #[tokio::test]
     async fn version_call_times_out_against_a_silent_peer() {
         let addr = spawn_silent_peer().await;
-        let mut config = ForgeClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None);
+        let mut config = CarbideClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None);
         config.request_timeout = Some(Duration::from_millis(300));
 
-        let mut client = ForgeTlsClient::new(&config)
+        let mut client = CarbideTlsClient::new(&config)
             .build(format!("http://{addr}"))
             .await
             .expect("building a client against a plaintext loopback URL must not fail");
@@ -1635,10 +1641,10 @@ mod tests {
     #[tokio::test]
     async fn hello_call_times_out_against_a_silent_peer() {
         let addr = spawn_silent_peer().await;
-        let mut config = ForgeClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None);
+        let mut config = CarbideClientConfig::new("/etc/carbide/root-ca.pem".to_string(), None);
         config.request_timeout = Some(Duration::from_millis(300));
 
-        let mut client = ForgeTlsClient::new(&config)
+        let mut client = CarbideTlsClient::new(&config)
             .build_nmx_c_client(format!("http://{addr}"))
             .await
             .expect("building a client against a plaintext loopback URL must not fail");

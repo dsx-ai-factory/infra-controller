@@ -275,7 +275,7 @@ async fn run_as_service(config: &Options) -> Result<(), eyre::Report> {
     let mut lldp_reporter = lldp_report::LldpReporter::new(
         machine_id,
         config.api.clone(),
-        client::forge_client_config(config),
+        client::carbide_client_config(config),
     );
 
     // Spawn any further background task into this set and give it a clone of

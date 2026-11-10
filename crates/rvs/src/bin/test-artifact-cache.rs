@@ -45,7 +45,7 @@ use carbide_rvs::error::RvsError;
 use carbide_rvs::rack::Racks;
 use carbide_rvs::scenario::Scenario;
 use clap::Parser;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -105,7 +105,7 @@ async fn main() -> Result<(), RvsError> {
 
     // NicoClient is required by RvsCtx but won't be called: the artifact
     // pipeline reads the SOT from `cfg.sot_path` and never touches gRPC here.
-    let client_config = ForgeClientConfig::new("/dev/null".to_string(), None);
+    let client_config = CarbideClientConfig::new("/dev/null".to_string(), None);
     let api_config = ApiConfig::new(&cfg.nico.url, &client_config);
     let nico = NicoClient::new(&api_config);
 
