@@ -132,6 +132,11 @@ report available and allocated values, respectively, for each resource pool, ide
 by the `pool` label. Watch for pools approaching zero availability before tenants start
 seeing allocation failures.
 
+These counts are absent before the first successful statistics check, after a failed
+check, or when the data is too old. Also monitor `carbide_resourcepool_stats_available`
+and `carbide_resourcepool_stats_fresh` to check whether pool data is available and up
+to date. See the [metrics reference](core_metrics.md) for their meanings.
+
 ### Health: "What's broken right now?"
 
 Health metrics reveal infrastructure problems. The machine controller exposes
