@@ -16,7 +16,7 @@
 # Note that the output container image needs to be able to produce artifacts
 # that are compatible with the DPU BFB, so for example the libc6 version can't
 # be greater than what we see in the BFB.
-FROM rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97
+FROM rust:1.97.1-bookworm
 
 RUN dpkg --add-architecture arm64 && \
     apt-get update && \
