@@ -2669,7 +2669,7 @@ impl MachineStateHandler {
             })?;
             (fixed_ip, format!("CX_{nic_index}"))
         } else {
-            // Every declared lane has a validated fixed IP. Use one lane's address
+            // Card validation guarantees at least one fixed IP. Use that address
             // for the card-level DPA registration.
             let lane_prefix = format!("{cage_mpo_encoded_string}-L");
             let fixed_ip = cx9_nics
@@ -6827,11 +6827,6 @@ fn astra_nic_indices(cx9_nics: &[&ExpectedInterface]) -> Result<Vec<u8>, StateHa
                 "astra inventory cannot mix named lane and legacy indexed declarations"
             ))
         })?;
-        if nic.fixed_ip.is_none() {
-            return Err(StateHandlerError::GenericError(eyre!(
-                "fixed IP not found for astra lane {physical_ifname}"
-            )));
-        }
         let mapping = ASTRA_NIC_MAPPINGS
             .iter()
             .find(|mapping| mapping.physical_ifname == physical_ifname)
@@ -6852,6 +6847,23 @@ fn astra_nic_indices(cx9_nics: &[&ExpectedInterface]) -> Result<Vec<u8>, StateHa
                 ))
             })?;
         indices.insert(index);
+    }
+    // DPA registration consumes one underlay address per card. The remaining
+    // declared lanes can share that card's address across isolated planes.
+    for index in &indices {
+        let card = astra_get_cage_mpo_encoded_string(*index);
+        let prefix = format!("{card}-L");
+        if !cx9_nics.iter().any(|nic| {
+            nic.fixed_ip.is_some()
+                && nic
+                    .physical_ifname
+                    .as_deref()
+                    .is_some_and(|name| name.starts_with(&prefix))
+        }) {
+            return Err(StateHandlerError::GenericError(eyre!(
+                "fixed IP not found for astra card {card}"
+            )));
+        }
     }
     Ok(indices.into_iter().collect())
 }
@@ -15473,6 +15485,101 @@ mod tests {
     use regex::Regex;
 
     use super::*;
+
+    #[test]
+    fn astra_nic_indices_validate_card_addresses() {
+        use model::machine::astra::ASTRA_NIC_MAPPINGS;
+
+        let lanes: Vec<ExpectedInterface> = ASTRA_NIC_MAPPINGS
+            .iter()
+            .map(|mapping| ExpectedInterface {
+                physical_ifname: Some(mapping.physical_ifname.to_string()),
+                fixed_ip: mapping
+                    .physical_ifname
+                    .ends_with("-L1")
+                    .then(|| "192.0.2.1".parse().unwrap()),
+                ..Default::default()
+            })
+            .collect();
+        assert_eq!(lanes.len(), 32);
+        assert_eq!(
+            lanes.iter().filter(|lane| lane.fixed_ip.is_some()).count(),
+            8
+        );
+        let mut shuffled = lanes.clone();
+        shuffled.reverse();
+        let mut alternate_lane = lanes.clone();
+        for lane in &mut alternate_lane {
+            lane.fixed_ip = lane
+                .physical_ifname
+                .as_deref()
+                .unwrap()
+                .ends_with("-L4")
+                .then(|| "192.0.2.1".parse().unwrap());
+        }
+        let mut missing_card_ip = lanes.clone();
+        missing_card_ip[0].fixed_ip = None;
+        let mut unknown_lane = lanes.clone();
+        unknown_lane[1].physical_ifname = Some("C1-2-L5".to_string());
+        let mut mixed = lanes.clone();
+        mixed[1].physical_ifname = None;
+        let mut all_fixed = lanes.clone();
+        for lane in &mut all_fixed {
+            lane.fixed_ip = Some("192.0.2.1".parse().unwrap());
+        }
+        let cases = [
+            ("one address per card", lanes, Ok((0..8).collect())),
+            (
+                "declaration order does not select cards",
+                shuffled,
+                Ok((0..8).collect()),
+            ),
+            (
+                "address may be on another lane",
+                alternate_lane,
+                Ok((0..8).collect()),
+            ),
+            (
+                "all lanes addressed remains valid",
+                all_fixed,
+                Ok((0..8).collect()),
+            ),
+            (
+                "card missing address",
+                missing_card_ip,
+                Err("fixed IP not found for astra card C1-2"),
+            ),
+            (
+                "unknown lane without address",
+                unknown_lane,
+                Err("unknown astra physical interface C1-2-L5"),
+            ),
+            (
+                "mixed declarations",
+                mixed,
+                Err("astra inventory cannot mix named lane and legacy indexed declarations"),
+            ),
+            (
+                "legacy declaration order",
+                vec![ExpectedInterface::default(); 2],
+                Ok(vec![0, 1]),
+            ),
+            (
+                "legacy overflow",
+                vec![ExpectedInterface::default(); 9],
+                Err("legacy astra inventory declares more than 8 cards"),
+            ),
+        ];
+        for (name, lanes, expected) in cases {
+            let result = astra_nic_indices(&lanes.iter().collect::<Vec<_>>());
+            match expected {
+                Ok(indices) => assert_eq!(result.unwrap(), indices, "{name}"),
+                Err(message) => {
+                    assert!(result.unwrap_err().to_string().contains(message), "{name}")
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn firmware_upload_entry_holds_capacity_until_transfer_finishes() {
