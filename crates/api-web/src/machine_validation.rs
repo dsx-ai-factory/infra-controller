@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use askama::Template;
@@ -38,6 +38,8 @@ struct ValidationResult {
     name: String,
     test_id: String,
     attempt_id: Option<String>,
+    attempt: Option<i32>,
+    in_progress: bool,
     status: String,
     start_time: String,
     start_time_sort: i64,
@@ -123,21 +125,6 @@ struct ValidationResults {
     status: String,
     progress: String,
     context: String,
-    current_tests: Vec<CurrentValidationTest>,
-    attempt_logs: Vec<ValidationAttemptLog>,
-}
-
-struct ValidationAttemptLog {
-    test_id: String,
-    attempt_id: String,
-    attempt: Option<i32>,
-}
-
-struct CurrentValidationTest {
-    name: String,
-    test_id: String,
-    attempt_id: Option<String>,
-    attempt: Option<i32>,
 }
 
 #[derive(Template)]
@@ -268,6 +255,8 @@ pub(super) async fn results(
                     name: r.name,
                     test_id: r.test_id.unwrap_or_default(),
                     attempt_id: None,
+                    attempt: None,
+                    in_progress: false,
                     status: r.exit_code.to_string(),
                     start_time: r
                         .start_time
@@ -385,9 +374,8 @@ pub(super) async fn results(
                 result.status.clone(),
             ))
             .cloned();
+        result.attempt = result.attempt_id.as_ref().map(|_| 1);
     }
-    let mut current_tests = Vec::new();
-    let mut attempt_logs = Vec::new();
     if let Some(run) = run.as_ref() {
         let items = match db::machine_validation_execution::find_run_items_by_run_id(
             &mut db_reader,
@@ -405,56 +393,51 @@ pub(super) async fn results(
                     .into_response();
             }
         };
-        attempt_logs = items
-            .iter()
-            .filter_map(|item| {
-                item.current_attempt_id.map(|id| {
-                    let attempt_id = id.to_string();
-                    ValidationAttemptLog {
-                        test_id: item.test_id.clone(),
-                        attempt: attempt_numbers.get(&attempt_id).copied(),
-                        attempt_id,
-                    }
+        validation_results.extend(
+            items
+                .into_iter()
+                .filter(|item| {
+                    run.end_time.is_none()
+                        && item.state
+                            == model::machine_validation::MachineValidationRunItemState::Running
                 })
-            })
-            .collect();
-        current_tests = items
-            .into_iter()
-            .filter(|item| {
-                run.end_time.is_none()
-                    && item.state
-                        == model::machine_validation::MachineValidationRunItemState::Running
-            })
-            .map(|item| CurrentValidationTest {
-                name: if item.display_name.is_empty() {
-                    item.test_id.clone()
-                } else {
-                    item.display_name
-                },
-                test_id: item.test_id,
-                attempt_id: item.current_attempt_id.map(|id| id.to_string()),
-                attempt: item
-                    .current_attempt_id
-                    .and_then(|id| attempt_numbers.get(&id.to_string()).copied()),
-            })
-            .collect();
+                .map(|item| {
+                    let start = item.started_at;
+                    let attempt_id = item.current_attempt_id.map(|id| id.to_string());
+                    ValidationResult {
+                        validation_id: validation_id.to_string(),
+                        name: if item.display_name.is_empty() {
+                            item.test_id.clone()
+                        } else {
+                            item.display_name
+                        },
+                        test_id: item.test_id,
+                        attempt: attempt_id
+                            .as_ref()
+                            .and_then(|id| attempt_numbers.get(id).copied()),
+                        attempt_id,
+                        in_progress: true,
+                        status: String::new(),
+                        start_time: start
+                            .map(|time| rpc::Timestamp::from(time).to_string())
+                            .unwrap_or_default(),
+                        start_time_sort: start
+                            .map(|time| time.timestamp_micros())
+                            .unwrap_or_default(),
+                        start_time_short: start
+                            .map(|time| time.format("%H:%M:%S").to_string())
+                            .unwrap_or_else(|| "N/A".to_string()),
+                        start_date: start
+                            .map(|time| time.format("%Y-%m-%d").to_string())
+                            .unwrap_or_default(),
+                        end_time: String::new(),
+                        duration: "N/A".to_string(),
+                        duration_ms: None,
+                    }
+                }),
+        );
     }
-
-    let mut log_attempt_ids: HashSet<_> = attempt_logs
-        .iter()
-        .map(|log| log.attempt_id.clone())
-        .collect();
-    for result in &validation_results {
-        if let Some(id) = &result.attempt_id
-            && log_attempt_ids.insert(id.clone())
-        {
-            attempt_logs.push(ValidationAttemptLog {
-                test_id: result.test_id.clone(),
-                attempt_id: id.clone(),
-                attempt: Some(1),
-            });
-        }
-    }
+    validation_results.sort_by_key(|result| !result.in_progress);
 
     let tmpl = ValidationResults {
         validation_id,
@@ -463,8 +446,6 @@ pub(super) async fn results(
         status,
         progress,
         context,
-        current_tests,
-        attempt_logs,
     };
 
     (StatusCode::OK, Html(tmpl.render().unwrap())).into_response()

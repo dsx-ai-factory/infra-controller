@@ -234,53 +234,36 @@ async fn validation_run_pages_show_progress_current_work_and_logs(pool: sqlx::Pg
         assert!(html.contains(&format!(
             "<th>Machine ID</th><td><a href=\"/admin/machine/{machine_id}\">{machine_id}</a></td>"
         )));
-        let work = html
-            .split("<h2>Current Work</h2>")
+        assert!(!html.contains("<h2>Current Work</h2>"));
+        let results_table = html
+            .split("<h2>Tests</h2>")
             .nth(1)
             .unwrap()
-            .split("<h2>Test Results</h2>")
+            .split("<aside")
             .next()
             .unwrap();
-        assert!(work.contains("<th>Current Test Name/ID</th>"));
+        assert_eq!(
+            results_table.matches("In Progress").count(),
+            if completed { 0 } else { 2 }
+        );
         for (index, attempt_id) in attempt_ids.iter().take(2).enumerate() {
-            assert_eq!(work.contains(&format!("live_test_{index}")), !completed);
-            assert_eq!(work.contains(&format!("Live test {index}")), !completed);
             assert_eq!(
-                work.contains(&format!(
-                    "href=\"/admin/machinevalidation/tests/live_test_{index}\">live_test_{index}</a>"
-                )),
+                results_table.contains(&format!("href=\"#attempt-log-{attempt_id}\"")),
                 !completed
             );
-            assert_eq!(work.contains("Attempt 2 · View logs"), !completed);
-            assert_eq!(
-                work.contains(&format!("href=\"#attempt-log-{attempt_id}\"")),
-                !completed
-            );
-            assert!(html.contains(&format!("id=\"attempt-log-{attempt_id}\"")));
-            assert!(html.contains(&format!(
-                "data-url=\"/admin/machinevalidation/attempts/{attempt_id}/logs\""
+            assert!(results_table.contains(&format!(
+                "href=\"/admin/machinevalidation/tests/live_test_{index}\">live_test_{index}</a>"
             )));
         }
-        assert!(!work.contains("live_test_2"));
-        assert!(!work.contains("live_pending"));
-        assert!(!work.contains("live_skipped"));
-        assert!(html.contains(&format!("live_pending — attempt 1 ({pending_attempt_id})")));
-        assert!(!html.contains("live_pending — attempt 0"));
-        let results_table = html
-            .split("<h2>Test Results</h2>")
-            .nth(1)
-            .unwrap()
-            .split("<h2>Attempt Logs</h2>")
-            .next()
-            .unwrap();
+        assert!(results_table.contains("Complete (1)"));
+        assert!(results_table.contains("Complete (0)"));
+        assert!(!html.contains(&pending_attempt_id.to_string()));
+        assert!(!html.contains("<details"));
+        assert_eq!(html.matches("<pre hidden><code></code></pre>").count(), 1);
+        assert!(html.contains("Select View logs to display one attempt's stdout/stderr here."));
         assert!(results_table.contains("<th>Test Name/ID</th>"));
         assert!(results_table.contains("<th>Attempt</th>"));
         assert!(results_table.contains(&format!("href=\"#attempt-log-{skipped_attempt_id}\"")));
-        assert_eq!(
-            html.matches(&format!("id=\"attempt-log-{skipped_attempt_id}\""))
-                .count(),
-            1
-        );
         assert!(!results_table.contains("<th>Context</th>"));
         assert!(!results_table.contains("<th>End Time</th>"));
         assert!(results_table.contains("<th>Started (UTC)</th>"));
@@ -298,7 +281,9 @@ async fn validation_run_pages_show_progress_current_work_and_logs(pool: sqlx::Pg
         for (index, attempt_id) in attempt_ids.iter().take(3).enumerate() {
             let row = results_table
                 .split("<tr>")
-                .find(|row| row.contains(&format!("live_test_{index}")))
+                .find(|row| {
+                    row.contains(&format!("live_test_{index}")) && !row.contains("In Progress")
+                })
                 .unwrap()
                 .split("</tr>")
                 .next()
@@ -314,7 +299,7 @@ async fn validation_run_pages_show_progress_current_work_and_logs(pool: sqlx::Pg
             assert!(!row.contains(&attempt_id.to_string()));
         }
         assert_eq!(
-            html.matches(&format!("id=\"attempt-log-{result_attempt_id}\""))
+            html.matches(&format!("href=\"#attempt-log-{result_attempt_id}\""))
                 .count(),
             1
         );
