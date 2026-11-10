@@ -450,7 +450,14 @@ tray request needs an operation rule that contains a `PowerShelf` firmware
 step. For RMS updates, Core resolves an omitted version from the owning rack
 profile before state-controller or direct-backend dispatch.
 
-State-controller dispatch updates a shelf only when
+With state-controller dispatch, a firmware request posts shelf reprovisioning
+requests only when its rack maintenance also targets at least one compute tray
+or switch, as full-rack maintenance does. A shelf-only request skips the rack
+firmware stage before any shelf request is posted, so it neither updates the
+shelf nor records a skip, regardless of the flag below. Direct-backend dispatch
+does not use rack reprovisioning requests.
+
+When the rack controller posts a shelf request, the shelf acts on it only when
 `power_shelf_state_controller.rack_firmware_reprovisioning_enabled` is `true`
 (Helm value `powerShelfStateController.rackFirmwareReprovisioningEnabled`).
 The default is `false`: the shelf skips the rack request, and `FindPowerShelves`
@@ -560,7 +567,7 @@ lower-level execution details.
 | Stage times out | Check Core and backend status. The built-in firmware rule polls for 45 minutes per attempt; a backend job can still be running when Flow times out. |
 | Rack-scale update fails before dispatch with an omitted or empty `version` | Confirm that the failed Core firmware request targets one rack. Verify that the rack profile has a configured, reachable `firmware_object.url` that returns a JSON object. |
 | Rack-scale update rejects an explicit `version` | Confirm that `version` contains a valid SOT JSON object, serialized as a string, and that the selected firmware-download credential can access the referenced artifacts. |
-| Power-shelf request succeeds without updating a shelf | Confirm that the resolved operation rule contains a `PowerShelf` step. The built-in rule excludes power shelves. If `FindPowerShelves` reports `status.rack_firmware_reprovisioning_skip`, enable `rack_firmware_reprovisioning_enabled` and submit a new request. |
+| Power-shelf request succeeds without updating a shelf | Confirm that the resolved operation rule contains a `PowerShelf` step. The built-in rule excludes power shelves. A shelf-only request through the state controller does not update shelves. If `FindPowerShelves` reports `status.rack_firmware_reprovisioning_skip`, enable `rack_firmware_reprovisioning_enabled`. Before submitting a new rack request, inspect the backend job and component inventory; a retry can resubmit compute or switch firmware work. |
 | Firmware was flashed but is not active | Determine whether the platform requires an AC cycle. The built-in firmware rule does not include one. |
 | Retry begins from an uncertain state | Inspect per-component status and inventory first. A Flow task failure or cancellation does not roll hardware back. |
 
