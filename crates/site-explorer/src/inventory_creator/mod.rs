@@ -115,14 +115,13 @@ impl InventoryCreator {
         }
     }
 
-    /// Creates or reconciles hosts, with periodic switch and power-shelf passes.
-    pub(super) async fn create_or_reconcile_hosts(
+    /// Creates hosts, with periodic switch and power-shelf passes.
+    pub(super) async fn create_hosts(
         &self,
         metrics: &mut SiteExplorationMetrics,
         identified_hosts: &mut [IdentifiedManagedHost],
         expected_endpoint_index: &ExploredEndpointIndex,
         already_ingested_bmc_ips: &HashSet<IpAddr>,
-        explored_this_run: &HashSet<IpAddr>,
         suppressed_bmc_macs: &HashSet<MacAddress>,
     ) {
         if self.config.create_machines.load(Ordering::Relaxed) {
@@ -152,7 +151,6 @@ impl InventoryCreator {
                 identified_hosts,
                 expected_endpoint_index,
                 already_ingested_bmc_ips,
-                explored_this_run,
             );
             let mut create_machines_latency = Duration::ZERO;
             loop {
@@ -184,22 +182,6 @@ impl InventoryCreator {
             }
             metrics.create_machines_latency = Some(create_machines_latency);
             metrics.record_phase_latency("create_machines", create_machines_latency);
-        } else {
-            // `create_machines` revisits ingested hosts explored this run on
-            // its steady-state path; with it off, revisit them here so a
-            // pending admin address repair is still made.
-            let reconcile_admin_addresses_start = Instant::now();
-            self.machine_creator
-                .reconcile_explored_host_admin_addresses(
-                    identified_hosts,
-                    already_ingested_bmc_ips,
-                    explored_this_run,
-                )
-                .await;
-            metrics.record_phase_latency(
-                "reconcile_explored_host_admin_addresses",
-                reconcile_admin_addresses_start.elapsed(),
-            );
         }
     }
 

@@ -53,6 +53,7 @@ fn network_segment_request(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         subdomain_id: domain_id,
         vpc_id: None,
@@ -344,6 +345,7 @@ async fn create_addressed_interface(
         svi_ip: None,
         free_ip_count_v2: None,
         free_ip_count_saturated: false,
+        dhcpv6_link_address: None,
     });
     env.api
         .create_network_segment(Request::new(request))

@@ -304,7 +304,6 @@ async fn proxy_request(
     request: Request<Body>,
 ) -> Result<Response<Body>, Response<Body>> {
     let request_span = bmc_proxy_request_span(&request);
-
     let result = proxy_request_inner(state, request)
         .instrument(request_span.clone())
         .await;
@@ -320,6 +319,7 @@ fn bmc_proxy_request_span<B>(request: &Request<B>) -> tracing::Span {
     let request_span = tracing::info_span!(
         parent: None,
         "bmc_proxy_request",
+        otel.kind = "server",
         http.request.method = %request.method(),
         url.path = %request.uri().path(),
         http.response.status_code = tracing::field::Empty,
@@ -742,6 +742,7 @@ mod tests {
             TraceId::from(inbound_trace)
         );
         assert_eq!(request.parent_span_id, SpanId::from(inbound_span));
+        assert_eq!(request.span_kind, opentelemetry::trace::SpanKind::Server);
     }
 
     #[test]

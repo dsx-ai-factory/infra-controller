@@ -25,7 +25,6 @@ use forge_http_connector::resolver::{ForgeResolver, ForgeResolverOpts};
 use forge_tls::client_config::ClientCert;
 use forge_tls::dummy_tls_verifier::DummyTlsVerifier;
 use hickory_resolver::config::ResolverConfig;
-use hyper::body::Incoming;
 use hyper_util::client::legacy;
 use hyper_util::rt::TokioTimer;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -100,11 +99,11 @@ impl From<tower::BoxError> for TransportError {
 }
 
 pub type NmxCClientT = NmxControllerClient<
-    BoxCloneService<hyper::Request<Body>, hyper::Response<Incoming>, TransportError>,
+    BoxCloneService<hyper::Request<Body>, hyper::Response<Body>, TransportError>,
 >;
 
 pub type ForgeClientT =
-    ForgeClient<BoxCloneService<hyper::Request<Body>, hyper::Response<Incoming>, TransportError>>;
+    ForgeClient<BoxCloneService<hyper::Request<Body>, hyper::Response<Body>, TransportError>>;
 
 /// HTTP/2 GETs confined to one configured Core origin.
 ///
@@ -114,7 +113,7 @@ pub type ForgeClientT =
 /// response-body consumption separately from the transport's header deadline.
 pub struct ForgeHttpClient {
     origin: Uri,
-    service: BoxCloneService<hyper::Request<Body>, hyper::Response<Incoming>, TransportError>,
+    service: BoxCloneService<hyper::Request<Body>, hyper::Response<Body>, TransportError>,
 }
 
 impl ForgeHttpClient {
@@ -123,7 +122,7 @@ impl ForgeHttpClient {
     pub async fn get(
         &mut self,
         path: PathAndQuery,
-    ) -> Result<hyper::Response<Incoming>, TransportError> {
+    ) -> Result<hyper::Response<Body>, TransportError> {
         let uri = Uri::builder()
             .scheme(
                 self.origin
@@ -712,20 +711,12 @@ impl<'a> ForgeTlsClient<'a> {
             hyper_client,
             self.forge_client_config.node_token_provider.clone(),
         );
-        // Inject the issuing span's W3C trace context into every request this client sends
-        // (issue #2438). Wrapping before `boxed_clone` keeps the erased `BoxCloneService` type.
-        let hyper_client = trace_propagation::TraceInjectService::new(hyper_client);
         let request_timeout = self
             .forge_client_config
             .request_timeout
             .unwrap_or(REQUEST_TIMEOUT);
-        let hyper_client: BoxCloneService<
-            hyper::Request<Body>,
-            hyper::Response<Incoming>,
-            TransportError,
-        > = tower::timeout::Timeout::new(hyper_client, request_timeout)
-            .map_err(TransportError)
-            .boxed_clone();
+        let hyper_client =
+            crate::grpc_client_tracing::traced_transport(hyper_client, request_timeout);
 
         Ok(ForgeHttpClient {
             origin: uri,
@@ -933,20 +924,12 @@ impl<'a> ForgeTlsClient<'a> {
             .pool_max_idle_per_host(2)
             .timer(TokioTimer::new())
             .build(connector);
-        // Inject the issuing span's W3C trace context into every request this client sends
-        // (issue #2438). Wrapping before `boxed_clone` keeps the erased `BoxCloneService` type.
-        let hyper_client = trace_propagation::TraceInjectService::new(hyper_client);
         let request_timeout = self
             .forge_client_config
             .request_timeout
             .unwrap_or(REQUEST_TIMEOUT);
-        let hyper_client: BoxCloneService<
-            hyper::Request<Body>,
-            hyper::Response<Incoming>,
-            TransportError,
-        > = tower::timeout::Timeout::new(hyper_client, request_timeout)
-            .map_err(TransportError)
-            .boxed_clone();
+        let hyper_client =
+            crate::grpc_client_tracing::traced_transport(hyper_client, request_timeout);
 
         let mut nmx_c_client = NmxControllerClient::with_origin(hyper_client, uri);
 
@@ -1073,7 +1056,6 @@ mod tests {
     use hyper::rt::Executor as _;
     use hyper_rustls::HttpsConnector;
     use hyper_util::rt::TokioExecutor;
-    use tower::ServiceExt as _;
     use tracing::Instrument as _;
 
     use super::*;
@@ -1086,7 +1068,7 @@ mod tests {
         let requests = captured.clone();
         let service = tower::service_fn(move |request: hyper::Request<Body>| {
             *requests.lock().unwrap() = Some((request.method().clone(), request.uri().clone()));
-            std::future::ready(Err::<hyper::Response<Incoming>, _>(TransportError(
+            std::future::ready(Err::<hyper::Response<Body>, _>(TransportError(
                 "request captured".into(),
             )))
         });
@@ -1224,6 +1206,105 @@ mod tests {
         let (task, seen_in) = span_seen();
         call.in_scope(|| DetachedExecutor.execute(task));
         assert_ne!(seen_in.await.unwrap(), call.id(), "spawned detached");
+    }
+
+    /// The public wrapper's version probe and RPC each propagate their own
+    /// client span, and neither span is retained by the pooled HTTP/2 connection.
+    #[tokio::test]
+    async fn forge_api_client_traces_each_wire_request() {
+        use http_body_util::StreamBody;
+        use hyper::body::{Bytes, Frame};
+        use hyper_util::rt::TokioIo;
+        use opentelemetry::trace::{SpanKind, TraceContextExt, TracerProvider};
+        use opentelemetry_sdk::propagation::TraceContextPropagator;
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+        use tracing::instrument::WithSubscriber;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("proxy-test")));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::channel(4);
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                .serve_connection(
+                    TokioIo::new(socket),
+                    hyper::service::service_fn(
+                        move |request: hyper::Request<hyper::body::Incoming>| {
+                            let seen_tx = seen_tx.clone();
+                            async move {
+                                seen_tx.send(request.headers().clone()).await.unwrap();
+                                let mut trailers = hyper::HeaderMap::new();
+                                trailers.insert("grpc-status", "0".parse().unwrap());
+                                let body = StreamBody::new(tokio_stream::iter([
+                                    Ok::<_, std::convert::Infallible>(Frame::data(
+                                        Bytes::from_static(&[0, 0, 0, 0, 0]),
+                                    )),
+                                    Ok(Frame::trailers(trailers)),
+                                ]));
+                                Ok::<_, std::convert::Infallible>(
+                                    hyper::Response::builder()
+                                        .header("content-type", "application/grpc")
+                                        .body(body)
+                                        .unwrap(),
+                                )
+                            }
+                        },
+                    ),
+                )
+                .await
+                .unwrap();
+        });
+        let config = ForgeClientConfig::default();
+        let client = crate::forge_api_client::ForgeApiClient::new(&ApiConfig::new(&url, &config));
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            async {
+                let caller = tracing::info_span!("proxy_request", otel.kind = "server");
+                client
+                    .version(VersionRequest {
+                        display_config: false,
+                    })
+                    .instrument(caller)
+                    .await
+                    .unwrap();
+            }
+            .with_subscriber(subscriber),
+        )
+        .await
+        .unwrap();
+
+        let spans = exporter.get_finished_spans().unwrap();
+        let caller = spans
+            .iter()
+            .find(|span| span.name == "proxy_request")
+            .expect("caller closes with the connection still open");
+        let clients: Vec<_> = spans
+            .iter()
+            .filter(|span| span.name == "grpc_client_request")
+            .collect();
+        assert_eq!(clients.len(), 2, "connection probe and public RPC");
+        for client in clients {
+            let received = trace_propagation::extract_context(&seen_rx.try_recv().unwrap());
+            assert_eq!(client.span_kind, SpanKind::Client);
+            assert_eq!(client.parent_span_id, caller.span_context.span_id());
+            assert_eq!(
+                received.span().span_context().span_id(),
+                client.span_context.span_id()
+            );
+            assert_eq!(
+                client.span_context.trace_id(),
+                caller.span_context.trace_id()
+            );
+        }
+        server.abort();
     }
 
     /// A node-token client presents no client certificate, which by itself
