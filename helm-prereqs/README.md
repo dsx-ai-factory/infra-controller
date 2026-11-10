@@ -844,9 +844,10 @@ root and both UEFI defaults before it explores anything:
 
 Do not leave the `siteCredentials` passwords empty on a site that already holds
 these credentials, for example one moved off Vault whose values are in Vault KV
-or Postgres. The chart generates a random password for each empty entry, and
-`nico-api` reads the file ahead of the persistent backends, so a generated
-password shadows the real one while the devices keep the old one. This holds
+or Postgres. The chart generates a random password only for an entry that has
+no explicit value and no entry in the existing Secret. `nico-api` reads the
+file ahead of the persistent backends, so a generated password shadows the real
+one while the devices keep the old one. This holds
 for both UEFI defaults whatever the policy, and for the site-wide BMC root
 under the default `nico-api.credentials.bmcSiteWideRootSource: local_first`.
 Set each password to the value in use, or leave `siteCredentials` disabled and
@@ -957,17 +958,26 @@ skip. Complete these first, each as described on its page:
    necessarily the one the role names.
 
    ```bash
-   kubectl get secret vaultroottoken -n vault -o jsonpath='{.data.token}' | base64 -d |
-     kubectl exec -i -n vault vault-0 -c vault -- sh -c '
-       export VAULT_TOKEN="$(cat)" VAULT_SKIP_VERIFY=1
-       issuer="$(vault read -field=issuer_ref nicoca/roles/nico-cluster)"
-       vault read -field=certificate "nicoca/issuer/${issuer}"' |
-     openssl x509 -noout -fingerprint -sha256
-   kubectl get secret site-root -n cert-manager -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -fingerprint -sha256
-   kubectl get secret site-root -n cert-manager -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -pubkey | sha256sum
-   kubectl get secret site-root -n cert-manager -o jsonpath='{.data.tls\.key}' | base64 -d | openssl pkey -pubout | sha256sum
-   kubectl get clusterissuer site-issuer -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+   (
+     set -euo pipefail
+     kubectl get secret vaultroottoken -n vault -o jsonpath='{.data.token}' | base64 -d |
+       kubectl exec -i -n vault vault-0 -c vault -- sh -c '
+         set -eu
+         export VAULT_TOKEN="$(cat)" VAULT_SKIP_VERIFY=1
+         issuer="$(vault read -field=issuer_ref nicoca/roles/nico-cluster)"
+         vault read -field=certificate "nicoca/issuer/${issuer}"' |
+       openssl x509 -noout -fingerprint -sha256
+     kubectl get secret site-root -n cert-manager -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -fingerprint -sha256
+     kubectl get secret site-root -n cert-manager -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -pubkey | sha256sum
+     kubectl get secret site-root -n cert-manager -o jsonpath='{.data.tls\.key}' | base64 -d | openssl pkey -pubout | sha256sum
+     kubectl get clusterissuer site-issuer -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+   )
    ```
+
+   The subshell stops at the first failed command, including a failure inside
+   a pipeline. Do not drop `pipefail`: a failed read would otherwise feed an
+   empty input to `sha256sum`, and two such failures print the same hash, which
+   looks like a match.
 
    The two fingerprints must be identical, the two public-key hashes must be
    identical, and the issuer must report `True`. Comparing the CA, rather
@@ -1048,13 +1058,14 @@ Three things differ from a fresh install:
   `health-check.sh` reporting its Vault integration checks as
   `not configured (--skip-vault was used)` reflects its consumer probe, not
   the release. Second, no stored credential may still be wrapped by a Transit
-  KEK: run `nico-admin-cli secrets re-wrap` again and confirm that it
-  reports `stale_remaining` as `0`, as
+  KEK: run `nico-admin-cli secrets re-wrap` again and confirm that it prints
+  `No live rows remain on KEKs outside the routing config.` rather than
+  `<n> rows are still wrapped by KEKs outside the routing config`, as
   [Rotating and Retiring Keys](../docs/configuration/secrets-storage.md#rotating-and-retiring-keys)
   describes, because the Transit key goes with the Vault data. Keep the key
   recoverable until the backup-retention window ends as well:
-  `stale_remaining` counts live entries only, and restoring a Postgres backup
-  taken before the re-wrap still needs the Transit key. Third,
+  that message covers live rows only, and restoring a Postgres backup taken
+  before the re-wrap still needs the Transit key. Third,
   nothing outside the installer's releases may still use this Vault. The
   consumer probe sees only Deployments in `nico-system` whose container
   environment names `VAULT_ADDR`, as the chart renders it, and cert-manager
