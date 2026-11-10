@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the MachineGPUInfo type satisfies the MappedNullable interface at compile time
@@ -38,14 +40,19 @@ type MachineGPUInfo struct {
 	Frequency NullableString `json:"frequency,omitempty"`
 	// PCI BusId of the Machine's GPU
 	PciBusId NullableString `json:"pciBusId,omitempty"`
+	// PCI device ID of the Machine's GPU
+	DeviceId NullableString `json:"deviceId"`
 }
+
+type _MachineGPUInfo MachineGPUInfo
 
 // NewMachineGPUInfo instantiates a new MachineGPUInfo object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineGPUInfo() *MachineGPUInfo {
+func NewMachineGPUInfo(deviceId NullableString) *MachineGPUInfo {
 	this := MachineGPUInfo{}
+	this.DeviceId = deviceId
 	return &this
 }
 
@@ -401,6 +408,32 @@ func (o *MachineGPUInfo) UnsetPciBusId() {
 	o.PciBusId.Unset()
 }
 
+// GetDeviceId returns the DeviceId field value
+// If the value is explicit nil, the zero value for string will be returned
+func (o *MachineGPUInfo) GetDeviceId() string {
+	if o == nil || o.DeviceId.Get() == nil {
+		var ret string
+		return ret
+	}
+
+	return *o.DeviceId.Get()
+}
+
+// GetDeviceIdOk returns a tuple with the DeviceId field value
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *MachineGPUInfo) GetDeviceIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DeviceId.Get(), o.DeviceId.IsSet()
+}
+
+// SetDeviceId sets field value
+func (o *MachineGPUInfo) SetDeviceId(v string) {
+	o.DeviceId.Set(&v)
+}
+
 func (o MachineGPUInfo) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -435,7 +468,48 @@ func (o MachineGPUInfo) ToMap() (map[string]interface{}, error) {
 	if o.PciBusId.IsSet() {
 		toSerialize["pciBusId"] = o.PciBusId.Get()
 	}
+	toSerialize["deviceId"] = o.DeviceId.Get()
 	return toSerialize, nil
+}
+
+func (o *MachineGPUInfo) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"deviceId",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	nullableRequiredProperties := map[string]struct{}{
+		"deviceId": {},
+	}
+	for _, requiredProperty := range requiredProperties {
+		_, nullable := nullableRequiredProperties[requiredProperty]
+		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varMachineGPUInfo := _MachineGPUInfo{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varMachineGPUInfo)
+
+	if err != nil {
+		return err
+	}
+
+	*o = MachineGPUInfo(varMachineGPUInfo)
+
+	return err
 }
 
 type NullableMachineGPUInfo struct {

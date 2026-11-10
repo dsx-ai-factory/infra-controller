@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the MachineNetworkInterface type satisfies the MappedNullable interface at compile time
@@ -36,14 +38,19 @@ type MachineNetworkInterface struct {
 	Description NullableString `json:"description,omitempty"`
 	// Slot number of the Machine's NetworkInterface
 	Slot NullableString `json:"slot,omitempty"`
+	// PCI device ID of the Machine's NetworkInterface
+	DeviceId NullableString `json:"deviceId"`
 }
+
+type _MachineNetworkInterface MachineNetworkInterface
 
 // NewMachineNetworkInterface instantiates a new MachineNetworkInterface object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineNetworkInterface() *MachineNetworkInterface {
+func NewMachineNetworkInterface(deviceId NullableString) *MachineNetworkInterface {
 	this := MachineNetworkInterface{}
+	this.DeviceId = deviceId
 	return &this
 }
 
@@ -345,6 +352,32 @@ func (o *MachineNetworkInterface) UnsetSlot() {
 	o.Slot.Unset()
 }
 
+// GetDeviceId returns the DeviceId field value
+// If the value is explicit nil, the zero value for string will be returned
+func (o *MachineNetworkInterface) GetDeviceId() string {
+	if o == nil || o.DeviceId.Get() == nil {
+		var ret string
+		return ret
+	}
+
+	return *o.DeviceId.Get()
+}
+
+// GetDeviceIdOk returns a tuple with the DeviceId field value
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *MachineNetworkInterface) GetDeviceIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DeviceId.Get(), o.DeviceId.IsSet()
+}
+
+// SetDeviceId sets field value
+func (o *MachineNetworkInterface) SetDeviceId(v string) {
+	o.DeviceId.Set(&v)
+}
+
 func (o MachineNetworkInterface) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -376,7 +409,48 @@ func (o MachineNetworkInterface) ToMap() (map[string]interface{}, error) {
 	if o.Slot.IsSet() {
 		toSerialize["slot"] = o.Slot.Get()
 	}
+	toSerialize["deviceId"] = o.DeviceId.Get()
 	return toSerialize, nil
+}
+
+func (o *MachineNetworkInterface) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"deviceId",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	nullableRequiredProperties := map[string]struct{}{
+		"deviceId": {},
+	}
+	for _, requiredProperty := range requiredProperties {
+		_, nullable := nullableRequiredProperties[requiredProperty]
+		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varMachineNetworkInterface := _MachineNetworkInterface{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varMachineNetworkInterface)
+
+	if err != nil {
+		return err
+	}
+
+	*o = MachineNetworkInterface(varMachineNetworkInterface)
+
+	return err
 }
 
 type NullableMachineNetworkInterface struct {
