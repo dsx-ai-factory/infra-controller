@@ -4,6 +4,34 @@ Use this guide to enable NICo's opt-in Dynamic Host Configuration Protocol for I
 
 The Core chart runs Kea DHCPv4 in `nico-dhcp` and, when enabled, Kea DHCPv6 in `nico-dhcp6`. The Deployments have separate pods, selectors, configuration, Services, probes, and rollouts. Both use the same image, hook library, ServiceAccount, client certificate, and application programming interface (API) identity. Both hooks call the same API through gRPC with mutual Transport Layer Security (mTLS). API role-based access control (RBAC) continues to apply.
 
+## Kea Runtime Compatibility
+
+Use the NICo hook and patched Kea runtime from the same repository revision.
+The repository build and runtime images apply
+[`kea-lease6-replacement.patch`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/docker/kea-lease6-replacement.patch)
+for safe DHCPv6 lease replacement and
+[`kea-reuse-null.patch`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/docker/kea-reuse-null.patch)
+for Kea 2.2 expired-candidate refusal. Kea 2.4 already includes the latter fix,
+but still requires the replacement contract. The packaged runtime is pinned to
+Kea 2.2.0-6; `build-kea.sh` does not build a Kea 2.4 package. The Kea 2.4
+conditional code is outside the pinned CI runtime coverage; these images do not
+provide a Kea 2.4 runtime.
+A distribution package version alone does not establish compatibility.
+
+The DHCPv6 hook checks native runtime capabilities when loading and rejects a
+missing or incompatible contract with `NICo DHCPv6 requires patched Kea`.
+Custom images must preserve these patches and capability exports. Reinstalling
+stock Kea libraries can therefore prevent DHCPv6 startup. DHCPv4 does not require
+these DHCPv6 capabilities.
+
+The package-manager commands in [Development](../development.md) and
+`dev/deployment/devspace/prepare-ubuntu-host-for-dev.sh` install distribution Kea,
+including headers for native builds. They do not apply these patches. Run
+DHCPv6 hook tests with the repository build image's patched runtime. The existing
+`test-dhcp-docker` cargo-make task selects the x86_64 Dockerfile. Running that
+task on ARM64 is unverified; it does not select the native ARM64 Dockerfile
+automatically. A native ARM64 test task is not provided.
+
 ## Network and Identity Requirements
 
 Before enabling the DHCPv6 workload, review the following requirements:
@@ -76,6 +104,33 @@ nico-dhcp:
 Apply through the site's normal Helm upgrade workflow, using the Core image and chart from the same repository revision as required by the [image compatibility policy](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#image-configuration). When upgrading from a revision without the `dhcp` and `v6ExternalService` maps, update both the chart and Core image. DSX, hardware-health, and PXE use their dual-stack listener defaults unless an explicit listener configuration overrides them. Setting `dhcp.v6Enabled: false` removes the v6 resources while preserving the v4 pod template. The v6 Deployment uses `Recreate` so old and replacement v6 pods do not serve simultaneously.
 
 The example enables address allocation, not HTTP boot. Refer to [Helm Values](#helm-values) for the complete settings and defaults, then complete [Deployment Verification and Metrics](#deployment-verification-and-metrics).
+
+## Lease Handoff and Refusal
+
+Firmware and the installed OS can use different DUIDs or IAIDs for the same NIC.
+During handoff, Kea can propose another address and the hook redirects it to
+Core's IA_NA address. Replacing an assigned or reclaimed lease at that target
+requires a matching stored MAC and subnet. A foreign or unknown MAC, another
+subnet, or a declined target is refused. Ordinary SOLICIT
+preserves the existing lease; REQUEST or jointly enabled Rapid Commit persists
+the replacement. Replacing that lease does not expire Core's assignment for the
+handed-off address. Reclamation of a different expired allocation candidate is a
+separate operation.
+
+The chart omits the `multi-threading` setting. The pinned Kea 2.2 runtime
+[disables multithreading by default](https://kea.readthedocs.io/en/kea-2.2.0/arm/dhcp6-srv.html#multi-threading-settings);
+custom runtimes can have a different default. When multithreading is enabled,
+overlapping packets for the same MAC or
+address are dropped with reason `lease_transaction_busy`, allowing the client to
+retry. An unrelated client's transaction can proceed. The hook also coordinates
+reclamation with those transactions. These guards are local to one Kea process;
+they do not provide cross-process or high-availability coordination.
+
+After handoff, a delayed RENEW or REBIND with the previous DUID or IAID is dropped
+with reason `stale_lease_identity`. It does not replace or extend the new owner's
+lease. The hook sends no reply on these dropped-request paths. Inspect the
+`reason` label of `carbide_dhcp_v6_requests_dropped_total` when diagnosing retries
+across boot stages; these drop counters do not emit per-packet log messages.
 
 ## Deployment Verification and Metrics
 

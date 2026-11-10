@@ -5,7 +5,7 @@ environment.
 
 ## Local environment prep
 
-1. Install rust by following the directions [here](https://www.rust-lang.org/tools/install).
+1. Install rust by following the [Rust installation directions](https://www.rust-lang.org/tools/install).
    You will need to use the rustup based installation method to use the same Rust compiler utilized by the CI toolchain.
    You can find the target compiler version in `rust-toolchain.toml` in the root of this directory
    If rustup is installed, you can switch toolchain versions using `rustup toolchain`.
@@ -40,14 +40,17 @@ environment.
    Debian/Ubuntu
     - Install required libraries
         - `sudo apt-get install -y libboost-dev`
-        - download libssl1 from [here](http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/) and install `sudo dpkg -i <downloaded-lib>`.  `libssl1.1_1.1.0g-2ubuntu4_amd64.deb` is known to work but there are newer versions that haven't been tested
+        - download libssl1 from the [Ubuntu OpenSSL package archive](http://archive.ubuntu.com/ubuntu/pool/main/o/openssl/) and install `sudo dpkg -i <downloaded-lib>`. `libssl1.1_1.1.0g-2ubuntu4_amd64.deb` is known to work but there are newer versions that haven't been tested
 
    - Install kea, but might be out of date:
-     ```
+
+     ```bash
      sudo apt-get update && sudo apt-get install -y isc-kea-dhcp4-server isc-kea-dev
      ```
+
    - Or, but has only been tested with Ubuntu 23.10, install kea:
-     ```
+
+     ```bash
      sudo apt-get update && sudo apt-get install -y kea-dev kea-dhcp4-server
      ```
 
@@ -75,7 +78,7 @@ environment.
 
 8. Install `direnv` using your package manager
 
-   It would be best to install `direnv` on your host. `direnv` requires a shell hook to work.  See `man direnv` (after install) for
+   It would be best to install `direnv` on your host. `direnv` requires a shell hook to work. See `man direnv` (after install) for
    more information on setting it up. Once you clone the `infra-controller` repo, you need to run `direnv allow` the first time you cd into your local copy.
    Running `direnv allow` exports the necessary environmental variables while in the repo and cleans up when not in the repo.
 
@@ -171,7 +174,12 @@ Start database container:
 
 Test!
 
-`cargo test`
+`cargo test --workspace --exclude carbide-dhcp`
+
+Run DHCP tests separately with the patched repository build image. Distribution
+Kea does not provide the runtime contract required by the DHCPv6 hook. See
+[Kea Runtime Compatibility](provisioning/dhcpv6-deployment.md#kea-runtime-compatibility)
+for the container test workflow and architecture limits.
 
 If the tests don't pass ask in Slack #infra-controller.
 
@@ -194,19 +202,23 @@ The DPU has an ARM core. To build software that runs there such as `nico-dpu-age
 Here's how I did it.
 
 One time build:
- - copy / edit the Docker file from the repo into `myarm/Dockerfile`.
- - delete these lines:
-```
+
+- copy / edit the Docker file from the repo into `myarm/Dockerfile`.
+- delete these lines:
+
+```dockerfile
  RUN /root/.cargo/bin/cargo install cargo-cache cargo-make mdbook@0.4.52 mdbook-plantuml@0.8.0 mdbook-mermaid@0.16.2 sccache && /root/.cargo/bin/cargo cache -r registry-index,registry-sources
  RUN curl -fsSL https://get.docker.com -o get-docker.sh && sh get-docker.sh
  RUN cd /usr/local/bin && curl -fL https://getcli.jfrog.io | sh
 ```
- - `docker build -t myarm myarm` # give it a cooler name
- - `docker run -it -v /home/user/src/infra-controller:/infra-controller myarm /bin/bash`
+
+- `docker build -t myarm myarm` # give it a cooler name
+- `docker run -it -v /home/user/src/infra-controller:/infra-controller myarm /bin/bash`
 
 Daily usage:
- - `docker start <container id or name>`
- - `docker attach <container id or name>`
+
+- `docker start <container id or name>`
+- `docker attach <container id or name>`
 
 Now that you're in the container go into `/infra-controller` and work normally (`cargo build --release`). The binary rust produces will be aarch64. You can `scp` it to a DPU and run it.
 
@@ -219,4 +231,4 @@ Remember to `strip` before you scp so that scp goes faster. scp to DPU example (
 Set up a QEMU host for your docker-compose services to manage:
 
 1. [Build iPXE and bootable artifacts image](bootable_artifacts.md)
-1. [Start QEMU server](development/vm_pxe_client.md)
+2. [Start QEMU server](development/vm_pxe_client.md)

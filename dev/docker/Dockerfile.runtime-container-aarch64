@@ -14,7 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-FROM arm64v8/debian:12-slim@sha256:6bd27d44e6c32a66bbd72d7cb2b76a8ae3497ec2e5274a81abd1b37f6013fa1f
+ARG DEBIAN_IMAGE=arm64v8/debian:12-slim@sha256:6bd27d44e6c32a66bbd72d7cb2b76a8ae3497ec2e5274a81abd1b37f6013fa1f
+FROM ${DEBIAN_IMAGE} AS kea-builder
+ARG KEA_VERSION
+COPY dev/docker/build-kea.sh dev/docker/kea-reuse-null.patch dev/docker/kea-lease6-replacement.patch /tmp/kea-build/
+RUN /tmp/kea-build/build-kea.sh "${KEA_VERSION}"
+
+FROM ${DEBIAN_IMAGE}
 
 ARG KEA_VERSION
 
@@ -71,6 +77,9 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt-get update && \
 		tpm2-tools \
 		zlib1g && \
 	rm -rf /var/lib/apt/lists/*
+
+COPY --from=kea-builder /kea-packages/kea-common.deb /tmp/kea-common.deb
+RUN dpkg -i /tmp/kea-common.deb && rm /tmp/kea-common.deb
 
 RUN test "$(dpkg-query -W -f='${Version}' kea-dhcp6-server)" = "${KEA_VERSION}" && \
 	kea-dhcp6 -V
