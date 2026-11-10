@@ -636,6 +636,16 @@ impl TestEnv {
             .await;
     }
 
+    /// Processes each queued machine once, without requeueing state transitions.
+    pub(in crate::tests) async fn run_machine_state_controller_iteration_without_requeue(&self) {
+        self.machine_state_controller
+            .lock()
+            .await
+            .run_single_iteration_ext(false)
+            .boxed()
+            .await;
+    }
+
     /// Reports membership in the latest database object-ID list so integration
     /// tests can verify which identity the machine controller read after discovery.
     pub(in crate::tests) async fn machine_object_ids_from_database_contains(
@@ -734,6 +744,15 @@ impl TestEnv {
             .lock()
             .await
             .run_single_iteration()
+            .await;
+    }
+
+    /// Processes each rack once so assertions can inspect the immediate transition.
+    pub(in crate::tests) async fn run_rack_controller_iteration_no_requeue(&self) {
+        self.rack_controller
+            .lock()
+            .await
+            .run_single_iteration_ext(false)
             .await;
     }
 
