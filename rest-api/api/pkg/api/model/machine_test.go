@@ -851,6 +851,32 @@ func TestMachine_NewAPIMachineScoutVersion(t *testing.T) {
 	}
 }
 
+func TestMachine_DeviceIdFromProto(t *testing.T) {
+	tests := []struct {
+		name     string
+		deviceId *string
+	}{
+		{name: "device id reported by Site", deviceId: cutil.GetPtr("0xa2dc")},
+		{name: "device id not reported by Site", deviceId: nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gpu := APIMachineGPUInfo{}
+			gpu.FromProto(&corev1.Gpu{PciDeviceId: cutil.GetValueOrZero(tc.deviceId)})
+			assert.Equal(t, tc.deviceId, gpu.DeviceId)
+
+			ni := APIMachineNetworkInterface{}
+			ni.FromProto(&corev1.NetworkInterface{PciProperties: &corev1.PciDeviceProperties{DeviceId: tc.deviceId}})
+			assert.Equal(t, tc.deviceId, ni.DeviceId)
+
+			ib := APIMachineInfiniBandInterface{}
+			ib.FromProto(&corev1.InfinibandInterface{PciProperties: &corev1.PciDeviceProperties{DeviceId: tc.deviceId}})
+			assert.Equal(t, tc.deviceId, ib.DeviceId)
+		})
+	}
+}
+
 func TestMachine_NewAPIMachineSummary(t *testing.T) {
 	mID := uuid.NewString()
 	dbm := &cdbm.Machine{

@@ -36,6 +36,8 @@ type MachineNetworkInterface struct {
 	Description NullableString `json:"description,omitempty"`
 	// Slot number of the Machine's NetworkInterface
 	Slot NullableString `json:"slot,omitempty"`
+	// PCI device ID of the Machine's NetworkInterface, as reported by udev (`ID_MODEL_ID`), such as `0x101b`. `null` if the Site did not report it
+	DeviceId NullableString `json:"deviceId,omitempty"`
 }
 
 // NewMachineNetworkInterface instantiates a new MachineNetworkInterface object
@@ -345,6 +347,49 @@ func (o *MachineNetworkInterface) UnsetSlot() {
 	o.Slot.Unset()
 }
 
+// GetDeviceId returns the DeviceId field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *MachineNetworkInterface) GetDeviceId() string {
+	if o == nil || IsNil(o.DeviceId.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.DeviceId.Get()
+}
+
+// GetDeviceIdOk returns a tuple with the DeviceId field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *MachineNetworkInterface) GetDeviceIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DeviceId.Get(), o.DeviceId.IsSet()
+}
+
+// HasDeviceId returns a boolean if a field has been set.
+func (o *MachineNetworkInterface) HasDeviceId() bool {
+	if o != nil && o.DeviceId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDeviceId gets a reference to the given NullableString and assigns it to the DeviceId field.
+func (o *MachineNetworkInterface) SetDeviceId(v string) {
+	o.DeviceId.Set(&v)
+}
+
+// SetDeviceIdNil sets the value for DeviceId to be an explicit nil
+func (o *MachineNetworkInterface) SetDeviceIdNil() {
+	o.DeviceId.Set(nil)
+}
+
+// UnsetDeviceId ensures that no value is present for DeviceId, not even an explicit nil
+func (o *MachineNetworkInterface) UnsetDeviceId() {
+	o.DeviceId.Unset()
+}
+
 func (o MachineNetworkInterface) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -375,6 +420,9 @@ func (o MachineNetworkInterface) ToMap() (map[string]interface{}, error) {
 	}
 	if o.Slot.IsSet() {
 		toSerialize["slot"] = o.Slot.Get()
+	}
+	if o.DeviceId.IsSet() {
+		toSerialize["deviceId"] = o.DeviceId.Get()
 	}
 	return toSerialize, nil
 }

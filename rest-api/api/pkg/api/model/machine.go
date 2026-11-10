@@ -511,6 +511,8 @@ type APIMachineGPUInfo struct {
 	Frequency *string `json:"frequency"`
 	// PciBusId is the PCI BusId of the Machine's GPU
 	PciBusId *string `json:"pciBusId"`
+	// DeviceId is the PCI device ID of the Machine's GPU, e.g. "0x2330". Nil when not reported by the Site
+	DeviceId *string `json:"deviceId"`
 }
 
 // FromProto populates an APIMachineGPUInfo from its protobuf form.
@@ -526,6 +528,7 @@ func (gpu *APIMachineGPUInfo) FromProto(protoGpu *corev1.Gpu) {
 	gpu.TotalMemory = &protoGpu.TotalMemory
 	gpu.Frequency = &protoGpu.Frequency
 	gpu.PciBusId = &protoGpu.PciBusId
+	gpu.DeviceId = cutil.GetPtrIfNotZero(protoGpu.PciDeviceId)
 }
 
 // APIMachineNetworkInterface is the data structure to capture API representation of a Machine's Network Interface Info
@@ -544,6 +547,8 @@ type APIMachineNetworkInterface struct {
 	Description *string `json:"description"`
 	// Slot is the slot number of the Machine's NetworkInterface
 	Slot *string `json:"slot"`
+	// DeviceId is the PCI device ID of the Machine's NetworkInterface, e.g. "0xa2dc". Nil when not reported by the Site
+	DeviceId *string `json:"deviceId"`
 }
 
 // FromProto populates an APIMachineNetworkInterface from its protobuf form.
@@ -559,6 +564,7 @@ func (ni *APIMachineNetworkInterface) FromProto(protoNI *corev1.NetworkInterface
 		ni.NumaNode = &protoNI.PciProperties.NumaNode
 		ni.Description = protoNI.PciProperties.Description
 		ni.Slot = protoNI.PciProperties.Slot
+		ni.DeviceId = protoNI.PciProperties.DeviceId
 	}
 }
 
@@ -578,6 +584,8 @@ type APIMachineInfiniBandInterface struct {
 	Description *string `json:"description"`
 	// Slot is the slot number of the Machine's InfiniBandInterface
 	Slot *string `json:"slot"`
+	// DeviceId is the PCI device ID of the Machine's InfiniBandInterface, e.g. "0x101b". Nil when not reported by the Site
+	DeviceId *string `json:"deviceId"`
 }
 
 // FromProto populates an APIMachineInfiniBandInterface from its protobuf form.
@@ -593,6 +601,7 @@ func (ib *APIMachineInfiniBandInterface) FromProto(protoIB *corev1.InfinibandInt
 		ib.NumaNode = &protoIB.PciProperties.NumaNode
 		ib.Description = protoIB.PciProperties.Description
 		ib.Slot = protoIB.PciProperties.Slot
+		ib.DeviceId = protoIB.PciProperties.DeviceId
 	}
 }
 

@@ -11681,6 +11681,7 @@ paths:
                           totalMemory: 81559 MiB
                           frequency: 1755 MHz
                           pciBusId: '00000000:17:00.0'
+                          deviceId: '0x2331'
                       networkInterfaces:
                         - macAddress: 'c8:4b:d6:7b:ac:a8'
                           vendor: Broadcom Inc. and subsidiaries
@@ -11689,6 +11690,7 @@ paths:
                           numaNode: 0
                           description: NetXtreme BCM5720 Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)
                           slot: '0000:04:00.0'
+                          deviceId: '0x165f'
                       infinibandInterfaces:
                         - guid: 1070fd0300bd43ac
                           vendor: Mellanox Technologies
@@ -11697,6 +11699,7 @@ paths:
                           numaNode: 1
                           description: 'MT28908 Family [ConnectX-6]'
                           slot: '0000:ca:00.0'
+                          deviceId: '0x101b'
                       lifecycleState:
                         value: Ready
                         isAboveSLA: false
@@ -30748,6 +30751,7 @@ components:
               totalMemory: 81559 MiB
               frequency: 1755 MHz
               pciBusId: '00000000:17:00.0'
+              deviceId: '0x2331'
           networkInterfaces:
             - macAddress: 'c8:4b:d6:7b:ac:a8'
               vendor: Broadcom Inc. and subsidiaries
@@ -30756,6 +30760,7 @@ components:
               numaNode: 0
               description: NetXtreme BCM5720 Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)
               slot: '0000:04:00.0'
+              deviceId: '0x165f'
           infinibandInterfaces:
             - guid: 1070fd0300bd43ac
               vendor: Mellanox Technologies
@@ -30764,6 +30769,7 @@ components:
               numaNode: 1
               description: 'MT28908 Family [ConnectX-6]'
               slot: '0000:ca:00.0'
+              deviceId: '0x101b'
           lifecycleState:
             value: Ready
             isAboveSLA: false
@@ -31035,6 +31041,7 @@ components:
           totalMemory: 81559 MiB
           frequency: 1755 MHz
           pciBusId: '00000000:17:00.0'
+          deviceId: '0x2331'
       properties:
         name:
           type:
@@ -31076,6 +31083,11 @@ components:
             - string
             - 'null'
           description: 'PCI BusId of the Machine''s GPU'
+        deviceId:
+          type:
+            - string
+            - 'null'
+          description: 'PCI device ID of the Machine''s GPU, as a lowercase hex string such as `0x2331`. `null` if the Site did not report it'
     AggregateHealth:
       title: AggregateHealth
       type: object
@@ -31330,6 +31342,7 @@ components:
           numaNode: 0
           description: NetXtreme BCM5720 Gigabit Ethernet PCIe (PowerEdge Rx5xx LOM Board)
           slot: '0000:04:00.0'
+          deviceId: '0x165f'
       properties:
         macAddress:
           type:
@@ -31365,6 +31378,11 @@ components:
             - string
             - 'null'
           description: 'Slot number of the Machine''s NetworkInterface'
+        deviceId:
+          type:
+            - string
+            - 'null'
+          description: 'PCI device ID of the Machine''s NetworkInterface, as reported by udev (`ID_MODEL_ID`), such as `0x101b`. `null` if the Site did not report it'
     MachineInfiniBandInterface:
       title: MachineInfiniBandInterface
       description: Describes information about an Infiniband Interface of a Machine
@@ -31377,6 +31395,7 @@ components:
           numaNode: 1
           description: 'MT28908 Family [ConnectX-6]'
           slot: '0000:ca:00.0'
+          deviceId: '0x101b'
       properties:
         guid:
           type:
@@ -31412,6 +31431,11 @@ components:
             - string
             - 'null'
           description: 'Slot number of the Machine''s InfiniBandInterface'
+        deviceId:
+          type:
+            - string
+            - 'null'
+          description: 'PCI device ID of the Machine''s InfiniBandInterface, as reported by udev (`ID_MODEL_ID`), such as `0x101b`. `null` if the Site did not report it'
     MachineInstanceType:
       title: MachineInstanceType
       type: object
