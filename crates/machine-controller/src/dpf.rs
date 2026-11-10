@@ -97,6 +97,14 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
         dpu_device_names: &[String],
     ) -> Result<(), DpfError>;
 
+    /// Delete the host's NICo-owned BMC credential Secrets after its DPF resources drain.
+    /// Returns `false` until resources and Secrets, including finalizers, are gone.
+    async fn delete_host_bmc_credential_secrets(
+        &self,
+        node_id: &str,
+        dpu_device_names: &[String],
+    ) -> Result<bool, DpfError>;
+
     /// Read a DPU phase and terminal failure details from the same CR observation.
     ///
     /// `device_id` excludes the `device-` prefix. `node_name` accepts a node ID
@@ -908,7 +916,7 @@ impl DpfOperations for DpfSdkOps {
                 .await?;
                 let secret_name = self
                     .sdk
-                    .ensure_bmc_credential_secret(&info.device_id, version, &password)
+                    .create_bmc_credential_secret(&info.device_id, version, &password)
                     .await?;
                 return self
                     .sdk
@@ -939,6 +947,16 @@ impl DpfOperations for DpfSdkOps {
         dpu_device_names: &[String],
     ) -> Result<(), DpfError> {
         self.sdk.force_delete_host(node_id, dpu_device_names).await
+    }
+
+    async fn delete_host_bmc_credential_secrets(
+        &self,
+        node_id: &str,
+        dpu_device_names: &[String],
+    ) -> Result<bool, DpfError> {
+        self.sdk
+            .delete_host_bmc_credential_secrets(node_id, dpu_device_names)
+            .await
     }
 
     async fn reprovision_dpu(

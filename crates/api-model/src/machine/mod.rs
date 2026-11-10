@@ -1718,10 +1718,10 @@ pub enum DeconfiguringDpuState {
 }
 
 /// Sub-states of [`ManagedHostState::Reset`]: wait for Admin networking before
-/// deleting the tenant Instance, then remove the DPF CRs before re-ingestion.
+/// deleting the tenant Instance, then remove the DPF CRs and credential Secrets before re-ingestion.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
-#[allow(clippy::enum_variant_names)] // Both steps delete; the object deleted is the distinction
+#[allow(clippy::enum_variant_names)] // Each step deletes a different owned resource.
 pub enum ResetState {
     /// Retains the Instance and its network resources until every topology DPU
     /// acknowledges Admin networking, then deletes them before host cleanup.
@@ -1731,6 +1731,9 @@ pub enum ResetState {
     /// still carries a deletionTimestamp, so re-ingestion has to wait for the drain
     /// rather than for the delete to be accepted.
     DeletingCrs,
+    /// Deletes NICo-owned per-DPU BMC credential Secrets after DPF resources are gone,
+    /// and waits for Secret finalizers before re-ingestion.
+    DeletingBmcCredentialSecrets,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]

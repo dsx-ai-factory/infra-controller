@@ -1164,6 +1164,8 @@ fn force_delete_request(machine_id: &impl std::fmt::Display) -> AdminForceDelete
 /// Builds a DPF-enabled environment whose caller controls host-deletion outcomes so retry and
 /// orphan policies share identical managed-host setup.
 async fn dpf_force_delete_test_env(pool: sqlx::PgPool, mut mock: MockDpfOperations) -> TestEnv {
+    mock.expect_delete_host_bmc_credential_secrets()
+        .returning(|_, _| Ok(true));
     // Supply DPF ingestion responses while leaving host-deletion behavior under caller control.
     mock.expect_get_service_versions_for_dpu().returning(|_| {
         Ok(vec![carbide_dpf::DpuServiceVersion {
@@ -3075,6 +3077,9 @@ async fn test_admin_force_delete_with_dpf_retries_offline_admin_cleanup(pool: sq
                 Ok(())
             }
         });
+    let cap = captured_calls.clone();
+    mock.expect_delete_host_bmc_credential_secrets()
+        .returning(move |_, _| Ok(cap.lock().unwrap().len() >= 3));
     let env = dpf_force_delete_test_env(pool, mock).await;
 
     let mh = tokio::time::timeout(
@@ -3153,7 +3158,22 @@ async fn test_admin_force_delete_with_dpf_retries_offline_admin_cleanup(pool: sq
         );
     }
 
-    // Retry with the same missing observation that preceded the first call.
+    // Accepted Secret deletion does not permit Core cleanup while finalizers remain.
+    let pending = env
+        .api
+        .admin_force_delete_machine(Request::new(force_delete_request(&host_id)))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!pending.all_done);
+    let mut txn = env.db_txn().await;
+    assert_eq!(
+        mh.snapshot(&mut txn).await.managed_state,
+        ManagedHostState::ForceDeletion
+    );
+    txn.commit().await.unwrap();
+
+    // Retry with the same missing observation once credential cleanup is complete.
     let response = env
         .api
         .admin_force_delete_machine(Request::new(force_delete_request(&host_id)))
@@ -3166,8 +3186,13 @@ async fn test_admin_force_delete_with_dpf_retries_offline_admin_cleanup(pool: sq
     }
 
     let calls = captured_calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 2, "the second request must retry DPF cleanup");
+    assert_eq!(
+        calls.len(),
+        3,
+        "cleanup must retry through Secret deletion completion"
+    );
     assert_eq!(calls[0], calls[1]);
+    assert_eq!(calls[1], calls[2]);
 
     let (node_id, device_ids) = &calls[0];
 

@@ -532,6 +532,15 @@ pub(super) async fn handle_deconfiguring_dpus(
                     "waiting for managed host DPF resources to be deleted".to_string(),
                 ));
             }
+            if !dpf_sdk
+                .delete_host_bmc_credential_secrets(&host_dpf_id, &dpu_dpf_ids)
+                .await
+                .map_err(|error| StateHandlerError::GenericError(error.into()))?
+            {
+                return Ok(StateHandlerOutcome::wait(
+                    "waiting for managed host BMC credential Secrets to be deleted".to_string(),
+                ));
+            }
             let next_states = dpu_states
                 .keys()
                 .map(|&id| (id, DeconfiguringDpuState::InstallingBfb))

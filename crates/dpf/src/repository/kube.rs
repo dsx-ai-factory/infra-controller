@@ -880,6 +880,18 @@ impl K8sConfigRepository for KubeRepository {
 
 #[async_trait]
 impl BmcCredentialRepository for KubeRepository {
+    async fn list_bmc_credential_secrets(
+        &self,
+        namespace: &str,
+        label_selector: &str,
+    ) -> Result<Vec<Secret>, DpfError> {
+        let api: Api<Secret> = self.api(namespace);
+        Ok(api
+            .list(&ListParams::default().labels(label_selector))
+            .await?
+            .items)
+    }
+
     async fn get_bmc_credential_secret(
         &self,
         name: &str,

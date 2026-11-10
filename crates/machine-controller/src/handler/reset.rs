@@ -16,7 +16,7 @@
  */
 
 //! Operator-requested managed host reset: wait for the DPUs to return to `Admin`,
-//! delete the tenant instance, clean up the host, and remove its DPF CRs before
+//! delete the tenant instance, clean up the host, and remove its DPF CRs and credential Secrets before
 //! DPU discovery re-ingests it. Hosts without an instance skip the network wait.
 
 use eyre::eyre;
@@ -46,7 +46,10 @@ pub(super) async fn handle_reset(
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     match reset_state {
         ResetState::DeletingInstance => handle_deleting_instance(state, ctx, common_pools).await,
-        ResetState::DeletingCrs => handle_deleting_crs(state, ctx, dpf_sdk).await,
+        ResetState::DeletingCrs => handle_deleting_crs(state, dpf_sdk).await,
+        ResetState::DeletingBmcCredentialSecrets => {
+            handle_deleting_bmc_credential_secrets(state, ctx, dpf_sdk).await
+        }
     }
 }
 
@@ -151,7 +154,6 @@ async fn handle_deleting_instance(
 /// re-running it on each poll is safe.
 async fn handle_deleting_crs(
     state: &ManagedHostStateSnapshot,
-    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     dpf_sdk: Option<&dyn DpfOperations>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let dpf_sdk = dpf_sdk.ok_or_else(|| {
@@ -161,6 +163,36 @@ async fn handle_deleting_crs(
         ))
     })?;
 
+    let (host_dpf_id, dpu_dpf_ids) = host_dpf_ids(state)?;
+
+    // Reused from decommissioning; deletes the host's DPUNode and DPUDevice CRs.
+    dpf_sdk
+        .force_delete_host(&host_dpf_id, &dpu_dpf_ids)
+        .await
+        .map_err(|error| {
+            StateHandlerError::GenericError(eyre!(
+                "failed to delete managed host {} from DPF: {error}",
+                state.host_snapshot.id
+            ))
+        })?;
+
+    if !dpf_dpudevices_and_dpunode_crs_noexist(state, dpf_sdk)
+        .await
+        .map_err(|error| StateHandlerError::GenericError(error.into()))?
+    {
+        return Ok(StateHandlerOutcome::wait(
+            "waiting for managed host DPF resources to be deleted".to_string(),
+        ));
+    }
+
+    Ok(StateHandlerOutcome::transition(ManagedHostState::Reset {
+        reset_state: ResetState::DeletingBmcCredentialSecrets,
+    }))
+}
+
+fn host_dpf_ids(
+    state: &ManagedHostStateSnapshot,
+) -> Result<(String, Vec<String>), StateHandlerError> {
     let host_dpf_id =
         state
             .host_snapshot
@@ -180,23 +212,28 @@ async fn handle_deleting_crs(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Reused from decommissioning; deletes the host's DPUNode and DPUDevice CRs.
-    dpf_sdk
-        .force_delete_host(&host_dpf_id, &dpu_dpf_ids)
-        .await
-        .map_err(|error| {
-            StateHandlerError::GenericError(eyre!(
-                "failed to delete managed host {} from DPF: {error}",
-                state.host_snapshot.id
-            ))
-        })?;
+    Ok((host_dpf_id, dpu_dpf_ids))
+}
 
-    if !dpf_dpudevices_and_dpunode_crs_noexist(state, dpf_sdk)
+async fn handle_deleting_bmc_credential_secrets(
+    state: &ManagedHostStateSnapshot,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    dpf_sdk: Option<&dyn DpfOperations>,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    let dpf_sdk = dpf_sdk.ok_or_else(|| {
+        StateHandlerError::GenericError(eyre!(
+            "managed host {} reset requires DPF, but DPF is not configured",
+            state.host_snapshot.id,
+        ))
+    })?;
+    let (node_id, device_ids) = host_dpf_ids(state)?;
+    if !dpf_sdk
+        .delete_host_bmc_credential_secrets(&node_id, &device_ids)
         .await
         .map_err(|error| StateHandlerError::GenericError(error.into()))?
     {
         return Ok(StateHandlerOutcome::wait(
-            "waiting for managed host DPF resources to be deleted".to_string(),
+            "waiting for managed host BMC credential Secrets to be deleted".to_string(),
         ));
     }
 

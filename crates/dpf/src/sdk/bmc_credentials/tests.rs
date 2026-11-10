@@ -59,6 +59,14 @@ async fn exchange(
         .expect("expected Kubernetes request");
     assert_eq!(request.method().as_str(), method);
     assert_eq!(request.uri().path(), path);
+    if method == "GET" && path == "/api/v1/namespaces/test-ns/secrets" {
+        assert!(
+            request
+                .uri()
+                .query()
+                .is_some_and(|query| query.contains("labelSelector="))
+        );
+    }
     let bytes = request.into_body().collect_bytes().await.unwrap();
     let body = if bytes.is_empty() {
         Value::Null
@@ -81,6 +89,194 @@ fn missing() -> Value {
 
 fn secret_path(name: &str) -> String {
     format!("/api/v1/namespaces/{NS}/secrets/{name}")
+}
+
+const NODE_PATH: &str =
+    "/apis/provisioning.dpu.nvidia.com/v1alpha1/namespaces/test-ns/dpunodes/node-host";
+const DPUS_PATH: &str = "/apis/provisioning.dpu.nvidia.com/v1alpha1/namespaces/test-ns/dpus";
+const SECRETS_PATH: &str = "/api/v1/namespaces/test-ns/secrets";
+
+async fn drained_host(handle: &mut ApiHandle) {
+    exchange(handle, "GET", NODE_PATH, 404, missing()).await;
+    exchange(handle, "GET", DEVICE_PATH, 404, missing()).await;
+    exchange(handle, "GET", DPUS_PATH, 200, json!({"kind": "DPUList", "apiVersion": "provisioning.dpu.nvidia.com/v1alpha1", "items": []})).await;
+}
+
+fn secret_list(items: Vec<Value>) -> Value {
+    json!({"kind": "SecretList", "apiVersion": "v1", "items": items})
+}
+
+#[tokio::test]
+async fn new_device_credential_creation_rejects_even_identical_existing_secrets() {
+    for version in [Some(3), None] {
+        let (sdk, mut handle) = fixture();
+        let name = bmc_credential_secret_name(DEVICE, version);
+        let operation = async {
+            assert_eq!(
+                sdk.create_bmc_credential_secret(DEVICE, version, "password")
+                    .await
+                    .unwrap(),
+                name
+            );
+            assert!(
+                sdk.create_bmc_credential_secret(DEVICE, version, "password")
+                    .await
+                    .is_err()
+            );
+        };
+        let server = async {
+            let body = exchange(
+                &mut handle,
+                "POST",
+                SECRETS_PATH,
+                201,
+                secret(version, "password"),
+            )
+            .await;
+            assert_eq!(body["metadata"]["name"], name);
+            assert_eq!(body["immutable"], true);
+            assert_eq!(body["data"], secret(version, "password")["data"]);
+            assert_eq!(
+                body["metadata"]["labels"],
+                secret(version, "password")["metadata"]["labels"]
+            );
+            exchange(&mut handle, "POST", SECRETS_PATH, 409,
+                json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "AlreadyExists", "code": 409})).await;
+        };
+        together(operation, server).await;
+    }
+}
+
+#[tokio::test]
+async fn host_credential_cleanup_waits_for_resources_and_secret_finalizers() {
+    let (sdk, mut handle) = fixture();
+    let initial_name = bmc_credential_secret_name(DEVICE, None);
+    let versioned_name = bmc_credential_secret_name(DEVICE, Some(1));
+    let operation = async {
+        for complete in [false, false, false, false, false, true] {
+            assert_eq!(
+                sdk.delete_host_bmc_credential_secrets("host", &[DEVICE.to_string()])
+                    .await
+                    .unwrap(),
+                complete
+            );
+        }
+    };
+    let server = async {
+        exchange(&mut handle, "GET", NODE_PATH, 200, json!({"apiVersion": "provisioning.dpu.nvidia.com/v1alpha1", "kind": "DPUNode", "metadata": {"name": "node-host"}, "spec": {}})).await;
+
+        exchange(&mut handle, "GET", NODE_PATH, 404, missing()).await;
+        let mut deleting_device = device(Some(&initial_name), None, "Unknown", "Pending");
+        deleting_device["metadata"]["deletionTimestamp"] = json!("2026-11-10T00:00:00Z");
+        exchange(&mut handle, "GET", DEVICE_PATH, 200, deleting_device).await;
+
+        exchange(&mut handle, "GET", NODE_PATH, 404, missing()).await;
+        exchange(&mut handle, "GET", DEVICE_PATH, 404, missing()).await;
+        exchange(&mut handle, "GET", DPUS_PATH, 200, json!({"apiVersion": "provisioning.dpu.nvidia.com/v1alpha1", "kind": "DPUList", "items": [{
+            "metadata": {"name": "still-deleting"},
+            "spec": {"dpuNodeName": "node-host", "dpuDeviceName": dpu_device_cr_name(DEVICE), "dpuFlavor": "test", "nodeEffect": {}, "serialNumber": "serial-1"},
+        }]})).await;
+
+        drained_host(&mut handle).await;
+        exchange(
+            &mut handle,
+            "GET",
+            SECRETS_PATH,
+            200,
+            secret_list(vec![secret(None, "initial"), secret(Some(1), "v1")]),
+        )
+        .await;
+        for name in [&initial_name, &versioned_name] {
+            let body = exchange(
+                &mut handle,
+                "DELETE",
+                &secret_path(name),
+                200,
+                json!({"kind": "Status", "apiVersion": "v1", "status": "Success", "code": 200}),
+            )
+            .await;
+            assert_eq!(
+                body,
+                json!({"preconditions": {"uid": "secret-uid", "resourceVersion": "9"}})
+            );
+        }
+
+        drained_host(&mut handle).await;
+        let mut deleting_secret = secret(None, "initial");
+        deleting_secret["metadata"]["deletionTimestamp"] = json!("2026-11-10T00:00:00Z");
+        exchange(
+            &mut handle,
+            "GET",
+            SECRETS_PATH,
+            200,
+            secret_list(vec![deleting_secret]),
+        )
+        .await;
+
+        drained_host(&mut handle).await;
+        exchange(&mut handle, "GET", SECRETS_PATH, 200, secret_list(vec![])).await;
+    };
+    together(operation, server).await;
+}
+
+#[tokio::test]
+async fn host_credential_cleanup_protects_foreign_shared_and_replaced_secrets() {
+    for scenario in ["foreign", "shared", "missing UID", "delete conflict"] {
+        let (sdk, mut handle) = fixture();
+        let name = bmc_credential_secret_name(DEVICE, None);
+        let device_ids = [DEVICE.to_string()];
+        let operation = sdk.delete_host_bmc_credential_secrets("host", &device_ids);
+        let server = async {
+            drained_host(&mut handle).await;
+            let mut stored = secret(None, "password");
+            match scenario {
+                "foreign" => stored["metadata"]["labels"][DEVICE_LABEL] = json!("another-device"),
+                "shared" => stored["metadata"]["name"] = json!(SECRET_NAME),
+                "missing UID" => {
+                    assert!(
+                        stored["metadata"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("uid")
+                            .is_some()
+                    );
+                }
+                _ => {}
+            }
+            exchange(
+                &mut handle,
+                "GET",
+                SECRETS_PATH,
+                200,
+                secret_list(vec![stored]),
+            )
+            .await;
+            if scenario == "delete conflict" {
+                exchange(&mut handle, "DELETE", &secret_path(&name), 409,
+                    json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "Conflict", "code": 409})).await;
+            }
+        };
+        let result = together(operation, server).await;
+        if scenario == "foreign" {
+            assert!(result.unwrap());
+        } else {
+            assert!(result.is_err(), "{scenario}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn host_credential_cleanup_is_a_noop_for_legacy_dpf() {
+    let (mut sdk, _handle) = fixture();
+    sdk.operator_version = semver::Version::new(26, 7, 0);
+    assert!(
+        together(
+            sdk.delete_host_bmc_credential_secrets("host", &[DEVICE.to_string()]),
+            async {}
+        )
+        .await
+        .unwrap()
+    );
 }
 
 fn secret(version: Option<u32>, password: &str) -> Value {
