@@ -392,10 +392,9 @@ impl DataSink for OtlpSink {
             }
             CollectorEvent::ResourceStatus(info) => {
                 let key = format!(
-                    "{}|resource_status|{}|{}",
+                    "{}|resource_status|{}",
                     context.endpoint_key,
-                    info.resource_type.as_str(),
-                    info.id
+                    info.resource_type.as_str()
                 );
                 (key, event.clone())
             }

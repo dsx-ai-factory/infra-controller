@@ -38,22 +38,16 @@ use crate::endpoint::SwitchEndpointRole;
 use crate::sink::{
     CollectorEvent, EventContext, HealthReport, HealthReportAlert, HealthReportSuccess,
     LogSeverity, MetricSample, MetricSemantics, PrometheusSink, RedfishCondition,
-    ResourceStatusInfo,
+    ResourceStatusInfo, ResourceStatusReport,
 };
 
-/// Maximum active conditions serialized into one resource-status OTLP record.
+/// Maximum active conditions serialized for one resource in a resource-status OTLP record.
 const MAX_SERIALIZED_RESOURCE_CONDITIONS: usize = 64;
-const RESOURCE_STATUS_SCHEMA_VERSION: &str = "v1";
+const RESOURCE_STATUS_SCHEMA_VERSION: &str = "v2";
 const RESOURCE_STATUS_SCHEMA_VERSION_KEY: &str = "redfish.resource_status.schema_version";
 const RESOURCE_TYPE_KEY: &str = "redfish.resource.type";
-const RESOURCE_ID_KEY: &str = "redfish.resource.id";
-const RESOURCE_NAME_KEY: &str = "redfish.resource.name";
-const STATUS_STATE_KEY: &str = "redfish.status.state";
-const STATUS_HEALTH_KEY: &str = "redfish.status.health";
-const STATUS_HEALTH_ROLLUP_KEY: &str = "redfish.status.health_rollup";
-const STATUS_CONDITION_COUNT_KEY: &str = "redfish.status.condition_count";
-const STATUS_CONDITIONS_KEY: &str = "redfish.status.conditions";
-const STATUS_CONDITIONS_DROPPED_KEY: &str = "redfish.status.conditions.dropped";
+const RESOURCE_COUNT_KEY: &str = "redfish.resource.count";
+const RESOURCE_IDS_KEY: &str = "redfish.resource.ids";
 
 /// Maximum alerts serialized into the `health_report.alerts` attribute.
 ///
@@ -367,26 +361,8 @@ fn alert_detail_attributes(alerts: &[HealthReportAlert]) -> Vec<(&'static str, A
     attributes
 }
 
-fn resource_condition_value(condition: &RedfishCondition) -> AnyValue {
-    let mut entries = HashMap::from([(
-        Key::from_static_str("message_id"),
-        AnyValue::from(condition.message_id.clone()),
-    )]);
-    for (key, value) in [
-        ("timestamp", &condition.timestamp),
-        ("severity", &condition.severity),
-        ("condition_type", &condition.condition_type),
-    ] {
-        if let Some(value) = value {
-            entries.insert(Key::from_static_str(key), AnyValue::from(value.clone()));
-        }
-    }
-
-    AnyValue::Map(Box::new(entries))
-}
-
-fn resource_status_attributes(info: &ResourceStatusInfo) -> Vec<(&'static str, AnyValue)> {
-    let mut attributes = vec![
+fn resource_status_attributes(report: &ResourceStatusReport) -> Vec<(&'static str, AnyValue)> {
+    vec![
         ("event.type", AnyValue::from("redfish.resource_status")),
         (
             RESOURCE_STATUS_SCHEMA_VERSION_KEY,
@@ -394,69 +370,80 @@ fn resource_status_attributes(info: &ResourceStatusInfo) -> Vec<(&'static str, A
         ),
         (
             RESOURCE_TYPE_KEY,
-            AnyValue::from(info.resource_type.as_str()),
+            AnyValue::from(report.resource_type.as_str()),
         ),
-        (RESOURCE_ID_KEY, AnyValue::from(info.id.clone())),
-        (RESOURCE_NAME_KEY, AnyValue::from(info.name.clone())),
-    ];
-    if let Some(status) = &info.status {
-        for (key, value) in [
-            (STATUS_STATE_KEY, &status.state),
-            (STATUS_HEALTH_KEY, &status.health),
-            (STATUS_HEALTH_ROLLUP_KEY, &status.health_rollup),
-        ] {
-            if let Some(value) = value {
-                attributes.push((key, AnyValue::from(value.clone())));
-            }
-        }
-        if let Some(conditions) = &status.conditions {
-            attributes.push((
-                STATUS_CONDITION_COUNT_KEY,
-                AnyValue::from(i64::try_from(conditions.len()).unwrap_or(i64::MAX)),
-            ));
-            attributes.push((
-                STATUS_CONDITIONS_KEY,
-                AnyValue::ListAny(Box::new(
+        (
+            RESOURCE_COUNT_KEY,
+            AnyValue::from(i64::try_from(report.resources.len()).unwrap_or(i64::MAX)),
+        ),
+        (
+            RESOURCE_IDS_KEY,
+            AnyValue::ListAny(Box::new(
+                report
+                    .resources
+                    .iter()
+                    .map(|resource| AnyValue::from(resource.id.clone()))
+                    .collect(),
+            )),
+        ),
+    ]
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceStatusBody<'a> {
+    resources: Vec<ResourceStatusBodyResource<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceStatusBodyResource<'a> {
+    id: &'a str,
+    name: &'a str,
+    status: Option<ResourceStatusBodyStatus<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceStatusBodyStatus<'a> {
+    state: Option<&'a str>,
+    health: Option<&'a str>,
+    health_rollup: Option<&'a str>,
+    conditions: Option<Vec<&'a RedfishCondition>>,
+    conditions_dropped: usize,
+}
+
+fn resource_status_body(report: &ResourceStatusReport) -> Result<String, serde_json::Error> {
+    let resources = report
+        .resources
+        .iter()
+        .map(|resource| ResourceStatusBodyResource {
+            id: &resource.id,
+            name: &resource.name,
+            status: resource.status.as_ref().map(|status| {
+                let conditions = status.conditions.as_ref().map(|conditions| {
                     conditions
                         .iter()
                         .take(MAX_SERIALIZED_RESOURCE_CONDITIONS)
-                        .map(resource_condition_value)
-                        .collect(),
-                )),
-            ));
-            let dropped = conditions
-                .len()
-                .saturating_sub(MAX_SERIALIZED_RESOURCE_CONDITIONS);
-            if dropped > 0 {
-                attributes.push((
-                    STATUS_CONDITIONS_DROPPED_KEY,
-                    AnyValue::from(i64::try_from(dropped).unwrap_or(i64::MAX)),
-                ));
-            }
-        }
-    }
+                        .collect()
+                });
+                let conditions_dropped = status.conditions.as_ref().map_or(0, |conditions| {
+                    conditions
+                        .len()
+                        .saturating_sub(MAX_SERIALIZED_RESOURCE_CONDITIONS)
+                });
+                ResourceStatusBodyStatus {
+                    state: status.state.as_deref(),
+                    health: status.health.as_deref(),
+                    health_rollup: status.health_rollup.as_deref(),
+                    conditions,
+                    conditions_dropped,
+                }
+            }),
+        })
+        .collect();
 
-    attributes
-}
-
-fn resource_status_body(info: &ResourceStatusInfo) -> String {
-    let prefix = format!("{} {} status", info.resource_type.as_str(), info.id);
-    let Some(status) = &info.status else {
-        return format!("{prefix}: unavailable");
-    };
-
-    let state = status.state.as_deref().unwrap_or("unknown");
-    let health = status.health.as_deref().unwrap_or("unknown");
-    let health_rollup = status.health_rollup.as_deref().unwrap_or("unknown");
-    let condition_count = status.conditions.as_ref().map_or_else(
-        || "unknown".to_string(),
-        |conditions| conditions.len().to_string(),
-    );
-
-    format!(
-        "{prefix}: state={state}, health={health}, health_rollup={health_rollup}, \
-         conditions={condition_count}"
-    )
+    serde_json::to_string(&ResourceStatusBody { resources })
 }
 
 fn resource_status_severity(info: &ResourceStatusInfo) -> LogSeverity {
@@ -481,6 +468,23 @@ fn resource_status_severity(info: &ResourceStatusInfo) -> LogSeverity {
         }
         warning |= value == "Warning";
     }
+    if warning {
+        LogSeverity::Warn
+    } else {
+        LogSeverity::Info
+    }
+}
+
+fn resource_status_report_severity(report: &ResourceStatusReport) -> LogSeverity {
+    let mut warning = false;
+    for resource in &report.resources {
+        match resource_status_severity(resource) {
+            LogSeverity::Error => return LogSeverity::Error,
+            LogSeverity::Warn => warning = true,
+            _ => {}
+        }
+    }
+
     if warning {
         LogSeverity::Warn
     } else {
@@ -536,16 +540,27 @@ fn convert_event(
                 ..Default::default()
             })
         }
-        CollectorEvent::ResourceStatus(info) => {
-            let body = resource_status_body(info);
-            let severity = resource_status_severity(info);
+        CollectorEvent::ResourceStatus(report) => {
+            let body = match resource_status_body(report) {
+                Ok(body) => body,
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        resource_type = report.resource_type.as_str(),
+                        resource_count = report.resources.len(),
+                        "failed to serialize Redfish resource status report"
+                    );
+                    return None;
+                }
+            };
+            let severity = resource_status_report_severity(report);
             Some(OtlpLogRecord {
                 time_unix_nano: observed_nanos,
                 observed_time_unix_nano: observed_nanos,
                 severity_number: severity_number(severity),
                 severity_text: severity.as_str().to_string(),
                 body: Some(AnyValue::from(body).into()),
-                attributes: resource_status_attributes(info)
+                attributes: resource_status_attributes(report)
                     .into_iter()
                     .collect::<Attributes>()
                     .0,
@@ -1346,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    fn resource_status_event_exports_structured_otlp_for_every_resource_type() {
+    fn resource_status_report_exports_one_structured_otlp_record_per_resource_type() {
         let conditions = (0..=MAX_SERIALIZED_RESOURCE_CONDITIONS)
             .map(|index| RedfishCondition {
                 timestamp: Some("2026-10-30T10:00:00Z".to_string()),
@@ -1368,123 +1383,112 @@ mod tests {
             RedfishResourceType::Chassis,
             RedfishResourceType::Firmware,
         ] {
-            let event = CollectorEvent::ResourceStatus(Box::new(ResourceStatusInfo {
+            let event = CollectorEvent::ResourceStatus(Box::new(ResourceStatusReport {
                 resource_type,
-                id: "resource-1".to_string(),
-                name: "Resource One".to_string(),
-                status: Some(status.clone()),
+                resources: vec![
+                    ResourceStatusInfo {
+                        resource_type,
+                        id: "resource-1".to_string(),
+                        name: "Resource One".to_string(),
+                        status: Some(status.clone()),
+                    },
+                    ResourceStatusInfo {
+                        resource_type,
+                        id: "resource-2".to_string(),
+                        name: "Resource Two".to_string(),
+                        status: None,
+                    },
+                ],
             }));
 
             let request = build_export_request(&[(test_context(), event)], EXPORT_NANOS, false);
-            let record = &request.resource_logs[0].scope_logs[0].log_records[0];
+            let records = &request.resource_logs[0].scope_logs[0].log_records;
+            assert_eq!(records.len(), 1);
+            let record = &records[0];
 
             assert_eq!(record.severity_text, "ERROR");
             assert_eq!(record.severity_number, SeverityNumber::Error as i32);
+            let body: serde_json::Value =
+                serde_json::from_str(body_value(record).expect("JSON body")).expect("valid JSON");
+            assert_eq!(body["resources"].as_array().map(Vec::len), Some(2));
+            assert_eq!(body["resources"][0]["id"], "resource-1");
+            assert_eq!(body["resources"][0]["status"]["state"], "Enabled");
+            assert_eq!(body["resources"][0]["status"]["health"], "Warning");
+            assert!(body["resources"][0]["status"]["healthRollup"].is_null());
             assert_eq!(
-                body_value(record),
-                Some(
-                    format!(
-                        "{} resource-1 status: state=Enabled, health=Warning, \
-                         health_rollup=unknown, conditions=65",
-                        resource_type.as_str()
-                    )
-                    .as_str()
-                )
+                body["resources"][0]["status"]["conditions"]
+                    .as_array()
+                    .map(Vec::len),
+                Some(MAX_SERIALIZED_RESOURCE_CONDITIONS)
             );
+            assert_eq!(
+                body["resources"][0]["status"]["conditionsDropped"],
+                serde_json::Value::from(1)
+            );
+            assert!(body["resources"][1]["status"].is_null());
             assert_eq!(
                 attr_value(&record.attributes, "event.type"),
                 Some("redfish.resource_status")
             );
             assert_eq!(
                 attr_value(&record.attributes, RESOURCE_STATUS_SCHEMA_VERSION_KEY),
-                Some("v1")
+                Some("v2")
             );
             assert_eq!(
                 attr_value(&record.attributes, RESOURCE_TYPE_KEY),
                 Some(resource_type.as_str())
             );
             assert_eq!(
-                attr_value(&record.attributes, RESOURCE_ID_KEY),
-                Some("resource-1")
+                attr_int_value(&record.attributes, RESOURCE_COUNT_KEY),
+                Some(2)
+            );
+            let ids = attr_array_value(&record.attributes, RESOURCE_IDS_KEY).expect("resource IDs");
+            assert_eq!(ids.len(), 2);
+            assert_eq!(
+                ids[0].value.as_ref(),
+                Some(&any_value::Value::StringValue("resource-1".to_string()))
             );
             assert_eq!(
-                attr_value(&record.attributes, RESOURCE_NAME_KEY),
-                Some("Resource One")
+                ids[1].value.as_ref(),
+                Some(&any_value::Value::StringValue("resource-2".to_string()))
             );
-            assert_eq!(
-                attr_value(&record.attributes, STATUS_STATE_KEY),
-                Some("Enabled")
-            );
-            assert_eq!(
-                attr_value(&record.attributes, STATUS_HEALTH_KEY),
-                Some("Warning")
-            );
-            assert_eq!(
-                attr_int_value(&record.attributes, STATUS_CONDITION_COUNT_KEY),
-                Some(65)
-            );
-            assert_eq!(
-                attr_int_value(&record.attributes, STATUS_CONDITIONS_DROPPED_KEY),
-                Some(1)
-            );
-            let conditions = attr_array_value(&record.attributes, STATUS_CONDITIONS_KEY)
-                .expect("condition array");
-            assert_eq!(conditions.len(), MAX_SERIALIZED_RESOURCE_CONDITIONS);
-            let first = any_kvlist_value(&conditions[0]).expect("condition fields");
-            assert_eq!(
-                attr_value(first, "message_id"),
-                Some("ResourceEvent.1.0.Condition0")
-            );
-            assert_eq!(attr_value(first, "severity"), Some("Critical"));
         }
     }
 
     #[test]
-    fn resource_status_event_preserves_missing_status_as_unknown() {
-        let event = CollectorEvent::ResourceStatus(Box::new(ResourceStatusInfo {
+    fn resource_status_report_uses_the_worst_resource_severity() {
+        let event = CollectorEvent::ResourceStatus(Box::new(ResourceStatusReport {
             resource_type: RedfishResourceType::Firmware,
-            id: "BMC".to_string(),
-            name: "Baseboard Management Controller".to_string(),
-            status: None,
+            resources: vec![
+                ResourceStatusInfo {
+                    resource_type: RedfishResourceType::Firmware,
+                    id: "BMC".to_string(),
+                    name: "Baseboard Management Controller".to_string(),
+                    status: None,
+                },
+                ResourceStatusInfo {
+                    resource_type: RedfishResourceType::Firmware,
+                    id: "CPLDMB_0".to_string(),
+                    name: "CPLD MB".to_string(),
+                    status: Some(RedfishStatus {
+                        state: None,
+                        health: Some("Warning".to_string()),
+                        health_rollup: Some("OK".to_string()),
+                        conditions: Some(Vec::new()),
+                    }),
+                },
+            ],
         }));
 
         let request = build_export_request(&[(test_context(), event)], EXPORT_NANOS, false);
         let record = &request.resource_logs[0].scope_logs[0].log_records[0];
 
-        assert_eq!(record.severity_text, "INFO");
-        assert_eq!(body_value(record), Some("firmware BMC status: unavailable"));
-        assert_eq!(attr_value(&record.attributes, STATUS_STATE_KEY), None);
-        assert_eq!(attr_value(&record.attributes, STATUS_HEALTH_KEY), None);
-        assert_eq!(
-            attr_array_value(&record.attributes, STATUS_CONDITIONS_KEY),
-            None
-        );
-    }
-
-    #[test]
-    fn resource_status_event_body_marks_partial_fields_unknown() {
-        let event = CollectorEvent::ResourceStatus(Box::new(ResourceStatusInfo {
-            resource_type: RedfishResourceType::Firmware,
-            id: "CPLDMB_0".to_string(),
-            name: "CPLD MB".to_string(),
-            status: Some(RedfishStatus {
-                state: None,
-                health: Some("OK".to_string()),
-                health_rollup: Some("OK".to_string()),
-                conditions: Some(Vec::new()),
-            }),
-        }));
-
-        let request = build_export_request(&[(test_context(), event)], EXPORT_NANOS, false);
-        let record = &request.resource_logs[0].scope_logs[0].log_records[0];
-
-        assert_eq!(
-            body_value(record),
-            Some(
-                "firmware CPLDMB_0 status: state=unknown, health=OK, \
-                 health_rollup=OK, conditions=0"
-            )
-        );
+        assert_eq!(record.severity_text, "WARN");
+        let body: serde_json::Value =
+            serde_json::from_str(body_value(record).expect("JSON body")).expect("valid JSON");
+        assert!(body["resources"][0]["status"].is_null());
+        assert!(body["resources"][1]["status"]["state"].is_null());
+        assert_eq!(body["resources"][1]["status"]["health"], "Warning");
     }
 
     #[test]

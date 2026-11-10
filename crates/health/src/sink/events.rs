@@ -540,10 +540,23 @@ impl RedfishResourceType {
 /// Source-owned Redfish resource offered to the resource-status processor.
 #[derive(Clone, Debug)]
 pub enum ResourceStatusObservation {
-    System(Arc<nv_redfish::schema::computer_system::ComputerSystem>),
-    Manager(Arc<nv_redfish::schema::manager::Manager>),
-    Chassis(Arc<nv_redfish::schema::chassis::Chassis>),
-    Firmware(Arc<nv_redfish::schema::software_inventory::SoftwareInventory>),
+    /// Computer systems returned by one entity-discovery iteration.
+    System(Vec<Arc<nv_redfish::schema::computer_system::ComputerSystem>>),
+    /// Managers returned by one manager-collector iteration.
+    Manager(Vec<Arc<nv_redfish::schema::manager::Manager>>),
+    /// Chassis returned by one entity-discovery iteration.
+    Chassis(Vec<Arc<nv_redfish::schema::chassis::Chassis>>),
+    /// Firmware inventory returned by one firmware-collector iteration.
+    Firmware(Vec<Arc<nv_redfish::schema::software_inventory::SoftwareInventory>>),
+}
+
+/// Status observations for one Redfish resource type and source iteration.
+#[derive(Clone, Debug)]
+pub struct ResourceStatusReport {
+    /// Kind shared by every resource in this report.
+    pub resource_type: RedfishResourceType,
+    /// Resources observed during the source collector's iteration.
+    pub resources: Vec<ResourceStatusInfo>,
 }
 
 /// One periodically observed top-level Redfish resource and its status.
@@ -625,7 +638,8 @@ fn redfish_enum_string(value: impl Serialize) -> Option<String> {
 }
 
 /// Bounded, machine-readable detail from one active Redfish condition.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RedfishCondition {
     /// Time at which the condition occurred, when reported.
     pub timestamp: Option<String>,
@@ -694,8 +708,8 @@ pub enum CollectorEvent {
     Firmware(FirmwareInfo),
     /// Source observation offered to the resource-status processor.
     ResourceStatusObservation(Box<ResourceStatusObservation>),
-    /// Processed status record ready for log sinks.
-    ResourceStatus(Box<ResourceStatusInfo>),
+    /// Processed status report ready for log sinks.
+    ResourceStatus(Box<ResourceStatusReport>),
     HealthReport(Arc<HealthReport>),
 }
 
