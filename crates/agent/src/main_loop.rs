@@ -866,7 +866,7 @@ impl CurrentNetworkVersion {
         Self::normalize_security_group_rule_order(&mut config.network_security_policy_overrides);
 
         if let Some(routing_profile) = &mut config.routing_profile {
-            Self::normalize_routing_profile(routing_profile);
+            crate::service_network::normalize_routing_profile(routing_profile);
         }
     }
 
@@ -883,7 +883,7 @@ impl CurrentNetworkVersion {
         interface.vpc_peer_vnis.sort_unstable();
 
         if let Some(routing_profile) = &mut interface.vpc_routing_profile {
-            Self::normalize_routing_profile(routing_profile);
+            crate::service_network::normalize_routing_profile(routing_profile);
         }
         if let Some(routing_profile) = &mut interface.interface_routing_profile {
             Self::sort_prefix_entries(&mut routing_profile.allowed_anycast_prefixes);
@@ -894,23 +894,6 @@ impl CurrentNetworkVersion {
             }
             Self::normalize_security_group_rule_order(&mut network_security_group.rules);
         }
-    }
-
-    /// `normalize_routing_profile` sorts collections whose order does not
-    /// change routing behavior.
-    fn normalize_routing_profile(routing_profile: &mut rpc::RoutingProfile) {
-        routing_profile
-            .route_target_imports
-            .sort_by_key(|route_target| {
-                (route_target.asn, route_target.vni, route_target.vni_self)
-            });
-        routing_profile
-            .route_targets_on_exports
-            .sort_by_key(|route_target| {
-                (route_target.asn, route_target.vni, route_target.vni_self)
-            });
-        Self::sort_prefix_entries(&mut routing_profile.accepted_leaks_from_underlay);
-        Self::sort_prefix_entries(&mut routing_profile.allowed_anycast_prefixes);
     }
 
     /// `normalize_security_group_rule` sorts the resolved source and

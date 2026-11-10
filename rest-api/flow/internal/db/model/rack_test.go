@@ -263,7 +263,7 @@ func TestGetRacksByIDsIncludingDeleted(t *testing.T) {
 	require.Len(t, includingDeleted, 2)
 }
 
-func TestGetRackOperationStatuses(t *testing.T) {
+func TestGetRackOperationStatusCounts(t *testing.T) {
 	ctx := context.Background()
 	if os.Getenv("DB_PORT") == "" {
 		t.Skip("Skipping integration test: no DB environment specified")
@@ -317,23 +317,25 @@ func TestGetRackOperationStatuses(t *testing.T) {
 	for i := range racks {
 		rackIDs = append(rackIDs, racks[i].ID)
 	}
-	got, err := GetRackOperationStatuses(ctx, pool.DB, rackIDs)
+	got, err := GetRackOperationStatusCounts(ctx, pool.DB, rackIDs)
 	require.NoError(t, err)
 
 	cases := []struct {
 		name      string
 		rackIndex int
 		want      types.Phase
+		counts    types.TrayStatusCountsByType
 	}{
-		{name: "unsupported component excluded", rackIndex: 0, want: types.PhaseReady},
-		{name: "error precedes ready", rackIndex: 1, want: types.PhaseError},
-		{name: "missing status", rackIndex: 2, want: types.PhaseUnknown},
+		{name: "unsupported component excluded", rackIndex: 0, want: types.PhaseReady, counts: types.TrayStatusCountsByType{Compute: types.TrayStatusCounts{Ready: 1}}},
+		{name: "error precedes ready", rackIndex: 1, want: types.PhaseError, counts: types.TrayStatusCountsByType{Compute: types.TrayStatusCounts{Ready: 1}, NVSwitch: types.TrayStatusCounts{Error: 1}}},
+		{name: "missing status", rackIndex: 2, want: types.PhaseUnknown, counts: types.TrayStatusCountsByType{PowerShelf: types.TrayStatusCounts{Unknown: 1}}},
 		{name: "no supported components", rackIndex: 3, want: types.PhaseUnknown},
-		{name: "deleted component excluded", rackIndex: 4, want: types.PhaseReady},
+		{name: "deleted component excluded", rackIndex: 4, want: types.PhaseReady, counts: types.TrayStatusCountsByType{Compute: types.TrayStatusCounts{Ready: 1}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, got[racks[tc.rackIndex].ID])
+			assert.Equal(t, tc.want, got[racks[tc.rackIndex].ID].Phase())
+			assert.Equal(t, tc.counts, got[racks[tc.rackIndex].ID])
 		})
 	}
 }

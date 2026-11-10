@@ -581,7 +581,11 @@ selected by the rack or component backend. Refer to
 ### Rack profile firmware object
 
 A rack profile can specify one firmware-object JSON document to use as the
-default input for automatic rack firmware and switch NVOS updates:
+default input for automatic rack firmware and switch NVOS updates. Follow the
+[canary-to-production rollout](rack-component-firmware.md#roll-out-an-sot-from-canary-to-production)
+when promoting this default alongside on-demand updates of existing racks.
+
+For example, configure a rack profile as follows:
 
 ```toml
 [rack_profiles.NVL72]

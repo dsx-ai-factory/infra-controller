@@ -24,6 +24,7 @@ pub mod nmx_c_endpoint;
 pub mod nvlink;
 mod rack_alert;
 mod switch_cert_monitor;
+mod switch_reachability;
 
 use std::io;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -1203,6 +1204,15 @@ impl NvLinkManager {
             self.work_lock_manager_handle.clone(),
         )
         .start(join_set, cancel_token.clone())?;
+
+        if self.config.switch_reachability_enabled() {
+            switch_reachability::SwitchReachabilityMonitor::new(
+                self.db_pool.clone(),
+                self.config.switch_reachability.clone(),
+                self.work_lock_manager_handle.clone(),
+            )
+            .start(join_set, cancel_token.clone())?;
+        }
 
         if self.config.certificate_rotation_enabled() {
             let switch_cert_monitor = switch_cert_monitor::SwitchCertificateMonitor::new(

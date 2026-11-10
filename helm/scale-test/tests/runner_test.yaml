@@ -55,10 +55,13 @@ tests:
           value: 0
       - equal:
           path: spec.activeDeadlineSeconds
-          value: 1200
+          value: 6720
       - equal:
           path: spec.template.spec.restartPolicy
           value: Never
+      - equal:
+          path: spec.template.spec.enableServiceLinks
+          value: false
       - equal:
           path: spec.template.spec.serviceAccountName
           value: run-scale-test-runner
@@ -160,6 +163,12 @@ tests:
           pattern: 'url: "http://probe.mat-ns.svc:9010"'
       - matchRegex:
           path: data["config.yaml"]
+          pattern: 'resultMaxBytes: 8388608\n'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'requestTimeoutSeconds: 5\n'
+      - matchRegex:
+          path: data["config.yaml"]
           pattern: 'journal:\n *dir: "/run-data"\n *claim: "run-scale-test-run-data"\n'
       - matchRegex:
           path: data["config.yaml"]
@@ -171,6 +180,61 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: 'ingestionDelaySeconds: 30\n *bearerTokenFile: /var/run/secrets/store-token/token'
+
+  - it: renders configurable result and BMC budgets
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      runner.resultMaxBytes: 12582912
+      runner.probeRequestTimeoutSeconds: 15
+      runner.bmc: {port: 8443, concurrency: 128, timeoutSeconds: 10, tries: 3}
+    template: runner-config.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'resultMaxBytes: 12582912\n'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'requestTimeoutSeconds: 15\n'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'bmc:\n *concurrency: 128\n *port: 8443\n *timeoutSeconds: 10\n *tries: 3\n'
+
+  - it: rejects a result budget below the minimum
+    set: {runner.enabled: true, runner.runId: fu-1, runner.resultMaxBytes: 262143}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate: {errorMessage: "runner.resultMaxBytes must be 262144 to 16777216"}
+
+  - it: rejects a result budget above the maximum
+    set: {runner.enabled: true, runner.runId: fu-1, runner.resultMaxBytes: 16777217}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate: {errorMessage: "runner.resultMaxBytes must be 262144 to 16777216"}
+
+  - it: rejects a BMC concurrency wider than its configuration type
+    set: {runner.enabled: true, runner.runId: fu-1, runner.bmc.concurrency: 65536}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate: {errorMessage: "runner.bmc.concurrency must be 1 to 65535"}
+
+  - it: rejects a BMC retry count wider than its configuration type
+    set: {runner.enabled: true, runner.runId: fu-1, runner.bmc.tries: 256}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate: {errorMessage: "runner.bmc.tries must be 1 to 255"}
+
+  - it: rejects a BMC concurrency that overflows an int64
+    set: {runner.enabled: true, runner.runId: fu-1, runner.bmc.concurrency: "9223372036854775808"}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate: {errorMessage: "runner.bmc.concurrency must be 1 to 65535"}
+
+  - it: rejects a probe timeout above the runner limit
+    set: {runner.enabled: true, runner.runId: fu-1, runner.probeRequestTimeoutSeconds: 601}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate: {errorMessage: "runner.probeRequestTimeoutSeconds must be at most 600"}
 
   - it: names the Job runner-<runId>, apart from the cluster hook a runId of cluster would otherwise replace
     set:
@@ -406,8 +470,103 @@ tests:
     set:
       runner.enabled: true
       runner.runId: fu-1
-      runner.activeDeadlineSeconds: 990
+      runner.activeDeadlineSeconds: 6690
     template: runner-job.yaml
     asserts:
       - failedTemplate:
           errorMessage: runner.activeDeadlineSeconds must exceed runner.wholeRunSeconds by more than the 90 s shutdown budget
+
+  - it: runs ingestion with dryRun, the write concurrency and the longer timeouts, on the runner's account and claim
+    set:
+      runner: &ingestion
+        enabled: true
+        runId: in-1
+        command: ingestion
+        dryRun: false
+        writes: {concurrency: {host: 16}}
+        wholeRunSeconds: 7200
+        finalizeSeconds: 1800
+        activeDeadlineSeconds: 7300
+        controlPlane: [{namespace: nico, labelSelector: app=nico-api}]
+    template: runner-config.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'runId: "in-1"\ncommand: ingestion\ndryRun: false\nnamespace: "mat-ns"\n'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'finalizeSeconds: 1800\n *wholeRunSeconds: 7200\n'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'writes:\n *concurrency:\n *rack: 8\n *host: 16\n *switch: 8\n *powerShelf: 8\n'
+
+  - it: runs the ingestion command in the runner Job on the shared claim
+    set:
+      runner: *ingestion
+    template: runner-job.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/scale-test", "ingestion", "--config", "/etc/scale-test/config.yaml"]
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: run-scale-test-runner
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: run-data
+            persistentVolumeClaim:
+              claimName: run-scale-test-run-data
+
+  - it: fails ingestion without dryRun
+    set:
+      runner: {<<: *ingestion, dryRun: null}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.dryRun must be true or false for ingestion, which writes
+
+  - it: renders a default ingestion install, its timeouts giving a 4800 s stage window
+    set:
+      runner: {enabled: true, runId: in-1, command: ingestion, dryRun: true}
+    template: runner-config.yaml
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'readinessSeconds: 300\n *finalizeSeconds: 1800\n *wholeRunSeconds: 6600\n'
+
+  - it: fails ingestion with explicit timeouts under its minimum
+    set:
+      runner: {<<: *ingestion, finalizeSeconds: 600}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: ingestion needs runner.wholeRunSeconds over 1800 and runner.finalizeSeconds of at least 1800
+
+  - it: fails ingestion with no write in flight
+    set:
+      runner: {<<: *ingestion, writes: {concurrency: {switch: 0}}}
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.writes.concurrency.switch must be at least 1
+
+  - it: fails fleet-up with dryRun
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      runner.dryRun: true
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.dryRun must be unset for fleet-up, which writes nothing
+
+  - it: fails an unknown command
+    set:
+      runner.enabled: true
+      runner.runId: fu-1
+      runner.command: burst
+    template: runner-config.yaml
+    asserts:
+      - failedTemplate:
+          errorMessage: runner.command must be fleet-up or ingestion

@@ -28,8 +28,10 @@ service FirmwareSupervisor {
   // with different work is rejected, as is new work while a predecessor still
   // requires execution or reconciliation. Complete permits a new ID, as do
   // Failed or Canceled before any mutation intent. The original receipt never
-  // restarts. An occupied host mutation claim returns RESOURCE_EXHAUSTED without
-  // admitting the request.
+  // restarts. If earlier checks pass but acquiring the host mutation claim fails
+  // because it is occupied, the default response is RESOURCE_EXHAUSTED.
+  // report_rejection_details opts in to an explicit not_admitted response for that
+  // submission. Other failures preserve their gRPC status.
   rpc SubmitFirmwareOperation(SubmitFirmwareOperationRequest) returns (SubmitFirmwareOperationResponse);
   // Return a recorded operation; an unknown ID returns NOT_FOUND.
   rpc GetFirmwareOperation(GetFirmwareOperationRequest) returns (GetFirmwareOperationResponse);
@@ -99,6 +101,15 @@ message SubmitFirmwareOperationRequest {
   // and the journal. A duplicate returns its receipt without requiring this
   // configuration and never replaces the accepted operation's runtime input.
   CoreFirmwareDownloadConfig core_download_config = 7;
+  // Report rejection only if earlier checks pass and acquiring the host mutation
+  // claim fails because it is occupied. Omission or false retains
+  // RESOURCE_EXHAUSTED. Older protocol-v5 helpers may return RESOURCE_EXHAUSTED
+  // even when true. A matching retained receipt takes precedence; this option
+  // does not change request identity. Other failures preserve their gRPC status.
+  // A rejection describes only this submission and never resolves an earlier
+  // uncertain attempt, even with the same operation ID. Transport failures and
+  // deadlines leave admission uncertain.
+  bool report_rejection_details = 8;
 }
 
 // FirmwareUpdateContext binds one checked workflow to its dispatch and artifacts.
@@ -182,10 +193,31 @@ message ObserveFirmwareUpdateRequest {
   FirmwareUpdateContext update_context = 5;
 }
 
-// SubmitFirmwareOperationResponse contains the durably recorded receipt.
+// A durable admission receipt or an explicit rejection before admission.
 message SubmitFirmwareOperationResponse {
-  // Always present on success; acknowledgement does not mean execution completed.
-  mlx_device.FirmwareOperation operation = 1;
+  // A successful response must set result; clients reject an unset result.
+  oneof result {
+    // A receipt acknowledges durable admission, not completed execution.
+    mlx_device.FirmwareOperation operation = 1;
+    // Rejection of this opted-in submission after earlier checks passed but
+    // acquiring an occupied host mutation claim failed. It never resolves an
+    // earlier uncertain attempt, even with the same operation ID.
+    FirmwareOperationNotAdmitted not_admitted = 2;
+  }
+}
+
+// Rejection of this submission before journal admission, not a durable receipt.
+// The client validates its operation ID and the identity pinned before Submit.
+// It never resolves an earlier uncertain attempt, even with the same ID.
+message FirmwareOperationNotAdmitted {
+  // Exact original Submit ID: 1-256 printable nonspace ASCII bytes.
+  string operation_id = 1;
+  // Opaque rejecting helper instance ID: 1-256 printable nonspace ASCII bytes.
+  // The client validates this token without requiring UUID syntax.
+  string supervisor_instance_id = 2;
+  // Required exact protocol, PCI slot, boot, and execution device identity pinned
+  // by the client's handshake before Submit. Omission or mismatch is invalid.
+  SupervisorIdentity identity = 3;
 }
 
 // GetFirmwareOperationRequest selects an operation without changing it.

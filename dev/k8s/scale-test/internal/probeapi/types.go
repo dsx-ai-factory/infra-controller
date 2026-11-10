@@ -136,6 +136,7 @@ const (
 	FamilyExpected             Family = "expected"
 	FamilyHostFirmwareRequests Family = "host_firmware_requests"
 	FamilyRestInstances        Family = "rest_instances"
+	FamilyRestMachines         Family = "rest_machines"
 	FamilyRestTotals           Family = "rest_totals"
 	FamilyRestSiteMatch        Family = "rest_site_match"
 	FamilyRestTenantInstances  Family = "rest_tenant_instances"
@@ -174,7 +175,7 @@ func init() {
 	jsonx.Enum(DirectionUp, DirectionDown)
 	jsonx.Enum(VersionSourceMachineRecord, VersionSourceExploredReport)
 	jsonx.Enum(FamilyHost, FamilyDpu, FamilySwitch, FamilyPowerShelf, FamilyRack, FamilyInstance, FamilyExpected,
-		FamilyHostFirmwareRequests, FamilyRestInstances, FamilyRestTotals, FamilyRestSiteMatch,
+		FamilyHostFirmwareRequests, FamilyRestInstances, FamilyRestMachines, FamilyRestTotals, FamilyRestSiteMatch,
 		FamilyRestTenantInstances, FamilyConfigNicoAPI, FamilyConfigRest)
 	jsonx.Enum(ErrorCodeInvalidParam, ErrorCodeUnsupportedFilter, ErrorCodeFieldUnavailable, ErrorCodeNoCompleteSweep,
 		ErrorCodeSnapshotExpired, ErrorCodeEndInFuture, ErrorCodeBusy, ErrorCodeStoreUnavailable,
@@ -213,9 +214,11 @@ func (Filter) JSONClosed() {}
 
 // SweepInfo is the snapshot a count or units reply was read from.
 type SweepInfo struct {
-	SnapshotID string     `json:"snapshotId"`
-	Family     Family     `json:"family"`
-	SweepStart jsonx.Time `json:"sweepStart"`
+	LastAttemptError     *string    `json:"lastAttemptError,omitempty"`
+	LastAttemptSucceeded *bool      `json:"lastAttemptSucceeded,omitempty"`
+	SnapshotID           string     `json:"snapshotId"`
+	Family               Family     `json:"family"`
+	SweepStart           jsonx.Time `json:"sweepStart"`
 	// ReadAt is the sweep end. Every unit in the snapshot was read by then.
 	ReadAt               jsonx.Time `json:"readAt"`
 	SweepAgeSeconds      float64    `json:"sweepAgeSeconds"`
@@ -251,18 +254,20 @@ type UnitsResponse struct {
 }
 
 type Unit struct {
-	ID       string          `json:"id"`
-	Type     UnitType        `json:"type"`
-	Source   Source          `json:"source"`
-	Stage    Stage           `json:"stage"`
-	Done     bool            `json:"done"`
-	State    string          `json:"state"`
-	Reason   *string         `json:"reason"`
-	BmcIP    *string         `json:"bmcIp"`
-	Host     *HostFields     `json:"host"`
-	Dpu      *DpuFields      `json:"dpu"`
-	Instance *InstanceFields `json:"instance"`
-	Expected *ExpectedFields `json:"expected"`
+	RestMachine          *RestMachineFields `json:"restMachine,omitempty"`
+	ControllerInstanceID *string            `json:"controllerInstanceId,omitempty"`
+	ID                   string             `json:"id"`
+	Type                 UnitType           `json:"type"`
+	Source               Source             `json:"source"`
+	Stage                Stage              `json:"stage"`
+	Done                 bool               `json:"done"`
+	State                string             `json:"state"`
+	Reason               *string            `json:"reason"`
+	BmcIP                *string            `json:"bmcIp"`
+	Host                 *HostFields        `json:"host"`
+	Dpu                  *DpuFields         `json:"dpu"`
+	Instance             *InstanceFields    `json:"instance"`
+	Expected             *ExpectedFields    `json:"expected"`
 }
 
 type HostFields struct {
@@ -426,3 +431,14 @@ func (r *CountResponse) UnmarshalJSON(data []byte) error  { return jsonx.Decode(
 func (r *UnitsResponse) UnmarshalJSON(data []byte) error  { return jsonx.Decode(data, r) }
 func (r *ConfigResponse) UnmarshalJSON(data []byte) error { return jsonx.Decode(data, r) }
 func (b *ErrorBody) UnmarshalJSON(data []byte) error      { return jsonx.Decode(data, b) }
+
+// RestMachineFields preserves REST identity, labels and eligibility evidence.
+// REST readiness alone does not prove NICo allocatability.
+type RestMachineFields struct {
+	ControllerID     string            `json:"controllerId"`
+	InstanceType     *string           `json:"instanceType"`
+	InstanceID       *string           `json:"instanceId"`
+	TenantID         *string           `json:"tenantId"`
+	Labels           map[string]string `json:"labels"`
+	IsUsableByTenant bool              `json:"isUsableByTenant"`
+}

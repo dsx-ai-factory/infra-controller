@@ -88,6 +88,19 @@ data:
           org: {{ .rest.provider.org | quote }}
           auth:
             {{- include "nico-site-health-probe.restAuth" (dict "auth" .rest.provider.auth "dir" "/var/secrets/state-provider") | nindent 12 }}
+        {{- with .rest.tenant }}
+        {{- if .org }}
+        tenant:
+          org: {{ .org | quote }}
+          tenant_id: {{ required "state.rest.tenant.tenantId is required" .tenantId | quote }}
+          instance_type: {{ required "state.rest.tenant.instanceType is required" .instanceType | quote }}
+          auth:
+            {{- include "nico-site-health-probe.restAuth" (dict "auth" .auth "dir" "/var/secrets/state-tenant") | nindent 12 }}
+        {{- end }}
+        {{- end }}
+        {{- if not .readers.restInventory.totals }}
+        skip_totals: true
+        {{- end }}
       readers:
         {{- range $name, $key := dict "devices" "devices" "restInventory" "rest_inventory" }}
         {{- $reader := index $.Values.state.readers $name }}
