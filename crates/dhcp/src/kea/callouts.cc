@@ -1570,18 +1570,7 @@ int lease6_select(CalloutHandle &handle) try {
       !own_lease6_address(handle, lease6->addr_)) {
     return 1;
   }
-  if (proposed_address == lease6->addr_) {
-    handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
-    return 0;
-  }
-  // Native REUSE sets an in-pool target's ID but does not clear an old ID
-  // for out-of-pool targets. Start with the same unset ID as native CREATE.
-  lease6->pool_id_ = 0;
-  const auto candidate = leases.getLease6(lease6->type_, proposed_address);
   Lease6Ptr previous = leases.getLease6(lease6->type_, lease6->addr_);
-  if (candidate && !candidate->expired()) {
-    return 1;
-  }
   const std::string previous_mac = previous ? lease6_mac(previous) : "";
   char *selected_mac = nullptr;
   boost::shared_ptr<Machine> machine;
@@ -1600,6 +1589,17 @@ int lease6_select(CalloutHandle &handle) try {
     LOG_WARN(logger, "LOG_CARBIDE_LEASE6_OVERRIDE: %1")
         .arg("lease6_select: refusing allocation over another or unknown MAC's lease");
     handle.setStatus(CalloutHandle::NEXT_STEP_SKIP);
+    return 1;
+  }
+  if (proposed_address == lease6->addr_) {
+    handle.setStatus(CalloutHandle::NEXT_STEP_CONTINUE);
+    return 0;
+  }
+  // Native REUSE sets an in-pool target's ID but does not clear an old ID
+  // for out-of-pool targets. Start with the same unset ID as native CREATE.
+  lease6->pool_id_ = 0;
+  const auto candidate = leases.getLease6(lease6->type_, proposed_address);
+  if (candidate && !candidate->expired()) {
     return 1;
   }
   // Ordinary SOLICIT is an offer; Rapid Commit follows the real allocation path.
@@ -1835,6 +1835,11 @@ int lease6_expire(CalloutHandle &handle) {
     if (selected_mac) {
       machine_free_discovery_mac(selected_mac);
     }
+  }
+  // Native hinted reuse reclaims before SELECT. Apply the same target-owner
+  // refusal here, before persistence, DNS cleanup, and reclamation accounting.
+  if (selected_target && !selected_handoff) {
+    return 0;
   }
   // A redirected allocation may retain only a durably retired candidate.
   // Leave unsupported candidates to the background sweep instead of allowing
