@@ -23,7 +23,8 @@ use carbide_secrets::credentials::CredentialManager;
 
 use crate::cfg::file::CarbideConfig;
 
-pub(crate) fn ib_fabric_test_manager(
+/// Builds a mock or disabled IB manager from the test API configuration.
+pub fn ib_fabric_test_manager(
     config: &CarbideConfig,
     credential_manager: Arc<dyn CredentialManager>,
 ) -> Arc<IBFabricManagerImpl> {

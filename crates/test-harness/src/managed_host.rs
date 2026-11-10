@@ -49,6 +49,14 @@ pub struct TestManagedHost {
 }
 
 impl TestManagedHost {
+    /// Creates an instance builder using this managed host and the supplied harness runtime.
+    pub fn instance_builder<'a>(
+        &'a self,
+        harness: &'a TestHarness,
+    ) -> crate::TestInstanceBuilder<'a> {
+        crate::TestInstanceBuilder::new(harness, self)
+    }
+
     pub fn dpu(&self, dpu_index: usize) -> &TestDpuMachine {
         self.dpus
             .get(dpu_index)

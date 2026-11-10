@@ -40,6 +40,7 @@ mod forge_agent_control;
 mod ib_fabric_find;
 mod instance_allocation_validation;
 mod instance_common;
+mod instance_creation;
 mod instance_health;
 mod instance_release;
 mod instance_vf_policy;

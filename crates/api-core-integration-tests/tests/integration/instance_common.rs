@@ -15,19 +15,27 @@
  * limitations under the License.
  */
 
+mod controller;
+
 use std::sync::Arc;
 
-use carbide_api_core::test_support::default_config;
+use carbide_api_core::test_support::{default_config, ib_fabric_test_manager};
+use carbide_nvlink_manager::nvlink::test_support::NmxcSimClient;
+use carbide_redfish::libredfish::test_support::RedfishSim;
+use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
+use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_test_harness::dns::TestDomain;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use carbide_test_harness::{CarbideConfig, TestNetworkSegment};
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
+use controller::{ControllerClients, InstanceControllers};
 use ipnetwork::IpNetwork;
 use model::resource_pool;
 use model::test_support::ManagedHostConfig;
 use rpc::forge::instance_interface_config::NetworkDetails;
+use tokio::sync::OnceCell;
 use tonic::IntoRequest;
 
 pub(super) struct InstanceEnv {
@@ -37,6 +45,8 @@ pub(super) struct InstanceEnv {
     admin_segment: TestNetworkSegment,
     underlay_segment: TestNetworkSegment,
     site_explorer: TestSiteExplorer,
+    instance_controllers: OnceCell<InstanceControllers>,
+    controller_clients: ControllerClients,
 }
 
 impl InstanceEnv {
@@ -44,33 +54,31 @@ impl InstanceEnv {
         let mut pools = ResourcePoolBuilder::default()
             .with_vlan_ids(1, 5)
             .with_vnis(10_001, 10_005)
-            .build();
+            .with_integer_pool(resource_pool::common::DPA_VNI, 40_001, 40_005);
         if config.fnn.is_some() {
-            pools.extend(
-                [
-                    (resource_pool::common::EXTERNAL_VPC_VNI, 50_001, 50_005),
-                    (resource_pool::common::FNN_ASN, 30_001, 30_035),
-                ]
-                .map(|(name, start, end)| {
-                    (
-                        name.to_string(),
-                        resource_pool::ResourcePoolDef {
-                            pool_type: resource_pool::ResourcePoolType::Integer,
-                            ranges: vec![resource_pool::Range {
-                                start: start.to_string(),
-                                end: end.to_string(),
-                                auto_assign: true,
-                            }],
-                            prefix: None,
-                            delegate_prefix_len: None,
-                        },
-                    )
-                }),
-            );
+            pools = pools
+                .with_integer_pool(resource_pool::common::EXTERNAL_VPC_VNI, 50_001, 50_005)
+                .with_integer_pool(resource_pool::common::FNN_ASN, 30_001, 30_035);
         }
+        let credentials = Arc::new(TestCredentialManager::default());
+        let ib = ib_fabric_test_manager(&config, credentials.clone());
+        let redfish = Arc::new(RedfishSim::default());
+        let nmxc = Arc::new(NmxcSimClient::default());
+        let controller_clients = ControllerClients {
+            redfish: redfish.clone(),
+            ib: ib.clone(),
+            nmxc: nmxc.clone(),
+        };
         let harness = TestHarness::builder(pool)
-            .with_resource_pools(pools)
-            .with_api_builder_fn(move |builder| builder.with_runtime_config(Arc::new(config)))
+            .with_resource_pools(pools.build())
+            .with_api_builder_fn(move |builder| {
+                builder
+                    .with_runtime_config(Arc::new(config))
+                    .with_credential_manager(credentials)
+                    .with_ib_fabric_manager(ib)
+                    .with_redfish_pool(redfish)
+                    .with_nmxc_client_pool(nmxc)
+            })
             .build()
             .await;
         let domain = harness.create_test_domain("dwrt1.com").await;
@@ -90,6 +98,8 @@ impl InstanceEnv {
             admin_segment,
             underlay_segment,
             site_explorer,
+            instance_controllers: OnceCell::new(),
+            controller_clients,
         }
     }
 
@@ -137,6 +147,22 @@ impl InstanceEnv {
         segment.id.unwrap()
     }
 
+    pub(super) async fn advance_instance_to_ready(
+        &self,
+        mh: &TestManagedHost,
+        instance: &TestInstance,
+    ) {
+        let controllers = self
+            .instance_controllers
+            .get_or_init(|| async {
+                InstanceControllers::new(&self.harness, &self.controller_clients)
+            })
+            .await;
+        controllers
+            .advance_instance_to_ready(&self.harness, mh, instance)
+            .await;
+    }
+
     pub(super) async fn create_managed_host(&self, config: ManagedHostConfig) -> TestManagedHost {
         let mut mh = self
             .harness
@@ -148,6 +174,39 @@ impl InstanceEnv {
             .0;
         mh.host.discover_primary_iface(self.admin_segment).await;
         mh.advance_to_converged_ready().await;
+        // Completed ingestion records BIOS setup; idle Ready hosts must remain stable when
+        // the instance fixture drives the shared machine controller for a sibling host.
+        let mut txn = self.harness.db_txn().await;
+        db::machine::update_bios_password_set_time(&mh.host.id, txn.as_mut())
+            .await
+            .unwrap();
+        txn.commit().await.unwrap();
+        for bmc_mac_address in
+            std::iter::once(mh.host.bmc_mac).chain(mh.dpus.iter().map(|dpu| dpu.bmc_mac))
+        {
+            self.harness
+                .api()
+                .credential_manager()
+                .set_credentials(
+                    &CredentialKey::BmcCredentials {
+                        credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
+                    },
+                    &Credentials::UsernamePassword {
+                        username: "root".to_string(),
+                        password: "notforprod".to_string(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        for dpu in &mh.dpus {
+            let status = dpu.network_status().dpu_agent_version("test").build().await;
+            self.harness
+                .api()
+                .record_dpu_network_status(status.into_request())
+                .await
+                .unwrap();
+        }
         mh
     }
 }

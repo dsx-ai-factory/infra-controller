@@ -32,6 +32,7 @@ pub struct DpuNetworkStatusBuilder<'a> {
     api: &'a Api,
     dpu_machine_id: DpuMachineId,
     health: HealthReport,
+    dpu_agent_version: String,
 }
 
 impl<'a> DpuNetworkStatusBuilder<'a> {
@@ -39,6 +40,7 @@ impl<'a> DpuNetworkStatusBuilder<'a> {
         Self {
             api,
             dpu_machine_id,
+            dpu_agent_version: "test-dpu-agent-version".to_string(),
             health: HealthReport {
                 source: "forge-dpu-agent".to_string(),
                 triggered_by: None,
@@ -54,6 +56,14 @@ impl<'a> DpuNetworkStatusBuilder<'a> {
         Self { health, ..self }
     }
 
+    /// Sets the reported agent version; the default is `test-dpu-agent-version`.
+    pub fn dpu_agent_version(self, version: impl Into<String>) -> Self {
+        Self {
+            dpu_agent_version: version.into(),
+            ..self
+        }
+    }
+
     /// Fetches the current desired configuration and builds its status acknowledgement.
     // This harness models the compatibility fields consumed by older agents.
     #[allow(deprecated)]
@@ -62,6 +72,7 @@ impl<'a> DpuNetworkStatusBuilder<'a> {
             api,
             dpu_machine_id,
             health,
+            dpu_agent_version,
         } = self;
         let network_config = api
             .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
@@ -170,7 +181,7 @@ impl<'a> DpuNetworkStatusBuilder<'a> {
 
         crate::rpc::forge::DpuNetworkStatus {
             dpu_machine_id: Some(dpu_machine_id),
-            dpu_agent_version: Some("test-dpu-agent-version".to_string()),
+            dpu_agent_version: Some(dpu_agent_version),
             observed_at: None,
             dpu_health: Some(health),
             network_config_version: Some(network_config.managed_host_config_version.clone()),
