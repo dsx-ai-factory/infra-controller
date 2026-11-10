@@ -90,11 +90,7 @@ func (r *APIMeasuredBootTrustedMachineCreateRequest) Validate() error {
 	); err != nil {
 		return err
 	}
-	if r.MachineID != "*" {
-		if err := validation.Validate(r.MachineID, validationis.UUID.Error(validationErrorInvalidUUID)); err != nil {
-			return fmt.Errorf("machineId: %w", err)
-		}
-	}
+	// Core validates machine IDs, including the wildcard, using its canonical parser.
 	return validateMeasuredBootApprovalType(r.ApprovalType)
 }
 
@@ -122,7 +118,7 @@ func (r *APIMeasuredBootTrustedMachineDeleteRequest) Validate() error {
 	); err != nil {
 		return err
 	}
-	if r.Selector == MeasuredBootTrustedMachineSelectorApprovalID || r.ID != "*" {
+	if r.Selector == MeasuredBootTrustedMachineSelectorApprovalID {
 		if err := validation.Validate(r.ID, validationis.UUID.Error(validationErrorInvalidUUID)); err != nil {
 			return fmt.Errorf("id: %w", err)
 		}

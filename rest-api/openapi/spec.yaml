@@ -19005,7 +19005,7 @@ components:
           description: ID of the Site where the approval applies.
         machineId:
           type: string
-          description: Machine UUID, or `*` to approve all Machines at the Site.
+          description: Machine ID, or `*` to approve all Machines at the Site.
         approvalType:
           type: string
           enum:
@@ -19036,7 +19036,7 @@ components:
           description: Unique approval ID.
         machineId:
           type: string
-          description: Machine UUID, or `*` when the approval applies to all Machines.
+          description: Machine ID, or `*` when the approval applies to all Machines.
         approvalType:
           type: string
           enum:
