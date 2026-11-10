@@ -28639,18 +28639,6 @@ components:
             authenticationData. Omitted or null means no download authentication.
             Not supported for DPU-only updates or by the legacy NICo compute
             firmware controller.
-        deviceCredentialOverrides:
-          $ref: '#/components/schemas/DeviceCredentialOverrides'
-          writeOnly: true
-          description: |-
-            Optional device logins shared by all directly dispatched tray targets.
-            Requires overrideReadinessCheck=true. Omitted or null preserves
-            configured credential lookup. Unsupported for rack firmware endpoints,
-            standalone compute reprovisioning, DPU updates and legacy compute
-            controllers. NVOS logins are supported only for switches.
-            Credentials remain encrypted in task storage and workflow payloads;
-            backend registration may persist them in its own credential store.
-            Supported targets must already exist in the site's Flow inventory.
         ruleId:
           type: string
           format: uuid
@@ -29952,7 +29940,8 @@ components:
           description: |-
             Optional device logins shared by all directly dispatched tray targets.
             Requires overrideReadinessCheck=true. Omitted or null preserves
-            configured credential lookup. Unsupported for rack firmware endpoints,
+            configured credential lookup. Rack firmware endpoints ignore this field.
+            Unsupported for
             standalone compute reprovisioning, DPU updates and legacy compute
             controllers. NVOS logins are supported only for switches.
             Credentials remain encrypted in task storage and workflow payloads;
@@ -30267,7 +30256,8 @@ components:
           description: |-
             Optional device logins shared by all directly dispatched tray targets.
             Requires overrideReadinessCheck=true. Omitted or null preserves
-            configured credential lookup. Unsupported for rack firmware endpoints,
+            configured credential lookup. Rack firmware endpoints ignore this field.
+            Unsupported for
             standalone compute reprovisioning, DPU updates and legacy compute
             controllers. NVOS logins are supported only for switches.
             Credentials remain encrypted in task storage and workflow payloads;

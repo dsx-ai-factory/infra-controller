@@ -78,6 +78,34 @@ func (r *APIUpdateFirmwareRequest) Validate() error {
 	return validateFirmwareTargets(r.Targets)
 }
 
+// APIRackFirmwareUpdateRequest preserves the single-rack request fields.
+// Device credentials are intentionally absent so the binder ignores them.
+type APIRackFirmwareUpdateRequest struct {
+	SiteID               string                         `json:"siteId"`
+	Version              *string                        `json:"version"`
+	AuthenticationData   *APIFirmwareAuthenticationData `json:"authenticationData"`
+	FirmwareDownloadAuth *APIFirmwareAuthenticationData `json:"firmwareDownloadAuth"`
+	// Targets retains the predecessor's validation; rack updates select all components.
+	Targets                []string `json:"targets"`
+	RuleID                 *string  `json:"ruleId"`
+	OverrideReadinessCheck bool     `json:"overrideReadinessCheck,omitempty"`
+	OverrideVersionCheck   bool     `json:"overrideVersionCheck"`
+}
+
+// Validate validates the firmware update request
+func (r *APIRackFirmwareUpdateRequest) Validate() error {
+	err := validation.ValidateStruct(r,
+		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
+		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
+		validation.Field(&r.AuthenticationData, validation.By(r.validateFirmwareAuth)),
+		validation.Field(&r.FirmwareDownloadAuth),
+	)
+	if err != nil {
+		return err
+	}
+	return validateFirmwareTargets(r.Targets)
+}
+
 // APIFirmwareAuthenticationData selects one shared firmware download
 // credential or credentials scoped to supported tray types.
 type APIFirmwareAuthenticationData struct {
@@ -242,8 +270,6 @@ type APIBatchRackFirmwareUpdateRequest struct {
 	AuthenticationData *APIFirmwareAuthenticationData `json:"authenticationData"`
 	// FirmwareDownloadAuth authenticates artifact downloads; it is mutually exclusive with AuthenticationData.
 	FirmwareDownloadAuth *APIFirmwareAuthenticationData `json:"firmwareDownloadAuth"`
-	// DeviceCredentialOverrides supplies device logins for direct tray firmware dispatch.
-	DeviceCredentialOverrides *APIDeviceCredentialOverrides `json:"deviceCredentialOverrides"`
 	// RuleID, when set, pins every task spawned by this batch to the named
 	// Operation Rule.
 	RuleID *string `json:"ruleId"`
@@ -262,7 +288,6 @@ func (r *APIBatchRackFirmwareUpdateRequest) Validate() error {
 		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
 		validation.Field(&r.AuthenticationData, validation.By(r.validateFirmwareAuth)),
 		validation.Field(&r.FirmwareDownloadAuth),
-		validation.Field(&r.DeviceCredentialOverrides),
 	)
 }
 
@@ -394,12 +419,24 @@ func (r *APIUpdateFirmwareRequest) DownloadAuth() *flowv1.FirmwareAuthentication
 	return r.AuthenticationData.ToProto()
 }
 
-func (r *APIBatchRackFirmwareUpdateRequest) validateFirmwareAuth(_ interface{}) error {
+func (r *APIRackFirmwareUpdateRequest) validateFirmwareAuth(_ interface{}) error {
 	if r.AuthenticationData != nil && r.FirmwareDownloadAuth != nil {
 		return fmt.Errorf("authenticationData and firmwareDownloadAuth are mutually exclusive")
 	}
-	if r.DeviceCredentialOverrides != nil && !r.OverrideReadinessCheck {
-		return fmt.Errorf("deviceCredentialOverrides requires overrideReadinessCheck")
+	return nil
+}
+
+// DownloadAuth returns the supplied download authentication after alias validation.
+func (r *APIRackFirmwareUpdateRequest) DownloadAuth() *flowv1.FirmwareAuthenticationData {
+	if r.FirmwareDownloadAuth != nil {
+		return r.FirmwareDownloadAuth.ToProto()
+	}
+	return r.AuthenticationData.ToProto()
+}
+
+func (r *APIBatchRackFirmwareUpdateRequest) validateFirmwareAuth(_ interface{}) error {
+	if r.AuthenticationData != nil && r.FirmwareDownloadAuth != nil {
+		return fmt.Errorf("authenticationData and firmwareDownloadAuth are mutually exclusive")
 	}
 	return nil
 }

@@ -256,8 +256,9 @@ does not fall back to stored credentials. These device logins are separate from
 `firmwareDownloadAuth`, which authenticates firmware file downloads.
 
 Device overrides require `overrideReadinessCheck: true` and a supported direct
-tray firmware path. Rack endpoints, standalone compute reprovisioning, DPU
-updates, legacy compute controllers, schedules and operation-run templates do not
+tray firmware path. Rack REST endpoints ignore `deviceCredentialOverrides` and
+do not forward it to Flow. Standalone compute reprovisioning, DPU updates,
+legacy compute controllers, schedules and operation-run templates do not
 support them. Devices targeted by BMC MAC must already be present in Flow
 inventory. An asynchronous task can fail if its resolved device or backend does
 not support the requested options. Power shelves also require an operation rule

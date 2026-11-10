@@ -66233,7 +66233,7 @@ type UpdateComponentFirmwareRequest struct {
 	// Not supported for rack-level firmware updates.
 	BypassStateController bool `protobuf:"varint,8,opt,name=bypass_state_controller,json=bypassStateController,proto3" json:"bypass_state_controller,omitempty"`
 	// Used only for directly dispatched targets; ignored for state-controller
-	// operations. Rack updates and standalone compute reprovisioning reject overrides.
+	// operations, rack updates, and standalone compute reprovisioning.
 	// Does not change routing. Use bypass_state_controller for
 	// ingested component targets that support direct firmware dispatch.
 	// Status requests accept their own overrides; version requests retain stored lookup.

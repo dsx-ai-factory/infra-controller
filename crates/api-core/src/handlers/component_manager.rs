@@ -5164,17 +5164,6 @@ pub(crate) async fn update_component_firmware(
     let bypass_state_controller = req.bypass_state_controller;
     let credential_overrides = parse_component_credentials(req.credential_overrides)?;
 
-    if credential_overrides.is_some()
-        && matches!(
-            &target,
-            rpc::update_component_firmware_request::Target::Racks(_)
-        )
-    {
-        return Err(Status::invalid_argument(
-            "rack firmware updates do not support device credential overrides",
-        ));
-    }
-
     // Only the power-shelf arm yields a result set that falls through to the
     // shared response below; every other arm returns its response directly.
     let results = match target {
@@ -5608,12 +5597,6 @@ async fn update_compute_tray_firmware_by_machine_ids(
     let machines_by_id = load_machines_by_id(api, machine_ids).await?;
     let (rack_scale_ids, standalone_ids) =
         partition_loaded_compute_machines_by_rack_scale(&machines_by_id, machine_ids)?;
-
-    if credentials.is_some() && !standalone_ids.is_empty() {
-        return Err(Status::invalid_argument(
-            "standalone compute reprovisioning does not support device credential overrides",
-        ));
-    }
 
     let route_through_state_controller =
         cm.compute_tray_use_state_controller && !bypass_state_controller;

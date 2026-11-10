@@ -32,7 +32,6 @@ func TestFirmwareRequestCredentialFields(t *testing.T) {
 			for _, makeRequest := range []func() interface{ Validate() error }{
 				func() interface{ Validate() error } { return &APIUpdateFirmwareRequest{} },
 				func() interface{ Validate() error } { return &APIBatchTrayFirmwareUpdateRequest{} },
-				func() interface{ Validate() error } { return &APIBatchRackFirmwareUpdateRequest{} },
 			} {
 				req := makeRequest()
 				err := json.Unmarshal([]byte(tc.body), req)
@@ -79,6 +78,18 @@ func TestAPIDeviceCredentialOverrides_ToProto(t *testing.T) {
 				require.Equal(t, "nvos-user", got.GetNvos().GetUsername())
 				require.Equal(t, "nvos-value", got.GetNvos().GetPassword())
 				require.Nil(t, got.Bmc)
+			}
+		})
+	}
+}
+
+func TestRackFirmwareRequestCredentialFields(t *testing.T) {
+	for _, value := range []string{`{"bmc":{"username":"operator","password":"device-value"}}`, `{"unknown":"ignored"}`, `42`} {
+		t.Run(value, func(t *testing.T) {
+			for _, req := range []interface{ Validate() error }{&APIRackFirmwareUpdateRequest{}, &APIBatchRackFirmwareUpdateRequest{}} {
+				body := `{"siteId":"site","deviceCredentialOverrides":` + value + `}`
+				require.NoError(t, json.Unmarshal([]byte(body), req))
+				require.NoError(t, req.Validate())
 			}
 		})
 	}

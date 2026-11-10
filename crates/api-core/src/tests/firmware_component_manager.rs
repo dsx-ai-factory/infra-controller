@@ -1490,7 +1490,7 @@ async fn credential_overrides_only_apply_to_direct_targets_in_mixed_batches(
 }
 
 #[crate::sqlx_test]
-async fn credential_overrides_are_rejected_for_rack_updates_and_standalone_reprovisioning(
+async fn credential_overrides_are_ignored_for_rack_updates_and_standalone_reprovisioning(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let fixture = create_firmware_object_fixture(pool.clone()).await?;
@@ -1500,9 +1500,6 @@ async fn credential_overrides_are_rejected_for_rack_updates_and_standalone_repro
     )
     .await;
     let host_id: HostMachineId = host.id.into();
-    let before = db::machine::find_one(&pool, &host_id, Default::default())
-        .await?
-        .unwrap();
     for mut request in [
         compute_request(host_id, true).into_inner(),
         rpc::UpdateComponentFirmwareRequest {
@@ -1518,27 +1515,23 @@ async fn credential_overrides_are_rejected_for_rack_updates_and_standalone_repro
         },
     ] {
         request.credential_overrides = Some(request_credentials(true));
-        let error = crate::handlers::component_manager::update_component_firmware(
+        let response = crate::handlers::component_manager::update_component_firmware(
             &fixture.env.api,
             Request::new(request),
         )
-        .await
-        .expect_err("unsupported credential overrides must be rejected");
-        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        .await?
+        .into_inner();
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(
+            response.results[0].status,
+            rpc::ComponentManagerStatusCode::Success as i32
+        );
     }
     let after = db::machine::find_one(&pool, &host_id, Default::default())
         .await?
         .unwrap();
-    assert_eq!(
-        after.config.firmware_autoupdate,
-        before.config.firmware_autoupdate
-    );
-    let racks = db::rack::find_by(
-        &mut *pool.acquire().await?,
-        db::ObjectColumnFilter::One(db::rack::IdColumn, &fixture.rack_id),
-    )
-    .await?;
-    assert!(racks[0].config.maintenance_requested.is_none());
+    assert_eq!(after.config.firmware_autoupdate, Some(true));
+    assert_rack_activity_version(&fixture).await?;
     assert!(
         fixture
             .compute_tray_manager

@@ -1460,12 +1460,13 @@ func TestUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusPreconditionFailed,
 		},
 		{
-			name:           "failure - device overrides unsupported on rack endpoint",
+			name:           "success - device overrides ignored on rack endpoint",
 			reqOrg:         org,
 			user:           providerUser,
 			rackID:         rackID,
-			body:           fmt.Sprintf(`{"siteId":"%s","overrideReadinessCheck":true,"deviceCredentialOverrides":{"bmc":{"username":"operator","password":"device-value"}}}`, site.ID.String()),
-			expectedStatus: http.StatusBadRequest,
+			body:           fmt.Sprintf(`{"siteId":"%s","deviceCredentialOverrides":{"unknown":"ignored"}}`, site.ID.String()),
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedStatus: http.StatusOK,
 		},
 		{
 			name:           "success - firmware update with authentication data",
@@ -1534,11 +1535,16 @@ func TestUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 				Run(func(args mock.Arguments) {
 					if tt.expectedAuth == "" {
+						flowReq := &flowv1.UpgradeFirmwareRequest{}
+						testFlowProxyRequest(t, args, flowReq)
+						assert.Nil(t, flowReq.GetDeviceCredentialOverrides())
+						assert.Empty(t, args.Get(3).(grpcproxy.Request).EncryptedSecrets)
 						return
 					}
 					flowReq := &flowv1.UpgradeFirmwareRequest{}
 					testFlowProxyRequestWithSecrets(t, args, site.ID.String(), tt.expectedAuth, flowReq)
 					assert.Equal(t, tt.expectedAuth, flowReq.GetAuthenticationData().GetShared())
+					assert.Nil(t, flowReq.GetDeviceCredentialOverrides())
 					assert.True(t, flowReq.GetOverrideVersionCheck())
 				}).
 				Return(mockWorkflowRun, nil)
@@ -1889,11 +1895,12 @@ func TestBatchUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusPreconditionFailed,
 		},
 		{
-			name:           "failure - device overrides unsupported on rack endpoint",
+			name:           "success - device overrides ignored on rack endpoint",
 			reqOrg:         org,
 			user:           providerUser,
-			body:           fmt.Sprintf(`{"siteId":"%s","overrideReadinessCheck":true,"deviceCredentialOverrides":{"bmc":{"username":"operator","password":"device-value"}}}`, site.ID.String()),
-			expectedStatus: http.StatusBadRequest,
+			body:           fmt.Sprintf(`{"siteId":"%s","deviceCredentialOverrides":{"unknown":"ignored"}}`, site.ID.String()),
+			mockTaskIDs:    []*flowv1.UUID{{Id: uuid.NewString()}},
+			expectedStatus: http.StatusOK,
 		},
 		{
 			name:           "success - firmware update all racks with authentication data",
@@ -1949,11 +1956,16 @@ func TestBatchUpdateRackFirmwareHandler_Handle(t *testing.T) {
 			mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 				Run(func(args mock.Arguments) {
 					if tt.expectedAuth == "" {
+						flowReq := &flowv1.UpgradeFirmwareRequest{}
+						testFlowProxyRequest(t, args, flowReq)
+						assert.Nil(t, flowReq.GetDeviceCredentialOverrides())
+						assert.Empty(t, args.Get(3).(grpcproxy.Request).EncryptedSecrets)
 						return
 					}
 					flowReq := &flowv1.UpgradeFirmwareRequest{}
 					testFlowProxyRequestWithSecrets(t, args, site.ID.String(), tt.expectedAuth, flowReq)
 					assert.Equal(t, tt.expectedAuth, flowReq.GetAuthenticationData().GetShared())
+					assert.Nil(t, flowReq.GetDeviceCredentialOverrides())
 				}).
 				Return(mockWorkflowRun, nil)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient

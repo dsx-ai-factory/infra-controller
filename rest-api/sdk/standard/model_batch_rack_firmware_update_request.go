@@ -35,8 +35,6 @@ type BatchRackFirmwareUpdateRequest struct {
 	AuthenticationData NullableFirmwareAuthenticationData `json:"authenticationData,omitempty"`
 	// Optional authentication for downloading firmware files, independent of device login credentials. Mutually exclusive with a non-null authenticationData. Omitted or null means no download authentication. Not supported for DPU-only updates or by the legacy NICo compute firmware controller.
 	FirmwareDownloadAuth NullableFirmwareAuthenticationData `json:"firmwareDownloadAuth,omitempty"`
-	// Optional device logins shared by all directly dispatched tray targets. Requires overrideReadinessCheck=true. Omitted or null preserves configured credential lookup. Unsupported for rack firmware endpoints, standalone compute reprovisioning, DPU updates and legacy compute controllers. NVOS logins are supported only for switches. Credentials remain encrypted in task storage and workflow payloads; backend registration may persist them in its own credential store. Supported targets must already exist in the site's Flow inventory.
-	DeviceCredentialOverrides NullableDeviceCredentialOverrides `json:"deviceCredentialOverrides,omitempty"`
 	// Optional Operation Rule UUID. When set, pins every task spawned by this batch to the named rule and overrides Flow's default rule resolution.
 	RuleId *string `json:"ruleId,omitempty"`
 	// When true, request that the selected component backend override firmware version-based checks when deciding whether to apply the update. This permits same-version reapplication and downgrade when supported. It does not bypass readiness checks or state-controller routing.
@@ -261,49 +259,6 @@ func (o *BatchRackFirmwareUpdateRequest) UnsetFirmwareDownloadAuth() {
 	o.FirmwareDownloadAuth.Unset()
 }
 
-// GetDeviceCredentialOverrides returns the DeviceCredentialOverrides field value if set, zero value otherwise (both if not set or set to explicit null).
-func (o *BatchRackFirmwareUpdateRequest) GetDeviceCredentialOverrides() DeviceCredentialOverrides {
-	if o == nil || IsNil(o.DeviceCredentialOverrides.Get()) {
-		var ret DeviceCredentialOverrides
-		return ret
-	}
-	return *o.DeviceCredentialOverrides.Get()
-}
-
-// GetDeviceCredentialOverridesOk returns a tuple with the DeviceCredentialOverrides field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
-func (o *BatchRackFirmwareUpdateRequest) GetDeviceCredentialOverridesOk() (*DeviceCredentialOverrides, bool) {
-	if o == nil {
-		return nil, false
-	}
-	return o.DeviceCredentialOverrides.Get(), o.DeviceCredentialOverrides.IsSet()
-}
-
-// HasDeviceCredentialOverrides returns a boolean if a field has been set.
-func (o *BatchRackFirmwareUpdateRequest) HasDeviceCredentialOverrides() bool {
-	if o != nil && o.DeviceCredentialOverrides.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetDeviceCredentialOverrides gets a reference to the given NullableDeviceCredentialOverrides and assigns it to the DeviceCredentialOverrides field.
-func (o *BatchRackFirmwareUpdateRequest) SetDeviceCredentialOverrides(v DeviceCredentialOverrides) {
-	o.DeviceCredentialOverrides.Set(&v)
-}
-
-// SetDeviceCredentialOverridesNil sets the value for DeviceCredentialOverrides to be an explicit nil
-func (o *BatchRackFirmwareUpdateRequest) SetDeviceCredentialOverridesNil() {
-	o.DeviceCredentialOverrides.Set(nil)
-}
-
-// UnsetDeviceCredentialOverrides ensures that no value is present for DeviceCredentialOverrides, not even an explicit nil
-func (o *BatchRackFirmwareUpdateRequest) UnsetDeviceCredentialOverrides() {
-	o.DeviceCredentialOverrides.Unset()
-}
-
 // GetRuleId returns the RuleId field value if set, zero value otherwise.
 func (o *BatchRackFirmwareUpdateRequest) GetRuleId() string {
 	if o == nil || IsNil(o.RuleId) {
@@ -422,9 +377,6 @@ func (o BatchRackFirmwareUpdateRequest) ToMap() (map[string]interface{}, error) 
 	}
 	if o.FirmwareDownloadAuth.IsSet() {
 		toSerialize["firmwareDownloadAuth"] = o.FirmwareDownloadAuth.Get()
-	}
-	if o.DeviceCredentialOverrides.IsSet() {
-		toSerialize["deviceCredentialOverrides"] = o.DeviceCredentialOverrides.Get()
 	}
 	if !IsNil(o.RuleId) {
 		toSerialize["ruleId"] = o.RuleId
