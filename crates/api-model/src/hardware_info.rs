@@ -200,6 +200,8 @@ pub struct PciDeviceProperties {
     pub description: Option<String>,
     #[serde(default)]
     pub slot: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +214,8 @@ pub struct Gpu {
     pub total_memory: String,
     pub frequency: String,
     pub pci_bus_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pci_device_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_info: Option<GpuPlatformInfo>,
 }
@@ -755,6 +759,7 @@ mod tests {
                 numa_node: 0,
                 description: None,
                 slot: None,
+                device_id: None,
             }
         );
 
@@ -765,6 +770,7 @@ mod tests {
             numa_node: 3,
             description: Some("desc1".to_string()),
             slot: Some("0000:4b:00.0".to_string()),
+            device_id: None,
         };
 
         let serialized = serde_json::to_string(&props1).unwrap();
@@ -775,6 +781,57 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<PciDeviceProperties>(&serialized).unwrap(),
             props1
+        );
+    }
+
+    // Stored hardware info written before device ids existed must decode to the
+    // field defaults and must not gain the keys when written back; populated ids
+    // must survive a JSON round-trip. Each row yields (decoded id, key present
+    // after re-serialization, re-decoded value equals the decoded one).
+    #[test]
+    fn device_id_json_round_trip() {
+        value_scenarios!(
+            run = |json: &str| {
+                let gpu: Gpu = serde_json::from_str(json).unwrap();
+                let written = serde_json::to_string(&gpu).unwrap();
+                (
+                    gpu.pci_device_id.clone(),
+                    written.contains("\"pci_device_id\""),
+                    serde_json::from_str::<Gpu>(&written).unwrap() == gpu,
+                )
+            };
+            "gpu stored before device ids defaults to empty and is not written back" {
+                r#"{"name":"NVIDIA H100","serial":"s","driver_version":"d","vbios_version":"v",
+                    "inforom_version":"i","total_memory":"m","frequency":"f",
+                    "pci_bus_id":"00000000:17:00.0"}"# => (String::new(), false, true),
+            }
+
+            "gpu with a device id round-trips it" {
+                r#"{"name":"NVIDIA H100","serial":"s","driver_version":"d","vbios_version":"v",
+                    "inforom_version":"i","total_memory":"m","frequency":"f",
+                    "pci_bus_id":"00000000:17:00.0","pci_device_id":"0x2330"}"# =>
+                    ("0x2330".to_string(), true, true),
+            }
+        );
+
+        value_scenarios!(
+            run = |json: &str| {
+                let props: PciDeviceProperties = serde_json::from_str(json).unwrap();
+                let written = serde_json::to_string(&props).unwrap();
+                (
+                    props.device_id.clone(),
+                    written.contains("\"device_id\""),
+                    serde_json::from_str::<PciDeviceProperties>(&written).unwrap() == props,
+                )
+            };
+            // Stored PCI properties without device_id are covered by
+            // serialize_pci_dev_properties (decode to None, not written back).
+            "pci properties with a device id round-trip it" {
+                r#"{"vendor":"Mellanox Technologies","device":"MT2910 Family [ConnectX-7]",
+                    "path":"/devices/pci0000:00/0000:00:01.0","numa_node":0,
+                    "slot":"0000:03:00.0","device_id":"0x1021"}"# =>
+                    (Some("0x1021".to_string()), true, true),
+            }
         );
     }
 
@@ -1062,6 +1119,7 @@ mod tests {
             frequency: String::new(),
             pci_bus_id: String::new(),
             platform_info: None,
+            pci_device_id: String::new(),
         }
     }
 
@@ -1083,6 +1141,7 @@ mod tests {
                 module_id: 1,
                 fabric_guid: "0x1".to_string(),
             }),
+            pci_device_id: String::new(),
         }
     }
 
@@ -1104,6 +1163,7 @@ mod tests {
                         frequency: String::new(),
                         pci_bus_id: String::new(),
                         platform_info: None,
+                        pci_device_id: String::new(),
                     });
                 }
                 info.is_mnnvl_capable()
