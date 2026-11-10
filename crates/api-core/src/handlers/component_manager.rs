@@ -8336,6 +8336,7 @@ mod tests {
             total_memory: String::new(),
             frequency: String::new(),
             pci_bus_id: String::new(),
+            pci_device_id: String::new(),
             platform_info: Some(GpuPlatformInfo {
                 chassis_serial: "CHASSIS-1".to_string(),
                 slot_number: 1,

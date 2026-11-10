@@ -160,6 +160,8 @@ message PciDeviceProperties{
   sint32 numa_node = 4;
   optional string description = 5;
   optional string slot = 6;
+  // PCI device id, e.g. "0xa2dc" (BlueField-3) or "0x2330" (H100).
+  optional string device_id = 7;
 }
 
 message LldpSwitchData {
@@ -219,6 +221,10 @@ message Gpu {
   string frequency = 7;
   string pci_bus_id = 8;
   GpuPlatformInfo platform_info = 9;
+  // PCI device id (upper 16 bits of nvidia-smi `pci.device_id`), e.g. "0x2330".
+  // Declared before platform_info on purpose: scout deserializes nvidia-smi CSV
+  // output positionally, so field order must match the --query-gpu order.
+  string pci_device_id = 10;
 }
 
 // A single physical memory device (DIMM). Deprecated in favor of
