@@ -12249,9 +12249,14 @@ type RuntimeConfig struct {
 	EwethersEnabled                                 bool     `protobuf:"varint,57,opt,name=ewethers_enabled,json=ewethersEnabled,proto3" json:"ewethers_enabled,omitempty"`
 	// Operator FNN null routes reported by the anonymous Version RPC. When
 	// site_fabric_null_routes is omitted from site configuration, this includes
-	// site_fabric_prefixes and removed operator-managed roots while they contain
-	// a VpcPrefix or VPC-attached direct NetworkPrefix. Tenant-managed roots are
-	// not added here; this is not a complete audit of DPU isolation routes. Use
+	// site_fabric_prefixes and removed operator-managed roots retained by an exact
+	// VpcPrefix reference, a contained VpcPrefix without parentage, or a contained
+	// VPC-attached direct NetworkPrefix. A direct prefix retains retiring roots
+	// while its segment exists and no Ready operator root fully covers it, including
+	// during draining. Adding or restoring that coverage releases the retiring
+	// roots without deleting the segment. VpcPrefix references remain until hard
+	// deletion. Tenant-managed roots are not added here; this is not a complete
+	// audit of DPU isolation routes. Use
 	// GetManagedHostNetworkConfig for the tenant-inclusive FNN response, with RBAC
 	// enforced. An explicit list is returned without checking tenant coverage.
 	// Older Core versions omit this field; an empty items list is authoritative.
