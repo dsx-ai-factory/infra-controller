@@ -13,7 +13,9 @@ use serde_json::json;
 use super::{DpfSdk, SECRET_NAME, dpu_device_cr_name};
 use crate::crds::dpudevices_generated::DPUDevice;
 use crate::error::DpfError;
-use crate::repository::{BmcCredentialRepository, DpuDeviceRepository};
+use crate::repository::{
+    BmcCredentialRepository, DpuDeviceRepository, DpuNodeRepository, DpuRepository,
+};
 use crate::types::DpfDeletePreconditions;
 
 const DEVICE_LABEL: &str = "carbide.nvidia.com/bmc-credential-device";
@@ -104,6 +106,54 @@ pub(super) fn check_registration_credential(
 }
 
 impl<R: BmcCredentialRepository, L> DpfSdk<R, L> {
+    fn new_bmc_credential_secret(
+        &self,
+        device_id: &str,
+        version: Option<u32>,
+        password: &str,
+    ) -> Secret {
+        Secret {
+            metadata: ObjectMeta {
+                name: Some(bmc_credential_secret_name(device_id, version)),
+                namespace: Some(self.namespace.clone()),
+                labels: Some(BTreeMap::from([
+                    (DEVICE_LABEL.to_string(), device_id.to_string()),
+                    (
+                        VERSION_LABEL.to_string(),
+                        version.map_or_else(|| "initial".to_string(), |v| v.to_string()),
+                    ),
+                ])),
+                ..Default::default()
+            },
+            type_: Some("Opaque".to_string()),
+            immutable: Some(true),
+            data: Some(BTreeMap::from([(
+                "password".to_string(),
+                ByteString(password.as_bytes().to_vec()),
+            )])),
+            ..Default::default()
+        }
+    }
+
+    /// Create an immutable credential Secret for a new device. An existing Secret is an error,
+    /// even when its credential matches; lifecycle cleanup must finish before registration.
+    /// `None` identifies an initial credential with no confirmed site-wide version.
+    pub async fn create_bmc_credential_secret(
+        &self,
+        device_id: &str,
+        version: Option<u32>,
+        password: &str,
+    ) -> Result<String, DpfError> {
+        if device_id.is_empty() || password.is_empty() {
+            return Err(DpfError::InvalidState(
+                "DPU identity and BMC password must be nonempty".to_string(),
+            ));
+        }
+        let secret = self.new_bmc_credential_secret(device_id, version, password);
+        BmcCredentialRepository::create_bmc_credential_secret(&*self.repo, &secret).await?;
+        Ok(bmc_credential_secret_name(device_id, version))
+    }
+
     /// Create an immutable per-device Secret or verify the identical result of an earlier attempt.
     /// `version` is the confirmed credential version; `None` identifies retained initial credentials.
     /// A collision, mutable Secret, or Secret being deleted is an error; nothing is overwritten.
@@ -126,24 +176,7 @@ impl<R: BmcCredentialRepository, L> DpfSdk<R, L> {
         let secret = match existing {
             Some(secret) => secret,
             None => {
-                let desired = Secret {
-                    metadata: ObjectMeta {
-                        name: Some(name.clone()),
-                        namespace: Some(self.namespace.clone()),
-                        labels: Some(BTreeMap::from([
-                            (DEVICE_LABEL.to_string(), device_id.to_string()),
-                            (VERSION_LABEL.to_string(), version_label.clone()),
-                        ])),
-                        ..Default::default()
-                    },
-                    type_: Some("Opaque".to_string()),
-                    immutable: Some(true),
-                    data: Some(BTreeMap::from([(
-                        "password".to_string(),
-                        ByteString(password.as_bytes().to_vec()),
-                    )])),
-                    ..Default::default()
-                };
+                let desired = self.new_bmc_credential_secret(device_id, version, password);
                 match BmcCredentialRepository::create_bmc_credential_secret(&*self.repo, &desired)
                     .await
                 {
@@ -192,6 +225,92 @@ impl<R: BmcCredentialRepository, L> DpfSdk<R, L> {
             )));
         }
         Ok(name)
+    }
+}
+
+impl<R: BmcCredentialRepository + DpuNodeRepository + DpuDeviceRepository + DpuRepository, L>
+    DpfSdk<R, L>
+{
+    /// Delete all NICo-owned credential revisions for a drained host. Returns `false` while
+    /// its DPUNode, DPUDevices, DPUs, or credential Secrets still exist, including finalizer waits.
+    /// Secrets are deleted using observed UID/resource-version preconditions; shared and foreign
+    /// Secrets are never deleted. On older DPF versions this is a no-op returning `true`.
+    /// Callers must serialize cleanup with registration for this host.
+    pub async fn delete_host_bmc_credential_secrets(
+        &self,
+        node_id: &str,
+        device_ids: &[String],
+    ) -> Result<bool, DpfError> {
+        if !self.supports_per_dpu_bmc_credentials() {
+            return Ok(true);
+        }
+        let node_name = super::dpu_node_cr_name(node_id);
+        if DpuNodeRepository::get(&*self.repo, &node_name, &self.namespace)
+            .await?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        for id in device_ids {
+            if DpuDeviceRepository::get(&*self.repo, &dpu_device_cr_name(id), &self.namespace)
+                .await?
+                .is_some()
+            {
+                return Ok(false);
+            }
+        }
+        let dpus = DpuRepository::list(&*self.repo, &self.namespace, None).await?;
+        if dpus.iter().any(|dpu| {
+            dpu.spec.dpu_node_name == node_name
+                || dpu.spec.dpu_node_name == node_id
+                || device_ids.iter().any(|id| {
+                    dpu.spec.dpu_device_name == *id
+                        || dpu.spec.dpu_device_name == dpu_device_cr_name(id)
+                })
+        }) {
+            return Ok(false);
+        }
+        let mut complete = true;
+        for id in device_ids {
+            let secrets = BmcCredentialRepository::list_bmc_credential_secrets(
+                &*self.repo,
+                &self.namespace,
+                &format!("{DEVICE_LABEL}={id}"),
+            )
+            .await?;
+            for secret in secrets {
+                if secret
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|labels| labels.get(DEVICE_LABEL))
+                    != Some(id)
+                {
+                    continue;
+                }
+                let name = required_identity(secret.metadata.name, "credential Secret name")?;
+                validate_per_device_secret_name(&name)?;
+                complete = false;
+                if secret.metadata.deletion_timestamp.is_some() {
+                    continue;
+                }
+                let preconditions = DpfDeletePreconditions {
+                    uid: required_identity(secret.metadata.uid, "credential Secret UID")?,
+                    resource_version: required_identity(
+                        secret.metadata.resource_version,
+                        "credential Secret resource version",
+                    )?,
+                };
+                BmcCredentialRepository::delete_bmc_credential_secret(
+                    &*self.repo,
+                    &name,
+                    &self.namespace,
+                    &preconditions,
+                )
+                .await?;
+            }
+        }
+        Ok(complete)
     }
 }
 

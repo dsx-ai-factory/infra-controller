@@ -35,7 +35,7 @@ tests:
             apiGroups: [""]
             resources: ["secrets"]
             verbs: ["list"]
-  - it: scopes shared BMC Secret updates to the derived Secret
+  - it: permits credential Secret lifecycle while restricting shared Secret patches
     documentIndex: 0
     set:
       dpf.rbacCreate: true
@@ -45,7 +45,7 @@ tests:
           content:
             apiGroups: [""]
             resources: ["secrets"]
-            verbs: ["create"]
+            verbs: ["get", "list", "create", "delete"]
       - contains:
           path: rules
           content:
@@ -58,7 +58,7 @@ tests:
           content:
             apiGroups: [""]
             resources: ["secrets"]
-            verbs: ["get", "create"]
+            verbs: ["get", "list", "create", "patch", "delete"]
       - notContains:
           path: rules
           content:
