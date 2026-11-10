@@ -17,8 +17,11 @@
 
 mod controller;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use carbide_api_core::cfg::file::{FnnConfig, FnnRoutingProfileConfig};
+use carbide_api_core::test_support::network_segment::FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS;
 use carbide_api_core::test_support::{default_config, ib_fabric_test_manager};
 use carbide_nvlink_manager::nvlink::test_support::NmxcSimClient;
 use carbide_redfish::libredfish::test_support::RedfishSim;
@@ -28,12 +31,16 @@ use carbide_test_harness::dns::TestDomain;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use carbide_test_harness::{CarbideConfig, TestNetworkSegment};
+use carbide_uuid::machine::StableHostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
-use carbide_uuid::vpc::VpcId;
+use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use controller::{ControllerClients, InstanceControllers};
+use db::ObjectColumnFilter;
 use ipnetwork::IpNetwork;
+use model::metadata::Metadata;
 use model::resource_pool;
 use model::test_support::ManagedHostConfig;
+use model::vpc_prefix::VpcPrefixConfig;
 use rpc::forge::instance_interface_config::NetworkDetails;
 use tokio::sync::OnceCell;
 use tonic::IntoRequest;
@@ -101,6 +108,24 @@ impl InstanceEnv {
             instance_controllers: OnceCell::new(),
             controller_clients,
         }
+    }
+
+    pub(super) async fn tenant_segments(&self, count: usize) -> Vec<NetworkSegmentId> {
+        let vpc_id =
+            db::vpc::find_by_segment(&self.harness.api().database_connection, self.segment_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .id;
+        let mut ids = vec![self.segment_id];
+        for network in FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS
+            .iter()
+            .take(count)
+            .skip(1)
+        {
+            ids.push(self.create_tenant_segment(vpc_id, *network, "TENANT").await);
+        }
+        ids
     }
 
     pub(super) async fn create_tenant_segment(
@@ -308,4 +333,134 @@ pub(super) fn single_interface_network_config_with_vfs(
         auto: false,
         auto_config: None,
     }
+}
+
+pub(super) async fn find_instances_by_label(
+    env: &InstanceEnv,
+    label: rpc::forge::Label,
+) -> rpc::forge::InstanceList {
+    let instance_ids = env
+        .harness
+        .api()
+        .find_instance_ids(tonic::Request::new(rpc::forge::InstanceSearchFilter {
+            label: Some(label),
+            tenant_org_id: None,
+            vpc_id: None,
+            instance_type_id: None,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .instance_ids;
+
+    env.harness
+        .api()
+        .find_instances_by_ids(tonic::Request::new(rpc::forge::InstancesByIdsRequest {
+            instance_ids,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+}
+
+pub(super) fn host_id(mh: &TestManagedHost) -> StableHostMachineId {
+    mh.host.id.try_into().unwrap()
+}
+
+pub(super) fn fnn_config() -> CarbideConfig {
+    let mut config = default_config::get();
+    config.fnn = Some(FnnConfig {
+        admin_vpc: None,
+        common_internal_route_target: None,
+        additional_route_target_imports: vec![],
+        routing_profiles: HashMap::from([
+            (
+                "EXTERNAL".to_string(),
+                FnnRoutingProfileConfig {
+                    access_tier: Some(2),
+                    internal: Some(false),
+                    ..Default::default()
+                },
+            ),
+            (
+                "INTERNAL".to_string(),
+                FnnRoutingProfileConfig {
+                    access_tier: Some(1),
+                    internal: Some(true),
+                    ..Default::default()
+                },
+            ),
+        ]),
+        use_vpc_vrf_loopback: false,
+    });
+    config
+}
+
+/// Persists a tenant overlay prefix with explicit capacity for allocation tests.
+pub(super) async fn create_tenant_overlay_prefix_with_prefix(
+    env: &InstanceEnv,
+    vpc_id: VpcId,
+    name: &str,
+    prefix: IpNetwork,
+) -> VpcPrefixId {
+    let mut txn = env.harness.db_txn().await;
+
+    // Look up the current VPC version so the prefix insert can increment it.
+    let vpcs = db::vpc::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(db::vpc::IdColumn, &vpc_id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(vpcs.len(), 1);
+    let expected_vpc_version = vpcs[0].version;
+
+    // Persist the prefix directly so tests can focus on allocation behavior.
+    let vpc_prefix_id = db::vpc_prefix::persist(
+        model::vpc_prefix::NewVpcPrefix {
+            id: uuid::Uuid::new_v4().into(),
+            site_prefix_id: None,
+            vpc_id,
+            overlap_vpc_id: None,
+            config: VpcPrefixConfig { prefix },
+            metadata: Metadata {
+                name: name.to_string(),
+                description: "desc".to_string(),
+                labels: HashMap::new(),
+            },
+        },
+        expected_vpc_version,
+        &mut txn,
+    )
+    .await
+    .unwrap()
+    .id;
+    txn.commit().await.unwrap();
+    vpc_prefix_id
+}
+
+pub(super) async fn create_fixture_tenant(
+    env: &InstanceEnv,
+    organization_id: impl Into<String>,
+) -> Result<rpc::forge::Tenant, tonic::Status> {
+    let organization_id = organization_id.into();
+
+    // Let the API apply the runtime default routing-profile behavior.
+    let response = env
+        .harness
+        .api()
+        .create_tenant(tonic::Request::new(rpc::forge::CreateTenantRequest {
+            organization_id: organization_id.clone(),
+            routing_profile_type: None,
+            metadata: Some(rpc::Metadata {
+                name: organization_id,
+                ..Default::default()
+            }),
+        }))
+        .await?;
+
+    Ok(response
+        .into_inner()
+        .tenant
+        .expect("created tenant response must include tenant"))
 }

@@ -15,11 +15,9 @@
  * limitations under the License.
  */
 
-use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
-use carbide_api_core::cfg::file::{FnnConfig, FnnRoutingProfileConfig};
 use carbide_api_core::test_support::network_segment::{
     FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS, FIXTURE_TENANT_ORG_ID,
 };
@@ -32,14 +30,11 @@ use carbide_uuid::external_validation::ExternalValidationRequestId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::StableHostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
-use carbide_uuid::vpc::{VpcId, VpcPrefixId};
-use db::ObjectColumnFilter;
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 use model::instance::config::network::DeviceLocator;
 use model::machine::ManagedHostState;
 use model::metadata::Metadata;
 use model::test_support::ManagedHostConfig;
-use model::vpc_prefix::VpcPrefixConfig;
 use rpc::forge::instance_interface_config::NetworkDetails;
 use rpc::forge::{
     InstanceAllocationRequest, InstanceConfig, ManagedHostQuarantineMode, VpcCreationRequest,
@@ -48,8 +43,8 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tonic::{IntoRequest, Request};
 
 use super::instance_common::{
-    InstanceEnv, InstanceFixture, default_os_config, default_tenant_config,
-    single_interface_network_config,
+    InstanceEnv, InstanceFixture, create_tenant_overlay_prefix_with_prefix, default_os_config,
+    default_tenant_config, fnn_config, single_interface_network_config,
 };
 
 #[sqlx_test]
@@ -632,31 +627,7 @@ async fn test_allocate_instance_rejects_dual_stack_prefixes_from_different_vpcs(
     options: PgConnectOptions,
 ) {
     let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
-    let mut config = default_config::get();
-    config.fnn = Some(FnnConfig {
-        admin_vpc: None,
-        common_internal_route_target: None,
-        additional_route_target_imports: vec![],
-        routing_profiles: HashMap::from([
-            (
-                "EXTERNAL".to_string(),
-                FnnRoutingProfileConfig {
-                    access_tier: Some(2),
-                    internal: Some(false),
-                    ..Default::default()
-                },
-            ),
-            (
-                "INTERNAL".to_string(),
-                FnnRoutingProfileConfig {
-                    access_tier: Some(1),
-                    internal: Some(true),
-                    ..Default::default()
-                },
-            ),
-        ]),
-        use_vpc_vrf_loopback: false,
-    });
+    let config = fnn_config();
     let env = InstanceEnv::new(pool, config).await;
     let mh = env.create_managed_host(ManagedHostConfig::default()).await;
 
@@ -858,47 +829,4 @@ fn interface_network_config_with_devices(
         auto: false,
         auto_config: None,
     }
-}
-
-/// Creates a tenant overlay VPC prefix with an explicit CIDR for allocation tests.
-async fn create_tenant_overlay_prefix_with_prefix(
-    env: &InstanceEnv,
-    vpc_id: VpcId,
-    name: &str,
-    prefix: IpNetwork,
-) -> VpcPrefixId {
-    let mut txn = env.harness.db_txn().await;
-
-    // Look up the current VPC version so the prefix insert can increment it.
-    let vpcs = db::vpc::find_by(
-        txn.as_mut(),
-        ObjectColumnFilter::One(db::vpc::IdColumn, &vpc_id),
-    )
-    .await
-    .unwrap();
-    assert_eq!(vpcs.len(), 1);
-    let expected_vpc_version = vpcs[0].version;
-
-    // Persist the prefix directly so tests can focus on allocation behavior.
-    let vpc_prefix_id = db::vpc_prefix::persist(
-        model::vpc_prefix::NewVpcPrefix {
-            id: uuid::Uuid::new_v4().into(),
-            site_prefix_id: None,
-            vpc_id,
-            overlap_vpc_id: None,
-            config: VpcPrefixConfig { prefix },
-            metadata: Metadata {
-                name: name.to_string(),
-                description: "desc".to_string(),
-                labels: HashMap::new(),
-            },
-        },
-        expected_vpc_version,
-        &mut txn,
-    )
-    .await
-    .unwrap()
-    .id;
-    txn.commit().await.unwrap();
-    vpc_prefix_id
 }

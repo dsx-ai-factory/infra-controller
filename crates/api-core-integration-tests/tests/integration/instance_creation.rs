@@ -20,10 +20,12 @@ use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use carbide_uuid::machine::StableHostMachineId;
 use model::test_support::ManagedHostConfig;
+use rpc::forge::InstanceConfig;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use super::instance_common::{
-    InstanceEnv, default_os_config, default_tenant_config, single_interface_network_config,
+    InstanceEnv, default_os_config, default_tenant_config, find_instances_by_label,
+    single_interface_network_config,
 };
 
 #[sqlx_test]
@@ -257,30 +259,157 @@ async fn test_instance_phone_home(_: PgPoolOptions, options: PgConnectOptions) {
     );
 }
 
-async fn find_instances_by_label(
-    env: &InstanceEnv,
-    label: rpc::forge::Label,
-) -> rpc::forge::InstanceList {
-    let instance_ids = env
+#[sqlx_test]
+async fn test_instance_dns_resolution(_: PgPoolOptions, options: PgConnectOptions) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let env = InstanceEnv::new(pool, default_config::get()).await;
+    let (segment_id_1, segment_id_2) = {
+        let ids = env.tenant_segments(2).await;
+        (ids[0], ids[1])
+    };
+    let mh = env.create_managed_host(ManagedHostConfig::default()).await;
+
+    let network = rpc::InstanceNetworkConfig {
+        interfaces: vec![
+            rpc::InstanceInterfaceConfig {
+                function_type: rpc::InterfaceFunctionType::Physical as i32,
+                network_segment_id: Some(segment_id_1),
+                network_details: None,
+                device: None,
+                device_instance: 0u32,
+                virtual_function_id: None,
+                ip_address: None,
+                ipv6_interface_config: None,
+                routing_profile: None,
+            },
+            rpc::InstanceInterfaceConfig {
+                function_type: rpc::InterfaceFunctionType::Virtual as i32,
+                network_segment_id: Some(segment_id_2),
+                network_details: None,
+                device: None,
+                device_instance: 0u32,
+                virtual_function_id: None,
+                ip_address: None,
+                ipv6_interface_config: None,
+                routing_profile: None,
+            },
+        ],
+        #[allow(deprecated)]
+        auto: false,
+        auto_config: None,
+    };
+
+    // Create instance with hostname
+    let tinstance = mh
+        .instance_builder(&env.harness)
+        .network(network)
+        .hostname("test-hostname")
+        .tenant_org("nvidia-org")
+        .build()
+        .await;
+    env.advance_instance_to_ready(&mh, &tinstance).await;
+
+    let response = env
         .harness
         .api()
-        .find_instance_ids(tonic::Request::new(rpc::forge::InstanceSearchFilter {
-            label: Some(label),
-            tenant_org_id: None,
-            vpc_id: None,
-            instance_type_id: None,
-        }))
+        .get_managed_host_network_config(tonic::Request::new(
+            rpc::forge::ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(mh.first_dpu().id),
+            },
+        ))
         .await
         .unwrap()
-        .into_inner()
-        .instance_ids;
+        .into_inner();
 
-    env.harness
+    //DNS record domain always uses IP Address (for now)
+    let dns_record = env
+        .harness
         .api()
-        .find_instances_by_ids(tonic::Request::new(rpc::forge::InstancesByIdsRequest {
-            instance_ids,
-        }))
+        .lookup_record(tonic::Request::new(
+            rpc::protos::dns::DnsResourceRecordLookupRequest {
+                qname: "192-0-2-3.dwrt1.com.".to_string(),
+                zone_id: uuid::Uuid::new_v4().to_string(),
+                local: None,
+                remote: None,
+                qtype: "A".to_string(),
+                real_remote: None,
+            },
+        ))
         .await
         .unwrap()
-        .into_inner()
+        .into_inner();
+
+    tracing::info!(
+        dns_record = ?dns_record,
+        "Fetched DNS record",
+    );
+    assert_eq!(dns_record.records.first().unwrap().content, "192.0.2.3");
+
+    //DHCP response uses hostname set during allocation
+    assert_eq!(
+        "test-hostname.dwrt1.com",
+        response.tenant_interfaces[0].fqdn
+    );
+}
+
+#[sqlx_test]
+async fn test_instance_null_hostname(_: PgPoolOptions, options: PgConnectOptions) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let env = InstanceEnv::new(pool, default_config::get()).await;
+    let segment_id = env.segment_id;
+    let mh = env.create_managed_host(ManagedHostConfig::default()).await;
+
+    //Create instance with no hostname set
+    let mut tenant_config = default_tenant_config();
+    tenant_config.hostname = None;
+    let instance_config = InstanceConfig::builder()
+        .tenant(tenant_config)
+        .os(default_os_config())
+        .network(single_interface_network_config(segment_id))
+        .rpc();
+
+    let tinstance = mh
+        .instance_builder(&env.harness)
+        .config(instance_config)
+        .build()
+        .await;
+    env.advance_instance_to_ready(&mh, &tinstance).await;
+
+    let _response = env
+        .harness
+        .api()
+        .get_managed_host_network_config(tonic::Request::new(
+            rpc::forge::ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(mh.first_dpu().id),
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+
+    //DNS record domain always uses dashed IP (for now)
+    let dns_record = env
+        .harness
+        .api()
+        .lookup_record(tonic::Request::new(
+            rpc::protos::dns::DnsResourceRecordLookupRequest {
+                qname: "192-0-2-3.dwrt1.com.".to_string(),
+                zone_id: uuid::Uuid::new_v4().to_string(),
+                local: None,
+                remote: None,
+                qtype: "A".to_string(),
+                real_remote: None,
+            },
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(dns_record.records.first().unwrap().content, "192.0.2.3");
+
+    //DHCP response uses dashed IP
+    assert_eq!(
+        dns_record.records.first().unwrap().qname,
+        "192-0-2-3.dwrt1.com."
+    );
 }

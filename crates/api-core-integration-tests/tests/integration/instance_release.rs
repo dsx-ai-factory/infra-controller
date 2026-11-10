@@ -498,3 +498,119 @@ async fn test_instance_release_auto_repair_enabled(_: PgPoolOptions, options: Pg
 
     txn.commit().await.unwrap();
 }
+
+#[sqlx_test]
+async fn test_can_not_update_instance_config_after_deletion(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let env = InstanceEnv::new(pool, default_config::get()).await;
+    let segment_id = env.segment_id;
+    let mh = env.create_managed_host(ManagedHostConfig::default()).await;
+
+    let initial_os = rpc::forge::InstanceOperatingSystemConfig {
+        phone_home_enabled: false,
+        run_provisioning_instructions_on_every_boot: false,
+        user_data: Some("SomeRandomData1".to_string()),
+        variant: Some(rpc::forge::instance_operating_system_config::Variant::Ipxe(
+            rpc::forge::InlineIpxe {
+                ipxe_script: "SomeRandomiPxe1".to_string(),
+            },
+        )),
+    };
+
+    let config = InstanceConfig::builder()
+        .tenant(default_tenant_config())
+        .os(default_os_config())
+        .network(single_interface_network_config(segment_id))
+        .rpc();
+
+    let tinstance = mh
+        .instance_builder(&env.harness)
+        .config(config.clone())
+        .build()
+        .await;
+    env.advance_instance_to_ready(&mh, &tinstance).await;
+
+    let instance = tinstance.rpc_instance().await;
+    let metadata = instance.metadata.as_ref().unwrap().clone();
+
+    assert_eq!(
+        instance
+            .status
+            .as_ref()
+            .unwrap()
+            .tenant
+            .as_ref()
+            .unwrap()
+            .state(),
+        rpc::forge::TenantState::Ready
+    );
+
+    env.harness
+        .api()
+        .release_instance(tonic::Request::new(InstanceReleaseRequest {
+            id: tinstance.id.into(),
+            issue: None,
+            is_repair_tenant: None,
+            delete_attribution: None,
+        }))
+        .await
+        .unwrap();
+    let instance = tinstance.rpc_instance().await;
+    assert_eq!(
+        instance
+            .status
+            .as_ref()
+            .unwrap()
+            .tenant
+            .as_ref()
+            .unwrap()
+            .state(),
+        rpc::TenantState::Terminating
+    );
+
+    let updated_os = initial_os.clone();
+
+    // Perform an update using update_instance_operating_system
+    let err = env
+        .harness
+        .api()
+        .update_instance_operating_system(tonic::Request::new(
+            rpc::forge::InstanceOperatingSystemUpdateRequest {
+                instance_id: tinstance.id.into(),
+                if_version_match: None,
+                os: Some(updated_os.clone()),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        err.message(),
+        "configuration for a terminating instance can not be changed"
+    );
+
+    // Perform an update using update_instance_config
+    let mut updated_config = config.clone();
+    updated_config.os = Some(updated_os.clone());
+    let err = env
+        .harness
+        .api()
+        .update_instance_config(tonic::Request::new(
+            rpc::forge::InstanceConfigUpdateRequest {
+                instance_id: tinstance.id.into(),
+                if_version_match: None,
+                config: Some(updated_config.clone()),
+                metadata: Some(metadata),
+            },
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        err.message(),
+        "configuration for a terminating instance can not be changed"
+    );
+}
