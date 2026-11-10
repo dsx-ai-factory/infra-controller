@@ -15,14 +15,16 @@
  * limitations under the License.
  */
 
-//! Runtime-owned BMC endpoint wiring over a resolved driver selection, and
-//! the status of asynchronous work drivers hand back.
+//! Runtime-owned BMC endpoint wiring over a resolved driver selection, the
+//! platform identity that selection matches on, projected from a stored
+//! exploration report, and the status of asynchronous work drivers hand back.
 
 mod capabilities;
 mod connection;
 mod credentials;
 mod endpoint;
 mod error;
+mod identity;
 mod ipmi;
 mod observe;
 mod status;
@@ -37,4 +39,5 @@ pub use credentials::{
 };
 pub use endpoint::{BmcRef, BmcRefError, ConnectedBmc};
 pub use error::ConnectError;
+pub use identity::platform_identity;
 pub use ipmi::EndpointIpmiOps;

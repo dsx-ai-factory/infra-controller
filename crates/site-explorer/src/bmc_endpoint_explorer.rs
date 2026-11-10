@@ -1730,7 +1730,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            bmc_explorer::platform_identity(&report)
+            bmc_runtime::platform_identity(&report)
                 .service_root
                 .vendor
                 .as_deref(),

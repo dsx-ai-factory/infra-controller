@@ -450,7 +450,7 @@ pub(crate) async fn find_bmc_driver_selection(
     if endpoint.report.service_root.is_none() {
         return Ok(Response::new(rpc::BmcDriverSelection::default()));
     }
-    let identity = bmc_explorer::platform_identity(&endpoint.report);
+    let identity = bmc_runtime::platform_identity(&endpoint.report);
     let rules = api
         .runtime_config
         .driver_rules()
