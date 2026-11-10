@@ -60,23 +60,17 @@ impl<B: Bmc> Lockdown<B> for LenovoAmiLockdown {
                 LockdownBiosUpgradeDowngradeState::Disable,
             ),
         ];
-        let interfaces = cx.host_interfaces().await?;
-        let interface = interfaces.first().ok_or(PlatformError::NoContent)?;
-        let enabled =
-            interface
-                .interface_enabled()
-                .ok_or_else(|| PlatformError::InvalidResponse {
-                    message: "host interface omitted InterfaceEnabled".to_string(),
-                })?;
+        let (bmc, interface) = cx.host_interface_state().await?;
         Ok(status(
             state_from_signals(&signals),
-            state_from_signals(&[signal(Some(enabled), false, true)]),
+            bmc,
             format!(
-                "host_control={}, bios_variable_write={}, bios_settings_change={}, bios_upgrade_downgrade={}, host_interface={enabled}",
+                "host_control={}, bios_variable_write={}, bios_settings_change={}, bios_upgrade_downgrade={}, host_interface={}",
                 reported(&raw.lockout_host_control),
                 reported(&raw.lockout_bios_variable_write_mode),
                 reported(&raw.lockdown_bios_settings_change),
-                reported(&raw.lockdown_bios_upgrade_downgrade)
+                reported(&raw.lockdown_bios_upgrade_downgrade),
+                reported(&interface)
             ),
         ))
     }
@@ -87,16 +81,17 @@ impl<B: Bmc> Lockdown<B> for LenovoAmiLockdown {
         scope: LockdownScope,
         desired: LockdownDesiredState,
     ) -> Result<DriverOutcome, PlatformError> {
+        let enabled = desired == LockdownDesiredState::Enabled;
         match scope {
             LockdownScope::All => {}
             LockdownScope::Bmc => {
-                let enabled = desired == LockdownDesiredState::Enabled;
                 return cx.set_first_host_interface(!enabled).await;
             }
             LockdownScope::Host | LockdownScope::BmcSystemLockdown => {
                 return Err(PlatformError::Unsupported);
             }
         }
+        cx.require_host_interface().await?;
         let (host_control, variable_write, settings_change, upgrade_downgrade) = match desired {
             LockdownDesiredState::Enabled => (
                 LockoutHostControlState::Enable,
@@ -123,10 +118,7 @@ impl<B: Bmc> Lockdown<B> for LenovoAmiLockdown {
             .await
             .map(DriverOutcome::from)
             .map_err(|error| cx.map_redfish_error(error))?;
-        Ok(outcome.merge(
-            cx.set_first_host_interface(desired == LockdownDesiredState::Disabled)
-                .await?,
-        ))
+        Ok(outcome.merge(cx.set_first_host_interface(!enabled).await?))
     }
 }
 
@@ -260,18 +252,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_or_invalid_host_interface_does_not_report_unlocked() {
-        for enabled in [Value::Null, json!("true")] {
-            let bmc = fixture("Disable", enabled).build().await;
+    async fn full_lockdown_writes_nothing_without_a_host_interface() {
+        for desired in [
+            LockdownDesiredState::Enabled,
+            LockdownDesiredState::Disabled,
+        ] {
+            let bmc = fixture("Disable", json!(true))
+                .document(
+                    INTERFACES,
+                    json!({
+                        "@odata.id": INTERFACES,
+                        "@odata.type": "#HostInterfaceCollection.HostInterfaceCollection",
+                        "Name": "Host Interfaces", "Members": [],
+                    }),
+                )
+                .build()
+                .await;
             let cx = bmc.cx().await;
-            assert!(LenovoAmiLockdown.status(&cx).await.is_err());
+            assert_eq!(
+                LenovoAmiLockdown
+                    .set(&cx, LockdownScope::All, desired)
+                    .await,
+                Err(PlatformError::NoContent)
+            );
+            assert!(bmc.writes().is_empty());
         }
-        let bmc = fixture("Disable", json!(true))
-            .respond(Method::GET, INTERFACE, StatusCode::NOT_FOUND, None)
-            .build()
-            .await;
-        let cx = bmc.cx().await;
-        assert!(LenovoAmiLockdown.status(&cx).await.is_err());
     }
 
     #[tokio::test]
