@@ -132,39 +132,7 @@ func TestNewClient(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
-	t.Run("TLS startup diagnostics use service JSON logging", func(t *testing.T) {
-		var logs bytes.Buffer
-		original := log.Logger
-		log.Logger = zerolog.New(&logs).With().Str("component", "site-manager").Logger()
-		t.Cleanup(func() { log.Logger = original })
-		caPath := writePEM(t, srv.Certificate().Raw)
-		ca, err := os.ReadFile(caPath)
-		require.NoError(t, err)
-		ca = append(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("invalid DER")})...)
-		require.NoError(t, os.WriteFile(caPath, ca, 0600))
-		certPath := writePEM(t, srv.Certificate().Raw)
-		stderr, err := os.Create(filepath.Join(t.TempDir(), "stderr.log"))
-		require.NoError(t, err)
-		originalStderr := os.Stderr
-		os.Stderr = stderr
-		t.Cleanup(func() {
-			os.Stderr = originalStderr
-			assert.NoError(t, stderr.Close())
-		})
-		// Identity loading fails synchronously after the CA diagnostic, so no poller starts.
-		_, err = NewClient(t.Context(), Options{URL: srv.URL, CAPath: caPath, ClientCertPath: certPath, ClientKeyPath: filepath.Join(t.TempDir(), "missing.key")})
-		require.Error(t, err)
-		var record map[string]any
-		require.NoError(t, json.Unmarshal(logs.Bytes(), &record))
-		assert.Equal(t, "error", record[zerolog.LevelFieldName])
-		assert.Contains(t, record[zerolog.MessageFieldName], "using parseable certificates")
-		assert.Equal(t, "site-manager", record["component"])
-		assert.Equal(t, caPath, record["path"])
-		os.Stderr = originalStderr
-		textLogs, err := os.ReadFile(stderr.Name())
-		require.NoError(t, err)
-		assert.Empty(t, string(textLogs), "TLS diagnostics must not also emit text records")
-	})
+
 	for _, tc := range []struct {
 		name             string
 		scheme           string
@@ -179,7 +147,41 @@ func TestNewClient(t *testing.T) {
 		wantInitError    bool
 		wantRequestError bool
 		wantStatus       int
+		check            func(*testing.T)
 	}{
+		{name: "TLS startup diagnostics use service JSON logging", check: func(t *testing.T) {
+			var logs bytes.Buffer
+			original := log.Logger
+			log.Logger = zerolog.New(&logs).With().Str("component", "site-manager").Logger()
+			t.Cleanup(func() { log.Logger = original })
+			caPath := writePEM(t, srv.Certificate().Raw)
+			ca, err := os.ReadFile(caPath)
+			require.NoError(t, err)
+			ca = append(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("invalid DER")})...)
+			require.NoError(t, os.WriteFile(caPath, ca, 0600))
+			certPath := writePEM(t, srv.Certificate().Raw)
+			stderr, err := os.Create(filepath.Join(t.TempDir(), "stderr.log"))
+			require.NoError(t, err)
+			originalStderr := os.Stderr
+			os.Stderr = stderr
+			t.Cleanup(func() {
+				os.Stderr = originalStderr
+				assert.NoError(t, stderr.Close())
+			})
+			// Identity loading fails synchronously after the CA diagnostic, so no poller starts.
+			_, err = NewClient(t.Context(), Options{URL: srv.URL, CAPath: caPath, ClientCertPath: certPath, ClientKeyPath: filepath.Join(t.TempDir(), "missing.key")})
+			require.Error(t, err)
+			var record map[string]any
+			require.NoError(t, json.Unmarshal(logs.Bytes(), &record))
+			assert.Equal(t, "error", record[zerolog.LevelFieldName])
+			assert.Contains(t, record[zerolog.MessageFieldName], "using parseable certificates")
+			assert.Equal(t, "site-manager", record["component"])
+			assert.Equal(t, caPath, record["path"])
+			os.Stderr = originalStderr
+			textLogs, err := os.ReadFile(stderr.Name())
+			require.NoError(t, err)
+			assert.Empty(t, string(textLogs), "TLS diagnostics must not also emit text records")
+		}},
 		{name: "verified TLS sends client certificate", scheme: "https", wantStatus: http.StatusOK},
 		{name: "ignores inherited proxy for in-cluster issuance", scheme: "https", inheritedProxy: true, wantStatus: http.StatusOK},
 		{name: "old chart without client identity", scheme: "https", noIdentity: true, wantStatus: http.StatusOK},
@@ -192,6 +194,10 @@ func TestNewClient(t *testing.T) {
 		{name: "redirect does not forward identity", scheme: "https", redirect: true, wantStatus: http.StatusTemporaryRedirect},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.check != nil {
+				tc.check(t)
+				return
+			}
 			if tc.inheritedProxy {
 				original := http.DefaultTransport
 				transport := original.(*http.Transport).Clone()

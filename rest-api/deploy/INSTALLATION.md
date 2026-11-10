@@ -697,6 +697,7 @@ when changing the namespace or identity.
 Under `nico-rest-site-manager.clientCertificate`, `duration` defaults to `2160h`,
 `renewBefore` to `360h`, and `enabled` to `true`. `issuerRef` overrides the client
 certificate issuer only; an empty map uses `global.certificate.issuerRef`.
+An override replaces the whole reference rather than merging with the global one.
 Set its `name`, `kind`, and `group` to select a dedicated client issuer without
 changing the serving or Temporal certificate issuers. With `enabled: false`,
 provision the required Secret yourself: it needs `tls.crt` and `tls.key`, client-auth usage, exactly one

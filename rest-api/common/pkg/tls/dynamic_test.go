@@ -265,12 +265,46 @@ func TestNewDynTLSCfg(t *testing.T) {
 		bundle        string
 		wantErr       bool
 		mismatchedKey bool
+		check         func(*testing.T)
 	}{
+		"caller logger receives startup diagnostics without reconfiguration": {check: func(t *testing.T) {
+			var logs bytes.Buffer
+			logger := logrus.New()
+			formatter := &logrus.JSONFormatter{}
+			logger.SetFormatter(formatter)
+			logger.SetOutput(&logs)
+			logger.SetLevel(logrus.WarnLevel)
+			invalid := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("invalid DER")}))
+			require.NoError(t, os.WriteFile(ca, []byte(testCaCert+"\n"+invalid), 0600))
+			// Fail before starting the poller while still exercising the startup diagnostic.
+			d, err := NewDynTLSCfg(filepath.Join(dir, "missing.key"), cert, ca, logger)
+			require.Error(t, err)
+			assert.Nil(t, d)
+			var record map[string]any
+			require.NoError(t, json.Unmarshal(logs.Bytes(), &record))
+			assert.Equal(t, "error", record["level"])
+			assert.Contains(t, record["msg"], "using parseable certificates")
+			assert.Equal(t, ca, record["path"])
+			assert.Same(t, formatter, logger.Formatter)
+			assert.Same(t, &logs, logger.Out)
+			assert.Equal(t, logrus.WarnLevel, logger.GetLevel())
+			assert.False(t, logger.ReportCaller)
+			assert.Empty(t, globalLogs.String())
+		}},
+		"rejects multiple loggers": {check: func(t *testing.T) {
+			d, err := NewDynTLSCfg(key, cert, ca, logrus.New(), logrus.New())
+			require.ErrorContains(t, err, "at most one TLS logger")
+			assert.Nil(t, d)
+		}},
 		"invalid startup identity": {bundle: testCaCert, wantErr: true, mismatchedKey: true},
 		"no certificates":          {bundle: "not a certificate", wantErr: true},
 		"partially valid bundle":   {bundle: testCaCert + "\n" + string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("invalid DER")}))},
 	} {
 		t.Run(name, func(t *testing.T) {
+			if tc.check != nil {
+				tc.check(t)
+				return
+			}
 			keyPEM := test1Key
 			if tc.mismatchedKey {
 				keyPEM = test2Key
@@ -293,36 +327,6 @@ func TestNewDynTLSCfg(t *testing.T) {
 			assert.Empty(t, globalLogs.String(), "startup CA diagnostics must not use the global logger")
 		})
 	}
-	t.Run("caller logger receives startup diagnostics without reconfiguration", func(t *testing.T) {
-		var logs bytes.Buffer
-		logger := logrus.New()
-		formatter := &logrus.JSONFormatter{}
-		logger.SetFormatter(formatter)
-		logger.SetOutput(&logs)
-		logger.SetLevel(logrus.WarnLevel)
-		invalid := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("invalid DER")}))
-		require.NoError(t, os.WriteFile(ca, []byte(testCaCert+"\n"+invalid), 0600))
-		// Fail before starting the poller while still exercising the startup diagnostic.
-		d, err := NewDynTLSCfg(filepath.Join(dir, "missing.key"), cert, ca, logger)
-		require.Error(t, err)
-		assert.Nil(t, d)
-		var record map[string]any
-		require.NoError(t, json.Unmarshal(logs.Bytes(), &record))
-		assert.Equal(t, "error", record["level"])
-		assert.Contains(t, record["msg"], "using parseable certificates")
-		assert.Equal(t, ca, record["path"])
-		assert.Same(t, formatter, logger.Formatter)
-		assert.Same(t, &logs, logger.Out)
-		assert.Equal(t, logrus.WarnLevel, logger.GetLevel())
-		assert.False(t, logger.ReportCaller)
-		assert.Empty(t, globalLogs.String())
-	})
-	t.Run("rejects multiple loggers", func(t *testing.T) {
-		d, err := NewDynTLSCfg(key, cert, ca, logrus.New(), logrus.New())
-		require.ErrorContains(t, err, "at most one TLS logger")
-		assert.Nil(t, d)
-	})
-
 }
 
 func TestParseCABundle(t *testing.T) {
