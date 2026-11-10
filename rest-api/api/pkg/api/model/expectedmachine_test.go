@@ -33,6 +33,28 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 		expectErr bool
 	}{
 		{
+			desc: "loopback replacement requires interfaces",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress: "00:11:22:33:44:55", ChassisSerialNumber: validChassisSerial,
+				ReplaceDpuLoopbacks: cutil.GetPtr(true),
+			},
+			expectErr: true,
+		},
+		{
+			desc: "loopback replacement accepts an empty list",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress: "00:11:22:33:44:55", ChassisSerialNumber: validChassisSerial,
+				ReplaceDpuLoopbacks: cutil.GetPtr(true), Interfaces: APIExpectedMachineInterfaces{},
+			},
+		},
+		{
+			desc: "false loopback replacement allows omitted interfaces",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress: "00:11:22:33:44:55", ChassisSerialNumber: validChassisSerial,
+				ReplaceDpuLoopbacks: cutil.GetPtr(false),
+			},
+		},
+		{
 			desc: "ok when all required fields are provided",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
@@ -544,6 +566,11 @@ func TestAPIExpectedMachineInterface_ToDBModel(t *testing.T) {
 			IpAllocation:       corev1.ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_FIXED.Enum(),
 		}},
 		{name: "legacy declaration without new fields", input: &corev1.ExpectedHostNic{MacAddress: cutil.GetPtr("02:00:00:00:00:09")}},
+		{name: "DPU loopback reservation", input: &corev1.ExpectedHostNic{
+			MacAddress: cutil.GetPtr("02:00:00:00:00:09"), FixedIp: cutil.GetPtr("198.51.100.9"),
+			Role:         corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_DPU_LOOPBACK.Enum(),
+			IpAllocation: corev1.ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_FIXED.Enum(),
+		}},
 		{name: "Astra names without a MAC", input: &corev1.ExpectedHostNic{
 			PhysicalIfname: cutil.GetPtr("C1-1-L1"), LogicalIfname: cutil.GetPtr("eth_r0_p0"),
 			NicType: cutil.GetPtr("CX9"), FixedIp: cutil.GetPtr("192.0.2.11"),
@@ -586,6 +613,81 @@ func TestAPIExpectedMachineInterface_ToDBModel(t *testing.T) {
 	}
 }
 
+func TestAPIExpectedMachineInterfaces_ToDBModelPreservingLoopbacks(t *testing.T) {
+	physical := cdbm.ExpectedMachineInterface{
+		MacAddress: cutil.GetPtr("02:AA:00:00:00:09"), FixedIP: cutil.GetPtr("192.0.2.9"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuOs),
+	}
+	ipv4 := cdbm.ExpectedMachineInterface{
+		MacAddress: physical.MacAddress, FixedIP: cutil.GetPtr("198.51.100.9"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuLoopback),
+		IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
+	}
+	ipv6 := ipv4
+	ipv6.FixedIP = cutil.GetPtr("2001:db8::9")
+	stored := []cdbm.ExpectedMachineInterface{physical, ipv4, ipv6}
+	legacy := APIExpectedMachineInterface{
+		Identifier: macIdentifier("02-aa-00-00-00-09"), FixedIP: cutil.GetPtr("2001:db8:0:0:0:0:0:9"), Primary: cutil.GetPtr(false),
+	}
+	restored := ipv6
+	restored.FixedIP = legacy.FixedIP
+	changedAddress := APIExpectedMachineInterface{MacAddress: physical.MacAddress, FixedIP: cutil.GetPtr("198.51.100.10")}
+	explicitPhysical := physical
+	explicitPhysical.FixedIP = ipv4.FixedIP
+	tests := []struct {
+		name       string
+		interfaces APIExpectedMachineInterfaces
+		replace    bool
+		want       []cdbm.ExpectedMachineInterface
+	}{
+		{name: "omitted list preserves every interface"},
+		{
+			name: "empty physical list retains both loopback families", interfaces: APIExpectedMachineInterfaces{},
+			want: []cdbm.ExpectedMachineInterface{ipv4, ipv6},
+		},
+		{
+			name:       "physical entry sharing the MAC retains loopbacks",
+			interfaces: APIExpectedMachineInterfaces{NewAPIExpectedMachineInterface(physical)},
+			want:       stored,
+		},
+		{
+			name: "explicit clear removes loopbacks", interfaces: APIExpectedMachineInterfaces{}, replace: true,
+			want: []cdbm.ExpectedMachineInterface{},
+		},
+		{
+			name: "explicit clear keeps supplied physical interfaces", replace: true,
+			interfaces: APIExpectedMachineInterfaces{NewAPIExpectedMachineInterface(physical)},
+			want:       []cdbm.ExpectedMachineInterface{physical},
+		},
+		{
+			name:       "supplied loopback replaces the entire loopback subset",
+			interfaces: APIExpectedMachineInterfaces{NewAPIExpectedMachineInterface(physical), NewAPIExpectedMachineInterface(ipv6)},
+			want:       []cdbm.ExpectedMachineInterface{physical, ipv6},
+		},
+		{
+			name:       "omitted role recognizes an unchanged address before the shared physical MAC",
+			interfaces: APIExpectedMachineInterfaces{legacy},
+			want:       []cdbm.ExpectedMachineInterface{restored},
+		},
+		{
+			name:       "changed address without a role does not claim loopback replacement",
+			interfaces: APIExpectedMachineInterfaces{changedAddress},
+			want:       []cdbm.ExpectedMachineInterface{changedAddress.ToDBModel(), ipv4, ipv6},
+		},
+		{
+			name:       "explicit physical role is never inherited as a loopback",
+			interfaces: APIExpectedMachineInterfaces{NewAPIExpectedMachineInterface(explicitPhysical)},
+			want:       []cdbm.ExpectedMachineInterface{explicitPhysical, ipv4, ipv6},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.NoError(t, test.interfaces.Validate())
+			assert.Equal(t, test.want, test.interfaces.ToDBModelPreservingLoopbacks(stored, test.replace))
+		})
+	}
+	assert.Nil(t, legacy.Role, "cache conversion must not change the original request forwarded to Core")
+	assert.Equal(t, cutil.GetPtr(false), legacy.Primary)
+}
+
 func TestAPIExpectedMachineUpdateRequest_InterfacesJSONSemantics(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -595,8 +697,8 @@ func TestAPIExpectedMachineUpdateRequest_InterfacesJSONSemantics(t *testing.T) {
 	}{
 		{name: "omitted preserves", body: `{}`, wantNil: true},
 		{name: "null preserves", body: `{"interfaces":null}`, wantNil: true},
-		{name: "empty clears", body: `{"interfaces":[]}`},
-		{name: "populated replaces", body: `{"interfaces":[{"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9"}]}`, wantLength: 1},
+		{name: "empty clears physical interfaces", body: `{"interfaces":[]}`},
+		{name: "populated replaces physical interfaces", body: `{"interfaces":[{"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9"}]}`, wantLength: 1},
 	}
 
 	for _, test := range tests {
@@ -849,6 +951,21 @@ func TestAPIExpectedMachineUpdateRequest_Validate(t *testing.T) {
 		obj       APIExpectedMachineUpdateRequest
 		expectErr bool
 	}{
+		{
+			desc:      "loopback replacement requires interfaces",
+			obj:       APIExpectedMachineUpdateRequest{ReplaceDpuLoopbacks: cutil.GetPtr(true)},
+			expectErr: true,
+		},
+		{
+			desc: "loopback replacement accepts an empty list",
+			obj: APIExpectedMachineUpdateRequest{
+				ReplaceDpuLoopbacks: cutil.GetPtr(true), Interfaces: APIExpectedMachineInterfaces{},
+			},
+		},
+		{
+			desc: "false loopback replacement allows omitted interfaces",
+			obj:  APIExpectedMachineUpdateRequest{ReplaceDpuLoopbacks: cutil.GetPtr(false)},
+		},
 		{
 			desc: "ok when all fields are provided",
 			obj: APIExpectedMachineUpdateRequest{
@@ -1673,12 +1790,13 @@ func TestNewAPIExpectedMachineWithSkuComponents(t *testing.T) {
 
 func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 	tests := []struct {
-		name      string
-		body      string
-		wantPaths []string
+		name                 string
+		body                 string
+		wantPaths            []string
+		wantReplaceLoopbacks bool
 	}{
 		{name: "omitted fields preserve Core state", body: `{}`},
-		{name: "null fields preserve Core state", body: `{"defaultBmcUsername":null,"defaultBmcPassword":null,"labels":null,"slotId":null,"bmcIpAddress":null}`},
+		{name: "null fields preserve Core state", body: `{"defaultBmcUsername":null,"defaultBmcPassword":null,"labels":null,"slotId":null,"bmcIpAddress":null,"interfaces":null}`},
 		{name: "explicit zero and empty values remain selected", body: `{"slotId":0,"labels":{},"fallbackDPUSerialNumbers":[],"isDpfEnabled":false,"hostLifecycleProfile":{"disableLockdown":false},"bmcIpAddress":""}`, wantPaths: []string{"bmc_ip_address", "metadata.labels", "fallback_dpu_serial_numbers", "is_dpf_enabled", "host_lifecycle_profile.disable_lockdown"}},
 		{name: "BMC address selects automatic allocation", body: `{"bmcIpAddress":"192.0.2.31"}`, wantPaths: []string{"bmc_ip_address", "bmc_ip_allocation"}},
 		{name: "slot ID alone selects derived labels", body: `{"slotId":0}`, wantPaths: []string{"metadata.labels"}},
@@ -1688,6 +1806,10 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 		{name: "empty lifecycle profile preserves policy", body: `{"hostLifecycleProfile":{}}`},
 		{name: "interfaces replace Core host NICs", body: `{"interfaces":[{"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9"}]}`, wantPaths: []string{"host_nics"}},
 		{name: "empty interfaces clear Core host NICs", body: `{"interfaces":[]}`, wantPaths: []string{"host_nics"}},
+		{name: "explicit intent clears loopbacks", body: `{"interfaces":[],"replaceDpuLoopbacks":true}`, wantPaths: []string{"host_nics"}, wantReplaceLoopbacks: true},
+		{name: "false intent preserves loopbacks", body: `{"interfaces":[],"replaceDpuLoopbacks":false}`, wantPaths: []string{"host_nics"}},
+		{name: "null intent preserves loopbacks", body: `{"interfaces":[],"replaceDpuLoopbacks":null}`, wantPaths: []string{"host_nics"}},
+		{name: "supplied loopbacks retain their own replacement signal", body: `{"interfaces":[{"macAddress":"02:00:00:00:00:09","role":"DpuLoopback","fixedIp":"198.51.100.9"}],"replaceDpuLoopbacks":false}`, wantPaths: []string{"host_nics"}},
 		{name: "server name selects server_name path", body: `{"serverName":"server-1"}`, wantPaths: []string{"server_name"}},
 		{name: "empty server name clears Core state", body: `{"serverName":""}`, wantPaths: []string{"server_name"}},
 		{name: "null server name preserves Core state", body: `{"serverName":null}`},
@@ -1697,13 +1819,20 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 			var request APIExpectedMachineUpdateRequest
 			require.NoError(t, json.Unmarshal([]byte(test.body), &request))
 			require.NoError(t, request.Validate())
-			patch := request.ToProto(&cdbm.ExpectedMachine{SlotID: cutil.GetPtr(int32(0)), IsDpfEnabled: cutil.GetPtr(false), ServerName: cutil.GetPtr("server-1"), HostLifecycleProfile: cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)}})
+			patch := request.ToProto(&cdbm.ExpectedMachine{
+				SlotID: cutil.GetPtr(int32(0)), IsDpfEnabled: cutil.GetPtr(false), ServerName: cutil.GetPtr("server-1"),
+				HostLifecycleProfile: cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
+				Interfaces: []cdbm.ExpectedMachineInterface{{
+					MacAddress: cutil.GetPtr("02:00:00:00:00:09"), FixedIP: cutil.GetPtr("198.51.100.9"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuLoopback),
+				}},
+			})
 			encoded, err := protojson.Marshal(patch)
 			require.NoError(t, err)
 			var decoded corev1.PatchExpectedMachineRequest
 			require.NoError(t, protojson.Unmarshal(encoded, &decoded))
 			require.NotNil(t, decoded.UpdateMask)
 			assert.Equal(t, test.wantPaths, decoded.GetUpdateMask().GetPaths())
+			assert.Equal(t, test.wantReplaceLoopbacks, decoded.GetExpectedMachine().GetReplaceDpuLoopbacks())
 			if request.SlotID != nil {
 				labels := decoded.GetExpectedMachine().GetMetadata().GetLabels()
 				require.Len(t, labels, 1)
@@ -1725,10 +1854,8 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 			}
 			if request.Interfaces != nil {
 				require.Len(t, decoded.GetExpectedMachine().GetHostNics(), len(request.Interfaces))
-				if len(request.Interfaces) > 0 {
-					assert.Equal(t, "02:00:00:00:00:09", decoded.GetExpectedMachine().GetHostNics()[0].GetMacAddress())
-					assert.Equal(t, "CX9", decoded.GetExpectedMachine().GetHostNics()[0].GetNicType())
-					assert.Equal(t, "192.0.2.9", decoded.GetExpectedMachine().GetHostNics()[0].GetFixedIp())
+				for index, incoming := range request.Interfaces {
+					assert.True(t, proto.Equal(incoming.ToDBModel().ToProto(), decoded.GetExpectedMachine().GetHostNics()[index]), "Core must receive original incoming intent, without cache-preserved loopbacks")
 				}
 			}
 		})

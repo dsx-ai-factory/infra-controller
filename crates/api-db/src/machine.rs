@@ -172,6 +172,7 @@ pub async fn get_or_create(
     common_pools: Option<&CommonPools>,
     stable_machine_id: &MachineId,
     interface: &MachineInterfaceSnapshot,
+    requested_loopback_v6: Option<Ipv6Addr>,
 ) -> DatabaseResult<AnyMachine> {
     let existing_machine =
         find_one(&mut *txn, stable_machine_id, MachineSearchConfig::default()).await?;
@@ -211,13 +212,14 @@ pub async fn get_or_create(
         // Host and DPU machines are created in same `discover_machine` call. Update same
         // state in both machines.
         let state = ManagedHostState::Created;
-        let machine = create(
+        let machine = create_with_requested_loopback(
             txn,
             common_pools,
             stable_machine_id,
             state,
             None,
             CURRENT_STATE_MODEL_VERSION,
+            requested_loopback_v6,
         )
         .await?;
         crate::machine_interface::associate_interface_with_machine(
@@ -2475,6 +2477,29 @@ pub async fn create(
     expected_machine_data: Option<&ExpectedMachineData>,
     state_model_version: i16,
 ) -> DatabaseResult<AnyMachine> {
+    create_with_requested_loopback(
+        txn,
+        common_pools,
+        stable_machine_id,
+        state,
+        expected_machine_data,
+        state_model_version,
+        None,
+    )
+    .await
+}
+
+/// Create a machine with explicit IPv6 loopback intent. The caller's transaction
+/// holds the reservation lock and claims IPv4 before committing creation.
+pub async fn create_with_requested_loopback(
+    txn: &mut PgConnection,
+    common_pools: Option<&CommonPools>,
+    stable_machine_id: &MachineId,
+    state: ManagedHostState,
+    expected_machine_data: Option<&ExpectedMachineData>,
+    state_model_version: i16,
+    requested_loopback_v6: Option<Ipv6Addr>,
+) -> DatabaseResult<AnyMachine> {
     let stable_machine_id_string = stable_machine_id.to_string();
 
     let default_metadata = &Metadata::default();
@@ -2512,7 +2537,13 @@ pub async fn create(
     let loopback_ip_v6 = if stable_machine_id.machine_type() == MachineType::Dpu {
         match common_pools {
             Some(common_pools) => {
-                allocate_loopback_ip_v6(common_pools, txn, &stable_machine_id_string).await?
+                allocate_loopback_ip_v6(
+                    common_pools,
+                    txn,
+                    &stable_machine_id_string,
+                    requested_loopback_v6,
+                )
+                .await?
             }
             None => None,
         }
@@ -3677,16 +3708,24 @@ pub async fn find_dpu_infos(txn: &mut PgConnection) -> Result<Vec<DpuInfo>, Data
 }
 
 /// Allocates one IPv6 underlay loopback when `lo-ip-v6` is configured.
-/// `None` preserves IPv4-only sites where the optional pool is absent;
-/// exhaustion remains an error so a configured site cannot silently leave a
-/// DPU without its reserved address.
+/// An absent pool yields `None`, preserving IPv4-only sites; exhaustion remains
+/// an error so a configured site cannot silently leave a DPU without its
+/// address. `requested_value` selects a specific operator-reserved address from
+/// the non-auto-assign partition, while `None` keeps the automatic assignment;
+/// a value already owned by this DPU is reused either way.
 pub async fn allocate_loopback_ip_v6(
     common_pools: &CommonPools,
     txn: &mut PgConnection,
     owner_id: &str,
+    requested_value: Option<Ipv6Addr>,
 ) -> Result<Option<Ipv6Addr>, DatabaseError> {
     let pool = &common_pools.ethernet.pool_loopback_ip_v6;
     if !crate::resource_pool::pool_has_rows(txn, pool.name()).await? {
+        if requested_value.is_some() {
+            return Err(DatabaseError::FailedPrecondition(
+                "requested IPv6 loopback requires a configured lo-ip-v6 pool".to_string(),
+            ));
+        }
         return Ok(None);
     }
 
@@ -3706,7 +3745,7 @@ pub async fn allocate_loopback_ip_v6(
         txn,
         resource_pool::OwnerType::Machine,
         owner_id,
-        None,
+        requested_value,
     )
     .await
     {
@@ -4300,6 +4339,7 @@ pub async fn update_dpu_loopback_ips_v6(
                 common_pools,
                 txn.as_pgconn(),
                 &dpu_machine_id.to_string(),
+                None,
             )
             .await?
             .ok_or_else(|| {
@@ -8946,9 +8986,21 @@ mod test {
                 &common_pools,
                 txn.as_mut(),
                 &dpu_machine_id.to_string(),
+                None,
             )
             .await?,
             None
+        );
+
+        assert!(
+            super::allocate_loopback_ip_v6(
+                &common_pools,
+                txn.as_mut(),
+                &dpu_machine_id.to_string(),
+                Some("2001:db8::20".parse()?)
+            )
+            .await
+            .is_err()
         );
 
         let dpu = super::create(
@@ -8993,9 +9045,13 @@ mod test {
         txn.commit().await?;
 
         let mut txn = pool.begin().await?;
-        let reused =
-            super::allocate_loopback_ip_v6(&common_pools, txn.as_mut(), &first_dpu_id.to_string())
-                .await?;
+        let reused = super::allocate_loopback_ip_v6(
+            &common_pools,
+            txn.as_mut(),
+            &first_dpu_id.to_string(),
+            None,
+        )
+        .await?;
         assert_eq!(reused, first_dpu.network_config.loopback_ip_v6);
         let stats_after_reuse = crate::resource_pool::stats(txn.as_mut(), LOOPBACK_IP_V6).await?;
         assert_eq!(stats_after_reuse.used, 1);
@@ -9091,6 +9147,7 @@ mod test {
             &common_pools,
             txn.as_mut(),
             &dpu_machine_id.to_string(),
+            None,
         )
         .await?;
         assert_eq!(reused, Some(allocated));
@@ -9262,6 +9319,7 @@ mod test {
             &common_pools,
             txn.as_mut(),
             &dpu_machine_id.to_string(),
+            None,
         )
         .await?
         .expect("configured pool should reserve an IPv6 loopback");

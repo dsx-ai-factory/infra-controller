@@ -4760,6 +4760,8 @@ paths:
       description: |-
         Replace the complete Expected Machine set for one Site. Entries omitted from the request are deleted, and entries in the request are created with new REST IDs. The `expectedMachines` array may be empty to clear the Site's set.
 
+        For a BMC MAC retained in the replacement set, stored DPU loopbacks are preserved unless its `interfaces` include a `DpuLoopback` declaration (including one whose omitted role is preserved), or its `replaceDpuLoopbacks` is true. Either case replaces the complete loopback subset. Physical interfaces are always replaced; omitted, null, or empty `interfaces` clears the physical subset.
+
         Every entry must use the top-level `siteId`. BMC MAC addresses and chassis serial numbers must be unique within the replacement set. Referenced SKUs must exist at the Site.
 
         Org must have an Infrastructure Provider entity and the caller must have Provider Admin access, or the caller must be a Tenant Admin with effective `TargetedInstanceCreation` access to the Site.
@@ -5200,7 +5202,7 @@ paths:
       description: |-
         Update multiple Expected Machines in a single request. All machines must belong to the same site.
 
-        All items in a batch update must provide the same set of fields, except that `bmcIpAddress` may be omitted or set to `null` to preserve that machine's current BMC IP address.
+        All items in a batch update must provide the same set of fields, except that `bmcIpAddress` may be omitted or set to `null` to preserve that machine's current BMC IP address, and `replaceDpuLoopbacks` is independent per machine.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -5238,7 +5240,7 @@ paths:
         description: |-
           Array of Expected Machine update requests.
 
-          Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Every item must use the same field set except bmcIpAddress; values may differ between items.
+          Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Every item must use the same field set except bmcIpAddress and replaceDpuLoopbacks; values may differ between items.
         required: true
       responses:
         '200':
@@ -31475,7 +31477,7 @@ components:
     ExpectedMachineInterface:
       title: ExpectedMachineInterface
       type: object
-      description: Expected interface declaration. Each supplied list entry replaces the corresponding declaration, so preserve all returned attributes when editing it. Core validates role, primary selection, and allocation against the Site configuration.
+      description: Expected interface declaration. Each supplied list entry replaces the corresponding declaration, so preserve all returned attributes when editing it. Core validates role, primary selection, and allocation against the Site configuration. DpuLoopback reserves an underlay loopback for the DPU identified by its OS/admin MAC, which may also appear in a DpuOs entry. It requires a MAC identifier and fixedIp; ipAllocation may be Fixed, omitted, null, or Unspecified (which infer Fixed). Astra names, nicType, fixedMask, non-empty fixedGateway, primary (including false), and networkSegmentType are not supported for DpuLoopback. Each DPU MAC may declare one loopback per address family; an undeclared family keeps automatic allocation. Changes apply upon DPU deletion and re-ingestion, without readdressing a live DPU.
       examples:
         - identifier:
             macAddress: '02:00:00:00:00:10'
@@ -31522,19 +31524,19 @@ components:
           description: Optional IPv4 or IPv6 gateway. Omission, null, or an empty string clears it when replacing the declaration.
         primary:
           type: [boolean, 'null']
-          description: Host boot-interface selection. At most one Host interface per machine may set true. Omission or null clears the declaration. DpuOs and DpuBmc must omit it; HostBmc also accepts false.
+          description: Host boot-interface selection. At most one Host interface per machine may set true. Omission or null clears the declaration. DpuOs, DpuBmc, and DpuLoopback must omit it; HostBmc also accepts false.
         networkSegmentType:
           type: [string, 'null']
           enum: [Tenant, Admin, Underlay, HostInband, null]
-          description: Optional segment constraint that takes precedence over nicType. Omission or null clears it. For explicit allocation policies and DPU roles it constrains relay-selected or fixed-address segments; legacy Host declarations without an explicit policy use it only for initial DHCP segment selection.
+          description: Optional segment constraint that takes precedence over nicType. Omission or null clears it. For explicit allocation policies and physical DPU roles it constrains relay-selected or fixed-address segments; legacy Host declarations without an explicit policy use it only for initial DHCP segment selection. DpuLoopback must omit it.
         role:
           type: [string, 'null']
-          enum: [Unspecified, Host, DpuOs, DpuBmc, HostBmc, null]
-          description: Interface owner. On create, omission, null, or Unspecified means Host. On update, omission or null preserves a matching stored role; Unspecified resets it to Host. At most one HostBmc is allowed, with the same MAC as bmcMacAddress.
+          enum: [Unspecified, Host, DpuOs, DpuBmc, HostBmc, DpuLoopback, null]
+          description: Interface owner. On create, omission, null, or Unspecified means Host. On update, omission or null preserves a matching stored role; preserving DpuLoopback requires an unchanged MAC and fixedIp, so changing its address requires explicit DpuLoopback. Unspecified resets the role to Host. At most one HostBmc is allowed, with the same MAC as bmcMacAddress.
         ipAllocation:
           type: [string, 'null']
           enum: [Unspecified, Dynamic, Fixed, Retained, null]
-          description: On create, omission, null, or Unspecified infers Fixed from fixedIp, otherwise Retained for HostBmc and Dynamic for other roles. On update, omission or null preserves a matching stored policy while fixedIp presence is unchanged; Unspecified resets inference. Fixed requires fixedIp; Dynamic and Retained forbid it. Explicit Fixed, inferred DPU Fixed, and inferred HostBmc Fixed with a segment constraint require a containing managed prefix; legacy Host or inferred HostBmc Fixed without a constraint may use static assignments. Retained keeps a DHCP-allocated address for the interface row lifetime.
+          description: On create, omission, null, or Unspecified infers Fixed from fixedIp, otherwise Retained for HostBmc and Dynamic for other roles. On update, omission or null preserves a matching stored policy while fixedIp presence is unchanged; Unspecified resets inference. Fixed requires fixedIp; Dynamic and Retained forbid it. DpuLoopback supports only Fixed and requires an address in the non-auto-assign partition of the Site's lo-ip or lo-ip-v6 pool. Other explicit Fixed, inferred DPU Fixed, and inferred HostBmc Fixed with a segment constraint require a containing managed prefix; legacy Host or inferred HostBmc Fixed without a constraint may use static assignments. Retained keeps a DHCP-allocated address for the interface row lifetime.
     ExpectedMachineInterfaceIdentifier:
       title: ExpectedMachineInterfaceIdentifier
       type: object
@@ -31745,7 +31747,7 @@ components:
       title: ExpectedMachineCreateRequest
       type: object
       description: |-
-        Request data to create a new ExpectedMachine.
+        Request data to create a new Expected Machine, or to declare a machine in a complete inventory replacement.
 
         Note: BMC credentials (username/password) are only accepted during creation and updates but are not returned in responses.
       examples:
@@ -31813,9 +31815,16 @@ components:
           type:
             - array
             - 'null'
-          description: Optional expected host NIC declarations. Omission or null creates an empty list.
+          description: |-
+            Physical-interface and DPU-loopback declarations. For a new machine, omission or null creates an empty list.
+
+            In a complete inventory replacement, this list replaces the physical-interface subset; omission, null, or an empty list clears that subset. For a retained BMC MAC, stored loopbacks are preserved unless the list includes a DpuLoopback declaration (including one whose omitted role is preserved), or replaceDpuLoopbacks is true. Either case replaces the complete loopback subset with the supplied loopback declarations.
           items:
             $ref: '#/components/schemas/ExpectedMachineInterface'
+        replaceDpuLoopbacks:
+          type: [boolean, 'null']
+          default: false
+          description: When true, replace the complete DPU-loopback subset with the loopback declarations in interfaces, clearing stored loopbacks omitted from the list. Requires non-null interfaces; an empty list clears all interface declarations. Omission, null, or false preserves stored loopbacks unless the interfaces list includes a DpuLoopback declaration (including one whose omitted role is preserved). This is request-only intent and is not stored on the Expected Machine.
         skuId:
           type:
             - string
@@ -31896,7 +31905,7 @@ components:
     ExpectedMachineList:
       title: ExpectedMachineList
       type: object
-      description: Complete replacement set of Expected Machines for one Site. Every entry must use the top-level `siteId`; the array may be empty to clear the set.
+      description: Complete replacement set of Expected Machines for one Site. Every entry must use the top-level `siteId`; omitted machines are deleted, and an empty array clears the set. For retained BMC MACs, each entry replaces physical interfaces while preserving stored loopbacks unless its interfaces list includes a DpuLoopback declaration (including one whose omitted role is preserved), or replaceDpuLoopbacks is true.
       examples:
         - siteId: f97df110-f4de-492e-8849-4a6af68026b0
           expectedMachines:
@@ -32001,9 +32010,16 @@ components:
           type:
             - array
             - 'null'
-          description: Complete expected host NIC list. Omission or null preserves the current list; an explicit empty list clears it.
+          description: |-
+            Expected physical-interface and DPU-loopback declarations. Omission or null preserves the current list. A non-null list replaces the physical-interface subset; an empty list clears that subset.
+
+            Stored loopbacks are preserved unless the list includes a DpuLoopback declaration (including one whose omitted role is preserved), or replaceDpuLoopbacks is true. Either case replaces the complete loopback subset with the supplied loopback declarations, clearing any omitted loopbacks.
           items:
             $ref: '#/components/schemas/ExpectedMachineInterface'
+        replaceDpuLoopbacks:
+          type: [boolean, 'null']
+          default: false
+          description: When true, replace the complete DPU-loopback subset with the loopback declarations in interfaces, clearing stored loopbacks omitted from the list. Requires non-null interfaces; an empty list clears all interface declarations. Omission, null, or false preserves stored loopbacks unless the interfaces list includes a DpuLoopback declaration (including one whose omitted role is preserved). This is request-only intent and is not stored on the Expected Machine.
         skuId:
           type:
             - string
