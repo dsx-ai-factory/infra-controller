@@ -53,6 +53,7 @@ struct RedfishSimState {
     users: HashMap<String, String>,
     ipmi_accounts: HashSet<String>,
     fw_version: Arc<String>,
+    firmware_upload_delay: Option<Duration>,
     secure_boot: AtomicBool,
     no_component_integrities: bool,
     firmware_for_component_error: bool,
@@ -378,6 +379,13 @@ impl RedfishSim {
     /// collection.
     pub fn set_no_component_integrities(&self, no_component_integrities: bool) {
         self.state.lock().unwrap().no_component_integrities = no_component_integrities;
+    }
+
+    /// `set_firmware_upload_delay` sets the delay for subsequent multipart uploads
+    /// from all clients of this simulator. The default is four seconds;
+    /// `Duration::ZERO` returns the task ID without a simulated wait.
+    pub fn set_firmware_upload_delay(&self, delay: Duration) {
+        self.state.lock().unwrap().firmware_upload_delay = Some(delay);
     }
 
     /// Fail the firmware-inventory lookup an attestation makes while fetching
@@ -2293,8 +2301,15 @@ impl Redfish for RedfishSimClient {
         _component_type: ComponentType,
     ) -> libredfish::RedfishFuture<'a, Result<String, RedfishError>> {
         Box::pin(async move {
-            // Simulate it taking a bit of time to upload
-            tokio::time::sleep(Duration::from_secs(4)).await;
+            let delay = self
+                .state
+                .lock()
+                .unwrap()
+                .firmware_upload_delay
+                .unwrap_or(Duration::from_secs(4));
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
             Ok("0".to_string())
         })
     }
