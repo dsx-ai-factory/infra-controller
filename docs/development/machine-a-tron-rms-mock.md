@@ -112,7 +112,7 @@ to the mock. Use it only on simulation-only sites.
 - `ListFirmwareObjects` reports object ids only, one by default. The
   `[rms_mock]` table of the machine-a-tron configuration can name others, and
   the chart exposes no setting for it.
-- `GetNodeFirmwareInventory` is not served, so NICo's RMS power-shelf backend
+- `BatchGetFirmwareInventory` is not served, so NICo's RMS power-shelf backend
   reports an error per shelf when it lists shelf firmware. The rack firmware
   upgrade does not use it.
 - Placement is reported for compute and switch trays only, and power shelves
