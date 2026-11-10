@@ -58,110 +58,121 @@ require_bin base64
 mkdir -p "${WORK_DIR}"
 
 kubectl rollout status deployment/nico-api -n "${CORE_NAMESPACE}" --timeout=300s >/dev/null
-kubectl rollout status "deployment/${MACHINE_A_TRON_DEPLOYMENT}" \
-  -n "${CORE_NAMESPACE}" --timeout=300s >/dev/null
-machine_a_tron_bmc_ip="$(kubectl get service "${MACHINE_A_TRON_BMC_SERVICE}" \
-  -n "${CORE_NAMESPACE}" -o jsonpath='{.spec.clusterIP}')"
-if [[ -z "${machine_a_tron_bmc_ip}" || "${machine_a_tron_bmc_ip}" == "None" ]]; then
-  printf 'machine-a-tron BMC Service has no ClusterIP\n' >&2
-  exit 1
-fi
-
-# Some ARM64 local clusters resolve this Service name correctly but connections
-# made by Core's HTTP client still time out. Put the current literal ClusterIP
-# in the local site configuration and restart Core. Updating the ConfigMap keeps
-# this setup path within Kubernetes administration instead of bypassing Core's
-# authorization rules for SetDynamicConfig. The literal address also works on
-# AMD64.
-machine_a_tron_bmc_proxy="${machine_a_tron_bmc_ip}:1266"
-# Keep the port separate from an IPv6 address in both the config and URLs.
-if [[ "${machine_a_tron_bmc_ip}" == *:* ]]; then
-  machine_a_tron_bmc_proxy="[${machine_a_tron_bmc_ip}]:1266"
-fi
-if ! site_config_patch="$(kubectl get configmap "${CORE_SITE_CONFIG_MAP}" \
-  -n "${CORE_NAMESPACE}" -o json | jq -c --arg proxy "${machine_a_tron_bmc_proxy}" '
-    {data: (
-      (.data // {}) |
-      with_entries(select(
-        .value | type == "string" and
-        test("(?m)^[[:space:]]*bmc_proxy[[:space:]]*=")
-      )) |
-      map_values(gsub(
-        "(?m)^[[:space:]]*bmc_proxy[[:space:]]*=[[:space:]]*\"[^\"]*\"";
-        "bmc_proxy = \"" + $proxy + "\""
-      ))
-    )}
-  ')"; then
-  printf 'Core site ConfigMap does not contain a writable bmc_proxy setting\n' >&2
-  exit 1
-fi
-if ! jq -e --arg proxy "bmc_proxy = \"${machine_a_tron_bmc_proxy}\"" '
-  (.data | length) > 0 and all(.data[]; contains($proxy))
-' <<<"${site_config_patch}" >/dev/null; then
-  printf 'Core site ConfigMap does not contain a bmc_proxy setting\n' >&2
-  exit 1
-fi
-kubectl patch configmap "${CORE_SITE_CONFIG_MAP}" -n "${CORE_NAMESPACE}" \
-  --type=merge --patch "${site_config_patch}" >/dev/null
-kubectl rollout restart deployment/nico-api -n "${CORE_NAMESPACE}" >/dev/null
-kubectl rollout status deployment/nico-api -n "${CORE_NAMESPACE}" --timeout=300s >/dev/null
-
-expected_host_count=0
-for ((attempt = 1; attempt <= verify_attempts; attempt++)); do
-  if machine_status="$(kubectl exec deployment/nico-api -n "${CORE_NAMESPACE}" -- \
-    curl --fail --insecure --silent --max-time 5 \
-    "https://${machine_a_tron_bmc_proxy}/machines/status" 2>/dev/null)"; then
-    if ! expected_host_count="$(jq -er \
-      'if type == "object" and (.machines | type) == "array" then
-         .machines | length
-       else 0 end' \
-      <<<"${machine_status}")"; then
-      printf 'machine-a-tron at %s returned invalid machine status JSON\n' \
-        "${machine_a_tron_bmc_proxy}" >&2
+target_backend="${LOCAL_DEV_TARGET_BACKEND:-machine-a-tron}"
+case "${target_backend}" in
+  machine-a-tron)
+    kubectl rollout status "deployment/${MACHINE_A_TRON_DEPLOYMENT}" \
+      -n "${CORE_NAMESPACE}" --timeout=300s >/dev/null
+    machine_a_tron_bmc_ip="$(kubectl get service "${MACHINE_A_TRON_BMC_SERVICE}" \
+      -n "${CORE_NAMESPACE}" -o jsonpath='{.spec.clusterIP}')"
+    if [[ -z "${machine_a_tron_bmc_ip}" || "${machine_a_tron_bmc_ip}" == "None" ]]; then
+      printf 'machine-a-tron BMC Service has no ClusterIP\n' >&2
       exit 1
     fi
-  else
+
+    # Some ARM64 local clusters resolve this Service name correctly but connections
+    # made by Core's HTTP client still time out. Put the current literal ClusterIP
+    # in the local site configuration and restart Core. Updating the ConfigMap keeps
+    # this setup path within Kubernetes administration instead of bypassing Core's
+    # authorization rules for SetDynamicConfig. The literal address also works on
+    # AMD64.
+    machine_a_tron_bmc_proxy="${machine_a_tron_bmc_ip}:1266"
+    # Keep the port separate from an IPv6 address in both the config and URLs.
+    if [[ "${machine_a_tron_bmc_ip}" == *:* ]]; then
+      machine_a_tron_bmc_proxy="[${machine_a_tron_bmc_ip}]:1266"
+    fi
+    if ! site_config_patch="$(kubectl get configmap "${CORE_SITE_CONFIG_MAP}" \
+      -n "${CORE_NAMESPACE}" -o json | jq -c --arg proxy "${machine_a_tron_bmc_proxy}" '
+        {data: (
+          (.data // {}) |
+          with_entries(select(
+            .value | type == "string" and
+            test("(?m)^[[:space:]]*bmc_proxy[[:space:]]*=")
+          )) |
+          map_values(gsub(
+            "(?m)^[[:space:]]*bmc_proxy[[:space:]]*=[[:space:]]*\"[^\"]*\"";
+            "bmc_proxy = \"" + $proxy + "\""
+          ))
+        )}
+      ')"; then
+      printf 'Core site ConfigMap does not contain a writable bmc_proxy setting\n' >&2
+      exit 1
+    fi
+    if ! jq -e --arg proxy "bmc_proxy = \"${machine_a_tron_bmc_proxy}\"" '
+      (.data | length) > 0 and all(.data[]; contains($proxy))
+    ' <<<"${site_config_patch}" >/dev/null; then
+      printf 'Core site ConfigMap does not contain a bmc_proxy setting\n' >&2
+      exit 1
+    fi
+    kubectl patch configmap "${CORE_SITE_CONFIG_MAP}" -n "${CORE_NAMESPACE}" \
+      --type=merge --patch "${site_config_patch}" >/dev/null
+    kubectl rollout restart deployment/nico-api -n "${CORE_NAMESPACE}" >/dev/null
+    kubectl rollout status deployment/nico-api -n "${CORE_NAMESPACE}" --timeout=300s >/dev/null
+
     expected_host_count=0
-  fi
-  if [[ "${expected_host_count}" =~ ^[1-9][0-9]*$ ]]; then
-    break
-  fi
-  if [[ "${attempt}" == "${verify_attempts}" ]]; then
-    printf 'machine-a-tron at %s did not report any expected hosts after %s attempts\n' \
-      "${machine_a_tron_bmc_proxy}" "${verify_attempts}" >&2
-    exit 1
-  fi
-  sleep "${verify_sleep_seconds}"
-done
+    for ((attempt = 1; attempt <= verify_attempts; attempt++)); do
+      if machine_status="$(kubectl exec deployment/nico-api -n "${CORE_NAMESPACE}" -- \
+        curl --fail --insecure --silent --max-time 5 \
+        "https://${machine_a_tron_bmc_proxy}/machines/status" 2>/dev/null)"; then
+        if ! expected_host_count="$(jq -er \
+          'if type == "object" and (.machines | type) == "array" then
+             .machines | length
+           else 0 end' \
+          <<<"${machine_status}")"; then
+          printf 'machine-a-tron at %s returned invalid machine status JSON\n' \
+            "${machine_a_tron_bmc_proxy}" >&2
+          exit 1
+        fi
+      else
+        expected_host_count=0
+      fi
+      if [[ "${expected_host_count}" =~ ^[1-9][0-9]*$ ]]; then
+        break
+      fi
+      if [[ "${attempt}" == "${verify_attempts}" ]]; then
+        printf 'machine-a-tron at %s did not report any expected hosts after %s attempts\n' \
+          "${machine_a_tron_bmc_proxy}" "${verify_attempts}" >&2
+        exit 1
+      fi
+      sleep "${verify_sleep_seconds}"
+    done
 
-# Clear any lockout-protection errors cached while Core was still using the
-# hostname, then refresh the report. Refresh alone persists an AvoidLockout
-# report without resetting the failed pre-ingestion state. Include both host
-# and DPU BMC endpoints from machine-a-tron.
-mapfile -t machine_a_tron_bmc_endpoints < <(jq -r '
-  [.machines[] | .bmc.ip, (.dpus[]?.bmc.ip)] |
-  map(select(. != null and . != "")) |
-  unique[]
-' <<<"${machine_status}")
+    # Clear any lockout-protection errors cached while Core was still using the
+    # hostname, then refresh the report. Refresh alone persists an AvoidLockout
+    # report without resetting the failed pre-ingestion state. Include both host
+    # and DPU BMC endpoints from machine-a-tron.
+    mapfile -t machine_a_tron_bmc_endpoints < <(jq -r '
+      [.machines[] | .bmc.ip, (.dpus[]?.bmc.ip)] |
+      map(select(. != null and . != "")) |
+      unique[]
+    ' <<<"${machine_status}")
 
-# Allow explorations that started before the proxy update to finish writing
-# their reports. Subsequent cycles read the updated proxy from shared runtime
-# state.
-sleep 6
-if ((${#machine_a_tron_bmc_endpoints[@]})); then
-  # Fail on broken admin credentials instead of mistaking a 403 for no report.
-  bash "${SCRIPT_DIR}/core-admin.sh" -f json machine show >/dev/null
-fi
-for endpoint in "${machine_a_tron_bmc_endpoints[@]}"; do
-  if ! bash "${SCRIPT_DIR}/core-admin.sh" -f json \
-    site-explorer get-report endpoint "${endpoint}" >/dev/null 2>&1; then
-    continue
-  fi
-  bash "${SCRIPT_DIR}/core-admin.sh" \
-    site-explorer clear-error "${endpoint}"
-  bash "${SCRIPT_DIR}/core-admin.sh" \
-    site-explorer refresh "${endpoint}" >/dev/null
-done
+    # Allow explorations that started before the proxy update to finish writing
+    # their reports. Subsequent cycles read the updated proxy from shared runtime
+    # state.
+    sleep 6
+    if ((${#machine_a_tron_bmc_endpoints[@]})); then
+      # Fail on broken admin credentials instead of mistaking a 403 for no report.
+      bash "${SCRIPT_DIR}/core-admin.sh" -f json machine show >/dev/null
+    fi
+    for endpoint in "${machine_a_tron_bmc_endpoints[@]}"; do
+      if ! bash "${SCRIPT_DIR}/core-admin.sh" -f json \
+        site-explorer get-report endpoint "${endpoint}" >/dev/null 2>&1; then
+        continue
+      fi
+      bash "${SCRIPT_DIR}/core-admin.sh" \
+        site-explorer clear-error "${endpoint}"
+      bash "${SCRIPT_DIR}/core-admin.sh" \
+        site-explorer refresh "${endpoint}" >/dev/null
+    done
+
+    ;;
+  vm-hosts)
+    inventory="${LOCAL_DEV_VM_HOSTS_DIR:-${HOME}/.local/share/nico-vm-hosts}/inventory.json"
+    expected_host_count="$(jq -er '.targets | length | select(. == 1 or . == 2)' "${inventory}")"
+    ;;
+  *) printf 'unsupported target backend: %s\n' "${target_backend}" >&2; exit 1 ;;
+esac
 
 kubectl rollout status deployment/nico-rest-api -n "${REST_NAMESPACE}" --timeout=300s >/dev/null
 kubectl rollout status deployment/nico-rest-cert-manager -n "${REST_NAMESPACE}" --timeout=300s >/dev/null
@@ -267,29 +278,31 @@ fi
 
 inventory_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# Discovery may still be adding machines after the first positive status
-# response used for endpoint recovery. Take a fresh snapshot so verification
-# expects the complete inventory rather than that earlier partial count.
-if ! machine_status="$(kubectl exec deployment/nico-api -n "${CORE_NAMESPACE}" -- \
-  curl --fail --insecure --silent --max-time 5 \
-  "https://${machine_a_tron_bmc_proxy}/machines/status" 2>/dev/null)"; then
-  printf 'machine-a-tron at %s did not return machine status before REST verification\n' \
-    "${machine_a_tron_bmc_proxy}" >&2
-  exit 1
-fi
-if ! expected_host_count="$(jq -er \
-  'if type == "object" and (.machines | type) == "array" then
-     .machines | length
-   else 0 end' \
-  <<<"${machine_status}")"; then
-  printf 'machine-a-tron at %s returned invalid machine status JSON\n' \
-    "${machine_a_tron_bmc_proxy}" >&2
-  exit 1
-fi
-if [[ ! "${expected_host_count}" =~ ^[1-9][0-9]*$ ]]; then
-  printf 'machine-a-tron at %s did not report a valid expected host count before REST verification\n' \
-    "${machine_a_tron_bmc_proxy}" >&2
-  exit 1
+if [[ "${target_backend}" == machine-a-tron ]]; then
+  # Discovery may still be adding machines after the first positive status
+  # response used for endpoint recovery. Take a fresh snapshot so verification
+  # expects the complete inventory rather than that earlier partial count.
+  if ! machine_status="$(kubectl exec deployment/nico-api -n "${CORE_NAMESPACE}" -- \
+    curl --fail --insecure --silent --max-time 5 \
+    "https://${machine_a_tron_bmc_proxy}/machines/status" 2>/dev/null)"; then
+    printf 'machine-a-tron at %s did not return machine status before REST verification\n' \
+      "${machine_a_tron_bmc_proxy}" >&2
+    exit 1
+  fi
+  if ! expected_host_count="$(jq -er \
+    'if type == "object" and (.machines | type) == "array" then
+       .machines | length
+     else 0 end' \
+    <<<"${machine_status}")"; then
+    printf 'machine-a-tron at %s returned invalid machine status JSON\n' \
+      "${machine_a_tron_bmc_proxy}" >&2
+    exit 1
+  fi
+  if [[ ! "${expected_host_count}" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'machine-a-tron at %s did not report a valid expected host count before REST verification\n' \
+      "${machine_a_tron_bmc_proxy}" >&2
+    exit 1
+  fi
 fi
 
 site_ready=false
