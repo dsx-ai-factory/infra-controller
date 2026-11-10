@@ -40,11 +40,11 @@ import (
 	temporalEnums "go.temporal.io/api/enums/v1"
 
 	cam "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	grpcproxyclient "github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy/client"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/siteproxy"
 )
 
 const (
@@ -1277,9 +1277,9 @@ func TerminateWorkflowOnTimeOutError(logger zerolog.Logger, temporalClient tclie
 }
 
 // UnwrapWorkflowError removes Temporal wrappers and maps backend errors to HTTP status codes.
-// See siteproxy.UnwrapWorkflowError.
+// See grpcproxyclient.UnwrapWorkflowError.
 func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
-	return siteproxy.UnwrapWorkflowError(err)
+	return grpcproxyclient.UnwrapWorkflowError(err)
 }
 
 // GRPCStatusMessage returns the gRPC status message when err is a gRPC status,

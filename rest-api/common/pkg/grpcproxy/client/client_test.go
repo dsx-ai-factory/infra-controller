@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-package siteproxy_test
+package client_test
 
 import (
 	"context"
@@ -29,10 +29,10 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy/client"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/siteproxy"
 )
 
 // newProxyEchoContext returns a context and recorder for helpers whose HTTP
@@ -165,7 +165,7 @@ func testFlowLostResults(t *testing.T) {
 				cancel()
 			}
 
-			err := siteproxy.ExecuteFlowGRPC(ctx, temporalClient, "/v1.Flow/CreateOperationRun", &emptypb.Empty{}, nil, "create-1", temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, "")
+			err := client.ExecuteFlowGRPC(ctx, temporalClient, "/v1.Flow/CreateOperationRun", &emptypb.Empty{}, nil, "create-1", temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, "")
 
 			require.NotNil(t, err)
 			assert.Equal(t, tc.expectedCode, err.Code)
@@ -190,9 +190,9 @@ func TestExecuteCoreGRPC(t *testing.T) {
 		{"rejects a malformed typed response", `{"allDone":"invalid"}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client := &tmocks.Client{}
+			temporalClient := &tmocks.Client{}
 			run := &tmocks.WorkflowRun{}
-			client.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+			temporalClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
 				Run(func(args mock.Arguments) {
 					payload := args.Get(3).(grpcproxy.Request)
 					assert.Equal(t, corev1.Forge_AdminForceDeleteMachine_FullMethodName, payload.FullMethod)
@@ -203,7 +203,7 @@ func TestExecuteCoreGRPC(t *testing.T) {
 			}).Return(nil).Once()
 			response := &corev1.AdminForceDeleteMachineResponse{}
 
-			err := siteproxy.ExecuteCoreGRPC(context.Background(), client,
+			err := client.ExecuteCoreGRPC(context.Background(), temporalClient,
 				corev1.Forge_AdminForceDeleteMachine_FullMethodName,
 				&corev1.AdminForceDeleteMachineRequest{HostQuery: "requested-host"}, response, "")
 
@@ -215,36 +215,36 @@ func TestExecuteCoreGRPC(t *testing.T) {
 				require.Nil(t, err)
 				assert.True(t, response.AllDone)
 			}
-			client.AssertExpectations(t)
+			temporalClient.AssertExpectations(t)
 			run.AssertExpectations(t)
 		})
 	}
 	t.Run("identical requests get distinct workflow IDs", func(t *testing.T) {
-		client := &tmocks.Client{}
+		temporalClient := &tmocks.Client{}
 		run := &tmocks.WorkflowRun{}
 		var workflowIDs []string
-		client.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+		temporalClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
 			Run(func(args mock.Arguments) {
 				workflowIDs = append(workflowIDs, args.Get(1).(tclient.StartWorkflowOptions).ID)
 			}).Return(run, nil).Twice()
 		run.On("Get", mock.Anything, mock.Anything).Return(nil).Twice()
 		for range 2 {
-			err := siteproxy.ExecuteCoreGRPC(context.Background(), client, "/forge.Forge/Test", &emptypb.Empty{}, nil, "")
+			err := client.ExecuteCoreGRPC(context.Background(), temporalClient, "/forge.Forge/Test", &emptypb.Empty{}, nil, "")
 			require.Nil(t, err)
 		}
 		require.Len(t, workflowIDs, 2)
 		assert.NotEqual(t, workflowIDs[0], workflowIDs[1])
-		client.AssertExpectations(t)
+		temporalClient.AssertExpectations(t)
 		run.AssertExpectations(t)
 	})
 
 	t.Run("secret fields require a key", func(t *testing.T) {
-		client := &tmocks.Client{}
-		err := siteproxy.ExecuteCoreGRPC(context.Background(), client, "/forge.Forge/RotateCredential", &emptypb.Empty{}, nil, "", "password")
+		temporalClient := &tmocks.Client{}
+		err := client.ExecuteCoreGRPC(context.Background(), temporalClient, "/forge.Forge/RotateCredential", &emptypb.Empty{}, nil, "", "password")
 		require.NotNil(t, err)
 		require.Equal(t, http.StatusInternalServerError, err.Code)
 		require.Equal(t, "Failed to encode Core proxy request", err.Message)
-		client.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+		temporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 	})
 
 	cause := tp.NewApplicationError("method unavailable", "methodError")
@@ -284,7 +284,7 @@ func TestExecuteCoreGRPC(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			temporalClient, started := newProxyClient(tc.getErr, nil)
-			apiErr := siteproxy.ExecuteCoreGRPC(context.Background(), temporalClient, "/forge.Forge/Test", &emptypb.Empty{}, nil, "")
+			apiErr := client.ExecuteCoreGRPC(context.Background(), temporalClient, "/forge.Forge/Test", &emptypb.Empty{}, nil, "")
 
 			assert.Equal(t, grpcproxy.Core.WorkflowName, started.workflowName)
 			assert.True(t, strings.HasPrefix(started.options.ID, "core-grpc-Test-"), "got %q", started.options.ID)
@@ -489,7 +489,7 @@ func TestExecuteCoreGRPCWithWorkflowID(t *testing.T) {
 				cancel()
 			}
 			response := &corev1.AdminForceDeleteMachineResponse{}
-			apiErr, observed := siteproxy.ExecuteCoreGRPCWithWorkflowID(ctx, temporalClient,
+			apiErr, observed := client.ExecuteCoreGRPCWithWorkflowID(ctx, temporalClient,
 				corev1.Forge_AdminForceDeleteMachine_FullMethodName,
 				&corev1.AdminForceDeleteMachineRequest{HostQuery: "machine-1"}, response,
 				workflowID, tc.startNewAttempt, "")
@@ -517,9 +517,9 @@ func TestExecuteFlowGRPC(t *testing.T) {
 		request, err := structpb.NewStruct(map[string]any{"public": "visible", "secret": "synthetic-secret"})
 		require.NoError(t, err)
 		response := &structpb.Struct{}
-		client := &tmocks.Client{}
+		temporalClient := &tmocks.Client{}
 		run := &tmocks.WorkflowRun{}
-		client.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Flow.WorkflowName, mock.Anything).
+		temporalClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Flow.WorkflowName, mock.Anything).
 			Run(func(args mock.Arguments) {
 				options := args.Get(1).(tclient.StartWorkflowOptions)
 				assert.Equal(t, "flow-secret", options.ID)
@@ -534,30 +534,30 @@ func TestExecuteFlowGRPC(t *testing.T) {
 			args.Get(1).(*grpcproxy.Response).ResponseJSON = []byte(`{"accepted":true}`)
 		}).Return(nil).Once()
 
-		apiErr := siteproxy.ExecuteFlowGRPC(context.Background(), client, "/v1.Flow/TransportTest",
+		apiErr := client.ExecuteFlowGRPC(context.Background(), temporalClient, "/v1.Flow/TransportTest",
 			request, response, "flow-secret", temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 			"site-key", "secret")
 
 		require.Nil(t, apiErr)
 		assert.Equal(t, map[string]any{"accepted": true}, response.AsMap())
-		client.AssertExpectations(t)
+		temporalClient.AssertExpectations(t)
 		run.AssertExpectations(t)
 	})
 
 	t.Run("secret fields require a key", func(t *testing.T) {
-		client := &tmocks.Client{}
-		err := siteproxy.ExecuteFlowGRPC(context.Background(), client, "/v1.Flow/CreateOperationRun", &emptypb.Empty{}, nil, "create-1", temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, "", "password")
+		temporalClient := &tmocks.Client{}
+		err := client.ExecuteFlowGRPC(context.Background(), temporalClient, "/v1.Flow/CreateOperationRun", &emptypb.Empty{}, nil, "create-1", temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, "", "password")
 		require.NotNil(t, err)
 		require.Equal(t, http.StatusInternalServerError, err.Code)
 		require.Equal(t, "Failed to encode Flow proxy request", err.Message)
-		client.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+		temporalClient.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 	})
 
 	t.Run("lost results", testFlowLostResults)
 	temporalClient, started := newTimingOutProxyClient()
 
 	const workflowID = "get-operation-run-run-1-true"
-	err := siteproxy.ExecuteFlowGRPC(
+	err := client.ExecuteFlowGRPC(
 		context.Background(),
 		temporalClient,
 		"/v1.Flow/GetOperationRun",
@@ -665,7 +665,7 @@ func TestUnwrapWorkflowError(t *testing.T) {
 				assert.True(t, applicationErr.NonRetryable())
 			}
 
-			code, gotErr := siteproxy.UnwrapWorkflowError(tt.err)
+			code, gotErr := client.UnwrapWorkflowError(tt.err)
 			assert.Equal(t, tt.wantCode, code)
 			assert.Equal(t, tt.wantErr, gotErr)
 		})

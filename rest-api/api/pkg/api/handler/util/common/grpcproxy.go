@@ -12,12 +12,12 @@ import (
 	tclient "go.temporal.io/sdk/client"
 	"google.golang.org/protobuf/proto"
 
+	grpcproxyclient "github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy/client"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/siteproxy"
 )
 
 // ExecuteCoreGRPC proxies one already-validated NICo Core (forge.Forge) gRPC
-// request via the generic site proxy workflow. See siteproxy.ExecuteCoreGRPC,
+// request via the generic site proxy workflow. See grpcproxyclient.ExecuteCoreGRPC,
 // which owns the transport so cloud workflow activities can share it without
 // depending on the REST handler tree.
 func ExecuteCoreGRPC(
@@ -29,11 +29,11 @@ func ExecuteCoreGRPC(
 	secretKey string,
 	secretFields ...string,
 ) *cutil.APIError {
-	return siteproxy.ExecuteCoreGRPC(ctx, stc, fullMethod, req, resp, secretKey, secretFields...)
+	return grpcproxyclient.ExecuteCoreGRPC(ctx, stc, fullMethod, req, resp, secretKey, secretFields...)
 }
 
 // ExecuteCoreGRPCWithWorkflowID starts or retrieves a persisted Core attempt.
-// See siteproxy.ExecuteCoreGRPCWithWorkflowID for the start/recovery boundary and
+// See grpcproxyclient.ExecuteCoreGRPCWithWorkflowID for the start/recovery boundary and
 // coreResultObserved semantics; that result does not itself mean deletion succeeded.
 func ExecuteCoreGRPCWithWorkflowID(
 	ctx context.Context,
@@ -46,13 +46,13 @@ func ExecuteCoreGRPCWithWorkflowID(
 	secretKey string,
 	secretFields ...string,
 ) (*cutil.APIError, bool) {
-	return siteproxy.ExecuteCoreGRPCWithWorkflowID(ctx, stc, fullMethod, req, resp,
+	return grpcproxyclient.ExecuteCoreGRPCWithWorkflowID(ctx, stc, fullMethod, req, resp,
 		workflowID, startNewAttempt, secretKey, secretFields...)
 }
 
 // ExecuteFlowGRPC proxies one already-validated Flow (v1.Flow) gRPC request via
 // the generic site proxy workflow with a caller-chosen workflow ID and conflict
-// policy. See siteproxy.ExecuteFlowGRPC.
+// policy. See grpcproxyclient.ExecuteFlowGRPC.
 //
 // On timeout it returns StatusGatewayTimeout. Do not follow that with
 // TerminateWorkflowOnTimeOut; the proxy deliberately leaves the execution alone.
@@ -67,7 +67,7 @@ func ExecuteFlowGRPC(
 	secretKey string,
 	secretFields ...string,
 ) *cutil.APIError {
-	return siteproxy.ExecuteFlowGRPC(ctx, stc, fullMethod, req, resp, workflowID, conflictPolicy, secretKey, secretFields...)
+	return grpcproxyclient.ExecuteFlowGRPC(ctx, stc, fullMethod, req, resp, workflowID, conflictPolicy, secretKey, secretFields...)
 }
 
 // ProxyFlowGRPC dispatches one already-validated request to Flow through the
