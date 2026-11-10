@@ -202,10 +202,12 @@ async fn machine_flags_select_only_supplied_fields() {
                 bmc_retain_credentials: Some(false),
                 host_lifecycle_profile: Some(forge::HostLifecycleProfile {
                     disable_lockdown: Some(false),
+                    retain_hbn_config_on_boot: None,
                 }),
                 dpu_mode: Some(forge::DpuMode::Unspecified as i32),
                 bmc_ip_allocation: Some(forge::BmcIpAllocationType::Auto as i32),
                 metadata: Some(forge::Metadata::default()),
+                replace_dpu_loopbacks: true,
                 ..Default::default()
             },
         },
@@ -225,6 +227,28 @@ async fn machine_flags_select_only_supplied_fields() {
                 id: Some(rpc_id()),
                 host_lifecycle_profile: Some(forge::HostLifecycleProfile {
                     disable_lockdown: Some(false),
+                    retain_hbn_config_on_boot: None,
+                }),
+                ..Default::default()
+            },
+        },
+        Case {
+            scenario: "standalone retain-hbn-config-on-boot flag selects only the nested lifecycle field",
+            args: vec![
+                "expected-machine",
+                "patch",
+                "--id",
+                ID,
+                "--retain-hbn-config-on-boot",
+                "true",
+            ],
+            methods: &["PatchExpectedMachine"],
+            paths: &["host_lifecycle_profile.retain_hbn_config_on_boot"],
+            expected: forge::ExpectedMachine {
+                id: Some(rpc_id()),
+                host_lifecycle_profile: Some(forge::HostLifecycleProfile {
+                    disable_lockdown: None,
+                    retain_hbn_config_on_boot: Some(true),
                 }),
                 ..Default::default()
             },
@@ -243,6 +267,7 @@ async fn machine_flags_select_only_supplied_fields() {
             paths: &["host_nics"],
             expected: forge::ExpectedMachine {
                 id: Some(rpc_id()),
+                replace_dpu_loopbacks: true,
                 host_nics: vec![
                     forge::ExpectedInterface {
                         mac_address: Some("00:11:22:33:44:66".to_string()),
@@ -299,10 +324,12 @@ async fn machine_files_preserve_their_metadata_and_interface_selection_contract(
         scenario: &'static str,
         filename: &'static str,
         paths: &'static [&'static str],
+        replace_dpu_loopbacks: bool,
     }
     for case in [
         Case {
             scenario: "omitted metadata clears its leaves while omitted interfaces preserve",
+            replace_dpu_loopbacks: false,
             filename: concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/testdata/expected-machine-patch-omitted.json"
@@ -318,6 +345,7 @@ async fn machine_files_preserve_their_metadata_and_interface_selection_contract(
         },
         Case {
             scenario: "null metadata clears its leaves and an empty interface list replaces",
+            replace_dpu_loopbacks: true,
             filename: concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/testdata/expected-machine-patch-empty.json"
@@ -350,6 +378,7 @@ async fn machine_files_preserve_their_metadata_and_interface_selection_contract(
                 bmc_password: "file-password".to_string(),
                 chassis_serial_number: "FILE-001".to_string(),
                 metadata: Some(forge::Metadata::default()),
+                replace_dpu_loopbacks: case.replace_dpu_loopbacks,
                 ..Default::default()
             }),
             "{}",
@@ -561,6 +590,39 @@ async fn unsupported_machine_patches_use_the_original_read_merge_update() {
                 }),
                 host_nics: Vec::new(),
                 replace_host_nics: true,
+                replace_dpu_loopbacks: true,
+                #[allow(deprecated)]
+                dpf_enabled: true,
+                is_dpf_enabled: None,
+                ..stored_machine()
+            },
+        },
+        Case {
+            scenario: "legacy lockdown patch keeps the stored retain-hbn-config-on-boot designation",
+            args: &[
+                "expected-machine",
+                "patch",
+                "--id",
+                ID,
+                "--disable-lockdown",
+                "true",
+            ],
+            patch_reply: PatchReply::Grpc(Code::Unimplemented),
+            lookup_id: Some(ID),
+            methods: &[
+                "PatchExpectedMachine",
+                "GetExpectedMachine",
+                "UpdateExpectedMachine",
+            ],
+            selector: forge::ExpectedMachineRequest {
+                id: Some(rpc_id()),
+                ..Default::default()
+            },
+            expected: forge::ExpectedMachine {
+                host_lifecycle_profile: Some(forge::HostLifecycleProfile {
+                    disable_lockdown: Some(true),
+                    retain_hbn_config_on_boot: Some(true),
+                }),
                 #[allow(deprecated)]
                 dpf_enabled: true,
                 is_dpf_enabled: None,
@@ -860,6 +922,37 @@ async fn switch_lookup_without_an_id_uses_the_original_mac_update_and_mask() {
         requests[1].headers[EXPECTED_SWITCH_UPDATE_MASK_HEADER],
         "bmc_password,nvos_username,nvos_password"
     );
+}
+
+/// An older site has no `retain_hbn_config_on_boot` field. The legacy update would drop it
+/// and still answer OK, so the CLI would report a designation the site never
+/// stored and never validated. Fail before the legacy write instead.
+#[tokio::test]
+async fn legacy_fallback_rejects_a_retain_hbn_config_on_boot_designation() {
+    let (result, requests) = dispatch_with_replies(
+        &[
+            "expected-machine",
+            "patch",
+            "--id",
+            ID,
+            "--retain-hbn-config-on-boot",
+            "true",
+        ],
+        PatchReply::Grpc(Code::Unimplemented),
+        Code::Ok,
+        Some(ID),
+    )
+    .await;
+    let error =
+        result.expect_err("the legacy update cannot store a retain-hbn-config-on-boot designation");
+    assert!(
+        error
+            .to_string()
+            .contains("retain-hbn-config-on-boot designation"),
+        "unexpected error: {error}"
+    );
+    // The legacy read/merge/update must not run at all.
+    assert_methods(&requests, &["PatchExpectedMachine"]);
 }
 
 #[tokio::test]
@@ -1396,6 +1489,10 @@ fn stored_machine() -> forge::ExpectedMachine {
             mac_address: Some("00:11:22:33:44:66".to_string()),
             ..Default::default()
         }],
+        host_lifecycle_profile: Some(forge::HostLifecycleProfile {
+            disable_lockdown: None,
+            retain_hbn_config_on_boot: Some(true),
+        }),
         ..Default::default()
     }
 }

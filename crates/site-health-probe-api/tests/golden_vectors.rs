@@ -98,6 +98,8 @@ const ESCAPES: &str = "Ünïcödé ✓ 🚀 \"quoted\" back\\slash\nline\ttab\r\
 
 fn sweep_info() -> SweepInfo {
     SweepInfo {
+        last_attempt_succeeded: None,
+        last_attempt_error: None,
         snapshot_id: "s-7".to_string(),
         family: Family::Host,
         sweep_start: t("2026-10-23T10:00:00Z"),
@@ -119,6 +121,8 @@ fn read_info() -> ReadInfo {
 
 fn unit(unit_type: UnitType, id: &str) -> Unit {
     Unit {
+        controller_instance_id: None,
+        rest_machine: None,
         id: id.to_string(),
         unit_type,
         source: Source::NicoApi,
@@ -237,6 +241,21 @@ fn wire_vectors_match_the_files() {
                 },
                 Unit {
                     source: Source::Rest,
+                    rest_machine: Some(RestMachineFields {
+                        controller_id: "fm100h".into(),
+                        instance_type: s("it-1"),
+                        instance_id: None,
+                        tenant_id: None,
+                        labels: [("selector".into(), "burst-1".into())]
+                            .into_iter()
+                            .collect(),
+                        is_usable_by_tenant: true,
+                    }),
+                    ..unit(UnitType::Host, "rest-machine-1")
+                },
+                Unit {
+                    source: Source::Rest,
+                    controller_instance_id: s("native-instance-1"),
                     stage: Stage::Ready,
                     done: true,
                     instance: Some(InstanceFields {
@@ -470,7 +489,7 @@ macro_rules! variants {
 
 fn variants_family() -> Vec<Family> {
     variants!(Family: Host, Dpu, Switch, PowerShelf, Rack, Instance, Expected,
-        HostFirmwareRequests, RestInstances, RestTotals, RestSiteMatch,
+        HostFirmwareRequests, RestInstances, RestMachines, RestTotals, RestSiteMatch,
         RestTenantInstances, ConfigNicoApi, ConfigRest)
 }
 

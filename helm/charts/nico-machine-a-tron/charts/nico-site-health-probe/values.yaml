@@ -156,6 +156,15 @@ state:
         existingSecret:
           name: ""
           key: client-secret
+    tenant:
+      org: ""
+      tenantId: ""
+      instanceType: ""
+      auth:
+        tokenUrl: ""
+        clientId: ""
+        tokenFile: ""
+        existingSecret: {name: "", key: token}
   ## Reader schedules. A sweep may outlast its interval; the next tick is
   ## then skipped. The REST reader is off until the site provides the
   ## `state.rest` inputs (see the README for a complete example).
@@ -168,6 +177,9 @@ state:
       enabled: false
       interval: 120s
       timeout: 600s
+      ## false skips the machine, rack and tray totals (the site check and
+      ## tenant reads stay), for a site whose REST API cannot answer them.
+      totals: true
   ## /v1/config names the stored series for clients that read them back:
   ## a selector and the scrape cadence. With serviceMonitor.enabled the
   ## cadence is serviceMonitor.interval, and the selector defaults to the

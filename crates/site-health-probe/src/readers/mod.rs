@@ -21,6 +21,7 @@
 //! [`SnapshotSink`](crate::snapshot::SnapshotSink).
 
 pub(crate) mod devices;
+pub(crate) mod rest_instances;
 pub(crate) mod rest_inventory;
 
 use std::collections::BTreeSet;

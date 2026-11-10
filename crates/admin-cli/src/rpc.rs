@@ -1199,6 +1199,13 @@ impl ApiClient {
                     .is_some(),
                 "host_lifecycle_profile.disable_lockdown",
             ),
+            (
+                host_lifecycle_profile
+                    .as_ref()
+                    .and_then(|profile| profile.retain_hbn_config_on_boot)
+                    .is_some(),
+                "host_lifecycle_profile.retain_hbn_config_on_boot",
+            ),
             (parsed_interfaces.is_some(), "host_nics"),
         ]
         .into_iter()
@@ -1254,6 +1261,7 @@ impl ApiClient {
                     dpu_mode: dpu_policy.map(|policy| rpc::DpuMode::from(policy) as i32),
                     bmc_ip_allocation: bmc_ip_allocation.map(|allocation| allocation as i32),
                     host_lifecycle_profile,
+                    replace_dpu_loopbacks: parsed_interfaces.is_some(),
                     host_nics: parsed_interfaces.unwrap_or_default(),
                     ..Default::default()
                 }),
@@ -1269,6 +1277,20 @@ impl ApiClient {
                         .into());
                 }
             }
+        }
+
+        // An older site has no `retain_hbn_config_on_boot` field, so its update RPC drops the
+        // designation and still answers OK. That would report a designation the
+        // site never stored and never validated, so refuse instead. Reached for
+        // both an Unimplemented PATCH and a legacy record that has no ID.
+        if host_lifecycle_profile
+            .as_ref()
+            .is_some_and(|profile| profile.retain_hbn_config_on_boot.is_some())
+        {
+            return Err(CarbideCliError::UnsupportedOperation(
+                "this site cannot store a retain-hbn-config-on-boot designation. Upgrade the site, or retry \
+                 without --retain-hbn-config-on-boot",
+            ));
         }
 
         self.patch_expected_machine_legacy(
@@ -1375,6 +1397,22 @@ impl ApiClient {
                 expected_machine.metadata
             };
 
+        // Merge lifecycle fields individually. The legacy update replaces the
+        // stored profile, so a half-filled one clears every member this request
+        // did not supply.
+        let merged_host_lifecycle_profile = match host_lifecycle_profile {
+            Some(supplied) => {
+                let existing = expected_machine.host_lifecycle_profile.unwrap_or_default();
+                Some(::rpc::forge::HostLifecycleProfile {
+                    disable_lockdown: supplied.disable_lockdown.or(existing.disable_lockdown),
+                    retain_hbn_config_on_boot: supplied
+                        .retain_hbn_config_on_boot
+                        .or(existing.retain_hbn_config_on_boot),
+                })
+            }
+            None => expected_machine.host_lifecycle_profile,
+        };
+
         let request = rpc::ExpectedMachine {
             bmc_mac_address: mac_str,
             bmc_username: bmc_username.unwrap_or(expected_machine.bmc_username),
@@ -1400,9 +1438,9 @@ impl ApiClient {
                 .map(|policy| ::rpc::forge::DpuMode::from(policy) as i32)
                 .or(expected_machine.dpu_mode),
             bmc_ip_allocation: legacy_bmc_fields.bmc_ip_allocation,
+            replace_dpu_loopbacks: replace_interfaces,
             replace_host_nics: replace_interfaces,
-            host_lifecycle_profile: host_lifecycle_profile
-                .or(expected_machine.host_lifecycle_profile),
+            host_lifecycle_profile: merged_host_lifecycle_profile,
             server_name: expected_machine.server_name,
         };
 
@@ -1447,10 +1485,12 @@ impl ApiClient {
                     bmc_ip_allocation: machine.bmc_ip_allocation.map(|m| m as i32),
                     // replace-all is authoritative even when the JSON field is
                     // omitted and therefore resolves to an empty list.
+                    replace_dpu_loopbacks: true,
                     replace_host_nics: true,
                     host_lifecycle_profile: machine.host_lifecycle_profile.map(|hlp| {
                         ::rpc::forge::HostLifecycleProfile {
                             disable_lockdown: hlp.disable_lockdown,
+                            retain_hbn_config_on_boot: hlp.retain_hbn_config_on_boot,
                         }
                     }),
                     server_name: machine.server_name,

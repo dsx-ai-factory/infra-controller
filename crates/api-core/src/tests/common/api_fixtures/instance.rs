@@ -109,11 +109,6 @@ impl<'a, 'b> TestInstanceBuilder<'a, 'b> {
         self
     }
 
-    pub(in crate::tests) fn hostname(mut self, hostname: impl Into<String>) -> Self {
-        self.tenant.hostname = Some(hostname.into());
-        self
-    }
-
     pub(in crate::tests) fn tenant_org(mut self, tenant_org: impl Into<String>) -> Self {
         self.tenant.tenant_organization_id = tenant_org.into();
         self

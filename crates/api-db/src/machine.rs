@@ -172,6 +172,7 @@ pub async fn get_or_create(
     common_pools: Option<&CommonPools>,
     stable_machine_id: &MachineId,
     interface: &MachineInterfaceSnapshot,
+    requested_loopback_v6: Option<Ipv6Addr>,
 ) -> DatabaseResult<AnyMachine> {
     let existing_machine =
         find_one(&mut *txn, stable_machine_id, MachineSearchConfig::default()).await?;
@@ -211,13 +212,14 @@ pub async fn get_or_create(
         // Host and DPU machines are created in same `discover_machine` call. Update same
         // state in both machines.
         let state = ManagedHostState::Created;
-        let machine = create(
+        let machine = create_with_requested_loopback(
             txn,
             common_pools,
             stable_machine_id,
             state,
             None,
             CURRENT_STATE_MODEL_VERSION,
+            requested_loopback_v6,
         )
         .await?;
         crate::machine_interface::associate_interface_with_machine(
@@ -2475,6 +2477,29 @@ pub async fn create(
     expected_machine_data: Option<&ExpectedMachineData>,
     state_model_version: i16,
 ) -> DatabaseResult<AnyMachine> {
+    create_with_requested_loopback(
+        txn,
+        common_pools,
+        stable_machine_id,
+        state,
+        expected_machine_data,
+        state_model_version,
+        None,
+    )
+    .await
+}
+
+/// Create a machine with explicit IPv6 loopback intent. The caller's transaction
+/// holds the reservation lock and claims IPv4 before committing creation.
+pub async fn create_with_requested_loopback(
+    txn: &mut PgConnection,
+    common_pools: Option<&CommonPools>,
+    stable_machine_id: &MachineId,
+    state: ManagedHostState,
+    expected_machine_data: Option<&ExpectedMachineData>,
+    state_model_version: i16,
+    requested_loopback_v6: Option<Ipv6Addr>,
+) -> DatabaseResult<AnyMachine> {
     let stable_machine_id_string = stable_machine_id.to_string();
 
     let default_metadata = &Metadata::default();
@@ -2512,7 +2537,13 @@ pub async fn create(
     let loopback_ip_v6 = if stable_machine_id.machine_type() == MachineType::Dpu {
         match common_pools {
             Some(common_pools) => {
-                allocate_loopback_ip_v6(common_pools, txn, &stable_machine_id_string).await?
+                allocate_loopback_ip_v6(
+                    common_pools,
+                    txn,
+                    &stable_machine_id_string,
+                    requested_loopback_v6,
+                )
+                .await?
             }
             None => None,
         }
@@ -3677,16 +3708,24 @@ pub async fn find_dpu_infos(txn: &mut PgConnection) -> Result<Vec<DpuInfo>, Data
 }
 
 /// Allocates one IPv6 underlay loopback when `lo-ip-v6` is configured.
-/// `None` preserves IPv4-only sites where the optional pool is absent;
-/// exhaustion remains an error so a configured site cannot silently leave a
-/// DPU without its reserved address.
+/// An absent pool yields `None`, preserving IPv4-only sites; exhaustion remains
+/// an error so a configured site cannot silently leave a DPU without its
+/// address. `requested_value` selects a specific operator-reserved address from
+/// the non-auto-assign partition, while `None` keeps the automatic assignment;
+/// a value already owned by this DPU is reused either way.
 pub async fn allocate_loopback_ip_v6(
     common_pools: &CommonPools,
     txn: &mut PgConnection,
     owner_id: &str,
+    requested_value: Option<Ipv6Addr>,
 ) -> Result<Option<Ipv6Addr>, DatabaseError> {
     let pool = &common_pools.ethernet.pool_loopback_ip_v6;
     if !crate::resource_pool::pool_has_rows(txn, pool.name()).await? {
+        if requested_value.is_some() {
+            return Err(DatabaseError::FailedPrecondition(
+                "requested IPv6 loopback requires a configured lo-ip-v6 pool".to_string(),
+            ));
+        }
         return Ok(None);
     }
 
@@ -3706,7 +3745,7 @@ pub async fn allocate_loopback_ip_v6(
         txn,
         resource_pool::OwnerType::Machine,
         owner_id,
-        None,
+        requested_value,
     )
     .await
     {
@@ -3928,7 +3967,7 @@ pub async fn try_set_machine_maintenance_requested(
     Ok(claimed)
 }
 
-/// Cancels only an unstarted Reboot or legacy Reset owned by the rack initiator.
+/// Cancels only an unstarted Reboot or Reset owned by the rack initiator.
 /// Requests already claimed by a machine controller or owned by others are preserved.
 pub async fn clear_unclaimed_machine_restart_request(
     txn: &mut PgConnection,
@@ -3941,12 +3980,17 @@ pub async fn clear_unclaimed_machine_restart_request(
     let query = r#"UPDATE machines SET machine_maintenance_requested = NULL
         WHERE id = $1 AND controller_state->>'state' <> 'maintenance'
           AND machine_maintenance_requested->>'initiator' = $2
-          AND machine_maintenance_requested->'operation' IN ($3, $4)
+          AND machine_maintenance_requested->'operation' IN ($3, $4, $5)
         RETURNING id"#;
     Ok(sqlx::query_as::<_, MachineId>(query)
         .bind(machine_id)
         .bind(initiator)
-        .bind(sqlx::types::Json(MachineMaintenanceOperation::Reset))
+        .bind(sqlx::types::Json(MachineMaintenanceOperation::Reset {
+            graceful: false,
+        }))
+        .bind(sqlx::types::Json(MachineMaintenanceOperation::Reset {
+            graceful: true,
+        }))
         .bind(sqlx::types::Json(MachineMaintenanceOperation::Reboot))
         .fetch_optional(txn)
         .await
@@ -4295,6 +4339,7 @@ pub async fn update_dpu_loopback_ips_v6(
                 common_pools,
                 txn.as_pgconn(),
                 &dpu_machine_id.to_string(),
+                None,
             )
             .await?
             .ok_or_else(|| {
@@ -7849,7 +7894,7 @@ mod test {
                 txn.as_mut(),
                 machine_id,
                 "rack-test",
-                super::MachineMaintenanceOperation::Reset,
+                super::MachineMaintenanceOperation::Reset { graceful: false },
             )
             .await?;
             txn.commit().await?;
@@ -8022,7 +8067,7 @@ mod test {
                 txn.as_mut(),
                 machine_id,
                 "rack-test",
-                super::MachineMaintenanceOperation::Reset
+                super::MachineMaintenanceOperation::Reset { graceful: false }
             )
             .await?
         );
@@ -8057,10 +8102,11 @@ mod test {
             ("rack-test", Reboot, false, true),
             ("operator", Reboot, false, false),
             ("rack-test", Reboot, true, false),
-            ("rack-test", Reset, false, true),
-            ("operator", Reset, false, false),
+            ("rack-test", Reset { graceful: false }, false, true),
+            ("rack-test", Reset { graceful: true }, false, true),
+            ("operator", Reset { graceful: false }, false, false),
             ("rack-test", PowerOn, false, false),
-            ("rack-test", Reset, true, false),
+            ("rack-test", Reset { graceful: false }, true, false),
         ] {
             let mut txn = pool.begin().await?;
             super::create(
@@ -8072,13 +8118,26 @@ mod test {
                 super::CURRENT_STATE_MODEL_VERSION,
             )
             .await?;
-            super::set_machine_maintenance_requested(
-                txn.as_mut(),
-                machine_id,
-                initiator,
-                operation,
-            )
-            .await?;
+            if matches!(operation, Reset { graceful: false }) {
+                // Seed the predecessor JSON directly, independent of current serde behavior.
+                sqlx::query("UPDATE machines SET machine_maintenance_requested = $1 WHERE id = $2")
+                    .bind(serde_json::json!({
+                        "requested_at": "2026-10-01T00:00:00Z",
+                        "initiator": initiator,
+                        "operation": { "operation": "reset" }
+                    }))
+                    .bind(machine_id)
+                    .execute(txn.as_mut())
+                    .await?;
+            } else {
+                super::set_machine_maintenance_requested(
+                    txn.as_mut(),
+                    machine_id,
+                    initiator,
+                    operation,
+                )
+                .await?;
+            }
             let machine = super::find_one(txn.as_mut(), &machine_id, Default::default())
                 .await?
                 .unwrap();
@@ -8222,20 +8281,23 @@ mod test {
                 super::CURRENT_STATE_MODEL_VERSION,
             )
             .await?;
-            super::set_machine_maintenance_requested(
-                txn.as_mut(),
-                machine_id,
-                "component-manager",
-                Reset,
-            )
-            .await?;
+            // These requests were persisted before Reset carried a graceful flag.
+            sqlx::query("UPDATE machines SET machine_maintenance_requested = $1 WHERE id = $2")
+                .bind(serde_json::json!({
+                    "requested_at": "2026-10-01T00:00:00Z",
+                    "initiator": "component-manager",
+                    "operation": { "operation": "reset" }
+                }))
+                .bind(machine_id)
+                .execute(txn.as_mut())
+                .await?;
             let snapshot = super::find_one(txn.as_mut(), &machine_id, Default::default())
                 .await?
                 .unwrap();
             let captured = snapshot.machine_maintenance_requested.clone().unwrap();
             let next = if matches!(case, Pending::Legacy) {
                 ManagedHostState::Maintenance {
-                    operation: Reset,
+                    operation: Reset { graceful: false },
                     request: None,
                 }
             } else {
@@ -8317,6 +8379,17 @@ mod test {
                 history_before + if applied { 1 } else { 0 },
                 "{case:?}"
             );
+            if matches!(case, Pending::Current) {
+                assert_eq!(
+                    super::clear_machine_maintenance_requested(txn.as_mut(), machine_id, &captured)
+                        .await?,
+                    crate::ConditionalWrite::Applied(())
+                );
+                let completed = super::find_one(txn.as_mut(), &machine_id, Default::default())
+                    .await?
+                    .unwrap();
+                assert!(completed.machine_maintenance_requested.is_none());
+            }
             txn.rollback().await?;
         }
         Ok(())
@@ -8913,9 +8986,21 @@ mod test {
                 &common_pools,
                 txn.as_mut(),
                 &dpu_machine_id.to_string(),
+                None,
             )
             .await?,
             None
+        );
+
+        assert!(
+            super::allocate_loopback_ip_v6(
+                &common_pools,
+                txn.as_mut(),
+                &dpu_machine_id.to_string(),
+                Some("2001:db8::20".parse()?)
+            )
+            .await
+            .is_err()
         );
 
         let dpu = super::create(
@@ -8960,9 +9045,13 @@ mod test {
         txn.commit().await?;
 
         let mut txn = pool.begin().await?;
-        let reused =
-            super::allocate_loopback_ip_v6(&common_pools, txn.as_mut(), &first_dpu_id.to_string())
-                .await?;
+        let reused = super::allocate_loopback_ip_v6(
+            &common_pools,
+            txn.as_mut(),
+            &first_dpu_id.to_string(),
+            None,
+        )
+        .await?;
         assert_eq!(reused, first_dpu.network_config.loopback_ip_v6);
         let stats_after_reuse = crate::resource_pool::stats(txn.as_mut(), LOOPBACK_IP_V6).await?;
         assert_eq!(stats_after_reuse.used, 1);
@@ -9058,6 +9147,7 @@ mod test {
             &common_pools,
             txn.as_mut(),
             &dpu_machine_id.to_string(),
+            None,
         )
         .await?;
         assert_eq!(reused, Some(allocated));
@@ -9229,6 +9319,7 @@ mod test {
             &common_pools,
             txn.as_mut(),
             &dpu_machine_id.to_string(),
+            None,
         )
         .await?
         .expect("configured pool should reserve an IPv6 loopback");

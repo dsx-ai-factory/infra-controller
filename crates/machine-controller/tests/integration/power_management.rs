@@ -34,7 +34,7 @@ use model::test_support::ManagedHostConfig;
 use rpc::forge::{
     MaintenanceOperation, MaintenanceRequest, PowerOptionRequest, PowerOptionUpdateRequest,
 };
-use tonic::Request;
+use tonic::{IntoRequest, Request};
 
 use crate::env::Env;
 
@@ -314,7 +314,11 @@ async fn dpu_init_power_cycle_and_uefi_restart_wait_for_observations(
         );
     }
 
-    mh.first_dpu().record_network_status().await;
+    let status = mh.first_dpu().network_status().build().await;
+    mh.api
+        .record_dpu_network_status(status.into_request())
+        .await
+        .expect("DPU network status should be recorded");
     env.run_single_iteration().await;
     let first_dpu_ready = ManagedHostState::DPUInit {
         dpu_states: DpuInitStates {

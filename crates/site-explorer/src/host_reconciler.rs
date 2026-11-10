@@ -272,6 +272,7 @@ impl HostReconciler {
                 &self.resource_pool_registry,
                 &self.common_pools,
                 (*dpu_id).into(),
+                None,
                 &self.preparation_cancel_token,
             )
         }))

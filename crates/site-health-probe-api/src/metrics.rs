@@ -327,6 +327,9 @@ pub struct Capabilities {
     /// Otherwise they compile to [`Need::CompactHostRead`], checked per
     /// sweep.
     pub full_host_read: bool,
+    /// The REST reader is enabled with a tenant fixture, so REST instances and machines are
+    /// listed. Otherwise `source=rest` is refused at once.
+    pub rest_fixture: bool,
 }
 
 /// A capability a filter needs from the sweep it is answered from.
@@ -686,19 +689,21 @@ pub fn series_spec(filter: &Filter, caps: &Capabilities) -> Result<SeriesSpec, F
     }
 }
 
-/// The tenant's REST instances, per status and one by one, wait for the
-/// instance tests (#8152). Site totals are `type=rest_total`.
+/// REST count series remain unavailable. Site totals use `type=rest_total`.
+/// REST units are listed only with a configured tenant fixture.
 fn rest_source(filter: &Filter) -> Result<(), FilterError> {
-    match filter.source {
-        Some(Source::Rest) if filter.unit_type == UnitType::Instance => {
-            Err(FilterError::unavailable(
-                "source",
-                "the tenant's REST instances are not read until the instance tests (#8152)",
-            ))
-        }
-        Some(Source::Rest) => Err(FilterError::unsupported(
+    match (filter.source, filter.unit_type) {
+        (Some(Source::Rest), UnitType::Instance) => Err(FilterError::unavailable(
             "source",
-            format!("type={} has no REST source", wire(filter.unit_type)),
+            "REST instances are not counted and need a configured tenant fixture to list",
+        )),
+        (Some(Source::Rest), UnitType::Host) => Err(FilterError::unsupported(
+            "source",
+            "type=host has no REST count and needs a configured tenant fixture to list".to_string(),
+        )),
+        (Some(Source::Rest), kind) => Err(FilterError::unsupported(
+            "source",
+            format!("type={} has no REST source", wire(kind)),
         )),
         _ => Ok(()),
     }
@@ -745,6 +750,20 @@ pub fn name_filter(filter: &Filter) -> Result<(), FilterError> {
 /// Validates a units listing of `filter` and names its family. A `name`
 /// filter is checked apart, by [`name_filter`].
 pub fn units_listing(filter: &Filter, caps: &Capabilities) -> Result<UnitsListing, FilterError> {
+    if caps.rest_fixture
+        && filter.source == Some(Source::Rest)
+        && matches!(filter.unit_type, UnitType::Instance | UnitType::Host)
+    {
+        only(filter, &["stage", "state", "done"])?;
+        return Ok(UnitsListing {
+            family: if filter.unit_type == UnitType::Host {
+                Family::RestMachines
+            } else {
+                Family::RestInstances
+            },
+            needs: vec![],
+        });
+    }
     rest_source(filter)?;
     let mut needs = Vec::new();
     let family = match filter.unit_type {
@@ -797,9 +816,11 @@ mod tests {
 
     const FULL: Capabilities = Capabilities {
         full_host_read: true,
+        rest_fixture: true,
     };
     const COMPACT: Capabilities = Capabilities {
         full_host_read: false,
+        rest_fixture: true,
     };
 
     fn filter(query: &str) -> Filter {
@@ -858,8 +879,8 @@ mod tests {
         "type=host&updateEligible=true => field_unavailable updateEligible update eligibility is unknown until nico-api serves the compact host read",
         "type=host&uefiVersion=u1&allocatable=true => field_unavailable uefiVersion exact host versions are not counted until the firmware tests (#8154)",
         "type=host&done=true => unsupported_filter done done is a /v1/units filter",
-        "type=host&source=rest => unsupported_filter source type=host has no REST source",
-        "type=instance&source=rest => field_unavailable source the tenant's REST instances are not read until the instance tests (#8152)",
+        "type=host&source=rest => unsupported_filter source type=host has no REST count and needs a configured tenant fixture to list",
+        "type=instance&source=rest => field_unavailable source REST instances are not counted and need a configured tenant fixture to list",
         "type=dpu&stage=expected => unsupported_filter stage type=dpu has no expected records",
         "type=dpu&model=x => unsupported_filter model model is not a filter of type=dpu",
         "type=expected_record => unsupported_filter recordType type=expected_record needs recordType",
@@ -884,7 +905,7 @@ mod tests {
         "name type=host => unsupported_filter name name is a filter of type=instance",
         "name type=rest_total&resource=rack => unsupported_filter name name is a filter of type=instance",
         "type=rest_total&resource=rack => unsupported_filter type type=rest_total is a count, not units",
-        "name type=instance&source=rest => field_unavailable source the tenant's REST instances are not read until the instance tests (#8152)",
+        "name type=instance&source=rest => ok rest_instances",
         "type=expected_record => unsupported_filter recordType type=expected_record needs recordType",
         "type=identity_mismatch&recordType=rack => unsupported_filter recordType identity mismatches exist for host, switch and power_shelf records",
         "type=dpu&model=x => unsupported_filter model model is not a filter of type=dpu",
@@ -926,7 +947,6 @@ mod tests {
             "type=host&tenant=t",
             "type=dpu&stage=error",
             "type=dpu&model=x",
-            "type=instance&source=rest",
             "type=switch&source=rest",
             "type=expected_record&recordType=rack&linked=true",
             "type=expected_record",
@@ -947,6 +967,33 @@ mod tests {
                     (count, units) => panic!("{query}: count {count:?}, units {units:?}"),
                 }
             }
+        }
+    }
+
+    #[test]
+    fn rest_fixture_lists_without_claiming_count_series() {
+        for (kind, family) in [
+            ("host", Family::RestMachines),
+            ("instance", Family::RestInstances),
+        ] {
+            let f = filter(&format!("type={kind}&source=rest"));
+            assert_eq!(units_listing(&f, &FULL).unwrap().family, family);
+            assert!(series_spec(&f, &FULL).is_err());
+        }
+    }
+
+    #[test]
+    fn rest_listing_needs_a_configured_fixture() {
+        let caps = Capabilities {
+            rest_fixture: false,
+            ..FULL
+        };
+        for (kind, code) in [
+            ("instance", ErrorCode::FieldUnavailable),
+            ("host", ErrorCode::UnsupportedFilter),
+        ] {
+            let err = units_listing(&filter(&format!("type={kind}&source=rest")), &caps);
+            assert_eq!(err.unwrap_err().code, code, "{kind}");
         }
     }
 
