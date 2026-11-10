@@ -549,6 +549,13 @@ PreventHostStateChanges, etc.).
 The site detail board (`nico-site-detail.json`) carries every NICo subsystem a site
 operator needs when the overview shows a problem but not its cause.
 
+On a central Prometheus datasource, select a **Site** to filter every panel by its
+`forge_site` label across all NICo scrape jobs. The selector discovers sites from
+NICo metrics, including serial console metrics, without requiring API metrics.
+The default **All** includes every site and metrics without `forge_site`; leave it
+selected for site-local datasources that do not expose that label. On a central
+datasource, **All** combines sites rather than isolating one site.
+
 **Service health** - API status, build version, open tracing spans, Postgres connection
 pool and resource pool utilization. A pool at 100% utilization means new allocations from it fail.
 

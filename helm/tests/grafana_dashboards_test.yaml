@@ -115,6 +115,29 @@ tests:
           path: metadata.name
           value: nico-system-test-nico-nico-fleet
 
+  - it: selects a site across NICo services while defaulting to all sites and unlabeled metrics
+    set:
+      grafanaDashboards.enabled: true
+    documentSelector:
+      path: metadata.name
+      value: nico-system-test-nico-nico-site-detail
+    asserts:
+      - matchRegex:
+          path: data["nico-site-detail.json"]
+          pattern: '(?s)"allValue": "\.\*",\s*"current": \{\s*"selected": true,\s*"text": "All",\s*"value": "\$__all".*?"includeAll": true,\s*"label": "Site",\s*"multi": false,\s*"name": "site"'
+      - matchRegex:
+          path: data["nico-site-detail.json"]
+          pattern: 'label_values\(\{__name__=~\\"\$\{metric_prefix\}_\.\+\|ssh_console_\.\+\\"\}, forge_site\)'
+      - matchRegex:
+          path: data["nico-site-detail.json"]
+          pattern: 'max\(\$\{metric_prefix\}_api_ready\{forge_site=~\\"\$site\\"\}\) or vector\(0\)'
+      - matchRegex:
+          path: data["nico-site-detail.json"]
+          pattern: '\$\{metric_prefix\}_machines_total\{forge_site=~\\"\$site\\",fresh=\\"true\\"\}'
+      - matchRegex:
+          path: data["nico-site-detail.json"]
+          pattern: 'max\(ssh_console_healthy_machines\{forge_site=~\\"\$site\\"\}\) / clamp_min\(max\(ssh_console_grpc_total_machines\{forge_site=~\\"\$site\\"\}\), 1\)'
+
   - it: supports a Grafana namespace and sidecar-specific metadata
     values:
       - fixtures/grafana-custom-values.yaml
