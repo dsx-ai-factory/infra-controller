@@ -14,8 +14,6 @@
 !include/**
 !dev
 !dev/
-!dev/docker/
-!dev/docker/sccache-cache.sh
 !dev/ipmi
 !dev/ipmi/
 !dev/ipmi/cmd.conf

@@ -1418,7 +1418,7 @@ jobs:
     if: >-
       ${{
         !cancelled()
-        && github.event_name != 'schedule'
+        && startsWith(github.ref, 'refs/heads/pull-request/')
         && needs.prepare.result == 'success'
         && contains('success,skipped', needs.build-container-x86_64.result)
         && contains('success,skipped', needs.build-container-aarch64.result)
@@ -1462,21 +1462,6 @@ jobs:
           username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
           token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
 
-      - name: Restore development DHCP compiler cache
-        id: sccache
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.cache/sccache-dev-dhcp
-          key: sccache-dev-dhcp-${{ matrix.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: sccache-dev-dhcp-${{ matrix.arch }}-
-
-      - name: Locate development DHCP compiler cache
-        id: sccache-dir
-        run: |
-          dir="${HOME}/.cache/sccache-dev-dhcp"
-          mkdir -p "$dir"
-          echo "dir=$dir" >> "$GITHUB_OUTPUT"
-
       # Reuse the prepared compiler, but build the actual development recipes
       # so runtime dependencies and COPY paths are checked on both architectures.
       - name: Build and smoke-test native development DHCP image
@@ -1488,7 +1473,6 @@ jobs:
           PUBLISH_COMPILER: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
           KEA_VERSION: ${{ needs.prepare.outputs.kea_version }}
           DOCKER_BUILDKIT: '1'
-          SCCACHE_SEED_DIR: ${{ steps.sccache-dir.outputs.dir }}
         run: |
           set -euo pipefail
           docker_context="$(docker context show)"
@@ -1524,10 +1508,7 @@ jobs:
           docker build --platform "linux/$ARCH" \
             --file dev/docker/Dockerfile.dev-runtime \
             --tag "$runtime_image" .
-          mkdir -p "$SCCACHE_SEED_DIR"
           docker build --platform "linux/$ARCH" \
-            --build-context "sccache-seed=$SCCACHE_SEED_DIR" \
-            --build-arg CI_SCCACHE=true \
             --file dev/docker/Dockerfile.dev-services --target dhcp \
             --build-arg CONTAINER_BUILD="$compiler_image" \
             --build-arg CONTAINER_RUNTIME="$runtime_image" \
@@ -1535,43 +1516,6 @@ jobs:
             --tag "$service_image" .
           test "$(docker image inspect --format '{{.Architecture}}' "$service_image")" = "$ARCH"
           bash dev/docker/tests/smoke_dhcp_image.sh "$service_image"
-
-      - name: Check whether another run saved development DHCP cache
-        id: sccache-saved
-        if: github.ref == 'refs/heads/main' && steps.sccache.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.cache/sccache-dev-dhcp
-          key: ${{ steps.sccache.outputs.cache-primary-key }}
-          lookup-only: true
-
-      - name: Export development DHCP compiler cache
-        id: sccache-export
-        if: steps.sccache-saved.outcome == 'success' && steps.sccache-saved.outputs.cache-hit != 'true'
-        continue-on-error: true
-        env:
-          ARCH: ${{ matrix.arch }}
-          BUILD_CONTAINER: ${{ steps.dev-build.outputs.compiler_image }}
-          DOCKER_CONTEXT: ${{ steps.dev-build.outputs.docker_context }}
-          BUILDX_BUILDER: ${{ steps.dev-build.outputs.docker_context }}
-          CACHE_EXPORT_DIR: ${{ steps.sccache-dir.outputs.dir }}
-        run: |
-          rm -rf "$CACHE_EXPORT_DIR"
-          mkdir -p "$CACHE_EXPORT_DIR"
-          docker build --platform "linux/$ARCH" \
-            --file dev/docker/Dockerfile.dev-services --target sccache-export \
-            --build-arg CONTAINER_BUILD="$BUILD_CONTAINER" \
-            --build-arg SCCACHE_EXPORT_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
-            --output "type=local,dest=$CACHE_EXPORT_DIR" .
-
-      - name: Save development DHCP compiler cache
-        if: steps.sccache-export.outcome == 'success'
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.cache/sccache-dev-dhcp
-          key: ${{ steps.sccache.outputs.cache-primary-key }}
 
       - name: Remove development DHCP job images
         if: always() && steps.dev-build.outputs.compiler_image != ''
@@ -3303,7 +3247,6 @@ jobs:
   prune-sccache:
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
     needs:
-      - test-dev-dhcp-image
       - test-release-container-services
       - build-release-container-x86_64
       - build-release-container-aarch64
@@ -3387,7 +3330,6 @@ jobs:
       - build-site-health-probe
       - build-scale-test-acceptance
       - test-release-container-services
-      - test-dev-dhcp-image
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
       - build-package-scout-aarch64
