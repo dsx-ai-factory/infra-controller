@@ -86,6 +86,12 @@ impl TryFrom<PowerShelf> for rpc::PowerShelf {
             }),
         };
         let controller_state = lifecycle.state.clone();
+        let rack_firmware_reprovisioning_skip = src.rack_firmware_reprovisioning_skip.map(|skip| {
+            rpc::PowerShelfRackReprovisioningSkip {
+                requested_at: Some(skip.requested_at.into()),
+                reason: skip.reason,
+            }
+        });
 
         let status = Some(match src.status {
             Some(s) => rpc::PowerShelfStatus {
@@ -94,19 +100,14 @@ impl TryFrom<PowerShelf> for rpc::PowerShelf {
                     sla: None,
                     time_in_state_above_sla: false,
                 }),
-                shelf_name: s.shelf_name,
-                power_state: s.power_state,
-                health_status: s.health_status,
+                shelf_name: Some(s.shelf_name),
+                power_state: Some(s.power_state),
+                health_status: Some(s.health_status),
                 controller_state: Some(controller_state.clone()),
                 health: Some(health.into()),
                 health_sources,
                 lifecycle: Some(lifecycle),
-                rack_firmware_reprovisioning_skip: s.rack_firmware_reprovisioning_skip.map(
-                    |skip| rpc::PowerShelfRackReprovisioningSkip {
-                        requested_at: Some(skip.requested_at.into()),
-                        reason: skip.reason,
-                    },
-                ),
+                rack_firmware_reprovisioning_skip,
             },
             None => rpc::PowerShelfStatus {
                 state_reason: None,
@@ -121,7 +122,7 @@ impl TryFrom<PowerShelf> for rpc::PowerShelf {
                 health: Some(health.into()),
                 health_sources,
                 lifecycle: Some(lifecycle),
-                rack_firmware_reprovisioning_skip: None,
+                rack_firmware_reprovisioning_skip,
             },
         });
 
@@ -180,10 +181,9 @@ mod tests {
                 voltage: Some(240),
             },
             status: Some(PowerShelfStatus {
-                shelf_name: Some("Conversion Test Power Shelf".to_string()),
-                power_state: Some("on".to_string()),
-                health_status: Some("ok".to_string()),
-                rack_firmware_reprovisioning_skip: None,
+                shelf_name: "Conversion Test Power Shelf".to_string(),
+                power_state: "on".to_string(),
+                health_status: "ok".to_string(),
             }),
             deleted: None,
             controller_state: Versioned {
@@ -204,6 +204,7 @@ mod tests {
             power_shelf_maintenance_requested: None,
             power_shelf_reprovisioning_requested: None,
             firmware_upgrade_status: None,
+            rack_firmware_reprovisioning_skip: None,
             metadata: Metadata::default(),
             version: ConfigVersion::initial(),
             health_reports: Default::default(),

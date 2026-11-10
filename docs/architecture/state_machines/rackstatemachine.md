@@ -235,8 +235,10 @@ powerShelfStateController:
 
 A complete `configFiles.nicoApiConfig` override takes precedence over this chart
 value. When the flag is disabled, the shelf controller logs a warning, clears the
-request, and records its timestamp and skip reason in the shelf's persisted
-status. `FindPowerShelves` exposes this record as
+request, and records the request's timestamp and the skip reason in the shelf's
+`rack_firmware_reprovisioning_skip` column, separate from its observed status.
+A replaced request is left pending rather than recorded as skipped.
+`FindPowerShelves` exposes this record as
 `status.rack_firmware_reprovisioning_skip`, with `requested_at` and `reason`.
 Power polling and idle controller iterations preserve the record. It is cleared
 when a subsequent enabled rack reprovisioning request is admitted. Enabling the

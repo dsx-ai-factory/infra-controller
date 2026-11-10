@@ -450,6 +450,14 @@ tray request needs an operation rule that contains a `PowerShelf` firmware
 step. For RMS updates, Core resolves an omitted version from the owning rack
 profile before state-controller or direct-backend dispatch.
 
+State-controller dispatch updates a shelf only when
+`power_shelf_state_controller.rack_firmware_reprovisioning_enabled` is `true`
+(Helm value `powerShelfStateController.rackFirmwareReprovisioningEnabled`).
+The default is `false`: the shelf skips the rack request, and `FindPowerShelves`
+reports the skip in `status.rack_firmware_reprovisioning_skip`. Refer to the
+[rack state machine](../../architecture/state_machines/rackstatemachine.md) for
+how the skip is recorded and cleared.
+
 ## Monitor and cancel tasks
 
 Use [Retrieve a Task](api:GET/v2/org/{org}/nico/task/{id})
@@ -552,7 +560,7 @@ lower-level execution details.
 | Stage times out | Check Core and backend status. The built-in firmware rule polls for 45 minutes per attempt; a backend job can still be running when Flow times out. |
 | Rack-scale update fails before dispatch with an omitted or empty `version` | Confirm that the failed Core firmware request targets one rack. Verify that the rack profile has a configured, reachable `firmware_object.url` that returns a JSON object. |
 | Rack-scale update rejects an explicit `version` | Confirm that `version` contains a valid SOT JSON object, serialized as a string, and that the selected firmware-download credential can access the referenced artifacts. |
-| Power-shelf request succeeds without updating a shelf | Confirm that the resolved operation rule contains a `PowerShelf` step. The built-in rule excludes power shelves. |
+| Power-shelf request succeeds without updating a shelf | Confirm that the resolved operation rule contains a `PowerShelf` step. The built-in rule excludes power shelves. If `FindPowerShelves` reports `status.rack_firmware_reprovisioning_skip`, enable `rack_firmware_reprovisioning_enabled` and submit a new request. |
 | Firmware was flashed but is not active | Determine whether the platform requires an AC cycle. The built-in firmware rule does not include one. |
 | Retry begins from an uncertain state | Inspect per-component status and inventory first. A Flow task failure or cancellation does not roll hardware back. |
 

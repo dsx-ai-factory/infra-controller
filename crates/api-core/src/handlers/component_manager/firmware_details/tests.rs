@@ -138,6 +138,7 @@ fn shelf_fixture() -> PowerShelf {
             }],
         }),
         firmware_upgrade_status: None,
+        rack_firmware_reprovisioning_skip: None,
         metadata: Metadata::default(),
         version: ConfigVersion::initial(),
         health_reports: Default::default(),

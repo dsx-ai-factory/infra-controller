@@ -54,21 +54,23 @@ pub struct PowerShelfConfig {
     pub voltage: Option<u32>,  // Voltage in volts
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PowerShelfStatus {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shelf_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub power_state: Option<String>, // "on", "off", "standby"
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub health_status: Option<String>, // "ok", "warning", "critical"
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rack_firmware_reprovisioning_skip: Option<PowerShelfRackReprovisioningSkip>,
+    pub shelf_name: String,
+    pub power_state: String,   // "on", "off", "standby"
+    pub health_status: String, // "ok", "warning", "critical"
 }
 
+/// A rack reprovisioning request that the power shelf controller consumed
+/// without entering `ReProvisioning`, because
+/// `power_shelf_state_controller.rack_firmware_reprovisioning_enabled` was
+/// false.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PowerShelfRackReprovisioningSkip {
+    /// `requested_at` of the skipped `PowerShelfReprovisionRequest`, which
+    /// identifies the rack maintenance request that the shelf did not run.
     pub requested_at: DateTime<Utc>,
+    /// Why the shelf skipped the request.
     pub reason: String,
 }
 
@@ -128,6 +130,13 @@ pub struct PowerShelf {
     /// `ReProvisioning::WaitingForRackFirmwareUpgrade`.
     pub firmware_upgrade_status: Option<crate::rack::RackFirmwareUpgradeStatus>,
 
+    /// The last rack reprovisioning request skipped while rack firmware
+    /// reprovisioning was disabled. Written when the Ready handler consumes
+    /// such a request and cleared when a later request is admitted with the
+    /// feature enabled. Stored in its own column so `status` keeps the shape
+    /// that earlier binaries decode.
+    pub rack_firmware_reprovisioning_skip: Option<PowerShelfRackReprovisioningSkip>,
+
     // Columns for these exist, but are unused in rust code
     // pub created: DateTime<Utc>,
     // pub updated: DateTime<Utc>,
@@ -162,6 +171,9 @@ impl<'r> FromRow<'r, PgRow> for PowerShelf {
             .try_get::<Option<sqlx::types::Json<HealthReportSources>>, _>("health_reports")?
             .map(|j| j.0)
             .unwrap_or_default();
+        let rack_firmware_reprovisioning_skip: Option<
+            sqlx::types::Json<PowerShelfRackReprovisioningSkip>,
+        > = row.try_get("rack_firmware_reprovisioning_skip")?;
         let labels: sqlx::types::Json<HashMap<String, String>> = row.try_get("labels")?;
         let metadata = Metadata {
             name: row.try_get("name")?,
@@ -192,6 +204,7 @@ impl<'r> FromRow<'r, PgRow> for PowerShelf {
             power_shelf_maintenance_requested: power_shelf_maintenance_requested.map(|r| r.0),
             power_shelf_reprovisioning_requested: power_shelf_reprovisioning_requested.map(|r| r.0),
             firmware_upgrade_status: firmware_upgrade_status.map(|j| j.0),
+            rack_firmware_reprovisioning_skip: rack_firmware_reprovisioning_skip.map(|j| j.0),
             health_reports,
         })
     }
@@ -886,95 +899,49 @@ mod tests {
             };
             "on / ok" {
                 PowerShelfStatus {
-                    shelf_name: Some("psu-a".to_string()),
-                    power_state: Some("on".to_string()),
-                    health_status: Some("ok".to_string()),
-                    rack_firmware_reprovisioning_skip: None,
+                    shelf_name: "psu-a".to_string(),
+                    power_state: "on".to_string(),
+                    health_status: "ok".to_string(),
                 } => Yields(PowerShelfStatus {
-                    shelf_name: Some("psu-a".to_string()),
-                    power_state: Some("on".to_string()),
-                    health_status: Some("ok".to_string()),
-                    rack_firmware_reprovisioning_skip: None,
+                    shelf_name: "psu-a".to_string(),
+                    power_state: "on".to_string(),
+                    health_status: "ok".to_string(),
                 }),
             }
 
             "off / warning" {
                 PowerShelfStatus {
-                    shelf_name: Some("psu-b".to_string()),
-                    power_state: Some("off".to_string()),
-                    health_status: Some("warning".to_string()),
-                    rack_firmware_reprovisioning_skip: None,
+                    shelf_name: "psu-b".to_string(),
+                    power_state: "off".to_string(),
+                    health_status: "warning".to_string(),
                 } => Yields(PowerShelfStatus {
-                    shelf_name: Some("psu-b".to_string()),
-                    power_state: Some("off".to_string()),
-                    health_status: Some("warning".to_string()),
-                    rack_firmware_reprovisioning_skip: None,
+                    shelf_name: "psu-b".to_string(),
+                    power_state: "off".to_string(),
+                    health_status: "warning".to_string(),
                 }),
             }
 
             "standby / critical" {
                 PowerShelfStatus {
-                    shelf_name: Some("psu-c".to_string()),
-                    power_state: Some("standby".to_string()),
-                    health_status: Some("critical".to_string()),
-                    rack_firmware_reprovisioning_skip: None,
+                    shelf_name: "psu-c".to_string(),
+                    power_state: "standby".to_string(),
+                    health_status: "critical".to_string(),
                 } => Yields(PowerShelfStatus {
-                    shelf_name: Some("psu-c".to_string()),
-                    power_state: Some("standby".to_string()),
-                    health_status: Some("critical".to_string()),
-                    rack_firmware_reprovisioning_skip: None,
+                    shelf_name: "psu-c".to_string(),
+                    power_state: "standby".to_string(),
+                    health_status: "critical".to_string(),
                 }),
             }
 
             "empty strings" {
                 PowerShelfStatus {
-                    shelf_name: Some(String::new()),
-                    power_state: Some(String::new()),
-                    health_status: Some(String::new()),
-                    rack_firmware_reprovisioning_skip: None,
+                    shelf_name: String::new(),
+                    power_state: String::new(),
+                    health_status: String::new(),
                 } => Yields(PowerShelfStatus {
-                    shelf_name: Some(String::new()),
-                    power_state: Some(String::new()),
-                    health_status: Some(String::new()),
-                    rack_firmware_reprovisioning_skip: None,
-                }),
-            }
-        );
-    }
-
-    #[test]
-    fn status_json_preserves_legacy_and_skip_only_records() {
-        let requested_at: DateTime<Utc> = "2026-11-10T12:00:00Z".parse().unwrap();
-        scenarios!(
-            run = |json: serde_json::Value| {
-                let status = serde_json::from_value::<PowerShelfStatus>(json.clone()).map_err(drop)?;
-                assert_eq!(serde_json::to_value(&status).map_err(drop)?, json);
-                Ok::<_, ()>(status)
-            };
-            "legacy observations" {
-                serde_json::json!({
-                    "shelf_name": "psu-a",
-                    "power_state": "on",
-                    "health_status": "ok",
-                }) => Yields(PowerShelfStatus {
-                    shelf_name: Some("psu-a".to_string()),
-                    power_state: Some("on".to_string()),
-                    health_status: Some("ok".to_string()),
-                    rack_firmware_reprovisioning_skip: None,
-                }),
-            }
-            "skip without observations" {
-                serde_json::json!({
-                    "rack_firmware_reprovisioning_skip": {
-                        "requested_at": "2026-11-10T12:00:00Z",
-                        "reason": "rack firmware reprovisioning is disabled",
-                    },
-                }) => Yields(PowerShelfStatus {
-                    rack_firmware_reprovisioning_skip: Some(PowerShelfRackReprovisioningSkip {
-                        requested_at,
-                        reason: "rack firmware reprovisioning is disabled".to_string(),
-                    }),
-                    ..Default::default()
+                    shelf_name: String::new(),
+                    power_state: String::new(),
+                    health_status: String::new(),
                 }),
             }
         );

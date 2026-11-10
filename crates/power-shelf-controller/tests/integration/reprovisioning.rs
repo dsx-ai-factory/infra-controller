@@ -45,6 +45,16 @@ async fn commit_outcome(mut outcome: StateHandlerOutcome<PowerShelfControllerSta
     }
 }
 
+async fn stored_status(
+    pool: &PgPool,
+    power_shelf_id: &PowerShelfId,
+) -> Result<Option<serde_json::Value>, sqlx::Error> {
+    sqlx::query_scalar("SELECT status FROM power_shelves WHERE id = $1")
+        .bind(*power_shelf_id)
+        .fetch_one(pool)
+        .await
+}
+
 async fn park_ready(txn: &mut PgConnection, power_shelf_id: &PowerShelfId) {
     set_power_shelf_controller_state(txn, power_shelf_id, PowerShelfControllerState::Ready)
         .await
@@ -78,6 +88,7 @@ async fn test_ready_clears_reprovision_request_when_flag_disabled(
         .as_ref()
         .expect("reprovision request should exist")
         .requested_at;
+    let status_before = stored_status(&pool, &power_shelf_id).await?;
     let mut services = services_without_component_manager(&pool, false);
     let outcome = run_handler(&mut services, &mut state).await;
     assert!(matches!(outcome, StateHandlerOutcome::DoNothing { .. }));
@@ -89,15 +100,14 @@ async fn test_ready_clears_reprovision_request_when_flag_disabled(
         state.controller_state.value,
         PowerShelfControllerState::Ready
     ));
-    let status = state.status.as_ref().expect("skip should be persisted");
-    assert!(status.shelf_name.is_none());
-    assert!(status.power_state.is_none());
-    assert!(status.health_status.is_none());
-    let skipped = status
+    // Earlier binaries decode `status` with all observation fields required,
+    // so the skip must leave that column exactly as it was.
+    assert_eq!(stored_status(&pool, &power_shelf_id).await?, status_before);
+    assert!(state.status.is_none());
+    let skipped = state
         .rack_firmware_reprovisioning_skip
-        .as_ref()
-        .expect("disabled reprovisioning should record a skip")
-        .clone();
+        .clone()
+        .expect("disabled reprovisioning should record a skip");
     assert_eq!(skipped.requested_at, requested_at);
     assert!(
         skipped
@@ -132,12 +142,7 @@ async fn test_ready_clears_reprovision_request_when_flag_disabled(
     commit_outcome(outcome).await;
     let state = load_power_shelf(&pool, &power_shelf_id).await;
     assert_eq!(
-        state
-            .status
-            .as_ref()
-            .unwrap()
-            .rack_firmware_reprovisioning_skip
-            .as_ref(),
+        state.rack_firmware_reprovisioning_skip.as_ref(),
         Some(&skipped),
         "an idle sweep must preserve the completed request's skip"
     );
@@ -166,12 +171,7 @@ async fn test_ready_clears_reprovision_request_when_flag_disabled(
     commit_outcome(outcome).await;
     let state = load_power_shelf(&pool, &power_shelf_id).await;
     assert!(
-        state
-            .status
-            .as_ref()
-            .unwrap()
-            .rack_firmware_reprovisioning_skip
-            .is_none(),
+        state.rack_firmware_reprovisioning_skip.is_none(),
         "admitting a later request must clear the earlier skip"
     );
     assert_eq!(
@@ -228,7 +228,7 @@ async fn test_disabled_reprovisioning_preserves_a_replacement_request(
         state.power_shelf_reprovisioning_requested.as_ref(),
         Some(&replacement)
     );
-    assert!(state.status.is_none());
+    assert!(state.rack_firmware_reprovisioning_skip.is_none());
 
     let outcome = run_handler(&mut services, &mut state).await;
     assert!(matches!(outcome, StateHandlerOutcome::DoNothing { .. }));
@@ -236,10 +236,8 @@ async fn test_disabled_reprovisioning_preserves_a_replacement_request(
     let state = load_power_shelf(&pool, &power_shelf_id).await;
     assert!(state.power_shelf_reprovisioning_requested.is_none());
     let skipped = state
-        .status
-        .expect("replacement request should record a skip")
         .rack_firmware_reprovisioning_skip
-        .expect("replacement request's skip should be present");
+        .expect("replacement request should record a skip");
     assert_eq!(skipped.requested_at, replacement.requested_at);
     assert!(
         skipped

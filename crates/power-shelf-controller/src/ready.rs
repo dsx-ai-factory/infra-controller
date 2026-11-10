@@ -85,17 +85,16 @@ pub async fn handle_ready(
     if let Some(req) = &state.power_shelf_reprovisioning_requested {
         if !ctx.services.rack_firmware_reprovisioning_enabled {
             let reason = "rack_firmware_reprovisioning_enabled is false";
-            let mut status = state.status.clone().unwrap_or_default();
-            status.rack_firmware_reprovisioning_skip = Some(PowerShelfRackReprovisioningSkip {
+            let skip = PowerShelfRackReprovisioningSkip {
                 requested_at: req.requested_at,
                 reason: reason.to_string(),
-            });
+            };
             let mut txn = ctx.services.db_pool.begin().await?;
             if db_power_shelf::skip_power_shelf_reprovisioning_requested(
                 txn.as_mut(),
                 *power_shelf_id,
                 req,
-                &status,
+                &skip,
             )
             .await?
             {
@@ -105,7 +104,7 @@ pub async fn handle_ready(
                     reason,
                     "Skipping power shelf rack reprovisioning"
                 );
-                state.status = Some(status);
+                state.rack_firmware_reprovisioning_skip = Some(skip);
             }
             return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
         }
@@ -150,19 +149,15 @@ pub async fn handle_ready(
             ?reprovisioning_state,
             "Rack-level reprovisioning requested — entering ReProvisioning"
         );
-        let mut outcome =
-            StateHandlerOutcome::transition(PowerShelfControllerState::ReProvisioning {
-                reprovisioning_state,
-            });
-        if let Some(mut status) = state.status.clone()
-            && status.rack_firmware_reprovisioning_skip.take().is_some()
-        {
-            let mut updated_state = state.clone();
-            updated_state.status = Some(status);
+        let outcome = StateHandlerOutcome::transition(PowerShelfControllerState::ReProvisioning {
+            reprovisioning_state,
+        });
+        if state.rack_firmware_reprovisioning_skip.is_some() {
             let mut txn = ctx.services.db_pool.begin().await?;
-            db_power_shelf::update(&updated_state, txn.as_mut()).await?;
-            state.status = updated_state.status;
-            outcome = outcome.with_txn(txn);
+            db_power_shelf::clear_rack_firmware_reprovisioning_skip(txn.as_mut(), *power_shelf_id)
+                .await?;
+            state.rack_firmware_reprovisioning_skip = None;
+            return Ok(outcome.with_txn(txn));
         }
         return Ok(outcome);
     }
@@ -305,15 +300,13 @@ async fn persist_observed_power_state(
     let new_status = match state.status.as_ref() {
         Some(existing) => PowerShelfStatus {
             shelf_name: existing.shelf_name.clone(),
-            power_state: Some(observed_power_state.to_owned()),
+            power_state: observed_power_state.to_owned(),
             health_status: existing.health_status.clone(),
-            rack_firmware_reprovisioning_skip: existing.rack_firmware_reprovisioning_skip.clone(),
         },
         None => PowerShelfStatus {
-            shelf_name: Some(state.config.name.clone()),
-            power_state: Some(observed_power_state.to_owned()),
-            health_status: Some(String::new()),
-            rack_firmware_reprovisioning_skip: None,
+            shelf_name: state.config.name.clone(),
+            power_state: observed_power_state.to_owned(),
+            health_status: String::new(),
         },
     };
 
@@ -324,7 +317,7 @@ async fn persist_observed_power_state(
     {
         tracing::debug!(
             power_shelf_id = %power_shelf_id,
-            power_state = %observed_power_state,
+            power_state = %new_status.power_state,
             "PowerShelf status power_state unchanged; skipping DB write",
         );
         return None;
