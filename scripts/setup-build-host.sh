@@ -48,6 +48,13 @@ KEA_VERSION="$(cat dev/docker/kea.version)"
 ${SUDO} env DEBIAN_FRONTEND=noninteractive apt-get install -y kea-common- \
     "isc-kea-common=${KEA_VERSION}" "isc-kea-hooks=${KEA_VERSION}" "isc-kea-dev=${KEA_VERSION}" \
     "isc-kea-dhcp4=${KEA_VERSION}" "isc-kea-dhcp6=${KEA_VERSION}"
+# Native DHCPv6 tests require the same handoff contract as the runtime image.
+KEA_PACKAGE_DIR="$(mktemp -d)"
+trap '${SUDO} rm -rf "${KEA_PACKAGE_DIR}"' EXIT
+${SUDO} env KEA_PACKAGE_DIR="${KEA_PACKAGE_DIR}" sh dev/docker/build-kea.sh "${KEA_VERSION}"
+${SUDO} dpkg -i "${KEA_PACKAGE_DIR}/isc-kea-common.deb"
+${SUDO} rm -rf "${KEA_PACKAGE_DIR}"
+trap - EXIT
 ${SUDO} usermod -aG _kea "${DOCKER_USER}"
 
 # --- 2. Rust toolchain --------------------------------------------------------
