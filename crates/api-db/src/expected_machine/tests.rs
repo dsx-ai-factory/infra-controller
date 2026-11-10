@@ -46,6 +46,7 @@ async fn exercise_expected_machine_queries(
         bmc_mac_address: "02:00:00:00:01:01".parse()?,
         data: ExpectedMachineData {
             server_name: Some("projection-name".to_string()),
+            replace_dpu_loopbacks: false,
             bmc_username: "test-user".to_string(),
             bmc_password: "test-password".to_string(),
             serial_number: "projection-machine".to_string(),

@@ -654,6 +654,7 @@ impl forge::ExpectedInterfaceRole {
                 match name.trim().to_ascii_lowercase().replace('-', "_").as_str() {
                     "unspecified" | "expected_interface_role_unspecified" => Self::Unspecified,
                     "host" | "expected_interface_role_host" => Self::Host,
+                    "dpu_loopback" | "expected_interface_role_dpu_loopback" => Self::DpuLoopback,
                     "dpu_os" | "dpuos" | "expected_interface_role_dpu_os" => Self::DpuOs,
                     "dpu_bmc" | "dpubmc" | "expected_interface_role_dpu_bmc" => Self::DpuBmc,
                     "host_bmc" | "hostbmc" | "expected_interface_role_host_bmc" => Self::HostBmc,
@@ -684,6 +685,7 @@ impl forge::ExpectedInterfaceRole {
             Self::Unspecified => "unspecified",
             Self::Host => "host",
             Self::DpuOs => "dpu_os",
+            Self::DpuLoopback => "dpu_loopback",
             Self::DpuBmc => "dpu_bmc",
             Self::HostBmc => "host_bmc",
         })

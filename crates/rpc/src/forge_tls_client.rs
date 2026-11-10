@@ -32,6 +32,7 @@ use rustls::{ClientConfig, RootCertStore};
 use tonic::body::Body;
 use tonic::codegen::http::uri::PathAndQuery;
 use tonic::transport::Uri;
+use tower::ServiceExt;
 use tower::util::BoxCloneService;
 use tryhard::backoff_strategies::FixedBackoff;
 use tryhard::{NoOnRetry, RetryFutureConfig};
@@ -112,7 +113,7 @@ pub type ForgeClientT =
 /// response-body consumption separately from the transport's header deadline.
 pub struct ForgeHttpClient {
     origin: Uri,
-    service: BoxCloneService<hyper::Request<Body>, hyper::Response<Incoming>, TransportError>,
+    service: BoxCloneService<hyper::Request<Body>, hyper::Response<Body>, TransportError>,
 }
 
 impl ForgeHttpClient {
@@ -121,7 +122,7 @@ impl ForgeHttpClient {
     pub async fn get(
         &mut self,
         path: PathAndQuery,
-    ) -> Result<hyper::Response<Incoming>, TransportError> {
+    ) -> Result<hyper::Response<Body>, TransportError> {
         let uri = Uri::builder()
             .scheme(
                 self.origin
@@ -1055,7 +1056,6 @@ mod tests {
     use hyper::rt::Executor as _;
     use hyper_rustls::HttpsConnector;
     use hyper_util::rt::TokioExecutor;
-    use tower::ServiceExt as _;
     use tracing::Instrument as _;
 
     use super::*;
@@ -1068,7 +1068,7 @@ mod tests {
         let requests = captured.clone();
         let service = tower::service_fn(move |request: hyper::Request<Body>| {
             *requests.lock().unwrap() = Some((request.method().clone(), request.uri().clone()));
-            std::future::ready(Err::<hyper::Response<Incoming>, _>(TransportError(
+            std::future::ready(Err::<hyper::Response<Body>, _>(TransportError(
                 "request captured".into(),
             )))
         });

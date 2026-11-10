@@ -26,10 +26,11 @@ use chrono::Utc;
 use mac_address::MacAddress;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
 use model::hardware_info::HardwareInfo;
-use model::machine::ManagedHostState;
 use model::machine::machine_id::host_id_from_dpu_hardware_info;
+use model::machine::{ManagedHostState, ManagedHostStateSnapshot};
 use model::site_explorer::EndpointExplorationReport;
 use model::test_support::ManagedHostConfig;
+use tonic::IntoRequest;
 
 use crate::TestHarness;
 use crate::db_machine::DbMachineExt as _;
@@ -48,6 +49,22 @@ pub struct TestManagedHost {
 }
 
 impl TestManagedHost {
+    /// Reloads this host and its instance within the caller's transaction.
+    pub async fn snapshot(&self, txn: &mut sqlx::PgTransaction<'_>) -> ManagedHostStateSnapshot {
+        db::managed_host::load_snapshot(txn.as_mut(), &self.host.id.into(), Default::default())
+            .await
+            .unwrap()
+            .expect("managed host should exist")
+    }
+
+    /// Creates an instance builder using this managed host and the supplied harness runtime.
+    pub fn instance_builder<'a>(
+        &'a self,
+        harness: &'a TestHarness,
+    ) -> crate::TestInstanceBuilder<'a> {
+        crate::TestInstanceBuilder::new(harness, self)
+    }
+
     pub fn dpu(&self, dpu_index: usize) -> &TestDpuMachine {
         self.dpus
             .get(dpu_index)
@@ -133,7 +150,11 @@ impl TestManagedHost {
 
     pub async fn report_dpu_network_status(&self) {
         for dpu in &self.dpus {
-            dpu.record_network_status().await;
+            let status = dpu.network_status().build().await;
+            self.api
+                .record_dpu_network_status(status.into_request())
+                .await
+                .expect("DPU network status should be recorded");
         }
     }
 }

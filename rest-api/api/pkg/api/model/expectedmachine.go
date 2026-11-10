@@ -5,6 +5,7 @@ package model
 
 import (
 	"errors"
+	"net/netip"
 	"regexp"
 	"strings"
 	"time"
@@ -124,7 +125,7 @@ func (i APIExpectedMachineInterface) Validate() error {
 			cdbm.ExpectedInterfaceNetworkSegmentTypeUnderlay, cdbm.ExpectedInterfaceNetworkSegmentTypeHostInband)),
 		validation.Field(&i.Role, validation.NilOrNotEmpty, validation.In(
 			cdbm.ExpectedInterfaceRoleUnspecified, cdbm.ExpectedInterfaceRoleHost, cdbm.ExpectedInterfaceRoleDpuOs,
-			cdbm.ExpectedInterfaceRoleDpuBmc, cdbm.ExpectedInterfaceRoleHostBmc)),
+			cdbm.ExpectedInterfaceRoleDpuBmc, cdbm.ExpectedInterfaceRoleHostBmc, cdbm.ExpectedInterfaceRoleDpuLoopback)),
 		validation.Field(&i.IPAllocation, validation.NilOrNotEmpty, validation.In(
 			cdbm.ExpectedInterfaceIPAllocationUnspecified, cdbm.ExpectedInterfaceIPAllocationDynamic,
 			cdbm.ExpectedInterfaceIPAllocationFixed, cdbm.ExpectedInterfaceIPAllocationRetained)),
@@ -241,9 +242,60 @@ func expectedMachineInterfacesToDB(interfaces []APIExpectedMachineInterface) []c
 	return result
 }
 
-// APIExpectedMachineInterfaces is an ordered replacement list of declarations.
-// Nil preserves the list on PATCH; an explicit empty list clears it.
+// APIExpectedMachineInterfaces is an ordered list of declarations. Nil preserves
+// the list on PATCH. Physical-only lists preserve the stored loopback subset
+// unless ReplaceDpuLoopbacks explicitly requests its replacement.
 type APIExpectedMachineInterfaces []APIExpectedMachineInterface
+
+// ToDBModelPreservingLoopbacks converts a replacement list for REST storage.
+// Nil preserves the entire PATCH list. Supplied loopbacks or replace=true replace
+// the loopback subset; otherwise stored loopbacks are retained. Callers must read
+// existing under their update lock and forward the original request to Core.
+func (interfaces APIExpectedMachineInterfaces) ToDBModelPreservingLoopbacks(existing []cdbm.ExpectedMachineInterface, replace bool) []cdbm.ExpectedMachineInterface {
+	result := expectedMachineInterfacesToDB(interfaces)
+	if result == nil {
+		return nil
+	}
+	for index := range result {
+		incoming := &result[index]
+		// Core recognizes an omitted loopback role only for an unchanged MAC
+		// and address, including equivalent textual IP and MAC spellings.
+		if incoming.Role == nil && incoming.MacAddress != nil && incoming.FixedIP != nil {
+			address, err := netip.ParseAddr(*incoming.FixedIP)
+			if err != nil {
+				continue
+			}
+			for _, stored := range existing {
+				if stored.Role == nil || *stored.Role != cdbm.ExpectedInterfaceRoleDpuLoopback || stored.MacAddress == nil || stored.FixedIP == nil {
+					continue
+				}
+				storedAddress, err := netip.ParseAddr(*stored.FixedIP)
+				if err != nil || address != storedAddress || *incoming.MacAddress != APIExpectedMachineInterfaceMacAddressIdentifier(*stored.MacAddress).ToDBModel() {
+					continue
+				}
+				incoming.Role = cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuLoopback)
+				if incoming.Primary != nil && !*incoming.Primary {
+					incoming.Primary = nil
+				}
+				if incoming.IPAllocation == nil {
+					incoming.IPAllocation = stored.IPAllocation
+				}
+				break
+			}
+		}
+		if incoming.Role != nil && *incoming.Role == cdbm.ExpectedInterfaceRoleDpuLoopback {
+			replace = true
+		}
+	}
+	if !replace {
+		for _, stored := range existing {
+			if stored.Role != nil && *stored.Role == cdbm.ExpectedInterfaceRoleDpuLoopback {
+				result = append(result, stored)
+			}
+		}
+	}
+	return result
+}
 
 // Validate checks each declaration and the cardinality constraints shared with Core.
 // Omitted roles may be inherited on PATCH, so Core validates their resolved values.
@@ -329,6 +381,11 @@ type APIExpectedMachineCreateRequest struct {
 	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers"`
 	// Interfaces are expected host NIC declarations forwarded to Core.
 	Interfaces APIExpectedMachineInterfaces `json:"interfaces"`
+	// ReplaceDpuLoopbacks explicitly replaces the loopback subset, including
+	// clearing it when interfaces contains no loopbacks. True requires a non-null
+	// interfaces list. Without supplied loopbacks, omitted, null, or false
+	// preserves the stored loopback subset.
+	ReplaceDpuLoopbacks *bool `json:"replaceDpuLoopbacks"`
 	// SkuId is the optional UUID for an SKU
 	SkuID *string `json:"skuId"`
 	// RackID is the optional rack identifier
@@ -368,7 +425,9 @@ func (emcr *APIExpectedMachineCreateRequest) InterfacesToDBModel() []cdbm.Expect
 // Validate ensure the values passed in request are acceptable
 func (emcr *APIExpectedMachineCreateRequest) Validate() error {
 	err := validation.ValidateStruct(emcr,
-		validation.Field(&emcr.Interfaces),
+		validation.Field(&emcr.Interfaces,
+			validation.When(emcr.ReplaceDpuLoopbacks != nil && *emcr.ReplaceDpuLoopbacks,
+				validation.NotNil.Error("must be non-null when replaceDpuLoopbacks is true"))),
 		validation.Field(&emcr.SiteID,
 			validation.When(emcr.SiteID != "", validationis.UUID.Error(validationErrorInvalidUUID))),
 		validation.Field(&emcr.BmcMacAddress,
@@ -430,9 +489,15 @@ type APIExpectedMachineUpdateRequest struct {
 	ChassisSerialNumber *string `json:"chassisSerialNumber"`
 	// FallbackDPUSerialNumbers is the serial numbers of the expected machine's fallback DPUs
 	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers"`
-	// Interfaces replaces the complete interface list when non-nil. An omitted
-	// or null field preserves it, while an explicit empty list clears it.
+	// Interfaces replaces physical declarations when non-nil. Omitted or null
+	// preserves the list; loopbacks require supplied loopback declarations or
+	// ReplaceDpuLoopbacks to replace their subset.
 	Interfaces APIExpectedMachineInterfaces `json:"interfaces"`
+	// ReplaceDpuLoopbacks explicitly replaces the loopback subset, including
+	// clearing it when interfaces contains no loopbacks. True requires a non-null
+	// interfaces list. Without supplied loopbacks, omitted, null, or false
+	// preserves the stored loopback subset.
+	ReplaceDpuLoopbacks *bool `json:"replaceDpuLoopbacks"`
 	// SkuId is the optional UUID for an SKU
 	SkuID *string `json:"skuId"`
 	// RackID is the optional rack identifier
@@ -486,7 +551,9 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 	}
 
 	err := validation.ValidateStruct(emur,
-		validation.Field(&emur.Interfaces),
+		validation.Field(&emur.Interfaces,
+			validation.When(emur.ReplaceDpuLoopbacks != nil && *emur.ReplaceDpuLoopbacks,
+				validation.NotNil.Error("must be non-null when replaceDpuLoopbacks is true"))),
 		validation.Field(&emur.BmcMacAddress,
 			validation.NilOrNotEmpty.Error("BmcMacAddress cannot be empty"),
 			validation.When(emur.BmcMacAddress != nil && *emur.BmcMacAddress != "",
@@ -552,6 +619,7 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 		resource.ServerName = cutil.GetPtrIfNotZero(*emur.ServerName)
 	}
 	if emur.Interfaces != nil {
+		resource.ReplaceDpuLoopbacks = emur.ReplaceDpuLoopbacks != nil && *emur.ReplaceDpuLoopbacks
 		resource.HostNics = make([]*corev1.ExpectedHostNic, 0, len(emur.Interfaces))
 		for _, expectedInterface := range emur.Interfaces {
 			resource.HostNics = append(resource.HostNics, expectedInterface.ToDBModel().ToProto())

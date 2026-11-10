@@ -110,16 +110,15 @@ calls per second, a deadline per call, and back-off on pushback (429, 503,
 | Reader | API | Default schedule | Reads |
 |---|---|---|---|
 | `devices` | nico-api | 120 s, 600 s timeout | Censuses and by-ID records of hosts, DPUs, switches, power shelves, racks and instances; expected records; open host firmware requests |
-| `rest_inventory` | nico-rest-api | 120 s | Site totals (machine, rack, tray) and a site check, as the provider |
+| `rest_inventory` | nico-rest-api | 120 s | Site totals (machine, rack, tray; `restInventory.totals: false` skips them) and a site check, as the provider |
 
 The provider instance total is unavailable because the REST API has no
 provider-scoped instance count. Other supported totals are collected
 independently of that capability.
 
-Firmware targets, update limits, the tenant's allocation and the tenant's
-instances are read once the firmware and instance tests need them (issues
-8154 and 8152). Until then their filters answer 422 `field_unavailable`, and
-`/v1/config` serves them as `null`.
+Firmware targets and update limits remain unavailable. Their filters answer
+422 `field_unavailable`, and `/v1/config` serves them as `null`. Tenant
+allocation and REST unit reads require the optional instance fixture below.
 
 Each reader publishes one immutable snapshot per count family. A family is
 replaced only by a complete sweep: a failed or unresolved read keeps its last
@@ -284,3 +283,39 @@ rotated the site CA, delete the stale secret so cert-manager reissues it:
 ```bash
 kubectl delete secret nico-site-health-probe-tls -n <namespace>
 ```
+
+### Instance fixture reads
+
+Set `state.rest.tenant.org`, `tenantId`, `instanceType` and `auth` to enable
+single-tenant instance evidence. Use the existing `auth` token-file or Secret
+settings, with a tenant org distinct from the provider org. The provider
+identity reads all site Machines, including labels. The tenant identity reads
+its instances and quota. No caller identity is accepted in `/v1` requests.
+
+`GET /v1/units?type=instance&source=rest` returns REST IDs, names, tenant UUIDs,
+REST Machine IDs and status, plus `controllerInstanceId` for NICo agreement.
+`GET /v1/units?type=host&source=rest` returns REST Machine IDs and state, with
+`restMachine` containing `controllerId`, `instanceType`, `instanceId`,
+`tenantId`, `labels` and the backend's `isUsableByTenant` flag. This flag comes
+from the provider view, not proof of a tenant grant. Combine exact type/quota
+and free REST state with NICo allocatability. Preserve labels on updates.
+Both listings use existing immutable cursor paging and `/v1/units/query`.
+REST count queries remain unsupported. Native instance counts are unchanged.
+
+`GET /v1/config?instanceType=<id>` exposes `rest.tenantAllocation` for the
+configured type, with a tenant UUID and the existing read/error timestamps.
+The source is `tenant/current`, then `instance/type/<id>` with allocation
+stats and provider ownership, so provider-wide quota cannot masquerade as
+tenant quota. A different type returns no allocation. Before the first good
+read, allocation is null. Failed reads retain the old value and its error.
+
+Unit/count sweep metadata adds `lastAttemptSucceeded` and
+`lastAttemptError`. Failed attempts do not refresh the retained snapshot's
+source times. Before the first good unit read, 503 includes any recorded,
+sanitized source failure. Require success, a matching process and bounded source age.
+A complete REST scan is bounded to 200,000 rows and 64 MiB across pages,
+rejecting duplicate IDs, missing pages and changing totals. REST pages share
+no transaction. Repeat full agreement after writes settle, and never infer
+late-create settlement from an empty listing. The fixture adds two allocation
+GETs plus Machine/instance pages to the shared API gate. Existing inventory
+calls remain. Calibrate the complete reader workload before timing a run.

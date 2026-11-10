@@ -41,6 +41,8 @@ pub mod asset;
 pub mod builder;
 pub mod db_machine;
 pub mod dns;
+mod dpu_network_status;
+mod instance;
 pub mod machine;
 pub mod machine_dpu;
 pub mod machine_host;
@@ -50,6 +52,8 @@ pub mod prelude;
 pub mod resource_pool;
 
 pub use db_machine::DbMachineExt;
+pub use dpu_network_status::DpuNetworkStatusBuilder;
+pub use instance::{TestInstance, TestInstanceBuilder};
 pub use machine::TestMachine;
 pub use machine_dpu::TestDpuMachine;
 pub use machine_host::TestHostMachine;
