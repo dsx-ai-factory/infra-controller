@@ -736,6 +736,15 @@ impl TestEnv {
             .await;
     }
 
+    /// Processes each rack once so assertions can inspect the immediate transition.
+    pub(in crate::tests) async fn run_rack_controller_iteration_no_requeue(&self) {
+        self.rack_controller
+            .lock()
+            .await
+            .run_single_iteration_ext(false)
+            .await;
+    }
+
     pub(in crate::tests) async fn run_site_explorer_iteration(&self) {
         self.site_explorer
             .run_single_iteration()
