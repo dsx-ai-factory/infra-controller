@@ -924,6 +924,25 @@ impl DerefMut for Transaction<'_> {
     }
 }
 
+/// `TransactionHandler` lets the transaction helpers accept an async function
+/// directly. Its future can borrow the supplied transaction and must be `Send`.
+/// Ordinary async functions satisfy this bound without a manual implementation.
+///
+/// `Txn` is the borrowed transaction type. Keeping it as a type parameter lets
+/// each invocation select its own borrow lifetime.
+pub trait TransactionHandler<Txn, Request, T, E>: FnOnce(Txn, Request) -> Self::Future {
+    /// The handler's asynchronous work, including any transaction borrow.
+    type Future: Future<Output = Result<T, E>> + Send;
+}
+
+impl<Txn, Request, T, E, F, Fut> TransactionHandler<Txn, Request, T, E> for F
+where
+    F: FnOnce(Txn, Request) -> Fut,
+    Fut: Future<Output = Result<T, E>> + Send,
+{
+    type Future = Fut;
+}
+
 /// Provides an easy way to auto-commit a transaction if no error is thrown.
 pub trait WithTransaction {
     #[track_caller]
@@ -937,6 +956,67 @@ pub trait WithTransaction {
     where
         T: Send,
         E: Send;
+
+    /// `with_write_txn` runs a handler with its request in a new transaction,
+    /// then commits before returning its successful result. The handler does
+    /// the work; this helper owns begin, commit, and error cleanup.
+    ///
+    /// Operation errors trigger an explicit rollback attempt. Begin/commit
+    /// errors are converted into `E`; a rollback failure is logged without
+    /// replacing the operation error. Cancellation uses SQLx's drop cleanup.
+    /// No errors are retried, including an interrupted or failed commit.
+    ///
+    /// The name expresses write intent, not a requirement to change a row.
+    /// It uses the connection's default isolation level and access mode. Keep
+    /// unrelated external I/O outside the handler, just as with [`Self::with_txn`].
+    #[track_caller]
+    fn with_write_txn<'pool, Request, T, E>(
+        &'pool self,
+        handler: impl for<'txn> TransactionHandler<&'txn mut PgTransaction<'pool>, Request, T, E>
+        + Send
+        + 'pool,
+        request: Request,
+    ) -> impl Future<Output = Result<T, E>> + Send
+    where
+        Request: Send + 'pool,
+        T: Send + 'pool,
+        E: From<DatabaseError> + Send + 'pool,
+    {
+        // Call with_txn before entering the async block to preserve the caller's location.
+        let transaction = self.with_txn(move |txn| Box::pin(handler(txn, request)));
+        async move { transaction.await? }
+    }
+
+    /// `with_read_only_snapshot` runs a handler with its request after setting
+    /// `REPEATABLE READ, READ ONLY`, so its reads share one database snapshot.
+    /// It commits on success and uses [`Self::with_write_txn`]'s error policy;
+    /// Errors from [`set_read_only_snapshot`] also trigger rollback and convert into `E`.
+    ///
+    /// Use [`db_read::DbReader`] for ordinary reads that do not need a shared
+    /// snapshot. This helper does not replace [`DbSessionGuard`]'s deadline and
+    /// cancellation handling.
+    #[track_caller]
+    fn with_read_only_snapshot<'pool, Request, T, E>(
+        &'pool self,
+        handler: impl for<'txn> TransactionHandler<&'txn mut PgTransaction<'pool>, Request, T, E>
+        + Send
+        + 'pool,
+        request: Request,
+    ) -> impl Future<Output = Result<T, E>> + Send
+    where
+        Request: Send + 'pool,
+        T: Send + 'pool,
+        E: From<DatabaseError> + Send + 'pool,
+    {
+        // Keep this call synchronous for the same caller tracking as with_write_txn.
+        let transaction = self.with_txn(move |txn| {
+            Box::pin(async move {
+                set_read_only_snapshot(txn).await?;
+                handler(txn, request).await
+            })
+        });
+        async move { transaction.await? }
+    }
 }
 
 impl WithTransaction for PgPool {
@@ -1056,17 +1136,203 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn read_only_snapshot_rejects_writes(pool: PgPool) {
-        let mut txn = pool.begin().await.unwrap();
-        set_read_only_snapshot(&mut txn).await.unwrap();
-        let error = sqlx::query("CREATE TABLE read_only_snapshot_probe (id int)")
-            .execute(&mut *txn)
+        async fn write_probe(txn: &mut PgTransaction<'_>, (): ()) -> DatabaseResult<()> {
+            let query = "CREATE TABLE read_only_snapshot_probe (id int)";
+            sqlx::query(query)
+                .execute(&mut **txn)
+                .await
+                .map_err(|error| DatabaseError::query(query, error))?;
+            Ok(())
+        }
+
+        let error = pool
+            .with_read_only_snapshot(write_probe, ())
             .await
             .expect_err("a read-only transaction rejects writes");
+        let DatabaseError::Sqlx(error) = error else {
+            panic!("expected a database query error: {error:?}");
+        };
         // read_only_sql_transaction
         assert_eq!(
-            error.as_database_error().and_then(|e| e.code()).as_deref(),
+            error
+                .source
+                .as_database_error()
+                .and_then(|e| e.code())
+                .as_deref(),
             Some("25006")
         );
+    }
+
+    // WriteCompletion selects how the test handler finishes.
+    #[derive(Clone, Copy, Debug)]
+    enum WriteCompletion {
+        Success,
+        OperationError,
+        CommitError,
+    }
+
+    // OperationError is the test handler's error, including converted database failures.
+    #[derive(Debug, thiserror::Error)]
+    enum OperationError {
+        #[error("operation rejected")]
+        Rejected,
+        #[error(transparent)]
+        Database(#[from] DatabaseError),
+    }
+
+    // write_transaction_probe is a test handler. The deferred unique constraint
+    // lets its duplicate insert succeed, so the error comes from commit instead.
+    async fn write_transaction_probe(
+        txn: &mut PgTransaction<'_>,
+        (value, completion): (&str, WriteCompletion),
+    ) -> Result<usize, OperationError> {
+        let query = "INSERT INTO transaction_probe (value) VALUES ($1)";
+        sqlx::query(query)
+            .bind(value)
+            .execute(&mut **txn)
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?;
+        match completion {
+            WriteCompletion::Success => Ok(value.len()),
+            WriteCompletion::OperationError => Err(OperationError::Rejected),
+            WriteCompletion::CommitError => {
+                sqlx::query(query)
+                    .bind(value)
+                    .execute(&mut **txn)
+                    .await
+                    .map_err(|error| DatabaseError::query(query, error))?;
+                Ok(value.len())
+            }
+        }
+    }
+
+    /// Check persisted data after each completion, not just the returned Result.
+    /// The borrowed request also prevents an accidental `'static` API restriction.
+    #[crate::sqlx_test]
+    async fn write_transaction_completion(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
+        sqlx::query(
+            "CREATE TABLE transaction_probe (value text UNIQUE DEFERRABLE INITIALLY DEFERRED)",
+        )
+        .execute(&pool)
+        .await?;
+        let value = String::from("request value");
+
+        for completion in [
+            WriteCompletion::Success,
+            WriteCompletion::OperationError,
+            WriteCompletion::CommitError,
+        ] {
+            sqlx::query("DELETE FROM transaction_probe")
+                .execute(&pool)
+                .await?;
+
+            let request = (value.as_str(), completion);
+            let caller_line = line!() + 1;
+            let result = pool.with_write_txn(write_transaction_probe, request).await;
+
+            let expected = match completion {
+                WriteCompletion::Success => {
+                    assert_eq!(result.unwrap(), value.len());
+                    vec![value.clone()]
+                }
+                WriteCompletion::OperationError => {
+                    assert!(matches!(result, Err(OperationError::Rejected)));
+                    vec![]
+                }
+                WriteCompletion::CommitError => {
+                    let Err(OperationError::Database(DatabaseError::Sqlx(error))) = result else {
+                        panic!("expected a commit error, got {result:?}");
+                    };
+                    assert_eq!(error.query, "transaction commit");
+                    assert_eq!((error.file, error.line), (file!(), caller_line));
+                    assert_eq!(
+                        error
+                            .source
+                            .as_database_error()
+                            .and_then(|e| e.code())
+                            .as_deref(),
+                        Some("23505")
+                    );
+                    vec![]
+                }
+            };
+            let values: Vec<String> = sqlx::query_scalar("SELECT value FROM transaction_probe")
+                .fetch_all(&pool)
+                .await?;
+            assert_eq!(values, expected, "{completion:?}");
+        }
+        Ok(())
+    }
+
+    /// A closed pool must fail before invoking either handler, with the error
+    /// pointing at the helper's caller rather than its implementation.
+    #[tokio::test]
+    async fn transaction_helpers_propagate_begin_errors() {
+        async fn must_not_run(_: &mut PgTransaction<'_>, (): ()) -> DatabaseResult<()> {
+            panic!("handler ran despite transaction begin failure");
+        }
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost/unused")
+            .unwrap();
+        pool.close().await;
+
+        let write_line = line!() + 1;
+        let write = pool.with_write_txn(must_not_run, ()).await;
+        let read_line = line!() + 1;
+        let read = pool.with_read_only_snapshot(must_not_run, ()).await;
+        for (result, caller_line) in [(write, write_line), (read, read_line)] {
+            let Err(DatabaseError::Sqlx(error)) = result else {
+                panic!("expected transaction begin failure, got {result:?}");
+            };
+            assert_eq!(error.query, "transaction begin");
+            assert_eq!((error.file, error.line), (file!(), caller_line));
+            assert!(matches!(error.source, sqlx::Error::PoolClosed));
+        }
+    }
+
+    /// Commit a change on another connection between reads. The snapshot
+    /// must retain the first value even though new readers see the update.
+    #[crate::sqlx_test]
+    async fn read_only_snapshot_keeps_consistent_reads(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        async fn read_around_update(
+            txn: &mut PgTransaction<'_>,
+            pool: &PgPool,
+        ) -> DatabaseResult<(i32, i32)> {
+            let query = "SELECT value FROM snapshot_probe";
+            let before = sqlx::query_scalar(query)
+                .fetch_one(&mut **txn)
+                .await
+                .map_err(|error| DatabaseError::query(query, error))?;
+            let update = "UPDATE snapshot_probe SET value = 2";
+            sqlx::query(update)
+                .execute(pool)
+                .await
+                .map_err(|error| DatabaseError::query(update, error))?;
+            let after = sqlx::query_scalar(query)
+                .fetch_one(&mut **txn)
+                .await
+                .map_err(|error| DatabaseError::query(query, error))?;
+            Ok((before, after))
+        }
+        sqlx::query("CREATE TABLE snapshot_probe (value integer NOT NULL)")
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT INTO snapshot_probe (value) VALUES (1)")
+            .execute(&pool)
+            .await?;
+
+        let reads = pool
+            .with_read_only_snapshot(read_around_update, &pool)
+            .await?;
+
+        assert_eq!(reads, (1, 1));
+        let current: i32 = sqlx::query_scalar("SELECT value FROM snapshot_probe")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(current, 2);
+        Ok(())
     }
 
     const TRANSACTION_ROLLBACK_FAILURES_METRIC: &str =
