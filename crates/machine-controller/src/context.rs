@@ -122,7 +122,7 @@ impl MachineStateHandlerServices {
         machine: &Machine<impl MachineIdSubtypeTrait>,
     ) -> Result<BackendBmc, StateHandlerError> {
         let bmc_access_info = self.bmc_access_info_for_machine(machine).await?;
-        let report = async {
+        let report = || async {
             db::explored_endpoints::find_by_ips(&self.db_pool, vec![bmc_addr(machine)?.ip()])
                 .await?
                 .into_iter()

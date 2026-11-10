@@ -41,13 +41,16 @@ impl BmcConnector {
         }
     }
 
-    /// Connects to the BMC at `access`. Only the drivers await `report`, the
-    /// exploration report they select by, so libredfish never reads it.
-    pub async fn connect<E>(
+    /// Connects to the BMC at `access`. Only the drivers call `report` for the
+    /// exploration report they select by, so libredfish never loads it.
+    pub async fn connect<E, Fut>(
         &self,
         access: &BmcAccessInfo,
-        report: impl Future<Output = Result<EndpointExplorationReport, E>>,
-    ) -> Result<BackendBmc, BmcConnectError<E>> {
+        report: impl FnOnce() -> Fut,
+    ) -> Result<BackendBmc, BmcConnectError<E>>
+    where
+        Fut: Future<Output = Result<EndpointExplorationReport, E>>,
+    {
         match self {
             Self::Libredfish(pool) => pool
                 .client_by_info(access)
@@ -55,7 +58,7 @@ impl BmcConnector {
                 .map(BackendBmc::from)
                 .map_err(BmcConnectError::Libredfish),
             Self::Drivers(drivers) => {
-                let report = report.await.map_err(BmcConnectError::Report)?;
+                let report = report().await.map_err(BmcConnectError::Report)?;
                 drivers
                     .connect(access, &report)
                     .await

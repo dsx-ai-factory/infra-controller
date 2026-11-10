@@ -599,7 +599,7 @@ impl PreingestionManagerStatic {
         let bmc_access_info =
             db::machine_interface::lookup_bmc_access_info(db_pool, endpoint.address, None).await?;
         self.bmc_connector
-            .connect(&bmc_access_info, async {
+            .connect(&bmc_access_info, || async {
                 Ok::<_, Infallible>(endpoint.report.clone())
             })
             .await
