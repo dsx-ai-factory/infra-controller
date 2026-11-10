@@ -423,18 +423,23 @@ impl CollectorState {
             .collect()
     }
 
-    pub(super) fn prune_finished_logs(&mut self) {
-        self.logs.retain(|key, collector| {
-            if collector.is_finished() {
-                tracing::info!(
-                    endpoint_key = %key,
-                    "pruning finished logs collector (task exited); discovery will respawn"
-                );
-                false
-            } else {
-                true
-            }
-        });
+    /// Releases Logs parents after auto-mode transitions and gNMI parents after
+    /// supervised failure, allowing the normal spawn pass to replace them.
+    pub(super) fn prune_finished_collectors(&mut self) {
+        for kind in [CollectorKind::Logs, CollectorKind::NvueGnmi] {
+            self.map_mut(kind).retain(|key, collector| {
+                if collector.is_finished() {
+                    tracing::info!(
+                        endpoint_key = %key,
+                        collector_kind = ?kind,
+                        "pruning finished collector (task exited); discovery will respawn"
+                    );
+                    false
+                } else {
+                    true
+                }
+            });
+        }
     }
 }
 
