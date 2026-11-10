@@ -726,8 +726,11 @@ Download the JSON files from `helm/observability/dashboards/` and import via Gra
 (Dashboards -> Import -> Upload JSON file). Set the Prometheus datasource when prompted.
 
 Each dashboard provides variables for datasource selection and metric prefix customization.
-The prefix defaults to `carbide_` (NICo's current emission prefix). If your site uses
-`alt_metric_prefix`, update the dashboard variable accordingly.
+The `metric_prefix` dashboard variable defaults to `carbide`, without a trailing underscore.
+Dashboard expressions add the separator: `${metric_prefix}_api_ready` becomes
+`carbide_api_ready`. Entering `carbide_` instead produces `carbide__api_ready`, which does not
+match the emitted metric. If your site uses `alt_metric_prefix`, set the dashboard variable
+to the alternative prefix without its trailing underscore.
 
 ## 6. Troubleshooting
 
