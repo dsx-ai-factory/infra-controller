@@ -3406,16 +3406,7 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
         if let Some(existing) =
             DpuDeviceRepository::get(&*self.repo, &cr_name, &self.namespace).await?
         {
-            let existing_placement = existing
-                .spec
-                .values
-                .as_ref()
-                .and_then(|values| values.get("astra_hardware_placement"));
-            if existing_placement != placement.as_ref() {
-                return Err(DpfError::InvalidState(
-                    "Astra placement changed for an existing DPUDevice; decommission and re-ingest through the supported lifecycle before changing placement".to_string()
-                ));
-            }
+            existing.check_registration_placement(placement.as_ref())?;
             bmc_credentials::check_registration_credential(
                 &existing,
                 credential_secret_name.as_deref(),
@@ -3522,6 +3513,13 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
                 let existing =
                     DpuDeviceRepository::get(&*self.repo, &cr_name, &self.namespace).await?;
                 if let Some(existing) = &existing {
+                    existing.check_registration_placement(
+                        device
+                            .spec
+                            .values
+                            .as_ref()
+                            .and_then(|values| values.get("astra_hardware_placement")),
+                    )?;
                     bmc_credentials::check_registration_credential(
                         existing,
                         credential_secret_name.as_deref(),
@@ -3553,6 +3551,26 @@ impl<R: DpuDeviceRepository, L: ResourceLabeler> DpfSdk<R, L> {
     }
 }
 
+impl DPUDevice {
+    // Both lookup and create-conflict recovery must verify the persisted hardware mapping.
+    fn check_registration_placement(
+        &self,
+        expected: Option<&serde_json::Value>,
+    ) -> Result<(), DpfError> {
+        let existing = self
+            .spec
+            .values
+            .as_ref()
+            .and_then(|values| values.get("astra_hardware_placement"));
+        if existing != expected {
+            return Err(DpfError::InvalidState(
+                "Astra placement changed for an existing DPUDevice; decommission and re-ingest through the supported lifecycle before changing placement".to_string()
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Build one array entry per declared Astra interface, including ports without an IP.
 fn astra_underlay_configuration(
     device_name: &str,
@@ -3574,17 +3592,25 @@ fn astra_underlay_configuration(
             ));
         }
 
-        // The four Cerebro lanes in a group share their bridge's IP and routes.
-        let cerebro_group = nic
-            .physical_ifname
-            .as_deref()
-            .and_then(|name| name.rsplit_once("-L"))
-            .filter(|(group, lane)| !group.is_empty() && matches!(*lane, "1" | "2" | "3" | "4"))
-            .map(|(group, _)| group);
+        // IP sharing must use the same bridge identity as the rendered network scripts.
+        // Legacy declarations infer that identity from the Cerebro lane name.
+        let bridge_group = nic
+            .astra_placement
+            .as_ref()
+            .map(|placement| placement.group_id.as_str())
+            .or_else(|| {
+                nic.physical_ifname
+                    .as_deref()
+                    .and_then(|name| name.rsplit_once("-L"))
+                    .filter(|(group, lane)| {
+                        !group.is_empty() && matches!(*lane, "1" | "2" | "3" | "4")
+                    })
+                    .map(|(group, _)| group)
+            });
         let (ip, gateway, rail_route, sw_plane_route) = match nic.fixed_ip {
             Some(IpAddr::V4(ip)) => {
-                if let Some(previous_group) = seen_ips.insert(ip, cerebro_group)
-                    && (cerebro_group.is_none() || previous_group != cerebro_group)
+                if let Some(previous_group) = seen_ips.insert(ip, bridge_group)
+                    && (bridge_group.is_none() || previous_group != bridge_group)
                 {
                     return Err(DpfError::ConfigError(
                         "Astra underlay IPs must be unique across bridge groups".to_string(),
@@ -6546,6 +6572,7 @@ mod tests {
             Arc<RwLock<Option<(String, String, DpfDeletePreconditions)>>>,
         node_patches: Arc<RwLock<Vec<serde_json::Value>>>,
         dpu_delete_error: Arc<RwLock<Option<DpfError>>>,
+        device_create_winner: Arc<RwLock<Option<DPUDevice>>>,
     }
 
     impl SdkMock {
@@ -6862,6 +6889,11 @@ mod tests {
         async fn create(&self, d: &DPUDevice) -> Result<DPUDevice, DpfError> {
             let key = Self::key(d);
             let mut devices = self.devices.write().unwrap();
+            // Publish the competing registration only after the caller's initial lookup.
+            if let Some(winner) = self.device_create_winner.write().unwrap().take() {
+                assert_eq!(Self::key(&winner), key);
+                devices.insert(key.clone(), winner);
+            }
             if devices.contains_key(&key) {
                 return Err(already_exists_error(d.meta().name.as_deref().unwrap_or("")));
             }
@@ -7183,6 +7215,72 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert!(default.spec.values.is_none());
+    }
+
+    #[tokio::test]
+    async fn astra_registration_checks_placement_after_create_conflict() {
+        use carbide_test_support::{Case, check_cases_async};
+
+        check_cases_async(
+            [
+                Case {
+                    scenario: "matching placement is an idempotent concurrent registration",
+                    input: 3,
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "different placement must not acknowledge the concurrent winner",
+                    input: 20,
+                    expect: FailsWith("placement mismatch"),
+                },
+            ],
+            |requested_bus| async move {
+                let mock = SdkMock::new();
+                let sdk = DpfSdkBuilder::new(mock.clone(), TEST_NAMESPACE, String::new())
+                    .build_without_resources()
+                    .await
+                    .unwrap();
+                let prefixes = AstraRoutePrefixes {
+                    rail_route_prefix_len: 16,
+                    software_plane_route_prefix_len: 13,
+                };
+                let winner_machine = crate::astra_placement::test_machine("SN123456", 3);
+                sdk.register_dpu_device(test_dpu_device_info(), Some((&winner_machine, prefixes)))
+                    .await
+                    .unwrap();
+                let cr_name = dpu_device_cr_name("dpu-001");
+                let winner = mock
+                    .devices
+                    .write()
+                    .unwrap()
+                    .remove(&SdkMock::ns_key(TEST_NAMESPACE, &cr_name))
+                    .unwrap();
+                *mock.device_create_winner.write().unwrap() = Some(winner.clone());
+                let requested = crate::astra_placement::test_machine("SN123456", requested_bus);
+                let result = sdk
+                    .register_dpu_device(test_dpu_device_info(), Some((&requested, prefixes)))
+                    .await;
+                assert!(mock.device_create_winner.read().unwrap().is_none());
+                let persisted = DpuDeviceRepository::get(&mock, &cr_name, TEST_NAMESPACE)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    serde_json::to_value(persisted).unwrap(),
+                    serde_json::to_value(winner).unwrap(),
+                    "conflict recovery must leave the winning registration unchanged"
+                );
+                result.map_err(|error| match error {
+                    DpfError::InvalidState(message)
+                        if message.contains("Astra placement changed") =>
+                    {
+                        "placement mismatch"
+                    }
+                    other => panic!("unexpected registration error: {other}"),
+                })
+            },
+        )
+        .await;
     }
 
     #[async_trait]
@@ -7724,6 +7822,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn astra_explicit_placement_controls_shared_ip_groups() {
+        use carbide_test_support::{Case, check_cases};
+
+        check_cases(
+            [
+                Case {
+                    scenario: "arbitrary physical names share the explicit group's bridge IP",
+                    input: vec![(0, "port0"), (1, "port1"), (2, "port2"), (3, "port3")],
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "explicit group overrides different inferred physical groups",
+                    input: vec![(0, "left-L1"), (1, "right-L1")],
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "different explicit groups cannot share an inferred group's IP",
+                    input: vec![(0, "shared-L1"), (4, "shared-L2")],
+                    expect: Fails,
+                },
+            ],
+            |addressed_ports| {
+                let mut machine = crate::astra_placement::test_machine("SN123456", 3);
+                for (index, name) in addressed_ports {
+                    let nic = &mut machine.data.interfaces[index];
+                    nic.physical_ifname = Some(name.to_string());
+                    nic.fixed_ip = Some("100.96.0.212".parse().unwrap());
+                }
+                model::expected_machine::validate_astra_placements(&machine.data.interfaces)
+                    .unwrap();
+                astra_underlay_configuration(
+                    "dpu-001",
+                    &machine.data.interfaces.iter().collect::<Vec<_>>(),
+                    AstraRoutePrefixes {
+                        rail_route_prefix_len: 16,
+                        software_plane_route_prefix_len: 13,
+                    },
+                )
+                .map(|_| ())
+                .map_err(|error| match error {
+                    DpfError::ConfigError(message) => {
+                        assert_eq!(
+                            message,
+                            "Astra underlay IPs must be unique across bridge groups"
+                        );
+                    }
+                    other => panic!("unexpected underlay error: {other}"),
+                })
+            },
+        );
     }
 
     #[test]
