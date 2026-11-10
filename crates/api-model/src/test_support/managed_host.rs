@@ -180,6 +180,7 @@ impl From<&ManagedHostConfig> for HardwareInfo {
                     numa_node: 1,
                     description: None,
                     slot: None,
+                    device_id: None,
                 }),
             })
             .chain(config.non_dpu_macs.iter().map(|m| NetworkInterface {

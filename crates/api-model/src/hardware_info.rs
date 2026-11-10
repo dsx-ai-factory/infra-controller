@@ -200,6 +200,8 @@ pub struct PciDeviceProperties {
     pub description: Option<String>,
     #[serde(default)]
     pub slot: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -212,6 +214,8 @@ pub struct Gpu {
     pub total_memory: String,
     pub frequency: String,
     pub pci_bus_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pci_device_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_info: Option<GpuPlatformInfo>,
 }
@@ -755,6 +759,7 @@ mod tests {
                 numa_node: 0,
                 description: None,
                 slot: None,
+                device_id: None,
             }
         );
 
@@ -765,6 +770,7 @@ mod tests {
             numa_node: 3,
             description: Some("desc1".to_string()),
             slot: Some("0000:4b:00.0".to_string()),
+            device_id: None,
         };
 
         let serialized = serde_json::to_string(&props1).unwrap();
@@ -1062,6 +1068,7 @@ mod tests {
             frequency: String::new(),
             pci_bus_id: String::new(),
             platform_info: None,
+            pci_device_id: String::new(),
         }
     }
 
@@ -1083,6 +1090,7 @@ mod tests {
                 module_id: 1,
                 fabric_guid: "0x1".to_string(),
             }),
+            pci_device_id: String::new(),
         }
     }
 
@@ -1104,6 +1112,7 @@ mod tests {
                         frequency: String::new(),
                         pci_bus_id: String::new(),
                         platform_info: None,
+                        pci_device_id: String::new(),
                     });
                 }
                 info.is_mnnvl_capable()

@@ -135,6 +135,7 @@ pub fn host_hardware_info() -> HardwareInfo {
                     "MT2910 Family [ConnectX-7]".to_string()
                 }),
                 slot: Some(format!("{i}")),
+                device_id: None,
             }),
         })
         .collect();
@@ -149,6 +150,7 @@ pub fn host_hardware_info() -> HardwareInfo {
                 numa_node: i % 2,
                 description: Some("MT2910 Family [ConnectX-7]".to_string()),
                 slot: Some(format!("ib{i}")),
+                device_id: None,
             }),
         })
         .collect();
@@ -208,6 +210,7 @@ pub fn host_hardware_info() -> HardwareInfo {
                 frequency: "1980 MHz".to_string(),
                 pci_bus_id: format!("00000000:1{i}:00.0"),
                 platform_info: None,
+                pci_device_id: String::new(),
             })
             .collect(),
         memory_devices: vec![MemoryDeviceGroup {
