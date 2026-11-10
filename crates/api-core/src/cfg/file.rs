@@ -7547,6 +7547,10 @@ path = "credentials.yaml"
             ),
             ("{{ .Values.apiAdmissionControl.enabled }}", "true"),
             (
+                "{{ .Values.powerShelfStateController.rackFirmwareReprovisioningEnabled }}",
+                "false",
+            ),
+            (
                 "{{ default list .Values.service.perObjectStateMetrics.objectTypes | toJson }}",
                 "[]",
             ),
