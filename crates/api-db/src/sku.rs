@@ -295,7 +295,7 @@ pub async fn update_metadata(
         builder.push(", ");
     }
 
-    builder.push(" updated = clock_timestamp()");
+    builder.push(" updated = NOW()");
     builder.push(" WHERE id = ");
     builder.push_bind(sku_id);
     builder.push(" RETURNING id");
@@ -426,7 +426,7 @@ async fn replace_locked(txn: &mut PgConnection, sku: &Sku) -> Result<(), Databas
         )));
     }
 
-    let query = "UPDATE machine_skus set description=$1, components=$2, schema_version=$3, device_type=$4, updated=clock_timestamp() WHERE id=$5 RETURNING id";
+    let query = "UPDATE machine_skus set description=$1, components=$2, schema_version=$3, device_type=$4, updated=NOW() WHERE id=$5 RETURNING id";
 
     sqlx::query_as::<_, ()>(query)
         .bind(&sku.description)

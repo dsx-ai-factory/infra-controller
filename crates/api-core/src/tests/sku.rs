@@ -3000,7 +3000,7 @@ pub(in crate::tests) mod tests {
     }
 
     #[crate::sqlx_test]
-    async fn test_sku_updated_timestamp_advances_on_mutation(
+    async fn test_sku_updates_use_transaction_timestamp(
         pool: sqlx::PgPool,
     ) -> Result<(), eyre::Error> {
         use rpc::forge::forge_server::Forge;
@@ -3020,30 +3020,37 @@ pub(in crate::tests) mod tests {
             .expect("created SKU should exist");
         assert_eq!(fetched.updated, Some(fetched.created));
 
-        // update metadata (uses clock_timestamp(), so no sleep is needed)
+        let mut txn = db::Transaction::begin_inner(connection.as_mut()).await?;
+        let metadata_updated: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT NOW()")
+            .fetch_one(txn.as_pgconn())
+            .await?;
         db::sku::update_metadata(
-            &mut connection,
+            txn.as_pgconn(),
             original_sku.id.clone(),
             Some("updated description".to_string()),
             None,
         )
         .await?;
+        txn.commit().await?;
 
         let after_metadata = db::sku::find(&mut connection, std::slice::from_ref(&original_sku.id))
             .await?
             .pop()
             .expect("SKU should exist after metadata update");
         assert_eq!(after_metadata.description, "updated description");
-        assert!(after_metadata.updated > Some(after_metadata.created));
+        assert_eq!(after_metadata.updated, Some(metadata_updated));
 
-        // replace SKU
-        let prior_updated = after_metadata.updated;
         let mut replace_req = original_sku.clone();
         replace_req.description = "replaced description".to_string();
-        let replaced_sku = db::sku::replace(&mut connection, &replace_req).await?;
+        let mut txn = db::Transaction::begin_inner(connection.as_mut()).await?;
+        let replacement_updated: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT NOW()")
+            .fetch_one(txn.as_pgconn())
+            .await?;
+        let replaced_sku = db::sku::replace(txn.as_pgconn(), &replace_req).await?;
+        txn.commit().await?;
         assert_eq!(replaced_sku.description, "replaced description");
         assert_eq!(replaced_sku.created, fetched.created);
-        assert!(replaced_sku.updated > prior_updated);
+        assert_eq!(replaced_sku.updated, Some(replacement_updated));
 
         // Verify across gRPC boundary
         let rpc_res = env
