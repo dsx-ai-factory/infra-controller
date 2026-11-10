@@ -70,7 +70,8 @@ pub(crate) struct MachineHardwareInfoGpus {
             \"inforom_version\": \"string\",
             \"total_memory\": \"string\",
             \"frequency\": \"string\",
-            \"pci_bus_id\": \"string\"
+            \"pci_bus_id\": \"string\",
+            \"pci_device_id\": \"string (optional)\"
         }
         Pass an empty array if you want to remove GPUs."
     )]

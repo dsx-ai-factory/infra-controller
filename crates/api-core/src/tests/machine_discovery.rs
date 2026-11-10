@@ -233,6 +233,7 @@ fn scout_pci_report(host_config: &ManagedHostConfig, winning_mac: MacAddress) ->
             numa_node: 0,
             description: Some("DPU-backed host interface".to_string()),
             slot: Some(format!("0000:{bus:02x}:00.0")),
+            device_id: None,
         });
     }
     hardware_info

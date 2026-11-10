@@ -241,6 +241,7 @@ mod tests {
             numa_node: 0,
             description: None,
             slot: Some("0000:08:00.0".to_string()),
+            device_id: None,
         })
     }
 
