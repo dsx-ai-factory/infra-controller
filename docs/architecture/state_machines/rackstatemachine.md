@@ -292,17 +292,16 @@ another reboot.
 
 Graceful reboots do not fall back to forced restarts. Both direct Redfish and
 RMS compute backends receive `GracefulRestart`. Saved legacy `Reset` requests
-retain their existing forced-restart/power-cycle behavior and can still complete
+retain forced-restart behavior and can still complete
 or be cancelled by the rack. All controllers reading machine maintenance must
 support the `Reboot` operation before a rack queues it.
 
-The RMS compute adapter preserves `GracefulRestart` for all callers, not only
-rack maintenance. This also affects pre-ingestion power control and ingested
-power control that bypasses or disables the machine state controller. RMS
-`ForceRestart` and `AcPowercycle` still map to `RESET`; switch and power-shelf
-mapping is unchanged. Existing power API requests routed through the machine
-state controller still map all three restart actions to legacy `Reset`, so
-those requests do not acquire graceful semantics from this change.
+The RMS power-control adapter preserves `GracefulRestart` and `ForceRestart` as
+distinct operations and rejects `AcPowercycle` for compute trays, switches, and
+power shelves. Queued compute and switch resets preserve graceful intent through
+the `graceful` flag; both state controllers reject `AcPowercycle`. The power-shelf
+state controller supports only power on/off. See the
+[RMS power-control mapping](../backends/rms.md#rms-apis-nico-calls).
 
 | Sub-state | Description |
 |-----------|-------------|
