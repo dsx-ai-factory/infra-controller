@@ -13,7 +13,7 @@
  namespace ph = std::placeholders;
  
 +// The DHCPv6 hook checks this native persistence contract before loading.
-+extern "C" int nico_kea_lease6_handoff_contract() { return 1; }
++extern "C" int nico_kea_lease6_handoff_contract() { return 2; }
 +
  namespace {
 +
@@ -232,7 +232,24 @@
  
              return (lease);
          } else {
-@@ -2143,6 +2248,8 @@
+@@ -2137,12 +2242,25 @@
+                                                        ctx.currentIA().iaid_,
+                                                        subnet->getID());
+             for (auto const& l : leases_subnet) {
++                if (l->type_ == Lease::TYPE_NA && l->stateExpiredReclaimed() &&
++                    HooksManager::calloutsPresent(hook_index_lease6_select_)) {
++                    const auto reservation = makeIPv6Resrv(*l);
++                    const auto host = ctx.hosts_.find(l->subnet_id_);
++                    if (!ctx.hasGlobalReservation(reservation) &&
++                        (host == ctx.hosts_.end() || !host->second->hasReservation(reservation))) {
++                        // As in allocation, dynamic reclaimed rows must pass
++                        // SELECT again instead of invalidating active siblings.
++                        continue;
++                    }
++                }
+                 if (l->state_ != Lease::STATE_REGISTERED) {
+                     leases.push_back(l);
+                 }
              }
              subnet = subnet->getNextSubnet(ctx.subnet_);
          }
@@ -241,7 +258,7 @@
  
          if (!leases.empty()) {
              LOG_DEBUG(alloc_engine_logger, ALLOC_ENGINE_DBG_TRACE,
-@@ -2916,8 +3023,16 @@
+@@ -2916,8 +3034,16 @@
          callout_handle->setArgument("lease6", lease);
          callout_handle->setArgument("remove_lease", reclaim_mode == DB_RECLAIM_REMOVE);
  
