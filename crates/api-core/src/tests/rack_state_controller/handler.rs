@@ -4044,6 +4044,9 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     )
     .await;
     let (rack_id, original) = create_single_compute_rack(&env, &pool).await?;
+    // The legacy fixture runs all machine controllers. Create the future arrival
+    // before starting firmware work, then attach it at the admission boundary.
+    let late = Box::pin(new_host(&env, ManagedHostConfig::default())).await?;
     let start = RackState::Maintenance {
         maintenance_state: RackMaintenanceState::FirmwareUpgrade {
             rack_firmware_upgrade: FirmwareUpgradeState::Start,
@@ -4121,14 +4124,11 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     )
     .await?;
 
-    let late = new_host(
-        &env,
-        ManagedHostConfig::default().with_expected_machine_data(ExpectedMachineData {
-            rack_id: Some(rack_id.clone()),
-            ..Default::default()
-        }),
-    )
-    .await?;
+    sqlx::query("UPDATE machines SET rack_id = $1 WHERE id = $2")
+        .bind(&rack_id)
+        .bind(late.host_snapshot.id)
+        .execute(&pool)
+        .await?;
     set_machine_host_reprovision_state(
         &pool,
         &late.host_snapshot.id,
@@ -9224,6 +9224,9 @@ async fn ingestion_restart_removed_targets_workflow(
     .await;
     for (case, remove_all) in [("one target removed", false), ("all targets removed", true)] {
         let (rack_id, removed, remaining) = Box::pin(create_two_compute_rack(&env, &pool)).await?;
+        // Prepare outside the rack before queuing restart requests: legacy
+        // new_host also runs the controllers of existing machines.
+        let arrival = Box::pin(new_host(&env, ManagedHostConfig::default())).await?;
         db_rack::update(
             pool.acquire().await?.as_mut(),
             &rack_id,
@@ -9265,14 +9268,11 @@ async fn ingestion_restart_removed_targets_workflow(
                 .machine_maintenance_requested
                 .unwrap();
 
-        let arrival = Box::pin(new_host(
-            &env,
-            ManagedHostConfig::default().with_expected_machine_data(ExpectedMachineData {
-                rack_id: Some(rack_id.clone()),
-                ..Default::default()
-            }),
-        ))
-        .await?;
+        sqlx::query("UPDATE machines SET rack_id = $1 WHERE id = $2")
+            .bind(&rack_id)
+            .bind(arrival.host_snapshot.id)
+            .execute(&pool)
+            .await?;
         // Exercise actual deletion, not just an incomplete machine snapshot.
         db::machine::force_cleanup(
             pool.acquire().await?.as_mut(),
