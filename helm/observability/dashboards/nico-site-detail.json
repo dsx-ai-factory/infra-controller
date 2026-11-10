@@ -1156,7 +1156,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_network_segments_total{forge_site=~\"$site\",fresh=\"true\"})",
+          "expr": "sum(max by (forge_site) (${metric_prefix}_network_segments_total{forge_site=~\"$site\",fresh=\"true\"}))",
           "legendFormat": "network segments",
           "range": true,
           "instant": false,
@@ -1168,7 +1168,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_vpc_prefixes_total{forge_site=~\"$site\",fresh=\"true\"})",
+          "expr": "sum(max by (forge_site) (${metric_prefix}_vpc_prefixes_total{forge_site=~\"$site\",fresh=\"true\"}))",
           "legendFormat": "VPC prefixes",
           "range": true,
           "instant": false,
@@ -1180,7 +1180,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_ib_partitions_total{forge_site=~\"$site\",fresh=\"true\"})",
+          "expr": "sum(max by (forge_site) (${metric_prefix}_ib_partitions_total{forge_site=~\"$site\",fresh=\"true\"}))",
           "legendFormat": "IB partitions",
           "range": true,
           "instant": false,
@@ -1192,7 +1192,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_racks_total{forge_site=~\"$site\",fresh=\"true\"})",
+          "expr": "sum(max by (forge_site) (${metric_prefix}_racks_total{forge_site=~\"$site\",fresh=\"true\"}))",
           "legendFormat": "racks",
           "range": true,
           "instant": false,
@@ -1204,7 +1204,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_switches_total{forge_site=~\"$site\",fresh=\"true\"})",
+          "expr": "sum(max by (forge_site) (${metric_prefix}_switches_total{forge_site=~\"$site\",fresh=\"true\"}))",
           "legendFormat": "switches",
           "range": true,
           "instant": false,
@@ -1216,7 +1216,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(${metric_prefix}_power_shelves_total{forge_site=~\"$site\",fresh=\"true\"})",
+          "expr": "sum(max by (forge_site) (${metric_prefix}_power_shelves_total{forge_site=~\"$site\",fresh=\"true\"}))",
           "legendFormat": "power shelves",
           "range": true,
           "instant": false,
