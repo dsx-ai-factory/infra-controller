@@ -3,7 +3,7 @@
 
 apiVersion: v2
 name: nico-rest-cert-manager
-description: Helm chart for the NICo REST certificate manager (credsmgr)
+description: Helm chart for NICo REST Cert Manager
 type: application
 version: 0.1.0
 appVersion: "latest"

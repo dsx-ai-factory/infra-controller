@@ -19,10 +19,10 @@ tests:
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
-          content: --creds-manager-url=https://nico-rest-cert-manager.nico-rest:8000
+          content: --cert-manager-url=https://nico-rest-cert-manager.nico-rest:8000
       - contains:
           path: spec.template.spec.containers[0].args
-          content: --creds-manager-ca-path=/etc/credsmgr-ca/ca.crt
+          content: --cert-manager-ca-path=/etc/credsmgr-ca/ca.crt
       - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
@@ -39,7 +39,7 @@ tests:
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
-          content: --creds-manager-url=https://nico-rest-cert-manager.nico-rest:8000
+          content: --cert-manager-url=https://nico-rest-cert-manager.nico-rest:8000
 
   # Trust has to come from the CA that signs nico-rest-cert-manager's listener,
   # not from whichever issuer produced this service's own serving certificate.
@@ -51,7 +51,7 @@ tests:
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
-          content: --creds-manager-ca-path=/etc/credsmgr-ca/ca.crt
+          content: --cert-manager-ca-path=/etc/credsmgr-ca/ca.crt
       - contains:
           path: spec.template.spec.volumes
           content:
@@ -68,11 +68,70 @@ tests:
             mountPath: /etc/credsmgr-ca
             readOnly: true
 
-  - it: honours an explicit args.credsManagerUrl
+  - it: honours an explicit args.certManagerUrl
     set:
       args:
-        credsManagerUrl: https://credsmgr.override.example.com:8443
+        certManagerUrl: https://cert-manager.override.example.com:8443
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
-          content: --creds-manager-url=https://credsmgr.override.example.com:8443
+          content: --cert-manager-url=https://cert-manager.override.example.com:8443
+
+  # The former names carry no defaults, so a value set under one is the only
+  # signal that an operator chose it. It overrides the current name.
+  - it: honours the deprecated former value names
+    set:
+      args:
+        certManagerUrl: https://current.example.com:8000
+        credsManagerUrl: https://former.example.com:8000
+        credsManagerCaPath: /etc/former-ca/ca.crt
+      credsManagerCa:
+        secretName: former-ca
+        key: ca.crt
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --cert-manager-url=https://former.example.com:8000
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --cert-manager-ca-path=/etc/former-ca/ca.crt
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: credsmgr-ca
+            secret:
+              secretName: former-ca
+              items:
+                - key: ca.crt
+                  path: ca.crt
+
+  # helm upgrade --reuse-values renders with the previous release's values,
+  # which carry the former names at their old defaults and lack the current
+  # ones entirely.
+  - it: renders the values of a release that predates the current names
+    set:
+      args:
+        certManagerUrl: null
+        certManagerCaPath: null
+        credsManagerUrl: ""
+        credsManagerCaPath: /etc/credsmgr-ca/ca.crt
+      certManagerCa: null
+      credsManagerCa:
+        secretName: ca-signing-secret
+        key: tls.crt
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --cert-manager-url=https://nico-rest-cert-manager.nico-rest:8000
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --cert-manager-ca-path=/etc/credsmgr-ca/ca.crt
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: credsmgr-ca
+            secret:
+              secretName: ca-signing-secret
+              items:
+                - key: tls.crt
+                  path: ca.crt

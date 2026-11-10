@@ -50,7 +50,7 @@ class ManifestTest(unittest.TestCase):
         # explicit test change that a reviewer can see.
         packages = {
             "api": "./api/cmd/api",
-            "credsmgr": "./cert-manager/cmd/credsmgr",
+            "cert-manager": "./cert-manager/cmd/cert-manager",
             "flow": "./flow",
             "migrations": "./db/cmd/migrations",
             "mock-core": "./site-agent/cmd/mock-core",
@@ -66,7 +66,7 @@ class ManifestTest(unittest.TestCase):
         static_stripped = ("-extldflags=-static", "-w", "-s")
         static_only = ("-extldflags=-static",)
         metadata_flags = {
-            "credsmgr": (
+            "cert-manager": (
                 "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}",
             ),
             "site-manager": (
@@ -97,7 +97,7 @@ class ManifestTest(unittest.TestCase):
             "site-agent": static_stripped + metadata_flags["site-agent"],
             "mock-core": (),
             "mock-flow": (),
-            "credsmgr": static_stripped + metadata_flags["credsmgr"],
+            "cert-manager": static_stripped + metadata_flags["cert-manager"],
             "flow": static_only + metadata_flags["flow"],
             "nicocli": static_stripped,
             "nico-mcp": static_stripped,

@@ -24,7 +24,7 @@ tests:
   - it: reports each configured name when the two diverge
     set:
       nico-rest-cert-manager.secrets.caSigningSecret: cm-ca
-      nico-rest-site-manager.credsManagerCa.secretName: sm-ca
+      nico-rest-site-manager.certManagerCa.secretName: sm-ca
     asserts:
       - matchRegexRaw:
           pattern: '- Secret: cm-ca in namespace nico-rest \(CA cert\+key that'
@@ -42,7 +42,7 @@ tests:
   - it: lists both copies when one Secret name spans two namespaces
     set:
       nico-rest-site-manager.namespaceOverride: nico-rest-sm
-      nico-rest-site-manager.args.credsManagerUrl: https://nico-rest-cert-manager.nico-rest:8000
+      nico-rest-site-manager.args.certManagerUrl: https://nico-rest-cert-manager.nico-rest:8000
     asserts:
       - matchRegexRaw:
           pattern: '- Secret: ca-signing-secret in namespace nico-rest \(CA cert\+key that'
@@ -58,3 +58,23 @@ tests:
     asserts:
       - matchRegexRaw:
           pattern: 'Prerequisites \(must exist before install\):'
+
+  - it: lists no deprecated values by default
+    asserts:
+      - notMatchRegexRaw:
+          pattern: 'Deprecated values'
+
+  - it: lists each deprecated former value name that is set and honours it
+    set:
+      nico-rest-site-manager.args.credsManagerUrl: https://nico-rest-cert-manager.nico-rest:8000
+      nico-rest-site-manager.args.credsManagerCaPath: /etc/former-ca/ca.crt
+      nico-rest-site-manager.credsManagerCa.secretName: former-ca
+    asserts:
+      - matchRegexRaw:
+          pattern: '- nico-rest-site-manager\.args\.credsManagerUrl, now args\.certManagerUrl'
+      - matchRegexRaw:
+          pattern: '- nico-rest-site-manager\.args\.credsManagerCaPath, now args\.certManagerCaPath'
+      - matchRegexRaw:
+          pattern: '- nico-rest-site-manager\.credsManagerCa, now certManagerCa'
+      - matchRegexRaw:
+          pattern: '- Secret: former-ca in namespace nico-rest \(certificate of the'

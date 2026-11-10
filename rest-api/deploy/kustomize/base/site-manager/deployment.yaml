@@ -42,10 +42,10 @@ spec:
             - --listen-port=8100
             # This host name has to be one of nico-rest-cert-manager's
             # --dns-name SANs, because the connection is verified.
-            - --creds-manager-url=https://nico-rest-cert-manager.nico-rest:8000
+            - --cert-manager-url=https://nico-rest-cert-manager.nico-rest:8000
             # The CA that signs that listener, not the issuer of this service's
             # own serving certificate. They are configured independently.
-            - --creds-manager-ca-path=/etc/credsmgr-ca/ca.crt
+            - --cert-manager-ca-path=/etc/credsmgr-ca/ca.crt
             - --tls-cert-path=/etc/tls/tls.crt
             - --tls-key-path=/etc/tls/tls.key
             - --namespace=nico-rest

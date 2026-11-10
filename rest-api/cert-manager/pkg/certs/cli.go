@@ -18,8 +18,8 @@ const (
 // NewCommand creates a new cli command
 func NewCommand() *cli.Command {
 	return &cli.Command{
-		Name:  "NICo Credentials Service",
-		Usage: "NICo Credentials Service",
+		Name:  "NICo REST Cert Manager",
+		Usage: "Issues certificates for NICo REST services and Site Agents",
 		Flags: []cli.Flag{
 			&cli.BoolFlag{
 				Name:  "debug",
@@ -36,6 +36,8 @@ func NewCommand() *cli.Command {
 				Value: "8001",
 				Usage: "http port to listen to",
 			},
+			// credsmgr.csm is the service's original name. It stays in the
+			// default so existing clients that dial it still verify.
 			&cli.StringSliceFlag{
 				Name:  "dns-name",
 				Value: cli.NewStringSlice("credsmgr.csm", "localhost"),
@@ -48,7 +50,7 @@ func NewCommand() *cli.Command {
 				Value: caBaseDNSDefault,
 				Usage: "Base dns appended to common names",
 			},
-			// Accepted so existing invocations keep working. Cert Manager
+			// Accepted so existing invocations keep working. REST Cert Manager
 			// doesn't report to Sentry.
 			&cli.StringFlag{
 				Name:    "sentry-dsn",

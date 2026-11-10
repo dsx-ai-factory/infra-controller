@@ -107,7 +107,7 @@ echo "Why: Services must be running before we test PKI"
 echo "=========================================="
 
 echo ""
-echo "--- Test 1: Cert Manager Health ---"
+echo "--- Test 1: REST Cert Manager Health ---"
 echo "Checks: cert-manager pod is alive and responding"
 HEALTH=$(curl -sf http://localhost:18001/healthz 2>/dev/null || echo "FAILED")
 if [[ "$HEALTH" == *"ok"* ]]; then

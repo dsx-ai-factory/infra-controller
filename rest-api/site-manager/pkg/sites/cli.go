@@ -12,11 +12,17 @@ import (
 )
 
 const (
-	defOTPDuration = 24
+	defOTPDuration       = 24
+	defCertManagerURL    = "https://localhost:8000"
+	defCertManagerCAPath = "/etc/credsmgr-ca/ca.crt"
 )
 
 // NewCommand creates a new cli command
 func NewCommand() *cli.Command {
+	// Each REST Cert Manager flag shares its destination with its former name,
+	// so whichever is given last wins, the same as repeating one flag. That
+	// keeps an override appended under the former name working.
+	var certManagerURL, certManagerCAPath string
 	return &cli.Command{
 		Name:  "Forge Site Manager Service",
 		Usage: "Forge Site Manager Service",
@@ -37,15 +43,31 @@ func NewCommand() *cli.Command {
 				Usage: "Ingress host name for self signed certs",
 			},
 			&cli.StringFlag{
-				Name:  "creds-manager-url",
-				Value: "https://localhost:8000",
-				Usage: "creds manager service endpoint used by backend",
+				Name:        "cert-manager-url",
+				Value:       defCertManagerURL,
+				Destination: &certManagerURL,
+				Usage:       "REST Cert Manager endpoint that issues Site certificates",
 			},
 			&cli.StringFlag{
-				Name:  "creds-manager-ca-path",
-				Value: "/etc/credsmgr-ca/ca.crt",
-				Usage: "CA that signed the creds manager endpoint's listener. That " +
-					"endpoint's host name must appear in its --dns-name SANs",
+				Name:        "cert-manager-ca-path",
+				Value:       defCertManagerCAPath,
+				Destination: &certManagerCAPath,
+				Usage: "CA that signed REST Cert Manager's listener. The endpoint's " +
+					"host name must appear in its --dns-name SANs",
+			},
+			// Former names of --cert-manager-url and --cert-manager-ca-path,
+			// accepted so existing invocations keep working.
+			&cli.StringFlag{
+				Name:        "creds-manager-url",
+				Value:       defCertManagerURL,
+				Destination: &certManagerURL,
+				Usage:       "Deprecated, use --cert-manager-url",
+			},
+			&cli.StringFlag{
+				Name:        "creds-manager-ca-path",
+				Value:       defCertManagerCAPath,
+				Destination: &certManagerCAPath,
+				Usage:       "Deprecated, use --cert-manager-ca-path",
 			},
 			&cli.StringFlag{
 				Name:  "tls-key-path",
@@ -100,16 +122,7 @@ func NewCommand() *cli.Command {
 				log.Warn().Int("otp_duration_hours", otpHrs).Msg("OTP duration overridden")
 			}
 
-			o := Options{
-				credsMgrURL:    c.String("creds-manager-url"),
-				credsMgrCAPath: c.String("creds-manager-ca-path"),
-				ingressHost:    c.String("ingress-host"),
-				listenPort:     c.String("listen-port"),
-				tlsKeyPath:     c.String("tls-key-path"),
-				tlsCertPath:    c.String("tls-cert-path"),
-				namespace:      c.String("namespace"),
-				otpDuration:    time.Duration(otpHrs) * time.Hour,
-			}
+			o := newOptions(c)
 			log.Info().Msg("configuring Site Manager server")
 			crdClient, err := newCRDClient()
 			if err != nil {
@@ -130,5 +143,29 @@ func NewCommand() *cli.Command {
 			log.Info().Msg("server terminated")
 			return nil
 		},
+	}
+}
+
+// newOptions builds the Site Manager options from the parsed flags.
+func newOptions(c *cli.Context) Options {
+	warnFormerName(c, "cert-manager-url", "creds-manager-url")
+	warnFormerName(c, "cert-manager-ca-path", "creds-manager-ca-path")
+	return Options{
+		certManagerURL:    c.String("cert-manager-url"),
+		certManagerCAPath: c.String("cert-manager-ca-path"),
+		ingressHost:       c.String("ingress-host"),
+		listenPort:        c.String("listen-port"),
+		tlsKeyPath:        c.String("tls-key-path"),
+		tlsCertPath:       c.String("tls-cert-path"),
+		namespace:         c.String("namespace"),
+		otpDuration:       time.Duration(c.Int("otp-duration")) * time.Hour,
+	}
+}
+
+// warnFormerName logs a deprecation warning when the flag name was given under
+// its former name oldName.
+func warnFormerName(c *cli.Context, name, oldName string) {
+	if c.IsSet(oldName) {
+		log.Warn().Msgf("--%s is deprecated, use --%s", oldName, name)
 	}
 }

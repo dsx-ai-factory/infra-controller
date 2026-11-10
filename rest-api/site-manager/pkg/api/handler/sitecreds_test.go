@@ -23,7 +23,7 @@ import (
 
 const testCAPEM = "CA PEM"
 
-// newCertManager returns a client for a Cert Manager stub that issues a fixed
+// newCertManager returns a client for a REST Cert Manager stub that issues a fixed
 // key and certificate and serves testCAPEM.
 func newCertManager(t *testing.T) *certmanager.Client {
 	mux := http.NewServeMux()

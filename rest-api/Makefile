@@ -293,7 +293,7 @@ build:
 	cd site-manager && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/site-manager ./cmd/site-manager
 	cd site-agent && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/site-agent ./cmd/site-agent
 	cd db && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/migrations ./cmd/migrations
-	cd cert-manager && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/credsmgr ./cmd/credsmgr
+	cd cert-manager && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/cert-manager ./cmd/cert-manager
 	cd cli && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/nicocli ./cmd/cli
 	cd mcp && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/nico-mcp ./cmd/nico-mcp
 
@@ -478,7 +478,7 @@ kind-apply:
 	kubectl apply -k $(KUSTOMIZE_OVERLAY)
 	@echo "Waiting for PostgreSQL..."
 	kubectl -n postgres rollout status statefulset/postgres --timeout=120s
-	@echo "Waiting for Cert Manager..."
+	@echo "Waiting for REST Cert Manager..."
 	kubectl -n nico-rest rollout status deployment/nico-rest-cert-manager --timeout=180s
 	@echo "Waiting for Temporal..."
 	kubectl -n temporal rollout status deployment/temporal-frontend --timeout=120s || true
@@ -546,9 +546,9 @@ deploy-overlay-workflow:
 
 # Shared infrastructure: cluster, cert-manager.io, PostgreSQL, Temporal, Keycloak,
 # and mock-core (dev only).
-# common secrets and credsmgr are now installed as part of the Helm chart (nico-rest-common,
-# nico-rest-cert-manager sub-charts). App services are deployed separately by
-# kind-reset-helm or kind-reset-kustomize.
+# common secrets and REST Cert Manager are now installed as part of the Helm
+# chart (nico-rest-common, nico-rest-cert-manager sub-charts). App services are
+# deployed separately by kind-reset-helm or kind-reset-kustomize.
 kind-reset-infra: docker-build-local
 	-kind delete cluster --name $(KIND_CLUSTER_NAME)
 	kind create cluster --name $(KIND_CLUSTER_NAME) --config deploy/kind/cluster-config.yaml
@@ -631,7 +631,7 @@ kind-reset-kustomize: kind-reset-infra
 	kubectl apply -k deploy/kustomize/base/common
 	kubectl -n nico-rest wait --for=condition=Ready certificate/temporal-client-cloud-cert --timeout=240s || true
 
-	@echo "Setting up Nico REST Cert Manager (credsmgr)..."
+	@echo "Setting up Nico REST Cert Manager..."
 	kubectl apply -k deploy/kustomize/overlays/cert-manager
 	kubectl -n nico-rest rollout status deployment/nico-rest-cert-manager --timeout=240s
 

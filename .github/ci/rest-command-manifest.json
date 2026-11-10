@@ -101,8 +101,8 @@
       "output": "bin/mock-flow"
     },
     {
-      "name": "credsmgr",
-      "package": "./cert-manager/cmd/credsmgr",
+      "name": "cert-manager",
+      "package": "./cert-manager/cmd/cert-manager",
       "target": "linux-amd64",
       "cgo_enabled": false,
       "ldflags": [
@@ -111,7 +111,7 @@
         "-s",
         "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}"
       ],
-      "output": "bin/credsmgr"
+      "output": "bin/cert-manager"
     },
     {
       "name": "flow",
@@ -253,8 +253,8 @@
       "output": "bin/mock-flow"
     },
     {
-      "name": "credsmgr",
-      "package": "./cert-manager/cmd/credsmgr",
+      "name": "cert-manager",
+      "package": "./cert-manager/cmd/cert-manager",
       "target": "linux-arm64",
       "cgo_enabled": false,
       "ldflags": [
@@ -263,7 +263,7 @@
         "-s",
         "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}"
       ],
-      "output": "bin/credsmgr"
+      "output": "bin/cert-manager"
     },
     {
       "name": "flow",
@@ -389,14 +389,14 @@
       "output": "bin/mock-flow"
     },
     {
-      "name": "credsmgr",
-      "package": "./cert-manager/cmd/credsmgr",
+      "name": "cert-manager",
+      "package": "./cert-manager/cmd/cert-manager",
       "target": "darwin-arm64",
       "cgo_enabled": false,
       "ldflags": [
         "-X=github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core.Version=${VERSION}"
       ],
-      "output": "bin/credsmgr"
+      "output": "bin/cert-manager"
     },
     {
       "name": "flow",

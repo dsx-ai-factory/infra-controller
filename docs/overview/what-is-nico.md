@@ -77,7 +77,7 @@ The green boxes in the architecture diagram are the services that NICo provides.
 The white boxes in the architecture diagram are off-the-shelf services that NICo depends on but does not build. They must be deployed before NICo installation. See [Software Prerequisites](../getting-started/prerequisites/software.md) for validated versions and configuration details.
 
 - **PostgreSQL** — stores all NICo system state in the `nico_system_nico` database. Only the API Service reads from and writes to it. The reference deployment uses the Zalando Postgres Operator with Spilo-15.
-- **Vault** — provides a PKI engine for certificate issuance and a KV secrets engine for credential storage. Consumed by the API Service and credsmgr (cloud-cert-manager). Uses Kubernetes authentication to authorize NICo service accounts.
+- **Vault** — provides a PKI engine for certificate issuance and a KV secrets engine for credential storage. Consumed by the API Service and REST Cert Manager (`nico-rest-cert-manager`). Uses Kubernetes authentication to authorize NICo service accounts.
 - **Temporal** — workflow orchestration engine used by NICo REST for multi-step operations (instance provisioning, reboot, release). The Site Agent connects to NICo REST through Temporal. Requires registered namespaces: `cloud`, `site`, and a per-site UUID.
 - **cert-manager** — issues and rotates the TLS certificates that NICo services use for mTLS/gRPC communication. Includes approver-policy for certificate request authorization.
 - **External Secrets Operator (ESO)** — syncs secrets from Vault into Kubernetes Secret objects, making credentials (database, PKI, bootstrap material) available to NICo workloads in each namespace.
