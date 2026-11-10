@@ -64,6 +64,7 @@ impl HealthReport {
     pub const DPU_AGENT_SOURCE: &str = "forge-dpu-agent";
     pub const MACHINE_VALIDATION_SOURCE: &str = "machine-validation";
     pub const SITE_EXPLORER_SOURCE: &str = "site-explorer";
+    pub const RACK_FIRMWARE_SOURCE: &str = "rack-firmware";
     pub const SKU_VALIDATION_SOURCE: &str = "sku-validation";
     pub const QUARANTINE_SOURCE: &str = "quarantine";
 
@@ -716,6 +717,11 @@ impl HealthProbeId {
     /// The ID used when a rack has fewer components than its profile requires.
     pub fn missing_rack_component() -> Self {
         HealthProbeId("MissingRackComponent".to_string())
+    }
+
+    /// The ID used when trays of the same type report different firmware versions.
+    pub fn rack_firmware_mismatch() -> Self {
+        HealthProbeId("RackFirmwareMismatch".to_string())
     }
 
     /// The ID used while a new HBN configuration waits for a later health sample.
