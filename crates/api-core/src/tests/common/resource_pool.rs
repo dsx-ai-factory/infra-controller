@@ -177,6 +177,8 @@ impl RemotePoolFixture {
                 route_target_policy,
             )?,
             allocations: Arc::default(),
+            recoveries: Arc::default(),
+            allocation_unavailable: Arc::default(),
             reject_allocate_call: Arc::default(),
             lose_allocate_reply: Arc::default(),
             allocate_pause: Arc::default(),
@@ -387,17 +389,21 @@ impl RemotePoolFixture {
 }
 
 /// `ObservedProvider` injects registration and inspection failures around the
-/// local provider. Describe, Define, Allocate, and Release counters record
-/// incoming calls, including calls that are rejected or paused.
+/// local provider. Counters record Describe, Define, Allocate, AllocateExact,
+/// Recover and Release calls, including calls that are rejected or paused.
 #[derive(Clone)]
 pub(in crate::tests) struct ObservedProvider {
     pub(in crate::tests) local: LocalProvider,
     pub(in crate::tests) allocations: Arc<AtomicUsize>,
+    /// Incoming Recover calls, including unavailable attempts.
+    pub(in crate::tests) recoveries: Arc<AtomicUsize>,
+    /// Makes Allocate, AllocateExact and Recover return Unavailable.
+    pub(in crate::tests) allocation_unavailable: Arc<AtomicBool>,
     /// Rejects this one-based Allocate call before reserving; zero disables it.
     pub(in crate::tests) reject_allocate_call: Arc<AtomicUsize>,
     /// Loses one successful Allocate reply after the provider saves its value.
     pub(in crate::tests) lose_allocate_reply: Arc<AtomicBool>,
-    /// Pauses after the local provider allocates, before Core receives the reply.
+    /// Pauses Allocate after reserving, before Core receives the reply.
     pub(in crate::tests) allocate_pause: Arc<PausedCall>,
     /// Holds Allocate calls until every participant reaches the barrier.
     pub(in crate::tests) allocate_barrier: Arc<Mutex<Option<Arc<Barrier>>>>,
@@ -492,6 +498,9 @@ impl ResourcePool for ObservedProvider {
         request: Request<v1::AllocateRequest>,
     ) -> Result<Response<v1::AllocateResponse>, Status> {
         let call = self.allocations.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.allocation_unavailable.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("allocation provider disabled"));
+        }
         let barrier = self
             .allocate_barrier
             .lock()
@@ -515,6 +524,10 @@ impl ResourcePool for ObservedProvider {
         &self,
         request: Request<v1::AllocateExactRequest>,
     ) -> Result<Response<v1::AllocateExactResponse>, Status> {
+        self.allocations.fetch_add(1, Ordering::SeqCst);
+        if self.allocation_unavailable.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("allocation provider disabled"));
+        }
         self.local.allocate_exact(request).await
     }
 
@@ -522,6 +535,10 @@ impl ResourcePool for ObservedProvider {
         &self,
         request: Request<v1::RecoverRequest>,
     ) -> Result<Response<v1::RecoverResponse>, Status> {
+        self.recoveries.fetch_add(1, Ordering::SeqCst);
+        if self.allocation_unavailable.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("allocation provider disabled"));
+        }
         self.local.recover(request).await
     }
 
