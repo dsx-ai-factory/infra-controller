@@ -32,7 +32,6 @@ carbide-ipmi = { path = "../ipmi" }
 carbide-redfish = { path = "../redfish" }
 carbide-secrets = { path = "../secrets", default-features = false }
 carbide-utils = { path = "../utils", default-features = false }
-carbide-uuid = { path = "../uuid" }
 mac_address = { features = ["serde"], workspace = true }
 nv-redfish = { features = [
     "accounts",
