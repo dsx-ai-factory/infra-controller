@@ -94,7 +94,13 @@ struct Parity {
 
 fn outcome(filter: &Value, full_host_read: bool) -> Outcome {
     let f: Filter = serde_json::from_value(filter.clone()).expect("a valid filter");
-    match metrics::series_spec(&f, &metrics::Capabilities { full_host_read }) {
+    match metrics::series_spec(
+        &f,
+        &metrics::Capabilities {
+            full_host_read,
+            rest_fixture: true,
+        },
+    ) {
         Ok(spec) => Outcome {
             series: Some(SeriesOut {
                 metric: spec.metric.to_string(),
