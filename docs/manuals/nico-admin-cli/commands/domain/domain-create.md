@@ -10,8 +10,7 @@ VPC
 ## SYNOPSIS
 
 ```text
-nico-admin-cli domain create [--vpc-id] [--default-ttl]
-[--extended] [--sort-by] [-h|--help] <NAME>
+nico-admin-cli domain create [OPTIONS] <NAME>
 ```
 
 ## DESCRIPTION
@@ -60,14 +59,15 @@ Print help (see a summary with -h)
 
 `<NAME>`
 
-Domain name. Reverse zones (in-addr.arpa, ip6.arpa) and duplicate live
-names are rejected
+Lowercase domain name. Reverse zones (in-addr.arpa, ip6.arpa) and
+duplicate live names are rejected
 
 ## Examples
 
 ```sh
 nico-admin-cli domain create mysite.example.com
 nico-admin-cli domain create compute.customer.example --vpc-id 12345678-1234-5678-90ab-cdef01234567
+nico-admin-cli domain create example.com --default-ttl 600
 ```
 
 ---

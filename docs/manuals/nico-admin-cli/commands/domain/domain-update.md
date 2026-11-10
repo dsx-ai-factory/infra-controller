@@ -9,9 +9,7 @@ nico-admin-cli-domain-update - Update domain default TTL
 ## SYNOPSIS
 
 ```text
-nico-admin-cli domain update <--default-ttl>
-[--extended] [--sort-by] [-h|--help]
-<DomainId>
+nico-admin-cli domain update [OPTIONS] --default-ttl <SECONDS> <DomainId>
 ```
 
 ## DESCRIPTION

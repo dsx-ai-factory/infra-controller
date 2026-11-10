@@ -64,13 +64,13 @@ impl InternalRBACRules {
         // Add additional permissions to the list below.
         x.perm("Version", vec![Anonymous]);
         x.perm("StreamConsoleLogs", vec![ForgeAdminCLI]);
-        x.perm("CreateDomain", vec![]);
+        x.perm("CreateDomain", vec![ForgeAdminCLI]);
         x.perm("CreateDomainLegacy", vec![]);
         x.perm("UpdateDomainLegacy", vec![]);
         x.perm("DeleteDomainLegacy", vec![]);
         x.perm("FindDomainLegacy", vec![ForgeAdminCLI]);
-        x.perm("UpdateDomain", vec![]);
-        x.perm("DeleteDomain", vec![]);
+        x.perm("UpdateDomain", vec![ForgeAdminCLI]);
+        x.perm("DeleteDomain", vec![ForgeAdminCLI]);
         x.perm("FindDomain", vec![ForgeAdminCLI]);
         x.perm("CreateVpc", vec![SiteAgent, Machineatron]);
         x.perm("UpdateVpc", vec![ForgeAdminCLI, SiteAgent]);
@@ -1382,6 +1382,28 @@ mod rbac_rule_tests {
                 InternalRBACRules::allowed_from_static("AddNetworkSegmentPrefix", &principals)
             },
         );
+    }
+
+    #[test]
+    fn operator_domain_commands_operation_permissions() {
+        let admin = Principal::ExternalUser(ExternalUserInfo::new(
+            None,
+            "nico-cli-client".to_string(),
+            None,
+        ));
+        let unrelated = Principal::SpiffeServiceIdentifier("nico-dns".to_string());
+        let anonymous = Principal::Anonymous;
+        for method in ["CreateDomain", "UpdateDomain", "DeleteDomain", "FindDomain"] {
+            for (principal, expected) in [(&admin, true), (&unrelated, false), (&anonymous, false)]
+            {
+                assert_eq!(
+                    InternalRBACRules::allowed_from_static(method, std::slice::from_ref(principal)),
+                    expected,
+                    "{method}: {}",
+                    principal.as_identifier(),
+                );
+            }
+        }
     }
 
     #[test]

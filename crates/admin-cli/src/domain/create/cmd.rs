@@ -18,6 +18,7 @@
 use ::rpc::admin_cli::OutputFormat;
 
 use super::args::Args;
+use crate::async_writeln;
 use crate::domain::show::cmd::convert_domain_to_nice_format;
 use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
@@ -25,16 +26,48 @@ use crate::rpc::ApiClient;
 pub(super) async fn create(
     args: Args,
     output_format: OutputFormat,
+    output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
     api_client: &ApiClient,
 ) -> CarbideCliResult<()> {
     let domain = api_client
         .create_domain(args.name, args.vpc_id, args.default_ttl)
         .await?;
 
-    match output_format {
-        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&domain)?),
-        _ => println!("{}", convert_domain_to_nice_format(&domain)?),
-    }
+    write_create_output(&domain, output_format, output_file).await
+}
 
+async fn write_create_output(
+    domain: &::rpc::protos::dns::Domain,
+    output_format: OutputFormat,
+    output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
+) -> CarbideCliResult<()> {
+    match output_format {
+        OutputFormat::Json => {
+            async_writeln!(output_file, "{}", serde_json::to_string_pretty(domain)?)?
+        }
+        _ => async_writeln!(output_file, "{}", convert_domain_to_nice_format(domain)?)?,
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::async_write::CapturedOutput;
+
+    #[tokio::test]
+    async fn create_output_uses_configured_writer() {
+        let mut captured = CapturedOutput::new();
+        let domain = ::rpc::protos::dns::Domain {
+            name: "tenant.example.com".to_string(),
+            ..Default::default()
+        };
+
+        write_create_output(&domain, OutputFormat::Json, captured.writer())
+            .await
+            .unwrap();
+
+        let output = String::from_utf8(captured.into_bytes().await).unwrap();
+        assert!(output.contains("tenant.example.com"));
+    }
 }
