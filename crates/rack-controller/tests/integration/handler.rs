@@ -4162,6 +4162,9 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
         if err.contains("temporary dispatch failure")
     ));
     let job = rack.firmware_upgrade_job.unwrap();
+    // A failed admission must not leave the aggregate completed while the host waits.
+    assert_eq!(job.status, Some(FirmwareProgressState::InProgress));
+    assert!(job.completed_at.is_none());
     assert_eq!(job.machines.len(), 2);
     assert!(
         job.machines

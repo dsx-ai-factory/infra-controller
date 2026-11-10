@@ -3028,6 +3028,12 @@ pub async fn handle_maintenance(
                     // Existing device controllers consume these results independently
                     // of supplemental admission. Commit before any fallible dispatch
                     // so a late host cannot roll back their firmware completion.
+                    // The aggregate stays open until device evaluation below
+                    // confirms that no host still awaits admission.
+                    if job.status == Some(FirmwareProgressState::Completed) {
+                        job.status = Some(FirmwareProgressState::InProgress);
+                        job.completed_at = None;
+                    }
                     db_rack::update_firmware_upgrade_job(txn.as_mut(), id, Some(&job)).await?;
                     txn.commit().await?;
                     state.firmware_upgrade_job = Some(job.clone());
@@ -3056,12 +3062,6 @@ pub async fn handle_maintenance(
                         completed,
                         failed,
                     } => {
-                        if is_automatic_ingestion(state)
-                            && job.status == Some(FirmwareProgressState::Completed)
-                        {
-                            job.status = Some(FirmwareProgressState::InProgress);
-                            job.completed_at = None;
-                        }
                         db_rack::update_firmware_upgrade_job(txn.as_mut(), id, Some(&job)).await?;
                         state.firmware_upgrade_job = Some(job);
                         Ok(StateHandlerOutcome::wait(format!(
