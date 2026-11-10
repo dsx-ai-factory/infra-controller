@@ -23,6 +23,7 @@ mod connection;
 mod credentials;
 mod endpoint;
 mod error;
+mod identity;
 mod ipmi;
 mod observe;
 mod status;
@@ -37,4 +38,5 @@ pub use credentials::{
 };
 pub use endpoint::{BmcRef, BmcRefError, ConnectedBmc};
 pub use error::ConnectError;
+pub use identity::platform_identity;
 pub use ipmi::EndpointIpmiOps;

@@ -47,7 +47,6 @@ mod computer_system;
 mod drives;
 mod error;
 pub mod hw;
-mod identity;
 mod inventories;
 mod manager;
 mod network_adapter;
@@ -59,12 +58,12 @@ use std::convert::identity;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bmc_platform::ServiceRootIdentity;
 use chassis::ExploredChassisCollection;
 use component_integrity::ExploredComponentIntegrity;
 use computer_system::ExploredComputerSystem;
 use drives::ExploredDrives;
 pub use error::Error;
-pub use identity::{platform_identity, service_root_identity};
 use inventories::ExploredInventories;
 use itertools::Itertools;
 use mac_address::MacAddress;
@@ -587,6 +586,17 @@ fn service_root<B: Bmc>(root: &ServiceRoot<B>) -> ModelServiceRoot {
             .and_then(|oem| oem.additional_properties.as_object())
             .map(|oem| oem.keys().cloned().collect())
             .unwrap_or_default(),
+    }
+}
+
+/// The service root part of the identity driver selection matches on, read
+/// from `root` directly. It is all a BMC in factory state serves.
+pub fn service_root_identity<B: Bmc>(root: &ServiceRoot<B>) -> ServiceRootIdentity {
+    let root = service_root(root);
+    ServiceRootIdentity {
+        vendor: root.vendor,
+        product: root.product,
+        oem_keys: root.oem_keys,
     }
 }
 

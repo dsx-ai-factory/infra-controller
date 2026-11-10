@@ -159,7 +159,7 @@ impl Target {
                 .map_err(|error| format!("connecting: {error}"))?;
             bmc_explorer::nv_generate_exploration_report(connection.service_root, &explore_config())
                 .await
-                .map(|report| bmc_explorer::platform_identity(&report))
+                .map(|report| bmc_runtime::platform_identity(&report))
                 .map_err(|error| format!("exploring: {error}"))
         })
         .await
