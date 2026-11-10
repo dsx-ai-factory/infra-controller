@@ -1418,6 +1418,7 @@ name = "carbide-api-core-integration-tests"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
  "carbide-api-core",
  "carbide-api-db",
  "carbide-api-model",
@@ -3085,6 +3086,7 @@ name = "carbide-power-shelf-controller"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-credential-rotation",
@@ -3756,6 +3758,7 @@ name = "carbide-spdm-controller"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-instrument",
@@ -3900,6 +3903,7 @@ name = "carbide-switch-controller"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-credential-rotation",

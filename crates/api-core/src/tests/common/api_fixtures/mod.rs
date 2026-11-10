@@ -1740,6 +1740,7 @@ async fn create_test_env_with_overrides_inner(
             SpdmStateHandlerServices {
                 db_pool: db_pool.clone(),
                 redfish_client_pool: redfish_sim.clone(),
+                bmc_connector: BmcConnector::Libredfish(redfish_sim.clone()),
             }
             .into(),
         )

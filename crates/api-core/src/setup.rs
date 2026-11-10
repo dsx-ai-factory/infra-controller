@@ -2390,6 +2390,10 @@ async fn initialize_and_start_controllers<'a>(
                 SpdmStateHandlerServices {
                     db_pool: db_pool.clone(),
                     redfish_client_pool: shared_redfish_pool.clone(),
+                    bmc_connector: BmcConnector::new(
+                        shared_redfish_pool.clone(),
+                        driver_connector.clone(),
+                    ),
                 }
                 .into(),
             )
@@ -2436,6 +2440,10 @@ async fn initialize_and_start_controllers<'a>(
                     .power_shelf_state_controller
                     .rack_firmware_reprovisioning_enabled,
                 redfish_client_pool: shared_redfish_pool.clone(),
+                bmc_connector: BmcConnector::new(
+                    shared_redfish_pool.clone(),
+                    driver_connector.clone(),
+                ),
                 bmc_credential_ops: bmc_credential_ops.clone(),
                 bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::Bmc,
@@ -2496,6 +2504,10 @@ async fn initialize_and_start_controllers<'a>(
                     .effective_switch_mtls_services_as_i32(),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
                 redfish_client_pool: shared_redfish_pool.clone(),
+                bmc_connector: BmcConnector::new(
+                    shared_redfish_pool.clone(),
+                    driver_connector.clone(),
+                ),
                 bmc_credential_ops: bmc_credential_ops.clone(),
                 bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::Bmc,
