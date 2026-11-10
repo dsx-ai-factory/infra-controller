@@ -15,15 +15,41 @@
  * limitations under the License.
  */
 
-use carbide_api_core::test_support::metadata;
+use std::collections::HashMap;
+use std::net::{Ipv4Addr, Ipv6Addr};
+use std::str::FromStr;
+
+use carbide_api_core::cfg::file::{FnnConfig, FnnRoutingProfileConfig};
+use carbide_api_core::test_support::network_segment::{
+    FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS, FIXTURE_TENANT_ORG_ID,
+};
+use carbide_api_core::test_support::{default_config, metadata};
 use carbide_test_harness::prelude::*;
+use carbide_test_harness::test_support::fixture_config::{
+    FixtureDefault as _, ManagedHostConfigExt as _,
+};
+use carbide_uuid::external_validation::ExternalValidationRequestId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::StableHostMachineId;
-use rpc::forge::{InstanceAllocationRequest, InstanceConfig, ManagedHostQuarantineMode};
+use carbide_uuid::network::NetworkSegmentId;
+use carbide_uuid::vpc::{VpcId, VpcPrefixId};
+use db::ObjectColumnFilter;
+use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
+use model::instance::config::network::DeviceLocator;
+use model::machine::ManagedHostState;
+use model::metadata::Metadata;
+use model::test_support::ManagedHostConfig;
+use model::vpc_prefix::VpcPrefixConfig;
+use rpc::forge::instance_interface_config::NetworkDetails;
+use rpc::forge::{
+    InstanceAllocationRequest, InstanceConfig, ManagedHostQuarantineMode, VpcCreationRequest,
+};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use tonic::{IntoRequest, Request};
 
 use super::instance_common::{
-    InstanceFixture, default_os_config, default_tenant_config, single_interface_network_config,
+    InstanceEnv, InstanceFixture, default_os_config, default_tenant_config,
+    single_interface_network_config,
 };
 
 #[sqlx_test]
@@ -424,4 +450,455 @@ async fn test_can_not_create_instances_with_machine_in_quarantine(
         err.message()
             .contains("host is not available for allocation due to health probe alert")
     );
+}
+
+#[sqlx_test]
+async fn test_instance_cannot_allocate_requested_ip_with_network_segment(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let env = InstanceEnv::new(pool, default_config::get()).await;
+    let segment_id = env.segment_id;
+    let vpc_id = db::vpc::find_by_segment(&env.harness.api().database_connection, segment_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let segment_id2 = env
+        .create_tenant_segment(vpc_id, FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[1], "TENANT")
+        .await;
+    let mh = env.create_managed_host(ManagedHostConfig::default()).await;
+
+    let mut txn = env.harness.db_txn().await;
+    assert_eq!(
+        db::instance_address::count_by_segment_id(&mut txn, &segment_id)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(matches!(
+        mh.host.db_machine(&mut txn).await.current_state(),
+        ManagedHostState::Ready
+    ));
+    txn.commit().await.unwrap();
+
+    // Attempt to create an instance with a network segment and
+    // an explicit IP request.
+    let err = env
+        .harness
+        .api()
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(StableHostMachineId::try_from(mh.host.id).unwrap())
+                .config(rpc::InstanceConfig {
+                    tenant: Some(default_tenant_config()),
+                    os: Some(rpc::forge::InstanceOperatingSystemConfig {
+                        phone_home_enabled: false,
+                        run_provisioning_instructions_on_every_boot: false,
+                        user_data: Some("SomeRandomData1".to_string()),
+                        variant: Some(rpc::forge::instance_operating_system_config::Variant::Ipxe(
+                            rpc::forge::InlineIpxe {
+                                ipxe_script: "SomeRandomiPxe1".to_string(),
+                            },
+                        )),
+                    }),
+                    network: Some(rpc::InstanceNetworkConfig {
+                        interfaces: vec![rpc::InstanceInterfaceConfig {
+                            ip_address: Some("192.168.0.1".to_string()),
+                            ipv6_interface_config: None,
+                            routing_profile: None,
+
+                            function_type: rpc::InterfaceFunctionType::Physical as i32,
+                            network_segment_id: None,
+                            network_details: Some(
+                                rpc::forge::instance_interface_config::NetworkDetails::SegmentId(
+                                    segment_id2,
+                                ),
+                            ),
+                            device: None,
+                            device_instance: 0,
+                            virtual_function_id: None,
+                        }],
+                        #[allow(deprecated)]
+                        auto: false,
+                        auto_config: None,
+                    }),
+                    infiniband: None,
+                    network_security_group_id: None,
+                    dpu_extension_services: None,
+                    nvlink: None,
+                    spxconfig: None,
+                    power_profile: None,
+                })
+                .metadata(rpc::Metadata {
+                    name: "test_instance".to_string(),
+                    description: "tests/instance".to_string(),
+                    labels: Vec::new(),
+                })
+                .tonic_request(),
+        )
+        .await
+        .expect_err("IP request with network segment should not be allowed");
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(
+        err.message()
+            .contains("explicit IP requests are only supported for VPC prefixes")
+    );
+}
+
+/// Verifies that non-FNN interfaces cannot span direct segments from multiple VPCs.
+#[sqlx_test]
+async fn test_allocate_instance_rejects_multiple_non_fnn_network_segments(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let env = InstanceEnv::new(pool, default_config::get()).await;
+    let mh = env
+        .create_managed_host(ManagedHostConfig::default().with_dpu_count(2))
+        .await;
+
+    // Create two non-FNN tenant segments across two VPCs.
+    let first_segment_id = env.segment_id;
+    let peer_vpc_id = env
+        .harness
+        .api()
+        .create_vpc(
+            VpcCreationRequest::builder("e65a9d69-39d2-4872-a53e-e5cb87c84e75")
+                .metadata(Metadata {
+                    name: "test peer vpc".to_string(),
+                    ..Default::default()
+                })
+                .network_virtualization_type(
+                    rpc::forge::VpcVirtualizationType::EthernetVirtualizer as i32,
+                )
+                .tonic_request(),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+    let second_segment_id = env
+        .create_tenant_segment(
+            peer_vpc_id,
+            FIXTURE_TENANT_NETWORK_SEGMENT_GATEWAYS[1],
+            "TENANT2",
+        )
+        .await;
+
+    // Non-FNN segments must still reject cross-VPC interface configs.
+    let err = env
+        .harness
+        .api()
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(StableHostMachineId::try_from(mh.host.id).unwrap())
+                .config(
+                    InstanceConfig::builder()
+                        .tenant(default_tenant_config())
+                        .os(default_os_config())
+                        .network(interface_network_config_with_devices(
+                            &[first_segment_id, second_segment_id],
+                            &[
+                                DeviceLocator {
+                                    device: "BlueField SoC".to_string(),
+                                    device_instance: 0,
+                                },
+                                DeviceLocator {
+                                    device: "BlueField SoC".to_string(),
+                                    device_instance: 1,
+                                },
+                            ],
+                        )),
+                )
+                .tonic_request(),
+        )
+        .await
+        .expect_err("non-FNN cross-VPC segment allocation should fail");
+
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(
+        err.message()
+            .contains("found segments attached to multiple VPCs")
+    );
+}
+
+/// Verifies that dual-stack prefixes on one interface cannot cross VPC boundaries.
+#[sqlx_test]
+async fn test_allocate_instance_rejects_dual_stack_prefixes_from_different_vpcs(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let mut config = default_config::get();
+    config.fnn = Some(FnnConfig {
+        admin_vpc: None,
+        common_internal_route_target: None,
+        additional_route_target_imports: vec![],
+        routing_profiles: HashMap::from([
+            (
+                "EXTERNAL".to_string(),
+                FnnRoutingProfileConfig {
+                    access_tier: Some(2),
+                    internal: Some(false),
+                    ..Default::default()
+                },
+            ),
+            (
+                "INTERNAL".to_string(),
+                FnnRoutingProfileConfig {
+                    access_tier: Some(1),
+                    internal: Some(true),
+                    ..Default::default()
+                },
+            ),
+        ]),
+        use_vpc_vrf_loopback: false,
+    });
+    let env = InstanceEnv::new(pool, config).await;
+    let mh = env.create_managed_host(ManagedHostConfig::default()).await;
+
+    // Register the tenant required by both FNN VPCs used in this validation scenario.
+    env.harness
+        .api()
+        .create_tenant(
+            rpc::forge::CreateTenantRequest {
+                organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+                routing_profile_type: None,
+                metadata: Some(rpc::Metadata {
+                    name: FIXTURE_TENANT_ORG_ID.to_string(),
+                    ..Default::default()
+                }),
+            }
+            .into_request(),
+        )
+        .await
+        .unwrap();
+
+    // Create two FNN VPCs so the global multi-FNN check passes.
+    let first_vpc = env
+        .harness
+        .api()
+        .create_vpc(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .metadata(Metadata {
+                    name: "dual-stack fnn vpc 1".to_string(),
+                    ..Default::default()
+                })
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .tonic_request(),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+    let second_vpc = env
+        .harness
+        .api()
+        .create_vpc(
+            VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID)
+                .metadata(Metadata {
+                    name: "dual-stack fnn vpc 2".to_string(),
+                    ..Default::default()
+                })
+                .network_virtualization_type(rpc::forge::VpcVirtualizationType::Fnn as i32)
+                .tonic_request(),
+        )
+        .await
+        .unwrap()
+        .into_inner()
+        .id
+        .unwrap();
+
+    // Put the IPv4 and IPv6 prefixes in different VPCs on the same interface.
+    let primary_prefix_id = create_tenant_overlay_prefix_with_prefix(
+        &env,
+        first_vpc,
+        "dual-stack primary prefix",
+        IpNetwork::V4(Ipv4Network::new(Ipv4Addr::new(10, 217, 9, 224), 27).unwrap()),
+    )
+    .await;
+    let ipv6_prefix_id = create_tenant_overlay_prefix_with_prefix(
+        &env,
+        second_vpc,
+        "dual-stack ipv6 prefix",
+        IpNetwork::V6(Ipv6Network::new(Ipv6Addr::from_str("fd00:217:9::").unwrap(), 120).unwrap()),
+    )
+    .await;
+
+    // Reject creating a single dual-stack segment that crosses VPC boundaries.
+    let err = env
+        .harness
+        .api()
+        .allocate_instance(
+            InstanceAllocationRequest::builder(false)
+                .machine_id(StableHostMachineId::try_from(mh.host.id).unwrap())
+                .config(
+                    InstanceConfig::builder()
+                        .tenant(default_tenant_config())
+                        .os(default_os_config())
+                        .network(rpc::InstanceNetworkConfig {
+                            interfaces: vec![rpc::InstanceInterfaceConfig {
+                            function_type: rpc::InterfaceFunctionType::Physical as i32,
+                            network_segment_id: None,
+                            network_details: Some(
+                                rpc::forge::instance_interface_config::NetworkDetails::VpcPrefixId(
+                                    primary_prefix_id,
+                                ),
+                            ),
+                            device: Some("BlueField SoC".to_string()),
+                            device_instance: 0,
+                            virtual_function_id: None,
+                            ip_address: None,
+                            ipv6_interface_config: Some(rpc::forge::InstanceInterfaceIpv6Config {
+                                vpc_prefix_id: Some(ipv6_prefix_id),
+                                ip_address: None,
+                            }),
+                            routing_profile: None,
+                        }],
+                            #[allow(deprecated)]
+                            auto: false,
+                            auto_config: None,
+                        }),
+                )
+                .tonic_request(),
+        )
+        .await
+        .expect_err("dual-stack prefixes from different VPCs should fail");
+
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(
+        err.message()
+            .contains("dual-stack VPC prefixes must belong to the same VPC")
+    );
+}
+
+/// Unsupported bindings must fail before legacy hydration acquires a connection.
+#[sqlx_test]
+async fn test_external_validation_binding_rejected_before_hydration(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    let pool = PgPoolOptions::new().connect_with(options).await.unwrap();
+    let env = TestHarness::builder(pool.clone()).build().await;
+    // Hydration must not acquire a connection for an unsupported binding.
+    pool.close().await;
+
+    #[allow(deprecated)]
+    let legacy_request = rpc::InstanceAllocationRequest {
+        machine_id: Some(
+            "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"
+                .parse()
+                .unwrap(),
+        ),
+        config: Some(rpc::InstanceConfig {
+            network: Some(rpc::forge::InstanceNetworkConfig {
+                auto: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let bound_request = rpc::InstanceAllocationRequest {
+        external_validation_request_id: Some(ExternalValidationRequestId::new()),
+        ..legacy_request.clone()
+    };
+
+    for (scenario, batch) in [
+        ("single legacy allocation", false),
+        ("batch with an earlier unbound legacy allocation", true),
+    ] {
+        let error = if batch {
+            env.api()
+                .allocate_instances(Request::new(rpc::forge::BatchInstanceAllocationRequest {
+                    instance_requests: vec![legacy_request.clone(), bound_request.clone()],
+                }))
+                .await
+                .unwrap_err()
+        } else {
+            env.api()
+                .allocate_instance(Request::new(bound_request.clone()))
+                .await
+                .unwrap_err()
+        };
+        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{scenario}");
+        assert!(
+            error.message().contains("external validation allocation"),
+            "{scenario}"
+        );
+    }
+}
+
+fn interface_network_config_with_devices(
+    segment_ids: &[NetworkSegmentId],
+    device_locators: &[DeviceLocator],
+) -> rpc::InstanceNetworkConfig {
+    let interfaces = device_locators
+        .iter()
+        .zip(segment_ids)
+        .map(|(dl, segment_id)| rpc::InstanceInterfaceConfig {
+            function_type: rpc::InterfaceFunctionType::Physical as i32,
+            network_segment_id: Some(*segment_id),
+            network_details: Some(NetworkDetails::SegmentId(*segment_id)),
+            device: Some(dl.device.clone()),
+            device_instance: dl.device_instance as u32,
+            virtual_function_id: None,
+            ip_address: None,
+            ipv6_interface_config: None,
+            routing_profile: None,
+        })
+        .collect();
+    rpc::InstanceNetworkConfig {
+        interfaces,
+        #[allow(deprecated)]
+        auto: false,
+        auto_config: None,
+    }
+}
+
+/// Creates a tenant overlay VPC prefix with an explicit CIDR for allocation tests.
+async fn create_tenant_overlay_prefix_with_prefix(
+    env: &InstanceEnv,
+    vpc_id: VpcId,
+    name: &str,
+    prefix: IpNetwork,
+) -> VpcPrefixId {
+    let mut txn = env.harness.db_txn().await;
+
+    // Look up the current VPC version so the prefix insert can increment it.
+    let vpcs = db::vpc::find_by(
+        txn.as_mut(),
+        ObjectColumnFilter::One(db::vpc::IdColumn, &vpc_id),
+    )
+    .await
+    .unwrap();
+    assert_eq!(vpcs.len(), 1);
+    let expected_vpc_version = vpcs[0].version;
+
+    // Persist the prefix directly so tests can focus on allocation behavior.
+    let vpc_prefix_id = db::vpc_prefix::persist(
+        model::vpc_prefix::NewVpcPrefix {
+            id: uuid::Uuid::new_v4().into(),
+            site_prefix_id: None,
+            vpc_id,
+            overlap_vpc_id: None,
+            config: VpcPrefixConfig { prefix },
+            metadata: Metadata {
+                name: name.to_string(),
+                description: "desc".to_string(),
+                labels: HashMap::new(),
+            },
+        },
+        expected_vpc_version,
+        &mut txn,
+    )
+    .await
+    .unwrap()
+    .id;
+    txn.commit().await.unwrap();
+    vpc_prefix_id
 }

@@ -23,8 +23,12 @@ use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use carbide_test_harness::{CarbideConfig, TestNetworkSegment};
 use carbide_uuid::network::NetworkSegmentId;
+use carbide_uuid::vpc::VpcId;
+use ipnetwork::IpNetwork;
+use model::resource_pool;
 use model::test_support::ManagedHostConfig;
 use rpc::forge::instance_interface_config::NetworkDetails;
+use tonic::IntoRequest;
 
 pub(super) struct InstanceEnv {
     pub(super) harness: TestHarness,
@@ -37,13 +41,35 @@ pub(super) struct InstanceEnv {
 
 impl InstanceEnv {
     pub(super) async fn new(pool: PgPool, config: CarbideConfig) -> Self {
+        let mut pools = ResourcePoolBuilder::default()
+            .with_vlan_ids(1, 5)
+            .with_vnis(10_001, 10_005)
+            .build();
+        if config.fnn.is_some() {
+            pools.extend(
+                [
+                    (resource_pool::common::EXTERNAL_VPC_VNI, 50_001, 50_005),
+                    (resource_pool::common::FNN_ASN, 30_001, 30_035),
+                ]
+                .map(|(name, start, end)| {
+                    (
+                        name.to_string(),
+                        resource_pool::ResourcePoolDef {
+                            pool_type: resource_pool::ResourcePoolType::Integer,
+                            ranges: vec![resource_pool::Range {
+                                start: start.to_string(),
+                                end: end.to_string(),
+                                auto_assign: true,
+                            }],
+                            prefix: None,
+                            delegate_prefix_len: None,
+                        },
+                    )
+                }),
+            );
+        }
         let harness = TestHarness::builder(pool)
-            .with_resource_pools(
-                ResourcePoolBuilder::default()
-                    .with_vlan_ids(1, 5)
-                    .with_vnis(10_001, 10_005)
-                    .build(),
-            )
+            .with_resource_pools(pools)
             .with_api_builder_fn(move |builder| builder.with_runtime_config(Arc::new(config)))
             .build()
             .await;
@@ -67,11 +93,55 @@ impl InstanceEnv {
         }
     }
 
-    pub(super) async fn create_managed_host(&self) -> TestManagedHost {
+    pub(super) async fn create_tenant_segment(
+        &self,
+        vpc_id: VpcId,
+        network: IpNetwork,
+        name: &str,
+    ) -> NetworkSegmentId {
+        let segment = self
+            .harness
+            .api()
+            .create_network_segment(
+                rpc::forge::NetworkSegmentCreationRequest {
+                    id: None,
+                    mtu: Some(1500),
+                    name: name.to_string(),
+                    prefixes: vec![rpc::forge::NetworkPrefix {
+                        id: None,
+                        prefix: ipnetwork::IpNetwork::new(network.network(), network.prefix())
+                            .unwrap()
+                            .to_string(),
+                        gateway: Some(network.ip().to_string()),
+                        reserve_first: 3,
+                        free_ip_count: 0,
+                        svi_ip: None,
+                        free_ip_count_v2: None,
+                        free_ip_count_saturated: false,
+                        dhcpv6_link_address: None,
+                    }],
+                    subdomain_id: Some(self.domain.id),
+                    vpc_id: Some(vpc_id),
+                    segment_type: rpc::forge::NetworkSegmentType::Tenant as i32,
+                    infer_slaac_eui64_addresses: false,
+                }
+                .into_request(),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+        // Get the tenant segment into ready state, as in the shared network fixtures.
+        let network_controller = self.harness.network_controller();
+        network_controller.run_single_iteration().await;
+        network_controller.run_single_iteration().await;
+        segment.id.unwrap()
+    }
+
+    pub(super) async fn create_managed_host(&self, config: ManagedHostConfig) -> TestManagedHost {
         let mut mh = self
             .harness
             .managed_host_builder(&self.site_explorer, self.underlay_segment)
-            .with_config(ManagedHostConfig::default())
+            .with_config(config)
             .with_dpu_network_status_reported()
             .build()
             .await
@@ -91,7 +161,7 @@ pub(super) struct InstanceFixture {
 impl InstanceFixture {
     pub(super) async fn new(pool: PgPool) -> Self {
         let env = InstanceEnv::new(pool, default_config::get()).await;
-        let mh = env.create_managed_host().await;
+        let mh = env.create_managed_host(ManagedHostConfig::default()).await;
         Self {
             harness: env.harness,
             mh,

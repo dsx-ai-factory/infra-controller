@@ -19,8 +19,10 @@ use std::time::Duration;
 
 use carbide_api_core::test_support::default_config;
 use carbide_test_harness::prelude::*;
+use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use carbide_uuid::machine::StableHostMachineId;
 use model::machine::health_override::HARDWARE_HEALTH_OVERRIDE_PREFIX;
+use model::test_support::ManagedHostConfig;
 use rpc::InstanceReleaseRequest;
 use rpc::forge::{InstanceAllocationRequest, InstanceConfig, Issue, IssueCategory};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -31,7 +33,7 @@ use super::instance_common::{
 };
 
 async fn create_release_host(env: &InstanceEnv) -> TestManagedHost {
-    let mh = env.create_managed_host().await;
+    let mh = env.create_managed_host(ManagedHostConfig::default()).await;
     // Release assertions count this healthy hardware report alongside issue and repair overrides.
     env.harness
         .api()
