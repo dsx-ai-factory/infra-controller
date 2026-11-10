@@ -1596,25 +1596,27 @@ async fn fetch_chassis(
             net_adapters.push(net_adapter);
         }
 
-        // For GB200 and Vera Rubin hosts, use the Chassis_0 assembly serial number to
+        // For GB200, GB300 and Vera Rubin hosts, use the Chassis_0 assembly serial number to
         // match Nautobot / expected-machine inventory serials.
         let serial_number = if chassis_id == "Chassis_0" {
             client
                 .get_chassis_assembly("Chassis_0")
                 .await
                 .ok()
-                .and_then(|assembly| {
-                    assembly
-                        .assemblies
-                        .iter()
-                        .find(|asm| {
-                            let model = asm.model.as_deref();
-                            model.is_some_and(
-                                bmc_explorer::hw::vera_rubin::chassis_assembly_serial_model,
-                            ) || model == Some("GB200 NVL")
-                        })
-                        .and_then(|asm| asm.serial_number.clone())
+                .map(|assembly| {
+                    bmc_explorer::hw::chassis_assembly::select_serial_number(
+                        assembly
+                            .assemblies
+                            .iter()
+                            .map(|asm| (asm.model.as_deref(), asm.serial_number.as_deref())),
+                    )
+                    .map(|serial| serial.map(str::to_string))
                 })
+                .transpose()
+                .map_err(|err| RedfishError::GenericError {
+                    error: err.to_string(),
+                })?
+                .flatten()
                 .or(desc.serial_number)
         } else {
             desc.serial_number
@@ -2133,6 +2135,86 @@ mod tests {
         nv_bmc_explore_config, record_evaluated_boot_interface, should_fetch_network_adapter_ports,
         system_resource_to_model,
     };
+
+    #[tokio::test]
+    async fn gb300_assembly_serial_reaches_chassis_and_ambiguity_fails() {
+        use libredfish::model::chassis::{Assembly, Chassis};
+        use libredfish::{Redfish, RedfishError, RedfishFuture};
+
+        struct AssemblyClient(Assembly);
+
+        impl Redfish for AssemblyClient {
+            fn std_redfish(&self) -> &libredfish::standard::RedfishStandard {
+                panic!("this test only reads chassis and assemblies")
+            }
+
+            fn get_chassis_all(&self) -> RedfishFuture<'_, Result<Vec<String>, RedfishError>> {
+                Box::pin(async { Ok(vec!["Chassis_0".into(), "Other".into()]) })
+            }
+
+            fn get_chassis<'a>(
+                &'a self,
+                id: &'a str,
+            ) -> RedfishFuture<'a, Result<Chassis, RedfishError>> {
+                Box::pin(async move {
+                    Ok(Chassis {
+                        id: Some(id.into()),
+                        serial_number: Some("9990000000002".into()),
+                        ..Default::default()
+                    })
+                })
+            }
+
+            fn get_chassis_assembly<'a>(
+                &'a self,
+                id: &'a str,
+            ) -> RedfishFuture<'a, Result<Assembly, RedfishError>> {
+                Box::pin(async move {
+                    assert_eq!(id, "Chassis_0");
+                    Ok(self.0.clone())
+                })
+            }
+        }
+
+        for (scenario, serials, expected) in [
+            (
+                "unique tray",
+                vec!["999XXXXXXXXXX", "9990000000001"],
+                Ok("9990000000001"),
+            ),
+            (
+                "ambiguous tray",
+                vec!["9990000000001", "9990000000003"],
+                Err(()),
+            ),
+            ("missing tray", vec![], Ok("9990000000002")),
+        ] {
+            let assembly = serde_json::from_value(json!({
+                "Assemblies": serials.into_iter().map(|serial| json!({
+                    "Model": "GB300 Titania-Bianca Compute Tray",
+                    "SerialNumber": serial
+                })).collect::<Vec<_>>()
+            }))
+            .unwrap();
+            let result = super::fetch_chassis(&AssemblyClient(assembly), None).await;
+            match expected {
+                Ok(serial) => {
+                    let chassis = result.unwrap().chassis;
+                    assert_eq!(
+                        chassis[0].serial_number.as_deref(),
+                        Some(serial),
+                        "{scenario}"
+                    );
+                    assert_eq!(chassis[1].serial_number.as_deref(), Some("9990000000002"));
+                }
+                Err(()) => assert!(
+                    matches!(result, Err(RedfishError::GenericError { ref error })
+                        if error == "multiple distinct GB300 tray assembly serial numbers"),
+                    "{scenario} must not fall back to the board serial"
+                ),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn secure_boot_absence_preserves_other_errors() {

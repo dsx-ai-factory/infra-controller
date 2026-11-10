@@ -23,6 +23,135 @@ use tokio::test;
 
 use crate::common;
 
+#[test]
+async fn gb300_assembly_serial_reaches_report_and_ambiguity_fails() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::routing::get;
+    use axum::{Json, Router};
+    use bmc_mock::injection::{Action, Rule, Selector};
+    use bmc_mock::test_support::axum_http_client::AxumRouterHttpClient;
+    use bmc_mock::{DpuMachineInfo, DpuSettings, HardwareType, HostMachineInfo, MachineInfo};
+    use nv_redfish::bmc_http::{BmcCredentials, CacheSettings, HttpBmc};
+
+    const ASSEMBLY: &str = "/redfish/v1/Chassis/Chassis_0/Assembly";
+
+    for (scenario, second_serial, ambiguous) in [
+        ("unprogrammed second tray FRU", "999XXXXXXXXXX", false),
+        ("conflicting second tray FRU", "9990000000003", true),
+    ] {
+        let machine_info = {
+            let mut pool = test_support::TEST_MAC_POOL.lock().unwrap();
+            let ranges = pool.allocate_range_config().unwrap();
+            let dpu = DpuMachineInfo::new(
+                HardwareType::NvidiaDgxGb300,
+                &mut pool,
+                DpuSettings::default(),
+            );
+            MachineInfo::Host(HostMachineInfo::new(
+                HardwareType::NvidiaDgxGb300,
+                vec![dpu],
+                &mut pool,
+                ranges,
+            ))
+        };
+        let (router, state) = bmc_mock::machine_router(
+            &machine_info,
+            Arc::new(test_support::TestCallbacks::default()),
+            "test-host-id".into(),
+            false,
+            Default::default(),
+        );
+        // This profile has no assembly inventory. Add both its advertised link
+        // and a successful endpoint; JSON injection cannot replace its 404.
+        state.injection.upsert(Rule {
+            id: "gb300-tray-assembly-link".into(),
+            selector: Selector::OdataId("/redfish/v1/Chassis/Chassis_0".into()),
+            action: Action::JsonMerge(serde_json::json!({
+                "Assembly": {"@odata.id": ASSEMBLY}
+            })),
+            remaining: Some(1),
+        });
+        let assembly = serde_json::json!({
+            "@odata.id": ASSEMBLY,
+            "@odata.type": "#Assembly.v1_3_0.Assembly",
+            "Id": "Assembly", "Name": "Chassis assembly",
+            "Assemblies": [
+                {
+                    "@odata.id": format!("{ASSEMBLY}#/Assemblies/0"),
+                    "@odata.type": "#Assembly.v1_3_0.AssemblyData",
+                    "MemberId": "0", "Name": "Tray FRU",
+                    "Model": "GB300 Titania-Bianca Compute Tray",
+                    "SerialNumber": "9990000000001", "PartNumber": "675-20000-0000-TEST"
+                },
+                {
+                    "@odata.id": format!("{ASSEMBLY}#/Assemblies/1"),
+                    "@odata.type": "#Assembly.v1_3_0.AssemblyData",
+                    "MemberId": "1", "Name": "Board FRU", "Model": "P5859 B03",
+                    "SerialNumber": "9990000000002", "PartNumber": "699-20000-0000-TEST"
+                },
+                {
+                    "@odata.id": format!("{ASSEMBLY}#/Assemblies/2"),
+                    "@odata.type": "#Assembly.v1_3_0.AssemblyData",
+                    "MemberId": "2", "Name": "Secondary tray FRU",
+                    "Model": "GB300 Titania-Bianca Compute Tray",
+                    "SerialNumber": second_serial, "PartNumber": "965-XXXXX-XXXX-XXX"
+                }
+            ]
+        });
+        let assembly_requests = Arc::new(AtomicUsize::new(0));
+        let requests = assembly_requests.clone();
+        let router = Router::new()
+            .route(
+                ASSEMBLY,
+                get(move || {
+                    requests.fetch_add(1, Ordering::Relaxed);
+                    let assembly = assembly.clone();
+                    async move { Json(assembly) }
+                }),
+            )
+            .fallback_service(router);
+        let bmc = Arc::new(HttpBmc::new(
+            AxumRouterHttpClient::new(router),
+            "https://bmc.example".parse().unwrap(),
+            BmcCredentials::new("root".into(), "password".into()),
+            CacheSettings::with_capacity(32),
+        ));
+        let root = nv_redfish::ServiceRoot::new(bmc)
+            .await
+            .unwrap()
+            .restrict_expand()
+            .into();
+        let report = nv_generate_exploration_report(root, &common::explorer_config()).await;
+        if ambiguous {
+            assert!(
+                matches!(report, Err(bmc_explorer::Error::InvalidValue(ref error))
+                    if error == "multiple distinct GB300 tray assembly serial numbers"),
+                "{scenario}: {report:?}"
+            );
+        } else {
+            let report = report.unwrap();
+            assert_eq!(
+                report
+                    .chassis
+                    .iter()
+                    .find(|chassis| chassis.id == "Chassis_0")
+                    .unwrap()
+                    .serial_number
+                    .as_deref(),
+                Some("9990000000001"),
+                "{scenario}"
+            );
+        }
+        assert!(
+            state.injection.list().is_empty(),
+            "{scenario}: assembly link"
+        );
+        assert_eq!(assembly_requests.load(Ordering::Relaxed), 1, "{scenario}");
+    }
+}
+
 /// A DGX GB300 runs the NVIDIA "GB BMC" -- the same ServiceRoot signature as a
 /// Wiwynn GB200 (`Vendor: NVIDIA`, `Product: GB BMC`). It must classify as the
 /// GB300 platform (resolved from the NVIDIA GB300 GPU chassis ahead of the GB200

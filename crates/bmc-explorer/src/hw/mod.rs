@@ -20,6 +20,7 @@ use std::fmt;
 use itertools::Itertools;
 
 pub mod bluefield;
+pub mod chassis_assembly;
 pub mod dell;
 pub mod gb200;
 pub mod hpe;
