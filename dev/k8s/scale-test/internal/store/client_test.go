@@ -768,12 +768,15 @@ func TestTheAllocatableCapabilityIsReadAndEnforced(t *testing.T) {
 }
 
 func TestProbeDemandCalibration(t *testing.T) {
-	for _, bad := range []string{"healthy", "late", "rate", "gap", "age", "reset", "edge"} {
+	for _, bad := range []string{"healthy", "late", "rate", "gap", "age", "reset", "edge", "missing-rest"} {
 		t.Run(fmt.Sprint(bad), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				s := newSite(t, DefaultOptions, Config{})
 				now := time.Now()
 				for _, api := range []string{"nico-api", "nico-rest-api"} {
+					if bad == "missing-rest" && api == "nico-rest-api" {
+						continue
+					}
 					for i, offset := range []int64{-86304, -56304, -26296} {
 						if bad == "late" {
 							offset -= 3712
@@ -803,9 +806,16 @@ func TestProbeDemandCalibration(t *testing.T) {
 				if _, e := s.client.PoolHealthy(context.Background(), now.Add(time.Minute), map[string]string{"pod": "api-1"}); (e == nil) != (bad != "gap" && bad != "age") {
 					t.Fatalf("pool=%v", e)
 				}
-				err := s.client.ProbeDemand(context.Background(), now.Add(time.Minute), time.Minute)
-				if (err != nil) != (bad != "healthy" && bad != "late" && bad != "edge") {
-					t.Fatalf("demand=%v", err)
+				extras := []float64{0}
+				if bad == "healthy" {
+					extras = []float64{0, .5, .8, .9, -1, math.NaN(), math.Inf(1)}
+				}
+				for _, extra := range extras {
+					err := s.client.ProbeDemand(context.Background(), now.Add(time.Minute), time.Minute, extra)
+					if (err != nil) != (bad != "healthy" && bad != "late" && bad != "edge" || extra+10.0/60.008 >= 1 || !(extra >= 0 && extra < 1)) {
+						t.Fatalf("extra=%v demand=%v", extra, err)
+					}
+
 				}
 			})
 		})

@@ -377,11 +377,23 @@ pub struct Unit {
     pub expected: Option<ExpectedFields>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct MachineCapability {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: String,
+    pub count: Option<u64>,
+}
+
 /// REST Machine identity and allocation evidence, without physical inventory.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RestMachineFields {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub machine_capabilities: Vec<MachineCapability>,
     /// NICo host identity corresponding to the REST Machine ID in `Unit.id`.
     pub controller_id: String,
     /// Assigned REST instance-type UUID, or null when none is assigned.

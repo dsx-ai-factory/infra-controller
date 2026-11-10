@@ -4,6 +4,7 @@
 package ingestion
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/config"
@@ -47,12 +49,21 @@ func ProductionInstances(cfg *config.Config, s InstanceSettings, d readiness.Dep
 	if !ok {
 		return nil, instanceIssue("probe cannot page instance evidence")
 	}
+	if s.Fixture.Name != "" {
+		rp, e := probe.NewHTTP(s.Fixture.ProbeURL, 40*time.Second)
+		if e != nil {
+			return nil, e
+		}
+		s.sidecar = rp.(fixtureProbe)
+		s.preparing = true
+	}
 	rest, err := newREST(s)
 	if err != nil {
 		return nil, err
 	}
 	return &InstanceTest{cfg, s, d, p, rest, readiness.Populated}, nil
 }
+func (t *InstanceTest) journalID() string       { return cmp.Or(t.s.journalRunID, t.cfg.RunID) }
 func (t *InstanceTest) Name() string            { return t.cfg.Command }
 func (*InstanceTest) LockKind() lock.HolderKind { return lock.HolderTest }
 func (*InstanceTest) Writes() bool              { return true }
@@ -60,8 +71,18 @@ func (*InstanceTest) Writes() bool              { return true }
 type instanceStore interface {
 	Summarizer
 	PoolHealthy(context.Context, time.Time, map[string]string) ([]string, error)
-	ProbeDemand(context.Context, time.Time, time.Duration) error
+	ProbeDemand(context.Context, time.Time, time.Duration, ...float64) error
 }
+type instanceBaseline struct {
+	cp, mat                map[string]podState
+	pools                  []string
+	nativeEpoch, restEpoch float64
+}
+type instanceHealth struct {
+	at  time.Time
+	err error
+}
+
 type instanceRun struct {
 	t            *InstanceTest
 	rc           run.RunCtx
@@ -78,7 +99,7 @@ type instanceRun struct {
 	cp, mat      map[string]podState
 	pools        []string
 	safetyMu     sync.Mutex
-	healthAt     time.Time
+	health       atomic.Pointer[instanceHealth]
 	writeRefresh time.Time
 	healthStop   chan struct{}
 	epoch        float64
@@ -94,9 +115,47 @@ type instanceRun struct {
 	positions    map[string]int
 	cohortSaved  bool
 	stages       []result.StageResult
+
+	fixture           *fixtureRun
+	fixturePhase      bool
+	fixtureRESTClosed bool
+	stageScopes       [][]int
+	remaining         []CohortHost
 }
 
 func (t *InstanceTest) Run(rc run.RunCtx, w *writer.Writer) (out result.Outcome, err error) {
+	if t.Name() != "instance-lifecycle" {
+		return t.run(rc, w)
+	}
+	child := *t
+	cfg := *t.cfg
+	child.cfg = &cfg
+	child.s.journalRunID = t.cfg.RunID
+	phases := map[string]json.RawMessage{}
+	var stages []result.StageResult
+	for _, phase := range []string{"create", "delete"} {
+		cfg.Command = "instance-" + phase
+		cfg.RunID = phase + "-" + digest([]byte(t.cfg.RunID))[:32]
+		child.s.preparing = child.s.Fixture.Name != ""
+		out, err = child.run(rc, w)
+		phases[phase] = out.Detail
+		stages = append(stages, out.Stages...)
+		if err != nil || out.Verdict != result.Passed {
+			break
+		}
+		var detail instanceDetail
+		if json.Unmarshal(out.Detail, &detail) != nil || detail.Manifest == "" {
+			err = errors.New("lifecycle phase has no owned manifest")
+			out.Verdict = result.Unresolved
+			break
+		}
+		child.s.Instance.OwnedManifest = detail.Manifest
+	}
+	out.Detail, _ = json.Marshal(phases)
+	out.Stages = stages
+	return out, err
+}
+func (t *InstanceTest) run(rc run.RunCtx, w *writer.Writer) (out result.Outcome, err error) {
 	end := rc.Clock.Instant().Add(rc.Deadline.Sub(rc.Clock.Now()))
 	ctx, cancel := context.WithDeadline(rc.Ctx, end)
 	defer cancel()
@@ -121,15 +180,22 @@ func (t *InstanceTest) Run(rc run.RunCtx, w *writer.Writer) (out result.Outcome,
 			out.Verdict = result.Unresolved
 		}
 		for b := range in.stages {
+			scope := in.stageScopes[b]
 			failed := uint64(0)
-			for _, i := range in.scopes[b] {
+			for _, i := range scope {
 				if in.plan.Cohort[i].FirstFailure != "" {
 					failed++
 				}
 			}
 			if failed > 0 {
 				in.stages[b].Status = result.StageFailed
-				in.stages[b].Units = result.UnitCountsOf(uint64(len(in.scopes[b])), 0, failed)
+				in.stages[b].Units = result.UnitCountsOf(uint64(len(scope)), 0, failed)
+			}
+		}
+		if in.fixture != nil {
+			report := in.fixture.report
+			if phase, ok := report["measurement"].(map[string]any); ok && phase["verdict"] == "running" {
+				phase["verdict"] = out.Verdict
 			}
 		}
 		out = in.d.outcome(out.Verdict, err)
@@ -183,11 +249,43 @@ func (t *InstanceTest) Run(rc run.RunCtx, w *writer.Writer) (out result.Outcome,
 	if in.store == nil {
 		return out, instanceIssue("store cannot check instance timing and API pool health")
 	}
+	in.fixturePhase = t.s.Fixture.Name != ""
+	if b := t.s.lifecycleBase; b != nil {
+		in.cp, in.mat, in.pools, in.epoch = b.cp, b.mat, b.pools, b.nativeEpoch
+		t.s.restEpoch = b.restEpoch
+	}
 	if err = in.safety(); err != nil {
 		return out, err
 	}
+	if t.s.Fixture.Name != "" {
+		in.fixture, err = in.beginFixture(rep.Inventory)
+		if err == nil {
+			if in.deleting {
+				err = in.fixture.reuse()
+			} else {
+				err = in.fixture.setup()
+			}
+		}
+		if in.fixture != nil {
+			err = in.fixture.finishSetup(err)
+		}
+		if err != nil {
+			return out, err
+		}
+		if rc.DryRun && !in.deleting {
+			return result.OutcomeOf(result.Go), nil
+		}
+		t.s.tenantCensus = in.deleting && len(in.plan.Cohort) == 0 && t.s.Fixture.Teardown
+		t.s.preparing, in.fixturePhase = t.s.tenantCensus, t.s.tenantCensus
+		if t.s.tenantCensus {
+			in.fixture.report["measurement"] = map[string]string{"verdict": "skipped", "reason": "cleanup-only"}
+		}
+	}
 	if err = in.calibrate(minTime(end, rc.Clock.Instant().Add(window))); err != nil {
 		return out, err
+	}
+	if t.s.tenantCensus && (len(in.latest.rows[probeapi.FamilyInstance]) != 0 || len(in.latest.rows[probeapi.FamilyRestInstances]) != 0) {
+		return out, instanceIssue("cleanup requires a current empty native and REST tenant")
 	}
 	if !in.deleting && in.latest.config.Rest.TenantAllocation.UnusedUsable < int64(t.s.Instance.N) {
 		return out, instanceIssue("tenant usable allocation is below requested N")
@@ -196,9 +294,31 @@ func (t *InstanceTest) Run(rc run.RunCtx, w *writer.Writer) (out result.Outcome,
 		in.plan, err = readOwned(t.cfg.Journal.Dir, t.s.Instance.OwnedManifest)
 		if err == nil {
 			err = in.owned()
+			if err == nil {
+				err = in.selectDelete()
+			}
 		}
-	} else {
+	} else if in.fixture == nil {
 		in.plan, err = planInstances(in.latest, rep.Inventory, in.mat, t.s, t.cfg.RunID, t.cfg.Namespace)
+	} else {
+		in.plan.Tenant, in.plan.Type = t.s.Instance.TenantID, t.s.Instance.InstanceTypeID
+		in.plan.Sources = in.latest.meta
+		if err = in.fixture.checkFrozen(in.latest); err != nil {
+			return out, err
+		}
+		for _, h := range in.plan.Cohort {
+			if in.latest.unstable[h.ID] || !readyHost(in.latest.rows[probeapi.FamilyHost][h.ID]) || !restFree(in.latest.rest[h.ID], in.plan.Type) {
+				return out, instanceIssue("frozen fixture cohort lost eligibility")
+			}
+		}
+		for id, before := range in.plan.Baseline {
+			_, selected := in.fixture.ledger.Cohort[id]
+			if !selected {
+				if err = in.fixture.background(id, before, hostSignature(in.latest, id), in.latest); err != nil {
+					return out, err
+				}
+			}
+		}
 	}
 	if err != nil {
 		return out, err
@@ -230,6 +350,7 @@ func (t *InstanceTest) Run(rc run.RunCtx, w *writer.Writer) (out result.Outcome,
 		in.scopes[h.Burst] = append(in.scopes[h.Burst], i)
 	}
 	if !in.deleting {
+		in.plan.OriginalCount = len(in.plan.Cohort)
 		if err = in.planNames(); err != nil {
 			return out, err
 		}
@@ -238,6 +359,7 @@ func (t *InstanceTest) Run(rc run.RunCtx, w *writer.Writer) (out result.Outcome,
 			return out, err
 		}
 		in.plan.ScriptSHA = digest([]byte(in.script))
+		in.plan.OwnerJournalRunID = t.journalID()
 	}
 	in.previous = map[string]string{}
 	in.classes = map[string]string{}
@@ -310,6 +432,9 @@ func (t *InstanceTest) Run(rc run.RunCtx, w *writer.Writer) (out result.Outcome,
 			if in.deleting {
 				for _, i := range scope {
 					h := in.plan.Cohort[i]
+					if t.s.Instance.DeleteCount == 0 && in.released(h) {
+						continue
+					}
 					if _, err = in.send("delete", http.MethodDelete, "instance/"+h.InstanceID, nil, 0, h.ID); err != nil {
 						return out, err
 					}
@@ -338,7 +463,13 @@ func (t *InstanceTest) Run(rc run.RunCtx, w *writer.Writer) (out result.Outcome,
 		return result.OutcomeOf(result.Go), nil
 	}
 	out = result.OutcomeOf(result.Unresolved)
-	for burst := 0; burst <= in.plan.Cohort[len(in.plan.Cohort)-1].Burst; burst++ {
+	if in.fixture != nil && !t.s.tenantCensus {
+		in.fixture.report["measurement"] = map[string]any{"verdict": "running", "startedAt": time.Now()}
+	}
+	for burst, scope := range in.scopes {
+		if len(scope) == 0 {
+			continue
+		}
 		in.active = burst
 		if err = in.burst(burst); err != nil {
 			return out, err
@@ -350,10 +481,30 @@ func (t *InstanceTest) Run(rc run.RunCtx, w *writer.Writer) (out result.Outcome,
 	if err = in.saveCohort(); err != nil {
 		return out, err
 	}
-	if !in.deleting {
-		in.d.Manifest = t.cfg.RunID + ".owned.json"
-		if _, e = writeOnce(t.cfg.Journal.Dir, in.d.Manifest, in.plan); e != nil {
-			return out, e
+	owned := in.plan
+	if in.deleting {
+		owned.Cohort = in.remaining
+	}
+	in.d.Manifest = t.cfg.RunID + ".owned.json"
+	if _, e = writeOnce(t.cfg.Journal.Dir, in.d.Manifest, owned); e != nil {
+		return out, e
+	}
+	if in.fixture != nil {
+		if !t.s.tenantCensus && len(in.stages) > 0 {
+			in.fixture.report["measurement"] = map[string]any{"verdict": "passed", "finishedAt": time.Now()}
+		} else if !t.s.tenantCensus {
+			in.fixture.report["measurement"] = map[string]string{"verdict": "skipped", "reason": "already released"}
+		}
+		if in.deleting && len(in.remaining) == 0 && t.s.Fixture.Teardown {
+			in.safetyMu.Lock()
+			in.fixturePhase = true
+			in.safetyMu.Unlock()
+			if err = in.fixture.teardown(); err != nil {
+				return out, err
+			}
+		}
+		if err = in.fixture.commitOwner(); err != nil {
+			return out, err
 		}
 	}
 	if err = in.evidence.finish(); err != nil {
@@ -367,33 +518,78 @@ func (t *InstanceTest) Run(rc run.RunCtx, w *writer.Writer) (out result.Outcome,
 		return out, e
 	default:
 	}
-	if err = w.Pending(ctx, false); err != nil {
-		return out, err
+	// A lifecycle retains its cleanup obligation until delete has settled.
+	if in.deleting || t.s.journalRunID == "" {
+		if err = w.Pending(ctx, false); err != nil {
+			return out, err
+		}
+	}
+	if !in.deleting && t.s.journalRunID != "" {
+		t.s.lifecycleBase = &instanceBaseline{in.cp, in.mat, in.pools, in.epoch, in.latest.restEpoch}
 	}
 	return result.OutcomeOf(result.Passed), nil
 }
 
-func (in *instanceRun) safety() error {
+func (in *instanceRun) safety(until ...time.Time) (err error) {
 	in.safetyMu.Lock()
 	defer in.safetyMu.Unlock()
-	if time.Since(in.healthAt) < 15*time.Second {
-		return nil
+	var health instanceHealth
+	if previous := in.health.Load(); previous != nil {
+		if previous.err != nil || time.Since(previous.at) < 15*time.Second {
+			return previous.err
+		}
+		health.at = previous.at
 	}
-	ctx, cancel := context.WithDeadline(in.ctx, minTime(in.end, time.Now().Add(15*time.Second)))
+	defer func() {
+		health.err = err
+		if err == nil {
+			health.at = time.Now()
+		}
+		in.health.Store(&health)
+	}()
+	deadline := minTime(in.end, time.Now().Add(15*time.Second))
+	if len(until) > 0 {
+		deadline = minTime(deadline, until[0])
+	}
+	ctx, cancel := context.WithDeadline(in.ctx, deadline)
 	defer cancel()
 	cfg, e := in.t.p.Config(ctx, probe.ConfigFilter{InstanceType: &in.t.s.Instance.InstanceTypeID})
 	if e != nil {
 		return instanceObservationError(e)
 	}
-	if cfg.Metrics == nil || cfg.Rest == nil || cfg.RestSite == nil || cfg.Rest.LastAttemptError != nil || cfg.RestSite.LastAttemptError != nil || cfg.RestSite.Result != probeapi.SiteMatchMatch || in.epoch != 0 && cfg.Metrics.ProcessStartSeconds != in.epoch {
-		return instanceIssue("probe configuration or process evidence failed")
+	if cfg.Metrics == nil || in.epoch != 0 && cfg.Metrics.ProcessStartSeconds != in.epoch {
+		return instanceIssue("native probe process changed")
 	}
-	for _, spec := range instanceFamilies {
-		page, e := in.t.p.Units(ctx, spec.filter, nil, probe.Page{Limit: new(uint32(1))})
+	if in.t.s.sidecar == nil && (cfg.Rest == nil || cfg.RestSite == nil || cfg.Rest.LastAttemptError != nil || cfg.RestSite.LastAttemptError != nil || cfg.RestSite.Result != probeapi.SiteMatchMatch) {
+		return instanceIssue("probe REST configuration failed")
+	}
+	if in.t.s.sidecar != nil && !in.fixturePhase && !in.fixtureRESTClosed {
+		rest, e := in.t.s.sidecar.Config(ctx, probe.ConfigFilter{InstanceType: &in.t.s.Instance.InstanceTypeID})
 		if e != nil {
 			return instanceObservationError(e)
 		}
-		if e = sourceMeta(page.SweepInfo, spec.family, cfg.Metrics.ProcessStartSeconds, float64(in.t.s.Observation.IntervalSeconds)); e != nil {
+		if e = instanceAllocation(rest, in.t.s); e != nil {
+			return e
+		}
+	}
+	for _, spec := range instanceFamilies {
+		reader, epoch := in.t.p, cfg.Metrics.ProcessStartSeconds
+		if spec.filter.Source != nil {
+			if in.fixtureRESTClosed || in.fixturePhase && (spec.family == probeapi.FamilyRestInstances || in.t.s.restEpoch == 0) {
+				continue
+			}
+			if in.t.s.sidecar != nil {
+				reader, epoch = in.t.s.sidecar, in.t.s.restEpoch
+			}
+		}
+		page, e := reader.Units(ctx, spec.filter, nil, probe.Page{Limit: new(uint32(1))})
+		if e != nil {
+			return instanceObservationError(e)
+		}
+		if in.fixturePhase && spec.filter.Source != nil && epoch == 0 {
+			continue
+		}
+		if e = sourceMeta(page.SweepInfo, spec.family, epoch, float64(in.t.s.Observation.IntervalSeconds)); e != nil {
 			return e
 		}
 	}
@@ -427,7 +623,6 @@ func (in *instanceRun) safety() error {
 			return &instanceSafetyFailure{Cause: "control-plane or MAT pod identity, readiness or restart count changed", Before: set.baseline, After: now.Pods}
 		}
 	}
-	in.healthAt = time.Now()
 	return nil
 }
 
@@ -445,6 +640,12 @@ func (in *instanceRun) calibrate(until time.Time) (err error) {
 	for {
 		next, err := readInstanceSnapshot(ctx, in.t.p, until, in.t.s, last)
 		if err != nil {
+			var pending *probe.Error
+			if in.fixture != nil && last == nil && errors.As(err, &pending) && pending.Kind == probe.NoCompleteSweep {
+				if err = waitInstance(ctx, in.t.cfg.Probe.PollSeconds); err == nil {
+					continue
+				}
+			}
 			return err
 		}
 		if last != nil {
@@ -456,16 +657,30 @@ func (in *instanceRun) calibrate(until time.Time) (err error) {
 		if first != nil {
 			advanced := true
 			for _, spec := range instanceFamilies {
+				if in.t.s.preparing && !in.t.s.tenantCensus && spec.family == probeapi.FamilyRestInstances {
+					continue
+				}
 				advanced = advanced && next.meta[spec.family].SweepStart.After(first.meta[spec.family].ReadAt.Time)
 			}
 			if advanced {
 				if len(next.rows[probeapi.FamilyHost]) == 0 {
 					return instanceIssue("populated calibration has no hosts")
 				}
-				if err = in.store.ProbeDemand(ctx, until, time.Duration(in.t.s.Observation.IntervalSeconds)*time.Second); err != nil {
+				extra := 0.0
+				if in.t.s.sidecar != nil {
+					elapsed := next.sidecarRead.Sub(first.sidecarRead).Seconds()
+					if next.restEpoch != first.restEpoch || next.sidecarCalls < first.sidecarCalls || !(elapsed > 0) {
+						return instanceIssue("REST sidecar call accounting changed")
+					}
+					extra = float64(next.sidecarCalls-first.sidecarCalls+1) / elapsed
+				}
+				if err = in.store.ProbeDemand(ctx, until, time.Duration(in.t.s.Observation.IntervalSeconds)*time.Second, extra); err != nil {
 					return instanceObservationError(err)
 				}
 				in.latest = next
+				if in.t.s.preparing {
+					return nil
+				}
 				return in.agreement(next)
 			}
 		} else {
@@ -534,13 +749,17 @@ func (in *instanceRun) calibrationChanges(first, next *instanceSnapshot, changes
 	return nil
 }
 func (in *instanceRun) saveCalibrationChanges(changes []transition) error {
-	file := in.t.cfg.RunID + ".calibration-background.json"
+	phase := "calibration"
+	if in.t.s.preparing && !in.t.s.tenantCensus {
+		phase = "fixture-calibration"
+	}
+	file := in.t.cfg.RunID + "." + phase + "-background.json"
 	hash, err := writeOnce(in.t.cfg.Journal.Dir, file, changes)
 	if err != nil {
 		return err
 	}
 	ref := map[string]any{"path": file, "sha256": hash, "entries": len(changes)}
-	in.d.Evidence["calibrationBackground"] = ref
+	in.d.Evidence[phase+"Background"] = ref
 	return in.w.Record(in.ctx, "calibrationBackground", ref)
 }
 
@@ -567,18 +786,13 @@ func (in *instanceRun) send(kind, method, path string, body any, count int, host
 		return out, err
 	}
 	check := func() error {
-		if time.Since(in.latest.oldestSource()).Seconds() > 2*float64(in.t.s.Observation.IntervalSeconds) {
-			return instanceIssue("source evidence expired before dispatch")
-		}
-		if err := in.writePreconditions(kind, body, count, hosts); err != nil {
+		if err := validToken(in.t.rest.until); err != nil {
 			return err
 		}
-		select {
-		case <-in.healthStop:
-			return errSafetyStop
-		default:
-			return nil
+		if err := in.dispatchEvidence(); err != nil {
+			return err
 		}
+		return in.writePreconditions(kind, body, count, hosts)
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -588,7 +802,7 @@ func (in *instanceRun) send(kind, method, path string, body any, count int, host
 		raw = nil
 	}
 	in.sequence++
-	call := writer.Call{WriteCall: journal.WriteCall{Scope: in.t.Name(), Kind: kind, Key: fmt.Sprintf("%s/%s/%d", kind, path, in.sequence), Hosts: hosts, RequestDigest: digest(append([]byte(method+" "+path+"\n"), raw...))}, Retry: writer.RetryPolicy{MaxAttempts: 1, AttemptTimeout: time.Minute}, Cutoff: in.end}
+	call := writer.Call{WriteCall: journal.WriteCall{Scope: in.t.Name(), Kind: kind, Key: fmt.Sprintf("%s/%s/%s/%d", in.t.cfg.RunID, kind, path, in.sequence), Hosts: hosts, RequestDigest: digest(append([]byte(method+" "+path+"\n"), raw...))}, Retry: writer.RetryPolicy{MaxAttempts: 1, AttemptTimeout: time.Minute}, Cutoff: in.end}
 	call.BeforeDispatch = check
 	if kind == "labels" {
 		call.Idempotent, call.Retry.MaxAttempts = true, 2
@@ -600,7 +814,7 @@ func (in *instanceRun) send(kind, method, path string, body any, count int, host
 			_, adding := labels[instanceLabel]
 			err := in.settleLabel(in.plan.Cohort[host], op, !adding, time.Now())
 			if errors.Is(err, errLabelAbsent) && !retried {
-				if err = errors.Join(in.safety(), in.t.rest.refreshToken()); err != nil {
+				if err = errors.Join(in.t.rest.authorize(in.ctx, true), in.safety()); err != nil {
 					return false, err
 				}
 				retried = true
@@ -610,14 +824,19 @@ func (in *instanceRun) send(kind, method, path string, body any, count int, host
 		}
 	}
 	if !in.rc.DryRun {
-		if err = in.t.rest.refreshToken(); err != nil {
-			return out, err
-		}
 		if err = in.t.rest.pace.Wait(in.ctx); err != nil {
 			return out, err
 		}
 	}
 	if err = in.refreshForWrite(); err != nil {
+		return out, err
+	}
+	if !in.rc.DryRun {
+		if err = in.t.rest.authorize(in.ctx, kind == "labels"); err != nil {
+			return out, err
+		}
+	}
+	if err = in.safety(); err != nil {
 		return out, err
 	}
 	if err = check(); err != nil {
@@ -626,17 +845,7 @@ func (in *instanceRun) send(kind, method, path string, body any, count int, host
 	if in.rc.DryRun {
 		return writer.Plan(in.ctx, in.w, call)
 	}
-	first := !in.w.Unsettled()
-	if first {
-		if err = in.w.Pending(in.ctx, true); err != nil {
-			return out, err
-		}
-	}
-	out, err = writer.Send(in.ctx, in.w, call, func(ctx context.Context) writer.Attempt { return in.t.rest.attempt(ctx, method, path, raw, count) })
-	var notSent *writer.OpError
-	if first && (out.Kind == writer.Failed || errors.As(err, &notSent) && !notSent.Dispatched) {
-		err = errors.Join(err, in.w.Pending(in.ctx, false))
-	}
+	out, err = in.write(call, func(ctx context.Context) writer.Attempt { return in.t.rest.attempt(ctx, method, path, raw, count) })
 	if kind == "labels" && (err != nil || out.Kind == writer.Unclear) {
 		if err == nil {
 			err = instanceIssue("label remains unclear after retry")
@@ -651,6 +860,36 @@ func (in *instanceRun) send(kind, method, path string, body any, count int, host
 		// Fresh read-back records any visible result, but never settles an
 		// unclear create or authorizes a resend, even after an empty scan.
 		err = errors.Join(err, in.await(time.Now(), []probeapi.Family{probeapi.FamilyHost, probeapi.FamilyInstance, probeapi.FamilyRestMachines, probeapi.FamilyRestInstances}, func() bool { return true }))
+	}
+	return out, err
+}
+
+func (in *instanceRun) dispatchEvidence() error {
+	if time.Since(in.latest.oldestSource(in.fixtureRESTClosed)).Seconds() > 2*float64(in.t.s.Observation.IntervalSeconds) {
+		return instanceIssue("source evidence expired before dispatch")
+	}
+	health := in.health.Load()
+	if health == nil || health.err != nil || time.Since(health.at) >= 15*time.Second {
+		return errSafetyStop
+	}
+	select {
+	case <-in.healthStop:
+		return errSafetyStop
+	default:
+		return nil
+	}
+}
+func (in *instanceRun) write(call writer.Call, attempt func(context.Context) writer.Attempt) (out writer.Outcome, err error) {
+	first := !in.w.Unsettled()
+	if first {
+		if err = in.w.Pending(in.ctx, true); err != nil {
+			return out, err
+		}
+	}
+	out, err = writer.Send(in.ctx, in.w, call, attempt)
+	var notSent *writer.OpError
+	if first && (out.Kind == writer.Failed || errors.As(err, &notSent) && !notSent.Dispatched) {
+		err = errors.Join(err, in.w.Pending(in.ctx, false))
 	}
 	return out, err
 }
@@ -718,8 +957,25 @@ func (in *instanceRun) await(after time.Time, families []probeapi.Family, check 
 
 func (in *instanceRun) burst(burst int) error {
 	scope := in.scopes[burst]
+	cleanup := scope
 	if err := in.refresh(); err != nil {
 		return err
+	}
+	if in.deleting {
+		for _, h := range in.plan.Cohort {
+			if (in.sequence == 0 || h.Burst == burst) && !in.deletable(h) && (in.t.s.Instance.DeleteCount != 0 || !in.released(h)) {
+				return instanceIssue("selected owned instances are no longer Ready before delete")
+			}
+		}
+		scope = slices.DeleteFunc(slices.Clone(scope), func(i int) bool { return in.t.s.Instance.DeleteCount == 0 && in.released(in.plan.Cohort[i]) })
+		if len(scope) != len(cleanup) {
+			if err := in.w.Record(in.ctx, "instanceAlreadyReleased", map[string]any{"hosts": scopeIDs(cleanup, in.plan.Cohort), "toDelete": scopeIDs(scope, in.plan.Cohort), "sources": in.latest.meta}); err != nil {
+				return err
+			}
+		}
+		if len(scope) == 0 {
+			return in.clearLabels(burst, cleanup)
+		}
 	}
 	if !in.deleting {
 		last, err := in.labels(scope, false)
@@ -741,6 +997,7 @@ func (in *instanceRun) burst(burst int) error {
 	}
 	stageIndex := len(in.stages)
 	in.stages = append(in.stages, result.StageResult{ID: stageID, Status: result.StageUnresolved, Units: result.UnitCountsOf(uint64(len(scope)), 0, 0)})
+	in.stageScopes = append(in.stageScopes, slices.Clone(scope))
 
 	window := Window{}
 	record := func(out writer.Outcome) {
@@ -803,13 +1060,16 @@ func (in *instanceRun) burst(burst int) error {
 		return instanceIssue("stored samples do not prove the stage timing")
 	}
 	if in.deleting {
-		last, err := in.labels(scope, true)
-		if err != nil {
-			return err
-		}
-		return in.await(last, instanceSettlementFamilies, func() bool { return in.settled(burst) && in.labelsCleared(burst) })
+		return in.clearLabels(burst, cleanup)
 	}
 	return nil
+}
+func (in *instanceRun) clearLabels(burst int, scope []int) error {
+	last, err := in.labels(scope, true)
+	if err != nil {
+		return err
+	}
+	return in.await(last, instanceSettlementFamilies, func() bool { return in.settled(burst) && in.labelsCleared(burst) })
 }
 
 var instanceSettlementFamilies = []probeapi.Family{probeapi.FamilyHost, probeapi.FamilyInstance, probeapi.FamilyRestMachines, probeapi.FamilyRestInstances}
@@ -855,7 +1115,12 @@ type instanceSafetyFailure struct {
 func (e *instanceSafetyFailure) Error() string { return e.Cause }
 
 func (in *instanceRun) createBody(request instanceRequest) map[string]any {
-	return map[string]any{"topologyOptimized": in.t.s.Instance.TopologyOptimized, "namePrefix": request.Prefix, "count": request.Count, "tenantId": in.plan.Tenant, "instanceTypeId": in.plan.Type, "vpcId": in.t.s.Instance.VPCID, "machineLabelSelector": map[string]string{instanceLabel: in.selectorValue(request.Burst)}, "ipxeScript": in.script, "phoneHomeEnabled": false, "interfaces": []any{map[string]string{"subnetId": in.t.s.Instance.SubnetID}}}
+	body := map[string]any{"topologyOptimized": in.t.s.Instance.TopologyOptimized, "namePrefix": request.Prefix, "count": request.Count, "tenantId": in.plan.Tenant, "instanceTypeId": in.plan.Type, "vpcId": in.t.s.Instance.VPCID, "machineLabelSelector": map[string]string{instanceLabel: in.selectorValue(request.Burst)}, "ipxeScript": in.script, "phoneHomeEnabled": false, "interfaces": []any{map[string]string{"subnetId": in.t.s.Instance.SubnetID}}}
+	if in.t.s.Instance.OperatingSystemID != "" {
+		delete(body, "ipxeScript")
+		body["operatingSystemId"] = in.t.s.Instance.OperatingSystemID
+	}
+	return body
 }
 
 // instanceIssue is a deliberate notReady, failed or unresolved reason. All

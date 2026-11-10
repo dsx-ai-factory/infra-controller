@@ -242,6 +242,7 @@ fn wire_vectors_match_the_files() {
                 Unit {
                     source: Source::Rest,
                     rest_machine: Some(RestMachineFields {
+                        machine_capabilities: vec![],
                         controller_id: "fm100h".into(),
                         instance_type: s("it-1"),
                         instance_id: None,
