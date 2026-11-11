@@ -998,7 +998,14 @@ type ForgeClient interface {
 	SetMaintenance(ctx context.Context, in *MaintenanceRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Set a dynamic feature, like RUST_LOG
 	SetDynamicConfig(ctx context.Context, in *SetDynamicConfigRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Trigger reprovisioning of DPU
+	// Sets, clears, or restarts DPU reprovisioning requests.
+	// Restart admission runs after the existing shared target and host-update
+	// validation and Restart's host-only/pending-request checks. It rechecks the
+	// attached DPU set, selected pending IDs, and host-update authorization after
+	// lock admission. Changed attachments or pending membership return
+	// FailedPrecondition; missing host-update authorization returns InvalidArgument.
+	// Replacing a selected pending request preserves its new fields while merging
+	// Restart. Set/Clear retain their existing validation and failure behavior.
 	TriggerDpuReprovisioning(ctx context.Context, in *DpuReprovisioningRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// List DPUs waiting for reprovisioning
 	ListDpuWaitingForReprovisioning(ctx context.Context, in *DpuReprovisioningListRequest, opts ...grpc.CallOption) (*DpuReprovisioningListResponse, error)
@@ -1667,6 +1674,18 @@ type ForgeClient interface {
 	// Get position related information for machines
 	GetMachinePositionInfo(ctx context.Context, in *MachinePositionQuery, opts ...grpc.CallOption) (*MachinePositionInfoList, error)
 	NmxcBrowse(ctx context.Context, in *NmxcBrowseRequest, opts ...grpc.CallOption) (*NmxcBrowseResponse, error)
+	// Atomically sets DPF enabled flags for the current host and attached DPUs.
+	// Disabling a host ingested through DPF returns FailedPrecondition; a missing
+	// host returns NotFound. Database preparation, including pool acquisition,
+	// lock retries, isolated waits, and commit, has a 300-second cap measured
+	// from server receipt before authorization/admission. A shorter valid
+	// grpc-timeout reduces the cap. The metadata accepts one to eight decimal
+	// digits followed
+	// by H (hours), M (minutes), S (seconds), m (milliseconds), u (microseconds),
+	// or n (nanoseconds); zero is valid. Missing or malformed metadata keeps the
+	// cap. Expiry returns DeadlineExceeded. Database cleanup can finish later,
+	// and a commit already in flight may have succeeded. Inspect current host
+	// and attached DPU flags before retrying an ambiguous result.
 	ModifyDPFState(ctx context.Context, in *ModifyDPFStateRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetDPFState(ctx context.Context, in *GetDPFStateRequest, opts ...grpc.CallOption) (*DPFStateResponse, error)
 	// Curated snapshot of DPF CRs (DPUNode + DPUDevices + DPUs) for one host.
@@ -7867,7 +7886,14 @@ type ForgeServer interface {
 	SetMaintenance(context.Context, *MaintenanceRequest) (*emptypb.Empty, error)
 	// Set a dynamic feature, like RUST_LOG
 	SetDynamicConfig(context.Context, *SetDynamicConfigRequest) (*emptypb.Empty, error)
-	// Trigger reprovisioning of DPU
+	// Sets, clears, or restarts DPU reprovisioning requests.
+	// Restart admission runs after the existing shared target and host-update
+	// validation and Restart's host-only/pending-request checks. It rechecks the
+	// attached DPU set, selected pending IDs, and host-update authorization after
+	// lock admission. Changed attachments or pending membership return
+	// FailedPrecondition; missing host-update authorization returns InvalidArgument.
+	// Replacing a selected pending request preserves its new fields while merging
+	// Restart. Set/Clear retain their existing validation and failure behavior.
 	TriggerDpuReprovisioning(context.Context, *DpuReprovisioningRequest) (*emptypb.Empty, error)
 	// List DPUs waiting for reprovisioning
 	ListDpuWaitingForReprovisioning(context.Context, *DpuReprovisioningListRequest) (*DpuReprovisioningListResponse, error)
@@ -8536,6 +8562,18 @@ type ForgeServer interface {
 	// Get position related information for machines
 	GetMachinePositionInfo(context.Context, *MachinePositionQuery) (*MachinePositionInfoList, error)
 	NmxcBrowse(context.Context, *NmxcBrowseRequest) (*NmxcBrowseResponse, error)
+	// Atomically sets DPF enabled flags for the current host and attached DPUs.
+	// Disabling a host ingested through DPF returns FailedPrecondition; a missing
+	// host returns NotFound. Database preparation, including pool acquisition,
+	// lock retries, isolated waits, and commit, has a 300-second cap measured
+	// from server receipt before authorization/admission. A shorter valid
+	// grpc-timeout reduces the cap. The metadata accepts one to eight decimal
+	// digits followed
+	// by H (hours), M (minutes), S (seconds), m (milliseconds), u (microseconds),
+	// or n (nanoseconds); zero is valid. Missing or malformed metadata keeps the
+	// cap. Expiry returns DeadlineExceeded. Database cleanup can finish later,
+	// and a commit already in flight may have succeeded. Inspect current host
+	// and attached DPU flags before retrying an ambiguous result.
 	ModifyDPFState(context.Context, *ModifyDPFStateRequest) (*emptypb.Empty, error)
 	GetDPFState(context.Context, *GetDPFStateRequest) (*DPFStateResponse, error)
 	// Curated snapshot of DPF CRs (DPUNode + DPUDevices + DPUs) for one host.

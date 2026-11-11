@@ -19,7 +19,7 @@
 //!
 //! Network configuration transaction boundaries are documented on
 //! [`try_update_network_config`] and [`update_dpu_loopback_ips_v6`]. The
-//! crate's `LOCK_ORDERING.md` traces their cross-crate callers.
+//! crate's `LOCK_ORDERING.md` also traces DPF and reprovisioning admission.
 
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -346,17 +346,29 @@ pub async fn database_now(db: impl DbReader<'_>) -> Result<DateTime<Utc>, Databa
 
 /// Lock the machine row before reading its mutable request state. A separate
 /// read after this query sees changes committed by the previous lock holder.
+/// An absent machine is accepted; use [`lock_by_id_for_update_if_present`] when
+/// the caller needs to distinguish absence.
 pub async fn lock_by_id_for_update(
     txn: &mut PgConnection,
     id: &MachineId,
 ) -> Result<(), DatabaseError> {
+    lock_by_id_for_update_if_present(txn, id).await.map(|_| ())
+}
+
+/// Locks an existing machine with `FOR UPDATE`, returning false if it is absent.
+/// Retaining this lock fences new interface owner references through their
+/// foreign key; callers can then admit existing interfaces and read attached DPUs.
+pub async fn lock_by_id_for_update_if_present(
+    txn: &mut PgConnection,
+    id: &MachineId,
+) -> Result<bool, DatabaseError> {
     let query = "SELECT id FROM machines WHERE id = $1 FOR UPDATE";
     sqlx::query_scalar::<_, MachineId>(query)
         .bind(id)
         .fetch_optional(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
-    Ok(())
+        .map(|id| id.is_some())
+        .map_err(|error| DatabaseError::query(query, error))
 }
 
 /// `try_lock_group_for_update` tries a host and its DPUs in machine-row order.
@@ -434,6 +446,105 @@ pub async fn try_lock_machine_state_history(
         .fetch_one(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// `wait_for_machine_no_key_update` waits for exactly one Machine row
+/// with NO KEY UPDATE in an isolated transaction and releases it before return.
+///
+/// Call only after rolling back the whole rejected attempt. Missing rows
+/// return promptly so the caller can recheck their existence. Callers retain
+/// their own cancellation, deadline, and freshness checks.
+pub async fn wait_for_machine_no_key_update(
+    pool: &sqlx::PgPool,
+    machine_id: &MachineId,
+) -> Result<(), DatabaseError> {
+    let mut txn = Transaction::begin(pool).await?;
+    let query = "SELECT id FROM machines WHERE id = $1 FOR NO KEY UPDATE";
+    sqlx::query_scalar::<_, MachineId>(query)
+        .bind(machine_id)
+        .fetch_optional(txn.as_pgconn())
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    txn.rollback().await
+}
+
+/// Reports whether every interface belonging to the locked host was acquired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostInterfaceAdmission {
+    /// Every currently selected interface is locked in this transaction.
+    Acquired,
+    /// This selected interface is busy; all acquired interface locks remain held.
+    Contended(MachineInterfaceId),
+    /// An interface disappeared or changed its selected reference during admission.
+    Changed,
+}
+
+/// Tries to lock every existing host interface without waiting.
+///
+/// The caller must already retain a strong host `FOR UPDATE` lock in this same
+/// transaction, fencing new interface owner references. `FOR NO KEY UPDATE`
+/// protects existing interface attachment/classification changes while allowing
+/// foreign-key readers of those interfaces. Every result retains locks on all
+/// available selected interfaces, including rows after a contended one. Roll
+/// back the entire attempt before waiting or retrying, then reread attached DPUs.
+pub async fn try_lock_host_interfaces(
+    txn: &mut PgConnection,
+    host_id: &HostMachineId,
+) -> Result<HostInterfaceAdmission, DatabaseError> {
+    let query = "SELECT id FROM machine_interfaces WHERE machine_id = $1 ORDER BY id";
+    let expected_interfaces: Vec<MachineInterfaceId> = sqlx::query_scalar(query)
+        .bind(host_id)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    let query = "SELECT id FROM machine_interfaces WHERE machine_id = $1
+                 ORDER BY id FOR NO KEY UPDATE SKIP LOCKED";
+    let locked_interfaces: Vec<MachineInterfaceId> = sqlx::query_scalar(query)
+        .bind(host_id)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if locked_interfaces != expected_interfaces {
+        let Some(interface_id) = expected_interfaces
+            .iter()
+            .find(|id| !locked_interfaces.contains(id))
+        else {
+            return Ok(HostInterfaceAdmission::Changed);
+        };
+        let query = "SELECT EXISTS(SELECT 1 FROM machine_interfaces
+                                   WHERE id = $1 AND machine_id = $2)";
+        let exists: bool = sqlx::query_scalar(query)
+            .bind(interface_id)
+            .bind(host_id)
+            .fetch_one(&mut *txn)
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?;
+        return Ok(if exists {
+            HostInterfaceAdmission::Contended(*interface_id)
+        } else {
+            HostInterfaceAdmission::Changed
+        });
+    }
+
+    Ok(HostInterfaceAdmission::Acquired)
+}
+
+/// Waits for one interface in an isolated transaction and releases it before return.
+/// Call only after rolling back the entire rejected attempt. Missing rows return
+/// promptly; the caller must reload its complete selection and authorization.
+/// The caller owns cancellation and any deadline, including pool acquisition.
+pub async fn wait_for_host_interface(
+    pool: &sqlx::PgPool,
+    interface_id: &MachineInterfaceId,
+) -> Result<(), DatabaseError> {
+    let mut txn = Transaction::begin(pool).await?;
+    let query = "SELECT id FROM machine_interfaces WHERE id = $1 FOR NO KEY UPDATE";
+    sqlx::query_scalar::<_, MachineInterfaceId>(query)
+        .bind(interface_id)
+        .fetch_optional(txn.as_pgconn())
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    txn.rollback().await
 }
 
 pub async fn find_existing_machine(
@@ -2902,27 +3013,62 @@ pub async fn approve_host_reprovision_request(
     Ok(())
 }
 
-/// This will reset the dpu_reprov request.
+/// `restart_dpu_reprovisioning` takes non-key locks on pending requests in native
+/// DPU ID order before merging the firmware selection and restart timestamp.
+/// Native ID order matches text order under `COLLATE "C"`; see [`MachineRowLockOrderIter`].
+/// Duplicate IDs are handled once. Empty input, missing DPUs, or requests
+/// cleared during the lock wait return `FailedPrecondition` before any write.
+/// SQL failures remain errors; success requires the caller's transaction to
+/// commit, retaining the admission locks through every request update.
 pub async fn restart_dpu_reprovisioning(
     txn: &mut PgConnection,
     machine_ids: &[&DpuMachineId],
     update_firmware: bool,
 ) -> Result<(), DatabaseError> {
+    let mut target_ids = machine_ids.iter().map(|id| **id).collect::<Vec<_>>();
+    target_ids.sort_unstable();
+    target_ids.dedup();
+    if target_ids.is_empty() {
+        return Err(DatabaseError::FailedPrecondition(
+            "DPU reprovisioning requires at least one selected request".to_string(),
+        ));
+    }
+
+    // The predicate is rechecked after a row-lock wait. Clear must not turn
+    // a restart into a successful NULL || jsonb merge from a stale snapshot.
+    let query = r#"SELECT id FROM machines
+                   WHERE id = ANY($1) AND reprovisioning_requested IS NOT NULL
+                   ORDER BY id COLLATE "C" FOR NO KEY UPDATE"#;
+    let locked_ids: Vec<DpuMachineId> = sqlx::query_scalar(query)
+        .bind(&target_ids)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if locked_ids.len() != target_ids.len() {
+        return Err(DatabaseError::FailedPrecondition(
+            "DPU reprovisioning requests are missing or no longer pending; retry with current requests".to_string(),
+        ));
+    }
+
     let restart_request = ReprovisionRequestRestart {
         update_firmware,
         restart_reprovision_requested_at: chrono::Utc::now(),
     };
     let query = r#"UPDATE machines
-                                SET reprovisioning_requested=reprovisioning_requested || $1
-                        WHERE id=ANY($2) RETURNING id"#;
-
-    let str_list: Vec<String> = machine_ids.iter().map(|id| id.to_string()).collect();
-    let _id = sqlx::query_as::<_, MachineId>(query)
+                     SET reprovisioning_requested=reprovisioning_requested || $1
+                   WHERE id=ANY($2) AND reprovisioning_requested IS NOT NULL
+                   RETURNING id"#;
+    let updated_ids: Vec<DpuMachineId> = sqlx::query_scalar(query)
         .bind(sqlx::types::Json(restart_request))
-        .bind(str_list)
-        .fetch_one(txn)
+        .bind(&target_ids)
+        .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::new("restart reprovisioning_requested", e))?;
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if updated_ids.len() != target_ids.len() {
+        return Err(DatabaseError::FailedPrecondition(
+            "DPU reprovisioning update count differs from its admitted selection".to_string(),
+        ));
+    }
 
     Ok(())
 }
@@ -10306,6 +10452,298 @@ mod test {
             crate::resource_pool::stats(&pool, LOOPBACK_IP_V6).await?,
             stats_after_first_pass
         );
+        Ok(())
+    }
+
+    // Queue the real `Set` and `Restart` primitives in both orders. Inspect a
+    // survivor before rollback when `Set` clears another selected request, so
+    // rollback cannot hide an earlier partial `Restart` write.
+    #[crate::sqlx_test]
+    async fn restart_requests_follow_public_set_lock_order(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::time::Duration;
+
+        use futures_util::future::maybe_done;
+
+        use crate::test_support::postgres::wait_for_blocked_query;
+
+        let mut empty = pool.begin().await?;
+        assert!(matches!(
+            super::restart_dpu_reprovisioning(empty.as_mut(), &[], false).await,
+            Err(crate::DatabaseError::FailedPrecondition(_))
+        ));
+        empty.rollback().await?;
+
+        #[derive(Clone, Copy, Debug)]
+        enum FirstWriter {
+            Set,
+            Restart,
+            SetThenClearOne,
+        }
+        for (seed, first) in [
+            (120, FirstWriter::Set),
+            (122, FirstWriter::Restart),
+            (124, FirstWriter::SetThenClearOne),
+        ] {
+            let mut ids = [
+                DpuMachineId::try_from(machine_id(seed, MachineType::Dpu))?,
+                DpuMachineId::try_from(machine_id(seed + 1, MachineType::Dpu))?,
+            ];
+            ids.sort_unstable();
+            let [low, high] = ids;
+            let mut setup = pool.begin().await?;
+            for id in [high, low] {
+                super::create(
+                    setup.as_mut(),
+                    None,
+                    &id.into(),
+                    ManagedHostState::Ready,
+                    None,
+                    model::machine::CURRENT_STATE_MODEL_VERSION,
+                )
+                .await?;
+                super::trigger_dpu_reprovisioning_request(&id, setup.as_mut(), "initial", true)
+                    .await?;
+            }
+            setup.commit().await?;
+            let mut gate = pool.begin().await?;
+            super::lock_by_id_for_update(gate.as_mut(), &low.into()).await?;
+            let gate_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(gate.as_mut())
+                .await?;
+            let mut set_txn = pool.begin().await?;
+            let set_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(set_txn.as_mut())
+                .await?;
+            let mut restart_txn = pool.begin().await?;
+            let restart_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(restart_txn.as_mut())
+                .await?;
+            // Heap order is high first. Disable index paths so the proof exercises
+            // each real primitive's SQL ORDER BY rather than a convenient plan.
+            for txn in [&mut set_txn, &mut restart_txn] {
+                sqlx::raw_sql(
+                    "SET LOCAL enable_indexscan = off;
+                               SET LOCAL enable_indexonlyscan = off;
+                               SET LOCAL enable_bitmapscan = off",
+                )
+                .execute(txn.as_mut())
+                .await?;
+            }
+            let set = maybe_done(async {
+                super::find(
+                    set_txn.as_mut(),
+                    crate::ObjectFilter::List(&ids),
+                    MachineSearchConfig {
+                        for_update: true,
+                        ..Default::default()
+                    },
+                )
+                .await?;
+                let mut requests = HashMap::new();
+                for id in ids {
+                    super::trigger_dpu_reprovisioning_request(
+                        &id,
+                        set_txn.as_mut(),
+                        "ordered-set",
+                        true,
+                    )
+                    .await?;
+                    let machine = super::find_one(set_txn.as_mut(), &id, Default::default())
+                        .await?
+                        .unwrap();
+                    requests.insert(id, machine.reprovision_requested.unwrap());
+                }
+                if matches!(first, FirstWriter::SetThenClearOne) {
+                    super::clear_dpu_reprovisioning_request(set_txn.as_mut(), &low, true).await?;
+                }
+                set_txn.commit().await?;
+                Ok::<_, Box<dyn std::error::Error>>(requests)
+            });
+            let restart = maybe_done(async {
+                let result = super::restart_dpu_reprovisioning(
+                    restart_txn.as_mut(),
+                    &[&high, &low, &high],
+                    false,
+                )
+                .await;
+                let survivor = super::find_one(restart_txn.as_mut(), &high, Default::default())
+                    .await?
+                    .unwrap()
+                    .reprovision_requested;
+                if result.is_ok() {
+                    restart_txn.commit().await?;
+                } else {
+                    restart_txn.rollback().await?;
+                }
+                Ok::<_, Box<dyn std::error::Error>>((result, survivor))
+            });
+            tokio::pin!(set, restart);
+            if matches!(first, FirstWriter::Restart) {
+                tokio::select! {
+                    () = &mut restart => panic!("Restart passed the low DPU gate"),
+                    _ = wait_for_blocked_query(&pool, gate_pid, "ORDER BY id COLLATE \"C\" FOR NO KEY UPDATE") => {}
+                }
+                tokio::select! {
+                    () = &mut restart => panic!("Restart passed the low DPU gate"),
+                    () = &mut set => panic!("Set did not wait behind Restart"),
+                    _ = wait_for_blocked_query(&pool, restart_pid, "SELECT row_to_json") => {}
+                }
+            } else {
+                tokio::select! {
+                    () = &mut set => panic!("Set passed the low DPU gate"),
+                    _ = wait_for_blocked_query(&pool, gate_pid, "SELECT row_to_json") => {}
+                }
+                tokio::select! {
+                    () = &mut set => panic!("Set passed the low DPU gate"),
+                    () = &mut restart => panic!("Restart did not wait behind Set"),
+                    _ = wait_for_blocked_query(&pool, set_pid, "ORDER BY id COLLATE \"C\" FOR NO KEY UPDATE") => {}
+                }
+            }
+            sqlx::query("SELECT id FROM machines WHERE id = $1 FOR UPDATE NOWAIT")
+                .bind(high)
+                .fetch_one(&pool)
+                .await?;
+            gate.commit().await?;
+            tokio::time::timeout(Duration::from_secs(25), async {
+                tokio::join!(&mut set, &mut restart);
+            })
+            .await?;
+            let requests = set.as_mut().take_output().unwrap()?;
+            let (result, survivor) = restart.as_mut().take_output().unwrap()?;
+            let mut check = pool.begin().await?;
+            for id in ids {
+                let actual = super::find_one(check.as_mut(), &id, Default::default())
+                    .await?
+                    .unwrap()
+                    .reprovision_requested;
+                match first {
+                    FirstWriter::Set => {
+                        let actual = actual.unwrap();
+                        let mut expected = requests[&id].clone();
+                        expected.update_firmware = false;
+                        expected.restart_reprovision_requested_at =
+                            actual.restart_reprovision_requested_at;
+                        assert_eq!(actual, expected);
+                    }
+                    FirstWriter::Restart => assert_eq!(actual.as_ref(), Some(&requests[&id])),
+                    FirstWriter::SetThenClearOne if id == low => assert_eq!(actual, None),
+                    FirstWriter::SetThenClearOne => {
+                        assert_eq!(actual.as_ref(), Some(&requests[&id]))
+                    }
+                }
+            }
+            check.rollback().await?;
+            if matches!(first, FirstWriter::SetThenClearOne) {
+                assert!(matches!(
+                    result,
+                    Err(crate::DatabaseError::FailedPrecondition(_))
+                ));
+                assert_eq!(
+                    survivor.as_ref(),
+                    Some(&requests[&high]),
+                    "rejection must precede even an uncommitted survivor write"
+                );
+            } else {
+                result?;
+            }
+        }
+        Ok(())
+    }
+
+    // Strong host admission fences new owner references, while existing
+    // interface admission permits unrelated foreign-key readers.
+    #[crate::sqlx_test]
+    async fn host_interface_admission_preserves_foreign_key_boundaries(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::time::Duration;
+
+        use crate::test_support::postgres::wait_for_blocked_query;
+
+        let (host, _, interface) = nic_firmware_failure_fixture(&pool, 185).await?;
+        let (_, _, other_interface) = nic_firmware_failure_fixture(&pool, 186).await?;
+        let mut admission = pool.begin().await?;
+        assert!(super::lock_by_id_for_update_if_present(admission.as_mut(), &host.into()).await?);
+        assert_eq!(
+            super::try_lock_host_interfaces(admission.as_mut(), &host).await?,
+            super::HostInterfaceAdmission::Acquired
+        );
+        let admission_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(admission.as_mut())
+            .await?;
+
+        let mut reader = pool.begin().await?;
+        sqlx::query("SET LOCAL lock_timeout = '500ms'")
+            .execute(reader.as_mut())
+            .await?;
+        sqlx::query("INSERT INTO dhcp_entries (machine_interface_id, vendor_string) VALUES ($1, 'admission-test')")
+            .bind(interface).execute(reader.as_mut()).await?;
+        reader.commit().await?;
+
+        // A non-key interface update must conflict even though FK readers pass.
+        let classification =
+            sqlx::query("UPDATE machine_interfaces SET interface_type = 'Bmc' WHERE id = $1")
+                .bind(interface)
+                .execute(&pool);
+        tokio::pin!(classification);
+        tokio::select! {
+            result = &mut classification => panic!("classification changed under admission: {result:?}"),
+            _ = wait_for_blocked_query(&pool, admission_pid, "UPDATE machine_interfaces SET interface_type") => {}
+        }
+        let reassign = sqlx::query("UPDATE machine_interfaces SET machine_id = $1 WHERE id = $2")
+            .bind(host)
+            .bind(other_interface)
+            .execute(&pool);
+        tokio::pin!(reassign);
+        tokio::select! {
+            result = &mut reassign => panic!("new owner reference passed strong host admission: {result:?}"),
+            _ = wait_for_blocked_query(&pool, admission_pid, "UPDATE machine_interfaces SET machine_id") => {}
+        }
+        admission.rollback().await?;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(25), classification)
+                .await??
+                .rows_affected(),
+            1
+        );
+        let interface_type: InterfaceType =
+            sqlx::query_scalar("SELECT interface_type FROM machine_interfaces WHERE id = $1")
+                .bind(interface)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(interface_type, InterfaceType::Bmc);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(25), reassign)
+                .await??
+                .rows_affected(),
+            1
+        );
+        let owner: HostMachineId =
+            sqlx::query_scalar("SELECT machine_id FROM machine_interfaces WHERE id = $1")
+                .bind(other_interface)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(owner, host);
+        Ok(())
+    }
+
+    // A dependency can disappear after a rejected attempt. Each isolated wait
+    // must finish successfully so its caller can reload the current selection.
+    #[crate::sqlx_test]
+    async fn isolated_dependency_waits_allow_missing_rows(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let absent_machine = machine_id(187, MachineType::Dpu);
+        let absent_interface: MachineInterfaceId =
+            "ffffffff-ffff-4fff-bfff-ffffffffffff".parse()?;
+        tokio::time::timeout(std::time::Duration::from_secs(25), async {
+            super::wait_for_machine_no_key_update(&pool, &absent_machine).await?;
+            super::wait_for_host_interface(&pool, &absent_interface).await?;
+            Ok::<_, crate::DatabaseError>(())
+        })
+        .await??;
         Ok(())
     }
 }

@@ -76,7 +76,7 @@ use crate::{CarbideError, CarbideResult};
 pub(crate) struct RequestReceivedAt(pub(crate) tokio::time::Instant);
 
 /// Records request arrival before authorization and business admission. The
-/// listener installs this outermost; firmware reads consume the extension.
+/// listener installs this outermost; firmware reads and DPF updates consume it.
 fn record_grpc_receipt<B>(mut request: axum::extract::Request<B>) -> axum::extract::Request<B> {
     request
         .extensions_mut()
@@ -85,7 +85,7 @@ fn record_grpc_receipt<B>(mut request: axum::extract::Request<B>) -> axum::extra
 }
 
 /// Builds the listener's receipt layer independently of admission configuration.
-/// Firmware reads consume its stamp even when admission is disabled.
+/// Firmware reads and DPF updates consume its stamp even when admission is disabled.
 pub(crate) fn grpc_receipt_layer<B>() -> tower::util::MapRequestLayer<
     impl Fn(axum::extract::Request<B>) -> axum::extract::Request<B> + Clone,
 > {

@@ -503,7 +503,14 @@ service Forge {
   // Set a dynamic feature, like RUST_LOG
   rpc SetDynamicConfig(SetDynamicConfigRequest) returns (google.protobuf.Empty);
 
-  // Trigger reprovisioning of DPU
+  // Sets, clears, or restarts DPU reprovisioning requests.
+  // Restart admission runs after the existing shared target and host-update
+  // validation and Restart's host-only/pending-request checks. It rechecks the
+  // attached DPU set, selected pending IDs, and host-update authorization after
+  // lock admission. Changed attachments or pending membership return
+  // FailedPrecondition; missing host-update authorization returns InvalidArgument.
+  // Replacing a selected pending request preserves its new fields while merging
+  // Restart. Set/Clear retain their existing validation and failure behavior.
   rpc TriggerDpuReprovisioning(DpuReprovisioningRequest) returns (google.protobuf.Empty);
   // List DPUs waiting for reprovisioning
   rpc ListDpuWaitingForReprovisioning(DpuReprovisioningListRequest) returns (DpuReprovisioningListResponse);
@@ -1293,6 +1300,18 @@ service Forge {
 
   rpc NmxcBrowse(NmxcBrowseRequest) returns (NmxcBrowseResponse);
 
+  // Atomically sets DPF enabled flags for the current host and attached DPUs.
+  // Disabling a host ingested through DPF returns FailedPrecondition; a missing
+  // host returns NotFound. Database preparation, including pool acquisition,
+  // lock retries, isolated waits, and commit, has a 300-second cap measured
+  // from server receipt before authorization/admission. A shorter valid
+  // grpc-timeout reduces the cap. The metadata accepts one to eight decimal
+  // digits followed
+  // by H (hours), M (minutes), S (seconds), m (milliseconds), u (microseconds),
+  // or n (nanoseconds); zero is valid. Missing or malformed metadata keeps the
+  // cap. Expiry returns DeadlineExceeded. Database cleanup can finish later,
+  // and a commit already in flight may have succeeded. Inspect current host
+  // and attached DPU flags before retrying an ambiguous result.
   rpc ModifyDPFState(ModifyDPFStateRequest) returns (google.protobuf.Empty);
   rpc GetDPFState(GetDPFStateRequest) returns (DPFStateResponse);
   // Curated snapshot of DPF CRs (DPUNode + DPUDevices + DPUs) for one host.
@@ -7624,12 +7643,14 @@ message DpuReprovisioningRequest {
     Clear = 1;
     Restart = 2;
   }
-  // DEPRECATED, use machine id field.
+  // Deprecated fallback used only when machine_id is absent.
   common.MachineId dpu_id = 1;
   Mode mode = 2;
   UpdateInitiator initiator = 3;
   bool update_firmware = 4;
 
+  // Host or DPU target for Set/Clear; Restart requires a host. Takes precedence
+  // over dpu_id when both are provided. One of these target fields is required.
   common.MachineId machine_id = 5;
 }
 
@@ -11196,7 +11217,9 @@ message MachinePositionInfo {
 }
 
 message ModifyDPFStateRequest {
+  // Required host target; DPU IDs are rejected.
   common.MachineId machine_id = 1 [(carbide.codegen.v1.field_rust_type) = ".common.HostMachineId"];
+  // Desired enabled flag. Omission is false and therefore requests disabling.
   bool dpf_enabled = 2;
 }
 
