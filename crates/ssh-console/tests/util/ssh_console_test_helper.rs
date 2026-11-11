@@ -98,6 +98,9 @@ pub(crate) async fn spawn(
             .as_ref()
             .and_then(|c| c.successful_connection_minimum_duration)
             .unwrap_or(Duration::ZERO),
+        max_bmc_connections: Defaults::max_bmc_connections(),
+        on_demand_bmc_idle_timeout: Defaults::on_demand_bmc_idle_timeout(),
+        max_concurrent_bmc_probes: Defaults::max_concurrent_bmc_probes(),
         log_rotate_max_rotated_files: 3,
         log_rotate_max_size: config_overrides
             .as_ref()
