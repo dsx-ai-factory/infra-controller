@@ -378,35 +378,35 @@ func (a *TrayAPIService) DeleteTrayHealthReportExecute(r ApiDeleteTrayHealthRepo
 	return localVarHTTPResponse, nil
 }
 
-type ApiFactoryResetTrayNvosRequest struct {
-	ctx                     context.Context
-	ApiService              *TrayAPIService
-	org                     string
-	id                      string
-	nVOSFactoryResetRequest *NVOSFactoryResetRequest
+type ApiFactoryResetTrayRequest struct {
+	ctx                 context.Context
+	ApiService          *TrayAPIService
+	org                 string
+	id                  string
+	factoryResetRequest *FactoryResetRequest
 }
 
-func (r ApiFactoryResetTrayNvosRequest) NVOSFactoryResetRequest(nVOSFactoryResetRequest NVOSFactoryResetRequest) ApiFactoryResetTrayNvosRequest {
-	r.nVOSFactoryResetRequest = &nVOSFactoryResetRequest
+func (r ApiFactoryResetTrayRequest) FactoryResetRequest(factoryResetRequest FactoryResetRequest) ApiFactoryResetTrayRequest {
+	r.factoryResetRequest = &factoryResetRequest
 	return r
 }
 
-func (r ApiFactoryResetTrayNvosRequest) Execute() (*NVOSFactoryResetResponse, *http.Response, error) {
-	return r.ApiService.FactoryResetTrayNvosExecute(r)
+func (r ApiFactoryResetTrayRequest) Execute() (*FactoryResetResponse, *http.Response, error) {
+	return r.ApiService.FactoryResetTrayExecute(r)
 }
 
 /*
-FactoryResetTrayNvos Restore NVOS factory defaults on a switch tray
+FactoryResetTray Restore factory defaults on a switch tray
 
-Requires an explicit target of `nvos`; there is no default. Other reset targets are rejected. Provider Admin operation. Clears switch NVOS configuration and reboots the selected switches. Only ingested switches are supported. Domain targets expand to their switch members. Flow blocks conflicting rack tasks and applies its rack-host readiness gate without an override. Returns task IDs, one per owning rack; submission does not imply reset completion. Query the Task APIs for completed, failed, or terminated outcomes and the task report. Completion means Core reports reset completed, not that the Domain is operational. NICo does not automatically restore configuration or re-ingest devices in this operation. Core must implement NVOS_FACTORY_RESET; unsupported Core versions fail the task explicitly. Failed or unknown submissions are not automatically repeated. After a timeout or lost response, inspect existing tasks and hardware before submitting again. Core status observes the latest recorded device/action reference; another out-of-band reset can replace that reference.
+Requires an explicit target of `nvos` or `sdn`; there is no default. Other reset targets are rejected. Provider Admin operation. Target `nvos` clears NVOS configuration and reboots the selected switches; target `sdn` restores their SDN configuration to factory defaults. Only ingested switches are supported. Domain targets expand to their switch members. Flow blocks conflicting rack tasks and applies its rack-host readiness gate without an override. Returns task IDs, one per owning rack; submission does not imply reset completion. Query the Task APIs for completed, failed, or terminated outcomes and the task report. Completion means Core reports reset completed, not that the Domain is operational. NICo does not automatically restore configuration or re-ingest devices in this operation. Core must implement the selected NVOS_FACTORY_RESET or SDN_FACTORY_RESET action; unsupported Core versions fail the task explicitly. Failed or unknown submissions are not automatically repeated. After a timeout or lost response, inspect existing tasks and hardware before submitting again. Core status observes the latest recorded device/action reference; another out-of-band reset can replace that reference.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the organization whose provider owns the Site.
 	@param id Switch inventory identifier
-	@return ApiFactoryResetTrayNvosRequest
+	@return ApiFactoryResetTrayRequest
 */
-func (a *TrayAPIService) FactoryResetTrayNvos(ctx context.Context, org string, id string) ApiFactoryResetTrayNvosRequest {
-	return ApiFactoryResetTrayNvosRequest{
+func (a *TrayAPIService) FactoryResetTray(ctx context.Context, org string, id string) ApiFactoryResetTrayRequest {
+	return ApiFactoryResetTrayRequest{
 		ApiService: a,
 		ctx:        ctx,
 		org:        org,
@@ -416,16 +416,16 @@ func (a *TrayAPIService) FactoryResetTrayNvos(ctx context.Context, org string, i
 
 // Execute executes the request
 //
-//	@return NVOSFactoryResetResponse
-func (a *TrayAPIService) FactoryResetTrayNvosExecute(r ApiFactoryResetTrayNvosRequest) (*NVOSFactoryResetResponse, *http.Response, error) {
+//	@return FactoryResetResponse
+func (a *TrayAPIService) FactoryResetTrayExecute(r ApiFactoryResetTrayRequest) (*FactoryResetResponse, *http.Response, error) {
 	var (
 		localVarHTTPMethod  = http.MethodPost
 		localVarPostBody    interface{}
 		formFiles           []formFile
-		localVarReturnValue *NVOSFactoryResetResponse
+		localVarReturnValue *FactoryResetResponse
 	)
 
-	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "TrayAPIService.FactoryResetTrayNvos")
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "TrayAPIService.FactoryResetTray")
 	if err != nil {
 		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
 	}
@@ -437,8 +437,8 @@ func (a *TrayAPIService) FactoryResetTrayNvosExecute(r ApiFactoryResetTrayNvosRe
 	localVarHeaderParams := make(map[string]string)
 	localVarQueryParams := url.Values{}
 	localVarFormParams := url.Values{}
-	if r.nVOSFactoryResetRequest == nil {
-		return localVarReturnValue, nil, reportError("nVOSFactoryResetRequest is required and must be specified")
+	if r.factoryResetRequest == nil {
+		return localVarReturnValue, nil, reportError("factoryResetRequest is required and must be specified")
 	}
 
 	// to determine the Content-Type header
@@ -459,7 +459,7 @@ func (a *TrayAPIService) FactoryResetTrayNvosExecute(r ApiFactoryResetTrayNvosRe
 		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
 	}
 	// body params
-	localVarPostBody = r.nVOSFactoryResetRequest
+	localVarPostBody = r.factoryResetRequest
 	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
 	if err != nil {
 		return localVarReturnValue, nil, err

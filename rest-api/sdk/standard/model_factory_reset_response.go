@@ -19,37 +19,37 @@ import (
 	"fmt"
 )
 
-// checks if the NVOSFactoryResetResponse type satisfies the MappedNullable interface at compile time
-var _ MappedNullable = &NVOSFactoryResetResponse{}
+// checks if the FactoryResetResponse type satisfies the MappedNullable interface at compile time
+var _ MappedNullable = &FactoryResetResponse{}
 
-// NVOSFactoryResetResponse struct for NVOSFactoryResetResponse
-type NVOSFactoryResetResponse struct {
+// FactoryResetResponse struct for FactoryResetResponse
+type FactoryResetResponse struct {
 	// Asynchronous reset task IDs, one per owning rack; ordering is unspecified.
 	TaskIds []string `json:"taskIds"`
 }
 
-type _NVOSFactoryResetResponse NVOSFactoryResetResponse
+type _FactoryResetResponse FactoryResetResponse
 
-// NewNVOSFactoryResetResponse instantiates a new NVOSFactoryResetResponse object
+// NewFactoryResetResponse instantiates a new FactoryResetResponse object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewNVOSFactoryResetResponse(taskIds []string) *NVOSFactoryResetResponse {
-	this := NVOSFactoryResetResponse{}
+func NewFactoryResetResponse(taskIds []string) *FactoryResetResponse {
+	this := FactoryResetResponse{}
 	this.TaskIds = taskIds
 	return &this
 }
 
-// NewNVOSFactoryResetResponseWithDefaults instantiates a new NVOSFactoryResetResponse object
+// NewFactoryResetResponseWithDefaults instantiates a new FactoryResetResponse object
 // This constructor will only assign default values to properties that have it defined,
 // but it doesn't guarantee that properties required by API are set
-func NewNVOSFactoryResetResponseWithDefaults() *NVOSFactoryResetResponse {
-	this := NVOSFactoryResetResponse{}
+func NewFactoryResetResponseWithDefaults() *FactoryResetResponse {
+	this := FactoryResetResponse{}
 	return &this
 }
 
 // GetTaskIds returns the TaskIds field value
-func (o *NVOSFactoryResetResponse) GetTaskIds() []string {
+func (o *FactoryResetResponse) GetTaskIds() []string {
 	if o == nil {
 		var ret []string
 		return ret
@@ -60,7 +60,7 @@ func (o *NVOSFactoryResetResponse) GetTaskIds() []string {
 
 // GetTaskIdsOk returns a tuple with the TaskIds field value
 // and a boolean to check if the value has been set.
-func (o *NVOSFactoryResetResponse) GetTaskIdsOk() ([]string, bool) {
+func (o *FactoryResetResponse) GetTaskIdsOk() ([]string, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -68,11 +68,11 @@ func (o *NVOSFactoryResetResponse) GetTaskIdsOk() ([]string, bool) {
 }
 
 // SetTaskIds sets field value
-func (o *NVOSFactoryResetResponse) SetTaskIds(v []string) {
+func (o *FactoryResetResponse) SetTaskIds(v []string) {
 	o.TaskIds = v
 }
 
-func (o NVOSFactoryResetResponse) MarshalJSON() ([]byte, error) {
+func (o FactoryResetResponse) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
 		return []byte{}, err
@@ -80,13 +80,13 @@ func (o NVOSFactoryResetResponse) MarshalJSON() ([]byte, error) {
 	return json.Marshal(toSerialize)
 }
 
-func (o NVOSFactoryResetResponse) ToMap() (map[string]interface{}, error) {
+func (o FactoryResetResponse) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["taskIds"] = o.TaskIds
 	return toSerialize, nil
 }
 
-func (o *NVOSFactoryResetResponse) UnmarshalJSON(data []byte) (err error) {
+func (o *FactoryResetResponse) UnmarshalJSON(data []byte) (err error) {
 	// This validates that all required properties are included in the JSON object
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
@@ -108,52 +108,52 @@ func (o *NVOSFactoryResetResponse) UnmarshalJSON(data []byte) (err error) {
 		}
 	}
 
-	varNVOSFactoryResetResponse := _NVOSFactoryResetResponse{}
+	varFactoryResetResponse := _FactoryResetResponse{}
 
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	err = decoder.Decode(&varNVOSFactoryResetResponse)
+	err = decoder.Decode(&varFactoryResetResponse)
 
 	if err != nil {
 		return err
 	}
 
-	*o = NVOSFactoryResetResponse(varNVOSFactoryResetResponse)
+	*o = FactoryResetResponse(varFactoryResetResponse)
 
 	return err
 }
 
-type NullableNVOSFactoryResetResponse struct {
-	value *NVOSFactoryResetResponse
+type NullableFactoryResetResponse struct {
+	value *FactoryResetResponse
 	isSet bool
 }
 
-func (v NullableNVOSFactoryResetResponse) Get() *NVOSFactoryResetResponse {
+func (v NullableFactoryResetResponse) Get() *FactoryResetResponse {
 	return v.value
 }
 
-func (v *NullableNVOSFactoryResetResponse) Set(val *NVOSFactoryResetResponse) {
+func (v *NullableFactoryResetResponse) Set(val *FactoryResetResponse) {
 	v.value = val
 	v.isSet = true
 }
 
-func (v NullableNVOSFactoryResetResponse) IsSet() bool {
+func (v NullableFactoryResetResponse) IsSet() bool {
 	return v.isSet
 }
 
-func (v *NullableNVOSFactoryResetResponse) Unset() {
+func (v *NullableFactoryResetResponse) Unset() {
 	v.value = nil
 	v.isSet = false
 }
 
-func NewNullableNVOSFactoryResetResponse(val *NVOSFactoryResetResponse) *NullableNVOSFactoryResetResponse {
-	return &NullableNVOSFactoryResetResponse{value: val, isSet: true}
+func NewNullableFactoryResetResponse(val *FactoryResetResponse) *NullableFactoryResetResponse {
+	return &NullableFactoryResetResponse{value: val, isSet: true}
 }
 
-func (v NullableNVOSFactoryResetResponse) MarshalJSON() ([]byte, error) {
+func (v NullableFactoryResetResponse) MarshalJSON() ([]byte, error) {
 	return json.Marshal(v.value)
 }
 
-func (v *NullableNVOSFactoryResetResponse) UnmarshalJSON(src []byte) error {
+func (v *NullableFactoryResetResponse) UnmarshalJSON(src []byte) error {
 	v.isSet = true
 	return json.Unmarshal(src, &v.value)
 }

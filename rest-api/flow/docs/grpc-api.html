@@ -3432,6 +3432,13 @@ this operation. </p></td>
                   <td><p> </p></td>
                 </tr>
 
+                <tr>
+                  <td>reset_target</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Reset scope: &#34;nvos&#34; or &#34;sdn&#34;. Omission retains NVOS for older clients. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -11368,7 +11375,7 @@ becomes available, or can be cancelled explicitly via CancelTask.</p></td>
                 <td>FactoryResetSwitches</td>
                 <td><a href="#v1.FactoryResetSwitchesRequest">FactoryResetSwitchesRequest</a></td>
                 <td><a href="#v1.SubmitTaskResponse">SubmitTaskResponse</a></td>
-                <td><p>Restores NVOS configuration defaults on switches. Accepted work is polled;
+                <td><p>Restores NVOS or SDN configuration defaults on switches. Accepted work is polled;
 uncertain submissions are never automatically repeated. No reprovisioning.</p></td>
               </tr>
 

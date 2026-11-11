@@ -13,4 +13,6 @@ import (
 type ComponentResetter interface {
 	ResetNVOS(context.Context, common.Target) error
 	NVOSResetCompleted(context.Context, common.Target) (bool, error)
+	ResetSDN(context.Context, common.Target) error
+	SDNResetCompleted(context.Context, common.Target) (bool, error)
 }

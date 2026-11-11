@@ -503,7 +503,7 @@ func validateResolvedRackTargets(
 		}
 		for _, comp := range resolvedRack.Components {
 			if op.Type == taskcommon.TaskTypeComponentReset && comp.Type != devicetypes.ComponentTypeNVSwitch {
-				return flowerrors.GRPCErrorInvalidArgument("NVOS factory reset requires switch targets")
+				return flowerrors.GRPCErrorInvalidArgument("factory reset requires switch targets")
 			}
 			if comp.ComponentID == "" &&
 				(!macTargetSupported || comp.ManagementMAC() == "") {
@@ -1079,7 +1079,7 @@ func (m *ManagerImpl) resolveOperationRule(
 	// Reset has fixed execution semantics; user rules must not add retries or
 	// unrelated actions around this destructive operation.
 	if op.Type == taskcommon.TaskTypeComponentReset {
-		return &operationrules.OperationRule{Name: "Fixed NVOS factory reset", OperationType: op.Type, OperationCode: op.Code, RuleDefinition: operationrules.RuleDefinition{Version: operationrules.CurrentRuleDefinitionVersion}}, nil
+		return &operationrules.OperationRule{Name: "Fixed factory reset", OperationType: op.Type, OperationCode: op.Code, RuleDefinition: operationrules.RuleDefinition{Version: operationrules.CurrentRuleDefinitionVersion}}, nil
 	}
 	ruleID, err := operations.ExtractRuleID(op.Info)
 	if err != nil {

@@ -141,7 +141,7 @@ type FlowClient interface {
 	PowerOffRack(ctx context.Context, in *PowerOffRackRequest, opts ...grpc.CallOption) (*SubmitTaskResponse, error)
 	PowerResetRack(ctx context.Context, in *PowerResetRackRequest, opts ...grpc.CallOption) (*SubmitTaskResponse, error)
 	ACPowerCycleRack(ctx context.Context, in *ACPowerCycleRackRequest, opts ...grpc.CallOption) (*SubmitTaskResponse, error)
-	// Restores NVOS configuration defaults on switches. Accepted work is polled;
+	// Restores NVOS or SDN configuration defaults on switches. Accepted work is polled;
 	// uncertain submissions are never automatically repeated. No reprovisioning.
 	FactoryResetSwitches(ctx context.Context, in *FactoryResetSwitchesRequest, opts ...grpc.CallOption) (*SubmitTaskResponse, error)
 	// Component CRUD
@@ -1050,7 +1050,7 @@ type FlowServer interface {
 	PowerOffRack(context.Context, *PowerOffRackRequest) (*SubmitTaskResponse, error)
 	PowerResetRack(context.Context, *PowerResetRackRequest) (*SubmitTaskResponse, error)
 	ACPowerCycleRack(context.Context, *ACPowerCycleRackRequest) (*SubmitTaskResponse, error)
-	// Restores NVOS configuration defaults on switches. Accepted work is polled;
+	// Restores NVOS or SDN configuration defaults on switches. Accepted work is polled;
 	// uncertain submissions are never automatically repeated. No reprovisioning.
 	FactoryResetSwitches(context.Context, *FactoryResetSwitchesRequest) (*SubmitTaskResponse, error)
 	// Component CRUD

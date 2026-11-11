@@ -50,7 +50,7 @@ service Flow {
     rpc PowerOffRack(PowerOffRackRequest) returns (SubmitTaskResponse);
     rpc PowerResetRack(PowerResetRackRequest) returns (SubmitTaskResponse);
     rpc ACPowerCycleRack(ACPowerCycleRackRequest) returns (SubmitTaskResponse);
-    // Restores NVOS configuration defaults on switches. Accepted work is polled;
+    // Restores NVOS or SDN configuration defaults on switches. Accepted work is polled;
     // uncertain submissions are never automatically repeated. No reprovisioning.
     rpc FactoryResetSwitches(FactoryResetSwitchesRequest) returns (SubmitTaskResponse);
 
@@ -825,6 +825,8 @@ message PowerOnRackRequest {
 message FactoryResetSwitchesRequest {
     OperationTargetSpec target_spec = 1;
     string description = 2;
+    // Reset scope: "nvos" or "sdn". Omission retains NVOS for older clients.
+    string reset_target = 3;
 }
 
 message PowerOffRackRequest {

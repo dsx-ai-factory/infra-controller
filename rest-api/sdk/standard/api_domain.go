@@ -26,35 +26,35 @@ import (
 // DomainAPIService DomainAPI service
 type DomainAPIService service
 
-type ApiFactoryResetNvlinkDomainNvosRequest struct {
-	ctx                     context.Context
-	ApiService              *DomainAPIService
-	org                     string
-	id                      string
-	nVOSFactoryResetRequest *NVOSFactoryResetRequest
+type ApiFactoryResetNvlinkDomainRequest struct {
+	ctx                 context.Context
+	ApiService          *DomainAPIService
+	org                 string
+	id                  string
+	factoryResetRequest *FactoryResetRequest
 }
 
-func (r ApiFactoryResetNvlinkDomainNvosRequest) NVOSFactoryResetRequest(nVOSFactoryResetRequest NVOSFactoryResetRequest) ApiFactoryResetNvlinkDomainNvosRequest {
-	r.nVOSFactoryResetRequest = &nVOSFactoryResetRequest
+func (r ApiFactoryResetNvlinkDomainRequest) FactoryResetRequest(factoryResetRequest FactoryResetRequest) ApiFactoryResetNvlinkDomainRequest {
+	r.factoryResetRequest = &factoryResetRequest
 	return r
 }
 
-func (r ApiFactoryResetNvlinkDomainNvosRequest) Execute() (*NVOSFactoryResetResponse, *http.Response, error) {
-	return r.ApiService.FactoryResetNvlinkDomainNvosExecute(r)
+func (r ApiFactoryResetNvlinkDomainRequest) Execute() (*FactoryResetResponse, *http.Response, error) {
+	return r.ApiService.FactoryResetNvlinkDomainExecute(r)
 }
 
 /*
-FactoryResetNvlinkDomainNvos Restore NVOS factory defaults on an NVLink Domain’s switches
+FactoryResetNvlinkDomain Restore factory defaults on an NVLink Domain’s switches
 
-Requires an explicit target of `nvos`; there is no default. Other reset targets are rejected. Provider Admin operation. Clears switch NVOS configuration and reboots the selected switches. Only ingested switches are supported. Domain targets expand to their switch members. Flow blocks conflicting rack tasks and applies its rack-host readiness gate without an override. Returns task IDs, one per owning rack; submission does not imply reset completion. Query the Task APIs for completed, failed, or terminated outcomes and the task report. Completion means Core reports reset completed, not that the Domain is operational. NICo does not automatically restore configuration or re-ingest devices in this operation. Core must implement NVOS_FACTORY_RESET; unsupported Core versions fail the task explicitly. Failed or unknown submissions are not automatically repeated. After a timeout or lost response, inspect existing tasks and hardware before submitting again. Core status observes the latest recorded device/action reference; another out-of-band reset can replace that reference.
+Requires an explicit target of `nvos` or `sdn`; there is no default. Other reset targets are rejected. Provider Admin operation. Target `nvos` clears NVOS configuration and reboots the selected switches; target `sdn` restores their SDN configuration to factory defaults. Only ingested switches are supported. Domain targets expand to their switch members. Flow blocks conflicting rack tasks and applies its rack-host readiness gate without an override. Returns task IDs, one per owning rack; submission does not imply reset completion. Query the Task APIs for completed, failed, or terminated outcomes and the task report. Completion means Core reports reset completed, not that the Domain is operational. NICo does not automatically restore configuration or re-ingest devices in this operation. Core must implement the selected NVOS_FACTORY_RESET or SDN_FACTORY_RESET action; unsupported Core versions fail the task explicitly. Failed or unknown submissions are not automatically repeated. After a timeout or lost response, inspect existing tasks and hardware before submitting again. Core status observes the latest recorded device/action reference; another out-of-band reset can replace that reference.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the organization whose provider owns the Site.
 	@param id Core NVLink Domain ID
-	@return ApiFactoryResetNvlinkDomainNvosRequest
+	@return ApiFactoryResetNvlinkDomainRequest
 */
-func (a *DomainAPIService) FactoryResetNvlinkDomainNvos(ctx context.Context, org string, id string) ApiFactoryResetNvlinkDomainNvosRequest {
-	return ApiFactoryResetNvlinkDomainNvosRequest{
+func (a *DomainAPIService) FactoryResetNvlinkDomain(ctx context.Context, org string, id string) ApiFactoryResetNvlinkDomainRequest {
+	return ApiFactoryResetNvlinkDomainRequest{
 		ApiService: a,
 		ctx:        ctx,
 		org:        org,
@@ -64,16 +64,16 @@ func (a *DomainAPIService) FactoryResetNvlinkDomainNvos(ctx context.Context, org
 
 // Execute executes the request
 //
-//	@return NVOSFactoryResetResponse
-func (a *DomainAPIService) FactoryResetNvlinkDomainNvosExecute(r ApiFactoryResetNvlinkDomainNvosRequest) (*NVOSFactoryResetResponse, *http.Response, error) {
+//	@return FactoryResetResponse
+func (a *DomainAPIService) FactoryResetNvlinkDomainExecute(r ApiFactoryResetNvlinkDomainRequest) (*FactoryResetResponse, *http.Response, error) {
 	var (
 		localVarHTTPMethod  = http.MethodPost
 		localVarPostBody    interface{}
 		formFiles           []formFile
-		localVarReturnValue *NVOSFactoryResetResponse
+		localVarReturnValue *FactoryResetResponse
 	)
 
-	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DomainAPIService.FactoryResetNvlinkDomainNvos")
+	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DomainAPIService.FactoryResetNvlinkDomain")
 	if err != nil {
 		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
 	}
@@ -85,8 +85,8 @@ func (a *DomainAPIService) FactoryResetNvlinkDomainNvosExecute(r ApiFactoryReset
 	localVarHeaderParams := make(map[string]string)
 	localVarQueryParams := url.Values{}
 	localVarFormParams := url.Values{}
-	if r.nVOSFactoryResetRequest == nil {
-		return localVarReturnValue, nil, reportError("nVOSFactoryResetRequest is required and must be specified")
+	if r.factoryResetRequest == nil {
+		return localVarReturnValue, nil, reportError("factoryResetRequest is required and must be specified")
 	}
 
 	// to determine the Content-Type header
@@ -107,7 +107,7 @@ func (a *DomainAPIService) FactoryResetNvlinkDomainNvosExecute(r ApiFactoryReset
 		localVarHeaderParams["Accept"] = localVarHTTPHeaderAccept
 	}
 	// body params
-	localVarPostBody = r.nVOSFactoryResetRequest
+	localVarPostBody = r.factoryResetRequest
 	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
 	if err != nil {
 		return localVarReturnValue, nil, err

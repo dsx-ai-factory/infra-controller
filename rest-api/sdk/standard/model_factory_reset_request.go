@@ -19,40 +19,40 @@ import (
 	"fmt"
 )
 
-// checks if the NVOSFactoryResetRequest type satisfies the MappedNullable interface at compile time
-var _ MappedNullable = &NVOSFactoryResetRequest{}
+// checks if the FactoryResetRequest type satisfies the MappedNullable interface at compile time
+var _ MappedNullable = &FactoryResetRequest{}
 
-// NVOSFactoryResetRequest struct for NVOSFactoryResetRequest
-type NVOSFactoryResetRequest struct {
+// FactoryResetRequest struct for FactoryResetRequest
+type FactoryResetRequest struct {
 	// Registered site owned by the current organization’s provider.
 	SiteId string `json:"siteId"`
-	// Required reset scope. Only `nvos` is supported; case-sensitive, with no default.
+	// Required reset scope. Accepted values are `nvos` and `sdn`; case-sensitive, with no default.
 	Target string `json:"target"`
 }
 
-type _NVOSFactoryResetRequest NVOSFactoryResetRequest
+type _FactoryResetRequest FactoryResetRequest
 
-// NewNVOSFactoryResetRequest instantiates a new NVOSFactoryResetRequest object
+// NewFactoryResetRequest instantiates a new FactoryResetRequest object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewNVOSFactoryResetRequest(siteId string, target string) *NVOSFactoryResetRequest {
-	this := NVOSFactoryResetRequest{}
+func NewFactoryResetRequest(siteId string, target string) *FactoryResetRequest {
+	this := FactoryResetRequest{}
 	this.SiteId = siteId
 	this.Target = target
 	return &this
 }
 
-// NewNVOSFactoryResetRequestWithDefaults instantiates a new NVOSFactoryResetRequest object
+// NewFactoryResetRequestWithDefaults instantiates a new FactoryResetRequest object
 // This constructor will only assign default values to properties that have it defined,
 // but it doesn't guarantee that properties required by API are set
-func NewNVOSFactoryResetRequestWithDefaults() *NVOSFactoryResetRequest {
-	this := NVOSFactoryResetRequest{}
+func NewFactoryResetRequestWithDefaults() *FactoryResetRequest {
+	this := FactoryResetRequest{}
 	return &this
 }
 
 // GetSiteId returns the SiteId field value
-func (o *NVOSFactoryResetRequest) GetSiteId() string {
+func (o *FactoryResetRequest) GetSiteId() string {
 	if o == nil {
 		var ret string
 		return ret
@@ -63,7 +63,7 @@ func (o *NVOSFactoryResetRequest) GetSiteId() string {
 
 // GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
-func (o *NVOSFactoryResetRequest) GetSiteIdOk() (*string, bool) {
+func (o *FactoryResetRequest) GetSiteIdOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -71,12 +71,12 @@ func (o *NVOSFactoryResetRequest) GetSiteIdOk() (*string, bool) {
 }
 
 // SetSiteId sets field value
-func (o *NVOSFactoryResetRequest) SetSiteId(v string) {
+func (o *FactoryResetRequest) SetSiteId(v string) {
 	o.SiteId = v
 }
 
 // GetTarget returns the Target field value
-func (o *NVOSFactoryResetRequest) GetTarget() string {
+func (o *FactoryResetRequest) GetTarget() string {
 	if o == nil {
 		var ret string
 		return ret
@@ -87,7 +87,7 @@ func (o *NVOSFactoryResetRequest) GetTarget() string {
 
 // GetTargetOk returns a tuple with the Target field value
 // and a boolean to check if the value has been set.
-func (o *NVOSFactoryResetRequest) GetTargetOk() (*string, bool) {
+func (o *FactoryResetRequest) GetTargetOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -95,11 +95,11 @@ func (o *NVOSFactoryResetRequest) GetTargetOk() (*string, bool) {
 }
 
 // SetTarget sets field value
-func (o *NVOSFactoryResetRequest) SetTarget(v string) {
+func (o *FactoryResetRequest) SetTarget(v string) {
 	o.Target = v
 }
 
-func (o NVOSFactoryResetRequest) MarshalJSON() ([]byte, error) {
+func (o FactoryResetRequest) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
 		return []byte{}, err
@@ -107,14 +107,14 @@ func (o NVOSFactoryResetRequest) MarshalJSON() ([]byte, error) {
 	return json.Marshal(toSerialize)
 }
 
-func (o NVOSFactoryResetRequest) ToMap() (map[string]interface{}, error) {
+func (o FactoryResetRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["siteId"] = o.SiteId
 	toSerialize["target"] = o.Target
 	return toSerialize, nil
 }
 
-func (o *NVOSFactoryResetRequest) UnmarshalJSON(data []byte) (err error) {
+func (o *FactoryResetRequest) UnmarshalJSON(data []byte) (err error) {
 	// This validates that all required properties are included in the JSON object
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
@@ -137,52 +137,52 @@ func (o *NVOSFactoryResetRequest) UnmarshalJSON(data []byte) (err error) {
 		}
 	}
 
-	varNVOSFactoryResetRequest := _NVOSFactoryResetRequest{}
+	varFactoryResetRequest := _FactoryResetRequest{}
 
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	err = decoder.Decode(&varNVOSFactoryResetRequest)
+	err = decoder.Decode(&varFactoryResetRequest)
 
 	if err != nil {
 		return err
 	}
 
-	*o = NVOSFactoryResetRequest(varNVOSFactoryResetRequest)
+	*o = FactoryResetRequest(varFactoryResetRequest)
 
 	return err
 }
 
-type NullableNVOSFactoryResetRequest struct {
-	value *NVOSFactoryResetRequest
+type NullableFactoryResetRequest struct {
+	value *FactoryResetRequest
 	isSet bool
 }
 
-func (v NullableNVOSFactoryResetRequest) Get() *NVOSFactoryResetRequest {
+func (v NullableFactoryResetRequest) Get() *FactoryResetRequest {
 	return v.value
 }
 
-func (v *NullableNVOSFactoryResetRequest) Set(val *NVOSFactoryResetRequest) {
+func (v *NullableFactoryResetRequest) Set(val *FactoryResetRequest) {
 	v.value = val
 	v.isSet = true
 }
 
-func (v NullableNVOSFactoryResetRequest) IsSet() bool {
+func (v NullableFactoryResetRequest) IsSet() bool {
 	return v.isSet
 }
 
-func (v *NullableNVOSFactoryResetRequest) Unset() {
+func (v *NullableFactoryResetRequest) Unset() {
 	v.value = nil
 	v.isSet = false
 }
 
-func NewNullableNVOSFactoryResetRequest(val *NVOSFactoryResetRequest) *NullableNVOSFactoryResetRequest {
-	return &NullableNVOSFactoryResetRequest{value: val, isSet: true}
+func NewNullableFactoryResetRequest(val *FactoryResetRequest) *NullableFactoryResetRequest {
+	return &NullableFactoryResetRequest{value: val, isSet: true}
 }
 
-func (v NullableNVOSFactoryResetRequest) MarshalJSON() ([]byte, error) {
+func (v NullableFactoryResetRequest) MarshalJSON() ([]byte, error) {
 	return json.Marshal(v.value)
 }
 
-func (v *NullableNVOSFactoryResetRequest) UnmarshalJSON(src []byte) error {
+func (v *NullableFactoryResetRequest) UnmarshalJSON(src []byte) error {
 	v.isSet = true
 	return json.Unmarshal(src, &v.value)
 }

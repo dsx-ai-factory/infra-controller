@@ -26,7 +26,11 @@ func init() {
 
 // componentReset uses fixed execution semantics: no rule may retry a reset.
 // Separate per-device activities let accepted peers finish after another fails.
-func componentReset(ctx workflow.Context, info task.ExecutionInfo, _ *operations.ComponentResetTaskInfo) error {
+func componentReset(ctx workflow.Context, info task.ExecutionInfo, payload *operations.ComponentResetTaskInfo) error {
+	submitActivity, observeActivity := activity.NameResetNVOS, activity.NameNVOSResetCompleted
+	if payload.ResetTarget() == "sdn" {
+		submitActivity, observeActivity = activity.NameResetSDN, activity.NameSDNResetCompleted
+	}
 	statusCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: 30 * time.Second, RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 3}})
 	err := updateRunningTaskStatus(statusCtx, info.TaskID)
 	if err != nil {
@@ -35,7 +39,7 @@ func componentReset(ctx workflow.Context, info task.ExecutionInfo, _ *operations
 	targets := buildTargets(&info)
 	target, ok := targets[devicetypes.ComponentTypeNVSwitch]
 	if !ok || len(targets) != 1 || target.UsesMACAddresses() {
-		return updateFinishedTaskStatus(statusCtx, info.TaskID, fmt.Errorf("NVOS factory reset requires ingested switches"), nil)
+		return updateFinishedTaskStatus(statusCtx, info.TaskID, fmt.Errorf("factory reset requires ingested switches"), nil)
 	}
 	deadline := workflow.Now(ctx).Add(50 * time.Minute)
 	step := report.StepRecord{ComponentType: "NVSwitch", Status: report.StatusRunning, TotalComponents: target.Len()}
@@ -53,7 +57,7 @@ func componentReset(ctx workflow.Context, info task.ExecutionInfo, _ *operations
 			continue
 		}
 		submitCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: min(remaining, 31*time.Minute), RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1}})
-		err = executeActivityBeforeDeadline(submitCtx, deadline, nil, activity.NameResetNVOS, single)
+		err = executeActivityBeforeDeadline(submitCtx, deadline, nil, submitActivity, single)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -74,10 +78,10 @@ func componentReset(ctx workflow.Context, info task.ExecutionInfo, _ *operations
 			remaining := deadline.Sub(workflow.Now(ctx))
 			var completed bool
 			if remaining <= 0 {
-				err = fmt.Errorf("NVOS reset observation timed out; outcome is unknown")
+				err = fmt.Errorf("factory reset observation timed out; outcome is unknown")
 			} else {
 				pollCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{StartToCloseTimeout: min(remaining, time.Minute), RetryPolicy: &temporal.RetryPolicy{MaximumAttempts: 1}})
-				err = executeActivityBeforeDeadline(pollCtx, deadline, &completed, activity.NameNVOSResetCompleted, single)
+				err = executeActivityBeforeDeadline(pollCtx, deadline, &completed, observeActivity, single)
 			}
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -85,7 +89,7 @@ func componentReset(ctx workflow.Context, info task.ExecutionInfo, _ *operations
 			if err != nil && !resetFailureIsDefinitive(err) && deadline.After(workflow.Now(ctx)) {
 				// Observation failure is not a device outcome. Retain ownership
 				// and retry this read on a later round, never the reset itself.
-				workflow.GetLogger(ctx).Warn("NVOS reset observation unavailable", "switch_id", single.Identifiers[0], "error", err)
+				workflow.GetLogger(ctx).Warn("factory reset observation unavailable", "switch_id", single.Identifiers[0], "error", err)
 				next = append(next, single)
 			} else if err != nil {
 				failures = append(failures, fmt.Errorf("switch %s: %w", single.Identifiers[0], err))
@@ -122,5 +126,5 @@ func componentReset(ctx workflow.Context, info task.ExecutionInfo, _ *operations
 // Unknown outcomes fail the task without claiming a confirmed device failure.
 func resetFailureIsDefinitive(err error) bool {
 	var applicationError *temporal.ApplicationError
-	return errors.As(err, &applicationError) && (applicationError.Type() == "NVOSResetFailed" || applicationError.Type() == "NVOSResetRejected")
+	return errors.As(err, &applicationError) && (applicationError.Type() == "NVOSResetFailed" || applicationError.Type() == "NVOSResetRejected" || applicationError.Type() == "SDNResetFailed" || applicationError.Type() == "SDNResetRejected")
 }

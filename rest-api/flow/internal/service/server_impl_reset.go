@@ -16,7 +16,7 @@ import (
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 )
 
-// FactoryResetSwitches submits fixed NVOS reset work through the existing rack conflict
+// FactoryResetSwitches submits NVOS or SDN reset work through the existing rack conflict
 // scheduler. Core owns action support and hardware execution.
 func (rs *FlowServerImpl) FactoryResetSwitches(ctx context.Context, req *pb.FactoryResetSwitchesRequest) (*pb.SubmitTaskResponse, error) {
 	if req == nil || req.TargetSpec == nil {
@@ -25,14 +25,20 @@ func (rs *FlowServerImpl) FactoryResetSwitches(ctx context.Context, req *pb.Fact
 	if rs.taskManager == nil {
 		return nil, status.Error(codes.Unavailable, "task manager is not available")
 	}
-	request, err := rs.convertTargetSpecToOperationRequest(req.TargetSpec, req.Description, &operations.ComponentResetTaskInfo{})
+	info := &operations.ComponentResetTaskInfo{Target: req.GetResetTarget()}
+	info.Target = info.ResetTarget()
+	err := info.Validate()
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	request, err := rs.convertTargetSpecToOperationRequest(req.TargetSpec, req.Description, info)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	ids, err := rs.taskManager.SubmitTask(ctx, request)
 	if err != nil {
 		if errors.Is(err, taskmanager.ErrRackConflict) {
-			return nil, status.Error(codes.Aborted, "a conflicting rack task prevents NVOS reset")
+			return nil, status.Error(codes.Aborted, "a conflicting rack task prevents factory reset")
 		}
 		return nil, err
 	}

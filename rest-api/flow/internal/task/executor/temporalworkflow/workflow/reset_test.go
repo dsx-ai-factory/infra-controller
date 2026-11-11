@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	sdkactivity "go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
@@ -27,15 +28,21 @@ import (
 
 func TestComponentReset(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		firstError bool
-		pollError  bool
-	}{{name: "completion"}, {name: "transient observation recovers without resubmission", pollError: true}, {name: "unknown submit does not poll old completion", firstError: true}} {
+		name        string
+		firstError  bool
+		pollError   bool
+		resetTarget string
+		definitive  bool
+	}{{name: "completion"}, {name: "SDN completion", resetTarget: "sdn"}, {name: "SDN rejection is terminal", resetTarget: "sdn", firstError: true, definitive: true}, {name: "transient observation recovers without resubmission", pollError: true}, {name: "unknown submit does not poll old completion", firstError: true}} {
 		t.Run(tc.name, func(t *testing.T) {
+			submitActivity, observeActivity := taskactivity.NameResetNVOS, taskactivity.NameNVOSResetCompleted
+			if tc.resetTarget == "sdn" {
+				submitActivity, observeActivity = taskactivity.NameResetSDN, taskactivity.NameSDNResetCompleted
+			}
 			var suite testsuite.WorkflowTestSuite
 			env := suite.NewTestWorkflowEnvironment()
-			env.RegisterActivityWithOptions(func(context.Context, targetcommon.Target) error { return nil }, sdkactivity.RegisterOptions{Name: taskactivity.NameResetNVOS})
-			env.RegisterActivityWithOptions(func(context.Context, targetcommon.Target) (bool, error) { return false, nil }, sdkactivity.RegisterOptions{Name: taskactivity.NameNVOSResetCompleted})
+			env.RegisterActivityWithOptions(func(context.Context, targetcommon.Target) error { return nil }, sdkactivity.RegisterOptions{Name: submitActivity})
+			env.RegisterActivityWithOptions(func(context.Context, targetcommon.Target) (bool, error) { return false, nil }, sdkactivity.RegisterOptions{Name: observeActivity})
 			env.RegisterActivityWithOptions(func(context.Context, *task.TaskStatusUpdate) error { return nil }, sdkactivity.RegisterOptions{Name: taskactivity.NameUpdateTaskStatus})
 			env.RegisterActivityWithOptions(func(context.Context, *task.TaskReportUpdate) error { return nil }, sdkactivity.RegisterOptions{Name: taskactivity.NameUpdateTaskReport})
 			env.OnActivity(taskactivity.NameUpdateTaskStatus, mock.Anything, mock.Anything).Return(nil)
@@ -48,24 +55,27 @@ func TestComponentReset(t *testing.T) {
 			var firstErr error
 			if tc.firstError {
 				firstErr = errors.New("submission response lost")
+				if tc.definitive {
+					firstErr = temporal.NewNonRetryableApplicationError("reset rejected", "SDNResetRejected", nil)
+				}
 			}
-			env.OnActivity(taskactivity.NameResetNVOS, mock.Anything, first).Return(firstErr).Once()
-			env.OnActivity(taskactivity.NameResetNVOS, mock.Anything, second).Run(func(mock.Arguments) { secondSubmitted.Store(true) }).Return(nil).Once()
+			env.OnActivity(submitActivity, mock.Anything, first).Return(firstErr).Once()
+			env.OnActivity(submitActivity, mock.Anything, second).Run(func(mock.Arguments) { secondSubmitted.Store(true) }).Return(nil).Once()
 			if !tc.firstError {
 				var pollErr error
 				if tc.pollError {
 					pollErr = errors.New("temporary status transport failure")
 				}
-				env.OnActivity(taskactivity.NameNVOSResetCompleted, mock.Anything, first).Run(func(mock.Arguments) { require.True(t, secondSubmitted.Load()) }).Return(false, pollErr).Once()
-				env.OnActivity(taskactivity.NameNVOSResetCompleted, mock.Anything, first).Run(func(mock.Arguments) { require.True(t, secondCompleted.Load()) }).Return(true, nil).Once()
+				env.OnActivity(observeActivity, mock.Anything, first).Run(func(mock.Arguments) { require.True(t, secondSubmitted.Load()) }).Return(false, pollErr).Once()
+				env.OnActivity(observeActivity, mock.Anything, first).Run(func(mock.Arguments) { require.True(t, secondCompleted.Load()) }).Return(true, nil).Once()
 			}
-			env.OnActivity(taskactivity.NameNVOSResetCompleted, mock.Anything, second).Run(func(mock.Arguments) { secondCompleted.Store(true) }).Return(true, nil).Once()
-			env.ExecuteWorkflow(componentReset, task.ExecutionInfo{TaskID: uuid.New(), Components: []task.WorkflowComponent{{Type: devicetypes.ComponentTypeNVSwitch, ComponentID: "first"}, {Type: devicetypes.ComponentTypeNVSwitch, ComponentID: "second"}}}, &operations.ComponentResetTaskInfo{})
+			env.OnActivity(observeActivity, mock.Anything, second).Run(func(mock.Arguments) { secondCompleted.Store(true) }).Return(true, nil).Once()
+			env.ExecuteWorkflow(componentReset, task.ExecutionInfo{TaskID: uuid.New(), Components: []task.WorkflowComponent{{Type: devicetypes.ComponentTypeNVSwitch, ComponentID: "first"}, {Type: devicetypes.ComponentTypeNVSwitch, ComponentID: "second"}}}, &operations.ComponentResetTaskInfo{Target: tc.resetTarget})
 			require.True(t, env.IsWorkflowCompleted())
 			require.Equal(t, tc.firstError, env.GetWorkflowError() != nil)
 			env.AssertExpectations(t)
 			if tc.firstError {
-				env.AssertNotCalled(t, taskactivity.NameNVOSResetCompleted, mock.Anything, first)
+				env.AssertNotCalled(t, observeActivity, mock.Anything, first)
 			}
 			env.AssertCalled(t, taskactivity.NameUpdateTaskStatus, mock.Anything, mock.MatchedBy(func(update *task.TaskStatusUpdate) bool {
 				if update.Status != common.TaskStatusFailed && update.Status != common.TaskStatusCompleted {
@@ -76,7 +86,11 @@ func TestComponentReset(t *testing.T) {
 					return false
 				}
 				step := rep.Stages[0].Steps[0]
-				if step.TotalComponents != 2 || step.FailedComponents != 0 {
+				expectedFailed := 0
+				if tc.definitive {
+					expectedFailed = 1
+				}
+				if step.TotalComponents != 2 || step.FailedComponents != expectedFailed {
 					return false
 				}
 				if tc.firstError {

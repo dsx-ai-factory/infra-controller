@@ -17,11 +17,12 @@ import (
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
-func TestNVOSFactoryResetHandler_Handle(t *testing.T) {
+func TestFactoryResetHandler_Handle(t *testing.T) {
 	fixture := newNVLinkDomainHandlerTestFixture(t)
 	for _, tc := range []struct {
 		name         string
 		scope        resetScope
+		resetTarget  string
 		invalidBody  bool
 		omitTarget   bool
 		foreignSite  bool
@@ -32,6 +33,7 @@ func TestNVOSFactoryResetHandler_Handle(t *testing.T) {
 		status       int
 	}{
 		{name: "domain switches only", scope: resetDomain, status: http.StatusAccepted},
+		{name: "domain SDN scope forwarded", scope: resetDomain, resetTarget: "sdn", status: http.StatusAccepted},
 		{name: "tray external ID", scope: resetTray, status: http.StatusAccepted},
 		{name: "foreign provider site", scope: resetTray, foreignSite: true, status: http.StatusForbidden},
 		{name: "missing user", scope: resetTray, missingUser: true, status: http.StatusInternalServerError},
@@ -61,7 +63,11 @@ func TestNVOSFactoryResetHandler_Handle(t *testing.T) {
 			if tc.tenant {
 				user = fixture.tenantUser
 			}
-			body := fmt.Sprintf(`{"siteId":%q,"target":"nvos"}`, fixture.site.ID.String())
+			resetTarget := tc.resetTarget
+			if resetTarget == "" {
+				resetTarget = "nvos"
+			}
+			body := fmt.Sprintf(`{"siteId":%q,"target":%q}`, fixture.site.ID.String(), resetTarget)
 			if tc.omitTarget {
 				body = fmt.Sprintf(`{"siteId":%q}`, fixture.site.ID.String())
 			}
@@ -78,7 +84,7 @@ func TestNVOSFactoryResetHandler_Handle(t *testing.T) {
 			captured := fixture.installFlowReply(t, &flowv1.SubmitTaskResponse{TaskIds: []*flowv1.UUID{{Id: taskID}}})
 			ec, rec := fixture.echoContext(t, "/factory-reset", body, user, "target-1")
 			ec.Request().Method = http.MethodPost
-			handler := NVOSFactoryResetHandler{dbSession: fixture.dbSession, scp: fixture.scp, scope: tc.scope}
+			handler := FactoryResetHandler{dbSession: fixture.dbSession, scp: fixture.scp, scope: tc.scope}
 			require.NoError(t, handler.Handle(ec))
 			require.Equal(t, tc.status, rec.Code, rec.Body.String())
 			if tc.status != http.StatusAccepted && !tc.invalidTasks {
@@ -93,6 +99,7 @@ func TestNVOSFactoryResetHandler_Handle(t *testing.T) {
 			require.Equal(t, flowv1.Flow_FactoryResetSwitches_FullMethodName, captured.request.FullMethod)
 			var request flowv1.FactoryResetSwitchesRequest
 			require.NoError(t, protojson.Unmarshal(captured.request.RequestJSON, &request))
+			require.Equal(t, resetTarget, request.GetResetTarget())
 			if tc.scope == resetDomain {
 				require.Len(t, request.TargetSpec.GetNvlDomains().Targets[0].ComponentTypes, 1)
 			} else {

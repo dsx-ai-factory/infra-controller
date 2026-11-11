@@ -6,12 +6,25 @@ package operations
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 )
 
-// ComponentResetTaskInfo is the persisted operation payload. NVOS reset is a
+// ComponentResetTaskInfo persists the reset scope. Each reset is a
 // fixed, single-attempt operation; custom rules and readiness bypasses are absent.
-type ComponentResetTaskInfo struct{}
+type ComponentResetTaskInfo struct {
+	Target string `json:"target"`
+}
+
+// ResetTarget preserves NVOS semantics for task payloads created before the
+// target field existed. New submissions persist their explicit effective scope.
+func (t *ComponentResetTaskInfo) ResetTarget() string {
+	if t.Target == "" {
+		return "nvos"
+	}
+	return t.Target
+}
 
 func (t *ComponentResetTaskInfo) Validate() error {
 	if t == nil {
@@ -31,5 +44,16 @@ func (t *ComponentResetTaskInfo) Unmarshal(data json.RawMessage) error {
 	return json.Unmarshal(data, t)
 }
 func (*ComponentResetTaskInfo) Type() taskcommon.TaskType { return taskcommon.TaskTypeComponentReset }
-func (*ComponentResetTaskInfo) Description() string       { return "Restore NVOS factory defaults" }
-func (*ComponentResetTaskInfo) CodeString() string        { return taskcommon.OpCodeNVOSFactoryReset }
+func (t *ComponentResetTaskInfo) Description() string {
+	return "Restore " + strings.ToUpper(t.ResetTarget()) + " factory defaults"
+}
+func (t *ComponentResetTaskInfo) CodeString() string {
+	switch t.ResetTarget() {
+	case "nvos":
+		return taskcommon.OpCodeNVOSFactoryReset
+	case "sdn":
+		return taskcommon.OpCodeSDNFactoryReset
+	default:
+		return ""
+	}
+}

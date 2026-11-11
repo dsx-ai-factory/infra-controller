@@ -11,6 +11,7 @@ type OperationCode string
 
 // Reset operation codes.
 const OpCodeNVOSFactoryReset = "nvos_factory_reset"
+const OpCodeSDNFactoryReset = "sdn_factory_reset"
 
 // Inject-expectation operation codes.
 const OpCodeInjectExpectation = "inject_expectation"
@@ -59,7 +60,7 @@ func (c OperationCode) String() string {
 func (c OperationCode) ValidateFor(taskType TaskType) error {
 	switch taskType {
 	case TaskTypeComponentReset:
-		if c == OpCodeNVOSFactoryReset {
+		if c == OpCodeNVOSFactoryReset || c == OpCodeSDNFactoryReset {
 			return nil
 		}
 	case TaskTypeInjectExpectation:

@@ -28,25 +28,25 @@ type resetScope string
 const resetTray resetScope = "tray"
 const resetDomain resetScope = "domain"
 
-// NVOSFactoryResetHandler shares authorization and site checks for tray/domain
+// FactoryResetHandler shares authorization and site checks for tray/domain
 // reset. Scope is fixed by route construction, never taken from request data.
-type NVOSFactoryResetHandler struct {
+type FactoryResetHandler struct {
 	dbSession *cdb.Session
 	scp       *sc.ClientPool
 	scope     resetScope
 }
 
-func NewResetTrayNVOSHandler(dbSession *cdb.Session, scp *sc.ClientPool) NVOSFactoryResetHandler {
-	return NVOSFactoryResetHandler{dbSession: dbSession, scp: scp, scope: resetTray}
+func NewResetTrayHandler(dbSession *cdb.Session, scp *sc.ClientPool) FactoryResetHandler {
+	return FactoryResetHandler{dbSession: dbSession, scp: scp, scope: resetTray}
 }
-func NewResetNVLinkDomainNVOSHandler(dbSession *cdb.Session, scp *sc.ClientPool) NVOSFactoryResetHandler {
-	return NVOSFactoryResetHandler{dbSession: dbSession, scp: scp, scope: resetDomain}
+func NewResetNVLinkDomainHandler(dbSession *cdb.Session, scp *sc.ClientPool) FactoryResetHandler {
+	return FactoryResetHandler{dbSession: dbSession, scp: scp, scope: resetDomain}
 }
 
 // Handle authorizes a Provider Admin, then submits through the existing Flow
 // proxy. A 202 means tasks were created; GET task observes terminal outcomes.
-func (h NVOSFactoryResetHandler) Handle(c echo.Context) error {
-	org, user, ctx, logger, span := common.SetupHandler("NVOS", "FactoryReset", c)
+func (h FactoryResetHandler) Handle(c echo.Context) error {
+	org, user, ctx, logger, span := common.SetupHandler("Switch", "FactoryReset", c)
 	if span != nil {
 		defer span.End()
 	}
@@ -57,7 +57,7 @@ func (h NVOSFactoryResetHandler) Handle(c echo.Context) error {
 	if !member || !auth.ValidateUserRoles(user, org, nil, auth.ProviderAdminRole) {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Provider Admin membership is required", nil)
 	}
-	var request model.APINVOSFactoryResetRequest
+	var request model.APIFactoryResetRequest
 	err := c.Bind(&request)
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to parse request data", nil)
@@ -94,8 +94,8 @@ func (h NVOSFactoryResetHandler) Handle(c echo.Context) error {
 	}
 	var response flowv1.SubmitTaskResponse
 	proxyErr := common.ProxyFlowGRPC(ctx, logger, client, flowv1.Flow_FactoryResetSwitches_FullMethodName,
-		&flowv1.FactoryResetSwitchesRequest{TargetSpec: target, Description: "API NVOS factory reset"}, &response,
-		fmt.Sprintf("nvos-factory-reset-%s-%s", h.scope, uuid.NewString()), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED)
+		&flowv1.FactoryResetSwitchesRequest{TargetSpec: target, Description: "API " + request.Target + " factory reset", ResetTarget: request.Target}, &response,
+		fmt.Sprintf("factory-reset-%s-%s", h.scope, uuid.NewString()), temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED)
 	if proxyErr != nil {
 		return cutil.NewAPIErrorResponse(c, proxyErr.Code, proxyErr.Message, nil)
 	}
@@ -108,7 +108,7 @@ func (h NVOSFactoryResetHandler) Handle(c echo.Context) error {
 			return cutil.NewAPIErrorResponse(c, http.StatusBadGateway, "Flow returned an invalid task reference", nil)
 		}
 	}
-	result := &model.APINVOSFactoryResetResponse{}
+	result := &model.APIFactoryResetResponse{}
 	result.FromProto(&response)
 	return c.JSON(http.StatusAccepted, result)
 }

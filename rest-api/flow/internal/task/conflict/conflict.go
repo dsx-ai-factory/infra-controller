@@ -49,7 +49,7 @@ import (
 // in the same PR after assessing which operations it cannot coexist with.
 var builtinRule = &Rule{ //nolint
 	ConflictingPairs: []Entry{
-		// NVOS reset disrupts the rack fabric and must not overlap another task.
+		// NVOS and SDN factory resets disrupt the rack fabric and must not overlap another task.
 		{A: OperationSpec{OperationType: string(taskcommon.TaskTypeComponentReset)}, B: OperationSpec{OperationType: "*"}},
 		// PowerShelf power ops block all power ops on the rack: cutting
 		// power to a shelf affects every component.

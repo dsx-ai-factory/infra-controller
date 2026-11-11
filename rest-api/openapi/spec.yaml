@@ -19048,18 +19048,19 @@ paths:
   '/v2/org/{org}/nico/tray/{id}/factory-reset':
     post:
       tags: [Tray]
-      operationId: factory-reset-tray-nvos
-      summary: Restore NVOS factory defaults on a switch tray
+      operationId: factory-reset-tray
+      summary: Restore factory defaults on a switch tray
       description: >-
-        Requires an explicit target of `nvos`; there is no default. Other reset targets are rejected.
-        Provider Admin operation. Clears switch NVOS configuration and reboots the selected switches.
+        Requires an explicit target of `nvos` or `sdn`; there is no default. Other reset targets are rejected.
+        Provider Admin operation. Target `nvos` clears NVOS configuration and reboots the selected switches;
+        target `sdn` restores their SDN configuration to factory defaults.
         Only ingested switches are supported. Domain targets expand to their switch members.
         Flow blocks conflicting rack tasks and applies its rack-host readiness gate without an override.
         Returns task IDs, one per owning rack; submission does not imply reset completion.
         Query the Task APIs for completed, failed, or terminated outcomes and the task report.
         Completion means Core reports reset completed, not that the Domain is operational.
         NICo does not automatically restore configuration or re-ingest devices in this operation.
-        Core must implement NVOS_FACTORY_RESET; unsupported Core versions fail the task explicitly.
+        Core must implement the selected NVOS_FACTORY_RESET or SDN_FACTORY_RESET action; unsupported Core versions fail the task explicitly.
         Failed or unknown submissions are not automatically repeated. After a timeout or lost response,
         inspect existing tasks and hardware before submitting again. Core status observes the latest
         recorded device/action reference; another out-of-band reset can replace that reference.
@@ -19081,7 +19082,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/NVOSFactoryResetRequest'
+              $ref: '#/components/schemas/FactoryResetRequest'
             example:
               siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
               target: nvos
@@ -19091,7 +19092,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/NVOSFactoryResetResponse'
+                $ref: '#/components/schemas/FactoryResetResponse'
               example:
                 taskIds: [497f6eca-6276-4993-bfeb-53cbbbba6f08]
         '400':
@@ -19124,18 +19125,19 @@ paths:
   '/v2/org/{org}/nico/domain/nvlink/{id}/factory-reset':
     post:
       tags: [Domain]
-      operationId: factory-reset-nvlink-domain-nvos
-      summary: Restore NVOS factory defaults on an NVLink Domain’s switches
+      operationId: factory-reset-nvlink-domain
+      summary: Restore factory defaults on an NVLink Domain’s switches
       description: >-
-        Requires an explicit target of `nvos`; there is no default. Other reset targets are rejected.
-        Provider Admin operation. Clears switch NVOS configuration and reboots the selected switches.
+        Requires an explicit target of `nvos` or `sdn`; there is no default. Other reset targets are rejected.
+        Provider Admin operation. Target `nvos` clears NVOS configuration and reboots the selected switches;
+        target `sdn` restores their SDN configuration to factory defaults.
         Only ingested switches are supported. Domain targets expand to their switch members.
         Flow blocks conflicting rack tasks and applies its rack-host readiness gate without an override.
         Returns task IDs, one per owning rack; submission does not imply reset completion.
         Query the Task APIs for completed, failed, or terminated outcomes and the task report.
         Completion means Core reports reset completed, not that the Domain is operational.
         NICo does not automatically restore configuration or re-ingest devices in this operation.
-        Core must implement NVOS_FACTORY_RESET; unsupported Core versions fail the task explicitly.
+        Core must implement the selected NVOS_FACTORY_RESET or SDN_FACTORY_RESET action; unsupported Core versions fail the task explicitly.
         Failed or unknown submissions are not automatically repeated. After a timeout or lost response,
         inspect existing tasks and hardware before submitting again. Core status observes the latest
         recorded device/action reference; another out-of-band reset can replace that reference.
@@ -19157,17 +19159,17 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/NVOSFactoryResetRequest'
+              $ref: '#/components/schemas/FactoryResetRequest'
             example:
               siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
-              target: nvos
+              target: sdn
       responses:
         '202':
           description: Reset tasks created; hardware work is asynchronous.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/NVOSFactoryResetResponse'
+                $ref: '#/components/schemas/FactoryResetResponse'
               example:
                 taskIds: [497f6eca-6276-4993-bfeb-53cbbbba6f08]
         '400':
@@ -19201,7 +19203,7 @@ paths:
 
 components:
   schemas:
-    NVOSFactoryResetRequest:
+    FactoryResetRequest:
       type: object
       example:
         siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
@@ -19214,9 +19216,9 @@ components:
           description: Registered site owned by the current organization’s provider.
         target:
           type: string
-          enum: [nvos]
-          description: Required reset scope. Only `nvos` is supported; case-sensitive, with no default.
-    NVOSFactoryResetResponse:
+          enum: [nvos, sdn]
+          description: Required reset scope. Accepted values are `nvos` and `sdn`; case-sensitive, with no default.
+    FactoryResetResponse:
       type: object
       example:
         taskIds: [497f6eca-6276-4993-bfeb-53cbbbba6f08]

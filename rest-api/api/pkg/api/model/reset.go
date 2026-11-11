@@ -9,29 +9,32 @@ import (
 	validationis "github.com/go-ozzo/ozzo-validation/v4/is"
 )
 
-// FactoryResetTargetNVOS identifies the supported factory-reset scope.
+// FactoryResetTargetNVOS selects NVOS configuration factory reset.
 const FactoryResetTargetNVOS = "nvos"
 
-// APINVOSFactoryResetRequest selects the site and explicit reset scope for the path's tray or domain.
+// FactoryResetTargetSDN selects SDN configuration factory reset.
+const FactoryResetTargetSDN = "sdn"
+
+// APIFactoryResetRequest selects the site and explicit reset scope for the path's tray or domain.
 // There is no readiness override and no automatic restoration after reset.
-type APINVOSFactoryResetRequest struct {
+type APIFactoryResetRequest struct {
 	SiteID string `json:"siteId"`
 	Target string `json:"target"`
 }
 
-func (r *APINVOSFactoryResetRequest) Validate() error {
+func (r *APIFactoryResetRequest) Validate() error {
 	return validation.ValidateStruct(r,
 		validation.Field(&r.SiteID, validation.Required, validationis.UUID),
-		validation.Field(&r.Target, validation.Required, validation.In(FactoryResetTargetNVOS)),
+		validation.Field(&r.Target, validation.Required, validation.In(FactoryResetTargetNVOS, FactoryResetTargetSDN)),
 	)
 }
 
-// APINVOSFactoryResetResponse identifies asynchronous tasks, one per owning rack.
-type APINVOSFactoryResetResponse struct {
+// APIFactoryResetResponse identifies asynchronous tasks, one per owning rack.
+type APIFactoryResetResponse struct {
 	TaskIDs []string `json:"taskIds"`
 }
 
-func (r *APINVOSFactoryResetResponse) FromProto(response *flowv1.SubmitTaskResponse) {
+func (r *APIFactoryResetResponse) FromProto(response *flowv1.SubmitTaskResponse) {
 	r.TaskIDs = make([]string, 0, len(response.GetTaskIds()))
 	for _, id := range response.GetTaskIds() {
 		r.TaskIDs = append(r.TaskIDs, id.GetId())
