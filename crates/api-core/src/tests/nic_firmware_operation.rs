@@ -3520,3 +3520,71 @@ async fn firmware_activation_preserves_the_ipmi_route_and_committed_request_time
     assert_eq!(requested.time, attempted_at);
     assert_eq!(requested.mode, MachineLastRebootRequestedMode::Reboot);
 }
+
+/// An unresolved legacy command must block both Scout delivery and the persisted
+/// controller branch when it consumes a saved operation.
+#[crate::sqlx_test]
+async fn hardware_dispatch_blocks_saved_nic_work_until_exact_settlement(pool: sqlx::PgPool) {
+    use model::hardware_dispatch::{HardwareDispatchOwner, MlxAdminCommand};
+
+    let env = environment(pool).await;
+    let host = create_managed_host(&env).await;
+    let host_id = *host.id;
+    let owner = HardwareDispatchOwner::MlxAdmin {
+        machine_id: host_id.into(),
+        command: MlxAdminCommand::ConfigSet,
+    };
+    let token = uuid::Uuid::new_v4();
+    let mut txn = env.pool.begin().await.unwrap();
+    db::hardware_dispatch::begin(&mut txn, token, &owner)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    // Reproduce a saved NIC operation encountering an already committed command;
+    // this fixture write is not a new production admission path.
+    let admitted = fixtures::operation();
+    seed(&env, host_id, admitted.clone()).await;
+    let before = machine(&env, host_id).await;
+    assert!(matches!(action(&env, host_id).await, fac::Action::Noop(_)));
+    env.run_machine_state_controller_iteration_without_requeue()
+        .await;
+    let blocked = machine(&env, host_id).await;
+    assert_eq!(blocked.state.version, before.state.version);
+    assert_eq!(operation(&env, host_id).await, admitted);
+    assert_eq!(
+        blocked.status.last_reboot_requested,
+        before.status.last_reboot_requested
+    );
+    assert!(matches!(blocked.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::Wait { reason, .. })
+            if reason == "an earlier hardware command is still awaiting its result"));
+    assert!(
+        blocked
+            .status
+            .hardware_dispatch
+            .as_ref()
+            .unwrap()
+            .is_pending()
+    );
+
+    // Exact settlement permits saved work to resume. No
+    // baseline selection or automatic admission is enabled by this test.
+    let mut txn = env.pool.begin().await.unwrap();
+    assert!(
+        db::hardware_dispatch::settle(&mut txn, host_id, token, &owner)
+            .await
+            .unwrap()
+    );
+    txn.commit().await.unwrap();
+    assert!(matches!(
+        command(action(&env, host_id).await),
+        fac::mlx_device_action::Command::ObserveFirmwareUpdate(_)
+    ));
+    env.run_machine_state_controller_iteration_without_requeue()
+        .await;
+    let resumed = machine(&env, host_id).await;
+    assert!(matches!(resumed.controller_state_outcome,
+        Some(PersistentStateHandlerOutcome::Wait { reason, .. })
+            if reason == "waiting for the initial NIC firmware supervisor observation"));
+    assert_eq!(operation(&env, host_id).await, admitted);
+}

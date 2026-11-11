@@ -1204,6 +1204,12 @@ service Forge {
   // interconnect with a scout agent listening via an open ScoutStream connection.
   //
   // MlxAdminProfileSync is used to sync an MlxConfigProfile to a given device.
+  // Reserves the managed host (including commands sent to an attached DPU).
+  // Pending hardware commands or admitted NIC firmware work reject this request
+  // with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+  // with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+  // Unattached DPUs have no host reservation or added reply deadline. Do not retry
+  // unresolved work as a replacement command. Read-only requests remain available.
   rpc MlxAdminProfileSync(mlx_device.MlxAdminProfileSyncRequest) returns (mlx_device.MlxAdminProfileSyncResponse);
   // MlxAdminProfileShow shows the configuration of a specific MlxConfigProfile
   // loaded into carbide-api.
@@ -1220,9 +1226,21 @@ service Forge {
   //
   // MlxAdminLockdownLock locks a Mellanox device, using whatever key is currently
   // managed internally within Carbide.
+  // Reserves the managed host (including commands sent to an attached DPU).
+  // Pending hardware commands or admitted NIC firmware work reject this request
+  // with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+  // with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+  // Unattached DPUs have no host reservation or added reply deadline. Do not retry
+  // unresolved work as a replacement command. Read-only requests remain available.
   rpc MlxAdminLockdownLock(mlx_device.MlxAdminLockdownLockRequest) returns (mlx_device.MlxAdminLockdownLockResponse);
   // MlxAdminLockdownUnlock unlocks a Mellanox device, using whatever key is currently
   // managed internally within Carbide.
+  // Reserves the managed host (including commands sent to an attached DPU).
+  // Pending hardware commands or admitted NIC firmware work reject this request
+  // with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+  // with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+  // Unattached DPUs have no host reservation or added reply deadline. Do not retry
+  // unresolved work as a replacement command. Read-only requests remain available.
   rpc MlxAdminLockdownUnlock(mlx_device.MlxAdminLockdownUnlockRequest) returns (mlx_device.MlxAdminLockdownUnlockResponse);
   // MlxAdminLockdownStatus returns the live lock status of a Mellanox device
   // by querying over an open ScoutStream connection.
@@ -1261,10 +1279,22 @@ service Forge {
   rpc MlxAdminConfigQuery(mlx_device.MlxAdminConfigQueryRequest) returns (mlx_device.MlxAdminConfigQueryResponse);
   // MlxAdminConfigSet is used to set one or more running mlxconfig
   // variable values for the provided target machine device.
+  // Reserves the managed host (including commands sent to an attached DPU).
+  // Pending hardware commands or admitted NIC firmware work reject this request
+  // with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+  // with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+  // Unattached DPUs have no host reservation or added reply deadline. Do not retry
+  // unresolved work as a replacement command. Read-only requests remain available.
   rpc MlxAdminConfigSet(mlx_device.MlxAdminConfigSetRequest) returns (mlx_device.MlxAdminConfigSetResponse);
   // MlxAdminConfigSync is used to sync one or more running mlxconfig
   // variable values for the provided target machine device, reporting back
   // specifics of what changed.
+  // Reserves the managed host (including commands sent to an attached DPU).
+  // Pending hardware commands or admitted NIC firmware work reject this request
+  // with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+  // with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+  // Unattached DPUs have no host reservation or added reply deadline. Do not retry
+  // unresolved work as a replacement command. Read-only requests remain available.
   rpc MlxAdminConfigSync(mlx_device.MlxAdminConfigSyncRequest) returns (mlx_device.MlxAdminConfigSyncResponse);
   // MlxAdminConfigSync is used to compare one or more running mlxconfig
   // variable values for the provided target machine device, reporting back
