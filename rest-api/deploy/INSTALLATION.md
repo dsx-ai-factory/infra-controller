@@ -281,9 +281,9 @@ consults only the certificate's SANs. The manifests pass
 `nico-rest-cert-manager`, `nico-rest-cert-manager.nico-rest`,
 `nico-rest-cert-manager.nico-rest.svc`,
 `nico-rest-cert-manager.nico-rest.svc.cluster.local`, and `localhost`. Deploying
-into a namespace other than `nico-rest` means editing these to match, otherwise
-clients using the namespace-qualified hostname fail verification with
-`no alternative certificate subject name matches target hostname`.
+into a namespace other than `nico-rest` requires updating these names and Site
+Manager's `--creds-manager-url` in `base/site-manager/deployment.yaml` together.
+A client dialing a hostname absent from the SANs fails TLS hostname verification.
 
 ### Apply
 
@@ -527,7 +527,7 @@ status:
 | Flag | Value | Description |
 |---|---|---|
 | `--listen-port` | `8100` | HTTPS listen port |
-| `--creds-manager-url` | `https://nico-rest-cert-manager.$(POD_NAMESPACE):8000` | URL to nico-rest-cert-manager; the hostname must be one of that service's `--dns-name` SANs |
+| `--creds-manager-url` | `https://nico-rest-cert-manager.nico-rest:8000` | URL to nico-rest-cert-manager; the hostname must be one of that service's `--dns-name` SANs |
 | `--creds-manager-ca-path` | `/etc/credsmgr-ca/ca.crt` | CA bundle verifying nico-rest-cert-manager (`tls.crt` from `ca-signing-secret`) |
 | `--tls-cert-path` | `/etc/tls/tls.crt` | TLS cert path (from `site-manager-tls` secret) |
 | `--tls-key-path` | `/etc/tls/tls.key` | TLS key path (from `site-manager-tls` secret) |
