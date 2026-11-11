@@ -281,7 +281,8 @@ struct VaultCredentialsNotFound {
 }
 
 /// `VaultCredentialsGetFailed` pairs a non-`404` read failure with its
-/// existing `ERROR` record before the error returns to the caller.
+/// existing `ERROR` record before the error returns to the caller. Every GET
+/// caller receives a categorical NICo diagnostic; dependency logs remain separate.
 #[derive(Event)]
 #[event(
     event_name = "vault_credentials_get_failed",
@@ -832,7 +833,13 @@ fn record_vault_credentials_get_error(
             request_type: VaultRequestType::GetCredentials,
             http_response_status_code: VaultFailureStatusCode(status_code),
             credential_key,
-            error: format!("{err:?}"),
+            // Remote Vault errors can include credential or artifact text. Keep
+            // the typed status and a fixed category for every credential GET.
+            error: match err {
+                ClientError::APIError { .. } => "api_error",
+                _ => "client_error",
+            }
+            .to_string(),
         });
     }
     status_code
@@ -2268,7 +2275,7 @@ mod tests {
         struct FailureInput {
             request_type: VaultRequestType,
             request_type_label: &'static str,
-            status_code: u16,
+            status_code: Option<u16>,
             error: &'static str,
         }
 
@@ -2307,7 +2314,7 @@ mod tests {
             metadata_name: &str,
             message: &str,
             request_type: &str,
-            status_code: u16,
+            status_code: Option<u16>,
             credential_key: Option<String>,
             error: Option<String>,
         ) -> Vec<ObservedLog> {
@@ -2318,7 +2325,9 @@ mod tests {
                 event_name: Some(metadata_name.to_string()),
                 metric_name: Some("carbide_api_vault_requests_failed_total".to_string()),
                 request_type: Some(request_type.to_string()),
-                http_response_status_code: Some(status_code.to_string()),
+                http_response_status_code: Some(
+                    status_code.map(|code| code.to_string()).unwrap_or_default(),
+                ),
                 credential_key,
                 error,
             }]
@@ -2336,7 +2345,7 @@ mod tests {
                     input: FailureInput {
                         request_type: VaultRequestType::GetCredentials,
                         request_type_label: "get_credentials",
-                        status_code: 404,
+                        status_code: Some(404),
                         error: "credential not found",
                     },
                     expect: FailureObservation {
@@ -2347,7 +2356,7 @@ mod tests {
                             "vault_credentials_not_found",
                             "Credentials not found",
                             "get_credentials",
-                            404,
+                            Some(404),
                             Some(credential_key_string.clone()),
                             None,
                         ),
@@ -2358,8 +2367,8 @@ mod tests {
                     input: FailureInput {
                         request_type: VaultRequestType::GetCredentials,
                         request_type_label: "get_credentials",
-                        status_code: 403,
-                        error: "credential read failed",
+                        status_code: Some(403),
+                        error: "private-credential-get-marker https://private-artifact-token/firmware",
                     },
                     expect: FailureObservation {
                         status_code: Some(403),
@@ -2369,9 +2378,33 @@ mod tests {
                             "vault_credentials_get_failed",
                             "Error getting credentials",
                             "get_credentials",
-                            403,
+                            Some(403),
+                            Some(credential_key_string.clone()),
+                            Some("api_error".to_string()),
+                        ),
+                    },
+                },
+                Check {
+                    // `kv2::read` can receive a successful response whose credential
+                    // value cannot deserialize. The parser error quotes that value.
+                    scenario: "credential response parse failed without HTTP status",
+                    input: FailureInput {
+                        request_type: VaultRequestType::GetCredentials,
+                        request_type_label: "get_credentials",
+                        status_code: None,
+                        error: "private-credential-get-marker https://private-artifact-token/credential-format",
+                    },
+                    expect: FailureObservation {
+                        status_code: None,
+                        metric_delta: 1.0,
+                        logs: expected_log(
+                            tracing::Level::ERROR,
+                            "vault_credentials_get_failed",
+                            "Error getting credentials",
+                            "get_credentials",
+                            None,
                             Some(credential_key_string),
-                            Some(client_error_text(403, "credential read failed")),
+                            Some("client_error".to_string()),
                         ),
                     },
                 },
@@ -2380,7 +2413,7 @@ mod tests {
                     input: FailureInput {
                         request_type: VaultRequestType::SetCredentials,
                         request_type_label: "set_credentials",
-                        status_code: 500,
+                        status_code: Some(500),
                         error: "credential write failed",
                     },
                     expect: FailureObservation {
@@ -2391,7 +2424,7 @@ mod tests {
                             "vault_credentials_set_failed",
                             "Error setting credentials",
                             "set_credentials",
-                            500,
+                            Some(500),
                             None,
                             Some(client_error_text(500, "credential write failed")),
                         ),
@@ -2402,7 +2435,7 @@ mod tests {
                     input: FailureInput {
                         request_type: VaultRequestType::DeleteCredentials,
                         request_type_label: "delete_credentials",
-                        status_code: 503,
+                        status_code: Some(503),
                         error: "credential delete failed",
                     },
                     expect: FailureObservation {
@@ -2413,7 +2446,7 @@ mod tests {
                             "vault_credentials_delete_failed",
                             "Error deleting credentials",
                             "delete_credentials",
-                            503,
+                            Some(503),
                             None,
                             Some(client_error_text(503, "credential delete failed")),
                         ),
@@ -2424,7 +2457,7 @@ mod tests {
                     input: FailureInput {
                         request_type: VaultRequestType::ServiceAccountLogin,
                         request_type_label: "service_account_login",
-                        status_code: 401,
+                        status_code: Some(401),
                         error: "service account login failed",
                     },
                     expect: FailureObservation {
@@ -2438,7 +2471,7 @@ mod tests {
                     input: FailureInput {
                         request_type: VaultRequestType::GetCertificate,
                         request_type_label: "get_certificate",
-                        status_code: 502,
+                        status_code: Some(502),
                         error: "certificate request failed",
                     },
                     expect: FailureObservation {
@@ -2449,9 +2482,19 @@ mod tests {
                 },
             ],
             |input| {
-                let error = ClientError::APIError {
-                    code: input.status_code,
-                    errors: vec![input.error.to_string()],
+                let error = match input.status_code {
+                    Some(code) => ClientError::APIError {
+                        code,
+                        errors: vec![input.error.to_string()],
+                    },
+                    None => {
+                        let source = serde_json::from_value::<crate::credentials::Credentials>(
+                            serde_json::Value::String(input.error.to_string()),
+                        )
+                        .expect_err("an unknown credential variant must fail deserialization");
+                        assert!(source.to_string().contains(input.error));
+                        ClientError::JsonParseError { source }
+                    }
                 };
                 let metrics = MetricsCapture::start();
                 let mut status_code = None;
@@ -2477,7 +2520,22 @@ mod tests {
                         }
                     };
                 });
-                let status_label = input.status_code.to_string();
+                // This checks the NICo GET Event only; the pinned Vault SDK
+                // can emit its own parser diagnostic before this owner runs.
+                if matches!(input.request_type, VaultRequestType::GetCredentials)
+                    && input.status_code != Some(404)
+                {
+                    for marker in ["private-credential-get-marker", "private-artifact-token"] {
+                        assert!(
+                            logs.iter().all(|log| !format!("{log:?}").contains(marker)),
+                            "{marker}"
+                        );
+                    }
+                }
+                let status_label = input
+                    .status_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_default();
 
                 FailureObservation {
                     status_code,

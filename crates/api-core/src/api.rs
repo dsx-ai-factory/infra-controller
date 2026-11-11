@@ -70,6 +70,28 @@ use crate::resource_pool::ResourcePoolMonitor;
 use crate::scout_stream::ConnectionRegistry;
 use crate::{CarbideError, CarbideResult};
 
+/// `RequestReceivedAt` records ingress before authorization/admission waits.
+/// Handlers opt into it; it does not change other RPC timeout semantics.
+#[derive(Clone, Copy)]
+pub(crate) struct RequestReceivedAt(pub(crate) tokio::time::Instant);
+
+/// Records request arrival before authorization and business admission. The
+/// listener installs this outermost; firmware reads consume the extension.
+fn record_grpc_receipt<B>(mut request: axum::extract::Request<B>) -> axum::extract::Request<B> {
+    request
+        .extensions_mut()
+        .insert(RequestReceivedAt(tokio::time::Instant::now()));
+    request
+}
+
+/// Builds the listener's receipt layer independently of admission configuration.
+/// Firmware reads consume its stamp even when admission is disabled.
+pub(crate) fn grpc_receipt_layer<B>() -> tower::util::MapRequestLayer<
+    impl Fn(axum::extract::Request<B>) -> axum::extract::Request<B> + Clone,
+> {
+    tower::util::MapRequestLayer::new(record_grpc_receipt::<B>)
+}
+
 pub struct Api {
     // `pub` (not `pub(crate)`): read by the `carbide-api-web` admin UI (e.g. IPAM/DNS pages).
     pub database_connection: sqlx::PgPool,
@@ -104,7 +126,6 @@ pub struct Api {
     pub(crate) bmc_client: Arc<dyn AuthenticatedBmc>,
     pub(crate) endpoint_exploration_service: Arc<EndpointExplorationService>,
     pub(crate) scout_stream_registry: ConnectionRegistry,
-    #[allow(unused)]
     pub(crate) rms_client: Option<Arc<dyn RmsApi>>,
     pub(crate) nmxc_client_pool: Arc<dyn NmxcPool>,
     pub(crate) work_lock_manager_handle: WorkLockManagerHandle,
@@ -4138,6 +4159,16 @@ impl Forge for Api {
         request: Request<rpc::GetComponentPowerDetailsRequest>,
     ) -> Result<Response<rpc::GetComponentPowerDetailsResponse>, Status> {
         crate::handlers::component_manager::power_details::get_component_power_details(
+            self, request,
+        )
+        .await
+    }
+
+    async fn get_component_firmware_details(
+        &self,
+        request: Request<rpc::GetComponentFirmwareDetailsRequest>,
+    ) -> Result<Response<rpc::GetComponentFirmwareDetailsResponse>, Status> {
+        crate::handlers::component_manager::firmware_details::get_component_firmware_details(
             self, request,
         )
         .await
