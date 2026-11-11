@@ -1003,7 +1003,26 @@ type ForgeClient interface {
 	SetMaintenance(ctx context.Context, in *MaintenanceRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Set a dynamic feature, like RUST_LOG
 	SetDynamicConfig(ctx context.Context, in *SetDynamicConfigRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	// Trigger reprovisioning of DPU
+	// Sets, clears, or restarts DPU reprovisioning requests.
+	// Every mode requires a HostUpdateInProgress health alert classified as
+	// PreventAllocations. Set/Clear return Internal if any attached request has
+	// started. Set returns FailedPrecondition if migrating the complete DPU set
+	// to DPF would strand extension services attached to the host's instance.
+	// While a shared DPUNode still requires the BF3-to-GB200 deployment migration,
+	// Set/Clear must leave all attached DPUs selected or none; a partial request
+	// set returns FailedPrecondition. Use the host ID to change the complete set.
+	// Restart targets a discovered host and selects attached DPUs with stored
+	// requests, including requests whose reprovisioning has started.
+	// Restart rechecks the attached DPU set, selected pending requests, and
+	// host-update authorization after lock admission. Changed attachments or
+	// pending membership return FailedPrecondition; missing host-update
+	// authorization returns InvalidArgument; a missing host returns NotFound.
+	// Restart rejects an empty attached DPU set or stored-request selection with
+	// InvalidArgument. Replacing a selected pending request preserves its current
+	// fields except restart_reprovision_requested_at and update_firmware, which
+	// Restart overwrites. An omitted mode selects Set.
+	// A timeout response or caller disconnect does not prove Restart was cancelled
+	// or rolled back: work may still be running, or its change may have committed.
 	TriggerDpuReprovisioning(ctx context.Context, in *DpuReprovisioningRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// List DPUs waiting for reprovisioning
 	ListDpuWaitingForReprovisioning(ctx context.Context, in *DpuReprovisioningListRequest, opts ...grpc.CallOption) (*DpuReprovisioningListResponse, error)
@@ -1704,6 +1723,27 @@ type ForgeClient interface {
 	// Get position related information for machines
 	GetMachinePositionInfo(ctx context.Context, in *MachinePositionQuery, opts ...grpc.CallOption) (*MachinePositionInfoList, error)
 	NmxcBrowse(ctx context.Context, in *NmxcBrowseRequest, opts ...grpc.CallOption) (*NmxcBrowseResponse, error)
+	// Atomically sets DPF enabled flags for the current host and attached DPUs.
+	// Disabling a host ingested through DPF returns FailedPrecondition; a missing
+	// host returns NotFound. Database preparation, including pool acquisition,
+	// lock retries, isolated waits, and commit, has a 300-second cap measured
+	// from server receipt before authorization/admission. A shorter valid
+	// grpc-timeout in initial headers reduces the cap; timeout metadata in request
+	// trailers is ignored. The metadata accepts one to eight decimal digits
+	// followed by H (hours), M (minutes), S (seconds), m (milliseconds),
+	// u (microseconds), or n (nanoseconds); zero is valid. Missing or malformed
+	// metadata keeps the cap. Once the DPF handler owns preparation, this cap's
+	// expiry returns DeadlineExceeded with NICO-API-504. Admission can enforce
+	// its own execution limit or the caller timeout before the handler runs;
+	// queue rejection, pool-acquisition limits, and PostgreSQL limits can also
+	// return their own errors. Abandoned connections are discarded; this does not
+	// guarantee immediate PostgreSQL cancellation. A commit already in flight
+	// may have succeeded after any timeout, even without NICO-API-504. Read host
+	// settings with nico-admin-cli dpf show; attached DPU flags require authorized
+	// database inspection. A read can show old flags while the original transaction
+	// is still running. Establish that it has ended before treating inspection as
+	// final or retrying an ambiguous result.
+	// A client deadline can expire before it receives the server's status.
 	ModifyDPFState(ctx context.Context, in *ModifyDPFStateRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	GetDPFState(ctx context.Context, in *GetDPFStateRequest, opts ...grpc.CallOption) (*DPFStateResponse, error)
 	// Curated snapshot of DPF CRs (DPUNode + DPUDevices + DPUs) for one host.
@@ -7933,7 +7973,26 @@ type ForgeServer interface {
 	SetMaintenance(context.Context, *MaintenanceRequest) (*emptypb.Empty, error)
 	// Set a dynamic feature, like RUST_LOG
 	SetDynamicConfig(context.Context, *SetDynamicConfigRequest) (*emptypb.Empty, error)
-	// Trigger reprovisioning of DPU
+	// Sets, clears, or restarts DPU reprovisioning requests.
+	// Every mode requires a HostUpdateInProgress health alert classified as
+	// PreventAllocations. Set/Clear return Internal if any attached request has
+	// started. Set returns FailedPrecondition if migrating the complete DPU set
+	// to DPF would strand extension services attached to the host's instance.
+	// While a shared DPUNode still requires the BF3-to-GB200 deployment migration,
+	// Set/Clear must leave all attached DPUs selected or none; a partial request
+	// set returns FailedPrecondition. Use the host ID to change the complete set.
+	// Restart targets a discovered host and selects attached DPUs with stored
+	// requests, including requests whose reprovisioning has started.
+	// Restart rechecks the attached DPU set, selected pending requests, and
+	// host-update authorization after lock admission. Changed attachments or
+	// pending membership return FailedPrecondition; missing host-update
+	// authorization returns InvalidArgument; a missing host returns NotFound.
+	// Restart rejects an empty attached DPU set or stored-request selection with
+	// InvalidArgument. Replacing a selected pending request preserves its current
+	// fields except restart_reprovision_requested_at and update_firmware, which
+	// Restart overwrites. An omitted mode selects Set.
+	// A timeout response or caller disconnect does not prove Restart was cancelled
+	// or rolled back: work may still be running, or its change may have committed.
 	TriggerDpuReprovisioning(context.Context, *DpuReprovisioningRequest) (*emptypb.Empty, error)
 	// List DPUs waiting for reprovisioning
 	ListDpuWaitingForReprovisioning(context.Context, *DpuReprovisioningListRequest) (*DpuReprovisioningListResponse, error)
@@ -8634,6 +8693,27 @@ type ForgeServer interface {
 	// Get position related information for machines
 	GetMachinePositionInfo(context.Context, *MachinePositionQuery) (*MachinePositionInfoList, error)
 	NmxcBrowse(context.Context, *NmxcBrowseRequest) (*NmxcBrowseResponse, error)
+	// Atomically sets DPF enabled flags for the current host and attached DPUs.
+	// Disabling a host ingested through DPF returns FailedPrecondition; a missing
+	// host returns NotFound. Database preparation, including pool acquisition,
+	// lock retries, isolated waits, and commit, has a 300-second cap measured
+	// from server receipt before authorization/admission. A shorter valid
+	// grpc-timeout in initial headers reduces the cap; timeout metadata in request
+	// trailers is ignored. The metadata accepts one to eight decimal digits
+	// followed by H (hours), M (minutes), S (seconds), m (milliseconds),
+	// u (microseconds), or n (nanoseconds); zero is valid. Missing or malformed
+	// metadata keeps the cap. Once the DPF handler owns preparation, this cap's
+	// expiry returns DeadlineExceeded with NICO-API-504. Admission can enforce
+	// its own execution limit or the caller timeout before the handler runs;
+	// queue rejection, pool-acquisition limits, and PostgreSQL limits can also
+	// return their own errors. Abandoned connections are discarded; this does not
+	// guarantee immediate PostgreSQL cancellation. A commit already in flight
+	// may have succeeded after any timeout, even without NICO-API-504. Read host
+	// settings with nico-admin-cli dpf show; attached DPU flags require authorized
+	// database inspection. A read can show old flags while the original transaction
+	// is still running. Establish that it has ended before treating inspection as
+	// final or retrying an ambiguous result.
+	// A client deadline can expire before it receives the server's status.
 	ModifyDPFState(context.Context, *ModifyDPFStateRequest) (*emptypb.Empty, error)
 	GetDPFState(context.Context, *GetDPFStateRequest) (*DPFStateResponse, error)
 	// Curated snapshot of DPF CRs (DPUNode + DPUDevices + DPUs) for one host.

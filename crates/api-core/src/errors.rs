@@ -291,6 +291,10 @@ pub enum CarbideError {
     #[error("DPF error: {0}")]
     DpfError(#[from] carbide_dpf::DpfError),
 
+    /// DPF database preparation exceeded its request budget.
+    #[error("DPF database preparation deadline exceeded")]
+    DpfPreparationDeadlineExceeded,
+
     #[error("service unavailable: {0}")]
     UnavailableError(String),
 
@@ -623,6 +627,7 @@ impl OperatorError for CarbideError {
             | CarbideError::DiscoveryContended(_)
             | CarbideError::Ipv6LoopbackBackfillContended { .. } => ErrorCode::nico(Api, 503),
             CarbideError::ResourcePoolCancelled { .. } => ErrorCode::nico(Api, 499),
+            CarbideError::DpfPreparationDeadlineExceeded => ErrorCode::nico(Api, 504),
             CarbideError::ResourcePoolDeadlineExceeded { .. }
             | CarbideError::MlxCommandDeadlineExceeded { .. }
             | CarbideError::ComponentCredentialReadDeadlineExceeded => ErrorCode::nico(Api, 504),
@@ -660,6 +665,11 @@ impl OperatorError for CarbideError {
                 "Pool growth has committed. Check the current pool configuration and remaining IPv6 \
                  loopback assignments before retrying the same growth request after database \
                  contention clears.",
+            ),
+            CarbideError::DpfPreparationDeadlineExceeded => Some(
+                "Inspect host DPF state with nico-admin-cli dpf show before retrying; \
+                 a timed-out commit may have succeeded. Attached DPU flags require \
+                 authorized database inspection.",
             ),
             CarbideError::DiscoveryContended(_) => {
                 Some("Retry discovery with a fresh request after database contention clears.")
@@ -841,6 +851,9 @@ impl From<CarbideError> for tonic::Status {
             }
             error @ CarbideError::ClientCertificateMissingInformation(_) => {
                 Status::unauthenticated(error.to_string())
+            }
+            error @ CarbideError::DpfPreparationDeadlineExceeded => {
+                Status::deadline_exceeded(error.to_string())
             }
             CarbideError::UnavailableError(msg) => Status::unavailable(msg),
             CarbideError::ResourcePoolCancelled { operation } => {
@@ -1464,4 +1477,49 @@ fn test_address_already_in_use_maps_to_failed_precondition_status() {
     ));
     let status: tonic::Status = err.into();
     assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+}
+
+#[test]
+fn dpf_deadline_status_preserves_operator_guidance() {
+    use std::error::Error as _;
+    let conversion_line = line!() + 1;
+    let status = tonic::Status::from(CarbideError::DpfPreparationDeadlineExceeded);
+    let message = "DPF database preparation deadline exceeded";
+    assert_eq!(status.code(), tonic::Code::DeadlineExceeded);
+    assert_eq!(status.message(), message);
+    assert_eq!(
+        status.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-504"
+    );
+    assert_eq!(status.metadata().get("nico-error-text").unwrap(), message);
+    let mitigation = status
+        .metadata()
+        .get("nico-error-mitigation")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    for instruction in [
+        "nico-admin-cli dpf show",
+        "commit may have succeeded",
+        "Attached DPU flags require authorized database inspection",
+    ] {
+        assert!(
+            mitigation.contains(instruction),
+            "missing {instruction:?}: {mitigation}"
+        );
+    }
+    let source = status
+        .source()
+        .unwrap()
+        .downcast_ref::<CarbideErrorWithLocation>()
+        .unwrap();
+    assert!(matches!(
+        &source.error,
+        CarbideError::DpfPreparationDeadlineExceeded
+    ));
+    assert!(
+        source
+            .location
+            .starts_with(&format!("{}:{conversion_line}:", file!()))
+    );
 }

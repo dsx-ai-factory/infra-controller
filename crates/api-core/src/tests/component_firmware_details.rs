@@ -1320,9 +1320,10 @@ async fn component_firmware_details_validate_before_external_work(
         } else {
             Duration::ZERO
         };
-        request
-            .extensions_mut()
-            .insert(RequestReceivedAt(tokio::time::Instant::now() - elapsed));
+        request.extensions_mut().insert(RequestReceivedAt {
+            instant: tokio::time::Instant::now() - elapsed,
+            grpc_timeout: None,
+        });
 
         let (result, logs) = capture_logs_async(api.get_component_firmware_details(request)).await;
         let error = result.unwrap_err();
@@ -1625,7 +1626,10 @@ async fn component_firmware_details_own_pending_reads_and_preserve_completed_sec
             target: Some(target.target.clone()),
         });
         if expires {
-            input.extensions_mut().insert(RequestReceivedAt(started));
+            input.extensions_mut().insert(RequestReceivedAt {
+                instant: started,
+                grpc_timeout: None,
+            });
             input.set_timeout(Duration::from_secs(15));
         }
         let mut request = Box::pin(api.get_component_firmware_details(input));
@@ -1893,9 +1897,10 @@ async fn component_firmware_details_caller_budget_bounds_credentials(
     let mut request = Request::new(rpc::GetComponentFirmwareDetailsRequest {
         target: Some(target.target),
     });
-    request.extensions_mut().insert(RequestReceivedAt(
-        tokio::time::Instant::now() - Duration::from_secs(20),
-    ));
+    request.extensions_mut().insert(RequestReceivedAt {
+        instant: tokio::time::Instant::now() - Duration::from_secs(20),
+        grpc_timeout: None,
+    });
     request.set_timeout(Duration::from_secs(30));
     let mut read = Box::pin(api.get_component_firmware_details(request));
     let release = tokio::select! {

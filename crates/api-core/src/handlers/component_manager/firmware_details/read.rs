@@ -240,27 +240,11 @@ fn caller_deadline<T>(request: &Request<T>) -> Result<Option<Instant>, CarbideEr
     };
     let invalid = || CarbideError::InvalidArgument("invalid grpc-timeout".into());
     let text = timeout.to_str().map_err(|_| invalid())?;
-    let (digits, unit) = text
-        .split_at_checked(text.len().saturating_sub(1))
-        .ok_or_else(invalid)?;
-    // gRPC TimeoutValue permits at most eight ASCII digits.
-    if digits.is_empty() || digits.len() > 8 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(invalid());
-    }
-    let amount = digits.parse::<u64>().map_err(|_| invalid())?;
-    let duration = match unit {
-        "H" => Duration::from_secs(amount * 3600),
-        "M" => Duration::from_secs(amount * 60),
-        "S" => Duration::from_secs(amount),
-        "m" => Duration::from_millis(amount),
-        "u" => Duration::from_micros(amount),
-        "n" => Duration::from_nanos(amount),
-        _ => return Err(invalid()),
-    };
+    let duration = crate::grpc_timeout::parse_grpc_timeout(text).ok_or_else(invalid)?;
     request
         .extensions()
         .get::<RequestReceivedAt>()
-        .map_or_else(Instant::now, |at| at.0)
+        .map_or_else(Instant::now, |at| at.instant)
         .checked_add(duration)
         .map(Some)
         .ok_or_else(invalid)

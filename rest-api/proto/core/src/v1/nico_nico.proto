@@ -497,7 +497,26 @@ service Forge {
   // Set a dynamic feature, like RUST_LOG
   rpc SetDynamicConfig(SetDynamicConfigRequest) returns (google.protobuf.Empty);
 
-  // Trigger reprovisioning of DPU
+  // Sets, clears, or restarts DPU reprovisioning requests.
+  // Every mode requires a HostUpdateInProgress health alert classified as
+  // PreventAllocations. Set/Clear return Internal if any attached request has
+  // started. Set returns FailedPrecondition if migrating the complete DPU set
+  // to DPF would strand extension services attached to the host's instance.
+  // While a shared DPUNode still requires the BF3-to-GB200 deployment migration,
+  // Set/Clear must leave all attached DPUs selected or none; a partial request
+  // set returns FailedPrecondition. Use the host ID to change the complete set.
+  // Restart targets a discovered host and selects attached DPUs with stored
+  // requests, including requests whose reprovisioning has started.
+  // Restart rechecks the attached DPU set, selected pending requests, and
+  // host-update authorization after lock admission. Changed attachments or
+  // pending membership return FailedPrecondition; missing host-update
+  // authorization returns InvalidArgument; a missing host returns NotFound.
+  // Restart rejects an empty attached DPU set or stored-request selection with
+  // InvalidArgument. Replacing a selected pending request preserves its current
+  // fields except restart_reprovision_requested_at and update_firmware, which
+  // Restart overwrites. An omitted mode selects Set.
+  // A timeout response or caller disconnect does not prove Restart was cancelled
+  // or rolled back: work may still be running, or its change may have committed.
   rpc TriggerDpuReprovisioning(DpuReprovisioningRequest) returns (google.protobuf.Empty);
   // List DPUs waiting for reprovisioning
   rpc ListDpuWaitingForReprovisioning(DpuReprovisioningListRequest) returns (DpuReprovisioningListResponse);
@@ -1317,6 +1336,27 @@ service Forge {
 
   rpc NmxcBrowse(NmxcBrowseRequest) returns (NmxcBrowseResponse);
 
+  // Atomically sets DPF enabled flags for the current host and attached DPUs.
+  // Disabling a host ingested through DPF returns FailedPrecondition; a missing
+  // host returns NotFound. Database preparation, including pool acquisition,
+  // lock retries, isolated waits, and commit, has a 300-second cap measured
+  // from server receipt before authorization/admission. A shorter valid
+  // grpc-timeout in initial headers reduces the cap; timeout metadata in request
+  // trailers is ignored. The metadata accepts one to eight decimal digits
+  // followed by H (hours), M (minutes), S (seconds), m (milliseconds),
+  // u (microseconds), or n (nanoseconds); zero is valid. Missing or malformed
+  // metadata keeps the cap. Once the DPF handler owns preparation, this cap's
+  // expiry returns DeadlineExceeded with NICO-API-504. Admission can enforce
+  // its own execution limit or the caller timeout before the handler runs;
+  // queue rejection, pool-acquisition limits, and PostgreSQL limits can also
+  // return their own errors. Abandoned connections are discarded; this does not
+  // guarantee immediate PostgreSQL cancellation. A commit already in flight
+  // may have succeeded after any timeout, even without NICO-API-504. Read host
+  // settings with nico-admin-cli dpf show; attached DPU flags require authorized
+  // database inspection. A read can show old flags while the original transaction
+  // is still running. Establish that it has ended before treating inspection as
+  // final or retrying an ambiguous result.
+  // A client deadline can expire before it receives the server's status.
   rpc ModifyDPFState(ModifyDPFStateRequest) returns (google.protobuf.Empty);
   rpc GetDPFState(GetDPFStateRequest) returns (DPFStateResponse);
   // Curated snapshot of DPF CRs (DPUNode + DPUDevices + DPUs) for one host.
@@ -7476,12 +7516,22 @@ message DpuReprovisioningRequest {
     Clear = 1;
     Restart = 2;
   }
-  // DEPRECATED, use machine id field.
+  // Deprecated fallback used only when machine_id is absent.
   common.MachineId dpu_id = 1;
+  // Defaults to Set, including unrecognized enum values. Set creates or replaces
+  // requests; Clear removes them; Restart updates existing requests.
   Mode mode = 2;
+  // Set stores this enum name as the request initiator. Omission or an
+  // unrecognized value uses AdminCli. Clear and Restart ignore this field.
   UpdateInitiator initiator = 3;
+  // Set and Restart overwrite the stored firmware flag; omission is false.
+  // Clear ignores this field.
   bool update_firmware = 4;
 
+  // Host or DPU target for Set/Clear; Restart requires a discovered host. Takes precedence
+  // over dpu_id when both are provided. One of these target fields is required.
+  // Set/Clear on a DPF-ingested host with multiple attached DPUs requires the
+  // host ID; targeting one of those DPUs is rejected.
   common.MachineId machine_id = 5;
 }
 
@@ -10873,7 +10923,9 @@ message MachinePositionInfo {
 }
 
 message ModifyDPFStateRequest {
+  // Required host target; DPU IDs are rejected.
   common.MachineId machine_id = 1;
+  // Desired enabled flag. Omission is false and therefore requests disabling.
   bool dpf_enabled = 2;
 }
 

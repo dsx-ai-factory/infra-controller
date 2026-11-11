@@ -592,7 +592,13 @@ impl DatabaseError {
 
     #[track_caller]
     pub fn acquire(source: sqlx::Error) -> DatabaseError {
-        let loc = Location::caller();
+        Self::acquire_with_location(source, Location::caller())
+    }
+
+    fn acquire_with_location(
+        source: sqlx::Error,
+        loc: &'static Location<'static>,
+    ) -> DatabaseError {
         DatabaseError::Sqlx(Box::new(AnnotatedSqlxError {
             file: loc.file(),
             line: loc.line(),
