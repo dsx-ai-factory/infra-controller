@@ -6,7 +6,6 @@ import base64
 import configparser
 import ipaddress
 from pathlib import Path
-import re
 
 
 def configuration(path):
@@ -39,7 +38,8 @@ def configuration(path):
             if field == "presharedkey" and field not in section:
                 continue
             value = section[field]
-            if not re.fullmatch(r"[A-Za-z0-9+/]{43}=", value) or len(base64.b64decode(value, validate=True)) != 32:
+            decoded = base64.b64decode(value, validate=True)
+            if len(decoded) != 32 or base64.b64encode(decoded).decode() != value:
                 raise ValueError()
         # DNS stays on WAN so tunnel bootstrap cannot depend on the tunnel.
         result = (f"[Interface]\nAddress = {address}\nPrivateKey = {interface['privatekey']}\n"
