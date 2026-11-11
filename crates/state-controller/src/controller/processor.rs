@@ -318,8 +318,8 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
     }
 
     fn emit_periodic_log_if_necessary(&mut self) {
-        // Each iteration has an independent span, so add its totals before the
-        // periodic gate instead of subtracting the previous logged span's totals.
+        // Apply the latest db metrics to self.stats_since_last_log now while
+        // we have them, whether we're logging them or not.
         let iteration_metrics = sqlx_query_tracing::fetch_and_update_current_span_attributes();
         let db_metrics = &mut self.stats_since_last_log.db_query_metrics;
         db_metrics.num_queries += iteration_metrics.num_queries;
