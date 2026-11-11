@@ -12540,6 +12540,9 @@ enum SitePrefixRoutingScope {
   option (carbide.codegen.v1.enum_derive) = "serde::Serialize";
   SITE_PREFIX_ROUTING_SCOPE_UNSPECIFIED = 0;
   SITE_PREFIX_ROUTING_SCOPE_DATACENTER_ONLY = 1;
+  // Externally routable beyond the datacenter fabric (a delegated or
+  // bring-your-own routable block).
+  SITE_PREFIX_ROUTING_SCOPE_ROUTABLE = 2;
 }
 
 // Describes the current lifecycle state of a site prefix.

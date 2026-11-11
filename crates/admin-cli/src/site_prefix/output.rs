@@ -202,6 +202,7 @@ fn authority_name(value: i32) -> String {
 fn routing_scope_name(value: i32) -> String {
     match SitePrefixRoutingScope::try_from(value) {
         Ok(SitePrefixRoutingScope::DatacenterOnly) => "datacenter-only".to_string(),
+        Ok(SitePrefixRoutingScope::Routable) => "routable".to_string(),
         Ok(SitePrefixRoutingScope::Unspecified) => "unspecified".to_string(),
         Err(_) => format!("unknown ({value})"),
     }
@@ -246,6 +247,7 @@ mod tests {
         value_scenarios!(routing_scope_name:
             "known routing scopes" {
                 SitePrefixRoutingScope::DatacenterOnly as i32 => "datacenter-only".to_string(),
+                SitePrefixRoutingScope::Routable as i32 => "routable".to_string(),
                 SitePrefixRoutingScope::Unspecified as i32 => "unspecified".to_string(),
             }
 
