@@ -182,6 +182,7 @@ fn group(id: &str) -> ExpectedRackGroup {
             ExpectedRackGroupRack {
                 rack_id: RackId::new("rack-02"),
                 members: vec![ExpectedRackGroupMember {
+                    cartridge_index: Some(0),
                     device_type: model::rack_type::RackCapabilityType::Compute,
                     manufacturer: "NVIDIA".to_string(),
                     id: "device-01".to_string(),
@@ -203,11 +204,44 @@ fn group(id: &str) -> ExpectedRackGroup {
 }
 
 #[crate::sqlx_test]
+async fn legacy_members_require_indexes_only_when_replaced(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut txn = pool.begin().await?;
+    let mut legacy = group("legacy");
+    legacy.racks[0].members[0].cartridge_index = None;
+    create(&mut txn, &legacy).await?;
+    legacy.metadata.name = "renamed".into();
+    update(&mut txn, &legacy).await?;
+    let mut replacement = legacy.clone();
+    replacement.racks[0].members[0].id = "replacement".into();
+    assert!(matches!(
+        update(&mut txn, &replacement).await,
+        Err(DatabaseError::InvalidArgument(_))
+    ));
+    assert_eq!(
+        find_by_rack_group_id(&mut txn, &legacy.rack_group_id).await?,
+        Some(legacy)
+    );
+    replacement.racks[0].members[0].cartridge_index = Some(0);
+    update(&mut txn, &replacement).await?;
+    txn.commit().await?;
+    let mut txn = pool.begin().await?;
+    assert_eq!(
+        find_by_rack_group_id(&mut txn, &replacement.rack_group_id).await?,
+        Some(replacement)
+    );
+    txn.rollback().await?;
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn expected_rack_group_persistence(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = pool.begin().await?;
     let mut expected = group("group-b");
+    expected.racks[0].members[0].cartridge_index = Some(0);
     create(&mut txn, &expected).await?;
     assert_eq!(
         find_by_rack_group_id(&mut txn, &expected.rack_group_id).await?,

@@ -21,13 +21,13 @@ use backon::{ExponentialBuilder, Retryable};
 use carbide_host_support::agent_config::AgentConfig;
 use carbide_uuid::machine::{MachineId, MachineInterfaceId};
 use forge_dpu_agent_utils::utils::create_forge_client;
+use rpc::carbide_tls_client::{CarbideClientConfig, CarbideClientT};
 use rpc::forge::MachineInterface;
-use rpc::forge_tls_client::{ForgeClientConfig, ForgeClientT};
 
 use crate::periodic_config_fetcher::PeriodicConfigFetcher;
 
 async fn get_interface(
-    client: &mut ForgeClientT,
+    client: &mut CarbideClientT,
     interface_id: MachineInterfaceId,
 ) -> Result<MachineInterface, eyre::Error> {
     let request = tonic::Request::new(rpc::forge::InterfaceSearchQuery {
@@ -54,7 +54,7 @@ async fn get_interface(
 async fn get_host_machine_id(
     agent_config: &AgentConfig,
     fetcher: &PeriodicConfigFetcher,
-    forge_client_config: Arc<ForgeClientConfig>,
+    carbide_client_config: Arc<CarbideClientConfig>,
     forge_api: &str,
 ) -> Result<Option<MachineId>, eyre::Error> {
     // Try to get interface id from the agent config, otherwise try the periodic config fetcher.
@@ -64,7 +64,7 @@ async fn get_host_machine_id(
     };
 
     if let Some(interface_id) = interface_id_option {
-        let mut client = create_forge_client(forge_api, &forge_client_config).await?;
+        let mut client = create_forge_client(forge_api, &carbide_client_config).await?;
         let interface = get_interface(&mut client, interface_id).await?;
         return Ok(interface.machine_id);
     }
@@ -75,7 +75,7 @@ async fn get_host_machine_id(
 pub(super) async fn get_host_machine_id_retry(
     agent_config: &AgentConfig,
     fetcher: &PeriodicConfigFetcher,
-    forge_client_config: Arc<ForgeClientConfig>,
+    carbide_client_config: Arc<CarbideClientConfig>,
     forge_api: &str,
 ) -> Result<MachineId, eyre::Report> {
     let retry_policy = ExponentialBuilder::default()
@@ -88,7 +88,7 @@ pub(super) async fn get_host_machine_id_retry(
         get_host_machine_id(
             agent_config,
             fetcher,
-            forge_client_config.clone(),
+            carbide_client_config.clone(),
             forge_api,
         )
         .await

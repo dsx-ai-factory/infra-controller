@@ -2375,6 +2375,7 @@ async fn test_expected_machine_device_type_metrics(
         id: test_sku_gpu_id.clone(),
         description: "Test GPU SKU".to_string(),
         created: chrono::Utc::now(),
+        updated: None,
         components: model::sku::SkuComponents {
             chassis: model::sku::SkuComponentChassis {
                 vendor: format!("test_vendor_gpu_{}", uuid::Uuid::new_v4()),
@@ -2396,6 +2397,7 @@ async fn test_expected_machine_device_type_metrics(
         id: test_sku_no_type_id.clone(),
         description: "Test SKU without device type".to_string(),
         created: chrono::Utc::now(),
+        updated: None,
         components: model::sku::SkuComponents {
             chassis: model::sku::SkuComponentChassis {
                 vendor: format!("test_vendor_no_type_{}", uuid::Uuid::new_v4()),
@@ -2438,6 +2440,7 @@ async fn test_expected_machine_device_type_metrics(
                 bmc_ip_allocation: Default::default(),
                 host_lifecycle_profile: Default::default(),
                 server_name: None,
+                replace_dpu_loopbacks: false,
             },
         },
     )
@@ -2465,6 +2468,7 @@ async fn test_expected_machine_device_type_metrics(
                 bmc_ip_allocation: Default::default(),
                 host_lifecycle_profile: Default::default(),
                 server_name: None,
+                replace_dpu_loopbacks: false,
             },
         },
     )
@@ -2492,6 +2496,7 @@ async fn test_expected_machine_device_type_metrics(
                 bmc_ip_allocation: Default::default(),
                 host_lifecycle_profile: Default::default(),
                 server_name: None,
+                replace_dpu_loopbacks: false,
             },
         },
     )
@@ -3970,6 +3975,7 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
         id: "Sku1".to_string(),
         description: "Test SKU for site explorer test".to_string(),
         created: chrono::Utc::now(),
+        updated: None,
         components: model::sku::SkuComponents {
             chassis: model::sku::SkuComponentChassis {
                 vendor: "Vendor1".to_string(),
@@ -4009,6 +4015,7 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
                 bmc_ip_allocation: Default::default(),
                 host_lifecycle_profile: Default::default(),
                 server_name: None,
+                replace_dpu_loopbacks: false,
             },
         },
     )
@@ -4066,6 +4073,7 @@ async fn test_fallback_dpu_serial(pool: PgPool) -> Result<(), Box<dyn std::error
         bmc_ip_allocation: Default::default(),
         host_lifecycle_profile: Default::default(),
         server_name: None,
+        replace_dpu_loopbacks: false,
     };
     db::expected_machine::update(&mut txn, &host1_expected_machine).await?;
     txn.commit().await?;

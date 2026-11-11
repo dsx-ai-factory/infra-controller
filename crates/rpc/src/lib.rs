@@ -77,8 +77,8 @@ pub use crate::protos::machine_discovery::{
 pub use crate::protos::{agent_local, fmds, health, scout_firmware_upgrade, site_explorer};
 
 pub mod admission_retry;
+pub mod carbide_tls_client;
 pub mod errors;
-pub mod forge_tls_client;
 mod grpc_client_tracing;
 pub mod libmlx;
 pub mod lldp_snapshot;
@@ -97,7 +97,7 @@ pub mod model;
 #[cfg(feature = "cli")]
 pub mod admin_cli;
 
-pub mod forge_api_client;
+pub mod carbide_api_client;
 pub mod forge_resolver;
 pub mod nmx_c_client;
 
@@ -654,6 +654,7 @@ impl forge::ExpectedInterfaceRole {
                 match name.trim().to_ascii_lowercase().replace('-', "_").as_str() {
                     "unspecified" | "expected_interface_role_unspecified" => Self::Unspecified,
                     "host" | "expected_interface_role_host" => Self::Host,
+                    "dpu_loopback" | "expected_interface_role_dpu_loopback" => Self::DpuLoopback,
                     "dpu_os" | "dpuos" | "expected_interface_role_dpu_os" => Self::DpuOs,
                     "dpu_bmc" | "dpubmc" | "expected_interface_role_dpu_bmc" => Self::DpuBmc,
                     "host_bmc" | "hostbmc" | "expected_interface_role_host_bmc" => Self::HostBmc,
@@ -684,6 +685,7 @@ impl forge::ExpectedInterfaceRole {
             Self::Unspecified => "unspecified",
             Self::Host => "host",
             Self::DpuOs => "dpu_os",
+            Self::DpuLoopback => "dpu_loopback",
             Self::DpuBmc => "dpu_bmc",
             Self::HostBmc => "host_bmc",
         })
@@ -1222,7 +1224,6 @@ mod tests {
             id: Some(uuid),
             name: "MyDomain".to_string(),
             default_ttl: None,
-            vpc_id: None,
             created: Some(ts.into()),
             updated: Some(ts2.into()),
             deleted: None,

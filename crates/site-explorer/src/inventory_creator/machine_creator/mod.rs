@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::iter::Peekable;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use carbide_instrument::emit;
 use carbide_resource_pool::ResourcePoolRegistry;
-use carbide_uuid::machine::{HostMachineId, MachineId, PredictedHostMachineId};
+use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId, PredictedHostMachineId};
 use carbide_uuid::rack::RackId;
 use component_manager::MachineInfoProvider;
 use db::Transaction;
@@ -32,7 +32,9 @@ use futures_util::future::join_all;
 use futures_util::stream::FuturesUnordered;
 use mac_address::MacAddress;
 use model::bmc_info::BmcInfo;
-use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
+use model::expected_machine::{
+    DpuLoopbackReservation, ExpectedMachine, ExpectedMachineData, HostDpuPolicy,
+};
 use model::hardware_info::HardwareInfo;
 use model::machine::machine_id::host_id_from_dpu_hardware_info;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -81,6 +83,14 @@ pub struct MachineCreator {
     rack_profiles: Arc<RackProfileConfig>,
     machine_info_provider: Option<Arc<dyn MachineInfoProvider>>,
     dpf_enabled_at_site: bool,
+}
+
+/// Retains the intent used for preparation so creation can recheck it under lock.
+struct HostLoopbacks<'a> {
+    existing_host: Option<HostMachineId>,
+    reservations: Vec<DpuLoopbackReservation>,
+    reservations_by_dpu: HashMap<DpuMachineId, usize>,
+    prepared: Vec<PreparedDpuLoopback<'a>>,
 }
 
 impl MachineCreator {
@@ -271,24 +281,84 @@ impl MachineCreator {
             .iter()
             .map(|dpu| dpu.machine_id_if_valid_report())
             .collect::<Result<Vec<_>, _>>()?;
+        let existing_host = db::machine::DpuHostAssociations::load(pool, &dpu_ids)
+            .await?
+            .common_host_machine_id()?;
+        let host_dpu_policy = HostDpuPolicy::resolve(
+            Some(expected_machine.data.dpu_policy),
+            self.config.dpu_policy,
+        );
+        let reservations = if existing_host.is_some()
+            || (dpu_ids.is_empty() && !host_dpu_policy.expects_managed_dpus())
+        {
+            // Existing hosts ignore future ingestion intent. Nic
+            // and Ignore retain declarations without allocating loopbacks.
+            Vec::new()
+        } else {
+            db::expected_dpu_loopback_reservation::find_for_machine(
+                pool,
+                expected_machine.bmc_mac_address,
+            )
+            .await?
+        };
+        if dpu_ids.is_empty() && !reservations.is_empty() {
+            return Err(SiteExplorerError::internal(
+                "DPU loopback declarations exist but discovery reported no DPUs; defer creation"
+                    .to_string(),
+            ));
+        }
+        let mut reservations_by_dpu = HashMap::new();
+        for (index, reservation) in reservations.iter().enumerate() {
+            let matching = explored_host
+                .dpus
+                .iter()
+                .filter(|dpu| {
+                    dpu.os_mac_addresses()
+                        .any(|mac| mac == reservation.dpu_oob_net0_mac_address)
+                })
+                .collect::<Vec<_>>();
+            let [dpu] = matching.as_slice() else {
+                return Err(SiteExplorerError::internal(format!(
+                    "cannot resolve DPU loopback MAC {} unambiguously from discovery ({} matching DPUs); defer creation",
+                    reservation.dpu_oob_net0_mac_address,
+                    matching.len()
+                )));
+            };
+            let id = dpu.machine_id_if_valid_report()?;
+            if reservations_by_dpu.insert(id, index).is_some() {
+                return Err(SiteExplorerError::internal(format!(
+                    "multiple loopback MAC declarations resolve to DPU {id}; defer creation"
+                )));
+            }
+        }
+
         // Resolve siblings together so later provider calls cannot age the
         // first reservation past its attachment deadline. `join_all` drains every
         // result and retains report order for Integrated assignment below.
         let preparations = join_all(dpu_ids.into_iter().map(|machine_id| {
+            let requested_loopback_v4 = reservations_by_dpu
+                .get(&machine_id)
+                .and_then(|&index| reservations[index].loopback_ipv4);
             PreparedDpuLoopback::prepare(
                 pool,
                 &self.resource_pool_registry,
                 &self.common_pools,
                 machine_id.into(),
+                requested_loopback_v4,
                 &self.preparation_cancel_token,
             )
         }))
         .await;
-        let mut loopbacks = Vec::with_capacity(preparations.len());
+        let mut loopbacks = HostLoopbacks {
+            existing_host,
+            reservations,
+            reservations_by_dpu,
+            prepared: Vec::with_capacity(preparations.len()),
+        };
         let mut preparation_error = None;
         for preparation in preparations {
             match preparation {
-                Ok(prepared) => loopbacks.push(prepared),
+                Ok(prepared) => loopbacks.prepared.push(prepared),
                 Err(error) if preparation_error.is_none() => preparation_error = Some(error),
                 Err(_) => {}
             }
@@ -300,6 +370,7 @@ impl MachineCreator {
             }
             let admission_start = Instant::now();
             let has_provider_reservation = loopbacks
+                .prepared
                 .iter()
                 .any(PreparedDpuLoopback::has_provider_reservation);
             let admission =
@@ -330,7 +401,7 @@ impl MachineCreator {
         .await;
         // Attached requests ignore cancellation. This also abandons a
         // preparation a concurrent writer made unnecessary before commit.
-        for prepared in &loopbacks {
+        for prepared in &loopbacks.prepared {
             if let Err(error) = prepared.cancel(pool).await {
                 tracing::error!(machine_id = %prepared.machine_id(), %error, "Could not save DPU loopback cancellation");
             }
@@ -390,12 +461,39 @@ impl MachineCreator {
         report: &mut EndpointExplorationReport,
         expected_machine: &ExpectedMachine,
         primary_interface_selection: Option<HostPrimaryInterfaceSelection>,
-        loopbacks: &[PreparedDpuLoopback<'_>],
+        loopbacks: &HostLoopbacks<'_>,
     ) -> SiteExplorerResult<ManagedHostCreation> {
         let machine_data = Some(&expected_machine.data);
         let mut managed_host = ManagedHost::init(explored_host);
         let mut txn = Transaction::begin(pool).await?;
-        for prepared in loopbacks {
+        let host_dpu_policy = HostDpuPolicy::resolve(
+            Some(expected_machine.data.dpu_policy),
+            self.config.dpu_policy,
+        );
+        if loopbacks.existing_host.is_none()
+            && (!explored_host.dpus.is_empty() || host_dpu_policy.expects_managed_dpus())
+        {
+            // Preparation can call a provider outside this transaction. Fence
+            // all host intent before taking admin or interface locks so a
+            // concurrent edit retries instead of attaching stale reservations.
+            db::expected_dpu_loopback_reservation::lock_for_machine(
+                &mut txn,
+                expected_machine.bmc_mac_address,
+            )
+            .await?;
+            let reservations = db::expected_dpu_loopback_reservation::find_for_machine(
+                &mut txn,
+                expected_machine.bmc_mac_address,
+            )
+            .await?;
+            if reservations != loopbacks.reservations {
+                return Err(SiteExplorerError::internal(
+                    "DPU loopback declarations changed during preparation; retry creation"
+                        .to_string(),
+                ));
+            }
+        }
+        for prepared in &loopbacks.prepared {
             prepared.check_identity(&mut txn).await?;
         }
 
@@ -429,11 +527,17 @@ impl MachineCreator {
         }
 
         let host_associations = db::machine::DpuHostAssociations::load(&mut txn, &dpu_ids).await?;
+        let existing_host = host_associations.common_host_machine_id()?;
+        // An attempt that skipped ingestion intent must not become a creation.
+        if loopbacks.existing_host.is_some() && loopbacks.existing_host != existing_host {
+            return Err(SiteExplorerError::internal(
+                "DPU host attachments changed during preparation; retry creation".to_string(),
+            ));
+        }
 
-        if host_associations.common_host_machine_id()?.is_some() {
+        if existing_host.is_some() {
             // A stale creation candidate can already have an attached host.
-            // Validate the complete DPU set to avoid silently accepting partial
-            // or conflicting inventory, then leave existing state unchanged.
+            // The complete DPU set was validated above; leave existing state unchanged.
             txn.rollback().await?;
             return Ok(ManagedHostCreation::SkippedExisting);
         }
@@ -448,7 +552,7 @@ impl MachineCreator {
             // IPv4 allocation uses shared segment locks; force cleanup needs
             // them exclusively. Recheck after that fence and hold it through
             // creation, so an intervening create/delete cannot become absence.
-            for prepared in loopbacks {
+            for prepared in &loopbacks.prepared {
                 prepared.check_identity(&mut txn).await?;
             }
         }
@@ -456,8 +560,12 @@ impl MachineCreator {
         for (dpu_report, dpu_machine_id) in
             managed_host.explored_host.dpus.iter().zip(dpu_ids.iter())
         {
+            let requested_loopback_v6 = loopbacks
+                .reservations_by_dpu
+                .get(dpu_machine_id)
+                .and_then(|&index| loopbacks.reservations[index].loopback_ipv6);
             self
-                .create_dpu(&mut txn, dpu_report)
+                .create_dpu(&mut txn, dpu_report, requested_loopback_v6)
                 .await?
                 .ok_or_else(|| {
                     SiteExplorerError::internal(format!(
@@ -473,7 +581,7 @@ impl MachineCreator {
         }
 
         // Every host link exists before the machine-group configuration updates.
-        for prepared in loopbacks {
+        for prepared in &loopbacks.prepared {
             prepared.attach(&mut txn, true).await?;
         }
 
@@ -784,8 +892,12 @@ impl MachineCreator {
         &self,
         txn: &mut PgConnection,
         explored_dpu: &ExploredDpu,
+        requested_loopback_v6: Option<std::net::Ipv6Addr>,
     ) -> SiteExplorerResult<Option<AnyMachine>> {
-        if let Some(dpu_machine) = self.create_dpu_machine(txn, explored_dpu).await? {
+        if let Some(dpu_machine) = self
+            .create_dpu_machine(txn, explored_dpu, requested_loopback_v6)
+            .await?
+        {
             Self::ensure_dpu_oob_interface_ownership(txn, explored_dpu).await?;
             let dpu_machine_id: &MachineId = explored_dpu.report.machine_id.as_ref().unwrap();
             let dpu_bmc_info = explored_dpu.bmc_info();
@@ -861,6 +973,7 @@ impl MachineCreator {
         &self,
         txn: &mut PgConnection,
         explored_dpu: &ExploredDpu,
+        requested_loopback_v6: Option<std::net::Ipv6Addr>,
     ) -> SiteExplorerResult<Option<AnyMachine>> {
         let dpu_machine_id = explored_dpu.report.machine_id.as_ref().unwrap();
         match db::machine::find_one(&mut *txn, dpu_machine_id, MachineSearchConfig::default())
@@ -868,13 +981,14 @@ impl MachineCreator {
         {
             // Do nothing if machine exists. It'll be reprovisioned via redfish
             Some(_existing_machine) => Ok(None),
-            None => match db::machine::create(
+            None => match db::machine::create_with_requested_loopback(
                 txn,
                 Some(&self.common_pools),
                 dpu_machine_id,
                 ManagedHostState::Created,
                 None,
                 CURRENT_STATE_MODEL_VERSION,
+                requested_loopback_v6,
             )
             .await
             {

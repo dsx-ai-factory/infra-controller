@@ -569,6 +569,20 @@ async fn vpc_creation_rolls_back_unencodable_symbolic_route_target(
                         .message()
                         .contains("cannot both exceed 65535")
                 );
+                // SQLx queues rollback when the failed creation drops its transaction.
+                // Wait for its row lock before checking state and reusing this VNI.
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    sqlx::query(
+                        "SELECT 1 FROM resource_pool WHERE name = $1 AND value = $2 FOR SHARE",
+                    )
+                    .bind(VPC_VNI)
+                    .bind(requested_vni.to_string())
+                    .fetch_one(&env.pool),
+                )
+                .await
+                .expect("failed creation must release its VNI row lock")
+                .expect("requested VNI remains in the pool");
                 let found = env
                     .api
                     .find_vpc_ids(tonic::Request::new(rpc::forge::VpcSearchFilter {

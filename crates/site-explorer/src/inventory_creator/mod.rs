@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use carbide_resource_pool::ResourcePoolRegistry;
 use component_manager::MachineInfoProvider;
 use mac_address::MacAddress;
+use model::expected_machine::HostDpuPolicy;
 use model::rack_type::RackProfileConfig;
 use model::resource_pool::common::CommonPools;
 use sqlx::PgPool;
@@ -65,6 +66,8 @@ pub struct Config {
     pub switches_created_per_run: u64,
     /// Whether host interfaces can use IPv6-only admin segments.
     pub admin_fnn_enabled: bool,
+    /// Site policy inherited by hosts without an explicit Nic or Ignore policy.
+    pub dpu_policy: Option<HostDpuPolicy>,
     /// How long retained boot interfaces remain applicable; `None` means forever.
     pub retained_boot_interface_window: Option<chrono::Duration>,
 }

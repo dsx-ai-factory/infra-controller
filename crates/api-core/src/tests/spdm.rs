@@ -1647,15 +1647,15 @@ pub(in crate::tests) mod tests {
                 .unwrap_err();
             assert_eq!(error.code(), code);
         }
+        // Host setup performs its own attestation before the scenario starts.
+        env.redfish_sim.set_evidence_collection_running(false);
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
         for case in cases {
             let expected_state = if case.fail {
                 SpdmAttestationState::Failed("Failed by operator".to_string())
             } else {
                 SpdmAttestationState::Waived
             };
-            // Host setup performs its own attestation before the scenario starts.
-            env.redfish_sim.set_evidence_collection_running(false);
-            let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
             let initial_cancel_requests = env.redfish_sim.task_cancellation_requests().len();
             env.redfish_sim.set_evidence_collection_running(true);
             let job_id = uuid::Uuid::try_from(

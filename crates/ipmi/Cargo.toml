@@ -14,7 +14,6 @@ name = "carbide_ipmi"
 carbide-instrument = { path = "../instrument" }
 carbide-secrets = { path = "../secrets", default-features = false }
 carbide-utils = { path = "../utils", default-features = false }
-carbide-uuid = { path = "../uuid" }
 
 #these are alphabetized
 arc-swap = { workspace = true }

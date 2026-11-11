@@ -23,8 +23,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::MachineId;
+use rpc::carbide_api_client::CarbideApiClient;
 use rpc::forge;
-use rpc::forge_api_client::ForgeApiClient;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -95,7 +95,7 @@ impl SpawnError {
 pub(super) async fn lookup(
     machine_or_instance_id: &str,
     config: &Config,
-    forge_api_client: &ForgeApiClient,
+    carbide_api_client: &CarbideApiClient,
 ) -> Result<ConnectionDetails, LookupError> {
     if let Some(override_bmc) = config.override_bmcs.as_ref().and_then(|override_bmcs| {
         override_bmcs
@@ -144,7 +144,7 @@ pub(super) async fn lookup(
     let machine_id: MachineId = if let Ok(id) = machine_or_instance_id.parse() {
         id
     } else if let Ok(instance_id) = InstanceId::from_str(machine_or_instance_id) {
-        forge_api_client
+        carbide_api_client
             .find_instances_by_ids(forge::InstancesByIdsRequest {
                 instance_ids: vec![instance_id],
             })
@@ -176,7 +176,7 @@ pub(super) async fn lookup(
         serial_console_ssh_port,
         ipmi_port,
         vendor,
-    } = forge_api_client
+    } = carbide_api_client
         .get_bmc_meta_data(forge::BmcMetaDataGetRequest {
             machine_id: Some(machine_id),
             role: 0,

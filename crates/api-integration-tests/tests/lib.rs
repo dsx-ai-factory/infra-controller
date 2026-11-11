@@ -48,6 +48,9 @@ use config_version::ConfigVersion;
 use eyre::{ContextCompat, WrapErr};
 use futures::FutureExt;
 use futures::future::join_all;
+use health_report::{
+    HealthAlertClassification, HealthProbeAlert, HealthReport, HealthReportApplyMode,
+};
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::extension_service::{DpuTarget, ExtensionServiceDeploymentType, ExtensionServiceType};
@@ -146,10 +149,11 @@ async fn run_integration() -> eyre::Result<()> {
         None,
     )
     .await?;
+    let switch_id = SwitchId::new(SwitchIdSource::Tpm, [1u8; 32], SwitchType::NvLink);
     db::switch::create(
         &mut txn,
         &NewSwitch {
-            id: SwitchId::new(SwitchIdSource::Tpm, [1u8; 32], SwitchType::NvLink),
+            id: switch_id,
             config: SwitchConfig {
                 name: "metric-catalogue-switch".to_string(),
                 enable_nmxc: false,
@@ -160,6 +164,30 @@ async fn run_integration() -> eyre::Result<()> {
             rack_id: None,
             slot_number: None,
             tray_index: None,
+        },
+    )
+    .await?;
+    // The per-object classification gauge only exports objects carrying an
+    // opted-in classification, so give the switch an alert classified
+    // `Hardware` (opted in by the test API server config).
+    db::switch::insert_health_report(
+        &mut txn,
+        &switch_id,
+        HealthReportApplyMode::Merge,
+        &HealthReport {
+            source: "metric-catalogue".to_string(),
+            triggered_by: None,
+            observed_at: None,
+            successes: vec![],
+            alerts: vec![HealthProbeAlert {
+                id: "MetricCatalogue".parse()?,
+                target: None,
+                in_alert_since: None,
+                message: "Raised so the metric catalogue scrape includes per-object health"
+                    .to_string(),
+                tenant_message: None,
+                classifications: vec![HealthAlertClassification::hardware()],
+            }],
         },
     )
     .await?;
@@ -630,6 +658,11 @@ async fn run_integration() -> eyre::Result<()> {
         )
         .await?;
     }
+    metrics::wait_for_metric_line(
+        &test_env.carbide_metrics_addrs,
+        "# TYPE carbide_object_unhealthy_by_classification_count gauge\n",
+    )
+    .await?;
     let mut metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
     metric_infos.push(collect_ssh_console_metric_info().await?);
     metric_infos.extend(collect_dhcp_metric_infos().await?);
@@ -877,8 +910,8 @@ async fn exercise_dpf_exploration_suppression(
     use model::bmc_suppression::{
         BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression,
     };
-    use rpc::forge_api_client::ForgeApiClient;
-    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use rpc::carbide_api_client::CarbideApiClient;
+    use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 
     let (address, mac): (std::net::IpAddr, MacAddress) = sqlx::query_as(
         "SELECT e.address, mi.mac_address FROM explored_endpoints e
@@ -901,14 +934,14 @@ async fn exercise_dpf_exploration_suppression(
     .await?;
     txn.commit().await?;
     let certs = &api_test_helper::utils::LOCALHOST_CERTS;
-    let config = ForgeClientConfig::new(
+    let config = CarbideClientConfig::new(
         certs.ca_cert.to_string_lossy().into_owned(),
         Some(forge_tls::client_config::ClientCert {
             cert_path: certs.client_cert.to_string_lossy().into_owned(),
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
     );
-    let client = ForgeApiClient::new(&ApiConfig::new(
+    let client = CarbideApiClient::new(&ApiConfig::new(
         &format!("https://{}", test_env.carbide_api_addrs[0]),
         &config,
     ));
@@ -944,8 +977,8 @@ async fn exercise_admin_address_reconcile_failures(
 ) -> eyre::Result<()> {
     use carbide_uuid::machine::{MachineId, MachineInterfaceId};
     use model::machine::machine_search_config::MachineSearchConfig;
-    use rpc::forge_api_client::ForgeApiClient;
-    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use rpc::carbide_api_client::CarbideApiClient;
+    use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
     use rpc::{DiscoveryData, DiscoveryInfo, MachineDiscoveryInfo};
 
     // A DPU's own OOB interface is primary and attached to itself; a host's
@@ -1003,14 +1036,14 @@ async fn exercise_admin_address_reconcile_failures(
     txn.commit().await?;
 
     let certs = &api_test_helper::utils::LOCALHOST_CERTS;
-    let config = ForgeClientConfig::new(
+    let config = CarbideClientConfig::new(
         certs.ca_cert.to_string_lossy().into_owned(),
         Some(forge_tls::client_config::ClientCert {
             cert_path: certs.client_cert.to_string_lossy().into_owned(),
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
     );
-    let client = ForgeApiClient::new(&ApiConfig::new(
+    let client = CarbideApiClient::new(&ApiConfig::new(
         &format!("https://{}", test_env.carbide_api_addrs[0]),
         &config,
     ));
@@ -1049,8 +1082,8 @@ async fn exercise_ib_partition_mtu_fallback(
     test_env: &IntegrationTestEnvironment,
 ) -> eyre::Result<()> {
     use carbide_uuid::infiniband::IBPartitionId;
-    use rpc::forge_api_client::ForgeApiClient;
-    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use rpc::carbide_api_client::CarbideApiClient;
+    use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 
     let id = IBPartitionId::new();
     sqlx::query(
@@ -1065,14 +1098,14 @@ async fn exercise_ib_partition_mtu_fallback(
     .await?;
 
     let certs = &api_test_helper::utils::LOCALHOST_CERTS;
-    let config = ForgeClientConfig::new(
+    let config = CarbideClientConfig::new(
         certs.ca_cert.to_string_lossy().into_owned(),
         Some(forge_tls::client_config::ClientCert {
             cert_path: certs.client_cert.to_string_lossy().into_owned(),
             key_path: certs.client_key.to_string_lossy().into_owned(),
         }),
     );
-    let client = ForgeApiClient::new(&ApiConfig::new(
+    let client = CarbideApiClient::new(&ApiConfig::new(
         &format!("https://{}", test_env.carbide_api_addrs[0]),
         &config,
     ));
