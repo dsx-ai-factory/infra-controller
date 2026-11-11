@@ -290,6 +290,12 @@ impl<R: BmcCredentialRepository + DpuNodeRepository + DpuDeviceRepository + DpuR
                 }
                 let name = required_identity(secret.metadata.name, "credential Secret name")?;
                 validate_per_device_secret_name(&name)?;
+                let version = name
+                    .strip_prefix(&format!("{id}-v"))
+                    .and_then(|version| version.parse::<u32>().ok());
+                if name != bmc_credential_secret_name(id, version) {
+                    continue;
+                }
                 complete = false;
                 if secret.metadata.deletion_timestamp.is_some() {
                     continue;
