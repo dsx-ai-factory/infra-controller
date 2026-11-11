@@ -201,6 +201,7 @@ run_as_user() {
   local user_env=(
     HOME="${USER_HOME}"
     USER="${DEV_USER}"
+    KUBECONFIG="${USER_HOME}/.kube/config"
     PATH="${USER_HOME}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     GODEBUG="tlsmlkem=0"
   )
