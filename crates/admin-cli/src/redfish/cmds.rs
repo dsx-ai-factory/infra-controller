@@ -432,7 +432,7 @@ pub(crate) async fn action(action: RedfishAction) -> color_eyre::Result<()> {
                     TransferProtocolType::HTTP,
                 )
                 .await
-                .context("submit a Redfish SimpleUpdate installation with HTTP transfer")?;
+                .context("submit a SimpleUpdate installation with HTTP transfer")?;
             println!("Submitted Redfish task {}", task.id);
         }
         GetTasks => {
