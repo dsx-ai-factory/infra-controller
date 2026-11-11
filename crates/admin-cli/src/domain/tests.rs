@@ -64,7 +64,6 @@ impl Default for Reply {
             domain: Some(Domain {
                 id: Some(DOMAIN_ID.parse().unwrap()),
                 name: NAME.into(),
-                vpc_id: Some(VPC_ID.parse().unwrap()),
                 default_ttl: Some(600),
                 metadata: Some(Metadata {
                     allow_axfr_from: vec!["192.0.2.10".into()],
@@ -197,16 +196,14 @@ async fn create_preserves_default_and_explicit_requests() {
                 input: vec!["create", NAME],
                 expect: Yields(vec![Call::Create(CreateDomainRequest {
                     name: NAME.into(),
-                    vpc_id: None,
                     default_ttl: None,
                 })]),
             },
             Case {
-                scenario: "VPC ownership and explicit TTL reach Core",
-                input: vec!["create", NAME, "--vpc-id", VPC_ID, "--default-ttl", "600"],
+                scenario: "explicit TTL reaches Core",
+                input: vec!["create", NAME, "--default-ttl", "600"],
                 expect: Yields(vec![Call::Create(CreateDomainRequest {
                     name: NAME.into(),
-                    vpc_id: Some(VPC_ID.parse().unwrap()),
                     default_ttl: Some(600),
                 })]),
             },
@@ -230,13 +227,9 @@ async fn create_writes_the_complete_response_to_the_selected_output() {
         expected
     );
 
-    for (vpc_id, ttl, expected_vpc, expected_ttl) in [
-        (Some(VPC_ID.parse().unwrap()), Some(600), VPC_ID, "600s"),
-        (None, None, "none (infrastructure)", "site default"),
-    ] {
+    for (ttl, expected_ttl) in [(Some(600), "600s"), (None, "site default")] {
         let mut reply = Reply::default();
         let domain = reply.domain.as_mut().unwrap();
-        domain.vpc_id = vpc_id;
         domain.default_ttl = ttl;
         let (result, output, _) =
             dispatch(&["create", NAME], OutputFormat::AsciiTable, reply).await;
@@ -244,7 +237,6 @@ async fn create_writes_the_complete_response_to_the_selected_output() {
         for (label, value) in [
             ("ID", DOMAIN_ID),
             ("NAME", NAME),
-            ("VPC", expected_vpc),
             ("DEFAULT TTL", expected_ttl),
         ] {
             assert!(
@@ -254,6 +246,7 @@ async fn create_writes_the_complete_response_to_the_selected_output() {
                 "missing {label}: {value} in {output}",
             );
         }
+        assert!(!output.contains("VPC"), "removed VPC ownership in {output}");
     }
 }
 
@@ -421,8 +414,8 @@ fn invalid_arguments_are_rejected_before_dispatch() {
             ("missing deletion ID", vec!["delete"]),
             ("malformed deletion ID", vec!["delete", "not-a-domain-id"]),
             (
-                "malformed VPC ID",
-                vec!["create", NAME, "--vpc-id", "invalid"],
+                "removed VPC ownership option",
+                vec!["create", NAME, "--vpc-id", VPC_ID],
             ),
             ("invalid TTL", vec!["create", NAME, "--default-ttl", "-1"]),
             ("conflicting selectors", vec!["show", DOMAIN_ID, "--all"]),

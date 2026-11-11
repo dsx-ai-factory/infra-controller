@@ -75,8 +75,7 @@ service Forge {
   rpc UpdateVpcVirtualization(VpcUpdateVirtualizationRequest) returns (VpcUpdateVirtualizationResult);
   // Deletion does not release a retained VNI implicitly. Call
   // ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
-  // Retained or inconsistent owned allocations cause FailedPrecondition, as do
-  // live DNS domains owned by this VPC. Deleted domains do not block deletion.
+  // Retained or inconsistent owned allocations cause FailedPrecondition.
   rpc DeleteVpc(VpcDeletionRequest) returns (VpcDeletionResult);
   rpc FindVpcIds(VpcSearchFilter) returns (VpcIdList);
   rpc FindVpcsByIds(VpcsByIdsRequest) returns (VpcList);
@@ -3414,6 +3413,8 @@ message ExpectedRackGroupMember {
   string manufacturer = 2;
   // Non-blank external inventory identifier.
   string id = 3;
+  // Required in declarations; absent in legacy records. Zero is valid.
+  optional uint32 cartridge_index = 4;
 }
 
 message ExpectedRackGroupRequest {
@@ -9178,6 +9179,11 @@ message Sku {
   uint32 schema_version = 6;
   repeated common.MachineId associated_machine_ids = 7;
   optional string device_type = 8;
+  // Time the SKU was last modified. Set to the creation time on creation and
+  // advanced by UpdateSkuMetadata, ReplaceSku and ReplaceSkuComponents. Ignored
+  // on input. Unset for SKUs that predate update tracking or when the server
+  // predates this field.
+  optional google.protobuf.Timestamp updated = 9;
 }
 
 message SkuMachinePair {

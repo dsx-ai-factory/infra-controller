@@ -30,7 +30,7 @@ pub(super) async fn create(
     api_client: &ApiClient,
 ) -> CarbideCliResult<()> {
     let domain = api_client
-        .create_domain(args.name, args.vpc_id, args.default_ttl)
+        .create_domain(args.name, args.default_ttl)
         .await?;
 
     write_create_output(&domain, output_format, output_file).await

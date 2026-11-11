@@ -45,7 +45,7 @@ Print help (see a summary with -h)
 
 | Subcommand | Description |
 |---|---|
-| [`create`](./domain-create.md) | Create a Domain, optionally owned by a VPC |
+| [`create`](./domain-create.md) | Create a Domain |
 | [`delete`](./domain-delete.md) | Delete an unreferenced DNS domain |
 | [`show`](./domain-show.md) | Display Domain information |
 | [`update`](./domain-update.md) | Update domain default TTL |

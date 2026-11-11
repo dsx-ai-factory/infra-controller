@@ -929,6 +929,10 @@ fn routes_with_auth_mode(
                 "/machinevalidation/tests",
                 get(machine_validation::show_tests_html),
             )
+            .route(
+                "/machinevalidation/attempts/{attempt_id}/logs",
+                get(machine_validation::attempt_logs),
+            )
             .route("/machinevalidation", get(machine_validation::runs))
             .route(
                 "/machinevalidation/tests/{test_id}",

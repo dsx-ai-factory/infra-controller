@@ -802,7 +802,6 @@ dependencies = [
  "carbide-ipmi",
  "carbide-redfish",
  "carbide-secrets",
- "carbide-uuid",
  "clap",
  "colored",
  "futures",
@@ -957,13 +956,13 @@ dependencies = [
  "bmc-drivers",
  "bmc-mock",
  "bmc-platform",
+ "carbide-api-model",
  "carbide-instrument",
  "carbide-ipmi",
  "carbide-redfish",
  "carbide-secrets",
  "carbide-test-support",
  "carbide-utils",
- "carbide-uuid",
  "eyre",
  "mac_address",
  "nv-redfish",
@@ -1256,6 +1255,7 @@ dependencies = [
  "base64",
  "bmc-drivers",
  "bmc-explorer",
+ "bmc-runtime",
  "bmc-vendor",
  "byteorder",
  "carbide-api-db",
@@ -2561,7 +2561,6 @@ dependencies = [
  "carbide-secrets",
  "carbide-test-support",
  "carbide-utils",
- "carbide-uuid",
  "eyre",
  "reqwest 0.13.4",
  "serde",
@@ -3629,6 +3628,7 @@ dependencies = [
  "axum",
  "bmc-explorer",
  "bmc-mock",
+ "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
  "carbide-api-model",
@@ -7366,7 +7366,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.25#04e40498f99ce878d794961bf467eabd48f736dd"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.28#6145110b8cfa93c39ccc2ad40a165e2edd4c4938"
 dependencies = [
  "chrono",
  "clap",
