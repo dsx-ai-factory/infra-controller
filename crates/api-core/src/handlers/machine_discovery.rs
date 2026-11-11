@@ -21,6 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use ::rpc::forge as rpc;
+use carbide_resource_pool::ResourcePoolBackendError;
 use carbide_site_explorer::dpu_loopback::{PreparedDpuLoopback, acquire_admin_admission};
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::{
@@ -523,7 +524,29 @@ pub(crate) async fn discover_machine(
 
             // Interface rows precede the conditional machine/configuration write.
             if let Some(prepared) = &dpu_loopback {
-                prepared.attach(&mut txn, true).await.map_err(CarbideError::from)?;
+                match prepared.attach(&mut txn, true).await {
+                    Ok(()) => {}
+                    Err(ResourcePoolBackendError::Database(error))
+                        if error.is_lock_not_available() =>
+                    {
+                        tracing::warn!(
+                            %dpu_machine_id,
+                            error = %error,
+                            "discovery network group write is busy"
+                        );
+                        // NOWAIT aborts the transaction. Release all writes
+                        // made so far before cancelling preparation.
+                        txn.rollback_or_log("discovery network group contention").await;
+                        return Err(CarbideError::DiscoveryContended(format!(
+                            "machine network group for {dpu_machine_id} is busy; retry discovery"
+                        ))
+                        .into());
+                    }
+                    Err(error) => {
+                        txn.rollback_or_log("discovery loopback attachment failure").await;
+                        return Err(CarbideError::from(error).into());
+                    }
+                }
             }
 
             let host_machine_id = if let Some(host_machine_id) = machine_interface.machine_id {
@@ -569,6 +592,29 @@ pub(crate) async fn discover_machine(
                 let host_machine_id =
                     carbide_uuid::machine::HostMachineId::try_from(proactive_machine.id)
                         .map_err(|error| CarbideError::internal(error.to_string()))?;
+                // Reusing a predicted host takes only a foreign-key KEY SHARE
+                // lock. `update_reboot_requested_time` can still hold a
+                // non-key update lock, and state writers take history before
+                // the Machine row. Try both dependencies rather than wait
+                // while retaining discovery writes.
+                if !db::machine::try_lock_by_id_for_no_key_update(&mut txn, &host_machine_id.into())
+                    .await?
+                {
+                    txn.rollback_or_log("discovery host row contention").await;
+                    return Err(CarbideError::DiscoveryContended(format!(
+                        "discovery state for host {host_machine_id} is busy or missing; retry discovery"
+                    ))
+                    .into());
+                }
+                if !db::machine::try_lock_machine_state_history(&mut txn, &host_machine_id.into())
+                    .await?
+                {
+                    txn.rollback_or_log("discovery host history contention").await;
+                    return Err(CarbideError::DiscoveryContended(format!(
+                        "discovery state history for host {host_machine_id} is busy; retry discovery"
+                    ))
+                    .into());
+                }
                 db::machine::update_state(
                     &mut txn,
                     &host_machine_id,

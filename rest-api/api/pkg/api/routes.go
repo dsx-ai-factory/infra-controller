@@ -1201,6 +1201,14 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewDeleteSkuHandler(dbSession, scp),
 		},
+		{
+			// `/rack/task/power` preserves the inventory rack ID `task` before
+			// `/rack/task/:id` and `/rack/:id/power` can capture it. `power`
+			// is not a task UUID, so valid task lookups still use their route.
+			Path:    apiPathPrefix + "/rack/task/power",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetRackPowerStateHandler(dbSession, scp).ForRack("task"),
+		},
 		// Task endpoints (Flow). /rack/task/* and /task/* share get/cancel
 		// handlers; filtered lists are also exposed under /rack/{id}/task and
 		// /tray/{id}/task.
@@ -1378,6 +1386,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/rack/:id/validation",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewValidateRackHandler(dbSession, tc, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/rack/:id/power",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetRackPowerStateHandler(dbSession, scp),
 		},
 		{
 			Path:    apiPathPrefix + "/rack/:id/power",

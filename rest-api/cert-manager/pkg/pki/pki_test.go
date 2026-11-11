@@ -56,6 +56,7 @@ func TestCA_IssueCertificate(t *testing.T) {
 		commonName    string
 		extraDNSNames []string
 		ttlHours      int
+		wantError     bool
 		wantDNSNames  []string
 		// wantVerifyFails are hostnames the certificate must not vouch for.
 		wantVerifyFails []string
@@ -93,6 +94,17 @@ func TestCA_IssueCertificate(t *testing.T) {
 			ttlHours:      24,
 			wantDNSNames:  []string{"svc.ns", "localhost"},
 		},
+		{
+			name:       "zero lifetime is rejected at the CA boundary",
+			commonName: "svc.ns",
+			wantError:  true,
+		},
+		{
+			name:       "lifetime over one year is rejected at the CA boundary",
+			commonName: "svc.ns",
+			ttlHours:   365*24 + 1,
+			wantError:  true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -104,6 +116,12 @@ func TestCA_IssueCertificate(t *testing.T) {
 			require.NoError(t, err, "NewTestCA")
 
 			certPEM, keyPEM, err := ca.IssueCertificate(tt.commonName, tt.extraDNSNames, tt.ttlHours)
+			if tt.wantError {
+				require.ErrorContains(t, err, "certificate TTL must be between 1 and 8760 hours")
+				assert.Empty(t, certPEM)
+				assert.Empty(t, keyPEM)
+				return
+			}
 			require.NoError(t, err, "IssueCertificate")
 
 			// Verify certificate and key are valid PEM

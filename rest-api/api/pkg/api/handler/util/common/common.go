@@ -200,7 +200,7 @@ func GetInstanceFromIDString(ctx context.Context, tx *cdb.Tx, instanceID string,
 	if err != nil {
 		return nil, ErrInvalidID
 	}
-	return cdbm.NewInstanceDAO(dbSession).GetByID(ctx, tx, instanceid, nil)
+	return cdbm.NewInstanceDAO(dbSession).GetByID(ctx, tx, instanceid, nil, false)
 }
 
 // GetVpcFromIDString gets the vpc DB model from the id string

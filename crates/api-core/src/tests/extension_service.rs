@@ -5383,6 +5383,19 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
     assert!(deleting[0].active_versions.is_empty());
     assert!(deleting[0].latest_version_info.is_none());
 
+    // The inventory ID pass must retain everything still visible in exact snapshots.
+    let listed = env
+        .api
+        .find_dpu_extension_service_ids(Request::new(rpc::DpuExtensionServiceSearchFilter {
+            service_type: Some(rpc::DpuExtensionServiceType::DpfHelmChart.into()),
+            name: Some("DELETE-DPF-SERVICE".to_string()),
+            tenant_organization_id: Some("best_org".to_string()),
+        }))
+        .await?
+        .into_inner()
+        .service_ids;
+    assert_eq!(listed, vec![service_id.to_string()]);
+
     let recreate_while_deleting = env
         .api
         .create_dpu_extension_service(Request::new(rpc::CreateDpuExtensionServiceRequest {
@@ -5458,6 +5471,15 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
             if reason == "DPF DPUService finalization is in progress; retrying"
     ));
     txn.commit().await?;
+    let listed = env
+        .api
+        .find_dpu_extension_service_ids(Request::new(
+            rpc::DpuExtensionServiceSearchFilter::default(),
+        ))
+        .await?
+        .into_inner()
+        .service_ids;
+    assert_eq!(listed, vec![service_id.to_string()]);
 
     // Confirmed absence lets the controller commit Deleted; reload the row before proving the
     // reserved service name can be reused.
@@ -5495,6 +5517,15 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
         .into_inner()
         .services;
     assert!(terminal.is_empty());
+    let listed = env
+        .api
+        .find_dpu_extension_service_ids(Request::new(
+            rpc::DpuExtensionServiceSearchFilter::default(),
+        ))
+        .await?
+        .into_inner()
+        .service_ids;
+    assert!(listed.is_empty());
 
     // Only completed DPF deletion releases the name for a new registration.
     let recreated = env

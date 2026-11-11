@@ -17,6 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::time::Duration;
 
 use ::rpc::common::SystemPowerControl;
 use ::rpc::forge::{self as rpc};
@@ -41,7 +42,7 @@ use component_manager::power_shelf_manager::{
     PowerShelfEndpoint, PowerShelfManager, PowerShelfVendor,
 };
 use component_manager::types::{ComponentCredentials, FirmwareUpdateOptions};
-use db::{self, WithTransaction};
+use db::{self, DbSessionGuard, WithTransaction};
 use futures_util::FutureExt;
 use mac_address::MacAddress;
 use model::component_manager::{
@@ -64,16 +65,17 @@ use crate::handlers::firmware::load_desired_firmware_version_entries;
 
 #[cfg(test)]
 mod credentials_tests;
-#[allow(
-    dead_code,
-    reason = "Staged for the passive handler in https://github.com/dsx-ai-factory/infra-controller/issues/8633"
-)]
-mod firmware_details;
+pub(crate) mod firmware_details;
 pub(crate) mod power_details;
 
 const MACHINE_POWER_OVERRIDE_SOURCE: &str = "component_power_control";
 const MACHINE_POWER_OVERRIDE_MESSAGE: &str = "Compute-Tray component power control in progress";
 const UNTRACKED_SWITCH_FIRMWARE_ERROR: &str = "no firmware job tracked for this switch";
+
+// Cap each expected-inventory statement at five seconds, preserving a shorter
+// operator limit. This PostgreSQL cap applies after snapshot setup; it does not
+// bound connection acquisition, setup or the total helper duration.
+const EXPECTED_CREDENTIAL_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn parse_component_credentials(
     overrides: Option<rpc::ComponentCredentialOverrides>,
@@ -1686,8 +1688,9 @@ struct SwitchEndpoints {
     unresolved: Vec<UnresolvedDevice<SwitchId>>,
 }
 
-// Only direct-dispatch handlers use this fallback. State controllers require
-// credentials already configured in Vault during ingestion/rotation.
+// Direct dispatch and passive component reads may fall back to expected
+// inventory. State-controller writers still require credentials in Vault from
+// ingestion/rotation; a successful passive read does not admit an update.
 async fn fetch_credentials(
     api: &Api,
     component: RackComponent,
@@ -1700,7 +1703,7 @@ async fn fetch_credentials(
             tracing::info!(
                 rack_component = ?component,
                 management_mac_address = %bmc_mac,
-                "using expected inventory credentials for direct dispatch because Vault credentials are absent"
+                "using expected inventory credentials because Vault credentials are absent"
             );
             Ok(credentials)
         }
@@ -1729,6 +1732,15 @@ async fn fetch_vault_credentials(
     })
 }
 
+/// `fetch_expected_credentials` shares the statement cap across passive and
+/// direct-dispatch callers. Passive readers wrap credential resolution in their
+/// own deadlines, including acquisition and setup. Legacy direct-dispatch callers
+/// rely on the pool's configured acquisition timeout for that wait; this helper
+/// adds no overall deadline.
+///
+/// Dropping the future discards its connection and releases local pool capacity.
+/// The abandoned PostgreSQL session can outlive that release: the statement cap
+/// and eventual server/socket cleanup are separate from local cancellation.
 async fn fetch_expected_credentials(
     component: RackComponent,
     pool: &sqlx::PgPool,
@@ -1739,26 +1751,26 @@ async fn fetch_expected_credentials(
             "failed to fetch expected credentials for {component:?} at {bmc_mac}: {e}"
         ))
     };
-    let mut conn = pool
-        .acquire()
+    let mut connection = DbSessionGuard::acquire(pool).await.map_err(map_error)?;
+    let mut txn = connection
+        .begin_read_only_snapshot(EXPECTED_CREDENTIAL_STATEMENT_TIMEOUT)
         .await
-        .map_err(db::DatabaseError::acquire)
         .map_err(map_error)?;
     let credentials = match component {
         RackComponent::ComputeBmc => {
-            db::expected_machine::find_by_bmc_mac_address(&mut *conn, bmc_mac)
+            db::expected_machine::find_by_bmc_mac_address(txn.as_pgconn(), bmc_mac)
                 .await
                 .map(|row| {
                     row.map(|row| Credentials::new(row.data.bmc_username, row.data.bmc_password))
                 })
         }
         RackComponent::SwitchBmc => {
-            db::expected_switch::find_by_bmc_mac_address(&mut conn, bmc_mac)
+            db::expected_switch::find_by_bmc_mac_address(txn.as_pgconn(), bmc_mac)
                 .await
                 .map(|row| row.map(|row| Credentials::new(row.bmc_username, row.bmc_password)))
         }
         RackComponent::SwitchNvos => {
-            db::expected_switch::find_by_bmc_mac_address(&mut conn, bmc_mac)
+            db::expected_switch::find_by_bmc_mac_address(txn.as_pgconn(), bmc_mac)
                 .await
                 .map(|row| {
                     row.and_then(|row| {
@@ -1769,12 +1781,16 @@ async fn fetch_expected_credentials(
                 })
         }
         RackComponent::PowerShelfPmc => {
-            db::expected_power_shelf::find_by_bmc_mac_address(&mut conn, bmc_mac)
+            db::expected_power_shelf::find_by_bmc_mac_address(txn.as_pgconn(), bmc_mac)
                 .await
                 .map(|row| row.map(|row| Credentials::new(row.bmc_username, row.bmc_password)))
         }
     };
-    credentials.map_err(map_error)?.ok_or_else(|| {
+    let credentials = credentials.map_err(map_error)?;
+    txn.commit().await.map_err(map_error)?;
+    connection.return_to_pool();
+    // An absent row is a successful read and must also return its healthy session.
+    credentials.ok_or_else(|| {
         ComponentManagerError::NotFound(format!(
             "no credentials found for {component:?} at {bmc_mac}"
         ))

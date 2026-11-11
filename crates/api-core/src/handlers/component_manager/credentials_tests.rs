@@ -3,10 +3,12 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::CompositeCredentialManager;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
+use db::test_support::postgres::wait_for_blocked_query;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
 use model::expected_power_shelf::ExpectedPowerShelf;
 use model::expected_switch::ExpectedSwitch;
@@ -242,6 +244,73 @@ async fn direct_dispatch_credentials_require_both_expected_nvos_fields(pool: sql
             Err(ComponentManagerError::NotFound(_))
         ));
     }
+}
+
+/// Expected-credential fallback must release its local pool slot when the caller
+/// drops a blocked read, without waiting for the server statement cap or lock.
+#[crate::sqlx_test]
+async fn expected_credentials_cancellation_releases_pool_capacity(
+    pool: sqlx::PgPool,
+) -> eyre::Result<()> {
+    let reader_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await?;
+    let (configured_timeout, reader_pid): (String, i32) =
+        sqlx::query_as("SELECT set_config('statement_timeout', '0', false), pg_backend_pid()")
+            .fetch_one(&reader_pool)
+            .await?;
+    assert_eq!(configured_timeout, "0");
+    let mac = MacAddress::new([2, 0, 0, 0, 0, 9]);
+
+    // Missing credentials are a successful query, so the helper must commit and
+    // return this healthy session before mapping the absence to `NotFound`.
+    let missing = fetch_expected_credentials(RackComponent::SwitchBmc, &reader_pool, mac).await;
+
+    assert!(matches!(missing, Err(ComponentManagerError::NotFound(_))));
+    let reused_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&reader_pool)
+        .await?;
+    assert_eq!(reused_pid, reader_pid);
+
+    let mut blocker = pool.begin().await?;
+    sqlx::query("LOCK TABLE expected_switches IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await?;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+    let mut read = Box::pin(fetch_expected_credentials(
+        RackComponent::SwitchBmc,
+        &reader_pool,
+        mac,
+    ));
+    let blocked_pid = tokio::select! {
+        result = tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_for_blocked_query(&pool, blocker_pid, "FROM expected_switches"),
+        ) => result.expect("expected-credential query must reach the held lock"),
+        result = &mut read => panic!("credential read finished before blocking: {result:?}"),
+    };
+    assert_eq!(blocked_pid, reader_pid);
+
+    drop(read);
+
+    // Check local capacity before any async cleanup can run, then borrow again
+    // while the table remains locked. Unlocking first would hide blocked cleanup.
+    assert_eq!(reader_pool.size(), 0);
+    let recovered = tokio::time::timeout(
+        Duration::from_secs(2),
+        sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&reader_pool),
+    )
+    .await;
+    blocker.rollback().await?;
+    reader_pool.close().await;
+    assert_eq!(
+        recovered.expect("cancelled read must free its local pool slot")?,
+        1
+    );
+    Ok(())
 }
 
 fn pair(username: &str) -> rpc::UsernamePassword {
