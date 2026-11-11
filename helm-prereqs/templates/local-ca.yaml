@@ -2,6 +2,9 @@
 {{- if or .Values.externalSecrets.enabled .Values.certManager.siteRoot.create }}
 {{- fail "certManager.localCA requires externalSecrets.enabled=false and certManager.siteRoot.create=false" }}
 {{- end }}
+{{- if and (not .Values.vault.enabled) .Values.certManager.siteIssuer.create }}
+{{- fail "certManager.localCA requires certManager.siteIssuer.create=false when vault.enabled=false" }}
+{{- end }}
 {{- $certificate := required "certManager.localCA.certificate is required" .Values.certManager.localCA.certificate }}
 {{- $key := required "certManager.localCA.privateKey is required" .Values.certManager.localCA.privateKey }}
 # One supplied CA signs local certificates and provides Core's trust bundle.

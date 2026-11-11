@@ -78,3 +78,28 @@ tests:
     asserts:
       - failedTemplate:
           errorMessage: certManager.localCA.privateKey is required
+  - it: rejects the Vault-free site issuer without its site root
+    set:
+      vault.enabled: false
+      certManager.localCA.enabled: true
+      certManager.siteRoot.create: false
+      externalSecrets.enabled: false
+    asserts:
+      - failedTemplate:
+          errorMessage: certManager.localCA requires certManager.siteIssuer.create=false when vault.enabled=false
+  - it: permits supplied local trust without Vault or the site issuer
+    set:
+      vault.enabled: false
+      certManager.siteIssuer.create: false
+      certManager.localCA.enabled: true
+      certManager.localCA.certificate: test-certificate
+      certManager.localCA.privateKey: test-key
+      certManager.siteRoot.create: false
+      externalSecrets.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 3
+      - equal:
+          path: spec.ca.secretName
+          value: nico-local-ca
+        documentIndex: 2
