@@ -11,6 +11,8 @@ on:
     paths:
       - 'devspace.yaml'
       - 'dev/deployment/devspace/**'
+      - 'dev/deployment/setup-kind.sh'
+      - 'dev/deployment/tests/test_setup_kind.py'
       - 'pxe/scout-firmware-scripts/nvidia/dgxh100/cx7/metadata.toml'
       - '.github/workflows/devspace-tests.yml'
       - '.github/ci/test_devspace_workflow.py'
@@ -20,6 +22,8 @@ on:
     paths:
       - 'devspace.yaml'
       - 'dev/deployment/devspace/**'
+      - 'dev/deployment/setup-kind.sh'
+      - 'dev/deployment/tests/test_setup_kind.py'
       - 'pxe/scout-firmware-scripts/nvidia/dgxh100/cx7/metadata.toml'
       - '.github/workflows/devspace-tests.yml'
       - '.github/ci/test_devspace_workflow.py'
@@ -58,3 +62,6 @@ jobs:
 
       - name: Run DevSpace regression tests
         run: /usr/bin/python3 -B -m unittest discover -s dev/deployment/devspace/tests -t dev/deployment/devspace -v
+
+      - name: Run shared kind bootstrap tests
+        run: /usr/bin/python3 -B -m unittest discover -s dev/deployment/tests -p 'test_setup_kind.py'
