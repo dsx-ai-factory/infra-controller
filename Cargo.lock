@@ -1519,6 +1519,7 @@ dependencies = [
  "carbide-resource-pool",
  "carbide-rpc",
  "carbide-secrets",
+ "carbide-site-explorer",
  "carbide-ssh-console",
  "carbide-tls",
  "carbide-utils",

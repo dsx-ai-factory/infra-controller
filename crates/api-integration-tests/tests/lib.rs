@@ -669,6 +669,9 @@ async fn run_integration() -> eyre::Result<()> {
     metric_infos.extend(metrics::parse_metric_infos(
         &carbide_health::test_support::hardware_metric_exposition()?,
     ));
+    metric_infos.extend(metrics::parse_metric_infos(
+        &carbide_site_explorer::test_support::exploration_metric_exposition(),
+    ));
     for name in [
         "carbide_dpu_client_certificate_expiration_time",
         "carbide_dpu_client_certificate_expiration_time_seconds",
