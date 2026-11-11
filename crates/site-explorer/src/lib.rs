@@ -2423,11 +2423,8 @@ impl SiteExplorer {
                 .endpoint_exploration_duration
                 .push(exploration_duration);
             match &result {
-                Ok(report) => {
+                Ok(_) => {
                     metrics.endpoint_explorations_success += 1;
-                    if let Some(e) = &report.remediation_error {
-                        redfish_error = Some(e.clone());
-                    }
                 }
                 Err(e) => {
                     *metrics
@@ -2498,8 +2495,7 @@ impl SiteExplorer {
                                     refreshed_endpoints.insert(address);
                                 }
                                 ConditionalWrite::NotApplied(EndpointReportNotCurrent) => {
-                                    // Skip transient remediation: it would use
-                                    // the rejected report's stale endpoint snapshot.
+                                    // Undo topology changes from the rejected report.
                                     txn.rollback().await?;
                                     continue;
                                 }
@@ -2804,31 +2800,6 @@ impl SiteExplorer {
             %time_since_ipmitool_bmc_reset,
             "Site explorer captured an error"
         );
-
-        // If the endpoint is a DPU, and the error is that the BIOS attributes are coming up as empty for this DPU,
-        // reboot the DPU as our first course of action. This is the official workaround from the DPU redfish team to mitigate empty UEFI attributes
-        // until https://redmine.mellanox.com/issues/3746477 is fixed.
-        //
-        // If this fails, and we continue seeing the BIOS attributes come up as empty after twenty minutes (providing plenty of time)
-        // for the DPU to come back up after the reboot, lets try resetting the BMC to see if it helps.
-
-        if (error.is_dpu_redfish_bios_response_invalid())
-            && time_since_redfish_reboot > reset_rate_limit
-            && self
-                .redfish_power(endpoint, libredfish::SystemPowerControl::ForceRestart)
-                .await
-                .map_err(|err| {
-                    tracing::error!(
-                        bmc_ip_address = %endpoint.address,
-                        error = %err,
-                        "Site Explorer failed to reboot"
-                    )
-                })
-                .is_ok()
-        {
-            metrics.bmc_reboot_count += 1;
-            return;
-        }
 
         if self.is_viking_bmc(endpoint).await && time_since_redfish_reboot > reset_rate_limit {
             match self.clear_nvram(endpoint).await {
