@@ -28800,6 +28800,7 @@ components:
           - PowerOff
           - Reset
           - ChassisReset
+          - AcPowercycle
           - Unknown
         requested:
           type:

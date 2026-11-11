@@ -372,6 +372,7 @@ impl StateControllerIO for MachineStateControllerIO {
                     MachineMaintenanceOperation::PowerOff { .. } => "power_off",
                     MachineMaintenanceOperation::Reset { .. } => "reset",
                     MachineMaintenanceOperation::Reboot => "reboot",
+                    MachineMaintenanceOperation::AcPowercycle { .. } => "acpowercycle",
                     MachineMaintenanceOperation::ChassisReset { .. } => "chassis_reset",
                 };
                 ("maintenance", op)

@@ -2974,8 +2974,25 @@ pub enum MachineMaintenanceOperation {
     },
     /// Gracefully reboot the host without falling back to a forced restart.
     Reboot,
+    /// AC power cycle the compute tray through its configured backend.
+    AcPowercycle {
+        #[serde(default)]
+        state: AcPowercycleState,
+    },
     /// Reset the identified Redfish chassis through the host BMC.
     ChassisReset { chassis_id: String },
+}
+
+/// Durable AC-cycle progress. Once command success is persisted, retry NIC
+/// restoration without another cycle. Vera Rubin hosts use the ingestion sequence.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "lowercase")]
+pub enum AcPowercycleState {
+    /// Determine NIC restoration eligibility, then submit the AC power-cycle command.
+    #[default]
+    PowerCycle,
+    /// Restore onboard NIC configuration after a Vera Rubin AC cycle.
+    DisableOnboardNics { state: DisableOnboardNicsState },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

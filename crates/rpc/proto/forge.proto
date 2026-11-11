@@ -11614,6 +11614,8 @@ enum ComponentPowerActionOperation {
   COMPONENT_POWER_ACTION_OPERATION_RESET = 3;
   // Reset a specific Redfish chassis through a compute tray's BMC.
   COMPONENT_POWER_ACTION_OPERATION_CHASSIS_RESET = 4;
+  // AC power cycle the compute tray.
+  COMPONENT_POWER_ACTION_OPERATION_AC_POWERCYCLE = 5;
 }
 
 // One explicit persisted maintenance operation. There is no stable action ID,

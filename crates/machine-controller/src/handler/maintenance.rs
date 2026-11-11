@@ -29,8 +29,9 @@ use mac_address::MacAddress;
 use model::component_manager::PowerAction;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
-    FailureCause, FailureDetails, FailureSource, HostMachine, MachineMaintenanceOperation,
-    MachineMaintenanceRequest, ManagedHostState, ManagedHostStateSnapshot, StateMachineArea,
+    AcPowercycleState, DisableOnboardNicsState, FailureCause, FailureDetails, FailureSource,
+    HostMachine, MachineMaintenanceOperation, MachineMaintenanceRequest, ManagedHostState,
+    ManagedHostStateSnapshot, StateMachineArea,
 };
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -89,6 +90,9 @@ pub(super) async fn handle_maintenance(
             )
             .await
         }
+        MachineMaintenanceOperation::AcPowercycle { state } => {
+            handle_ac_powercycle(host_machine_id, mh_snapshot, request, ctx, state).await
+        }
         MachineMaintenanceOperation::ChassisReset { chassis_id } => {
             handle_chassis_reset(host_machine_id, mh_snapshot, request, ctx, chassis_id).await
         }
@@ -135,6 +139,55 @@ async fn handle_reset(
     };
     tracing::info!(machine_id = %host_machine_id, graceful, "Machine maintenance: Reset");
     invoke_power_operation(host_machine_id, mh_snapshot, request, ctx, action).await
+}
+
+async fn handle_ac_powercycle(
+    host_machine_id: &HostMachineId,
+    snapshot: &ManagedHostStateSnapshot,
+    request: Option<&MachineMaintenanceRequest>,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    state: &AcPowercycleState,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    use super::onboard_nics;
+    let next = match state {
+        AcPowercycleState::PowerCycle => {
+            return invoke_power_operation(
+                host_machine_id,
+                snapshot,
+                request,
+                ctx,
+                PowerAction::AcPowercycle,
+            )
+            .await;
+        }
+        AcPowercycleState::DisableOnboardNics { state } => {
+            match onboard_nics::advance(state, snapshot, ctx).await? {
+                onboard_nics::Progress::Wait => {
+                    return Ok(StateHandlerOutcome::wait(
+                        onboard_nics::WAIT_REASON.to_string(),
+                    ));
+                }
+                onboard_nics::Progress::Next(state) => {
+                    AcPowercycleState::DisableOnboardNics { state }
+                }
+                onboard_nics::Progress::Complete => {
+                    return finish_maintenance(
+                        host_machine_id,
+                        request,
+                        ctx,
+                        ManagedHostState::Ready,
+                    )
+                    .await;
+                }
+            }
+        }
+    };
+    Ok(StateHandlerOutcome::transition(
+        ManagedHostState::Maintenance {
+            operation: MachineMaintenanceOperation::AcPowercycle { state: next },
+            request: request.cloned(),
+        },
+    ))
 }
 
 async fn handle_chassis_reset(
@@ -222,6 +275,20 @@ async fn invoke_power_operation(
         ))
     })?;
 
+    // An AC Powercycle of Vera Rubin Compute Trays enables all onboard NICs even after we disable
+    // them as part of ingesting the compute trays. Resolve cleanup before issuing the command 
+    // so a failed platform check cannot cause a successfully issued AC cycle to be repeated.
+    let restore_onboard_nics =
+        if action == PowerAction::AcPowercycle && mh_snapshot.has_managed_dpus() {
+            let client = ctx
+                .services
+                .create_redfish_client_from_machine(machine)
+                .await?;
+            super::is_vera_rubin_host(client.as_ref()).await?
+        } else {
+            false
+        };
+
     match component_manager
         .compute_tray
         .power_control(std::slice::from_ref(&endpoint), action)
@@ -237,6 +304,21 @@ async fn invoke_power_operation(
             });
 
             if result.success {
+                if restore_onboard_nics {
+                    return Ok(StateHandlerOutcome::transition(
+                        ManagedHostState::Maintenance {
+                            operation: MachineMaintenanceOperation::AcPowercycle {
+                                state: AcPowercycleState::DisableOnboardNics {
+                                    state: DisableOnboardNicsState::ConfigureOnboardNics {
+                                        enable: true,
+                                    },
+                                },
+                            },
+                            request: request.cloned(),
+                        },
+                    ));
+                }
+
                 tracing::info!(
                     machine_id = %host_machine_id,
                     operation = ?action,
