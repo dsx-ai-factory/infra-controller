@@ -486,7 +486,6 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         machine_setup_status: Some(machine_setup_status),
         secure_boot_status,
         lockdown_status,
-        remediation_error: None,
         ..Default::default()
     })
 }
@@ -567,7 +566,6 @@ async fn build_powershelf_report<B: Bmc>(
         }),
         secure_boot_status: None,
         lockdown_status: None,
-        remediation_error: None,
         ..Default::default()
     })
 }
