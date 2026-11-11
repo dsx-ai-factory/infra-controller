@@ -445,8 +445,10 @@ The Python regression tests live in [tests/](tests/). The existing
 the deployment scripts because CI invokes those paths directly.
 
 The standalone [advisory workflow](../../../.github/workflows/devspace-tests.yml)
-runs the `tests/` package for changes to DevSpace, the PXE metadata fixture, or
-the workflow and its boundary test. Same-repository PRs use `pull_request_target`
+runs the DevSpace `tests/` package and shared kind bootstrap tests for changes to
+DevSpace, shared kind setup and its tests, the shared tool installer, Docker host
+setup or admin helper, the PXE metadata fixture, or the workflow and its boundary
+test. Same-repository PRs use `pull_request_target`
 so the job guard comes from the base workflow, then test the PR head commit.
 Fork PRs run through maintainer-approved `pull-request/<number>` mirror pushes.
 It can also be started manually with `workflow_dispatch`; mirror and manual runs
