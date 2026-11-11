@@ -508,6 +508,10 @@ granularity switch.
 - Check with: `kubectl cluster-info dump | grep service-cluster-ip-range`
 - The `DenyServiceExternalIPs` admission plugin must not be enabled on the
   apiserver
+- kube-proxy in IPVS mode keeps every externalIP and port in an ipset of
+  65,536 entries, so one cluster holds 736 GB200 NVL72 racks at per-pod
+  granularity. Refer to
+  [kube-proxy IPVS Capacity](../../../docs/development/machine-a-tron-deployment.md#kube-proxy-ipvs-capacity)
 
 ### NICo Configuration
 

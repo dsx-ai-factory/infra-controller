@@ -384,6 +384,11 @@ converged at 10.5 h.
 - The Service count is 46, not the BMC count. The 250-rack check that the
   controller-managed Services approach the BMC count does not apply at pod
   granularity.
+- The fleet uses 49,484 of the 65,536 externalIP and port entries that
+  kube-proxy in IPVS mode holds per cluster, so a fleet above 736 racks needs
+  one of the options in
+  [kube-proxy IPVS Capacity](machine-a-tron-deployment.md#kube-proxy-ipvs-capacity).
+  Run its preflight before a larger fleet is installed.
 
 ## What this work delivers
 
@@ -428,6 +433,10 @@ The `mat-k8s-controller` dynamically creates one Service per BMC:
   `[networks.*]` prefix and fails on an overlap or when it cannot determine
   the ServiceCIDR. `SCALE_SERVICE_CIDRS` replaces the cluster lookup, and
   `SCALE_BMC_PREFIXES` adds networks the site config does not declare yet
+- kube-proxy in IPVS mode holds at most 65,536 externalIP and port entries
+  per cluster, 736 GB200 NVL72 racks at per-pod granularity. Refer to
+  [kube-proxy IPVS Capacity](machine-a-tron-deployment.md#kube-proxy-ipvs-capacity)
+  for the arithmetic and the preflight
 - NICo siteConfig needs `allow_insecure_discovery = true` and a network
   covering the BMC IP range
 - Leave `site_explorer.bmc_proxy` unset - NICo dials each BMC IP directly
