@@ -34,7 +34,7 @@ impl Run for Args {
             &ctx.api_client,
         )
         .await
-        .context("run the Domain create command")?;
+        .context("run the domain create command")?;
         Ok(())
     }
 }
