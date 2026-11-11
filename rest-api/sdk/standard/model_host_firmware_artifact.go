@@ -26,7 +26,7 @@ var _ MappedNullable = &HostFirmwareArtifact{}
 type HostFirmwareArtifact struct {
 	// URL from which the firmware artifact can be downloaded.
 	Url string `json:"url"`
-	// Optional SHA-256 digest of the artifact, in lowercase hex.
+	// SHA-256 digest of the artifact, in lowercase hex. Required when the version installs through Scout, which verifies every artifact: a `Drive` version, a version with `upgradeScript`, or a component for which Core packages a Scout script. Optional otherwise.
 	Sha256 *string `json:"sha256,omitempty"`
 }
 

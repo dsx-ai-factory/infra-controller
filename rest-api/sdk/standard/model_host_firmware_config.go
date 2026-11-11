@@ -33,8 +33,8 @@ type HostFirmwareConfig struct {
 	Components []HostFirmwareComponent `json:"components"`
 	// Whether host firmware updates require an explicit start.
 	ExplicitStartNeeded bool `json:"explicitStartNeeded"`
-	// Stored update order for configured components.
-	Ordering []HostFirmwareComponentType `json:"ordering"`
+	// Stored update order for configured components, each drive model as its own entry.
+	Ordering []HostFirmwareComponentRef `json:"ordering"`
 	// When this vendor/model configuration was first created.
 	Created time.Time `json:"created"`
 	// When this vendor/model configuration was last updated.
@@ -47,7 +47,7 @@ type _HostFirmwareConfig HostFirmwareConfig
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewHostFirmwareConfig(vendor string, model string, components []HostFirmwareComponent, explicitStartNeeded bool, ordering []HostFirmwareComponentType, created time.Time, updated time.Time) *HostFirmwareConfig {
+func NewHostFirmwareConfig(vendor string, model string, components []HostFirmwareComponent, explicitStartNeeded bool, ordering []HostFirmwareComponentRef, created time.Time, updated time.Time) *HostFirmwareConfig {
 	this := HostFirmwareConfig{}
 	this.Vendor = vendor
 	this.Model = model
@@ -164,9 +164,9 @@ func (o *HostFirmwareConfig) SetExplicitStartNeeded(v bool) {
 }
 
 // GetOrdering returns the Ordering field value
-func (o *HostFirmwareConfig) GetOrdering() []HostFirmwareComponentType {
+func (o *HostFirmwareConfig) GetOrdering() []HostFirmwareComponentRef {
 	if o == nil {
-		var ret []HostFirmwareComponentType
+		var ret []HostFirmwareComponentRef
 		return ret
 	}
 
@@ -175,7 +175,7 @@ func (o *HostFirmwareConfig) GetOrdering() []HostFirmwareComponentType {
 
 // GetOrderingOk returns a tuple with the Ordering field value
 // and a boolean to check if the value has been set.
-func (o *HostFirmwareConfig) GetOrderingOk() ([]HostFirmwareComponentType, bool) {
+func (o *HostFirmwareConfig) GetOrderingOk() ([]HostFirmwareComponentRef, bool) {
 	if o == nil {
 		return nil, false
 	}
@@ -183,7 +183,7 @@ func (o *HostFirmwareConfig) GetOrderingOk() ([]HostFirmwareComponentType, bool)
 }
 
 // SetOrdering sets field value
-func (o *HostFirmwareConfig) SetOrdering(v []HostFirmwareComponentType) {
+func (o *HostFirmwareConfig) SetOrdering(v []HostFirmwareComponentRef) {
 	o.Ordering = v
 }
 

@@ -15,21 +15,92 @@
  * limitations under the License.
  */
 
-use model::firmware::FirmwareComponentType;
+use model::firmware::{DriveModel, FirmwareComponentType};
 
 use crate as rpc;
 use crate::errors::RpcDataConversionError;
 
-pub fn firmware_component_type_from_rpc(
+/// Longest drive model the API accepts, in bytes. Redfish drive models are
+/// short (NVMe and ATA model fields hold 40 bytes); the limit bounds what an
+/// API request can store; [`DriveModel`] also caps the total it keeps.
+pub const MAX_DRIVE_MODEL_LEN: usize = 128;
+
+/// A component an API request names, with a drive's model kept as text.
+/// Interning a drive model is permanent and draws on a fixed budget (see
+/// [`DriveModel`]), so a reference is resolved against configured drives
+/// rather than interned.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ComponentRef {
+    /// A component type other than a drive.
+    Component(FirmwareComponentType),
+    /// A drive, by its Redfish `Model`.
+    Drive(String),
+}
+
+/// Checks an API component type and drive model without interning the model.
+/// A drive needs `drive_model`, the drive's Redfish `Model` as site explorer
+/// records it, of at most [`MAX_DRIVE_MODEL_LEN`] bytes. Every other type
+/// rejects one.
+pub fn component_ref_from_rpc(
     value: i32,
-) -> Result<FirmwareComponentType, RpcDataConversionError> {
+    drive_model: Option<&str>,
+) -> Result<ComponentRef, RpcDataConversionError> {
     let value = rpc::forge::HostFirmwareComponentType::try_from(value).map_err(|_| {
         RpcDataConversionError::InvalidArgument(format!(
             "unknown host firmware component type value {value}"
         ))
     })?;
 
-    FirmwareComponentType::try_from(value)
+    match (value, drive_model) {
+        (rpc::forge::HostFirmwareComponentType::Drive, Some(model)) => {
+            if model.len() > MAX_DRIVE_MODEL_LEN {
+                return Err(RpcDataConversionError::InvalidArgument(format!(
+                    "drive_model must be at most {MAX_DRIVE_MODEL_LEN} bytes"
+                )));
+            }
+            Ok(ComponentRef::Drive(model.to_string()))
+        }
+        (rpc::forge::HostFirmwareComponentType::Drive, None) => {
+            Err(RpcDataConversionError::InvalidArgument(
+                "drive_model is required for a drive component".to_string(),
+            ))
+        }
+        (_, Some(_)) => Err(RpcDataConversionError::InvalidArgument(format!(
+            "drive_model is only allowed for a drive component, not {}",
+            value.as_str_name()
+        ))),
+        (value, None) => FirmwareComponentType::try_from(value).map(ComponentRef::Component),
+    }
+}
+
+/// Converts an API component type and drive model to a component, interning a
+/// drive's model, which must also be non-empty and without surrounding
+/// whitespace. See [`component_ref_from_rpc`] for the other rules.
+pub fn firmware_component_from_rpc(
+    value: i32,
+    drive_model: Option<&str>,
+) -> Result<FirmwareComponentType, RpcDataConversionError> {
+    match component_ref_from_rpc(value, drive_model)? {
+        ComponentRef::Component(component) => Ok(component),
+        ComponentRef::Drive(model) => DriveModel::new(&model)
+            .map(|model| FirmwareComponentType::Drive { model })
+            .map_err(|error| {
+                RpcDataConversionError::InvalidArgument(format!("drive_model {model:?}: {error}"))
+            }),
+    }
+}
+
+impl From<FirmwareComponentType> for rpc::forge::HostFirmwareComponentRef {
+    fn from(value: FirmwareComponentType) -> Self {
+        let drive_model = match value {
+            FirmwareComponentType::Drive { model } => Some(model.as_str().to_string()),
+            _ => None,
+        };
+        Self {
+            r#type: rpc::forge::HostFirmwareComponentType::from(value) as i32,
+            drive_model,
+        }
+    }
 }
 
 impl TryFrom<rpc::forge::HostFirmwareComponentType> for FirmwareComponentType {
@@ -52,6 +123,11 @@ impl TryFrom<rpc::forge::HostFirmwareComponentType> for FirmwareComponentType {
             }
             rpc::forge::HostFirmwareComponentType::Gpu => Ok(FirmwareComponentType::Gpu),
             rpc::forge::HostFirmwareComponentType::Cx7 => Ok(FirmwareComponentType::Cx7),
+            rpc::forge::HostFirmwareComponentType::Drive => {
+                Err(RpcDataConversionError::InvalidArgument(
+                    "a drive component needs its drive_model".to_string(),
+                ))
+            }
         }
     }
 }
@@ -71,38 +147,63 @@ impl From<FirmwareComponentType> for rpc::forge::HostFirmwareComponentType {
             }
             FirmwareComponentType::Gpu => rpc::forge::HostFirmwareComponentType::Gpu,
             FirmwareComponentType::Cx7 => rpc::forge::HostFirmwareComponentType::Cx7,
-            // The API has no drive component types yet.
-            FirmwareComponentType::Drive { .. } | FirmwareComponentType::Unknown => {
-                rpc::forge::HostFirmwareComponentType::Unspecified
-            }
+            FirmwareComponentType::Drive { .. } => rpc::forge::HostFirmwareComponentType::Drive,
+            FirmwareComponentType::Unknown => rpc::forge::HostFirmwareComponentType::Unspecified,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::scenarios;
+    use rpc::forge::HostFirmwareComponentType as Rpc;
+
     use super::*;
 
+    fn drive(model: &str) -> FirmwareComponentType {
+        FirmwareComponentType::Drive {
+            model: DriveModel::new(model).unwrap(),
+        }
+    }
+
     #[test]
-    fn firmware_component_type_from_rpc_rejects_unspecified_and_unknown_values() {
-        assert_eq!(
-            firmware_component_type_from_rpc(
-                rpc::forge::HostFirmwareComponentType::CombinedBmcUefi as i32
-            )
-            .unwrap(),
-            FirmwareComponentType::CombinedBmcUefi
+    fn firmware_component_from_rpc_requires_drive_model_only_for_drives() {
+        let longest_model = "M".repeat(MAX_DRIVE_MODEL_LEN);
+        let too_long_model = "M".repeat(MAX_DRIVE_MODEL_LEN + 1);
+        scenarios!(
+            run = |(value, model): (i32, Option<&str>)| firmware_component_from_rpc(value, model)
+                .map_err(drop);
+            "component types without a model" {
+                (Rpc::CombinedBmcUefi as i32, None) => Yields(FirmwareComponentType::CombinedBmcUefi),
+                (Rpc::Cx7 as i32, None) => Yields(FirmwareComponentType::Cx7),
+            }
+            "a drive keeps its model exactly" {
+                (Rpc::Drive as i32, Some("Dell Ent NVMe CM6 RI 1.92TB")) =>
+                    Yields(drive("Dell Ent NVMe CM6 RI 1.92TB")),
+                (Rpc::Drive as i32, Some(longest_model.as_str())) => Yields(drive(&longest_model)),
+            }
+            "invalid type or model" {
+                (Rpc::Unspecified as i32, None) => Fails,
+                (i32::MAX, None) => Fails,
+                (Rpc::Drive as i32, None) => Fails,
+                (Rpc::Drive as i32, Some("")) => Fails,
+                (Rpc::Drive as i32, Some(" ST24000NM005H")) => Fails,
+                (Rpc::Drive as i32, Some(too_long_model.as_str())) => Fails,
+                (Rpc::Bmc as i32, Some("ST24000NM005H")) => Fails,
+            }
         );
-        assert_eq!(
-            firmware_component_type_from_rpc(rpc::forge::HostFirmwareComponentType::Cx7 as i32)
-                .unwrap(),
-            FirmwareComponentType::Cx7
-        );
-        assert!(
-            firmware_component_type_from_rpc(
-                rpc::forge::HostFirmwareComponentType::Unspecified as i32
-            )
-            .is_err()
-        );
-        assert!(firmware_component_type_from_rpc(i32::MAX).is_err());
+    }
+
+    #[test]
+    fn component_ref_round_trips_drive_model() {
+        for component in [FirmwareComponentType::Uefi, drive("ST24000NM005H")] {
+            let wire = rpc::forge::HostFirmwareComponentRef::from(component);
+            assert_eq!(
+                firmware_component_from_rpc(wire.r#type, wire.drive_model.as_deref()).unwrap(),
+                component,
+                "{wire:?}"
+            );
+        }
     }
 }

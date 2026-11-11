@@ -547,7 +547,7 @@ service Forge {
   rpc TriggerUefiCredentialRotation(UefiCredentialRotationRequest) returns (google.protobuf.Empty);
   // Operator "force-converge this host's NIC lockdown keys now" escape hatch
   // for a single host. This is asynchronous: the handler only persists (Set) or
-  // removes (Clear) a flag maintained per host to determine whether to initiate NIC lockdown key rotation. 
+  // removes (Clear) a flag maintained per host to determine whether to initiate NIC lockdown key rotation.
   // A later machine-controller sweep observes a set flag and facilitates rotation.
   rpc TriggerNicLockdownCredentialRotation(NicLockdownCredentialRotationRequest) returns (google.protobuf.Empty);
   // TODO: Remove when manual upgrade feature is removed
@@ -587,7 +587,7 @@ service Forge {
   rpc GetCredentialRotationStatus(CredentialRotationStatusRequest)
       returns (CredentialRotationStatusResult);
 
-  // Get Container registry credentials 
+  // Get Container registry credentials
   rpc GetContainerRegistryCredential(GetContainerRegistryCredentialRequest)
     returns (GetContainerRegistryCredentialResponse);
   rpc SetContainerRegistryCredential(SetContainerRegistryCredentialRequest)
@@ -2586,7 +2586,7 @@ message VpcCreationRequest {
   // type of the tenant.
   // For example, an internal tenant can request internal or external VPCs,
   // but an external tenant can only request external VPCs.
-  optional string routing_profile_type = 17;  
+  optional string routing_profile_type = 17;
 
   // Properties to overlay on the selected named routing profile. Properties
   // left unset inherit from the base profile.
@@ -2863,7 +2863,7 @@ message VpcPeeringCreationRequest {
   common.VpcId peer_vpc_id = 2;
 
   // The desired ID for this VPC peering. If the ID is not provided, a random one will be generated.
-  optional common.VpcPeeringId id = 3; 
+  optional common.VpcPeeringId id = 3;
 }
 
 message VpcPeeringSearchFilter {
@@ -2989,13 +2989,13 @@ message IBPartitionCreationRequest {
   // a random ID.
   // The Partition ID must be unique within the Forge site.
   optional common.IBPartitionId id = 2;
- 
+
   Metadata metadata = 3;
 }
 
 message IBPartitionUpdateRequest {
-  common.IBPartitionId id = 1; 
- 
+  common.IBPartitionId id = 1;
+
   // New IBPartitionConfig to be applied to the IBPartition.
   IBPartitionConfig config = 2;
 
@@ -7367,7 +7367,7 @@ message UpdateTenantRequest {
   optional string if_version_match = 3;
 
   reserved 4;
-  
+
   // Core treats omission as a replacement with no profile, not patch-preserve behavior.
   // When FNN is enabled, omission is rejected. When FNN is disabled, omission clears any existing
   // profile, subject to the restriction against profile changes while active FNN VPCs exist.
@@ -8524,7 +8524,7 @@ message RackMaintenanceOnDemandRequest {
 }
 
 message RackMaintenanceOnDemandResponse {
-  // RackMaintenanceOnDemandResponse 
+  // RackMaintenanceOnDemandResponse
 }
 
 // Requests termination of NICo rack maintenance orchestration. The call is
@@ -8972,7 +8972,7 @@ message InstanceTypeAttributes {
   repeated InstanceTypeMachineCapabilityFilterAttributes desired_capabilities = 1;
 }
 
-// An InstanceType describes a desired set of 
+// An InstanceType describes a desired set of
 // machine capabilities.
 // It's probably easiest to just think of InstanceType
 // as a pool, and the desired capabilities of an InstanceType
@@ -8985,7 +8985,7 @@ message InstanceType {
   string version                                        = 3;
   Metadata metadata                                     = 4;
   optional string created_at                            = 5;
-  optional InstanceTypeAllocationStats allocation_stats = 6;  
+  optional InstanceTypeAllocationStats allocation_stats = 6;
 }
 
 // These match the current set of distinct
@@ -9043,7 +9043,7 @@ message FindInstanceTypeIdsResponse {
 
 message FindInstanceTypesByIdsRequest {
   repeated string instance_type_ids        = 1;
-  
+
   // Used to filter by tenant allocations.
   // In the future, this value would be ignored if the
   // caller is a tenant and the org of the tenant would
@@ -9058,7 +9058,7 @@ message FindInstanceTypesByIdsRequest {
 }
 
 message FindInstanceTypesByIdsResponse {
-  repeated InstanceType instance_types = 1;  
+  repeated InstanceType instance_types = 1;
 }
 
 message DeleteInstanceTypeRequest {
@@ -9725,7 +9725,7 @@ message PowerOptionResponse {
 message ComputeAllocationAttributes {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   string instance_type_id = 1; // The source of the compute resources
-  
+
   // The number of instances for this requested instance type allocated
   // for the tenant.  The total for all allocations of an instance type
   // cannot exceed the number of machines associated with the instance
@@ -9780,7 +9780,7 @@ message FindComputeAllocationIdsResponse {
 // In the future, the handler would automatically filter by the
 // tenant org of the caller.
 message FindComputeAllocationsByIdsRequest {
-  repeated common.ComputeAllocationId ids = 1;   
+  repeated common.ComputeAllocationId ids = 1;
 }
 
 message FindComputeAllocationsByIdsResponse {
@@ -9810,7 +9810,7 @@ message DeleteComputeAllocationResponse {
 
 // For use with the existing InstanceType message
 // to include allocation stats when requested in
-// FindInstanceTypesByIdsRequest 
+// FindInstanceTypesByIdsRequest
 message InstanceTypeAllocationStats {
   option (carbide.codegen.v1.message_derive) = "serde::Deserialize";
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
@@ -9827,7 +9827,7 @@ message InstanceTypeAllocationStats {
   // The number of additional instances that a user can
   // _actually_ create after filtering out all unused
   // machines in bad states
-  uint32 unused_usable   = 4;    
+  uint32 unused_usable   = 4;
 }
 
 message GetRackRequest {
@@ -10399,7 +10399,7 @@ message UpsertHostFirmwareConfigRequest {
   string model = 2;
   repeated UpsertHostFirmwareComponentConfig components = 3;
   optional bool explicit_start_needed = 4;
-  repeated HostFirmwareComponentType ordering = 5;
+  repeated HostFirmwareComponentRef ordering = 5;
 }
 
 message DeleteHostFirmwareConfigRequest {
@@ -10419,12 +10419,25 @@ enum HostFirmwareComponentType {
   HOST_FIRMWARE_COMPONENT_TYPE_COMBINED_BMC_UEFI = 8;
   HOST_FIRMWARE_COMPONENT_TYPE_GPU = 9;
   HOST_FIRMWARE_COMPONENT_TYPE_CX7 = 10;
+  HOST_FIRMWARE_COMPONENT_TYPE_DRIVE = 11;
+}
+
+// One component in an upgrade ordering.
+message HostFirmwareComponentRef {
+  HostFirmwareComponentType type = 1;
+  // The drive's Redfish Drive.Model as site explorer records it: without
+  // surrounding whitespace, at most 128 bytes. Required for
+  // HOST_FIRMWARE_COMPONENT_TYPE_DRIVE and rejected for other types.
+  optional string drive_model = 2;
 }
 
 message UpsertHostFirmwareComponentConfig {
   HostFirmwareComponentType type = 1;
   repeated HostFirmwareVersionConfig firmware = 2;
   optional string preingest_upgrade_when_below = 3;
+  // Required for HOST_FIRMWARE_COMPONENT_TYPE_DRIVE and rejected for other
+  // types. See HostFirmwareComponentRef.drive_model.
+  optional string drive_model = 4;
 }
 
 message HostFirmwareComponentConfigResponse {
@@ -10432,6 +10445,8 @@ message HostFirmwareComponentConfigResponse {
   optional string current_version_reported_as = 2;
   repeated HostFirmwareVersionConfig firmware = 3;
   optional string preingest_upgrade_when_below = 4;
+  // Set only for HOST_FIRMWARE_COMPONENT_TYPE_DRIVE.
+  optional string drive_model = 5;
 }
 
 message HostFirmwareVersionConfig {
@@ -10442,10 +10457,33 @@ message HostFirmwareVersionConfig {
   optional uint32 power_drains_needed = 5;
   bool pre_update_resets = 6;
   optional bool preingestion_exclusive_config = 7;
+  // Script Scout downloads and runs on the host to apply this version. Without
+  // it, NICo uses the script packaged for the vendor, model and component, if
+  // any. A drive version is rejected when it has neither, since drives never
+  // fall back to a BMC upload. An upsert replaces a version as a whole, so
+  // omitting upgrade_script clears a stored one.
+  optional HostFirmwareUpgradeScript upgrade_script = 8;
+}
+
+message HostFirmwareUpgradeScript {
+  // HTTPS URL ending in the script's file name.
+  string url = 1;
+  // Hex SHA-256 of the script, in either case. Stored and returned in
+  // lowercase.
+  string sha256 = 2;
+  // Non-zero limit for running the script.
+  uint32 execution_timeout_seconds = 3;
+  // Non-zero limit, in seconds, for downloading each of the version's
+  // artifacts, applied to each artifact separately. The script itself always
+  // has a fixed 30-second download limit.
+  uint32 artifact_download_timeout_seconds = 4;
 }
 
 message HostFirmwareArtifact {
   string url = 1;
+  // Hex SHA-256 of the artifact. Required when the version installs through
+  // Scout, which verifies every artifact: a drive version, a version with
+  // upgrade_script, or a component with a packaged Scout script.
   optional string sha256 = 2;
 }
 
@@ -10457,7 +10495,8 @@ message HostFirmwareConfigResponse {
   string model = 2;
   repeated HostFirmwareComponentConfigResponse components = 3;
   bool explicit_start_needed = 4;
-  repeated HostFirmwareComponentType ordering = 5;
+  // Upgrade order, each drive model as its own entry.
+  repeated HostFirmwareComponentRef ordering = 5;
   google.protobuf.Timestamp created_at = 6;
   google.protobuf.Timestamp updated_at = 7;
 }
