@@ -60,6 +60,17 @@ fn parse(args: &[&str]) -> Result<Cmd, clap::Error> {
 fn required_arguments_are_validated_before_dispatch() {
     for (args, expected) in [
         (
+            vec![
+                "add",
+                "group-01",
+                "NVLINK_V6",
+                "topology",
+                "--rack",
+                r#"{"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01"}]}"#,
+            ],
+            clap::error::ErrorKind::ValueValidation,
+        ),
+        (
             vec!["update", "group-01"],
             clap::error::ErrorKind::MissingRequiredArgument,
         ),
@@ -107,6 +118,7 @@ fn populated_group() -> forge::ExpectedRackGroup {
             forge::ExpectedRackGroupRack {
                 rack_id: Some("rack-01".parse().unwrap()),
                 members: vec![forge::ExpectedRackGroupMember {
+                    cartridge_index: Some(0),
                     r#type: "Switch".into(),
                     manufacturer: "NVIDIA".into(),
                     id: "switch-01".into(),
@@ -132,7 +144,7 @@ fn populated_group() -> forge::ExpectedRackGroup {
 async fn writes_dispatch_expected_rpc_payloads() {
     let attributes = [
         "--rack",
-        r#"{"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01"}]}"#,
+        r#"{"rack_id":"rack-01","members":[{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01","cartridge_index":0}]}"#,
         "--rack",
         r#"{"rack_id":"rack-02","members":[]}"#,
         "--meta-name",
