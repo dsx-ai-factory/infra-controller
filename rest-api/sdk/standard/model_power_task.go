@@ -35,7 +35,7 @@ type PowerTask struct {
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
 	// Complete recorded selection grouped by type, using external inventory IDs available at read time. Null with targetsError when any external target metadata is unavailable; an empty array with no error means an explicitly empty selection. Groups follow Flow's component-type name order; IDs retain recorded UUID order, including repeated external IDs. IDs are not sorted by their external values or deduplicated across types.
 	Targets []PowerTaskTargetGroup `json:"targets"`
-	// Null when rackId and the complete target selection are available. Missing metadata reports `Unsupported`; missing, empty, or purged inventory identities report `NotLinked`. Malformed metadata reports `InvalidResponse`; lookup failures retain their error category. `LimitExceeded` means the recorded target identifiers alone exceed the proxy response allowance, or external metadata was removed to meet that allowance. Any error makes rackId and targets null, without removing the task or returning a partial selection.
+	// Null when rackId and the complete target selection are available. Missing metadata reports `Unsupported`; missing, empty, or purged inventory identities report `NotLinked`. Malformed metadata reports `InvalidResponse`; lookup failures retain their error category. `LimitExceeded` means the recorded target identifiers alone exceed the proxy response allowance, or the tray endpoint removed external metadata to meet that allowance. The rack endpoint preserves metadata and fails the whole request if replacing nonempty successful waiting context lists with `LimitExceeded` cannot make the response fit. Any error makes rackId and targets null, without removing the task or returning a partial selection.
 	TargetsError NullablePowerReadError `json:"targetsError"`
 	// `Pending` includes Flow `Waiting` and admitted `Pending`; `Running` does not prove hardware dispatch. `Unknown` represents an unrecognized service value.
 	Status string `json:"status"`
@@ -45,7 +45,7 @@ type PowerTask struct {
 	Updated NullableTime `json:"updated"`
 	// Recorded execution start; null until recorded.
 	Started NullableTime `json:"started"`
-	// `Selected` means a recorded target; `RackAffected` means the task selects a shelf in this tray's current rack and can affect this tray without selecting it.
+	// `Selected` means a recorded target; `RackAffected` means the task selects a shelf in this tray's current rack and can affect this tray without selecting it. `Unknown` represents an unrecognized or unspecified service value, including root rack task records; their per-member task references supply relevance.
 	Relevance string `json:"relevance"`
 	// Present for every Flow `Waiting` task, which reports public status `Pending`, and null for every other task. When an older service doesn't supply the context, both lists are empty and `error` is `Unsupported`. Neither list establishes a definitive blocker, queue position or future execution order.
 	WaitingContext NullablePowerTaskWaitingContext `json:"waitingContext"`
