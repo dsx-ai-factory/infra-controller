@@ -178,12 +178,20 @@ async fn host_credential_cleanup_waits_for_resources_and_secret_finalizers() {
         }]})).await;
 
         drained_host(&mut handle).await;
+        let mut versioned_secret = secret(Some(1), "v1");
+        assert!(
+            versioned_secret["metadata"]["labels"]
+                .as_object_mut()
+                .unwrap()
+                .remove(VERSION_LABEL)
+                .is_some()
+        );
         exchange(
             &mut handle,
             "GET",
             SECRETS_PATH,
             200,
-            secret_list(vec![secret(None, "initial"), secret(Some(1), "v1")]),
+            secret_list(vec![secret(None, "initial"), versioned_secret]),
         )
         .await;
         for name in [&initial_name, &versioned_name] {
@@ -221,7 +229,13 @@ async fn host_credential_cleanup_waits_for_resources_and_secret_finalizers() {
 
 #[tokio::test]
 async fn host_credential_cleanup_protects_foreign_shared_and_replaced_secrets() {
-    for scenario in ["foreign", "shared", "missing UID", "delete conflict"] {
+    for scenario in [
+        "foreign",
+        "unrelated name",
+        "shared",
+        "missing UID",
+        "delete conflict",
+    ] {
         let (sdk, mut handle) = fixture();
         let name = bmc_credential_secret_name(DEVICE, None);
         let device_ids = [DEVICE.to_string()];
@@ -231,6 +245,7 @@ async fn host_credential_cleanup_protects_foreign_shared_and_replaced_secrets() 
             let mut stored = secret(None, "password");
             match scenario {
                 "foreign" => stored["metadata"]["labels"][DEVICE_LABEL] = json!("another-device"),
+                "unrelated name" => stored["metadata"]["name"] = json!("unrelated-credential"),
                 "shared" => stored["metadata"]["name"] = json!(SECRET_NAME),
                 "missing UID" => {
                     assert!(
@@ -257,7 +272,7 @@ async fn host_credential_cleanup_protects_foreign_shared_and_replaced_secrets() 
             }
         };
         let result = together(operation, server).await;
-        if scenario == "foreign" {
+        if matches!(scenario, "foreign" | "unrelated name") {
             assert!(result.unwrap());
         } else {
             assert!(result.is_err(), "{scenario}");

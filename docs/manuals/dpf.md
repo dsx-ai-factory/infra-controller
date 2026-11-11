@@ -428,6 +428,12 @@ resources in `dpf-operator-system`. This is a **namespaced Role +
 RoleBinding** scoped to `dpf-operator-system` — cluster-admin is *not*
 required.
 
+This Role trusts NICo to read, list, create, and delete every Secret in the DPF
+namespace, including `bmc-shared-password` and registry credentials. NICo's cleanup
+code limits deletion to Secrets with the matching device label and a generated
+name (`<device-id>-initial` or `<device-id>-v<version>`). These ownership checks
+are enforced by NICo; Kubernetes RBAC grants access throughout the namespace.
+
 <Note>
 On chart-based deployments, this Role/RoleBinding is created by the
 NICo Core chart itself (`nico-api.dpf.rbacCreate=true`, set automatically by `setup.sh`, and the DPF default), with the subject bound to the chart's actual ServiceAccount (`nico-api` in `nico-system` by default).
