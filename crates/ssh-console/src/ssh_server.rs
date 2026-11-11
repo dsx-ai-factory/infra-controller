@@ -210,6 +210,14 @@ pub(crate) struct ServerMetrics {
 }
 
 impl ServerMetrics {
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self::new(
+            &opentelemetry::global::meter("ssh-console-test"),
+            &Config::default(),
+        )
+    }
+
     fn new(meter: &Meter, config: &Config) -> ServerMetrics {
         Self {
             total_clients: meter

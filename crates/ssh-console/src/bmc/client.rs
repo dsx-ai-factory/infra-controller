@@ -16,7 +16,8 @@
  */
 use std::io;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use carbide_uuid::machine::MachineId;
@@ -24,7 +25,7 @@ use chrono::{DateTime, Utc};
 use opentelemetry::KeyValue;
 use russh::ChannelMsg;
 use tokio::net::TcpStream;
-use tokio::sync::{MutexGuard, broadcast, mpsc};
+use tokio::sync::{MutexGuard, Semaphore, broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -54,10 +55,13 @@ pub(super) struct BmcRecoveryAttempted;
 /// Spawn a connection to the given BMC in the background, returning a handle. Connections will
 /// be retried indefinitely, with exponential backoff, until a shutdown is signaled (ie. by dropping
 /// the ClientHandle.)
+///
+/// `probe_permits` bounds how many reachability probes all clients run at once.
 pub(super) fn spawn(
     connection_details: ConnectionDetails,
     config: Arc<Config>,
     metrics: Arc<BmcPoolMetrics>,
+    probe_permits: Arc<Semaphore>,
     cancel_token: CancellationToken,
 ) -> ClientHandle {
     let (cancel_token, drop_guard) = fork_cancel_token(cancel_token);
@@ -101,6 +105,7 @@ pub(super) fn spawn(
         cancel_token,
         to_bmc_msg_rx,
         metrics,
+        probe_permits,
         logger_handle,
     };
 
@@ -115,6 +120,7 @@ pub(super) fn spawn(
         connection_state,
         kind,
         console_log_client,
+        sessions: Arc::new(SessionTracker::new()),
     }
 }
 
@@ -126,6 +132,7 @@ struct BmcClient {
     broadcast_to_frontend_tx: broadcast::Sender<ToFrontendMessage>,
     to_bmc_msg_rx: mpsc::Receiver<ToBmcMessage>,
     metrics: Arc<BmcPoolMetrics>,
+    probe_permits: Arc<Semaphore>,
     logger_handle: Option<console_logger::ConsoleLoggerHandle>,
 }
 
@@ -195,6 +202,7 @@ impl BmcClient {
                 self.connection_details.addr(),
                 self.connection_details.kind(),
                 self.connection_details.machine_id(),
+                &self.probe_permits,
                 self.cancel_token.clone(),
             )
             .await
@@ -334,10 +342,14 @@ impl BmcClient {
 /// ASF Presence Ping works with most hardware vendors BMC and machine-a-tron simulations,
 /// but some BMCs (eg, NVIDIA DGX GB200) ignore it. Running both ICMP and UDP ASF pings in parallel
 /// provides fast detection in all environments.
+///
+/// Each probe holds one of `probe_permits` while it runs, so clients whose BMC is down wait for
+/// a slot instead of each keeping a pending connection open.
 async fn wait_until_host_is_up(
     addr: SocketAddr,
     kind: connection::Kind,
     machine_id: MachineId,
+    probe_permits: &Semaphore,
     cancel_token: CancellationToken,
 ) -> io::Result<()> {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -346,6 +358,10 @@ async fn wait_until_host_is_up(
     loop {
         tokio::select! {
             _ = interval.tick() => {
+                let Some(permit) = cancel_token.run_until_cancelled(probe_permits.acquire()).await else {
+                    break Ok(());
+                };
+                let _permit = permit.expect("probe semaphore is never closed");
                 match kind {
                     connection::Kind::Ssh => {
                         if let Some(Ok(Ok(_))) = cancel_token.run_until_cancelled(tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr))).await {
@@ -532,6 +548,37 @@ pub(super) struct ClientHandle {
     // Read by the pool's observable-gauge callbacks.
     pub(super) connection_state: Arc<AtomicConnectionState>,
     console_log_client: Option<console_logger::ConsoleLogClient>,
+    sessions: Arc<SessionTracker>,
+}
+
+/// Open console sessions on a BMC client, and when the last one ended.
+struct SessionTracker {
+    active: AtomicUsize,
+    last_session_end: Mutex<Instant>,
+}
+
+impl SessionTracker {
+    fn new() -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            last_session_end: Mutex::new(Instant::now()),
+        }
+    }
+
+    fn begin(&self) {
+        self.active.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn end(&self) {
+        *self.last_session_end.lock().expect("lock poisoned") = Instant::now();
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Since when the client has had no console session, or `None` while one is open.
+    fn idle_since(&self) -> Option<Instant> {
+        (self.active.load(Ordering::SeqCst) == 0)
+            .then(|| *self.last_session_end.lock().expect("lock poisoned"))
+    }
 }
 
 impl ShutdownHandle<()> for ClientHandle {
@@ -545,6 +592,11 @@ impl ClientHandle {
         self.console_log_client.clone()
     }
 
+    /// Since when no console session has used this client, or `None` while one is open.
+    pub(super) fn idle_since(&self) -> Option<Instant> {
+        self.sessions.idle_since()
+    }
+
     pub(super) fn subscribe(&self, metrics: Arc<ServerMetrics>) -> BmcConnectionSubscription {
         tracing::debug!("new bmc subscription");
         metrics.total_clients.add(1, &[]);
@@ -552,6 +604,7 @@ impl ClientHandle {
             1,
             &[KeyValue::new("machine_id", self.machine_id.to_string())],
         );
+        self.sessions.begin();
 
         BmcConnectionSubscription {
             machine_id: self.machine_id,
@@ -559,6 +612,7 @@ impl ClientHandle {
             to_bmc_msg_tx: self.to_bmc_msg_tx.clone(),
             metrics,
             kind: self.kind,
+            sessions: self.sessions.clone(),
         }
     }
 }
@@ -573,6 +627,7 @@ pub(crate) struct BmcConnectionSubscription {
     // Not pub, to make sure we go through ClientHandle::subscribe() to build, so we get the
     // right metrics
     metrics: Arc<ServerMetrics>,
+    sessions: Arc<SessionTracker>,
 }
 
 impl Drop for BmcConnectionSubscription {
@@ -584,6 +639,7 @@ impl Drop for BmcConnectionSubscription {
             -1,
             &[KeyValue::new("machine_id", self.machine_id.to_string())],
         );
+        self.sessions.end();
     }
 }
 
@@ -742,10 +798,12 @@ mod tests {
             }))
         };
         let cancel_token = CancellationToken::new();
+        let probe_permits = Arc::new(Semaphore::new(1));
         let handle = spawn(
             connection_details(listener.local_addr().expect("BMC listener address")),
             config.clone(),
             metrics.clone(),
+            probe_permits.clone(),
             cancel_token.clone(),
         );
 
@@ -778,6 +836,7 @@ mod tests {
             connection_details(addr),
             config.clone(),
             metrics.clone(),
+            probe_permits.clone(),
             cancel_token.clone(),
         );
         let mut messages = handle.broadcast_to_frontend_tx.subscribe();
@@ -791,7 +850,13 @@ mod tests {
         handle.shutdown_and_wait().await;
         assert_recovery_metrics(&state, machine_id, 2.0, Some(0.0));
 
-        let handle = spawn(connection_details(addr), config, metrics, cancel_token);
+        let handle = spawn(
+            connection_details(addr),
+            config,
+            metrics,
+            probe_permits,
+            cancel_token,
+        );
         let mut messages = handle.broadcast_to_frontend_tx.subscribe();
         assert!(matches!(
             next_connection_change(&mut messages).await,
@@ -814,6 +879,58 @@ mod tests {
         handle.shutdown_and_wait().await;
         assert_recovery_metrics(&state, machine_id, 3.0, Some(1.0));
         assert_recovery_metrics(&other_state, machine_id, 0.0, None);
+    }
+
+    #[tokio::test]
+    async fn reachability_probe_waits_for_a_probe_permit() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind BMC listener");
+        let addr = listener.local_addr().expect("BMC listener address");
+        let probe_permits = Arc::new(Semaphore::new(1));
+        let held = probe_permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("take the only probe permit");
+        let config = Arc::new(Config {
+            console_logging_enabled: false,
+            ..Default::default()
+        });
+        let state = MetricsState::new();
+        let handle = spawn(
+            ConnectionDetails::Ssh(Arc::new(ssh::ConnectionDetails {
+                machine_id: MachineId::new(MachineIdSource::Tpm, [1; 32], MachineType::Host),
+                addr,
+                user: "test".to_string(),
+                password: "test".to_string(),
+                ssh_key_path: None,
+                bmc_vendor: SshBmcVendor::Dell,
+            })),
+            config,
+            Arc::new(BmcPoolMetrics::for_test(
+                &state.meter,
+                state.instrumentation.clone(),
+            )),
+            probe_permits,
+            CancellationToken::new(),
+        );
+
+        // The client's first probe is due immediately, but no connection may reach the BMC while
+        // the only permit is held elsewhere.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "probe ran without a permit"
+        );
+
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("probe after the permit was released")
+            .expect("accept probe");
+        handle.shutdown_and_wait().await;
     }
 
     #[derive(Debug)]

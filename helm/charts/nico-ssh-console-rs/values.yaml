@@ -117,6 +117,26 @@ sshConsole:
   opensshCertificateCaFingerprints: []
   ## Role that must appear in the certificate key_id `roles=` field.
   adminCertificateRole: ""
+  ## BMC connection pool. Each setting is written into the packaged config.toml
+  ## only when set; unset keeps the binary default noted below and leaves the
+  ## rendered file unchanged. Ignored when configFiles.config supplies a
+  ## complete config; set the matching TOML keys there instead.
+  bmcPool:
+    ## Upper bound on BMC connections held open at once: standing connections
+    ## kept for console logging plus connections opened on demand for console
+    ## sessions. Binary default 16384, which keeps a full pool within three
+    ## quarters of a 65536 fileDescriptorLimit at about three descriptors per
+    ## connection. Raise it only together with fileDescriptorLimit and the
+    ## runtime hard limit. Machines beyond the bound connect on demand.
+    ## TOML key: max_bmc_connections.
+    maxConnections: null
+    ## How long an on-demand connection stays open after its last console
+    ## session ends, for example "600s". Binary default 600s.
+    ## TOML key: on_demand_bmc_idle_timeout.
+    onDemandIdleTimeout: ""
+    ## BMC reachability probes in flight at once. Binary default 512.
+    ## TOML key: max_concurrent_bmc_probes.
+    maxConcurrentProbes: null
 
 # Config files - can be overridden
 configFiles:
