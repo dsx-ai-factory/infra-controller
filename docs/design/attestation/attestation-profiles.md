@@ -329,6 +329,10 @@ list attesters before collecting.
 
 ## 5 Resolving the class and scheduling
 
+The flow below applies to lifecycle triggers and manual triggers without
+`--attester-id-regex`. A manual regex override replaces profile selection for
+one request; see [trigger selection](spdm-jobs.md#start-a-run-trigger).
+
 1. Check `spdm_enabled`. If false, stop.
 2. Resolve the machine to its BMC address from `machine_interfaces`, as the
   existing worker does.
@@ -691,8 +695,8 @@ error: generic error: removing the 'any' fallback leaves every hardware class
        confirm
 ```
 
-`attestation spdm trigger` prints what §5.3 decided for the machine: the
-outcome, the hardware class resolved for it, and the profile version that
+Without a regex override, `attestation spdm trigger` prints what §5.3 decided for
+the machine: the outcome, the hardware class resolved for it, and the profile version that
 applied. A trigger that schedules nothing still succeeds, so without the outcome
 its response cannot be told from one that scheduled work.
 

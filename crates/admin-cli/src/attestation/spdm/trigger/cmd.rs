@@ -16,6 +16,7 @@
  */
 
 use ::rpc::forge::{SpdmMachineAttestationTriggerRequest, SpdmSchedulingOutcome};
+use eyre::Context;
 
 use crate::attestation::spdm::trigger::Args;
 use crate::errors::CarbideCliResult;
@@ -38,7 +39,7 @@ fn outcome(outcome: i32) -> &'static str {
             "nothing scheduled: the BMC offered nothing eligible"
         }
         Ok(SpdmSchedulingOutcome::PolicyMatchedNothing) => {
-            "nothing scheduled: the profile's requirement went unsatisfied"
+            "nothing scheduled: the selection matched no eligible attester"
         }
         Ok(SpdmSchedulingOutcome::ClassNotRecorded) => {
             "nothing scheduled: no hardware class recorded and no any profile; \
@@ -59,8 +60,12 @@ pub(super) async fn trigger(args: Args, api_client: &ApiClient) -> CarbideCliRes
         .trigger_machine_attestation(SpdmMachineAttestationTriggerRequest {
             machine_id: Some(args.machine_id),
             redfish_timeout_secs: args.redfish_timeout_secs,
+            attester_id_regex: args
+                .attester_id_regex
+                .map(|regex| regex.as_str().to_string()),
         })
-        .await?;
+        .await
+        .context("trigger SPDM attestation")?;
 
     println!(
         "Attestation triggered for machine {}",
@@ -69,14 +74,21 @@ pub(super) async fn trigger(args: Args, api_client: &ApiClient) -> CarbideCliRes
             .unwrap_or("No MachineId returned".to_string())
     );
     println!("  outcome:        {}", outcome(res.outcome));
+    // Report the server's applied selector, rather than inferring it from the request.
+    if let Some(pattern) = &res.attester_id_regex {
+        println!("  selection:      manual override ({pattern})");
+    }
     println!("  devices:        {}", res.devices_under_attestation);
+    if !res.attester_ids.is_empty() {
+        println!("  attester IDs:   {}", res.attester_ids.join(", "));
+    }
     println!(
         "  job ID:         {}",
         res.job_id
             .map(|id| id.value)
             .unwrap_or_else(|| "none".to_string())
     );
-    // Empty when exploration has recorded no class, which is itself an outcome.
+    // Exploration may not have recorded a hardware class for this BMC.
     println!(
         "  hardware class: {}",
         if res.resolved_hardware_class.is_empty() {

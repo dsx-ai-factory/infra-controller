@@ -17,14 +17,23 @@
 
 use carbide_uuid::machine::MachineId;
 use clap::Parser;
+use regex::Regex;
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = "\
 EXAMPLES:
 
 Trigger SPDM attestation for a machine with a 60-second Redfish timeout:
-    $ nico-admin-cli attestation spdm trigger 12345678-1234-5678-90ab-cdef01234567 \
+    $ nico-admin-cli attestation spdm trigger fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg \
     --redfish-timeout-secs 60
+
+Attest eligible GPUs, overriding the machine's profile selection:
+    $ nico-admin-cli attestation spdm trigger fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg \
+    --redfish-timeout-secs 60 --attester-id-regex 'GPU_'
+
+Attest exactly one reported attester ID:
+    $ nico-admin-cli attestation spdm trigger fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg \
+    --redfish-timeout-secs 60 --attester-id-regex '^HGX_IRoT_GPU_0$'
 
 ")]
 pub(crate) struct Args {
@@ -35,4 +44,27 @@ pub(crate) struct Args {
         help = "Timeout in seconds for Redfish operations while triggering attestation (passed to carbide-api)"
     )]
     pub(super) redfish_timeout_secs: u32,
+    #[clap(
+        long,
+        value_name = "REGEX",
+        value_parser = parse_attester_id_regex,
+        help = "Override profile selection with a regex against reported attester IDs",
+        long_help = "Override profile selection, including mode NONE or a missing profile, for this request only. \
+                     Uses Rust regex syntax; matching is case-sensitive by default and searches within each \
+                     reported attester ID unless anchored with ^ and $. Device eligibility checks and \
+                     site-wide SPDM enablement still apply. Empty or invalid patterns are rejected. \
+                     If no eligible attester matches, no job is created. \
+                     Omit this option to use the profile for this machine."
+    )]
+    pub(super) attester_id_regex: Option<Regex>,
+}
+
+fn parse_attester_id_regex(pattern: &str) -> Result<Regex, String> {
+    // Empty regexes match every ID, so require an explicit pattern such as .* for that intent.
+    if pattern.is_empty() {
+        return Err("attester ID regex must not be empty".to_string());
+    }
+
+    // Parse here so invalid invocations retain Clap's usage output and exit status.
+    Regex::new(pattern).map_err(|error| format!("invalid attester ID regex: {error}"))
 }
