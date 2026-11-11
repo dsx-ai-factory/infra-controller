@@ -703,23 +703,25 @@ service Forge {
   // Delete all expected racks in site
   rpc DeleteAllExpectedRacks(google.protobuf.Empty) returns (google.protobuf.Empty);
 
-  // Administrator-managed expected NVLink domain inventory
-  // Declare immutable expected membership. This does not configure hardware or validate
-  // physical NVLink connectivity. Unknown/ambiguous members and wrong-group racks are rejected.
-  rpc CreateExpectedNvLinkDomain(CreateExpectedNvLinkDomainRequest) returns (ExpectedNvLinkDomain);
-  // Delete only the declaration and release its MAC claims; no hardware operations occur.
+  // Administrator-managed NVLink domain inventory
+  // Declare immutable membership by rack index, slot index, and component type.
+  // This does not configure hardware, resolve positions against RackGroup members,
+  // or validate physical NVLink connectivity. A missing RackGroup returns NOT_FOUND.
+  // Positions already claimed by another domain return ALREADY_EXISTS.
+  rpc CreateNvLinkDomain(CreateNvLinkDomainRequest) returns (NvLinkDomain);
+  // Delete only the declaration and release its positions; no hardware operations occur.
   // Missing declarations return NOT_FOUND. Observed domains and health reports are untouched.
-  rpc DeleteExpectedNvLinkDomain(ExpectedNvLinkDomainRequest) returns (google.protobuf.Empty);
-  rpc GetExpectedNvLinkDomain(ExpectedNvLinkDomainRequest) returns (ExpectedNvLinkDomain);
-  rpc FindExpectedNvLinkDomainIds(ExpectedNvLinkDomainSearchFilter) returns (ExpectedNvLinkDomainIdList);
-  rpc FindExpectedNvLinkDomainsByIds(ExpectedNvLinkDomainsByIdsRequest) returns (ExpectedNvLinkDomainList);
+  rpc DeleteNvLinkDomain(NvLinkDomainRequest) returns (google.protobuf.Empty);
+  rpc GetNvLinkDomain(NvLinkDomainRequest) returns (NvLinkDomain);
+  rpc FindNvLinkDomainIds(NvLinkDomainSearchFilter) returns (NvLinkDomainIdList);
+  rpc FindNvLinkDomainsByIds(NvLinkDomainsByIdsRequest) returns (NvLinkDomainList);
 
   // Expected Rack Group Management
   rpc AddExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
-  // Fails with FAILED_PRECONDITION if expected NVLink domains reference this group.
+  // Fails with FAILED_PRECONDITION if NVLink domains reference this group.
   rpc DeleteExpectedRackGroup(ExpectedRackGroupRequest) returns (google.protobuf.Empty);
   // Replace the full record, including both lists and metadata.
-  // With expected NVLink domains, racks must remain unchanged.
+  // With NVLink domains, racks must remain unchanged.
   // Topology, protocol, and metadata changes are accepted.
   rpc UpdateExpectedRackGroup(ExpectedRackGroup) returns (google.protobuf.Empty);
   rpc GetExpectedRackGroup(ExpectedRackGroupRequest) returns (ExpectedRackGroup);
@@ -728,9 +730,9 @@ service Forge {
   rpc FindExpectedRackGroupIds(ExpectedRackGroupSearchFilter) returns (ExpectedRackGroupIdList);
   rpc FindExpectedRackGroupsByIds(ExpectedRackGroupsByIdsRequest) returns (ExpectedRackGroupList);
   // Atomically clear existing groups and insert the supplied list; an empty list clears all groups.
-  // Fails with FAILED_PRECONDITION while any expected NVLink domain references a group.
+  // Fails with FAILED_PRECONDITION while any NVLink domain references a group.
   rpc ReplaceAllExpectedRackGroups(ExpectedRackGroupList) returns (google.protobuf.Empty);
-  // Fails with FAILED_PRECONDITION while any expected NVLink domain references a group.
+  // Fails with FAILED_PRECONDITION while any NVLink domain references a group.
   rpc DeleteAllExpectedRackGroups(google.protobuf.Empty) returns (google.protobuf.Empty);
 
   // Perform Attestation Procedure for Measured Boot
@@ -13489,52 +13491,61 @@ message ListMachineAttestationStatusesResponse {
 
 // Administrator-managed desired inventory, separate from an NMX-C observed domain.
 // Membership and attributes are immutable; delete and recreate to change them.
-message ExpectedNvLinkDomain {
+message NvLinkDomain {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
   // Core-generated declaration UUID, not an NMX-C domain UUID.
   common.UUID id = 1;
   common.RackGroupId rack_group_id = 2;
   // Absent when no name was supplied. Names are not unique.
   optional string name = 3;
-  // Canonical BMC MACs sorted by address; every MAC belongs to at most one declaration.
-  repeated string member_bmc_mac_addresses = 4;
+  // Members sorted by rack index, slot index, and component type.
+  repeated NvLinkDomainMember members = 4;
 }
 
-message CreateExpectedNvLinkDomainRequest {
+message NvLinkDomainMember {
+  option (carbide.codegen.v1.message_derive) = "serde::Serialize";
+  // Required zero-based position in the rack group's racks array; zero is valid.
+  optional uint32 rack_index = 1;
+  // Required caller-supplied slot index; zero is valid.
+  optional uint32 slot_index = 2;
+  // Required case-sensitive Core type: Compute or Switch.
+  string component_type = 3;
+}
+
+message CreateNvLinkDomainRequest {
   // Required existing group ID, nonblank and at most 128 characters.
   common.RackGroupId rack_group_id = 1;
   // Optional nonblank name, at most 256 characters. Omission stores NULL.
   optional string name = 2;
-  // Required distinct six-byte BMC MACs. Each must resolve to exactly one expected
-  // machine or switch whose rack is in the group. At least one of each type is required.
-  // Discovery is not required. Order is ignored. Claimed MACs return ALREADY_EXISTS.
-  // Membership records intent; subsequent device inventory changes do not rewrite it.
-  repeated string member_bmc_mac_addresses = 3;
+  // Required nonempty list of distinct positions. RackGroup member matching and
+  // physical topology validation are not performed.
+  // Order is ignored. Positions already claimed by another domain return ALREADY_EXISTS.
+  repeated NvLinkDomainMember members = 3;
 }
 
-message ExpectedNvLinkDomainRequest {
+message NvLinkDomainRequest {
   // Required non-nil declaration UUID.
   common.UUID id = 1;
 }
 
-message ExpectedNvLinkDomainSearchFilter {
+message NvLinkDomainSearchFilter {
   // Optional group filter; omission lists all declaration IDs, sorted by UUID.
   common.RackGroupId rack_group_id = 1;
 }
 
-message ExpectedNvLinkDomainIdList {
+message NvLinkDomainIdList {
   repeated common.UUID ids = 1;
 }
 
-message ExpectedNvLinkDomainsByIdsRequest {
+message NvLinkDomainsByIdsRequest {
   // Nonempty batch of non-nil UUIDs, limited by max_find_by_ids. Missing IDs are
   // omitted and duplicates collapsed; results are sorted by UUID.
   repeated common.UUID ids = 1;
 }
 
-message ExpectedNvLinkDomainList {
+message NvLinkDomainList {
   option (carbide.codegen.v1.message_derive) = "serde::Serialize";
-  repeated ExpectedNvLinkDomain domains = 1;
+  repeated NvLinkDomain domains = 1;
 }
 
 // `InspectResourcePoolsRequest` selects every pool with local inventory or a saved binding.

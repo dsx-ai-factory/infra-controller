@@ -70,7 +70,6 @@ mod dpu;
 mod dpu_remediation;
 mod errors;
 mod expected_machines;
-mod expected_nvlink_domain;
 mod expected_power_shelf;
 mod expected_rack;
 mod expected_rack_group;
@@ -102,6 +101,7 @@ mod network_segment;
 mod nvl_domain;
 mod nvl_logical_partition;
 mod nvl_partition;
+mod nvlink_domain;
 mod nvlink_nmxc_endpoints;
 mod operating_system;
 mod os_image;
@@ -347,7 +347,7 @@ async fn main() -> color_eyre::Result<()> {
         CliCommand::ExpectedPowerShelf(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExpectedRack(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExpectedRackGroup(cmd) => cmd.dispatch(ctx).await?,
-        CliCommand::ExpectedNvlinkDomain(cmd) => cmd.dispatch(ctx).await?,
+        CliCommand::NvlinkDomain(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExpectedSwitch(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::ExtensionService(cmd) => cmd.dispatch(ctx).await?,
         CliCommand::Firmware(cmd) => cmd.dispatch(ctx).await?,
