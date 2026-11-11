@@ -70,6 +70,12 @@ impl HostBiosProfiles {
                 "bios-profile {name} is not defined in named_bios_profiles"
             )));
         };
+        if !matches!(profile.vendor, RedfishVendor::Dell | RedfishVendor::Lenovo) {
+            return Ok(Self::Fallback(format!(
+                "bios-profile {name} is for vendor {}, which does not apply BIOS profiles",
+                profile.vendor
+            )));
+        }
         let vendor = redfish_client
             .get_service_root()
             .await?
@@ -688,14 +694,24 @@ mod tests {
         let attributes =
             HashMap::from([("LogicalProc".to_string(), serde_json::json!("Disabled"))]);
         let mut site_config = MachineStateHandlerSiteConfig::test_default();
-        site_config.named_bios_profiles = HashMap::from([(
-            "gpu-perf".to_string(),
-            NamedBiosProfile {
-                vendor: RedfishVendor::Dell,
-                model: "PowerEdge_XE9680".to_string(),
-                attributes: attributes.clone(),
-            },
-        )]);
+        site_config.named_bios_profiles = HashMap::from([
+            (
+                "gpu-perf".to_string(),
+                NamedBiosProfile {
+                    vendor: RedfishVendor::Dell,
+                    model: "PowerEdge_XE9680".to_string(),
+                    attributes: attributes.clone(),
+                },
+            ),
+            (
+                "hpe-perf".to_string(),
+                NamedBiosProfile {
+                    vendor: RedfishVendor::Hpe,
+                    model: "ProLiant_XD685".to_string(),
+                    attributes: attributes.clone(),
+                },
+            ),
+        ]);
         let named = HostBiosProfiles::Named(HashMap::from([(
             RedfishVendor::Dell,
             HashMap::from([(
@@ -740,6 +756,13 @@ mod tests {
                     input: (Some("gpu-perf"), "Dell", "PowerEdge R760"),
                     expect: fallback(
                         "bios-profile gpu-perf is for model PowerEdge_XE9680 but the host is PowerEdge_R760",
+                    ),
+                },
+                Case {
+                    scenario: "recipe for a vendor whose setup ignores profiles falls back",
+                    input: (Some("hpe-perf"), "HPE", "ProLiant XD685"),
+                    expect: fallback(
+                        "bios-profile hpe-perf is for vendor Hpe, which does not apply BIOS profiles",
                     ),
                 },
             ],
