@@ -22,6 +22,7 @@ use std::sync::atomic::Ordering;
 
 use ::rpc::forge as rpc;
 use carbide_resource_pool::ResourcePoolBackendError;
+use carbide_site_explorer::dpu_asn::PreparedDpuAsn;
 use carbide_site_explorer::dpu_loopback::{PreparedDpuLoopback, acquire_admin_admission};
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::machine::{
@@ -195,7 +196,7 @@ pub(crate) async fn discover_machine(
         caller_machine_id.and_then(|id| PredictedHostMachineId::try_from(id).ok())
     };
 
-    let (dpu_loopback, admin_admission, loopback_intent) = if hardware_info.is_dpu() {
+    let (dpu_loopback, dpu_asn, admin_admission, loopback_intent) = if hardware_info.is_dpu() {
         let mut preflight = api.txn_begin().await?;
         let interface = discovery_interface(
             &mut preflight,
@@ -247,35 +248,57 @@ pub(crate) async fn discover_machine(
         };
         preflight.commit().await?;
         drop(admin_admission);
-        (
-            Some(
-                PreparedDpuLoopback::prepare(
-                    api.pg_pool(),
-                    &api.resource_pool_registry,
-                    &api.common_pools,
-                    stable_machine_id,
-                    reservation.as_ref().and_then(|r| r.loopback_ipv4),
-                    &api.cancel_token,
-                )
-                .await
-                .map_err(CarbideError::from)?,
+        let (loopback, asn) = tokio::join!(
+            PreparedDpuLoopback::prepare(
+                api.pg_pool(),
+                &api.resource_pool_registry,
+                &api.common_pools,
+                stable_machine_id,
+                reservation.as_ref().and_then(|r| r.loopback_ipv4),
+                &api.cancel_token,
             ),
+            PreparedDpuAsn::prepare(
+                api.pg_pool(),
+                &api.resource_pool_registry,
+                &api.common_pools,
+                stable_machine_id,
+                &api.cancel_token,
+            ),
+        );
+        // Both preparations have finished. Clean the successful one before an
+        // error returns here, ahead of the later entity-transaction cleanup.
+        if loopback.is_err()
+            && let Ok(prepared) = &asn
+            && let Err(error) = prepared.cancel(api.pg_pool()).await
+        {
+            tracing::error!(machine_id = %stable_machine_id, error = %error, "Could not save DPU ASN cancellation");
+        }
+        if asn.is_err()
+            && let Ok(prepared) = &loopback
+            && let Err(error) = prepared.cancel(api.pg_pool()).await
+        {
+            tracing::error!(machine_id = %stable_machine_id, error = %error, "Could not save DPU loopback cancellation");
+        }
+        (
+            Some(loopback.map_err(CarbideError::from)?),
+            Some(asn.map_err(CarbideError::from)?),
             None,
             machine_discovery_info
                 .create_machine
                 .then_some((interface.mac_address, reservation)),
         )
     } else {
-        (None, Some(admin_admission), None)
+        (None, None, Some(admin_admission), None)
     };
 
     let result = async {
-        let has_provider_reservation = dpu_loopback
+        let needs_bounded_admission = dpu_loopback
             .as_ref()
-            .is_some_and(PreparedDpuLoopback::has_provider_reservation);
+            .is_some_and(PreparedDpuLoopback::has_provider_reservation)
+            || dpu_asn.as_ref().is_some_and(PreparedDpuAsn::has_provider_reservation);
         let admin_admission = match admin_admission {
             Some(permit) => permit,
-            None => acquire_admin_admission(has_provider_reservation, &api.cancel_token)
+            None => acquire_admin_admission(needs_bounded_admission, &api.cancel_token)
                 .await
                 .map_err(CarbideError::from)?,
         };
@@ -375,6 +398,9 @@ pub(crate) async fn discover_machine(
         if let Some(prepared) = &dpu_loopback {
             prepared.check_identity(&mut txn).await?;
         }
+        if let Some(prepared) = &dpu_asn {
+            prepared.check_identity(&mut txn).await?;
+        }
 
         if !hardware_info.is_dpu()
             && hardware_info.tpm_ek_certificate.is_none()
@@ -441,7 +467,7 @@ pub(crate) async fn discover_machine(
             let db_machine = if machine_discovery_info.create_machine {
                 let machine = db::machine::get_or_create(
                     &mut txn,
-                    Some(&api.common_pools),
+                    Some(db::machine::MachineCreationPools::Ipv6Only(&api.common_pools)),
                     &stable_machine_id,
                     &caller_interface,
                     loopback_reservation.as_ref().and_then(|r| r.loopback_ipv6),
@@ -548,6 +574,12 @@ pub(crate) async fn discover_machine(
                     }
                 }
             }
+            if let Some(prepared) = &dpu_asn
+                && let Err(error) = prepared.attach(&mut txn).await
+            {
+                txn.rollback_or_log("DPU resource attachment failed").await;
+                return Err(CarbideError::from(error).into());
+            }
 
             let host_machine_id = if let Some(host_machine_id) = machine_interface.machine_id {
                 host_machine_id
@@ -581,7 +613,7 @@ pub(crate) async fn discover_machine(
                 let mi_id = machine_interface.id;
                 let proactive_machine = db::machine::get_or_create(
                     &mut txn,
-                    Some(&api.common_pools),
+                    Some(db::machine::MachineCreationPools::All(&api.common_pools)),
                     &predicted_machine_id,
                     &machine_interface,
                     None,
@@ -700,6 +732,10 @@ pub(crate) async fn discover_machine(
         {
             tracing::error!(machine_id = %stable_machine_id, %error, "Could not save unused DPU loopback cancellation");
         }
+        if let Some(prepared) = &dpu_asn
+            && let Err(error) = prepared.cancel(api.pg_pool()).await {
+            tracing::error!(machine_id = %stable_machine_id, error = %error, "Could not save unused DPU ASN cancellation");
+        }
 
         // The reconcile runs in a transaction of its own after this one has
         // committed, so its segment locks never follow a row lock held here. A
@@ -815,6 +851,12 @@ pub(crate) async fn discover_machine(
         && let Err(error) = prepared.cancel(api.pg_pool()).await
     {
         tracing::error!(machine_id = %stable_machine_id, %error, "Could not save DPU loopback cancellation");
+    }
+    if result.is_err()
+        && let Some(prepared) = &dpu_asn
+        && let Err(error) = prepared.cancel(api.pg_pool()).await
+    {
+        tracing::error!(machine_id = %stable_machine_id, error = %error, "Could not save DPU ASN cancellation");
     }
     result
 }

@@ -146,6 +146,28 @@ impl RemotePoolFixture {
         .await
     }
 
+    /// `start_asn` moves only the DPU ASN pool, retaining discovery's networks.
+    pub(in crate::tests) async fn start_asn(database: PgPool) -> eyre::Result<Self> {
+        Self::start_asn_with_policy(database, None).await
+    }
+
+    pub(in crate::tests) async fn start_asn_with_policy(
+        database: PgPool,
+        policy: Option<v1::RouteTargetPolicy>,
+    ) -> eyre::Result<Self> {
+        Self::start_with_values(
+            database,
+            &[RemotePool {
+                name: model::resource_pool::common::FNN_ASN,
+                start: 64_512,
+                auto_assign: true,
+            }],
+            &[64_512, 64_513],
+            policy,
+        )
+        .await
+    }
+
     /// `start_with_typed_values` runs one provider with the requested value
     /// domain and inventory, then binds the fixture's selected pools to it.
     async fn start_with_typed_values(
@@ -157,7 +179,11 @@ impl RemotePoolFixture {
     ) -> eyre::Result<Self> {
         let alias = pools.first().expect("at least one remote pool").name;
         let ipv4 = value_domain == v1::ValueDomain::IpAddress;
-        let overrides = if ipv4 {
+        let overrides = if ipv4
+            || pools
+                .iter()
+                .any(|pool| pool.name == model::resource_pool::common::FNN_ASN)
+        {
             TestEnvOverrides::default()
         } else {
             TestEnvOverrides::no_network_segments()

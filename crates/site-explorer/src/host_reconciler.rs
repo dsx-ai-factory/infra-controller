@@ -38,6 +38,7 @@ use sqlx::{PgConnection, PgPool};
 use tokio_util::sync::CancellationToken;
 
 use crate::boot_interfaces::{initial_selection_source, zero_dpu_primary_mac};
+use crate::dpu_asn::PreparedDpuAsn;
 use crate::dpu_loopback::{PreparedDpuLoopback, acquire_admin_admission};
 use crate::endpoint_exploration_report_ext::EndpointExplorationReportExt;
 use crate::errors::SiteExplorerResult;
@@ -266,22 +267,37 @@ impl HostReconciler {
 
         // Prepare outside the entity transaction, preserving backend selection and
         // DPU lifetime checks for existing hosts as well as new inventory.
-        let preparations = join_all(dpu_ids.iter().map(|dpu_id| {
-            PreparedDpuLoopback::prepare(
-                &self.database_connection,
-                &self.resource_pool_registry,
-                &self.common_pools,
-                (*dpu_id).into(),
-                None,
-                &self.preparation_cancel_token,
+        let preparations = join_all(dpu_ids.iter().map(|dpu_id| async move {
+            tokio::join!(
+                PreparedDpuLoopback::prepare(
+                    &self.database_connection,
+                    &self.resource_pool_registry,
+                    &self.common_pools,
+                    (*dpu_id).into(),
+                    None,
+                    &self.preparation_cancel_token,
+                ),
+                PreparedDpuAsn::prepare(
+                    &self.database_connection,
+                    &self.resource_pool_registry,
+                    &self.common_pools,
+                    (*dpu_id).into(),
+                    &self.preparation_cancel_token,
+                ),
             )
         }))
         .await;
         let mut loopbacks = Vec::with_capacity(preparations.len());
+        let mut asns = Vec::with_capacity(preparations.len());
         let mut preparation_error = None;
-        for preparation in preparations {
-            match preparation {
+        for (loopback, asn) in preparations {
+            match loopback {
                 Ok(prepared) => loopbacks.push(prepared),
+                Err(error) if preparation_error.is_none() => preparation_error = Some(error),
+                Err(_) => {}
+            }
+            match asn {
+                Ok(prepared) => asns.push(prepared),
                 Err(error) if preparation_error.is_none() => preparation_error = Some(error),
                 Err(_) => {}
             }
@@ -290,11 +306,12 @@ impl HostReconciler {
             if let Some(error) = preparation_error {
                 return Err(error.into());
             }
-            let has_provider_reservation = loopbacks
+            let needs_bounded_admission = loopbacks
                 .iter()
-                .any(PreparedDpuLoopback::has_provider_reservation);
+                .any(PreparedDpuLoopback::has_provider_reservation)
+                || asns.iter().any(PreparedDpuAsn::has_provider_reservation);
             let _admission =
-                acquire_admin_admission(has_provider_reservation, &self.preparation_cancel_token)
+                acquire_admin_admission(needs_bounded_admission, &self.preparation_cancel_token)
                     .await?;
             let mut txn = Transaction::begin(&self.database_connection).await?;
             // Provider preparation may outlive the attachment snapshot.
@@ -302,11 +319,14 @@ impl HostReconciler {
                 db::machine::DpuHostAssociations::load(&mut txn, &dpu_ids).await?;
             if current_associations.common_host_machine_id()? != Some(host_machine_id) {
                 return Err(db::DatabaseError::FailedPrecondition(
-                    "DPU host attachment changed during loopback preparation; retry".to_owned(),
+                    "DPU host attachment changed during DPU resource preparation; retry".to_owned(),
                 )
                 .into());
             }
             for prepared in &loopbacks {
+                prepared.check_identity(txn.as_pgconn()).await?;
+            }
+            for prepared in &asns {
                 prepared.check_identity(txn.as_pgconn()).await?;
             }
             for (dpu, dpu_id) in host.dpus.iter().zip(&dpu_ids) {
@@ -323,6 +343,9 @@ impl HostReconciler {
             for prepared in &loopbacks {
                 prepared.attach(&mut txn, false).await?;
             }
+            for prepared in &asns {
+                prepared.attach(&mut txn).await?;
+            }
             txn.commit().await?;
             Ok::<_, crate::errors::SiteExplorerError>(())
         }
@@ -331,6 +354,11 @@ impl HostReconciler {
         for prepared in &loopbacks {
             if let Err(error) = prepared.cancel(&self.database_connection).await {
                 tracing::error!(machine_id = %prepared.machine_id(), %error, "Could not save DPU loopback cancellation");
+            }
+        }
+        for prepared in &asns {
+            if let Err(error) = prepared.cancel(&self.database_connection).await {
+                tracing::error!(machine_id = %prepared.machine_id(), error = %error, "Could not save DPU ASN cancellation");
             }
         }
         result?;

@@ -833,6 +833,24 @@ async fn test_direct_discovery_applies_dpu_loopback_reservation(
         Some(IpAddr::V4(reserved_v4))
     );
     assert_eq!(dpu_machine.network_config.loopback_ip_v6, Some(reserved_v6));
+    let asn = dpu_machine
+        .asn
+        .expect("prepared ASN attaches alongside declared IPv6");
+    let mut txn = env.pool.begin().await?;
+    assert_eq!(
+        env.api
+            .resource_pool_registry
+            .inspect_allocations(
+                &env.api.common_pools.ethernet.pool_fnn_asn,
+                &mut txn,
+                model::resource_pool::OwnerType::Machine,
+                &dpu_machine.id.to_string(),
+                carbide_site_explorer::dpu_asn::DPU_ASN_SLOT,
+            )
+            .await?,
+        vec![carbide_resource_pool::AllocationStatus::Attached { value: asn }],
+    );
+    txn.rollback().await?;
     let interfaces =
         db::machine_interface::find_by_mac_address(&env.pool, dpu.oob_mac_address).await?;
     assert!(
