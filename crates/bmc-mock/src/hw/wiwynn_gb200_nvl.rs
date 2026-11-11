@@ -212,6 +212,7 @@ impl WiwynnGB200Nvl<'_> {
                 manufacturer: Some("NVIDIA".into()),
                 part_number: Some("B81.11810.000D".into()),
                 model: Some("GB200 NVL".into()),
+                serial_number: Some(self.system_serial_number.to_string().into()),
                 sensors: Some(redfish::sensor::generate_chassis_sensors(
                     "Chassis_0",
                     Self::sensor_layout(),
@@ -219,8 +220,18 @@ impl WiwynnGB200Nvl<'_> {
                 leak_detectors: Some(redfish::leak_detector::generate_chassis_leak_detectors(4)),
                 assembly: Some(redfish::assembly::response(
                     "Chassis_0",
-                    "0",
-                    &self.chassis_serial_number,
+                    &[
+                        (
+                            "PDB Chassis FRU Assembly0",
+                            "Titania-Bianca Compute Tray PDB",
+                            &self.chassis_serial_number,
+                        ),
+                        (
+                            "PDB Board FRU Assembly1",
+                            "P5859 B01",
+                            &self.system_serial_number,
+                        ),
+                    ],
                 )),
                 ..redfish::chassis::SingleChassisConfig::defaults()
             }))
