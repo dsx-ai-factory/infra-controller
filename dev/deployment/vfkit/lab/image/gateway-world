@@ -16,3 +16,5 @@ curl
 iproute2
 acpid
 acpid-openrc
+wireguard-tools
+bash

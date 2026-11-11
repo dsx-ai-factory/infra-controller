@@ -16,7 +16,10 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+
+import route64
 
 SOURCE = Path(__file__).resolve().parent / "lab"
 DEFAULT_ROOT = Path.home() / ".nico-lab/gateways"
@@ -164,9 +167,11 @@ class Lab:
         return {**os.environ, "VXLAB_VAR": str(self.root), "ALPINE_VERSION": ALPINE_VERSION,
                 "ALPINE_ARCH": "aarch64", "VXLAB_LAN_MODE": "dual",
                 "VXLAB_UPLINK": config["uplink"],
+                "VXLAB_IPV6_UPLINK": config.get("ipv6_uplink", "native"),
                 "VXLAB_WAN_MAC": config["wan_mac"], "VXLAB_LAN_MAC": config["lan_mac"]}
 
-    def ensure(self, uplink=None, interface=None):
+    def ensure(self, uplink=None, interface=None, route64_config=None):
+        tunnel = route64.configuration(route64_config) if route64_config else None
         config = self.config
         if config:
             for key, value in (("uplink", uplink), ("interface", interface)):
@@ -182,6 +187,28 @@ class Lab:
             config = {"uplink": uplink, "interface": interface,
                       "wan_mac": prefix + ":01", "lan_mac": prefix + ":02"}
             self.config_path.write_text(json.dumps(config, indent=2) + "\n")
+        secret = self.directory / "data/route64.conf"
+        if secret.is_symlink() or secret.parent.is_symlink():
+            raise ValueError("Route64 state must not be a symlink")
+        if tunnel is not None:
+            previous = secret.read_text() if secret.exists() else None
+            if tunnel != previous or config.get("ipv6_uplink", "native") != "route64":
+                self.require_no_clients()
+                if self.pid("gateway"):
+                    raise ValueError("stop the lab before changing its Route64 configuration")
+                secret.parent.mkdir(mode=0o700, exist_ok=True)
+                with tempfile.NamedTemporaryFile(mode="w", dir=secret.parent, delete=False) as stream:
+                    temporary = Path(stream.name)
+                    try:
+                        stream.write(tunnel)
+                        stream.flush()
+                        temporary.replace(secret)
+                    finally:
+                        temporary.unlink(missing_ok=True)
+                config["ipv6_uplink"] = "route64"
+                self.config_path.write_text(json.dumps(config, indent=2) + "\n")
+        if config.get("ipv6_uplink") == "route64" and not secret.is_file():
+            raise ValueError("saved Route64 configuration is missing; supply --lab-route64-config again")
         validate_uplink(config["uplink"], config["interface"])
         if config["uplink"] == "bridged":
             vmnet_run()
@@ -280,12 +307,13 @@ class Lab:
     def verify(self):
         for family in (4, 6):
             try:
-                self.ssh(f"curl -{family} --fail --silent --show-error --connect-timeout 10 "
+                interface = "--interface route64 " if family == 6 and (self.config or {}).get("ipv6_uplink") == "route64" else ""
+                self.ssh(f"curl {interface}-{family} --fail --silent --show-error --connect-timeout 10 "
                          f"--max-time 20 -o /dev/null {shlex.quote(HTTPS_PROBE)}",
                          stdin=subprocess.DEVNULL, timeout=30)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
-                raise ValueError(f"lab gateway IPv{family} HTTPS failed; NAT requires working upstream IPv6. "
-                                 "Use a bridged lab on a suitable interface; no automatic fallback is performed") from error
+                raise ValueError(f"lab gateway IPv{family} HTTPS failed; check the selected native or Route64 uplink. "
+                                 "Native mode requires upstream IPv6; Route64 requires working IPv4 UDP. No automatic fallback is performed") from error
 
     def stop_gateway(self, force=False):
         if not self.pid("gateway"):
