@@ -32,7 +32,7 @@ printf '\nHostKey /etc/ssh/ssh_host_ed25519_key\nPasswordAuthentication no\nPerm
 # The live root account is unlocked; SSH accepts only the injected public key.
 sh /usr/local/lib/vflab/networking-gateway.sh "$X" "$LAB_HOSTNAME" "10.$X.0.1" "fd00:$X::1" "$WAN_MAC" "$LAN_MAC"
 # Register the configured interfaces with OpenRC's net provider before DNS/RA.
-# This starts one dual-stack WAN DHCP client; no preliminary IPv4-only daemon.
+# This starts one WAN DHCP client, IPv4-only when Route64 provides IPv6.
 rc-service networking start
 rc-service sshd start
 if [ "${VXLAB_IPV6_UPLINK:-native}" = route64 ]; then

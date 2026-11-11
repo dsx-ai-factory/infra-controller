@@ -121,8 +121,13 @@ lab ID to return to native IPv6 mode.
 
 IPv4 keeps the ordinary WAN default route and NAT. IPv6 uses `route64` with
 NAT66 for the lab ULA prefix; the Route64 routed `/56` is not assigned to
-tenants by this option. The gateway advertises LAN MTU 1280 and restricts IPv6
-forwarding to the tunnel. It does not fall back to native IPv6. Readiness checks
+tenants by this option. The gateway advertises LAN MTU 1280 through both DHCPv4
+and IPv6 RA to keep forwarded packets within the tunnel's payload limit. The
+WAN retains its DHCP MTU, including with Apple NAT, to carry WireGuard's IPv4
+UDP encapsulation. VPN paths with a smaller outer MTU need separate validation;
+IPv4 fragmentation or blocked provider UDP can prevent tunnel connectivity.
+Unsolicited traffic entering the tunnel cannot access gateway services; replies
+and related ICMPv6 errors are accepted. IPv6 forwarding is restricted to the tunnel. It does not fall back to native IPv6. Readiness checks
 IPv4 HTTPS through WAN and IPv6 HTTPS explicitly through `route64`, including
 after restart. A failed handshake or blocked provider UDP leaves readiness
 failed and retains state for diagnosis. The same tunnel credentials must not
@@ -207,7 +212,8 @@ an absolute `--network-socket` from the bundled switch with its `.control`
 companion; generic vfkit datagram sockets are unsupported; `lab` uses the managed gateway options above.
 The interface and socket options cannot be used with other network modes.
 Direct bridge and external socket modes need working guest IPv4/IPv6 routing;
-NAT mode uses a 1280-byte MTU. Configuration remains fixed after first creation.
+Native NAT mode uses a 1280-byte MTU; see the Route64 section for tunnel MTUs.
+Configuration remains fixed after first creation.
 `--image` accepts a local raw Ubuntu ARM64 EFI disk and requires its matching
 64-digit hexadecimal `--image-sha256`. The canonical path and digest are saved;
 retries reuse them when omitted and reject conflicting values, even if the
@@ -398,8 +404,9 @@ bit-for-bit reproducible.
   advertisements when no usable default has more than 120 seconds remaining.
   It does not fabricate routes, extend expired lifetimes or restart DHCP.
   Logs are under that service tag in the gateway's `/var/log/messages`.
-- **Large transfers stall:** NAT uplinks use a 1280-byte MTU and advertise it to
-  clients; bridged labs advertise 1500. Verify the guest honors DHCP/RA settings
+- **Large transfers stall:** Native NAT uplinks use and advertise MTU 1280;
+  native bridged labs advertise 1500. Route64 advertises 1280 on the LAN and
+  retains the WAN DHCP MTU for encapsulation. Verify the guest honors DHCP/RA settings
   and uses the socketpair supervisor.
 - **Companion socket missing:** restart the lab with the bundled switch, after
   stopping its clients. Do not attach to an older datagram-only switch.

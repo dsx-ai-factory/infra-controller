@@ -112,14 +112,21 @@ if [ "$(wc -l < "$RA_TEST_DIR/sleeps")" -ge 3 ]; then kill -TERM "$PPID"; fi
         with patch.object(builder, "VAR", self.directory), patch.object(builder, "ASSETS", assets), \
                 patch.object(builder, "make_iso"), patch.dict(os.environ, {
                     "VXLAB_WAN_MAC": "02:00:00:00:12:01", "VXLAB_LAN_MAC": "02:00:00:00:12:02",
-                    "VXLAB_LAN_MODE": "dual", "VXLAB_UPLINK": "bridged"}):
+                    "VXLAB_LAN_MODE": "dual", "VXLAB_UPLINK": "bridged",
+                    "VXLAB_IPV6_UPLINK": "route64"}):
             builder.prepare(12)
         with tarfile.open(lab / "gateway.apkovl.tar.gz") as archive:
             for target, name in (("etc/init.d/vflab-ipv6-router", "ipv6-router-service"),
-                                 ("usr/local/lib/vflab/renew-ipv6-router.sh", "renew-ipv6-router.sh")):
+                                 ("usr/local/lib/vflab/renew-ipv6-router.sh", "renew-ipv6-router.sh"),
+                                 ("usr/local/lib/vflab/route64-gateway.sh", "route64-gateway.sh")):
                 self.assertEqual(archive.getmember(target).mode, 0o755)
                 self.assertEqual(archive.extractfile(target).read(), (SCRIPT.parent / name).read_bytes())
-            self.assertIn(b"ndisc6\n", archive.extractfile("etc/apk/world").read())
+            world = archive.extractfile("etc/apk/world").read()
+            for dependency in (b"ndisc6\n", b"wireguard-tools\n", b"bash\n"):
+                self.assertIn(dependency, world)
+            self.assertIn(b"export VXLAB_IPV6_UPLINK=route64\n",
+                          archive.extractfile("etc/vflab/lab.conf").read())
+            self.assertNotIn("etc/wireguard/route64.conf", archive.getnames())
 
     def test_shutdown_reaps_active_probe_and_poll_sleep(self):
         for phase, routes in (("rdisc6", ""), ("sleep", "default via fe80::1 dev wan0")):
