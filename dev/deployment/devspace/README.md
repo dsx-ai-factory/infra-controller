@@ -452,7 +452,8 @@ Fork PRs run through maintainer-approved `pull-request/<number>` mirror pushes.
 It can also be started manually with `workflow_dispatch`; mirror and manual runs
 test the event's commit. Failures remain visible
 but do not feed Core/REST CI gates or artifact publishing. Keep this check out of
-required branch checks. Existing bootstrap and REST shell-test gates are unchanged.
+required branch checks. Existing bootstrap and REST shell-test gates run on
+pre-merge PR mirrors, not post-merge builds.
 
 From the repository root, run:
 
