@@ -1426,8 +1426,7 @@ enum SpdmSchedulingOutcome {
   SPDM_SCHEDULING_OUTCOME_SCHEDULED = 1;
   // The profile's mode is NONE. The BMC is not contacted.
   SPDM_SCHEDULING_OUTCOME_ATTESTATION_DISABLED = 2;
-  // The BMC offered nothing eligible, under a policy that asserted nothing
-  // about what must be there. Points at the hardware, not the profile.
+  // The BMC exposed no eligible attesters for this attempt.
   SPDM_SCHEDULING_OUTCOME_NO_ATTESTERS_FOUND = 3;
   // An operator-authored requirement went unsatisfied.
   SPDM_SCHEDULING_OUTCOME_POLICY_MATCHED_NOTHING = 4;
@@ -1462,6 +1461,11 @@ message SpdmMachineAttestationTriggerResponse {
   optional google.protobuf.Timestamp started_at = 7;
   // Present only when devices were scheduled. Use this ID to get or cancel the job.
   common.UUID job_id = 8;
+  // IDs scheduled in this job, in ascending order. Empty when no job was created.
+  repeated string attester_ids = 9;
+  // Present when this request used a manual regex override instead of a profile.
+  // Echoes the applied pattern, including when it matched no eligible attesters.
+  optional string attester_id_regex = 10;
 }
 
 // Requested effective outcome after BMC evidence collection cleanup.
@@ -1491,6 +1495,15 @@ message SpdmGetAttestationResponse {
 message SpdmMachineAttestationTriggerRequest {
   common.MachineId machine_id = 1;
   uint32 redfish_timeout_secs = 2;
+  // Optional manual override of profile selection, including NONE or a missing
+  // profile. Uses Rust regex syntax against reported ComponentIntegrity IDs;
+  // matching is case-sensitive by default and unanchored unless ^ or $ is used.
+  // Omission uses the machine's profile. Empty or invalid patterns return
+  // INVALID_ARGUMENT before contacting the BMC. Device eligibility checks and
+  // site-wide SPDM enablement still apply. No eligible match creates no job;
+  // the response reports NO_ATTESTERS_FOUND if none were eligible, otherwise
+  // POLICY_MATCHED_NOTHING. The stored profile is never modified.
+  optional string attester_id_regex = 3;
 }
 
 enum SpdmListAttestationRequestSelector {
