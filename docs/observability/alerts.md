@@ -244,9 +244,15 @@ Use `carbide_object_info` to add context (rack, SKU, vendor, model) to alerts:
         (carbide_object_state_sla_seconds)
 )
   * on(object_type, object_id) group_left(rack_id, sku, vendor, model)
-    max by (object_type, object_id, rack_id, sku, vendor, model)
-        (carbide_object_info)
+    topk by (object_type, object_id) (1,
+      max by (object_type, object_id, rack_id, sku, vendor, model)
+          (carbide_object_info)
+    )
 ```
+
+`topk` keeps one info series per object so conflicting replica traits cannot
+break the join. Since info values are all `1`, selection among conflicting
+traits is arbitrary and does not identify the newest traits.
 
 ### Multi-replica considerations
 
