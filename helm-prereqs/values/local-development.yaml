@@ -23,6 +23,8 @@ vault:
 certManager:
   localCA:
     enabled: true
+  siteIssuer:
+    create: false
   siteRoot:
     create: false
   vaultAuthServiceAccount:

@@ -56,7 +56,11 @@ development cluster. Helm stores supplied values in its release Secret.
 generated. The chart creates `nico-local-ca`, `nico-roots` and the namespaced
 `local-ca-issuer`. It rejects `externalSecrets.enabled=true` or
 `certManager.siteRoot.create=true`, which would introduce competing CA/trust
-owners. The profile also disables Vault PKI/bootstrap jobs and the Vault Issuer.
+owners. With `vault.enabled=false`, it also requires
+`certManager.siteIssuer.create=false`: the site issuer would otherwise reference
+the disabled `site-root` Secret. Point consuming certificates at the namespaced
+`local-ca-issuer`. The local profile disables the site issuer, Vault PKI/bootstrap
+jobs and the Vault Issuer.
 It preserves the supplied CA on repeated installs; changing the supplied files
 changes the rendered Secret data and requires coordinating certificate renewal.
 
