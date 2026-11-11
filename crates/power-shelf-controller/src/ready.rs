@@ -145,21 +145,32 @@ pub async fn handle_ready(
             return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
         };
 
+        let txn = if state.rack_firmware_reprovisioning_skip.is_some() {
+            let mut txn = ctx.services.db_pool.begin().await?;
+            if !db_power_shelf::clear_rack_firmware_reprovisioning_skip(
+                txn.as_mut(),
+                *power_shelf_id,
+                req,
+            )
+            .await?
+            {
+                return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
+            }
+            state.rack_firmware_reprovisioning_skip = None;
+            Some(txn)
+        } else {
+            None
+        };
         tracing::info!(
             ?reprovisioning_state,
             "Rack-level reprovisioning requested — entering ReProvisioning"
         );
-        let outcome = StateHandlerOutcome::transition(PowerShelfControllerState::ReProvisioning {
-            reprovisioning_state,
-        });
-        if state.rack_firmware_reprovisioning_skip.is_some() {
-            let mut txn = ctx.services.db_pool.begin().await?;
-            db_power_shelf::clear_rack_firmware_reprovisioning_skip(txn.as_mut(), *power_shelf_id)
-                .await?;
-            state.rack_firmware_reprovisioning_skip = None;
-            return Ok(outcome.with_txn(txn));
-        }
-        return Ok(outcome);
+        return Ok(
+            StateHandlerOutcome::transition(PowerShelfControllerState::ReProvisioning {
+                reprovisioning_state,
+            })
+            .with_txn_opt(txn),
+        );
     }
 
     // Lowest precedence: only converge the PMC credential once the power shelf is

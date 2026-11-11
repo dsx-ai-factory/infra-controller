@@ -249,6 +249,95 @@ async fn test_disabled_reprovisioning_preserves_a_replacement_request(
 }
 
 #[sqlx_test]
+async fn test_stale_enabled_request_preserves_previous_skip(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    for (scenario, replacement_initiator) in [
+        ("cancelled request", None),
+        ("replaced request", Some("rack-replacement")),
+    ] {
+        let TestPowerShelf { id: power_shelf_id } =
+            env.create_power_shelf(power_shelf_config(scenario)).await;
+        let mut txn = pool.begin().await?;
+        park_ready(txn.as_mut(), &power_shelf_id).await;
+        db_power_shelf::set_power_shelf_reprovisioning_requested(
+            txn.as_mut(),
+            power_shelf_id,
+            "rack-skipped",
+            firmware_only_activities(),
+        )
+        .await?;
+        txn.commit().await?;
+        let mut state = load_power_shelf(&pool, &power_shelf_id).await;
+        let mut services = services_without_component_manager(&pool, false);
+        commit_outcome(run_handler(&mut services, &mut state).await).await;
+        let skipped = load_power_shelf(&pool, &power_shelf_id)
+            .await
+            .rack_firmware_reprovisioning_skip
+            .expect("disabled request should record a skip");
+
+        let mut txn = pool.begin().await?;
+        db_power_shelf::set_power_shelf_reprovisioning_requested(
+            txn.as_mut(),
+            power_shelf_id,
+            "rack-next-request",
+            firmware_only_activities(),
+        )
+        .await?;
+        txn.commit().await?;
+        let mut stale_state = load_power_shelf(&pool, &power_shelf_id).await;
+
+        let mut txn = pool.begin().await?;
+        if let Some(initiator) = replacement_initiator {
+            db_power_shelf::set_power_shelf_reprovisioning_requested(
+                txn.as_mut(),
+                power_shelf_id,
+                initiator,
+                firmware_only_activities(),
+            )
+            .await?;
+        } else {
+            assert!(
+                db_power_shelf::clear_ready_power_shelf_reprovisioning_requested(
+                    txn.as_mut(),
+                    power_shelf_id,
+                    "rack-next-request",
+                )
+                .await?
+            );
+        }
+        txn.commit().await?;
+        let current_request = load_power_shelf(&pool, &power_shelf_id)
+            .await
+            .power_shelf_reprovisioning_requested;
+
+        services.rack_firmware_reprovisioning_enabled = true;
+        let outcome = run_handler(&mut services, &mut stale_state).await;
+        assert!(
+            matches!(outcome, StateHandlerOutcome::DoNothing { .. }),
+            "{scenario}: stale request must not enter reprovisioning"
+        );
+        commit_outcome(outcome).await;
+        let state = load_power_shelf(&pool, &power_shelf_id).await;
+        assert_eq!(
+            state.rack_firmware_reprovisioning_skip.as_ref(),
+            Some(&skipped),
+            "{scenario}: stale request must preserve the prior skip"
+        );
+        assert_eq!(
+            state.power_shelf_reprovisioning_requested, current_request,
+            "{scenario}: stale request must not change the current request"
+        );
+        assert!(matches!(
+            state.controller_state.value,
+            PowerShelfControllerState::Ready
+        ));
+    }
+    Ok(())
+}
+
+#[sqlx_test]
 async fn test_ready_enters_waiting_for_rack_firmware_when_flag_enabled(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {

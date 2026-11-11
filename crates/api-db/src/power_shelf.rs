@@ -554,19 +554,11 @@ pub async fn skip_power_shelf_reprovisioning_requested(
     request: &PowerShelfReprovisionRequest,
     skip: &PowerShelfRackReprovisioningSkip,
 ) -> DatabaseResult<bool> {
-    let query =
-        "SELECT power_shelf_reprovisioning_requested FROM power_shelves WHERE id = $1 FOR UPDATE";
-    let current_request = sqlx::query_scalar::<
-        _,
-        Option<sqlx::types::Json<Option<PowerShelfReprovisionRequest>>>,
-    >(query)
-    .bind(power_shelf_id)
-    .fetch_optional(&mut *txn)
-    .await
-    .map_err(|e| DatabaseError::new("skip_power_shelf_reprovisioning_requested", e))?
-    .flatten()
-    .and_then(|request| request.0);
-    if current_request.as_ref() != Some(request) {
+    if lock_power_shelf_reprovisioning_request(txn, power_shelf_id)
+        .await?
+        .as_ref()
+        != Some(request)
+    {
         return Ok(false);
     }
 
@@ -580,18 +572,48 @@ pub async fn skip_power_shelf_reprovisioning_requested(
     Ok(true)
 }
 
+async fn lock_power_shelf_reprovisioning_request(
+    txn: &mut PgConnection,
+    power_shelf_id: PowerShelfId,
+) -> DatabaseResult<Option<PowerShelfReprovisionRequest>> {
+    let query =
+        "SELECT power_shelf_reprovisioning_requested FROM power_shelves WHERE id = $1 FOR UPDATE";
+    let current_request = sqlx::query_scalar::<
+        _,
+        Option<sqlx::types::Json<Option<PowerShelfReprovisionRequest>>>,
+    >(query)
+    .bind(power_shelf_id)
+    .fetch_optional(&mut *txn)
+    .await
+    .map_err(|e| DatabaseError::new("lock_power_shelf_reprovisioning_request", e))?
+    .flatten()
+    .and_then(|request| request.0);
+    Ok(current_request)
+}
+
 /// Clears the recorded rack reprovisioning skip once a later request is admitted.
+/// Returns false if the shelf is missing or its pending request no longer matches
+/// `request`. The caller must commit the request check, skip clear, and controller
+/// transition in the same transaction.
 pub async fn clear_rack_firmware_reprovisioning_skip(
     txn: &mut PgConnection,
     power_shelf_id: PowerShelfId,
-) -> DatabaseResult<()> {
+    request: &PowerShelfReprovisionRequest,
+) -> DatabaseResult<bool> {
+    if lock_power_shelf_reprovisioning_request(txn, power_shelf_id)
+        .await?
+        .as_ref()
+        != Some(request)
+    {
+        return Ok(false);
+    }
     let query = "UPDATE power_shelves SET rack_firmware_reprovisioning_skip = NULL WHERE id = $1";
     sqlx::query(query)
         .bind(power_shelf_id)
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::new("clear_rack_firmware_reprovisioning_skip", e))?;
-    Ok(())
+    Ok(true)
 }
 
 /// Clears a rack-owned reprovisioning request before the power shelf leaves
