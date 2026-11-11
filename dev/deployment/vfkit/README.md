@@ -71,8 +71,8 @@ python3 vm.py --lab-root "$lab_root" --lab-id 2 --lab-uplink nat lab-up
 ```
 
 Omit `--lab-interface` for NAT. NAT is the default for a newly created lab when
-`--lab-uplink` is omitted. Working upstream IPv6 is still required: NAT66 cannot
-supply connectivity that the host network lacks.
+`--lab-uplink` is omitted. Native IPv6 mode requires working upstream IPv6;
+use Route64 below when only IPv4 connectivity is available.
 
 On first use, `lab-up` builds shared gateway assets using a temporary diskless
 package-builder VM. It then creates the selected switch and gateway and checks
@@ -80,6 +80,54 @@ IPv4 and IPv6 HTTPS to `https://www.cloudflare.com/cdn-cgi/trace`. Failure leave
 state available for diagnosis and returns an error; blocking that endpoint also
 fails readiness. The gateway uses 2 vCPUs and 1024 MiB RAM; the package-builder
 uses the same resources. Additional guests have separate resource allocations.
+
+### Route64 IPv6 over IPv4
+
+[Route64](https://www.route64.org/) can supply IPv6 through a WireGuard tunnel
+when the WAN has IPv4 but no usable IPv6. The existing gateway image supports
+both modes. Obtain a WireGuard export from Route64 with an **IPv4 endpoint**,
+and keep it outside the checkout with mode `0600`:
+
+```bash
+python3 vm.py --lab-root "$lab_root" --lab-id 3 --lab-uplink nat \
+  --lab-route64-config "$HOME/.tunnels/route64.conf" lab-up
+```
+
+For a bridged IPv4 transport, replace `--lab-uplink nat` with
+`--lab-uplink bridged --lab-interface en0`. The option is also accepted by
+`--network lab up` (put all options before `up`). Existing labs without the
+option retain native IPv6 behavior. No Route64 account or tunnel is created
+by setup.
+
+The export must contain one `[Interface]` with a global IPv6 `Address` and
+`PrivateKey`, and one `[Peer]` with `PublicKey`, an IPv4-literal `Endpoint`, and
+`AllowedIPs` covering all IPv6 (`::/0` or `::/1, 8000::/1`). Optional settings
+are `PresharedKey`, `PersistentKeepalive` (1–65535 seconds, default 25), and
+`MTU` (1280–1420, default 1420). Exported `DNS` is ignored: WAN DNS is retained
+so tunnel bootstrap does not depend on tunneled connectivity. Shell hooks,
+extra peers, IPv4 addresses/routes, and appended commands such as `ping` are
+rejected. Remove example commands from a separate copy of the export before
+importing it; setup never executes them.
+
+Setup copies the normalized configuration into `data/route64.conf` in private
+per-lab state, with mode `0600`. It is not embedded in the ISO, shared image,
+status JSON, or VM configuration. The source file is unchanged and is not
+needed on subsequent starts. The copy is restored on each gateway boot.
+To change credentials or enable Route64 on an existing lab, stop its attached
+VMs, stop the lab, then run `lab-up` with the new export. Shared gateway assets
+can only be rebuilt while gateways using that cache are stopped; a separate
+`--lab-root` permits testing without interrupting an existing lab. Use a new
+lab ID to return to native IPv6 mode.
+
+IPv4 keeps the ordinary WAN default route and NAT. IPv6 uses `route64` with
+NAT66 for the lab ULA prefix; the Route64 routed `/56` is not assigned to
+tenants by this option. The gateway advertises LAN MTU 1280 and restricts IPv6
+forwarding to the tunnel. It does not fall back to native IPv6. Readiness checks
+IPv4 HTTPS through WAN and IPv6 HTTPS explicitly through `route64`, including
+after restart. A failed handshake or blocked provider UDP leaves readiness
+failed and retains state for diagnosis. The same tunnel credentials must not
+be used concurrently by multiple gateways, because WireGuard endpoint roaming
+would make them compete.
 
 ## Lab configuration and addressing
 
@@ -95,7 +143,8 @@ The owner marker prevents adoption of arbitrary directories. A new lab saves
 its WAN mode, interface and generated MACs.
 Later `lab-up` calls reuse these settings; conflicting values are rejected even
 after stopping the lab. Use another ID or delete the unused lab before choosing
-a different configuration. `lab-up` and `up --network lab` accept uplink/interface options.
+a different configuration. `lab-up` and `--network lab up` accept uplink/interface options and
+`--lab-route64-config`; the Route64 import can change only while the lab is stopped.
 
 | Setting | Lab X |
 | --- | --- |

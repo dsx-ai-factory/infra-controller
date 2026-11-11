@@ -196,6 +196,11 @@ def prepare(x: int):
     lan_mode = os.environ.get("VXLAB_LAN_MODE", "dual") or "dual"
     if lan_mode not in ("dual", "ipv4", "ipv6"):
         raise SystemExit("VXLAB_LAN_MODE must be dual, ipv4 or ipv6")
+    ipv6_uplink = os.environ.get("VXLAB_IPV6_UPLINK", "native")
+    if ipv6_uplink not in ("native", "route64"):
+        raise SystemExit("VXLAB_IPV6_UPLINK must be native or route64")
+    if ipv6_uplink == "route64" and lan_mode == "ipv4":
+        raise SystemExit("Route64 requires an IPv6-enabled LAN")
     if not 1 <= x <= 99:
         raise SystemExit("lab index must be 1..99")
     if not (ASSETS / "complete").exists():
@@ -213,11 +218,12 @@ def prepare(x: int):
                                 f"WAN_MAC={os.environ['VXLAB_WAN_MAC']}\n"
                                 f"LAN_MAC={os.environ['VXLAB_LAN_MAC']}\n"
                                 f"export VXLAB_LAN_MODE={lan_mode}\n"
+                                f"export VXLAB_IPV6_UPLINK={ipv6_uplink}\n"
                                 f"export VXLAB_UPLINK={os.environ['VXLAB_UPLINK']}\n").encode(), 0o644),
         "etc/local.d/gateway.start": ((ROOT / "guest/diskless-gateway.sh").read_bytes(), 0o755),
         "etc/init.d/vflab-ipv6-router": ((ROOT / "guest/ipv6-router-service").read_bytes(), 0o755),
     }
-    for name in ("networking-gateway.sh", "install-gateway.sh", "renew-ipv6-router.sh"):
+    for name in ("networking-gateway.sh", "install-gateway.sh", "renew-ipv6-router.sh", "route64-gateway.sh"):
         files[f"usr/local/lib/vflab/{name}"] = ((ROOT / "guest" / name).read_bytes(), 0o755)
     apkovl = directory / "gateway.apkovl.tar.gz"
     overlay(apkovl, files)

@@ -53,7 +53,7 @@ WAN_IF="$(ifname_for_mac "${WAN_MAC}")" || { echo >&2 "# WAN interface (mac ${WA
 LAN_IF="$(ifname_for_mac "${LAN_MAC}")" || { echo >&2 "# LAN interface (mac ${LAN_MAC}) not found"; exit 1; }
 echo >&2 "# using WAN_IF=${WAN_IF} LAN_IF=${LAN_IF}"
 
-if [ "${VXLAB_UPLINK:-bridged}" = nat ]; then
+if [ "${VXLAB_UPLINK:-bridged}" = nat ] && [ "${VXLAB_IPV6_UPLINK:-native}" != route64 ]; then
   # Apple's NAT/VPN path can stall large packets. Keep the WAN MTU stable
   # across both DHCP renewals and router advertisements.
   ip link set dev "$WAN_IF" mtu 1280
@@ -75,14 +75,16 @@ case "${reason:-}" in
 esac
 HOOK
 
+WAN_DHCP_OPTS=-b
+[ "${VXLAB_IPV6_UPLINK:-native}" != route64 ] || WAN_DHCP_OPTS="-b -4"
 cat > /etc/network/interfaces <<EOF
 auto lo
 iface lo inet loopback
 
-# WAN: hypervisor (vfkit NAT or vmnet shared). DHCP for v4 and v6.
+# WAN: Route64 uses IPv4 transport; native mode also discovers IPv6.
 auto ${WAN_IF}
 iface ${WAN_IF} inet dhcp
-  dhcp-opts -b
+  dhcp-opts ${WAN_DHCP_OPTS}
 
 # LAN: the isolated lab segment we serve (v4 + v6, static).
 auto ${LAN_IF}
@@ -106,11 +108,13 @@ echo "net.ipv6.conf.${LAN_IF}.disable_ipv6=$LAN_DISABLE_IPV6" > /etc/sysctl.d/20
 # learn the hypervisor's IPv6 default route (needed for IPv6 NAT).
 # Value 2 is required when global IPv6 forwarding is enabled; value 1 only
 # accepts RAs while the interface is acting as a host.
-echo "net.ipv6.conf.${WAN_IF}.accept_ra=2" > /etc/sysctl.d/20-wan-accept-ra.conf
+WAN_ACCEPT_RA=2
+[ "${VXLAB_IPV6_UPLINK:-native}" != route64 ] || WAN_ACCEPT_RA=0
+echo "net.ipv6.conf.${WAN_IF}.accept_ra=$WAN_ACCEPT_RA" > /etc/sysctl.d/20-wan-accept-ra.conf
 sysctl -w "net.ipv4.conf.all.forwarding=$IPV4_FORWARD"
 sysctl -w "net.ipv6.conf.all.forwarding=$IPV6_FORWARD"
 sysctl -w "net.ipv6.conf.${LAN_IF}.disable_ipv6=$LAN_DISABLE_IPV6"
-sysctl -w "net.ipv6.conf.${WAN_IF}.accept_ra=2"
+sysctl -w "net.ipv6.conf.${WAN_IF}.accept_ra=$WAN_ACCEPT_RA"
 
 # bring the LAN up (new interface: no risk to the SSH session)
 ifdown "${LAN_IF}" 2>/dev/null || true
