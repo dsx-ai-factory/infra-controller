@@ -200,12 +200,13 @@ behavior of locking down the server after configuring the BIOS.
 
 `--retain-hbn-config-on-boot <RETAIN_HBN_CONFIG_ON_BOOT>`
 
-If true, designate the machine to retain its HBN config on boot. This allows
-the machine to boot while NICO's DHCP and gRPC services are unavailable. The
-machine must declare a DPU BMC and a DPU OS interface, and the host BMC
-and both DPU interfaces must then use a fixed or retained IP allocation.
-A machine whose DPU policy attaches no DPU declares neither. If unset or
-false, the machine will need NICo to be up in order to boot.
+If true, designate the machine to retain its HBN config on boot. This
+allows the machine to boot while the NICo DHCP and gRPC services are
+unavailable. The machine must declare a DPU BMC and a DPU OS interface,
+and the host BMC and both DPU interfaces must then use a fixed or
+retained IP allocation. A machine whose DPU policy attaches no DPU
+declares neither. If unset or false, the machine will need NICo to be up
+in order to boot.
 
 *Possible values:*
 

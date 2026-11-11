@@ -419,6 +419,7 @@ fn uses_clap_synopsis(path: &[String]) -> bool {
         ),
         (Some("machine-validation"), Some("logs"))
             | (Some("machine"), Some("states"))
+            | (Some("network-segment"), Some("add-prefix"))
             | (Some("firmware"), Some("nic"))
             | (Some("spx-maintenance"), _)
             | (
@@ -715,6 +716,23 @@ An inline `HostInband` value and `mac=<mac>` selector.
         assert_eq!(
             command.clone().render_usage().to_string(),
             "Usage: nico-admin-cli machine states [OPTIONS] [MACHINE_ID]..."
+        );
+    }
+
+    #[test]
+    fn network_segment_prefix_synopsis_preserves_required_option_values() {
+        let root = command_tree();
+        let path = [BIN, "network-segment", "add-prefix"].map(String::from);
+        let command = path[1..].iter().fold(&root, |command, name| {
+            command
+                .find_subcommand(name)
+                .expect("prefix append exists in the CLI tree")
+        });
+
+        assert!(uses_clap_synopsis(&path));
+        assert_eq!(
+            command.clone().render_usage().to_string(),
+            "Usage: nico-admin-cli network-segment add-prefix [OPTIONS] --id <NetworkSegmentId> --prefix <CIDR-prefix>"
         );
     }
 

@@ -427,6 +427,10 @@ navigation:
               path: manuals/nico-admin-cli/commands/attestation/attestation-spdm-machines.md
             - page: SPDM Machine Attestation Status
               path: manuals/nico-admin-cli/commands/attestation/attestation-spdm-machines-list.md
+            - link: Machine Lifecycle States CLI Reference
+              href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/machine/machine-states.md
+            - link: Network Segment Prefix CLI Reference
+              href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/network-segment/network-segment-add-prefix.md
             - section: Routing Profile CLI Reference
               contents:
                 - link: Routing Profile Overview

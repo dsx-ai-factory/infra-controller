@@ -46,6 +46,7 @@ Print help (see a summary with -h)
 | Subcommand | Description |
 |---|---|
 | [`show`](./network-segment-show.md) | Display Network Segment information |
+| [`add-prefix`](./network-segment-add-prefix.md) | Append the missing address family to an existing Underlay segment |
 | [`attach-vpc`](./network-segment-attach-vpc.md) | Attach Network Segment to VPC |
 | [`delete`](./network-segment-delete.md) | Delete Network Segment |
 | [`create`](./network-segment-create.md) | Create Network Segment |

@@ -271,7 +271,7 @@ pub(crate) struct Args {
         long = "retain-hbn-config-on-boot",
         value_name = "RETAIN_HBN_CONFIG_ON_BOOT",
         group = "group",
-        help = "If true, designate the machine to retain its HBN config on boot. This allows the machine to boot while NICO's DHCP and gRPC services are unavailable. The machine must declare a DPU BMC and a DPU OS interface, and the host BMC and both DPU interfaces must then use a fixed or retained IP allocation. A machine whose DPU policy attaches no DPU declares neither. If unset or false, the machine will need NICo to be up in order to boot."
+        help = "If true, designate the machine to retain its HBN config on boot. This allows the machine to boot while the NICo DHCP and gRPC services are unavailable. The machine must declare a DPU BMC and a DPU OS interface, and the host BMC and both DPU interfaces must then use a fixed or retained IP allocation. A machine whose DPU policy attaches no DPU declares neither. If unset or false, the machine will need NICo to be up in order to boot."
     )]
     pub(super) retain_hbn_config_on_boot: Option<bool>,
 }

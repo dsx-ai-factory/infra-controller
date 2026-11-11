@@ -54,8 +54,8 @@ Print help (see a summary with -h)
 ## Examples
 
 ```sh
-nico-admin-cli power-shelf maintenance power-on --power-shelf-id 12345678-1234-5678-90ab-cdef01234567
-nico-admin-cli power-shelf maintenance power-on --power-shelf-id 12345678-1234-5678-90ab-cdef01234567 abcdef01-2345-6789-abcd-ef0123456789 --reference https://tickets.example.com/PS-42
+nico-admin-cli power-shelf maintenance power-on --power-shelf-id ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0
+nico-admin-cli power-shelf maintenance power-on --power-shelf-id ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0 ps100hsasb5dsh6e6ogogslpovne4rj82rp9jlf00qd7mcvmaadv85phk3g --reference https://tickets.example.com/PS-42
 ```
 
 ---
