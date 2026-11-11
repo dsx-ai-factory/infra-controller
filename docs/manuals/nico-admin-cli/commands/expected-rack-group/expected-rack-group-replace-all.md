@@ -22,7 +22,7 @@ Replace all expected rack groups from a JSON file
 This operation clears all existing groups before inserting replacements.
 Any expected NVLink domain declaration blocks it, even if the
 replacement preserves the referenced group. Delete all declarations with
-expected-nvlink-domain delete first.
+nvlink-domain delete first.
 
 ## OPTIONS
 

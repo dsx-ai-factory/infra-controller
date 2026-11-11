@@ -411,6 +411,16 @@ navigation:
               path: development/tls.md
             - page: nico-admin-cli
               path: manuals/nico-admin-cli.md
+            - section: NVLink Domain CLI Reference
+              contents:
+                - link: Domain Commands
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/nvlink-domain/nvlink-domain.md
+                - link: Create a Domain
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/nvlink-domain/nvlink-domain-create.md
+                - link: Show Domains
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/nvlink-domain/nvlink-domain-show.md
+                - link: Delete a Domain
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/nvlink-domain/nvlink-domain-delete.md
             - page: SPDM Attestation Jobs
               path: design/attestation/spdm-jobs.md
             - page: SPDM Job Commands
