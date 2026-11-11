@@ -30,6 +30,7 @@ LAN_MAC="${10}"
 LAN_MODE="${VXLAB_LAN_MODE:-dual}"
 LAN_MTU=1500
 [ "${VXLAB_UPLINK:-bridged}" != nat ] || LAN_MTU=1280
+[ "${VXLAB_IPV6_UPLINK:-native}" != route64 ] || LAN_MTU=1280
 case "$LAN_MODE" in dual|ipv4|ipv6) ;; *) echo >&2 'invalid LAN mode'; exit 1;; esac
 
 # the /24 for this lab, derived from the gateway address (10.X.0.1 -> 10.X.0.0)
@@ -65,6 +66,8 @@ fi
 if [ -n "$(ifname_for_mac "${LAN_MAC}" 2>/dev/null)" ]; then
   LAN_IF="$(ifname_for_mac "${LAN_MAC}")"
 fi
+IPV6_IF="$WAN_IF"
+[ "${VXLAB_IPV6_UPLINK:-native}" != route64 ] || IPV6_IF=route64
 echo >&2 "# using WAN_IF=${WAN_IF} LAN_IF=${LAN_IF}"
 
 apk info -e dhcpcd dhcpcd-openrc dnsmasq dnsmasq-openrc radvd radvd-openrc ndisc6 iptables ip6tables curl iproute2 acpid acpid-openrc >/dev/null
@@ -133,8 +136,10 @@ EOF
 
 rc-update add radvd default >/dev/null
 rc-service radvd restart
-rc-update add vflab-ipv6-router default >/dev/null
-rc-service vflab-ipv6-router restart
+if [ "${VXLAB_IPV6_UPLINK:-native}" != route64 ]; then
+  rc-update add vflab-ipv6-router default >/dev/null
+  rc-service vflab-ipv6-router restart
+fi
 else
   rc-service radvd stop 2>/dev/null || true
   rc-update del radvd default 2>/dev/null || true
@@ -153,8 +158,8 @@ write_nat() {
     || iptables -t nat -A POSTROUTING -s "${NET4}/24" -o "${WAN_IF}" -j MASQUERADE
   fi
   if [ "$LAN_MODE" != ipv4 ]; then
-  ip6tables -t nat -C POSTROUTING -s "${IPV6_PREFIX}" -o "${WAN_IF}" -j MASQUERADE 2>/dev/null \\
-    || ip6tables -t nat -A POSTROUTING -s "${IPV6_PREFIX}" -o "${WAN_IF}" -j MASQUERADE
+  ip6tables -t nat -C POSTROUTING -s "${IPV6_PREFIX}" -o "${IPV6_IF}" -j MASQUERADE 2>/dev/null \\
+    || ip6tables -t nat -A POSTROUTING -s "${IPV6_PREFIX}" -o "${IPV6_IF}" -j MASQUERADE
   fi
 }
 write_nat
@@ -171,7 +176,7 @@ done
 iptables -A VFLAB-FORWARD -i ${LAN_IF} -d 10.0.0.0/8 -j REJECT
 ip6tables -A VFLAB-FORWARD -i ${LAN_IF} -d fd00::/8 -j REJECT
 [ "$LAN_MODE" = ipv6 ] || iptables -A VFLAB-FORWARD -i ${LAN_IF} -o ${WAN_IF} -s ${NET4}/24 -j ACCEPT
-[ "$LAN_MODE" = ipv4 ] || ip6tables -A VFLAB-FORWARD -i ${LAN_IF} -o ${WAN_IF} -s ${IPV6_PREFIX} -j ACCEPT
+[ "$LAN_MODE" = ipv4 ] || ip6tables -A VFLAB-FORWARD -i ${LAN_IF} -o ${IPV6_IF} -s ${IPV6_PREFIX} -j ACCEPT
 iptables -A VFLAB-FORWARD -j DROP
 ip6tables -A VFLAB-FORWARD -j DROP
 EOF

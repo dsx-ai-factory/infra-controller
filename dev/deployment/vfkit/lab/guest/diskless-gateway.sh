@@ -35,6 +35,9 @@ sh /usr/local/lib/vflab/networking-gateway.sh "$X" "$LAB_HOSTNAME" "10.$X.0.1" "
 # This starts one dual-stack WAN DHCP client; no preliminary IPv4-only daemon.
 rc-service networking start
 rc-service sshd start
+if [ "${VXLAB_IPV6_UPLINK:-native}" = route64 ]; then
+  sh /usr/local/lib/vflab/route64-gateway.sh
+fi
 sh /usr/local/lib/vflab/install-gateway.sh "$X" "$LAB_HOSTNAME" \
   "10.$X.0.1" "fd00:$X::1" "10.$X.0.10" "10.$X.0.250" "fd00:$X::10" "fd00:$X::ff" "$WAN_MAC" "$LAN_MAC"
 printf '%s\n' "$X" > /run/vflab-ready

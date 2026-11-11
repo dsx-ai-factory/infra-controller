@@ -208,6 +208,10 @@ class VM:
                                              str(self.directory / 'root.raw'), run)
 
     def create(self, args):
+        if args.lab_route64_config and (self.config or {}).get("network", args.network) != "lab":
+            raise ValueError("--lab-route64-config requires --network lab")
+        if args.lab_route64_config:
+            lab_manager.route64.configuration(args.lab_route64_config)
         if self.config:
             for key in ("cpus", "memory_gib", "disk_gib", "network", "interface", "network_socket",
                         "data_dir", "data_disk_gib", "lab_id", "lab_root", "lab_uplink", "lab_interface",
@@ -225,7 +229,7 @@ class VM:
         if any(self.directory.iterdir()):
             raise ValueError(f"new VM directory must be empty: {self.directory}")
         network = args.network or "nat"
-        lab_options = (args.lab_id, args.lab_root, args.lab_uplink, args.lab_interface)
+        lab_options = (args.lab_id, args.lab_root, args.lab_uplink, args.lab_interface, args.lab_route64_config)
         if network != "lab" and any(value is not None for value in lab_options):
             raise ValueError("lab options require --network lab")
         lab = None
@@ -397,14 +401,14 @@ class VM:
             attachment = "nat"
         return command + ["--device", f"virtio-net,{attachment},mac={config['mac']}"]
 
-    def start(self):
+    def start(self, route64_config=None):
         self.require_config()
         if self.config["network"] == "lab":
             lab = self.lab()
             # Keep attachment creation under the lab lock so lab-stop cannot
             # race between gateway readiness and the VM process starting.
             with lab.locked():
-                lab.ensure(self.config["lab_uplink"], self.config["lab_interface"])
+                lab.ensure(self.config["lab_uplink"], self.config["lab_interface"], route64_config)
                 lab.verify()
                 self.start_process()
         else:
@@ -597,6 +601,8 @@ lab running. Lab configuration is saved on first use; conflicting settings fail.
                         help=f"managed lab state/cache root (default: {lab_manager.DEFAULT_ROOT}); must be outside checkout")
     result.add_argument("--lab-uplink", choices=("nat", "bridged"),
                         help="gateway WAN, not guest LAN (default: nat); only with up or lab-up")
+    result.add_argument("--lab-route64-config", type=Path,
+                        help="Route64 WireGuard export with IPv4 endpoint; copied privately into lab state; only up/lab-up")
     result.add_argument("--lab-interface", help="explicit physical interface required for a bridged lab uplink")
     result.add_argument("--force", action="store_true", help="force-stop an unused gateway through vfkit; only with lab-stop; retains state")
     result.add_argument("--yes", action="store_true", help="confirm irreversible lab-delete; invalid for other actions")
@@ -629,9 +635,9 @@ def main(argv=None):
     if args.action != "up" and any(value is not None for value in creation_options):
         raise ValueError("resource, network and image options are accepted only with up")
     if not lab_action and args.action != "up" and any(value is not None for value in
-            (args.lab_id, args.lab_root, args.lab_uplink, args.lab_interface)):
+            (args.lab_id, args.lab_root, args.lab_uplink, args.lab_interface, args.lab_route64_config)):
         raise ValueError("lab options are accepted only with up or lab actions; VM start uses saved settings")
-    if lab_action and args.action != "lab-up" and (args.lab_uplink or args.lab_interface):
+    if lab_action and args.action != "lab-up" and (args.lab_uplink or args.lab_interface or args.lab_route64_config):
         raise ValueError("lab uplink options are accepted only with up or lab-up")
     if bool(args.image) != bool(args.image_sha256):
         raise ValueError("--image and --image-sha256 must be supplied together")
@@ -657,7 +663,7 @@ def main(argv=None):
             raise ValueError("lab does not exist")
         with lab.locked():
             if args.action == "lab-up":
-                lab.ensure(args.lab_uplink, args.lab_interface)
+                lab.ensure(args.lab_uplink, args.lab_interface, args.lab_route64_config)
                 lab.verify()
                 print(json.dumps(lab.status(), indent=2))
             elif args.action == "lab-stop":
@@ -683,7 +689,7 @@ def main(argv=None):
             vm.create(args)
             vm.ensure_disk(args)
             vm.seed()
-            vm.start()
+            vm.start(args.lab_route64_config)
             vm.ready()
             vm.sync()
             vm.verify()
