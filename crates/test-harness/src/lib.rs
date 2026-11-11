@@ -98,7 +98,6 @@ impl TestHarness {
             .create_domain(Request::new(rpc::protos::dns::CreateDomainRequest {
                 name: name.clone(),
                 default_ttl: None,
-                vpc_id: None,
             }))
             .await
             .unwrap()
