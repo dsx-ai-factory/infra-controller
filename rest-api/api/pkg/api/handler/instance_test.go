@@ -6269,8 +6269,8 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			},
 			args: args{
 				reqData: &model.APIInstanceUpdateRequest{
-					Name:        cutil.GetPtr("Test Instance IB omit"),
-					IpxeScript:  os2.IpxeScript,
+					Name:       cutil.GetPtr("Test Instance IB omit"),
+					IpxeScript: os2.IpxeScript,
 					Labels: map[string]string{
 						"new_key": "new_value",
 					},
@@ -6300,12 +6300,12 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 					IpxeScript:           os2.IpxeScript,
 					InfiniBandInterfaces: []model.APIInfiniBandInterfaceCreateOrUpdateRequest{},
 				},
-				reqInstance:         inst1.ID.String(),
+				reqInstance:           inst1.ID.String(),
 				cleanInstanceToStatus: inst1.Status,
-				reqOrg:              tnOrg1,
-				reqUser:             tnu1,
-				respCode:            http.StatusOK,
-				ibInterfaceToDelete: []cdbm.InfiniBandInterface{*ibi1},
+				reqOrg:                tnOrg1,
+				reqUser:               tnu1,
+				respCode:              http.StatusOK,
+				ibInterfaceToDelete:   []cdbm.InfiniBandInterface{*ibi1},
 			},
 			wantErr:                     false,
 			verifySiteControllerRequest: true,
