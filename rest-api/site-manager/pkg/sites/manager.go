@@ -33,7 +33,9 @@ const (
 
 // Options are args passed to the site manager at boot
 type Options struct {
-	credsMgrURL string
+	credsMgrURL            string
+	credsMgrClientCertPath string
+	credsMgrClientKeyPath  string
 	// credsMgrCAPath is the CA bundle used to verify credsMgrURL. It is the
 	// ca.crt of the same CA that signs the cert-manager's listener, so the
 	// certificate chain and the hostname both have to check out.
@@ -58,7 +60,7 @@ type SiteManager struct {
 // NewSiteManager creates an instance of SiteManager that stores Sites
 // through crdClient.
 func NewSiteManager(ctx context.Context, o Options, crdClient crdclient.Interface) (*SiteManager, error) {
-	certManager, err := certmanager.NewClient(o.credsMgrURL, o.credsMgrCAPath)
+	certManager, err := certmanager.NewClient(ctx, certmanager.Options{URL: o.credsMgrURL, CAPath: o.credsMgrCAPath, ClientCertPath: o.credsMgrClientCertPath, ClientKeyPath: o.credsMgrClientKeyPath})
 	if err != nil {
 		return nil, errors.Wrap(err, "certmanager.NewClient")
 	}
