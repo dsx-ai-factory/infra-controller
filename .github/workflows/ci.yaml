@@ -2598,11 +2598,11 @@ jobs:
       - name: Test shared deployment and provider suites
         if: startsWith(github.ref, 'refs/heads/pull-request/')
         run: |
-          /usr/bin/python3 -B -m unittest discover -s dev/deployment/devspace/tests -p 'test_host_runtime.py'
-          /usr/bin/python3 -B -m unittest discover -s dev/deployment/tests
-          /usr/bin/python3 -B -m unittest discover -s dev/deployment/devspace/tests -p 'test_setup_devspace_on_host.py'
-
-          /usr/bin/python3 -B -m unittest discover -s dev/deployment/devspace/tests -p 'test_core_admin.py'
+          # Kind and DevSpace regressions belong to the advisory workflow.
+          for test_file in dev/deployment/tests/test_*.py; do
+            case "$test_file" in */test_setup_kind.py) continue ;; esac
+            /usr/bin/python3 -B -m unittest discover -s dev/deployment/tests -p "${test_file##*/}"
+          done
 
       - name: Install the shared kubectl version for rendering tests
         if: startsWith(github.ref, 'refs/heads/pull-request/')
