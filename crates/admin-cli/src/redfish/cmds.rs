@@ -20,11 +20,11 @@ use std::path::Path;
 use std::str::FromStr;
 use std::time::Duration;
 
-use eyre::eyre;
+use eyre::{Context, eyre};
 use libredfish::model::oem::nvidia_dpu::NicMode;
 use libredfish::model::software_inventory::SoftwareInventory;
 use libredfish::model::task::{Task, TaskState};
-use libredfish::model::update_service::ComponentType;
+use libredfish::model::update_service::{ComponentType, TransferProtocolType};
 use libredfish::model::{LinkStatus, ResourceStatus};
 use libredfish::{
     Boot, Chassis, EnabledDisabled, EthernetInterface, NetworkDeviceFunction, NetworkPort, Redfish,
@@ -423,6 +423,17 @@ pub(crate) async fn action(action: RedfishAction) -> color_eyre::Result<()> {
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
             }
+        }
+        SimpleUpdate(details) => {
+            let task = redfish
+                .update_firmware_simple_update(
+                    &details.image_uri,
+                    details.targets,
+                    TransferProtocolType::HTTP,
+                )
+                .await
+                .context("submit a Redfish SimpleUpdate installation with HTTP transfer")?;
+            println!("Submitted Redfish task {}", task.id);
         }
         GetTasks => {
             let tasks = redfish.get_tasks().await?;

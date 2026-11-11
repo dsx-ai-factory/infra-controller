@@ -209,6 +209,15 @@ Change the UEFI password (supply the current and new values):
     GetManager,
     /// Update host firmware
     UpdateFirmwareMultipart(Multipart),
+    /// Submit a SimpleUpdate installation and return its task ID without waiting
+    ///
+    /// Submit one Redfish SimpleUpdate request with TransferProtocol=HTTP.
+    /// The BMC retrieves the image; the CLI does not upload a local file.
+    /// HTTP is used for an image URI without a scheme; an explicit URI scheme
+    /// takes precedence. The image must be reachable from the BMC.
+    /// Returns the task ID without waiting for installation.
+    /// Monitor progress with redfish get-task --taskid TASK_ID.
+    SimpleUpdate(SimpleUpdateArgs),
     /// Get detailed info on a Redfish task
     GetTask(Task),
     /// Get a list of Redfish tasks
@@ -441,6 +450,35 @@ pub(super) struct Multipart {
         help = "Firmware type, ignored by some platforms and optional on others"
     )]
     pub(super) component_type: Option<ComponentType>,
+}
+
+#[derive(Parser, Debug, PartialEq, Clone)]
+#[command(after_long_help = "\
+EXAMPLES:
+
+Restart a vanilla BFB installation on a DPU:
+    $ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypassword \
+    simple-update --image-uri carbide-pxe.forge//public/blobs/internal/aarch64/preingestion.bfb \
+    --target redfish/v1/UpdateService/FirmwareInventory/DPU_OS
+
+Apply an image to multiple targets in one request:
+    $ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypassword \
+    simple-update --image-uri firmware.example.com/host-fw.bin \
+    --target /redfish/v1/UpdateService/FirmwareInventory/BIOS \
+    --target /redfish/v1/UpdateService/FirmwareInventory/BMC
+
+Monitor the returned task ID:
+    $ nico-admin-cli redfish --address 192.0.2.10 --username admin --password mypassword \
+    get-task --taskid 0
+
+")]
+pub(super) struct SimpleUpdateArgs {
+    /// Image URI for the BMC to retrieve
+    #[clap(long)]
+    pub(super) image_uri: String,
+    /// Firmware inventory URI to update; repeat for multiple targets
+    #[clap(long = "target", value_name = "TARGET", required = true)]
+    pub(super) targets: Vec<String>,
 }
 
 #[derive(Parser, Debug, PartialEq, Clone)]
@@ -691,4 +729,83 @@ pub(super) struct SetBios {
         help = "BIOS attributes to set in JSON, ex: {\"OperatingModes_ChooseOperatingMode\": \"MaximumPerformance\"}"
     )]
     pub(super) attributes: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::FailsWith;
+    use carbide_test_support::scenarios;
+    use clap::error::ErrorKind;
+    use clap::{CommandFactory, Parser};
+
+    use super::{Cmd, RedfishAction, SimpleUpdateArgs};
+
+    #[test]
+    fn simple_update_requires_image_and_target() {
+        scenarios!(run = |args: &[&str]| RedfishAction::try_parse_from(
+            ["redfish", "--address", "192.0.2.10", "simple-update"]
+                .into_iter()
+                .chain(args.iter().copied())
+        ).map(|_| ()).map_err(|error| error.kind());
+            "required operands" {
+                &["--target", "/redfish/v1/UpdateService/FirmwareInventory/DPU_OS"][..] =>
+                    FailsWith(ErrorKind::MissingRequiredArgument),
+                &["--image-uri", "firmware.example.com/image.bfb"][..] =>
+                    FailsWith(ErrorKind::MissingRequiredArgument),
+            }
+        );
+    }
+
+    #[test]
+    fn simple_update_preserves_image_uri_and_repeated_targets() {
+        let image = "carbide-pxe.forge//public/blobs/internal/aarch64/preingestion.bfb";
+        let targets = [
+            "redfish/v1/UpdateService/FirmwareInventory/DPU_OS",
+            "/redfish/v1/UpdateService/FirmwareInventory/BMC",
+        ];
+        let action = RedfishAction::try_parse_from([
+            "redfish",
+            "--address",
+            "192.0.2.10",
+            "simple-update",
+            "--image-uri",
+            image,
+            "--target",
+            targets[0],
+            "--target",
+            targets[1],
+        ])
+        .expect("SimpleUpdate accepts repeated targets");
+
+        assert_eq!(
+            action.command,
+            Cmd::SimpleUpdate(SimpleUpdateArgs {
+                image_uri: image.to_string(),
+                targets: targets.map(String::from).to_vec(),
+            })
+        );
+    }
+
+    #[test]
+    fn simple_update_help_explains_transfer_and_monitoring() {
+        let mut command = RedfishAction::command();
+        let help = command
+            .find_subcommand_mut("simple-update")
+            .expect("SimpleUpdate is registered")
+            .render_long_help()
+            .to_string();
+        for required_text in [
+            "TransferProtocol=HTTP",
+            "BMC retrieves the image",
+            "explicit URI scheme takes precedence",
+            "without waiting for installation",
+            "get-task --taskid",
+            "EXAMPLES:",
+        ] {
+            assert!(
+                help.contains(required_text),
+                "missing {required_text}: {help}"
+            );
+        }
+    }
 }
