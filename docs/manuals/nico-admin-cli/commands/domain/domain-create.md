@@ -4,32 +4,27 @@
 
 ## NAME
 
-nico-admin-cli-domain-create - Create a Domain, optionally owned by a
-VPC
+nico-admin-cli-domain-create - Create a Domain
 
 ## SYNOPSIS
 
 ```text
-nico-admin-cli domain create [--vpc-id] [--default-ttl]
+nico-admin-cli domain create [--default-ttl]
 [--extended] [--sort-by] [-h|--help] <NAME>
 ```
 
 ## DESCRIPTION
 
-Create a Domain, optionally owned by a VPC.
+Create a Domain.
 
 On success, JSON mode prints the created domain as pretty JSON. Other
-output modes print labelled fields: ID, NAME, DEFAULT TTL, VPC, CREATED,
+output modes print labelled fields: ID, NAME, DEFAULT TTL, CREATED,
 UPDATED, and DELETED.
 
 The inherited --extended and --sort-by options have no effect on this
 command.
 
 ## OPTIONS
-
-`--vpc-id <VpcId>`
-
-VPC that owns the domain. A VPC owns at most one live domain
 
 `--default-ttl <SECONDS>`
 
@@ -60,14 +55,13 @@ Print help (see a summary with -h)
 
 `<NAME>`
 
-Lowercase domain name. Reverse zones (in-addr.arpa, ip6.arpa) and
-duplicate live names are rejected
+Lowercase domain name. Reverse zones (in-addr.arpa, ip6.arpa) are
+rejected
 
 ## Examples
 
 ```sh
 nico-admin-cli domain create mysite.example.com
-nico-admin-cli domain create compute.customer.example --vpc-id 12345678-1234-5678-90ab-cdef01234567
 ```
 
 ---
