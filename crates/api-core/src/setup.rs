@@ -21,6 +21,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use bmc_backend::BmcConnector;
+use bmc_runtime::{DriverConnector, DriverPools};
 use carbide_dpa::DpaInfo;
 use carbide_dpa_manager::DpaMonitor;
 use carbide_dpf::repository::DpuServiceInterfaceRepository;
@@ -60,6 +62,7 @@ use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_rack_controller::handler::RackStateHandler;
 use carbide_rack_controller::io::RackStateControllerIO;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
+use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_resource_pool::PoolDefinitionSource;
 use carbide_secrets::credentials::{CredentialManager, CredentialReader};
 use carbide_site_explorer::{AuthenticatedBmcClient, EndpointExplorationService, SiteExplorer};
@@ -105,8 +108,8 @@ use crate::api::Api;
 use crate::api::metrics::ApiMetricsEmitter;
 use crate::bootstrap::{RuntimeInputs, RuntimePrelude};
 use crate::cfg::file::{
-    CarbideConfig, DpfDeploymentConfig, DpfExtraService, InitialObjectsConfig, ListenMode,
-    VmaasConfig,
+    BmcBackend, CarbideConfig, DpfDeploymentConfig, DpfExtraService, InitialObjectsConfig,
+    ListenMode, VmaasConfig,
 };
 use crate::cfg::load::all_configuration_files;
 use crate::cfg::resource_pool::ResourcePoolBackendConfig;
@@ -156,6 +159,9 @@ struct BmcProxyPools {
     /// work never uses this handle -- that is what the [`BmcCredentialOps`]
     /// handle is for.
     general: Arc<dyn RedfishClientPool>,
+    /// The pools the driver connector uses: ordinary traffic routed like
+    /// `general`, and the direct pool for explicit credentials.
+    drivers: DriverPools,
     /// The pools site-explorer uses for established-endpoint traffic via
     /// nico-bmc-proxy. `None` (section absent or disabled) leaves every
     /// site-explorer operation on the direct pools, unchanged.
@@ -166,10 +172,15 @@ fn create_bmc_proxy_pools(
     carbide_config: &CarbideConfig,
     credential_manager: Arc<dyn CredentialManager>,
     direct_pool: &Arc<dyn RedfishClientPool>,
+    direct_nv_redfish_pool: &Arc<NvRedfishClientPool>,
 ) -> eyre::Result<BmcProxyPools> {
     let Some(proxy_config) = enabled_bmc_proxy_config(carbide_config) else {
         return Ok(BmcProxyPools {
             general: direct_pool.clone(),
+            drivers: DriverPools {
+                routed: direct_nv_redfish_pool.clone(),
+                direct: direct_nv_redfish_pool.clone(),
+            },
             site_explorer: None,
         });
     };
@@ -180,17 +191,42 @@ fn create_bmc_proxy_pools(
         proxy_config,
         credential_manager,
     )?);
+    let proxied_nv_redfish = carbide_redfish::nv_redfish::new_proxied_pool(
+        proxy,
+        proxy_config.client_cert.as_str(),
+        proxy_config.client_key.as_str(),
+        proxy_config.root_ca.as_str(),
+    );
     Ok(BmcProxyPools {
         general: proxied.clone(),
+        drivers: DriverPools {
+            routed: proxied_nv_redfish.clone(),
+            direct: direct_nv_redfish_pool.clone(),
+        },
         site_explorer: Some(carbide_site_explorer::ProxiedPools {
             redfish: proxied,
-            nv_redfish: carbide_redfish::nv_redfish::new_proxied_pool(
-                proxy,
-                proxy_config.client_cert.as_str(),
-                proxy_config.client_key.as_str(),
-                proxy_config.root_ca.as_str(),
-            ),
+            nv_redfish: proxied_nv_redfish,
         }),
+    })
+}
+
+/// The connector services' moved BMC operations run through, or `None` while
+/// the site keeps them on libredfish.
+fn create_driver_connector(
+    carbide_config: &CarbideConfig,
+    pools: DriverPools,
+    credential_manager: Arc<dyn CredentialManager>,
+    ipmi_tool: Arc<dyn IPMITool>,
+) -> eyre::Result<Option<Arc<DriverConnector>>> {
+    Ok(match carbide_config.bmc_backend {
+        BmcBackend::Libredfish => None,
+        BmcBackend::Drivers => Some(Arc::new(DriverConnector::new(
+            pools,
+            credential_manager,
+            "nico-api",
+            carbide_config.driver_rules()?,
+            ipmi_tool,
+        )?)),
     })
 }
 
@@ -309,22 +345,31 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     // including site-explorer's established-endpoint traffic.
     // Credential-lifecycle work (credential setup, session minting, rotation)
     // stays on the direct ops handle, which authenticates to BMCs itself.
+    let shared_nv_redfish_pool =
+        carbide_redfish::nv_redfish::new_pool(carbide_config.site_explorer.bmc_proxy.clone());
     let BmcProxyPools {
         general: general_redfish_pool,
+        drivers: driver_pools,
         site_explorer: site_explorer_proxied_pools,
     } = create_bmc_proxy_pools(
         &carbide_config,
         credential_manager.clone(),
         &shared_redfish_pool,
+        &shared_nv_redfish_pool,
     )?;
-    let shared_nv_redfish_pool =
-        carbide_redfish::nv_redfish::new_pool(carbide_config.site_explorer.bmc_proxy.clone());
 
     let ipmi_tool = create_ipmi_tool(
         credential_manager.clone(),
         &carbide_config,
         dynamic_settings.bmc_proxy.clone(),
     );
+
+    let driver_connector = create_driver_connector(
+        &carbide_config,
+        driver_pools,
+        credential_manager.clone(),
+        ipmi_tool.clone(),
+    )?;
 
     let (rms_client, site_explorer_machine_info_provider, switch_system_image_rms_api) =
         match carbide_config.rms.api_url.clone() {
@@ -611,15 +656,18 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         carbide_config.bmc_max_sessions_per_caller,
     ));
 
-    let bmc_client = Arc::new(AuthenticatedBmcClient::new(
-        bmc_credential_ops.clone(),
-        shared_nv_redfish_pool,
-        // Established-endpoint traffic goes through nico-bmc-proxy when
-        // enabled; credential setup stays on the direct handle above.
-        site_explorer_proxied_pools,
-        ipmi_tool.clone(),
-        credential_manager.clone(),
-    ));
+    let bmc_client = Arc::new(
+        AuthenticatedBmcClient::new(
+            bmc_credential_ops.clone(),
+            shared_nv_redfish_pool,
+            // Established-endpoint traffic goes through nico-bmc-proxy when
+            // enabled; credential setup stays on the direct handle above.
+            site_explorer_proxied_pools,
+            ipmi_tool.clone(),
+            credential_manager.clone(),
+        )
+        .with_driver_connector(driver_connector.clone()),
+    );
     let bmc_explorer = carbide_site_explorer::new_bmc_explorer(
         bmc_client.clone(),
         carbide_config
@@ -716,6 +764,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             // proxied pool rejects by design -- keep it on the direct pool
             // until it moves to credential-key auth.
             Some(shared_redfish_pool.clone()),
+            driver_connector.clone(),
         )
         .await
         {
@@ -795,6 +844,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         ib_fabric_manager,
         redfish_pool: general_redfish_pool,
         bmc_credential_ops: bmc_credential_ops.clone(),
+        driver_connector: driver_connector.clone(),
         bmc_proxy_passthrough: enabled_bmc_proxy_config(&carbide_config)
             .map(crate::bmc_proxy::PassthroughClient::new)
             .transpose()?
@@ -1752,6 +1802,7 @@ async fn initialize_and_start_controllers<'a>(
         ib_fabric_manager,
         redfish_pool: shared_redfish_pool,
         bmc_credential_ops,
+        driver_connector,
         work_lock_manager_handle,
         rms_client,
         component_manager,
@@ -2141,6 +2192,10 @@ async fn initialize_and_start_controllers<'a>(
                 db_pool: db_pool.clone(),
                 db_reader: db_pool.clone().into(),
                 redfish_client_pool: shared_redfish_pool.clone(),
+                bmc_connector: BmcConnector::new(
+                    shared_redfish_pool.clone(),
+                    driver_connector.clone(),
+                ),
                 bmc_credential_ops: bmc_credential_ops.clone(),
                 ipmi_tool: ipmi_tool.clone(),
                 site_config: carbide_config.machine_state_handler_site_config().into(),
@@ -2335,6 +2390,10 @@ async fn initialize_and_start_controllers<'a>(
                 SpdmStateHandlerServices {
                     db_pool: db_pool.clone(),
                     redfish_client_pool: shared_redfish_pool.clone(),
+                    bmc_connector: BmcConnector::new(
+                        shared_redfish_pool.clone(),
+                        driver_connector.clone(),
+                    ),
                 }
                 .into(),
             )
@@ -2381,6 +2440,10 @@ async fn initialize_and_start_controllers<'a>(
                     .power_shelf_state_controller
                     .rack_firmware_reprovisioning_enabled,
                 redfish_client_pool: shared_redfish_pool.clone(),
+                bmc_connector: BmcConnector::new(
+                    shared_redfish_pool.clone(),
+                    driver_connector.clone(),
+                ),
                 bmc_credential_ops: bmc_credential_ops.clone(),
                 bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::Bmc,
@@ -2441,6 +2504,10 @@ async fn initialize_and_start_controllers<'a>(
                     .effective_switch_mtls_services_as_i32(),
                 per_object_metrics_registry: per_object_metrics_registry.clone(),
                 redfish_client_pool: shared_redfish_pool.clone(),
+                bmc_connector: BmcConnector::new(
+                    shared_redfish_pool.clone(),
+                    driver_connector.clone(),
+                ),
                 bmc_credential_ops: bmc_credential_ops.clone(),
                 bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::Bmc,
@@ -2587,7 +2654,8 @@ async fn initialize_and_start_controllers<'a>(
         Some(api_service.credential_manager.clone()),
         work_lock_manager_handle.clone(),
         carbide_config.ntp_servers.clone(),
-    );
+    )
+    .with_driver_connector(driver_connector.clone());
 
     let preingestion_manager = match component_manager.as_ref() {
         Some(manager)
@@ -4195,13 +4263,16 @@ mod tests {
         CarbideConfig,
         Arc<dyn CredentialManager>,
         Arc<dyn RedfishClientPool>,
+        Arc<NvRedfishClientPool>,
     ) {
         let config = crate::test_support::default_config::get();
         let credential_manager: Arc<dyn CredentialManager> =
             Arc::new(carbide_secrets::test_support::credentials::TestCredentialManager::default());
         let (direct, _ops) = create_redfish_pool(&config, credential_manager.clone())
             .expect("direct pool builds from the default test config");
-        (config, credential_manager, direct)
+        let direct_nv =
+            carbide_redfish::nv_redfish::new_pool(config.site_explorer.bmc_proxy.clone());
+        (config, credential_manager, direct, direct_nv)
     }
 
     /// With `[bmc_proxy]` absent or disabled, the general pool IS the direct
@@ -4209,17 +4280,22 @@ mod tests {
     /// pools, so disabled mode cannot change behavior.
     #[test]
     fn pools_are_direct_unless_bmc_proxy_is_enabled() {
-        let (mut config, credential_manager, direct) = selection_fixtures();
+        let (mut config, credential_manager, direct, direct_nv) = selection_fixtures();
 
         assert!(
             config.bmc_proxy.is_none(),
             "default test config has no section"
         );
-        let pools = create_bmc_proxy_pools(&config, credential_manager.clone(), &direct)
-            .expect("absent section selects pools");
+        let pools =
+            create_bmc_proxy_pools(&config, credential_manager.clone(), &direct, &direct_nv)
+                .expect("absent section selects pools");
         assert!(
             Arc::ptr_eq(&pools.general, &direct),
             "an absent [bmc_proxy] must alias the direct pool"
+        );
+        assert!(
+            Arc::ptr_eq(&pools.drivers.routed, &direct_nv),
+            "an absent [bmc_proxy] must alias the direct nv-redfish pool"
         );
         assert!(
             pools.site_explorer.is_none(),
@@ -4230,11 +4306,15 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "enabled": false }))
                 .expect("a disabled section parses without a url"),
         );
-        let pools = create_bmc_proxy_pools(&config, credential_manager, &direct)
+        let pools = create_bmc_proxy_pools(&config, credential_manager, &direct, &direct_nv)
             .expect("disabled section selects pools");
         assert!(
             Arc::ptr_eq(&pools.general, &direct),
             "a disabled [bmc_proxy] must alias the direct pool"
+        );
+        assert!(
+            Arc::ptr_eq(&pools.drivers.routed, &direct_nv),
+            "a disabled [bmc_proxy] must alias the direct nv-redfish pool"
         );
         assert!(
             pools.site_explorer.is_none(),
@@ -4248,11 +4328,11 @@ mod tests {
     /// which is left for credential-lifecycle work.
     #[test]
     fn pools_are_proxied_when_bmc_proxy_is_enabled() {
-        let (mut config, credential_manager, direct) = selection_fixtures();
+        let (mut config, credential_manager, direct, direct_nv) = selection_fixtures();
         let dir = tempfile::tempdir().expect("tempdir");
         config.bmc_proxy = Some(crate::bmc_proxy::test_config_with_generated_pems(&dir));
 
-        let pools = create_bmc_proxy_pools(&config, credential_manager, &direct)
+        let pools = create_bmc_proxy_pools(&config, credential_manager, &direct, &direct_nv)
             .expect("an enabled section with readable certs builds the proxied pools");
         assert!(
             !Arc::ptr_eq(&pools.general, &direct),
@@ -4265,19 +4345,44 @@ mod tests {
             Arc::ptr_eq(&site_explorer.redfish, &pools.general),
             "site-explorer's proxied Redfish handle must be the general (proxied) pool"
         );
+        assert!(
+            !Arc::ptr_eq(&pools.drivers.routed, &direct_nv),
+            "an enabled [bmc_proxy] must select a distinct proxied nv-redfish pool"
+        );
+        assert!(
+            Arc::ptr_eq(&site_explorer.nv_redfish, &pools.drivers.routed),
+            "site-explorer's proxied nv-redfish handle must be the general (proxied) pool"
+        );
+        assert!(
+            Arc::ptr_eq(&pools.drivers.direct, &direct_nv),
+            "explicit credentials must keep the direct nv-redfish pool"
+        );
+
+        // The connector rejects a proxied direct pool, so this fails if the
+        // pools are ever handed over swapped.
+        config.bmc_backend = BmcBackend::Drivers;
+        let connector = create_driver_connector(
+            &config,
+            pools.drivers,
+            Arc::new(carbide_secrets::test_support::credentials::TestCredentialManager::default()),
+            carbide_ipmi::test_support(),
+        )
+        .expect("the proxied pools build a driver connector");
+        assert!(connector.is_some(), "drivers mode builds a connector");
     }
 
     /// An enabled section without a url is a startup error, never a pool
     /// that silently dials BMCs directly.
     #[test]
     fn enabled_bmc_proxy_without_url_fails_startup() {
-        let (mut config, credential_manager, direct) = selection_fixtures();
+        let (mut config, credential_manager, direct, direct_nv) = selection_fixtures();
         config.bmc_proxy = Some(
             serde_json::from_value(serde_json::json!({ "enabled": true }))
                 .expect("the section parses; the empty default address is rejected later"),
         );
 
-        let Err(err) = create_bmc_proxy_pools(&config, credential_manager, &direct) else {
+        let Err(err) = create_bmc_proxy_pools(&config, credential_manager, &direct, &direct_nv)
+        else {
             panic!("an enabled section with no address must fail startup");
         };
         assert!(

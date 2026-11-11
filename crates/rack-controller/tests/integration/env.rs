@@ -135,6 +135,7 @@ async fn create_test_env_inner(pool: PgPool, overrides: TestEnvOverrides) -> Tes
         None,
         Some(pool.clone()),
         None,
+        None,
     )
     .await
     .expect("test component manager should build");
