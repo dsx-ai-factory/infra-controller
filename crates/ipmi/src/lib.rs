@@ -22,7 +22,6 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader};
 use carbide_utils::HostPortPair;
-use carbide_uuid::machine::MachineId;
 
 mod bmc_mock;
 mod metrics;
@@ -41,7 +40,6 @@ pub trait IPMITool: Send + Sync + 'static {
 
     async fn restart(
         &self,
-        machine_id: &MachineId,
         bmc_address: SocketAddr,
         legacy_boot: bool,
         credential_key: &CredentialKey,

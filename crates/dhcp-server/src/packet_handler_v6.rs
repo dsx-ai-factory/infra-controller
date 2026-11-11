@@ -891,7 +891,7 @@ mod tests {
     use carbide_rpc_utils::dhcp::DhcpConfig;
     use carbide_test_support::Outcome::{Fails, Yields};
     use carbide_test_support::{Case, check_cases, scenarios, value_scenarios};
-    use rpc::forge_tls_client::ForgeClientConfig;
+    use rpc::carbide_tls_client::CarbideClientConfig;
 
     use super::*;
 
@@ -1054,7 +1054,7 @@ mod tests {
             },
             None,
             67,
-            ForgeClientConfig::new(String::new(), None),
+            CarbideClientConfig::new(String::new(), None),
         );
         let server_id = server_identifier(&config).unwrap();
         let other_server_id = vec![0xff];
@@ -1162,7 +1162,7 @@ mod tests {
                     },
                     None,
                     67,
-                    ForgeClientConfig::new(String::new(), None),
+                    CarbideClientConfig::new(String::new(), None),
                 );
 
                 match base_reply(&request, message_type, &config)
@@ -1205,7 +1205,7 @@ mod tests {
             DhcpConfig::default(),
             None,
             67,
-            ForgeClientConfig::new(String::new(), None),
+            CarbideClientConfig::new(String::new(), None),
         );
 
         // Render through the option-39 production path so the flags/name boundary is covered.

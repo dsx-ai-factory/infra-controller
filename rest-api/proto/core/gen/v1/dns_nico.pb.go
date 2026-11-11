@@ -796,10 +796,7 @@ type Domain struct {
 	// Absent means the site default of 300. On UpdateDomain,
 	// absent preserves the stored value and a present value replaces it; the
 	// field cannot be cleared once set.
-	DefaultTtl *uint32 `protobuf:"varint,8,opt,name=default_ttl,json=defaultTtl,proto3,oneof" json:"default_ttl,omitempty"`
-	// Owning VPC; absent for infrastructure domains. Ownership is immutable
-	// and a VPC owns at most one live domain.
-	VpcId         *VpcId `protobuf:"bytes,9,opt,name=vpc_id,json=vpcId,proto3" json:"vpc_id,omitempty"`
+	DefaultTtl    *uint32 `protobuf:"varint,8,opt,name=default_ttl,json=defaultTtl,proto3,oneof" json:"default_ttl,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -890,39 +887,24 @@ func (x *Domain) GetDefaultTtl() uint32 {
 	return 0
 }
 
-func (x *Domain) GetVpcId() *VpcId {
-	if x != nil {
-		return x.VpcId
-	}
-	return nil
-}
-
 type CreateDomainRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Reverse DNS serves inventory-derived PTRs, not managed zones. Names at or below
 	// in-addr.arpa or ip6.arpa are rejected with INVALID_ARGUMENT, ignoring case,
 	// surrounding whitespace, and trailing dots. Reserved-ID forward names are
 	// normalized to ASCII lowercase with trailing dots removed; other forward
-	// names must already be lowercase.
-	// Live names are unique across all owners, with case and trailing dots ignored
-	// when checking uniqueness. A deleted domain's name may be reused, and parent
-	// and child domains may coexist.
-	// Duplicate live names are rejected with INVALID_ARGUMENT.
+	// names must already be lowercase. Forward names need not be unique;
+	// reserved_id identifies a create retry independently of the name.
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// Default record TTL in seconds, 30 to 86400 inclusive; values outside that
 	// range are rejected with INVALID_ARGUMENT. Absent means the site default
 	// of 300.
 	DefaultTtl *uint32 `protobuf:"varint,2,opt,name=default_ttl,json=defaultTtl,proto3,oneof" json:"default_ttl,omitempty"`
-	// Optional owning VPC. Omission creates an infrastructure domain. An
-	// unknown or deleted VPC is rejected with NOT_FOUND. A VPC owns at most one
-	// live domain; another is rejected with INVALID_ARGUMENT. The owning VPC
-	// cannot be deleted while this domain is live.
-	VpcId *VpcId `protobuf:"bytes,3,opt,name=vpc_id,json=vpcId,proto3" json:"vpc_id,omitempty"`
 	// Internal REST ownership-index retry, required for the exclusive SiteAgent
 	// identity. Other callers supplying an ID, or SiteAgent omitting it, receive
 	// PERMISSION_DENIED. Omit for legacy/operator calls. A cancelled, deleted, or
 	// legacy-created ID is rejected with FAILED_PRECONDITION, as is a replay whose
-	// canonical name, VPC, or requested TTL differs from the original intent.
+	// canonical name or requested TTL differs from the original intent.
 	ReservedId    *DomainId `protobuf:"bytes,4,opt,name=reserved_id,json=reservedId,proto3" json:"reserved_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -972,13 +954,6 @@ func (x *CreateDomainRequest) GetDefaultTtl() uint32 {
 	return 0
 }
 
-func (x *CreateDomainRequest) GetVpcId() *VpcId {
-	if x != nil {
-		return x.VpcId
-	}
-	return nil
-}
-
 func (x *CreateDomainRequest) GetReservedId() *DomainId {
 	if x != nil {
 		return x.ReservedId
@@ -992,8 +967,6 @@ type UpdateDomainRequest struct {
 	// renaming is not supported and is rejected with INVALID_ARGUMENT. See
 	// Domain.default_ttl for how an absent TTL is treated.
 	// Unknown or deleted IDs are rejected with NOT_FOUND.
-	// Omitted vpc_id preserves ownership; a supplied value must match the owner
-	// or the request is rejected with INVALID_ARGUMENT. Ownership cannot be cleared.
 	Domain        *Domain `protobuf:"bytes,1,opt,name=domain,proto3" json:"domain,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1246,7 +1219,7 @@ const file_dns_nico_proto_rawDesc = "" +
 	"\flast_checked\x18\x05 \x01(\x05H\x00R\vlastChecked\x88\x01\x01\x12,\n" +
 	"\x0fnotified_serial\x18\x06 \x01(\x05H\x01R\x0enotifiedSerial\x88\x01\x01B\x0f\n" +
 	"\r_last_checkedB\x12\n" +
-	"\x10_notified_serial\"\x8c\x03\n" +
+	"\x10_notified_serial\"\xf4\x02\n" +
 	"\x06Domain\x12 \n" +
 	"\x02id\x18\x01 \x01(\v2\x10.common.DomainIdR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x124\n" +
@@ -1256,18 +1229,17 @@ const file_dns_nico_proto_rawDesc = "" +
 	"\bmetadata\x18\x06 \x01(\v2\x13.dns.DomainMetadataR\bmetadata\x12\x15\n" +
 	"\x03soa\x18\a \x01(\tH\x00R\x03soa\x88\x01\x01\x12$\n" +
 	"\vdefault_ttl\x18\b \x01(\rH\x01R\n" +
-	"defaultTtl\x88\x01\x01\x12$\n" +
-	"\x06vpc_id\x18\t \x01(\v2\r.common.VpcIdR\x05vpcIdB\x06\n" +
+	"defaultTtl\x88\x01\x01B\x06\n" +
 	"\x04_soaB\x0e\n" +
-	"\f_default_ttl\"\xb8\x01\n" +
+	"\f_default_ttlJ\x04\b\t\x10\n" +
+	"R\x06vpc_id\"\xa0\x01\n" +
 	"\x13CreateDomainRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12$\n" +
 	"\vdefault_ttl\x18\x02 \x01(\rH\x00R\n" +
-	"defaultTtl\x88\x01\x01\x12$\n" +
-	"\x06vpc_id\x18\x03 \x01(\v2\r.common.VpcIdR\x05vpcId\x121\n" +
+	"defaultTtl\x88\x01\x01\x121\n" +
 	"\vreserved_id\x18\x04 \x01(\v2\x10.common.DomainIdR\n" +
 	"reservedIdB\x0e\n" +
-	"\f_default_ttl\":\n" +
+	"\f_default_ttlJ\x04\b\x03\x10\x04R\x06vpc_id\":\n" +
 	"\x13UpdateDomainRequest\x12#\n" +
 	"\x06domain\x18\x01 \x01(\v2\v.dns.DomainR\x06domain\"c\n" +
 	"\x11DomainSearchQuery\x12%\n" +
@@ -1324,7 +1296,6 @@ var file_dns_nico_proto_goTypes = []any{
 	(*DomainDeletionResult)(nil),            // 18: dns.DomainDeletionResult
 	(*DomainId)(nil),                        // 19: common.DomainId
 	(*timestamppb.Timestamp)(nil),           // 20: google.protobuf.Timestamp
-	(*VpcId)(nil),                           // 21: common.VpcId
 }
 var file_dns_nico_proto_depIdxs = []int32{
 	3,  // 0: dns.DnsResourceRecordLookupResponse.records:type_name -> dns.DnsResourceRecord
@@ -1340,17 +1311,15 @@ var file_dns_nico_proto_depIdxs = []int32{
 	20, // 10: dns.Domain.updated:type_name -> google.protobuf.Timestamp
 	20, // 11: dns.Domain.deleted:type_name -> google.protobuf.Timestamp
 	4,  // 12: dns.Domain.metadata:type_name -> dns.DomainMetadata
-	21, // 13: dns.Domain.vpc_id:type_name -> common.VpcId
-	21, // 14: dns.CreateDomainRequest.vpc_id:type_name -> common.VpcId
-	19, // 15: dns.CreateDomainRequest.reserved_id:type_name -> common.DomainId
-	13, // 16: dns.UpdateDomainRequest.domain:type_name -> dns.Domain
-	19, // 17: dns.DomainSearchQuery.id:type_name -> common.DomainId
-	19, // 18: dns.DomainDeletionRequest.id:type_name -> common.DomainId
-	19, // [19:19] is the sub-list for method output_type
-	19, // [19:19] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	19, // 13: dns.CreateDomainRequest.reserved_id:type_name -> common.DomainId
+	13, // 14: dns.UpdateDomainRequest.domain:type_name -> dns.Domain
+	19, // 15: dns.DomainSearchQuery.id:type_name -> common.DomainId
+	19, // 16: dns.DomainDeletionRequest.id:type_name -> common.DomainId
+	17, // [17:17] is the sub-list for method output_type
+	17, // [17:17] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_dns_nico_proto_init() }

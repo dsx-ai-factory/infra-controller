@@ -25,9 +25,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use ::rpc::carbide_tls_client::CarbideClientConfig;
 use ::rpc::forge::ManagedHostNetworkConfigResponse;
-use ::rpc::forge_tls_client::ForgeClientConfig;
-use ::rpc::{forge as rpc, forge_tls_client};
+use ::rpc::{carbide_tls_client, forge as rpc};
 use carbide_host_support::agent_config::AgentConfig;
 use carbide_host_support::lldp_snapshot_cache::classify_against_accepted_snapshot;
 use carbide_network::virtualization::VpcVirtualizationType;
@@ -85,7 +85,7 @@ use crate::{
 pub(super) async fn setup_and_run(
     machine_id: DpuMachineId,
     factory_mac_address: MacAddress,
-    forge_client_config: Arc<ForgeClientConfig>,
+    carbide_client_config: Arc<CarbideClientConfig>,
     agent_config: AgentConfig,
     options: command_line::RunOptions,
 ) -> eyre::Result<()> {
@@ -113,12 +113,12 @@ pub(super) async fn setup_and_run(
     let forge_api_server = agent_config.forge_system.api_server.clone();
     // Setup client certificate renewal
     let client_cert_renewer =
-        ClientCertRenewer::new(forge_api_server.clone(), Arc::clone(&forge_client_config));
+        ClientCertRenewer::new(forge_api_server.clone(), Arc::clone(&carbide_client_config));
 
     let machine_info = MachineInfo::new(machine_id);
     let remediation_executor = RemediationExecutor::new(
         forge_api_server.clone(),
-        Arc::clone(&forge_client_config),
+        Arc::clone(&carbide_client_config),
         machine_info,
     );
     tokio::task::spawn(async move {
@@ -129,7 +129,7 @@ pub(super) async fn setup_and_run(
         instance_metadata_endpoint::InstanceMetadataRouterStateImpl::new(
             machine_id,
             forge_api_server.clone(),
-            Arc::clone(&forge_client_config),
+            Arc::clone(&carbide_client_config),
             agent_config.machine_identity.clone(),
         )
         .map_err(|e| eyre::eyre!("failed to initialize instance metadata router state: {e}"))?,
@@ -280,8 +280,8 @@ pub(super) async fn setup_and_run(
     // collection, so it follows the renewals ClientCertRenewer performs over
     // the agent's lifetime.
     {
-        let forge_client_config = Arc::clone(&forge_client_config);
-        metrics.record_client_cert_expiry_time(move || forge_client_config.client_cert_expiry());
+        let carbide_client_config = Arc::clone(&carbide_client_config);
+        metrics.record_client_cert_expiry_time(move || carbide_client_config.client_cert_expiry());
     }
 
     if options.agent_platform_type.is_dpu_os()
@@ -327,7 +327,7 @@ pub(super) async fn setup_and_run(
             ),
             machine_id,
             forge_api: forge_api_server.clone(),
-            forge_client_config: Arc::clone(&forge_client_config),
+            carbide_client_config: Arc::clone(&carbide_client_config),
         },
     )
     .await;
@@ -335,7 +335,7 @@ pub(super) async fn setup_and_run(
     let host_machine_id = match get_host_machine_id_retry(
         &agent_config,
         &periodic_config_fetcher,
-        Arc::clone(&forge_client_config),
+        Arc::clone(&carbide_client_config),
         &forge_api_server,
     )
     .await
@@ -380,7 +380,7 @@ pub(super) async fn setup_and_run(
         update_inventory_interval: Duration::from_secs(agent_config.period.inventory_update_secs),
         machine_id,
         forge_api: forge_api_server.clone(),
-        forge_client_config: Arc::clone(&forge_client_config),
+        carbide_client_config: Arc::clone(&carbide_client_config),
         agent_platform_type: options.agent_platform_type.clone(),
     };
 
@@ -408,12 +408,12 @@ pub(super) async fn setup_and_run(
                 Arc::from(pinger_type),
             );
             let forge_api_clone = forge_api_server.clone();
-            let forge_client_config_clone = Arc::clone(&forge_client_config);
+            let carbide_client_config_clone = Arc::clone(&carbide_client_config);
             let network_monitor_handle = tokio::spawn(async move {
                 network_monitor
                     .run(
                         &forge_api_clone,
-                        forge_client_config_clone,
+                        carbide_client_config_clone,
                         &mut close_receiver,
                     )
                     .await
@@ -471,7 +471,7 @@ pub(super) async fn setup_and_run(
     );
 
     let mut main_loop = MainLoop {
-        forge_client_config,
+        carbide_client_config,
         build_version,
         machine_id,
         periodic_config_reader,
@@ -553,7 +553,7 @@ async fn apply_fmds_interface(
 }
 
 struct MainLoop {
-    forge_client_config: Arc<ForgeClientConfig>,
+    carbide_client_config: Arc<CarbideClientConfig>,
     machine_id: DpuMachineId,
     factory_mac_address: MacAddress,
     build_version: String,
@@ -1102,7 +1102,7 @@ impl MainLoop {
         let mut current_extension_service_version = None;
 
         let client_certificate_expiry_unix_epoch_secs =
-            self.forge_client_config.client_cert_expiry();
+            self.carbide_client_config.client_cert_expiry();
 
         let fabric_interfaces = get_fabric_interfaces_data().await.unwrap_or_else(|err| {
             tracing::warn!(
@@ -1595,7 +1595,7 @@ impl MainLoop {
                 let _ = record_network_status(
                     status_out,
                     &self.forge_api_server,
-                    &self.forge_client_config,
+                    &self.carbide_client_config,
                 )
                 .await;
                 self.seen_blank = false;
@@ -1716,7 +1716,7 @@ impl MainLoop {
             ));
             let upgrade_result = upgrade::upgrade(
                 &self.forge_api_server,
-                &self.forge_client_config,
+                &self.carbide_client_config,
                 &self.machine_id,
                 self.agent_config.updates.override_upgrade_cmd.as_deref(),
             )
@@ -1998,9 +1998,9 @@ fn fmds_reply_routes(
 async fn record_network_status(
     status: rpc::DpuNetworkStatus,
     forge_api: &str,
-    forge_client_config: &forge_tls_client::ForgeClientConfig,
+    carbide_client_config: &carbide_tls_client::CarbideClientConfig,
 ) -> Result<(), eyre::Report> {
-    let mut client = match forge_tls_client::ForgeTlsClient::new(forge_client_config)
+    let mut client = match carbide_tls_client::CarbideTlsClient::new(carbide_client_config)
         .build(forge_api)
         .await
     {

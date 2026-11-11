@@ -2,15 +2,17 @@
 ## =============================================================================
 ## Self-signed bootstrap → site-root CA
 ##
-## These are pre-install hooks so they run before vault-tls-certs.yaml hooks
-## (site-issuer at -5, vault cert hooks at -4) which depend on site-root.
+## These are pre-install hooks so they run before the site-issuer hook
+## (site-issuer.yaml, -5) and the Vault TLS cert hooks (vault-tls-certs.yaml,
+## -4), which depend on site-root. They render with or without Vault: site-root
+## is the trust root of every NICo issuer.
 ##
 ## Hook order:
 ##   -10  selfsigned-bootstrap ClusterIssuer (this file)
 ##    -9  site-root Certificate              (this file)
-##    -5  site-issuer ClusterIssuer          (vault-tls-certs.yaml)
-##    -4  nicoca-vault-client Certificate   (vault-tls-certs.yaml)
-##    -4  vault-raft-tls Certificate         (vault-tls-certs.yaml)
+##    -5  site-issuer ClusterIssuer          (site-issuer.yaml)
+##    -4  nicoca-vault-client Certificate   (vault-tls-certs.yaml, vault.enabled only)
+##    -4  vault-raft-tls Certificate         (vault-tls-certs.yaml, vault.enabled only)
 ##
 ## NOTE: setup.sh must run helmfile sync for cert-manager BEFORE vault so that
 ## cert-manager is available to issue the site-root cert before vault starts.

@@ -1413,6 +1413,126 @@ jobs:
       - name: Final repository clean check
         run: bash scripts/check-repo-clean.sh "release-container service tests"
 
+  test-dev-dhcp-image:
+    name: test-dev-dhcp-image (${{ matrix.arch }})
+    if: >-
+      ${{
+        !cancelled()
+        && startsWith(github.ref, 'refs/heads/pull-request/')
+        && needs.prepare.result == 'success'
+        && contains('success,skipped', needs.build-container-x86_64.result)
+        && contains('success,skipped', needs.build-container-aarch64.result)
+      }}
+    needs:
+      - prepare
+      - build-container-x86_64
+      - build-container-aarch64
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: linux-amd64-cpu8
+            build_container: ${{ needs.prepare.outputs.build_container_x86_64_ref }}
+            build_container_rebuilt: ${{ needs.prepare.outputs.build_container_x86_64_run }}
+          - arch: arm64
+            runner: linux-arm64-cpu8
+            build_container: ${{ needs.prepare.outputs.build_container_aarch64_ref }}
+            build_container_rebuilt: ${{ needs.prepare.outputs.build_container_aarch64_run }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Login to source registry
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ needs.prepare.outputs.source_registry_host }}
+          username: ${{ secrets.NICO_SOURCE_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_SOURCE_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      - name: Login to target registry
+        if: ${{ needs.prepare.outputs.publish_images == 'true' && needs.prepare.outputs.registry_host != needs.prepare.outputs.source_registry_host }}
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ needs.prepare.outputs.registry_host }}
+          username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      # Reuse the prepared compiler, but build the actual development recipes
+      # so runtime dependencies and COPY paths are checked on both architectures.
+      - name: Build and smoke-test native development DHCP image
+        id: dev-build
+        env:
+          ARCH: ${{ matrix.arch }}
+          BUILD_CONTAINER: ${{ matrix.build_container }}
+          BUILD_CONTAINER_REBUILT: ${{ matrix.build_container_rebuilt }}
+          PUBLISH_COMPILER: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+          KEA_VERSION: ${{ needs.prepare.outputs.kea_version }}
+          DOCKER_BUILDKIT: '1'
+        run: |
+          set -euo pipefail
+          docker_context="$(docker context show)"
+          export DOCKER_CONTEXT="$docker_context" BUILDX_BUILDER="$docker_context"
+          daemon_platform="$(docker info --format '{{.OSType}}/{{.Architecture}}')"
+          case "$daemon_platform" in
+            linux/amd64|linux/x86_64) daemon_arch=amd64; compiler=x86_64 ;;
+            linux/arm64|linux/aarch64) daemon_arch=arm64; compiler=aarch64 ;;
+            *) echo "Unsupported Docker daemon platform: $daemon_platform" >&2; exit 1 ;;
+          esac
+          if [[ "$daemon_arch" != "$ARCH" ]]; then
+            echo "Docker daemon platform $daemon_platform does not match requested linux/$ARCH" >&2
+            exit 1
+          fi
+          tag="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
+          runtime_image="nico-dev-runtime:$tag"
+          service_image="nico-dev-dhcp:$tag"
+          compiler_image="$BUILD_CONTAINER"
+          if [[ "$BUILD_CONTAINER_REBUILT" == true && "$PUBLISH_COMPILER" != true ]]; then
+            # Mirror PRs build the compiler without publishing it to another job.
+            compiler_image="nico-dev-build:$tag"
+          fi
+          echo "compiler_image=$compiler_image" >> "$GITHUB_OUTPUT"
+          echo "docker_context=$docker_context" >> "$GITHUB_OUTPUT"
+          if [[ "$BUILD_CONTAINER_REBUILT" == true && "$PUBLISH_COMPILER" != true ]]; then
+            docker build --platform "linux/$ARCH" \
+              --file "dev/docker/Dockerfile.build-container-$compiler" \
+              --build-arg KEA_VERSION="$KEA_VERSION" --tag "$compiler_image" .
+          else
+            docker pull --platform "linux/$ARCH" "$BUILD_CONTAINER"
+          fi
+          test "$(docker image inspect --format '{{.Architecture}}' "$compiler_image")" = "$ARCH"
+          docker build --platform "linux/$ARCH" \
+            --file dev/docker/Dockerfile.dev-runtime \
+            --tag "$runtime_image" .
+          docker build --platform "linux/$ARCH" \
+            --file dev/docker/Dockerfile.dev-services --target dhcp \
+            --build-arg CONTAINER_BUILD="$compiler_image" \
+            --build-arg CONTAINER_RUNTIME="$runtime_image" \
+            --build-arg KEA_VERSION="$KEA_VERSION" \
+            --tag "$service_image" .
+          test "$(docker image inspect --format '{{.Architecture}}' "$service_image")" = "$ARCH"
+          bash dev/docker/tests/smoke_dhcp_image.sh "$service_image"
+
+      - name: Remove development DHCP job images
+        if: always() && steps.dev-build.outputs.compiler_image != ''
+        env:
+          ARCH: ${{ matrix.arch }}
+          BUILD_CONTAINER_REBUILT: ${{ matrix.build_container_rebuilt }}
+          PUBLISH_COMPILER: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+          DOCKER_CONTEXT: ${{ steps.dev-build.outputs.docker_context }}
+          BUILDX_BUILDER: ${{ steps.dev-build.outputs.docker_context }}
+        run: |
+          tag="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
+          owned_images=("nico-dev-dhcp:$tag" "nico-dev-runtime:$tag")
+          if [[ "$BUILD_CONTAINER_REBUILT" == true && "$PUBLISH_COMPILER" != true ]]; then
+            owned_images+=("nico-dev-build:$tag")
+          fi
+          docker image rm "${owned_images[@]}" >/dev/null 2>&1 || true
+
   # ============================================================================
   # BUILD STAGE - Forge CLI (Multi-arch)
   # ============================================================================
@@ -2447,9 +2567,15 @@ jobs:
       - name: Check KMIP provider preflight
         run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_kmip_provider.py'
 
+      - name: Check Vault-free Core values preflight
+        run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_vault_free.py'
+
       # Uses python3-yaml installed by the configuration check above.
       - name: Test DevSpace bootstrap manifests
         run: /usr/bin/python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
+
+      - name: Test local native development image builds
+        run: /usr/bin/python3 -B -m unittest discover -s dev/docker/tests
 
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests
@@ -2604,6 +2730,15 @@ jobs:
 
       - name: Test Keycloak token error redaction
         run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_keycloak_token.py'
+
+      - name: Test setup --skip-vault
+        run: bash helm-prereqs/tests/setup-skip-vault_test.sh
+
+      - name: Test preflight --skip-vault
+        run: bash helm-prereqs/tests/preflight-skip-vault_test.sh
+
+      - name: Test health check without Vault
+        run: bash helm-prereqs/tests/health-check-vault-optional_test.sh
 
   # Waits for the nico chart push. NGC answers an upload with HTTP 409 while
   # another upload to the same namespace is updating its chart index, and the
@@ -3018,6 +3153,7 @@ jobs:
       - test-mat-k8s-controller
       - test-scale-test
       - test-release-container-services
+      - test-dev-dhcp-image
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
       - build-package-scout-aarch64
@@ -3294,6 +3430,7 @@ jobs:
       - test-mat-k8s-controller
       - test-scale-test
       - test-release-container-services
+      - test-dev-dhcp-image
 
       # CLI images
       - build-forge-cli-x86_64

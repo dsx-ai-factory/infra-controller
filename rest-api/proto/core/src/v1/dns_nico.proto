@@ -123,9 +123,8 @@ message Domain {
   // absent preserves the stored value and a present value replaces it; the
   // field cannot be cleared once set.
   optional uint32 default_ttl = 8;
-  // Owning VPC; absent for infrastructure domains. Ownership is immutable
-  // and a VPC owns at most one live domain.
-  common.VpcId vpc_id = 9;
+  reserved 9;
+  reserved "vpc_id";
 }
 
 message CreateDomainRequest {
@@ -133,26 +132,20 @@ message CreateDomainRequest {
   // in-addr.arpa or ip6.arpa are rejected with INVALID_ARGUMENT, ignoring case,
   // surrounding whitespace, and trailing dots. Reserved-ID forward names are
   // normalized to ASCII lowercase with trailing dots removed; other forward
-  // names must already be lowercase.
-  // Live names are unique across all owners, with case and trailing dots ignored
-  // when checking uniqueness. A deleted domain's name may be reused, and parent
-  // and child domains may coexist.
-  // Duplicate live names are rejected with INVALID_ARGUMENT.
+  // names must already be lowercase. Forward names need not be unique;
+  // reserved_id identifies a create retry independently of the name.
   string name = 1;
   // Default record TTL in seconds, 30 to 86400 inclusive; values outside that
   // range are rejected with INVALID_ARGUMENT. Absent means the site default
   // of 300.
   optional uint32 default_ttl = 2;
-  // Optional owning VPC. Omission creates an infrastructure domain. An
-  // unknown or deleted VPC is rejected with NOT_FOUND. A VPC owns at most one
-  // live domain; another is rejected with INVALID_ARGUMENT. The owning VPC
-  // cannot be deleted while this domain is live.
-  common.VpcId vpc_id = 3;
+  reserved 3;
+  reserved "vpc_id";
   // Internal REST ownership-index retry, required for the exclusive SiteAgent
   // identity. Other callers supplying an ID, or SiteAgent omitting it, receive
   // PERMISSION_DENIED. Omit for legacy/operator calls. A cancelled, deleted, or
   // legacy-created ID is rejected with FAILED_PRECONDITION, as is a replay whose
-  // canonical name, VPC, or requested TTL differs from the original intent.
+  // canonical name or requested TTL differs from the original intent.
   common.DomainId reserved_id = 4;
 }
 
@@ -161,8 +154,6 @@ message UpdateDomainRequest {
   // renaming is not supported and is rejected with INVALID_ARGUMENT. See
   // Domain.default_ttl for how an absent TTL is treated.
   // Unknown or deleted IDs are rejected with NOT_FOUND.
-  // Omitted vpc_id preserves ownership; a supplied value must match the owner
-  // or the request is rejected with INVALID_ARGUMENT. Ownership cannot be cleared.
   Domain domain = 1;
 }
 

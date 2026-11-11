@@ -23,7 +23,7 @@ use std::error::Error;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
 
-use ::rpc::forge_tls_client::ForgeClientConfig;
+use ::rpc::carbide_tls_client::CarbideClientConfig;
 use carbide_dhcp_server::cache::{self, CacheEntry};
 use carbide_dhcp_server::errors::DhcpError;
 use carbide_dhcp_server::metrics::{
@@ -1346,7 +1346,7 @@ async fn load_config(
     candidate_host: Option<String>,
     allow_missing_host: bool,
 ) -> Result<Config, DhcpError> {
-    let forge_client_config = forge_client_config(args)?;
+    let carbide_client_config = carbide_client_config(args)?;
     let dhcp_config = read_dhcp_config(&args.dhcp_config, candidate_dhcp).await?;
 
     let host_config;
@@ -1381,11 +1381,11 @@ async fn load_config(
         dhcp_config,
         host_config,
         args.relay_response_port,
-        forge_client_config,
+        carbide_client_config,
     ))
 }
 
-fn forge_client_config(args: &Args) -> Result<ForgeClientConfig, DhcpError> {
+fn carbide_client_config(args: &Args) -> Result<CarbideClientConfig, DhcpError> {
     let root_ca_path = args
         .forge_root_ca_path
         .clone()
@@ -1406,7 +1406,7 @@ fn forge_client_config(args: &Args) -> Result<ForgeClientConfig, DhcpError> {
         }
     };
 
-    Ok(ForgeClientConfig::new(root_ca_path, Some(client_cert)))
+    Ok(CarbideClientConfig::new(root_ca_path, Some(client_cert)))
 }
 
 const MINIMUM_DHCP_PKT_SIZE: usize = 236;
@@ -1598,7 +1598,7 @@ mod test {
     use crate::command_line::{Args, ServerMode};
     use crate::{
         Config, DhcpMode, ListenerFailure, ReplyStatus, admit_v6_packet, cache,
-        forge_client_config, handle_reload, init, packet_handler, process,
+        carbide_client_config, handle_reload, init, packet_handler, process,
         supervise_listener_tasks, validate_v6_source_port,
     };
 
@@ -1926,7 +1926,7 @@ mod test {
                         dhcp,
                         None,
                         67,
-                        forge_client_config(&args).unwrap(),
+                        carbide_client_config(&args).unwrap(),
                     );
                     let cancel = CancellationToken::new();
                     // Port zero isolates the socket from other test binaries.
@@ -1962,7 +1962,7 @@ mod test {
         let mut dhcp = ipv6_only_config();
         dhcp.carbide_dhcp_server = Some(Ipv4Addr::LOCALHOST);
         dhcp.carbide_provisioning_server_ipv4 = Some(Ipv4Addr::LOCALHOST);
-        let config = Config::new(dhcp, None, 67, forge_client_config(&args).unwrap());
+        let config = Config::new(dhcp, None, 67, carbide_client_config(&args).unwrap());
 
         // Cancel before startup so socket setup and retirement are simultaneously eligible.
         let cancel = CancellationToken::new();
@@ -3488,7 +3488,7 @@ mod test {
 
     #[test]
     fn forge_client_tls_paths_are_configurable() {
-        let defaults = forge_client_config(&get_test_args()).unwrap();
+        let defaults = carbide_client_config(&get_test_args()).unwrap();
         assert_eq!(defaults.root_ca_path, forge_tls::default::ROOT_CA);
         let default_identity = defaults.client_cert.unwrap();
         assert_eq!(default_identity.cert_path, forge_tls::default::CLIENT_CERT);
@@ -3498,14 +3498,14 @@ mod test {
         explicit.forge_root_ca_path = Some("/local/ca.crt".to_string());
         explicit.client_cert_path = Some("/local/client.crt".to_string());
         explicit.client_key_path = Some("/local/client.key".to_string());
-        let configured = forge_client_config(&explicit).unwrap();
+        let configured = carbide_client_config(&explicit).unwrap();
         assert_eq!(configured.root_ca_path, "/local/ca.crt");
         let configured_identity = configured.client_cert.unwrap();
         assert_eq!(configured_identity.cert_path, "/local/client.crt");
         assert_eq!(configured_identity.key_path, "/local/client.key");
 
         explicit.client_key_path = None;
-        assert!(forge_client_config(&explicit).is_err());
+        assert!(carbide_client_config(&explicit).is_err());
     }
 
     #[tokio::test]

@@ -2422,7 +2422,64 @@ async fn owner_slot_lookup_keeps_terminal_generations_across_pools(
     other_pool.request_id = Uuid::new_v4();
     other_pool.owner.generation = 8;
     begin(&pool, &other_pool, &authority).await?;
-    attach_assignment(&pool, other_pool.request_id, &authority, &assignment()).await?;
+    let retained_assignment = assignment();
+    attach_assignment(
+        &pool,
+        other_pool.request_id,
+        &authority,
+        &retained_assignment,
+    )
+    .await?;
+
+    // The shared scan includes both retained pools, omits terminal and unrelated
+    // work, and holds the older assignment until dependent inspection commits.
+    let mut inspecting = pool.begin().await?;
+    let active = super::active_for_owner_slot(
+        &mut inspecting,
+        OwnerType::Vpc,
+        &current.owner.owner_id,
+        "vni",
+    )
+    .await?;
+    assert_eq!(
+        active
+            .iter()
+            .map(|row| row.allocation_id)
+            .collect::<Vec<_>>(),
+        vec![other_pool.request_id, current.request_id]
+    );
+    let inspecting_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *inspecting)
+        .await?;
+    let mut releasing = pool.begin().await?;
+    let release_older = async {
+        let result = request_release(
+            &mut releasing,
+            other_pool.request_id,
+            &retained_assignment.allocation_id,
+        )
+        .await?;
+        releasing.commit().await?;
+        Ok::<_, eyre::Report>(result)
+    };
+    let finish_inspection = async {
+        wait_for_blocked_query(&pool, inspecting_pid, "resource_pool_allocations").await;
+        inspecting.commit().await?;
+        Ok::<_, eyre::Report>(())
+    };
+    let (released_older, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::try_join!(release_older, finish_inspection)
+    })
+    .await??;
+    assert_eq!(released_older, Applied(()));
+    assert_eq!(
+        load(&pool, other_pool.request_id).await?.unwrap().state,
+        AllocationState::ReleaseRequested
+    );
+    assert_eq!(
+        load(&pool, current.request_id).await?.unwrap().state,
+        AllocationState::Attached
+    );
 
     let mut txn = pool.begin().await?;
     let attached = super::attached_for_owner_slot(

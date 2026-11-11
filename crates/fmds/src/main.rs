@@ -27,8 +27,8 @@ use fmds::rest_server::get_fmds_router;
 use fmds::state::FmdsState;
 use fmds::{http_request_metrics, nic_init};
 use forge_tls::client_config::ClientCert;
+use rpc::carbide_tls_client::CarbideClientConfig;
 use rpc::fmds::fmds_config_service_server::FmdsConfigServiceServer;
-use rpc::forge_tls_client::ForgeClientConfig;
 use rpc::node_token_socket::SocketTokenSource;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
@@ -94,7 +94,7 @@ async fn main() -> eyre::Result<()> {
         nic_init::setup_metadata_routing(&options.interface_name, cidr.into()).await?;
     }
 
-    // Build ForgeClientConfig for phone_home. Either credential works alone:
+    // Build CarbideClientConfig for phone_home. Either credential works alone:
     // the shared mTLS client cert, and/or node-auth bearer tokens fetched from
     // the dpu-agent's local API socket (#355) — the latter lets this pod run
     // without the machine private key mounted at all.
@@ -120,9 +120,9 @@ async fn main() -> eyre::Result<()> {
     if options.root_ca.is_none() && options.node_token_socket.is_some() {
         eyre::bail!("--node-token-socket was provided without --root-ca");
     }
-    let forge_client_config = match &options.root_ca {
+    let carbide_client_config = match &options.root_ca {
         Some(root_ca) if client_cert.is_some() || options.node_token_socket.is_some() => {
-            let mut config = ForgeClientConfig::new(root_ca.clone(), client_cert);
+            let mut config = CarbideClientConfig::new(root_ca.clone(), client_cert);
             if let Some(socket) = &options.node_token_socket {
                 tracing::info!(
                     socket = %socket,
@@ -145,7 +145,7 @@ async fn main() -> eyre::Result<()> {
     };
 
     let state = Arc::new(
-        FmdsState::try_new(options.forge_api.clone(), forge_client_config)
+        FmdsState::try_new(options.forge_api.clone(), carbide_client_config)
             .map_err(|e| eyre::eyre!("failed to initialize FMDS state: {e}"))?,
     );
 

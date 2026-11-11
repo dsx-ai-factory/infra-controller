@@ -1,6 +1,7 @@
-{{- if .Values.vault.configJob.enabled }}
+{{- if and .Values.vault.enabled .Values.vault.configJob.enabled }}
 ## =============================================================================
 ## Vault PKI Configuration Job (post-install hook)
+## Rendered only while vault.enabled is true.
 ## Uses only tools built into hashicorp/vault image (busybox wget/sed/grep).
 ## No apk install — works on clusters without outbound internet access.
 ##

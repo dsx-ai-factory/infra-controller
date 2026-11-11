@@ -507,7 +507,7 @@ fn core_options_with_usable_identity(fixture: &Path) -> Options {
     options.root_ca = write("core-ca.pem", &ca.pem());
     options.client_cert = write("core-client.pem", &client.pem());
     options.client_key = write("core-client-key.pem", &client_key.serialize_pem());
-    let transport = crate::client::forge_client_config(&options);
+    let transport = crate::client::carbide_client_config(&options);
     assert!(transport.root_ca_is_usable());
     assert!(transport.read_client_cert().is_some());
     assert!(
