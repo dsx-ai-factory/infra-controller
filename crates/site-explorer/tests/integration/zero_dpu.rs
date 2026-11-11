@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use bmc_mock::test_support::{nvidia_gh200_swapped_managers_router, serve_https};
 use carbide_redfish::libredfish::test_support::RedfishSim;
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_secrets::credentials::{
@@ -1086,11 +1087,28 @@ async fn test_zero_dpu_multi_nic_no_declaration_adopts_without_primary_collision
 }
 
 /// A site-wide `ignore` site passes the production credential precheck without
-/// a DPU UEFI site default, so the run completes and is recorded as successful.
+/// a DPU UEFI site default and persists a successful BMC exploration.
 #[sqlx_test]
 async fn ignore_site_runs_without_dpu_uefi_credential(pool: PgPool) {
     let test_harness = TestHarness::builder(pool.clone()).build().await;
     let api = test_harness.api();
+    let domain = test_harness.test_domain().await;
+    let underlay_segment = test_harness
+        .network_controller()
+        .create_underlay_segment(&domain)
+        .await;
+    let host = zero_dpu_host();
+    let host_bmc_ip = super::machine_fixtures::discover_bmc(
+        api,
+        underlay_segment,
+        host.bmc_mac_address,
+        "NVIDIA/OOB",
+    )
+    .await;
+    let (bmc_server, _) = serve_https(
+        "ignore-site-without-dpu-uefi",
+        nvidia_gh200_swapped_managers_router(),
+    );
     let credential_manager = Arc::new(TestCredentialManager::default());
     for key in [
         CredentialKey::BmcCredentials {
@@ -1105,10 +1123,21 @@ async fn ignore_site_runs_without_dpu_uefi_credential(pool: PgPool) {
             .await
             .unwrap();
     }
+    credential_manager
+        .set_credentials(
+            &CredentialKey::BmcCredentials {
+                credential_type: BmcCredentialType::BmcRoot {
+                    bmc_mac_address: host.bmc_mac_address,
+                },
+            },
+            &Credentials::new("root", "configured"),
+        )
+        .await
+        .unwrap();
     let bmc_client = Arc::new(AuthenticatedBmcClient::new(
         Arc::new(RedfishSim::default()),
         Arc::new(NvRedfishClientPool::new(Arc::new(ArcSwap::new(Arc::new(
-            None,
+            Some(bmc_server.address.to_string().parse().unwrap()),
         ))))),
         None,
         carbide_ipmi::test_support(),
@@ -1151,4 +1180,11 @@ async fn ignore_site_runs_without_dpu_uefi_credential(pool: PgPool) {
         .unwrap()
         .expect("the iteration records its last run");
     assert!(last_run.success, "{last_run:?}");
+    let endpoints = db::explored_endpoints::find_by_ips(&pool, vec![host_bmc_ip])
+        .await
+        .unwrap();
+    assert_eq!(endpoints.len(), 1);
+    let report = &endpoints[0].report;
+    assert!(report.last_exploration_error.is_none(), "{report:?}");
+    assert!(!report.systems.is_empty(), "{report:?}");
 }
