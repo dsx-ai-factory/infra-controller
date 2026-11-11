@@ -57,6 +57,44 @@ class GatewayBootstrapTests(unittest.TestCase):
                 if failure in ("modprobe", "mount", "apk"):
                     self.assertEqual((build / "failed").read_text(), "41\n")
 
+    def test_route64_blocks_unsolicited_input_before_exposing_global_address(self):
+        for failure in ("", "firewall"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                binary = root / "bin"
+                binary.mkdir()
+                (root / "state").mkdir()
+                (root / "state/route64.conf").write_text("synthetic fixture\n")
+                script = (GUEST / "route64-gateway.sh").read_text()
+                script = script.replace("/mnt/state", str(root / "state"))
+                script = script.replace("/etc/wireguard", str(root / "wireguard"))
+                for name in ("modprobe", "ip6tables", "wg-quick", "ip"):
+                    body = '#!/bin/sh\nprintf "%s %s\\n" "${0##*/}" "$*" >> "$BOOT_TEST/events"\n'
+                    if name == "ip6tables":
+                        body += '[ "$1" != -C ] || exit 1\n'
+                        body += '[ "$BOOT_FAIL" != firewall ] || exit 41\n'
+                    path = binary / name
+                    path.write_text(body)
+                    path.chmod(0o755)
+                result = subprocess.run(["sh", "-eu", "-c", script], capture_output=True, text=True,
+                                        env=dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}",
+                                                 BOOT_TEST=str(root), BOOT_FAIL=failure), timeout=5)
+                events = (root / "events").read_text().splitlines()
+                if failure:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("wg-quick up route64", events)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    accept = events.index("ip6tables -I VFLAB-TUNNEL -m conntrack "
+                                          "--ctstate ESTABLISHED,RELATED -j ACCEPT")
+                    drop = events.index("ip6tables -A VFLAB-TUNNEL -j DROP")
+                    attach = events.index("ip6tables -I INPUT -i route64 -j VFLAB-TUNNEL")
+                    expose = events.index("wg-quick up route64")
+                    self.assertLess(accept, drop)
+                    self.assertLess(drop, attach)
+                    self.assertLess(attach, expose)
+                    self.assertEqual((root / "wireguard/route64.conf").stat().st_mode & 0o777, 0o600)
+
     def test_dhcp_hook_marks_only_configured_wan_ipv4_acquisitions(self):
         source = (GUEST / "networking-gateway.sh").read_text()
         hook = source.split("<<'HOOK'\n", 1)[1].split("\nHOOK\n", 1)[0]
