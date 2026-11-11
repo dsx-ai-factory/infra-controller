@@ -41,11 +41,10 @@ use forge_tls::client_config::{
 use mac_address::MacAddress;
 use machine_a_tron::{
     BmcMockRegistry, ControlState, DeviceStatusConfig, DhcpClient, MachineATron, MachineATronArgs,
-    MachineATronConfig, MachineATronContext, SimulatorLifecycle, api_throttler,
-    append_control_routes,
+    MachineATronConfig, MachineATronContext, SimulatorLifecycle, append_control_routes,
 };
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
-use rpc::protos::forge_api_client::ForgeApiClient;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
+use rpc::protos::carbide_api_client::CarbideApiClient;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
@@ -85,26 +84,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
     })?;
 
-    let mut forge_client_config =
-        ForgeClientConfig::new(forge_root_ca_path.clone(), Some(forge_client_cert));
-    forge_client_config.socks_proxy(proxy);
-    forge_client_config.connect_retries_max = Some(60);
-    forge_client_config.connect_retries_interval = Some(Duration::from_secs(1));
+    let mut carbide_client_config =
+        CarbideClientConfig::new(forge_root_ca_path.clone(), Some(forge_client_cert));
+    carbide_client_config.socks_proxy(proxy);
+    carbide_client_config.connect_retries_max = Some(60);
+    carbide_client_config.connect_retries_interval = Some(Duration::from_secs(1));
 
     let bmc_registry = BmcMockRegistry::default();
 
-    let api_config = ApiConfig::new(&app_config.carbide_api_url, &forge_client_config);
+    let api_config = ApiConfig::new(&app_config.carbide_api_url, &carbide_client_config);
 
-    let forge_api_client = ForgeApiClient::new(&api_config);
+    let carbide_api_client = CarbideApiClient::new(&api_config);
     let (dhcp_client, dhcp_service) =
-        DhcpClient::start(&app_config, forge_api_client.clone().into()).await?;
+        DhcpClient::start(&app_config, carbide_api_client.clone().into()).await?;
 
-    let api_throttler = api_throttler::run(
-        tokio::time::interval(Duration::from_secs(2)),
-        forge_api_client.clone().into(),
-    );
-
-    let desired_firmware_versions = forge_api_client
+    let desired_firmware_versions = carbide_api_client
         .get_desired_firmware_versions()
         .await?
         .entries;
@@ -151,19 +145,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let app_context = Arc::new(MachineATronContext {
         app_config,
-        forge_client_config,
+        carbide_client_config,
         bmc_mock_certs_dir,
         bmc_registry,
-        api_throttler,
         desired_firmware_versions: std::sync::RwLock::new(desired_firmware_versions),
-        forge_api_client,
+        carbide_api_client,
         dhcp_client,
         mac_address_pool: Mutex::new(mac_address_pool).into(),
     });
 
     machine_a_tron::spawn_desired_firmware_refresher(app_context.clone());
 
-    let info = app_context.forge_api_client.version(false).await?;
+    let info = app_context.carbide_api_client.version(false).await?;
     tracing::info!(
         build_version = %info.build_version,
         "machine-a-tron version",
@@ -174,7 +167,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Machines are created paused here. While paused, their actors do not advance the FSM, so
     // BMC DHCP and shared-router registration cannot run before the combined BMC mock listener is
     // started below.
-    let (simulators, expected_inventory) = mat.make_devices(true).await?;
+    let (simulators, expected_inventory, served_records) =
+        mat.make_devices_with_records(true).await?;
+    let expected_records =
+        served_records.into_response(inventory_id.clone(), &app_context.app_config);
 
     // Persist them once in case of unclean shutdown
     app_context.app_config.write_persisted_devices(
@@ -194,7 +190,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         DeviceStatusConfig::new(bmc_mock_port),
         inventory_id.into(),
     )
-    .with_expected_inventory(expected_inventory);
+    .with_expected_inventory(expected_inventory)
+    .with_expected_records(Arc::new(expected_records));
     // Hosted mode mounts the shared UFM mock router on machine-a-tron's control server. Its
     // ControlState can be injected as an in-process inventory provider; the standalone binary
     // initializes the same mock without this provider and relies on configured HTTP sources.

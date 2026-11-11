@@ -43,6 +43,7 @@ mod service_v1;
 mod service_v2;
 
 pub use config::{FaultConfig, RmsMockConfig};
+pub use fabric::SwitchFabricSnapshot;
 pub use inventory::{RmsInventory, SimNode, SimNodeKind, SimPowerState};
 /// The V1 protobuf module. Aliased because both service impls refer to it
 /// constantly, and because `rack_manager_v2` defines same-named messages that
@@ -74,44 +75,44 @@ impl RmsMock {
     pub fn new(inventory: std::sync::Arc<dyn RmsInventory>, config: RmsMockConfig) -> Self {
         Self {
             inventory,
-            jobs: jobs::JobStore::new(config.faults.clone()),
+            jobs: jobs::JobStore::new(&config),
             fabric: fabric::FabricState::new(),
             config,
         }
     }
 
+    /// Observe a rack/node's fabric state without electing a primary or
+    /// advancing jobs. IDs are the opaque values the RMS caller supplied.
+    /// Unobserved pairs have no primary role and a zero reset generation.
+    pub fn switch_fabric_snapshot(&self, rack_id: &str, node_id: &str) -> SwitchFabricSnapshot {
+        self.fabric.snapshot(rack_id, node_id)
+    }
+
     /// Poll a job and apply what its completion does to the mock.
-    pub(crate) fn observe_job(&self, job_id: &jobs::JobId) -> jobs::JobStatus {
-        let status = self.jobs.observe(job_id);
-        for job in std::iter::once(&status).chain(&status.children) {
-            // Only a node's job carries an effect, and it names its node.
-            let (Some(effect), Some(rack_id), Some(node_id)) =
-                (&job.effect, &job.rack_id, &job.node_id)
-            else {
-                continue;
-            };
+    pub(crate) fn observe_job(
+        &self,
+        job_id: &jobs::JobId,
+    ) -> Result<jobs::JobStatus, tonic::Status> {
+        self.jobs.observe_with(job_id, |rack_id, node_id, effect| {
             match effect {
-                jobs::Effect::ResetFabricRole => self.fabric.reset(rack_id, node_id),
+                jobs::Effect::ResetSwitch { bmc_mac } => {
+                    self.inventory
+                        .reset_switch(*bmc_mac)
+                        .map_err(|error| error.to_string())?;
+                    self.fabric.reset(rack_id, node_id);
+                }
                 jobs::Effect::SetSwitchPassword {
                     bmc_mac,
                     username,
                     password,
                 } => {
-                    if let Err(error) = self
-                        .inventory
+                    self.inventory
                         .set_switch_password(*bmc_mac, username, password)
-                    {
-                        tracing::warn!(
-                            %node_id,
-                            %bmc_mac,
-                            %error,
-                            "The host did not take the switch's rotated NVOS password",
-                        );
-                    }
+                        .map_err(|error| error.to_string())?;
                 }
             }
-        }
-        status
+            Ok(())
+        })
     }
 }
 
@@ -143,7 +144,7 @@ impl StaticInventory {
     }
 
     /// The NVOS username and password the last completed rotation set on the
-    /// switch whose BMC has `bmc_mac`, if any has.
+    /// switch whose BMC has `bmc_mac`, or None after a factory reset.
     pub fn switch_password(&self, bmc_mac: mac_address::MacAddress) -> Option<(String, String)> {
         lock(&self.switch_passwords).get(&bmc_mac).cloned()
     }
@@ -199,6 +200,12 @@ impl RmsInventory for StaticInventory {
             ) => SimPowerState::On,
         };
         lock(&self.power).insert(bmc_mac, power);
+        Ok(())
+    }
+
+    fn reset_switch(&self, bmc_mac: mac_address::MacAddress) -> eyre::Result<()> {
+        self.has_bmc(bmc_mac)?;
+        lock(&self.switch_passwords).remove(&bmc_mac);
         Ok(())
     }
 

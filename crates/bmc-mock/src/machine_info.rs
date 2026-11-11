@@ -311,10 +311,10 @@ impl DpuMachineInfo {
         }
     }
 
-    fn bmc_product(&self) -> Option<&'static str> {
+    fn service_root_config(&self) -> redfish::service_root::Config {
         match self.dpu_type() {
-            DpuType::Bluefield3 => Some("BlueField-3 DPU"),
-            DpuType::Bluefield4 => Some("BlueField-4"),
+            DpuType::Bluefield3 => self.bluefield3().service_root_config(),
+            DpuType::Bluefield4 => self.bluefield4().service_root_config(),
         }
     }
 
@@ -354,6 +354,7 @@ impl DpuMachineInfo {
             DpuType::Bluefield3 => self.bluefield3().update_service_config(),
             DpuType::Bluefield4 => self.bluefield4().update_service_config(),
         };
+        config.dpu_os = true;
         self.append_configured_firmware_inventory(&mut config);
         config
     }
@@ -506,71 +507,33 @@ impl HostMachineInfo {
         }
     }
 
-    fn bmc_vendor(&self) -> redfish::oem::BmcVendor {
+    fn service_root_config(&self) -> redfish::service_root::Config {
         match self.hw_type {
-            HardwareType::DellPowerEdgeR750 | HardwareType::DellPowerEdgeR760Bf4 => {
-                redfish::oem::BmcVendor::Dell
+            HardwareType::DellPowerEdgeR750 => self.dell_poweredge_r750().service_root_config(),
+            HardwareType::DellPowerEdgeR760Bf4 => {
+                self.dell_poweredge_r760_bf4().service_root_config()
             }
-            HardwareType::WiwynnGB200Nvl => redfish::oem::BmcVendor::Wiwynn,
-            HardwareType::LenovoGB300Nvl => redfish::oem::BmcVendor::Ami,
-            HardwareType::NvidiaDgxGb300 => {
-                redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Uppercase)
-            }
-            HardwareType::SupermicroGb300Nvl => redfish::oem::BmcVendor::Supermicro,
-            HardwareType::NvidiaDgxVr => {
-                redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Uppercase)
-            }
-            HardwareType::LiteOnPowerShelf => redfish::oem::BmcVendor::LiteOn,
-            HardwareType::DeltaPowerShelf => redfish::oem::BmcVendor::Delta,
+            HardwareType::WiwynnGB200Nvl => self.wiwynn_gb200_nvl().service_root_config(),
+            HardwareType::LenovoGB300Nvl => self.lenovo_gb300_nvl().service_root_config(),
+            HardwareType::NvidiaDgxGb300 => self.dgx_gb300_nvl().service_root_config(),
+            HardwareType::SupermicroGb300Nvl => self.supermicro_gb300_nvl().service_root_config(),
+            HardwareType::NvidiaDgxVr => self.dgx_vr_nvl().service_root_config(),
             HardwareType::NvidiaSwitchNd5200Ld => {
-                redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Uppercase)
+                self.nvidia_switch_nd5200_ld().service_root_config()
             }
             HardwareType::NvidiaSwitchN5700Ld => {
-                redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Uppercase)
+                self.nvidia_switch_n5700_ld().service_root_config()
             }
-            HardwareType::NvidiaDgxH100 => redfish::oem::BmcVendor::Ami,
-            HardwareType::GenericAmi => redfish::oem::BmcVendor::Ami,
-            HardwareType::HpeProliantDl380aGen11 => redfish::oem::BmcVendor::Hpe,
-            HardwareType::GenericSupermicro => redfish::oem::BmcVendor::Supermicro,
-        }
-    }
-
-    fn bmc_product(&self) -> Option<&'static str> {
-        match self.hw_type {
-            HardwareType::DellPowerEdgeR750 => None,
-            HardwareType::DellPowerEdgeR760Bf4 => Some("Integrated Dell Remote Access Controller"),
-            HardwareType::WiwynnGB200Nvl => Some("GB200 NVL"),
-            HardwareType::LenovoGB300Nvl => Some("AMI Redfish Server"),
-            HardwareType::NvidiaDgxGb300 => Some("GB BMC"),
-            HardwareType::SupermicroGb300Nvl => Some("GB NVL"),
-            HardwareType::NvidiaDgxVr => Some("VR NVL72"),
-            HardwareType::LiteOnPowerShelf => None,
-            HardwareType::DeltaPowerShelf => None,
-            HardwareType::NvidiaSwitchNd5200Ld => Some("P3809"),
-            HardwareType::NvidiaSwitchN5700Ld => Some("P3809"),
-            HardwareType::NvidiaDgxH100 => Some("AMI Redfish Server"),
-            HardwareType::GenericAmi => Some("AMI Redfish Server"),
-            HardwareType::HpeProliantDl380aGen11 => Some("ProLiant DL380a Gen11"),
-            HardwareType::GenericSupermicro => Some("Super Server"),
-        }
-    }
-
-    fn bmc_redfish_version(&self) -> &'static str {
-        match self.hw_type {
-            HardwareType::DellPowerEdgeR750 | HardwareType::DellPowerEdgeR760Bf4 => "1.18.0",
-            HardwareType::WiwynnGB200Nvl => "1.17.0",
-            HardwareType::LenovoGB300Nvl => "1.21.1",
-            HardwareType::NvidiaDgxGb300 => "1.17.0",
-            HardwareType::SupermicroGb300Nvl => "1.17.0",
-            HardwareType::NvidiaDgxVr => "1.17.0",
-            HardwareType::LiteOnPowerShelf => "1.9.0",
-            HardwareType::DeltaPowerShelf => "1.9.0",
-            HardwareType::NvidiaSwitchNd5200Ld => "1.17.0",
-            HardwareType::NvidiaSwitchN5700Ld => "1.17.0",
-            HardwareType::NvidiaDgxH100 => "1.11.0",
-            HardwareType::GenericAmi => "1.17.0",
-            HardwareType::HpeProliantDl380aGen11 => "1.13.0",
-            HardwareType::GenericSupermicro => "1.17.0",
+            HardwareType::NvidiaDgxH100 => self.nvidia_dgx_h100().service_root_config(),
+            HardwareType::HpeProliantDl380aGen11 => {
+                self.hpe_proliant_dl380a_gen11().service_root_config()
+            }
+            HardwareType::GenericAmi => self.generic_server().ami_service_root_config(),
+            HardwareType::GenericSupermicro => {
+                self.generic_server().supermicro_service_root_config()
+            }
+            HardwareType::LiteOnPowerShelf => self.liteon_power_shelf().service_root_config(),
+            HardwareType::DeltaPowerShelf => self.delta_power_shelf().service_root_config(),
         }
     }
 
@@ -615,8 +578,12 @@ impl HostMachineInfo {
             }
             HardwareType::LiteOnPowerShelf => self.liteon_power_shelf().system_config(),
             HardwareType::DeltaPowerShelf => self.delta_power_shelf().system_config(),
-            HardwareType::NvidiaSwitchNd5200Ld => self.nvidia_switch_nd5200_ld().system_config(),
-            HardwareType::NvidiaSwitchN5700Ld => self.nvidia_switch_n5700_ld().system_config(),
+            HardwareType::NvidiaSwitchNd5200Ld => {
+                self.nvidia_switch_nd5200_ld().system_config(callbacks)
+            }
+            HardwareType::NvidiaSwitchN5700Ld => {
+                self.nvidia_switch_n5700_ld().system_config(callbacks)
+            }
             HardwareType::NvidiaDgxH100 => self.nvidia_dgx_h100().system_config(callbacks),
             HardwareType::HpeProliantDl380aGen11 => {
                 self.hpe_proliant_dl380a_gen11().system_config(callbacks)
@@ -815,7 +782,8 @@ impl HostMachineInfo {
     fn wiwynn_gb200_nvl(&self) -> hw::wiwynn_gb200_nvl::WiwynnGB200Nvl<'_> {
         let mut dpus = self.dpus.iter();
         hw::wiwynn_gb200_nvl::WiwynnGB200Nvl {
-            system_serial_number: Cow::Borrowed(&self.serial),
+            // Chassis_0 and System_0 expose the PDB serial; the tray serial is in Assembly.
+            system_serial_number: format!("{}-pdb", self.serial).into(),
             chassis_serial_number: Cow::Borrowed(&self.serial),
             compute_board: [
                 hw::nvidia_gb200::BiancaBoard {
@@ -1031,12 +999,6 @@ impl HostMachineInfo {
         }
     }
 
-    /// Whether this host advertises and serves a `/redfish/v1/Systems`
-    /// collection. Delta power shelves do not.
-    fn exposes_computer_systems(&self) -> bool {
-        !matches!(self.hw_type, HardwareType::DeltaPowerShelf)
-    }
-
     /// What this host says it can attest. `None` for every profile that does
     /// not model the collection yet, which is how a BMC without one behaves.
     fn component_integrity_config(
@@ -1213,26 +1175,10 @@ impl MachineInfo {
         }
     }
 
-    pub(super) fn bmc_vendor(&self) -> redfish::oem::BmcVendor {
+    pub(super) fn service_root_config(&self) -> redfish::service_root::Config {
         match self {
-            MachineInfo::Host(h) => h.bmc_vendor(),
-            MachineInfo::Dpu(_) => {
-                redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Capitalized)
-            }
-        }
-    }
-
-    pub(super) fn bmc_redfish_version(&self) -> &'static str {
-        match self {
-            MachineInfo::Host(h) => h.bmc_redfish_version(),
-            MachineInfo::Dpu(_) => "1.17.0",
-        }
-    }
-
-    pub(super) fn bmc_product(&self) -> Option<&'static str> {
-        match self {
-            MachineInfo::Host(h) => h.bmc_product(),
-            MachineInfo::Dpu(d) => d.bmc_product(),
+            Self::Host(host) => host.service_root_config(),
+            Self::Dpu(dpu) => dpu.service_root_config(),
         }
     }
 
@@ -1264,15 +1210,6 @@ impl MachineInfo {
         match self {
             Self::Host(h) => h.update_service_config(),
             Self::Dpu(dpu) => dpu.update_service_config(),
-        }
-    }
-
-    /// Whether this machine advertises and serves a `/redfish/v1/Systems`
-    /// collection. Only Delta power shelves omit it.
-    pub(super) fn exposes_computer_systems(&self) -> bool {
-        match self {
-            Self::Host(h) => h.exposes_computer_systems(),
-            Self::Dpu(_) => true,
         }
     }
 
@@ -1483,7 +1420,7 @@ mod tests {
             };
             let config =
                 host.system_config(Arc::new(crate::test_support::TestCallbacks::default()));
-            let options = config.systems[0]
+            let options = config.systems.as_ref().expect("supported Systems")[0]
                 .boot_options
                 .as_ref()
                 .expect("boot inventory");

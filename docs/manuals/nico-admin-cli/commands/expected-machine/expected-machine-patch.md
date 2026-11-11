@@ -19,7 +19,8 @@ nico-admin-cli expected-machine patch
 [--dpf-enabled] [--bmc-ip-address] [--extended]
 [--bmc-retain-credentials] [--dpu-policy]
 [--bmc-ip-allocation] [--interfaces]
-[--disable-lockdown] [--sort-by] [-h|--help]
+[--disable-lockdown] [--retain-hbn-config-on-boot]
+[--sort-by] [-h|--help]
 ```
 
 ## DESCRIPTION
@@ -135,7 +136,8 @@ value.
 `--bmc-ip-address <BMC_IP_ADDRESS>`
 
 Static BMC IP (updates pre-allocated machine_interface when safe, same
-as expected switches)
+as expected switches). Must not be unspecified, multicast, or IPv4
+limited broadcast, including the IPv4-mapped IPv6 form of each
 
 `--extended`
 
@@ -201,22 +203,42 @@ record. Unset preserves the existing per-host value.
 Interfaces as a JSON array of ExpectedInterface objects (fields:
 mac_address, role, ip_allocation, network_segment_type, fixed_ip,
 fixed_mask, fixed_gateway, primary; legacy: nic_type). Accepted values:
-role=host|dpu_os|dpu_bmc|host_bmc|unspecified and
-ip_allocation=dynamic|fixed|retained|unspecified.
-network_segment_type uses protobuf enum numbers: tenant=0, admin=1,
-underlay=2, host_inband=3. Replaces the full interface list for the
-machine. For a matching stored MAC, omitting role preserves the stored
-role; role=unspecified resets it to host. Omitting ip_allocation
-preserves the stored policy when the presence of fixed_ip is unchanged;
-ip_allocation=unspecified resets it to fixed_ip inference. Omitting any
-other optional interface field, including network_segment_type, clears
-its stored value.
+role=host|dpu_os|dpu_bmc|host_bmc|dpu_loopback|unspecified and
+ip_allocation=dynamic|fixed|retained|unspecified. dpu_loopback
+requires fixed_ip and only supports fixed allocation, explicit or
+inferred. network_segment_type uses protobuf enum numbers: tenant=0,
+admin=1, underlay=2, host_inband=3. Replaces the full interface list for
+the machine, including loopback reservations. For a matching stored MAC,
+omitting role preserves the stored physical-interface role. An omitted
+dpu_loopback role is preserved only when both MAC and fixed_ip match the
+stored loopback; changing its address requires explicit
+role=dpu_loopback. role=unspecified resets a physical-interface role to
+host. Omitting ip_allocation preserves the stored policy when the
+presence of fixed_ip is unchanged; ip_allocation=unspecified resets it
+to fixed_ip inference. Omitting any other optional interface field,
+including network_segment_type, clears its stored value.
 
 `--disable-lockdown <DISABLE_LOCKDOWN>`
 
 Set true to skip server lockdown during lifecycle management, or false
 to lock down after BIOS configuration. Omission preserves the stored
 setting
+
+*Possible values:*
+
+> - true
+>
+> - false
+
+`--retain-hbn-config-on-boot <RETAIN_HBN_CONFIG_ON_BOOT>`
+
+If true, designate the machine to retain its HBN config on boot.
+This allows the machine to boot while NICO's DHCP and gRPC services
+are unavailable. The machine must declare a DPU BMC and a DPU OS
+interface, and the host BMC and both DPU interfaces must then use a
+fixed or retained IP allocation. A machine whose DPU policy attaches
+no DPU declares neither. If unset or false, the machine will need NICo
+to be up in order to boot.
 
 *Possible values:*
 
@@ -249,7 +271,11 @@ nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --bmc-
 nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --dpu-policy ignore
 nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --bmc-ip-allocation retained
 nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --interfaces '[{"mac_address":"02:00:00:00:20:01","fixed_ip":"192.0.2.10"}]'
+nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --interfaces '[{"mac_address":"02:00:00:00:20:01","role":"dpu_loopback","fixed_ip":"198.51.100.20"}]'
+nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --interfaces '[]'
 nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --interfaces '[{"mac_address":"02:00:00:00:20:01","role":"unspecified","ip_allocation":"unspecified","fixed_ip":"192.0.2.10"}]'
+nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --retain-hbn-config-on-boot true
+nico-admin-cli expected-machine patch --bmc-mac-address 00:11:22:33:44:55 --retain-hbn-config-on-boot false
 ```
 
 ---

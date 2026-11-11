@@ -46,7 +46,7 @@ pub(crate) struct RackMemberRegistration {
 
 impl RackMemberRegistration {
     /// Member declared for this unit, identified by its machine config section.
-    fn expected_member(&self) -> eyre::Result<ExpectedRackGroupMember> {
+    fn expected_member(&self, cartridge_index: u32) -> eyre::Result<ExpectedRackGroupMember> {
         use RackCapabilityType::{Compute, PowerShelf, Switch};
 
         let (device_type, manufacturer) = match self.hardware_type {
@@ -70,6 +70,7 @@ impl RackMemberRegistration {
             }
         };
         Ok(ExpectedRackGroupMember {
+            cartridge_index: Some(cartridge_index),
             r#type: device_type.to_string(),
             manufacturer: manufacturer.to_string(),
             id: self.machine_config_section.clone(),
@@ -93,7 +94,8 @@ impl RackRegistration {
         let members = self
             .members
             .iter()
-            .map(RackMemberRegistration::expected_member)
+            .enumerate()
+            .map(|(index, member)| member.expected_member(u32::try_from(index)?))
             .collect::<eyre::Result<Vec<_>>>()?;
         Ok(ExpectedRackGroup {
             rack_group_id: Some(RackGroupId::new(self.rack_id.as_str())),
@@ -107,14 +109,13 @@ impl RackRegistration {
         })
     }
 
-    /// Rack profile nico-api derives for this rack from `group`. A group
-    /// read back from nico-api may predate protocols and carry none.
+    /// Rack profile nico-api derives for this rack from `group`.
+    #[cfg(test)]
     pub(crate) fn derived_rack_profile_id(
         &self,
         group: ExpectedRackGroup,
     ) -> eyre::Result<RackProfileId> {
-        let group = rpc::model::expected_rack_group::stored_expected_rack_group(group)?;
-        derive_rack_profile_id(&group, &self.rack_id).map_err(eyre::Report::msg)
+        derived_rack_profile_id(&self.rack_id, group)
     }
 
     /// Registration record for this rack. `existing` is the group that
@@ -132,24 +133,43 @@ impl RackRegistration {
                 (group.clone(), Some(group))
             }
         };
-        let rack_group_id = group
-            .rack_group_id
-            .as_ref()
-            .map(RackGroupId::to_string)
-            .unwrap_or_default();
-        let derived = self.derived_rack_profile_id(group)?;
-        eyre::ensure!(
-            self.rack_profile_id == derived,
-            "rack {} configures rack_profile_id {}, but nico-api derives {derived} from expected rack group {rack_group_id}",
-            self.rack_id,
-            self.rack_profile_id
-        );
+        ensure_derived_profile(&self.rack_id, &self.rack_profile_id, group)?;
         Ok(ExpectedRecord::Rack {
             rack_id: self.rack_id.clone(),
             rack_profile_id: self.rack_profile_id.clone(),
             group: declared,
         })
     }
+}
+
+/// Rack profile nico-api derives for `rack_id` from `group`. A group read
+/// back from nico-api may predate protocols and carry none.
+fn derived_rack_profile_id(
+    rack_id: &RackId,
+    group: ExpectedRackGroup,
+) -> eyre::Result<RackProfileId> {
+    let group = rpc::model::expected_rack_group::stored_expected_rack_group(group)?;
+    derive_rack_profile_id(&group, rack_id).map_err(eyre::Report::msg)
+}
+
+/// Fails unless `rack_profile_id` is the profile nico-api derives for
+/// `rack_id` from `group`.
+pub(crate) fn ensure_derived_profile(
+    rack_id: &RackId,
+    rack_profile_id: &RackProfileId,
+    group: ExpectedRackGroup,
+) -> eyre::Result<()> {
+    let rack_group_id = group
+        .rack_group_id
+        .as_ref()
+        .map(RackGroupId::to_string)
+        .unwrap_or_default();
+    let derived = derived_rack_profile_id(rack_id, group)?;
+    eyre::ensure!(
+        *rack_profile_id == derived,
+        "rack {rack_id} configures rack_profile_id {rack_profile_id}, but nico-api derives {derived} from expected rack group {rack_group_id}"
+    );
+    Ok(())
 }
 
 #[derive(Clone, Debug)]

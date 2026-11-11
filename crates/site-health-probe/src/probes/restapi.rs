@@ -15,37 +15,31 @@
  * limitations under the License.
  */
 
-//! Probes against nico-rest-api. This module owns the HTTP client and the
-//! Keycloak client-credentials machinery; probes here share it. Adding a REST
-//! probe means adding to this module — nothing in the framework or the
-//! nico-api module changes.
+//! Probes against nico-rest-api, on the HTTP client and Keycloak
+//! client-credentials machinery of [`crate::rest`]. Adding a REST probe means
+//! adding to this module — nothing in the framework or the nico-api module
+//! changes.
 //!
 //! TODO(#5360-followup): instance-creation stat collection belongs here as
 //! further read-only REST probes.
 
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use eyre::eyre;
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, AUTHORIZATION};
 use url::Url;
 
 use crate::config;
 use crate::framework::{ObservationRecorder, Probe};
-
-/// The Keycloak token response is small; a response bigger than this is not a
-/// token endpoint.
-const TOKEN_RESPONSE_CAP: usize = 1 << 20;
-
-/// Refresh the cached token once it is this close to expiry.
-const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(30);
-
-/// Cap on how far ahead a token expiry is tracked. A token endpoint can claim
-/// an arbitrarily large `expires_in`; uncapped, the `Instant` addition below
-/// could overflow and panic the run. The cache only needs "far future".
-const TOKEN_LIFETIME_CAP: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+use crate::gate::{CallError, CallGate, classify_http};
+use crate::rest::auth::TokenSource;
+use crate::rest::client::new_http_client;
 
 /// Probes one nico-rest-api read endpoint (GET /v2/org/{org}/nico/<path>)
-/// with an org-scoped bearer token obtained via client credentials.
+/// with an org-scoped bearer token obtained via client credentials. The GET
+/// passes the nico-rest-api gate shared with the state readers; the token
+/// request does not, it goes to Keycloak.
 pub(crate) struct ReadProbe {
     name: &'static str,
     operation: &'static str,
@@ -53,16 +47,23 @@ pub(crate) struct ReadProbe {
     cfg: config::RestProbe,
     client: reqwest::Client,
     tokens: TokenSource,
+    gate: Arc<CallGate>,
 }
 
 /// Probes the machines read endpoint.
-pub(crate) fn new_machines_probe(cfg: config::RestProbe) -> eyre::Result<ReadProbe> {
-    new_read_probe("rest_machines", "machine", "get_machine", cfg)
+pub(crate) fn new_machines_probe(
+    cfg: config::RestProbe,
+    gate: Arc<CallGate>,
+) -> eyre::Result<ReadProbe> {
+    new_read_probe("rest_machines", "machine", "get_machine", cfg, gate)
 }
 
 /// Probes the instances read endpoint.
-pub(crate) fn new_instances_probe(cfg: config::RestProbe) -> eyre::Result<ReadProbe> {
-    new_read_probe("rest_instances", "instance", "get_instance", cfg)
+pub(crate) fn new_instances_probe(
+    cfg: config::RestProbe,
+    gate: Arc<CallGate>,
+) -> eyre::Result<ReadProbe> {
+    new_read_probe("rest_instances", "instance", "get_instance", cfg, gate)
 }
 
 fn new_read_probe(
@@ -70,15 +71,17 @@ fn new_read_probe(
     path: &'static str,
     operation: &'static str,
     cfg: config::RestProbe,
+    gate: Arc<CallGate>,
 ) -> eyre::Result<ReadProbe> {
     let client = new_http_client(&cfg.ca)?;
     Ok(ReadProbe {
         name,
         operation,
         path,
-        tokens: TokenSource::new(cfg.auth.clone(), client.clone()),
+        tokens: TokenSource::new((&cfg.auth).into(), client.clone()),
         cfg,
         client,
+        gate,
     })
 }
 
@@ -89,7 +92,7 @@ impl Probe for ReadProbe {
     }
 
     fn api(&self) -> &'static str {
-        "nico-rest-api"
+        self.gate.api()
     }
 
     fn interval(&self) -> Duration {
@@ -110,189 +113,58 @@ impl Probe for ReadProbe {
             .pop_if_empty()
             .extend(["v2", "org", &self.cfg.org, "nico", self.path]);
 
-        let start = Instant::now();
-        let response = self
-            .client
-            .get(endpoint)
-            .header(AUTHORIZATION, format!("Bearer {token}"))
-            .header(ACCEPT, "application/json")
-            .send()
+        self.gate
+            .call(recorder, self.operation, || async {
+                let response = self
+                    .client
+                    .get(endpoint)
+                    .header(AUTHORIZATION, format!("Bearer {token}"))
+                    .header(ACCEPT, "application/json")
+                    .send()
+                    .await
+                    .map_err(|e| CallError::Transport(format!("GET {}: {e}", self.path)))?;
+                let status = response.status();
+                if status == reqwest::StatusCode::UNAUTHORIZED {
+                    // Token may have been revoked server-side; drop the cache
+                    // so the next run re-authenticates instead of failing
+                    // forever. This runs before the drain below, whose own
+                    // error would otherwise return early and leave the revoked
+                    // token cached until its expiry margin.
+                    self.tokens.drop_cached();
+                }
+                let pushback = match classify_http(status, response.headers()) {
+                    Some(err @ CallError::Pushback { .. }) => Some(err),
+                    _ => None,
+                };
+                // Drain fully so time-to-last-byte is what the histogram
+                // records, not time-to-first-header. Deliberately no byte cap:
+                // a cap silently truncates large sites' machine lists (success
+                // recorded, wrong duration), while the gate's call timeout
+                // already bounds how long this read may take — an oversized
+                // response surfaces as an honest timeout instead.
+                drain(response)
+                    .await
+                    .map_err(|e| CallError::Transport(format!("read body: {e}")))?;
+                if let Some(pushback) = pushback {
+                    return Err(pushback);
+                }
+                if status != reqwest::StatusCode::OK {
+                    return Err(CallError::Status(format!(
+                        "GET {} returned {}",
+                        self.path,
+                        status.as_u16()
+                    )));
+                }
+                Ok(())
+            })
             .await
-            .map_err(|e| eyre!("GET {}: {e}", self.path))?;
-        let status = response.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            // Token may have been revoked server-side; drop the cache so the
-            // next run re-authenticates instead of failing forever. This runs
-            // before the drain below, whose own error would otherwise return
-            // early and leave the revoked token cached until its expiry
-            // margin.
-            self.tokens.drop_cached();
-        }
-        // Drain fully so time-to-last-byte is what the histogram records, not
-        // time-to-first-header. Deliberately no byte cap: a cap silently
-        // truncates large sites' machine lists (success recorded, wrong
-        // duration), while the run's deadline already bounds how long this
-        // read may take — an oversized response surfaces as an honest timeout
-        // instead.
-        drain(response).await.map_err(|e| eyre!("read body: {e}"))?;
-        let took = start.elapsed();
-        if status != reqwest::StatusCode::OK {
-            return Err(eyre!("GET {} returned {}", self.path, status.as_u16()));
-        }
-        recorder.record(self.operation, took);
-        Ok(())
+            .map_err(eyre::Report::new)
     }
 }
 
 async fn drain(mut response: reqwest::Response) -> reqwest::Result<()> {
     while response.chunk().await?.is_some() {}
     Ok(())
-}
-
-/// Caches a Keycloak client-credentials bearer token and refreshes it shortly
-/// before expiry. The client secret is re-read from its mounted file on every
-/// refresh (rotation-safe). Tokens and secrets are never logged.
-struct TokenSource {
-    auth: config::RestAuth,
-    client: reqwest::Client,
-    // Held only for cache reads and writes, never across an await. Two
-    // overlapping refreshes would both hit the token endpoint; the last one
-    // wins the cache, which is harmless.
-    cached: std::sync::Mutex<Option<CachedToken>>,
-}
-
-struct CachedToken {
-    token: String,
-    expiry: Instant,
-}
-
-/// The subset of the OAuth2 token endpoint response we use.
-#[derive(serde::Deserialize)]
-struct TokenResponse {
-    #[serde(default)]
-    access_token: String,
-    #[serde(default)]
-    expires_in: i64,
-}
-
-impl TokenSource {
-    fn new(auth: config::RestAuth, client: reqwest::Client) -> Self {
-        Self {
-            auth,
-            client,
-            cached: std::sync::Mutex::new(None),
-        }
-    }
-
-    /// Returns a valid token, refreshing when within the expiry margin.
-    async fn bearer(&self) -> eyre::Result<String> {
-        if let Some(cached) = self.cached_token() {
-            return Ok(cached);
-        }
-
-        let secret = tokio::fs::read_to_string(&self.auth.client_secret_path)
-            .await
-            .map_err(|e| eyre!("read client secret: {e}"))?;
-        let form = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("grant_type", "client_credentials")
-            .append_pair("client_id", &self.auth.client_id)
-            .append_pair("client_secret", secret.trim())
-            .finish();
-        let response = self
-            .client
-            .post(&self.auth.token_url)
-            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(form)
-            .send()
-            .await
-            .map_err(|e| eyre!("token request: {e}"))?;
-        let status = response.status();
-        let body = read_capped(response, TOKEN_RESPONSE_CAP)
-            .await
-            .map_err(|e| eyre!("read token response: {e}"))?;
-        if status != reqwest::StatusCode::OK {
-            // Deliberately not echoing the body: error bodies from
-            // misconfigured IdPs can include sensitive detail.
-            return Err(eyre!("token endpoint returned {}", status.as_u16()));
-        }
-        let parsed: TokenResponse =
-            serde_json::from_slice(&body).map_err(|e| eyre!("parse token response: {e}"))?;
-        if parsed.access_token.is_empty() {
-            return Err(eyre!("token endpoint returned no access_token"));
-        }
-        let expiry = Instant::now()
-            + Duration::from_secs(parsed.expires_in.try_into().unwrap_or(0))
-                .min(TOKEN_LIFETIME_CAP);
-        *self
-            .cached
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(CachedToken {
-            token: parsed.access_token.clone(),
-            expiry,
-        });
-        Ok(parsed.access_token)
-    }
-
-    fn cached_token(&self) -> Option<String> {
-        let cached = self
-            .cached
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        cached
-            .as_ref()
-            .filter(|c| c.expiry.saturating_duration_since(Instant::now()) > TOKEN_EXPIRY_MARGIN)
-            .map(|c| c.token.clone())
-    }
-
-    /// Discards the cached token so the next call re-authenticates.
-    fn drop_cached(&self) {
-        *self
-            .cached
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-    }
-}
-
-/// Reads at most `cap` bytes of the response body. Only the token endpoint is
-/// capped — see the drain comment in [`ReadProbe::run`] for why the probe GET
-/// is not.
-async fn read_capped(mut response: reqwest::Response, cap: usize) -> reqwest::Result<Vec<u8>> {
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        let remaining = cap - body.len();
-        if chunk.len() >= remaining {
-            body.extend_from_slice(&chunk[..remaining]);
-            break;
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
-/// An HTTP client with full TLS verification; an optional extra CA bundle
-/// supports cluster-internal issuers. Redirects are refused outright: the
-/// token POST carries the client secret in its body (which clients re-send on
-/// 307/308 redirects, to ANY host) and the API GET carries a bearer token —
-/// both endpoints are fixed cluster-internal services that have no legitimate
-/// reason to redirect, so following one could only ever hand credentials to
-/// somewhere unexpected.
-fn new_http_client(ca_file: &str) -> eyre::Result<reqwest::Client> {
-    let mut builder = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .min_tls_version(reqwest::tls::Version::TLS_1_2);
-    if !ca_file.is_empty() {
-        let pem = std::fs::read(ca_file).map_err(|e| eyre!("read REST CA: {e}"))?;
-        let certs = reqwest::Certificate::from_pem_bundle(&pem)
-            .map_err(|e| eyre!("no certificates parsed from {ca_file}: {e}"))?;
-        if certs.is_empty() {
-            return Err(eyre!("no certificates parsed from {ca_file}"));
-        }
-        for cert in certs {
-            // Added to the default (system) roots, not replacing them.
-            builder = builder.add_root_certificate(cert);
-        }
-    }
-    builder.build().map_err(|e| eyre!("build HTTP client: {e}"))
 }
 
 #[cfg(test)]
@@ -307,9 +179,11 @@ mod tests {
     use axum::http::HeaderMap;
     use axum::response::{IntoResponse, Json, Response};
     use axum::routing::{get, post};
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::config::RestAuth;
+    use crate::framework::{Outcome, start};
 
     /// Shared state of the fake Keycloak + fake API server.
     #[derive(Default)]
@@ -324,6 +198,8 @@ mod tests {
         seen_secret: std::sync::Mutex<Option<String>>,
         /// The Authorization header the API last received.
         seen_authorization: std::sync::Mutex<Option<String>>,
+        /// How long the API waits before it answers.
+        api_delay: std::sync::Mutex<Duration>,
     }
 
     async fn token_handler(
@@ -345,6 +221,8 @@ mod tests {
             .get(AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
+        let delay = *site.api_delay.lock().expect("mutex");
+        tokio::time::sleep(delay).await;
         if let Some(target) = site.redirect_to.lock().expect("mutex").clone() {
             return (
                 axum::http::StatusCode::TEMPORARY_REDIRECT,
@@ -380,6 +258,10 @@ mod tests {
     }
 
     async fn harness() -> Harness {
+        harness_with_call_timeout(Duration::from_secs(5)).await
+    }
+
+    async fn harness_with_call_timeout(call_timeout: Duration) -> Harness {
         let site = Arc::new(FakeSite::default());
         let addr = serve(Arc::clone(&site)).await;
         let mut secret_file = tempfile::NamedTempFile::new().expect("secret file");
@@ -399,9 +281,15 @@ mod tests {
             },
             ca: String::new(),
         };
+        let gate = Arc::new(CallGate::new(
+            "nico-rest-api",
+            100.0,
+            call_timeout,
+            Duration::from_secs(30),
+        ));
         Harness {
             site,
-            probe: new_machines_probe(cfg).expect("probe builds"),
+            probe: new_machines_probe(cfg, gate).expect("probe builds"),
             _secret_file: secret_file,
         }
     }
@@ -429,6 +317,22 @@ mod tests {
             Some("s3cr3t"),
             "the mounted secret is sent trimmed"
         );
+    }
+
+    /// A call cut by the gate's call timeout, well before the probe's own
+    /// 5 s deadline, is a probe timeout, not a failure.
+    #[tokio::test]
+    async fn gate_call_timeout_is_a_probe_timeout() {
+        let h = harness_with_call_timeout(Duration::from_millis(100)).await;
+        *h.site.api_delay.lock().expect("mutex") = Duration::from_secs(2);
+
+        let cancel = CancellationToken::new();
+        let (mut results, _loops) = start(vec![Arc::new(h.probe)], cancel.clone());
+        let result = results.recv().await.expect("result");
+        cancel.cancel();
+
+        assert_eq!(result.outcome, Outcome::Timeout);
+        assert_eq!(result.error.as_deref(), Some("call timed out"));
     }
 
     #[tokio::test]

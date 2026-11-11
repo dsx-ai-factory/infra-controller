@@ -63,6 +63,8 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 		lld \
 		postgresql-15 \
 		protobuf-compiler \
+		python3 \
+		python3-venv \
 		sudo \
 		unzip \
 		wget \
@@ -102,7 +104,35 @@ RUN curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.14.0/kind-linux-arm64  && chm
 RUN cd /tmp && curl -Lo ./grpcurl.tar.gz https://github.com/fullstorydev/grpcurl/releases/download/v1.8.7/grpcurl_1.8.7_linux_arm64.tar.gz && tar xzf grpcurl.tar.gz && chmod +x ./grpcurl && mv grpcurl /usr/local/bin/ && rm LICENSE && rm grpcurl.tar.gz
 RUN cd /tmp && curl -Lo vault.zip https://releases.hashicorp.com/vault/1.14.1/vault_1.14.1_linux_arm64.zip && unzip vault.zip && chmod u+x vault && mv vault /usr/local/bin/ && rm vault.zip
 RUN cd /usr/local/bin && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/arm64/kubectl" && chmod +x /usr/local/bin/kubectl
-RUN export GO_VERSION="1.26.4" && \
+
+# PyKMIP is the reference software KMIP server. The `carbide-kms-provider`
+# interoperability test runs against it and skips when `pykmip-server` is not
+# on PATH, so this is the version that test is known to pass against. A
+# virtual environment keeps PyKMIP's dependencies out of the system Python.
+# The dependency list is the closure pip resolved for this release on
+# 2026-10-30, each with wheels for x86_64 and aarch64; `--no-deps` makes a
+# missing entry fail the checks below instead of resolving to whatever is
+# newest at build time.
+ARG PYKMIP_VERSION=0.11.0
+RUN python3 -m venv /opt/pykmip && \
+	/opt/pykmip/bin/pip install --no-cache-dir --no-deps \
+		"pykmip==${PYKMIP_VERSION}" \
+		certifi==2026.10.23 \
+		cffi==2.1.1 \
+		charset-normalizer==3.5.2 \
+		cryptography==50.0.2 \
+		enum-compat==0.0.3 \
+		idna==3.20 \
+		pycparser==3.12 \
+		requests==2.34.2 \
+		six==1.17.0 \
+		sqlalchemy==2.1.6 \
+		typing-extensions==4.16.0 \
+		urllib3==2.8.0 && \
+	ln -s /opt/pykmip/bin/pykmip-server /usr/local/bin/pykmip-server && \
+	test "$(/opt/pykmip/bin/python -c 'import kmip; print(kmip.__version__)')" = "${PYKMIP_VERSION}" && \
+	pykmip-server --help >/dev/null
+RUN export GO_VERSION="1.27.3" && \
 	export PLATFORM=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/') && \
 	export TARFILE=go${GO_VERSION}.linux-${PLATFORM}.tar.gz && \
 	export URL=https://golang.org/dl/${TARFILE} && \

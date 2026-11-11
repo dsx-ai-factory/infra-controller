@@ -259,6 +259,7 @@ mod expected_switch;
 mod explored_endpoint;
 mod filters;
 mod firmware;
+mod firmware_inventory;
 mod health;
 mod health_history;
 mod ib_fabric;
@@ -927,6 +928,10 @@ fn routes_with_auth_mode(
             .route(
                 "/machinevalidation/tests",
                 get(machine_validation::show_tests_html),
+            )
+            .route(
+                "/machinevalidation/attempts/{attempt_id}/logs",
+                get(machine_validation::attempt_logs),
             )
             .route("/machinevalidation", get(machine_validation::runs))
             .route(

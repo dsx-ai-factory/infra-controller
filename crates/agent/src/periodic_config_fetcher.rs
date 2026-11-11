@@ -19,7 +19,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ::rpc::forge_tls_client::ForgeClientConfig;
+use ::rpc::carbide_tls_client::CarbideClientConfig;
 use ::rpc::{Instance, forge as rpc};
 use arc_swap::ArcSwapOption;
 use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
@@ -34,6 +34,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{trace, warn};
 
 use crate::instrumentation::ConfigFetch;
+use crate::service_network;
 use crate::util::{get_periodic_dpu_config, get_sitename, jittered_interval};
 
 struct PeriodicFetcherState {
@@ -130,10 +131,10 @@ impl Drop for PeriodicConfigFetcher {
 
 impl PeriodicConfigFetcher {
     pub(super) async fn new(config: PeriodicConfigFetcherConfig) -> Self {
-        let forge_client_config = Arc::clone(&config.forge_client_config);
+        let carbide_client_config = Arc::clone(&config.carbide_client_config);
         // Fetch the sitename from Carbide at the start and keep it in State
         // so that it can be made available as instance metadata.
-        let sitename = match fetch_sitename(&forge_client_config, &config.forge_api).await {
+        let sitename = match fetch_sitename(&carbide_client_config, &config.forge_api).await {
             Ok(sn) => sn,
             Err(e) => {
                 warn!(error = %e, "Unable to fetch sitename");
@@ -151,7 +152,7 @@ impl PeriodicConfigFetcher {
 
         // Do an initial synchronous fetch so that caller has data to use
         // This gets a DPU on the network immediately
-        let next_fetch_delay = single_fetch(&forge_client_config, state.clone(), true).await;
+        let next_fetch_delay = single_fetch(&carbide_client_config, state.clone(), true).await;
 
         let task_state = state.clone();
         let join_handle = tokio::spawn(async move {
@@ -163,7 +164,7 @@ impl PeriodicConfigFetcher {
                     () = tokio::time::sleep(delay) => {}
                 }
                 next_fetch_delay =
-                    single_fetch(&forge_client_config, task_state.clone(), false).await;
+                    single_fetch(&carbide_client_config, task_state.clone(), false).await;
             }
         });
 
@@ -195,24 +196,24 @@ pub(super) struct PeriodicConfigFetcherConfig {
     pub(super) config_fetch_interval: Duration,
     pub(super) machine_id: DpuMachineId,
     pub(super) forge_api: String,
-    pub(super) forge_client_config: Arc<ForgeClientConfig>,
+    pub(super) carbide_client_config: Arc<CarbideClientConfig>,
 }
 
 // Use the version grpc call to carbide to get
 // the sitename. This will be made visible to tenant OS
 // at an FMDS endpoint
 async fn fetch_sitename(
-    forge_client_config: &ForgeClientConfig,
+    carbide_client_config: &CarbideClientConfig,
     forge_api: &str,
 ) -> Result<Option<String>, eyre::Report> {
-    let mut client = create_forge_client(forge_api, forge_client_config).await?;
+    let mut client = create_forge_client(forge_api, carbide_client_config).await?;
 
     get_sitename(&mut client).await
 }
 
 /// Returns the next fetch delay, or `None` when the fetcher was dropped.
 async fn single_fetch(
-    forge_client_config: &ForgeClientConfig,
+    carbide_client_config: &CarbideClientConfig,
     state: Arc<PeriodicFetcherState>,
     initial_fetch: bool,
 ) -> Option<Duration> {
@@ -226,10 +227,12 @@ async fn single_fetch(
         "Fetching periodic configuration"
     );
 
+    let accepted = state.netconf.load_full();
     let result = fetch(
         &state.config.machine_id,
         &state.config.forge_api,
-        forge_client_config,
+        carbide_client_config,
+        accepted.as_deref(),
     )
     .await;
     // A successful RPC whose instance metadata fails to convert is still a
@@ -277,13 +280,46 @@ async fn single_fetch(
 async fn fetch(
     dpu_machine_id: &MachineId,
     forge_api: &str,
-    client_config: &ForgeClientConfig,
+    client_config: &CarbideClientConfig,
+    accepted: Option<&rpc::ManagedHostNetworkConfigResponse>,
 ) -> Result<rpc::ManagedHostNetworkConfigResponse, eyre::Report> {
     let mut client = create_forge_client(forge_api, client_config).await?;
 
     let mut response = get_periodic_dpu_config(&mut client, dpu_machine_id).await?;
     normalize_network_config_addresses(&mut response)?;
+    validate_service_network_config(&response, accepted)?;
     Ok(response)
+}
+
+/// Validates fetched service networking so malformed topology can be rejected without erasing
+/// the last usable service configuration.
+///
+/// Callers must run this validation before replacing the cached response.
+fn validate_service_network_config(
+    response: &rpc::ManagedHostNetworkConfigResponse,
+    accepted: Option<&rpc::ManagedHostNetworkConfigResponse>,
+) -> Result<(), eyre::Report> {
+    if response.service_vpc_slot_inventory.is_none() {
+        eyre::ensure!(
+            response.service_interfaces.is_empty(),
+            "service interfaces require a fixed-slot inventory"
+        );
+
+        // Accept legacy omission only while the last accepted response has no service endpoints or slots.
+        if let Some(accepted) = accepted {
+            let retained_service_state = !accepted.service_interfaces.is_empty()
+                || accepted
+                    .service_vpc_slot_inventory
+                    .as_ref()
+                    .is_some_and(|inventory| !inventory.slots.is_empty());
+            eyre::ensure!(
+                !retained_service_state,
+                "fixed-slot inventory disappeared after service topology was accepted"
+            );
+        }
+    }
+
+    service_network::validate_and_build_ports(response).map(drop)
 }
 
 /// Validates the family-neutral address list and copies it into the compatibility fields used by
@@ -630,6 +666,686 @@ mod tests {
     use carbide_test_support::scenarios;
 
     use super::*;
+
+    /// Builds one complete service endpoint so validation cases can change only the contract they
+    /// exercise.
+    fn service_interface(
+        identity: u8,
+        link_prefix: &str,
+    ) -> rpc::ManagedHostServiceInterfaceConfig {
+        rpc::ManagedHostServiceInterfaceConfig {
+            service_id: format!("10000000-0000-0000-0000-{identity:012}"),
+            attachment_id: Some(::rpc::common::Uuid {
+                value: format!("20000000-0000-0000-0000-{identity:012}"),
+            }),
+            interface_ordinal: 0,
+            slot_index: 0, // Both valid endpoints intentionally share one fixed port.
+            vpc_id: Some("30000000-0000-0000-0000-000000000001".parse().unwrap()),
+            vpc_vni: 10_001,
+            vpc_prefixes: vec!["192.0.2.0/24".to_string(), "2001:db8::/64".to_string()],
+            vpc_peer_prefixes: vec![],
+            vpc_peer_vnis: vec![],
+            vpc_routing_profile: Some(rpc::RoutingProfile::default()),
+            interface_routing_profile: None,
+            network_security_group: None,
+            mtu: Some(9_000), // The fixed DPF and service-NAD contract must agree with HBN.
+            link_prefix: link_prefix.to_string(),
+            mac_address: format!("02:00:00:00:00:{identity:02x}"),
+            internal_uuid: Some(::rpc::common::Uuid {
+                value: format!("40000000-0000-0000-0000-{identity:012}"),
+            }),
+            tenant_vrf_loopback_ip: Some("198.51.100.10".to_string()),
+        }
+    }
+
+    /// Builds a valid same-VPC, same-slot response with multiple IPv4 endpoints so validation cases
+    /// exercise grouped service state independently of the host address model.
+    fn service_network_config() -> rpc::ManagedHostNetworkConfigResponse {
+        rpc::ManagedHostNetworkConfigResponse {
+            network_virtualization_type: Some(rpc::VpcVirtualizationType::Fnn.into()),
+            vpc_peer_vnis_authoritative: true,
+            service_interfaces: vec![
+                service_interface(1, "192.0.2.10/31"),
+                service_interface(2, "192.0.2.12/31"),
+            ],
+            service_vpc_slot_inventory: Some(rpc::ServiceVpcSlotInventory {
+                slots: vec![rpc::ServiceVpcSlot {
+                    slot_index: 0,
+                    hbn_interface_name: "iface_svc_0".to_string(),
+                }],
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Verifies service-network validation accepts supported legacy and grouped endpoint responses
+    /// and rejects malformed service interfaces, slot inventory, and unrenderable NSGs so callers
+    /// can retain the prior cached response.
+    #[test]
+    #[allow(deprecated)]
+    fn validates_service_network_contract() {
+        // Describe valid and rejected responses with the prior cache state relevant to omission.
+        struct Case {
+            name: &'static str,
+            response: rpc::ManagedHostNetworkConfigResponse,
+            accepted: Option<rpc::ManagedHostNetworkConfigResponse>,
+            error: Option<&'static str>,
+        }
+
+        // Start from a complete response with two endpoints sharing one slot and vary one
+        // validation rule per case.
+        let valid = service_network_config();
+        // Change only Core's projected virtualization type while retaining complete service topology.
+        let mut etv_service_config = valid.clone();
+        etv_service_config.network_virtualization_type =
+            Some(rpc::VpcVirtualizationType::EthernetVirtualizer.into());
+        // Represent explicit zero capacity with a present empty inventory.
+        let present_zero = rpc::ManagedHostNetworkConfigResponse {
+            service_vpc_slot_inventory: Some(rpc::ServiceVpcSlotInventory::default()),
+            ..Default::default()
+        };
+        let legacy_host_only = rpc::ManagedHostNetworkConfigResponse::default();
+
+        // Widen only the first IPv4 service link.
+        let mut wrong_prefix_length = valid.clone();
+        wrong_prefix_length.service_interfaces[0].link_prefix = "192.0.2.8/30".to_string();
+        // Set the first /31 to its service-side address while retaining the correct prefix length.
+        let mut noncanonical_prefix = valid.clone();
+        noncanonical_prefix.service_interfaces[0].link_prefix = "192.0.2.11/31".to_string();
+        let mut valid_ipv6 = valid.clone();
+        // Keep one endpoint so this case isolates IPv6 link validation from an unrelated IPv4 member.
+        valid_ipv6.service_interfaces.truncate(1);
+        valid_ipv6.service_interfaces[0].link_prefix = "2001:db8::10/127".to_string();
+        // Widen the IPv6 service link while retaining its canonical network address.
+        let mut wrong_ipv6_prefix = valid_ipv6.clone();
+        wrong_ipv6_prefix.service_interfaces[0].link_prefix = "2001:db8::10/126".to_string();
+        // Set the /127 to its service-side address while retaining the correct prefix length.
+        let mut noncanonical_ipv6_prefix = valid_ipv6.clone();
+        noncanonical_ipv6_prefix.service_interfaces[0].link_prefix = "2001:db8::11/127".to_string();
+        // Replace only the service identity with non-UUID text.
+        let mut invalid_service_id = valid.clone();
+        invalid_service_id.service_interfaces[0].service_id = "not-a-service-id".to_string();
+        // Replace only the service identity with the nil UUID.
+        let mut nil_service_id = valid.clone();
+        nil_service_id.service_interfaces[0].service_id =
+            "00000000-0000-0000-0000-000000000000".to_string();
+        // Replace only the attachment identity with non-UUID text.
+        let mut invalid_attachment_id = valid.clone();
+        invalid_attachment_id.service_interfaces[0]
+            .attachment_id
+            .as_mut()
+            .unwrap()
+            .value = "not-a-uuid".to_string();
+        // Replace only the internal reservation identity with the nil UUID.
+        let mut nil_internal_uuid = valid.clone();
+        nil_internal_uuid.service_interfaces[0]
+            .internal_uuid
+            .as_mut()
+            .unwrap()
+            .value = "00000000-0000-0000-0000-000000000000".to_string();
+        // Replace only the first endpoint's MAC with non-MAC text.
+        let mut invalid_mac = valid.clone();
+        invalid_mac.service_interfaces[0].mac_address = "not-a-mac".to_string();
+        // Reuse one MAC while retaining distinct attachment IDs, internal UUIDs and links.
+        let mut duplicate_mac = valid.clone();
+        duplicate_mac.service_interfaces[1].mac_address =
+            valid.service_interfaces[0].mac_address.clone();
+        // Replace only one selected-VPC prefix with non-prefix text.
+        let mut invalid_vpc_prefix = valid.clone();
+        invalid_vpc_prefix.service_interfaces[0].vpc_prefixes[0] = "not-a-prefix".to_string();
+        // Attach an instance-sourced NSG to the first service endpoint.
+        let mut non_vpc_nsg = valid.clone();
+        non_vpc_nsg.service_interfaces[0].network_security_group =
+            Some(rpc::FlatInterfaceNetworkSecurityGroupConfig {
+                id: "service-nsg".to_string(),
+                source: rpc::NetworkSecurityGroupSource::NsgSourceInstance.into(),
+                ..Default::default()
+            });
+        // Keep both grouped endpoints aligned so malformed rule conversion is the only failure.
+        let mut malformed_nsg_rule = valid.clone();
+        for interface in &mut malformed_nsg_rule.service_interfaces {
+            interface.network_security_group = Some(rpc::FlatInterfaceNetworkSecurityGroupConfig {
+                id: "service-nsg".to_string(),
+                source: rpc::NetworkSecurityGroupSource::NsgSourceVpc.into(),
+                rules: vec![rpc::ResolvedNetworkSecurityGroupRule::default()],
+                ..Default::default()
+            });
+        }
+        // Split exactly 10,000 expanded rules across two rules to exercise per-NSG accumulation.
+        let mut maximum_nsg = valid.clone();
+        // Keep one endpoint to isolate NSG capacity from grouped-policy agreement.
+        maximum_nsg.service_interfaces.truncate(1);
+        maximum_nsg.service_interfaces[0].network_security_group =
+            Some(rpc::FlatInterfaceNetworkSecurityGroupConfig {
+                id: "service-nsg".to_string(),
+                source: rpc::NetworkSecurityGroupSource::NsgSourceVpc.into(),
+                rules: [("first-range", 1, 5_000), ("second-range", 5_001, 10_000)]
+                    .into_iter()
+                    .map(|(id, start, end)| rpc::ResolvedNetworkSecurityGroupRule {
+                        rule: Some(rpc::NetworkSecurityGroupRuleAttributes {
+                            id: Some(id.to_string()),
+                            direction:
+                                rpc::NetworkSecurityGroupRuleDirection::NsgRuleDirectionIngress
+                                    .into(),
+                            protocol: rpc::NetworkSecurityGroupRuleProtocol::NsgRuleProtoTcp.into(),
+                            action: rpc::NetworkSecurityGroupRuleAction::NsgRuleActionPermit.into(),
+                            dst_port_start: Some(start), // Each range stays individually below the limit.
+                            dst_port_end: Some(end),
+                            ..Default::default()
+                        }),
+                        src_prefixes: vec!["0.0.0.0/0".to_string()],
+                        dst_prefixes: vec!["0.0.0.0/0".to_string()],
+                    })
+                    .collect(),
+                ..Default::default()
+            });
+        // Add one expansion to the second rule while keeping both individual counts below 10,000.
+        let mut oversized_nsg = maximum_nsg.clone();
+        oversized_nsg.service_interfaces[0]
+            .network_security_group
+            .as_mut()
+            .expect("the service endpoint has an NSG")
+            .rules[1]
+            .rule
+            .as_mut()
+            .expect("the resolved NSG rule has attributes")
+            .dst_port_end = Some(10_001);
+        // Keep both grouped endpoints aligned so unresolved route targets are the only failure.
+        let mut malformed_routing_profile = valid.clone();
+        for interface in &mut malformed_routing_profile.service_interfaces {
+            interface
+                .vpc_routing_profile
+                .as_mut()
+                .unwrap()
+                .route_target_imports
+                .push(::rpc::common::RouteTarget {
+                    asn: 65_000,
+                    vni: None,
+                    vni_self: true,
+                });
+        }
+        // Replace only the first endpoint's fixed service MTU.
+        let mut wrong_mtu = valid.clone();
+        wrong_mtu.service_interfaces[0].mtu = Some(1_500);
+        // Move only the first point-to-point link outside its selected VPC prefixes.
+        let mut link_outside_vpc = valid.clone();
+        link_outside_vpc.service_interfaces[0].link_prefix = "198.51.100.10/31".to_string();
+        // Reuse the first link on the independently identified second endpoint.
+        let mut duplicate_link = valid.clone();
+        duplicate_link.service_interfaces[1].link_prefix =
+            valid.service_interfaces[0].link_prefix.clone();
+        let mut without_loopback = valid.clone();
+        // Clear every grouped endpoint because `use_vpc_vrf_loopback` applies site-wide.
+        for interface in &mut without_loopback.service_interfaces {
+            interface.tenant_vrf_loopback_ip = None;
+        }
+        // Replace only the first endpoint's optional loopback with non-address text.
+        let mut invalid_loopback = valid.clone();
+        invalid_loopback.service_interfaces[0].tenant_vrf_loopback_ip =
+            Some("not-an-ipv4-address".to_string());
+        // Append slot two while leaving the expected slot-one entry absent.
+        let mut noncontiguous_inventory = valid.clone();
+        noncontiguous_inventory
+            .service_vpc_slot_inventory
+            .as_mut()
+            .unwrap()
+            .slots
+            .push(rpc::ServiceVpcSlot {
+                slot_index: 2,
+                hbn_interface_name: "iface_svc_2".to_string(),
+            });
+        // Clear only the configured HBN interface name.
+        let mut empty_inventory_name = valid.clone();
+        empty_inventory_name
+            .service_vpc_slot_inventory
+            .as_mut()
+            .unwrap()
+            .slots[0]
+            .hbn_interface_name
+            .clear();
+        // Move the first endpoint to a slot absent from the inventory.
+        let mut unconfigured_slot = valid.clone();
+        unconfigured_slot.service_interfaces[0].slot_index = 1;
+        let mut slot_conflict = valid.clone();
+        // Change both VPC fields so this response isolates one slot being bound to two VPCs.
+        slot_conflict.service_interfaces[1].vpc_id =
+            Some("30000000-0000-0000-0000-000000000002".parse().unwrap());
+        slot_conflict.service_interfaces[1].vpc_vni = 10_002;
+        let mut vpc_split_across_slots = valid.clone();
+        // Add a valid second slot before moving one endpoint to isolate a VPC split across slots.
+        vpc_split_across_slots
+            .service_vpc_slot_inventory
+            .as_mut()
+            .unwrap()
+            .slots
+            .push(rpc::ServiceVpcSlot {
+                slot_index: 1,
+                hbn_interface_name: "iface_svc_1".to_string(),
+            });
+        vpc_split_across_slots.service_interfaces[1].slot_index = 1;
+        let mut vni_shared_across_vpcs = valid.clone();
+        // Give the second VPC its own slot while retaining the first VPC's VNI.
+        vni_shared_across_vpcs
+            .service_vpc_slot_inventory
+            .as_mut()
+            .unwrap()
+            .slots
+            .push(rpc::ServiceVpcSlot {
+                slot_index: 1,
+                hbn_interface_name: "iface_svc_1".to_string(),
+            });
+        vni_shared_across_vpcs.service_interfaces[1].slot_index = 1;
+        vni_shared_across_vpcs.service_interfaces[1].vpc_id =
+            Some("30000000-0000-0000-0000-000000000002".parse().unwrap());
+        // Change only one peer-prefix collection within the shared slot.
+        let mut inconsistent_group_policy = valid.clone();
+        inconsistent_group_policy.service_interfaces[1]
+            .vpc_peer_prefixes
+            .push("203.0.113.0/24".to_string());
+        // Mirror the selected VPC fields needed for a valid shared host/service VNI.
+        let shared_host = rpc::FlatInterfaceConfig {
+            vpc_vni: valid.service_interfaces[0].vpc_vni,
+            vpc_prefixes: valid.service_interfaces[0].vpc_prefixes.clone(),
+            vpc_peer_prefixes: valid.service_interfaces[0].vpc_peer_prefixes.clone(),
+            vpc_peer_vnis: valid.service_interfaces[0].vpc_peer_vnis.clone(),
+            vpc_routing_profile: valid.service_interfaces[0].vpc_routing_profile.clone(),
+            tenant_vrf_loopback_ip: valid.service_interfaces[0].tenant_vrf_loopback_ip.clone(),
+            ..Default::default()
+        };
+        let mut inconsistent_host_routing = valid.clone();
+        // Change only the host routing profile before sharing the service VNI.
+        let mut host_with_different_routing = shared_host.clone();
+        host_with_different_routing
+            .vpc_routing_profile
+            .as_mut()
+            .unwrap()
+            .leak_default_route_from_underlay = true;
+        inconsistent_host_routing.tenant_interfaces = vec![host_with_different_routing];
+        let mut inconsistent_host_loopback = valid.clone();
+        // Change only the host loopback before sharing the service VNI.
+        let mut host_with_different_loopback = shared_host.clone();
+        host_with_different_loopback.tenant_vrf_loopback_ip = Some("198.51.100.11".to_string());
+        inconsistent_host_loopback.tenant_interfaces = vec![host_with_different_loopback];
+        // Keep IPv4 service links while selecting an IPv6 loopback for every grouped endpoint.
+        let mut ipv6_loopback = valid.clone();
+        for interface in &mut ipv6_loopback.service_interfaces {
+            interface.tenant_vrf_loopback_ip = Some("2001:db8::3".to_string());
+        }
+        // Use an equivalent IPv6 spelling to compare addresses rather than string representations.
+        let mut shared_ipv6_loopback = ipv6_loopback.clone();
+        shared_ipv6_loopback.tenant_interfaces = vec![rpc::FlatInterfaceConfig {
+            tenant_vrf_loopback_ip: None, // IPv6 is carried only in the family-neutral entry.
+            addresses: vec![rpc::InterfaceAddressConfig {
+                address_family: rpc::AddressFamily::V6.into(),
+                tenant_vrf_loopback_ip: Some("2001:0db8:0:0:0:0:0:3".to_string()),
+                ..Default::default()
+            }],
+            ..shared_host
+        }];
+        // Change only the canonical host loopback to retain the shared-VRF conflict guard for IPv6.
+        let mut conflicting_ipv6_loopback = shared_ipv6_loopback.clone();
+        conflicting_ipv6_loopback.tenant_interfaces[0].addresses[0].tenant_vrf_loopback_ip =
+            Some("2001:db8::4".to_string());
+        // Append a second slot that reuses the first slot's HBN interface name.
+        let mut duplicate_inventory_name = valid.clone();
+        duplicate_inventory_name
+            .service_vpc_slot_inventory
+            .as_mut()
+            .unwrap()
+            .slots
+            .push(rpc::ServiceVpcSlot {
+                slot_index: 1,
+                hbn_interface_name: "iface_svc_0".to_string(),
+            });
+        // Rename the service slot to the representor used by the host fixture below.
+        let mut host_name_collision = valid.clone();
+        host_name_collision
+            .service_vpc_slot_inventory
+            .as_mut()
+            .unwrap()
+            .slots[0]
+            .hbn_interface_name = "pf0vf0_if".to_string();
+        // Add one VF solely to make `pf0vf0_if` an occupied host port name.
+        host_name_collision.tenant_interfaces = vec![rpc::FlatInterfaceConfig {
+            function_type: rpc::InterfaceFunctionType::Virtual.into(),
+            virtual_function_id: Some(0),
+            vpc_vni: 99_999,
+            ..Default::default()
+        }];
+        // Remove inventory while retaining both service endpoints.
+        let mut missing_inventory = valid.clone();
+        missing_inventory.service_vpc_slot_inventory = None;
+        // Add a site-global VNI while retaining the fixed service inventory.
+        let mut site_global = valid.clone();
+        site_global.site_global_vpc_vni = Some(20_000);
+        // Remove service interfaces while retaining nonempty inventory so omission checks cannot
+        // rely on previously accepted endpoints.
+        let mut accepted_inventory_only = valid.clone();
+        accepted_inventory_only.service_interfaces.clear();
+
+        let cases = vec![
+            // Legacy host-only responses remain acceptable during an agent-first rolling upgrade.
+            Case {
+                name: "initial legacy omission",
+                response: legacy_host_only.clone(),
+                accepted: None,
+                error: None,
+            },
+            // Presence-bearing zero capacity is valid and remains distinct from an omission.
+            Case {
+                name: "present zero-slot inventory",
+                response: present_zero,
+                accepted: None,
+                error: None,
+            },
+            // Same-family endpoints share one slot without entering the one-address-per-family host model.
+            Case {
+                name: "multiple IPv4 endpoints on one slot",
+                response: valid.clone(),
+                accepted: None,
+                error: None,
+            },
+            // Fetched ETV responses cannot activate service endpoints requiring routed FNN ports.
+            Case {
+                name: "non-FNN service response",
+                response: etv_service_config,
+                accepted: None,
+                error: Some("service interfaces require FNN virtualization"),
+            },
+            // Canonical IPv6 links retain the independently staged /127 HBN contract.
+            Case {
+                name: "canonical IPv6 endpoint",
+                response: valid_ipv6,
+                accepted: None,
+                error: None,
+            },
+            // Malformed service identity must not enter the accepted cache as an opaque string.
+            Case {
+                name: "invalid service identity",
+                response: invalid_service_id,
+                accepted: None,
+                error: Some("invalid service_id"),
+            },
+            // A nil service identity cannot provide stable ownership across endpoint replacement.
+            Case {
+                name: "nil service identity",
+                response: nil_service_id,
+                accepted: None,
+                error: Some("service_id must not be nil"),
+            },
+            // Malformed wire UUID text must fail before DHCP reservation identity is constructed.
+            Case {
+                name: "invalid attachment identity",
+                response: invalid_attachment_id,
+                accepted: None,
+                error: Some("invalid service attachment_id"),
+            },
+            // A nil internal UUID cannot identify the target of a DHCP reservation.
+            Case {
+                name: "nil internal UUID",
+                response: nil_internal_uuid,
+                accepted: None,
+                error: Some("service internal_uuid must not be nil"),
+            },
+            // A syntactically invalid MAC cannot become an HBN or DHCP endpoint.
+            Case {
+                name: "invalid service MAC",
+                response: invalid_mac,
+                accepted: None,
+                error: Some("invalid service MAC"),
+            },
+            // Otherwise valid endpoints on one slot cannot create an ambiguous DHCP MAC lookup.
+            Case {
+                name: "duplicate service MAC on one slot",
+                response: duplicate_mac,
+                accepted: None,
+                error: Some("duplicate MAC"),
+            },
+            // A malformed selected-VPC prefix cannot safely bound the endpoint link.
+            Case {
+                name: "invalid VPC prefix",
+                response: invalid_vpc_prefix,
+                accepted: None,
+                error: Some("invalid VPC prefix"),
+            },
+            // Service policy must come from the selected VPC rather than a consumer instance.
+            Case {
+                name: "instance-sourced service NSG",
+                response: non_vpc_nsg,
+                accepted: None,
+                error: Some("must come from the selected VPC"),
+            },
+            // A missing resolved rule cannot become accepted service ACL state.
+            Case {
+                name: "malformed service NSG rule",
+                response: malformed_nsg_rule,
+                accepted: None,
+                error: Some("attempting to convert empty NSG rule"),
+            },
+            // Reaching the renderer's cumulative limit must remain accepted for compatible policies.
+            Case {
+                name: "service NSG at expanded-rule limit",
+                response: maximum_nsg,
+                accepted: None,
+                error: None,
+            },
+            // Individually small rules cannot exceed the per-NSG limit before cache publication.
+            Case {
+                name: "service NSG exceeds cumulative expanded-rule limit",
+                response: oversized_nsg,
+                accepted: None,
+                error: Some("supplied network security group rule count exceeds limit of 10000"),
+            },
+            // A Core-owned symbolic route target must be resolved before it reaches the DPU agent.
+            Case {
+                name: "unresolved service route target",
+                response: malformed_routing_profile,
+                accepted: None,
+                error: Some("received unresolved route target with vni_self set"),
+            },
+            // A wider IPv4 network does not provide the fixed two-address point-to-point contract.
+            Case {
+                name: "wrong IPv4 prefix length",
+                response: wrong_prefix_length,
+                accepted: None,
+                error: Some("canonical /31"),
+            },
+            // Host bits in the supplied prefix would reverse the fixed base+0/base+1 ownership.
+            Case {
+                name: "noncanonical IPv4 prefix",
+                response: noncanonical_prefix,
+                accepted: None,
+                error: Some("canonical /31"),
+            },
+            // A wider IPv6 network cannot identify the fixed HBN and service peers.
+            Case {
+                name: "wrong IPv6 prefix length",
+                response: wrong_ipv6_prefix,
+                accepted: None,
+                error: Some("canonical /127"),
+            },
+            // Supplying the service-side address as the /127 base would reverse fixed peer ownership.
+            Case {
+                name: "noncanonical IPv6 prefix",
+                response: noncanonical_ipv6_prefix,
+                accepted: None,
+                error: Some("canonical /127"),
+            },
+            // HBN and the fixed DPF service topology must agree on the endpoint MTU.
+            Case {
+                name: "wrong service MTU",
+                response: wrong_mtu,
+                accepted: None,
+                error: Some("MTU must be 9000"),
+            },
+            // A valid point-to-point prefix still cannot escape the selected VPC's address space.
+            Case {
+                name: "service link outside selected VPC",
+                response: link_outside_vpc,
+                accepted: None,
+                error: Some("outside the selected VPC prefixes"),
+            },
+            // Independent reservation identities cannot share one point-to-point service link.
+            Case {
+                name: "duplicate service link",
+                response: duplicate_link,
+                accepted: None,
+                error: Some("duplicate service link"),
+            },
+            // `use_vpc_vrf_loopback = false` omits this field without invalidating service endpoints.
+            Case {
+                name: "optional tenant VRF loopback omitted",
+                response: without_loopback,
+                accepted: None,
+                error: None,
+            },
+            // The loopback family is independent of the service link's IPv4 family.
+            Case {
+                name: "IPv6 tenant VRF loopback",
+                response: ipv6_loopback,
+                accepted: None,
+                error: None,
+            },
+            // Equal host/service IPv6 addresses agree even when their text representations differ.
+            Case {
+                name: "shared canonical host and service IPv6 loopback",
+                response: shared_ipv6_loopback,
+                accepted: None,
+                error: None,
+            },
+            // A host loopback stored only in addresses must still participate in shared-VRF validation.
+            Case {
+                name: "shared host and service IPv6 loopback disagreement",
+                response: conflicting_ipv6_loopback,
+                accepted: None,
+                error: Some("different loopbacks"),
+            },
+            // A present loopback remains syntax checked before it can reach the HBN template.
+            Case {
+                name: "invalid tenant VRF loopback",
+                response: invalid_loopback,
+                accepted: None,
+                error: Some("invalid tenant VRF loopback"),
+            },
+            // Gapped slot indices cannot select the HBN and DHCP receiving interface by inventory
+            // vector position.
+            Case {
+                name: "noncontiguous slot inventory",
+                response: noncontiguous_inventory,
+                accepted: None,
+                error: Some("not contiguous"),
+            },
+            // Empty names cannot select the provisioned HBN and DHCP receiving interface.
+            Case {
+                name: "empty inventory name",
+                response: empty_inventory_name,
+                accepted: None,
+                error: Some("empty HBN interface name"),
+            },
+            // An endpoint cannot invent a slot outside the complete fixed inventory.
+            Case {
+                name: "endpoint outside inventory",
+                response: unconfigured_slot,
+                accepted: None,
+                error: Some("unconfigured slot"),
+            },
+            // One physical slot cannot join two VPC VRFs at once.
+            Case {
+                name: "one slot mapped to two VPCs",
+                response: slot_conflict,
+                accepted: None,
+                error: Some("bound to both VPC"),
+            },
+            // One local VPC must aggregate on one slot rather than split its hidden port state.
+            Case {
+                name: "one VPC mapped to two slots",
+                response: vpc_split_across_slots,
+                accepted: None,
+                error: Some("bound to both slot"),
+            },
+            // One VNI cannot identify two distinct VPCs even when each VPC has its own slot.
+            Case {
+                name: "one VNI mapped to two VPCs",
+                response: vni_shared_across_vpcs,
+                accepted: None,
+                error: Some("associated with both VPC"),
+            },
+            // Endpoints sharing one slot must agree on every selected-VPC and port policy field.
+            Case {
+                name: "grouped endpoint policy disagreement",
+                response: inconsistent_group_policy,
+                accepted: None,
+                error: Some("inconsistent VPC or port policy"),
+            },
+            // Host and service ports sharing a VNI cannot render conflicting VPC routing state.
+            Case {
+                name: "shared host and service routing disagreement",
+                response: inconsistent_host_routing,
+                accepted: None,
+                error: Some("inconsistent state for VNI"),
+            },
+            // Two supplied loopbacks for one VNI must identify the same VPC VRF address.
+            Case {
+                name: "shared host and service loopback disagreement",
+                response: inconsistent_host_loopback,
+                accepted: None,
+                error: Some("different loopbacks"),
+            },
+            // Duplicate HBN interface names would make two slots share one HBN port and DHCP
+            // receiving interface.
+            Case {
+                name: "duplicate inventory name",
+                response: duplicate_inventory_name,
+                accepted: None,
+                error: Some("duplicate service slot HBN interface name"),
+            },
+            // A service port must not overwrite a normal host representor in generated NVUE state.
+            Case {
+                name: "host port name collision",
+                response: host_name_collision,
+                accepted: None,
+                error: Some("collides with a host port"),
+            },
+            // Endpoints are never interpreted as removed merely because a later response omits inventory.
+            Case {
+                name: "endpoint response without inventory",
+                response: missing_inventory,
+                accepted: Some(valid),
+                error: Some("require a fixed-slot inventory"),
+            },
+            // Reject omission after a nonempty slot inventory was accepted without endpoints so
+            // callers can retain the cached fixed-slot inventory.
+            Case {
+                name: "inventory disappears after accepted service state",
+                response: legacy_host_only,
+                accepted: Some(accepted_inventory_only),
+                error: Some("inventory disappeared"),
+            },
+            // Site-global VNI mode would collapse service VPC isolation into one shared VRF.
+            Case {
+                name: "site-global VNI with service slots",
+                response: site_global,
+                accepted: None,
+                error: Some("incompatible with site_global_vpc_vni"),
+            },
+        ];
+
+        for case in cases {
+            // Run the service-network validation used by fetch against each case's last accepted
+            // response.
+            let result = validate_service_network_config(&case.response, case.accepted.as_ref());
+
+            // Each rejection identifies the violated contract, while valid compatibility forms succeed.
+            match case.error {
+                Some(expected) => assert!(
+                    format!("{:#}", result.expect_err(case.name)).contains(expected),
+                    "{} did not report {expected}",
+                    case.name
+                ),
+                None => result.expect(case.name),
+            }
+        }
+    }
 
     // Builds the deprecated compatibility shape used by older Core versions.
     #[allow(deprecated)]

@@ -30,11 +30,11 @@ pub(crate) enum Args {
 EXAMPLES:
 
 Power on a power shelf:
-    $ nico-admin-cli power-shelf maintenance power-on --power-shelf-id 12345678-1234-5678-90ab-cdef01234567
+    $ nico-admin-cli power-shelf maintenance power-on --power-shelf-id ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0
 
 Power on several at once, citing a reference ticket:
     $ nico-admin-cli power-shelf maintenance power-on \
-    --power-shelf-id 12345678-1234-5678-90ab-cdef01234567 abcdef01-2345-6789-abcd-ef0123456789 \
+    --power-shelf-id ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0 ps100hsasb5dsh6e6ogogslpovne4rj82rp9jlf00qd7mcvmaadv85phk3g \
     --reference https://tickets.example.com/PS-42
 
 ")]
@@ -44,14 +44,14 @@ Power on several at once, citing a reference ticket:
 EXAMPLES:
 
 Power off a power shelf (forced, the default):
-    $ nico-admin-cli power-shelf maintenance power-off --power-shelf-id 12345678-1234-5678-90ab-cdef01234567
+    $ nico-admin-cli power-shelf maintenance power-off --power-shelf-id ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0
 
 Request a graceful shutdown instead of a forced power-off:
-    $ nico-admin-cli power-shelf maintenance power-off --power-shelf-id 12345678-1234-5678-90ab-cdef01234567 --graceful
+    $ nico-admin-cli power-shelf maintenance power-off --power-shelf-id ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0 --graceful
 
 Power off several at once, citing a reference ticket:
     $ nico-admin-cli power-shelf maintenance power-off \
-    --power-shelf-id 12345678-1234-5678-90ab-cdef01234567 abcdef01-2345-6789-abcd-ef0123456789 \
+    --power-shelf-id ps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0 ps100hsasb5dsh6e6ogogslpovne4rj82rp9jlf00qd7mcvmaadv85phk3g \
     --reference https://tickets.example.com/PS-42
 
 ")]

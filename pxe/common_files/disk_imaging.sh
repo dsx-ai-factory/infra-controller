@@ -28,6 +28,8 @@ image_url=
 image_sha=
 image_auth_type=
 image_auth_token=
+insecure_tls=no
+curl_args=()
 distro_name=
 distro_version=
 distro_release=
@@ -40,6 +42,26 @@ forge_test_pass=
 update_grub_template="yes"
 update_grub_cfg="yes"
 
+# Apply common curl options and TLS policy to all downloads.
+function configure_curl_args() {
+	curl_args=(--fail --retry 5 --retry-all-errors)
+	if [ "$insecure_tls" == "yes" ]; then
+		curl_args+=(-k)
+		echo "WARNING: insecure_tls=yes disables HTTPS certificate verification" | tee "$log_output" >&2
+	fi
+}
+
+# An HTTPS request must stay on HTTPS throughout its redirect chain.
+function curl_download() {
+	local request_url=$1
+	shift
+	local -a redirect_args=()
+	if [[ "${request_url,,}" == https://* ]]; then
+		redirect_args=(--proto-redir '=https')
+	fi
+	curl "${curl_args[@]}" "${redirect_args[@]}" "$@" "$request_url"
+}
+
 # Downloads the complete request URL to one caller-visible local filename while
 # preserving each forwarded curl argument as a separate value.
 function curl_url() {
@@ -50,8 +72,9 @@ function curl_url() {
 	if [ -z "$file" ]; then
 		file=$(basename "${url%%\?*}")
 	fi
-	curl --retry 5 --retry-all-errors -k -L "$@" \
-		--output "$file" "$url" 2>&1 | tee "$log_output"
+	curl_download "$url" -L "$@" \
+		--output "$file" 2>&1 | tee "$log_output"
+	return "${PIPESTATUS[0]}"
 }
 
 # Announces the download without exposing URL queries, which may contain
@@ -101,9 +124,9 @@ function build_image_auth_args() {
 function verify_sha() {
 	sha=$1
 
-	len=$(expr length $sha)
+	len=${#sha}
 	if [ $len -eq 40 ]; then
-		shasum=shasum
+		shasum=sha1sum
 	elif [ $len -eq 64 ]; then
 		shasum=sha256sum
 	elif [ $len -eq 96 ]; then
@@ -112,9 +135,11 @@ function verify_sha() {
 		shasum=sha512sum
 	else
 		echo "Unknown sha digest length" | tee $log_output
-		exit 1;
+		return 1
 	fi
-	echo "$sha $file" | $shasum --check 2>&1 | tee $log_output
+	# Two spaces: Perl-based checkers reject a single-space check line.
+	printf '%s  %s\n' "$sha" "$file" | $shasum --check - 2>&1 | tee $log_output
+	return "${PIPESTATUS[1]}"
 }
 
 function find_efi_disk() {
@@ -217,9 +242,17 @@ function get_distro_image() {
 		echo "Distro $distro_name not supported" | tee $log_output
 		exit 1;
 	fi
-	curl --retry 5 --retry-all-errors -k -L $shaurl --output shafile 2>&1 | tee $log_output
+	curl_download "$shaurl" -L --output shafile 2>&1 | tee "$log_output"
+	if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+		echo "Failed to download checksum file from $shaurl" | tee "$log_output"
+		return 1
+	fi
 	file=$(basename $image_url)
 	image_sha=$(grep -m 1 $file shafile)
+	if [ -z "$image_sha" ]; then
+		echo "Checksum for $file not found in $shaurl" | tee "$log_output"
+		return 1
+	fi
 }
 
 function add_cloud_init() {
@@ -230,9 +263,24 @@ function add_cloud_init() {
 	fi
 	seed_dir=/mnt/var/lib/cloud/seed/nocloud-net
 	mkdir -p "$seed_dir"
-	curl --fail --retry 5 --retry-all-errors -k "$cloud_init_url/user-data" --output "$seed_dir/user-data" 2>&1 | tee "$log_output"
-	curl --fail --retry 5 --retry-all-errors -k "$cloud_init_url/meta-data" --output "$seed_dir/meta-data" 2>&1 | tee "$log_output"
-	curl --fail --retry 5 --retry-all-errors -k "$cloud_init_url/network-config" --output "$seed_dir/network-config" 2>&1 | tee "$log_output"
+	local cloud_init_file download_status
+	for cloud_init_file in user-data meta-data network-config; do
+		curl_download "$cloud_init_url/$cloud_init_file" -L \
+			--output "$seed_dir/$cloud_init_file" 2>&1 | tee "$log_output"
+		download_status=${PIPESTATUS[0]}
+		if [ "$download_status" -ne 0 ]; then
+			if [ "$cloud_init_file" == "network-config" ]; then
+				if ! rm -f -- "$seed_dir/$cloud_init_file"; then
+					echo "Failed to remove incomplete cloud-init network-config" | tee "$log_output"
+					return 1
+				fi
+				echo "Skipping optional cloud-init network-config: download failed (curl status $download_status)" | tee "$log_output"
+				continue
+			fi
+			echo "Failed to download cloud-init $cloud_init_file" | tee "$log_output"
+			return "$download_status"
+		fi
+	done
 }
 
 function expand_root_fs() {
@@ -519,8 +567,13 @@ function resolve_fstab_mount_device() {
 			identifier_type=${spec%%=*}
 			identifier=$(printf '%b' "${spec#*=}")
 			;;
+		/dev/disk/by-uuid/?*)
+			# Resolve the identifier on the image disk, not through a host symlink.
+			identifier_type=UUID
+			identifier=${spec#/dev/disk/by-uuid/}
+			;;
 		*)
-			echo "$fstab names $mountpoint by [$spec], which cannot be resolved on $disk; only UUID=, LABEL=, PARTUUID= and PARTLABEL= sources are supported, set bootfs_uuid to select the partition explicitly" | tee "$log_output" >&2
+			echo "$fstab names $mountpoint by [$spec], which cannot be resolved on $disk; only UUID=, LABEL=, PARTUUID=, PARTLABEL= and /dev/disk/by-uuid/ sources are supported, set bootfs_uuid to select the partition explicitly" | tee "$log_output" >&2
 			return 3
 			;;
 	esac
@@ -1098,6 +1151,9 @@ function parse_kernel_cmdline_argument() {
 	local argument=$1
 
 	case "$argument" in
+		insecure_tls=*)
+			insecure_tls=${argument#insecure_tls=}
+			;;
 		image_url=*)
 			image_url=${argument#image_url=}
 			;;
@@ -1157,6 +1213,17 @@ function parse_kernel_cmdline_argument() {
 	return 0
 }
 
+# Writes the downloaded image to image_disk and returns qemu-img's status, not tee's.
+function write_image_to_disk() {
+	echo "Imaging $file to $image_disk" | tee $log_output
+	qemu-img convert -p -O raw -S 0 "$file" "$image_disk" 2>&1 | tee $log_output
+	local ret=${PIPESTATUS[0]}
+	if [ $ret -ne 0 ]; then
+		echo "Imaging failed $ret" | tee $log_output
+	fi
+	return $ret
+}
+
 function main() {
 
 	get_serial_port
@@ -1176,12 +1243,13 @@ function main() {
 	do
 		parse_kernel_cmdline_argument "$argument" || true
 	done
+	configure_curl_args
 	if [ -z "$rootfs_uuid" ] && [ -z "$rootfs_label" ]; then
 		rootfs_label="cloudimg-rootfs" #default rootfs name for cloud images
 	fi
 
 	if [ ! -z "$distro_name" ]; then
-		get_distro_image
+		get_distro_image || return 1
 	fi
 
 	if [ -z "$image_url" ]; then
@@ -1200,7 +1268,10 @@ function main() {
 	fi
 
 	announce_image_download
-	curl_url "$image_url" "${image_auth[@]}"
+	if ! curl_url "$image_url" "${image_auth[@]}"; then
+		echo "Failed to download image" | tee "$log_output"
+		return 1
+	fi
 	if [ -n "$image_auth_header_file" ]; then
 		rm -f "$image_auth_header_file"
 		trap - EXIT INT TERM
@@ -1229,13 +1300,7 @@ function main() {
 	image_disk=$resolved_image_disk
 	precheck_image_identifiers || return 1
 
-	echo "Imaging $file to $image_disk" | tee $log_output
-	qemu-img convert -p -O raw -S 0 "$file" "$image_disk" 2>&1 | tee $log_output
-	ret=$?
-	if [ $ret -ne 0 ]; then
-		echo "Imaging failed $ret" | tee $log_output
-		return $ret;
-	fi
+	write_image_to_disk || return $?
 
 	sgdisk -epv $image_disk 2>&1 | tee $log_output
 	partprobe $image_disk 2>&1 | tee $log_output
@@ -1262,7 +1327,10 @@ function main() {
 				fi
 			fi
 			if [ ! -z "$cloud_init_url" ]; then
-				add_cloud_init
+				if ! add_cloud_init; then
+					umount /mnt 2>&1 | tee "$log_output"
+					return 1
+				fi
 			fi
 			add_testing_user
 			umount /mnt 2>&1 | tee $log_output
@@ -1272,7 +1340,10 @@ function main() {
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-	main
+	if ! main; then
+		echo "Imaging failed; reboot suppressed" | tee "$log_output" >&2
+		exit 1
+	fi
 	echo "Rebooting" | tee $log_output
 	systemctl reboot | tee $log_output
 fi

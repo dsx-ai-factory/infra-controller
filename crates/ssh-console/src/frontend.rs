@@ -22,11 +22,11 @@ use std::time::Duration;
 
 use carbide_uuid::machine::MachineId;
 use lazy_static::lazy_static;
+use rpc::carbide_api_client::CarbideApiClient;
 use rpc::forge::ValidateTenantPublicKeyRequest;
-use rpc::forge_api_client::ForgeApiClient;
 use russh::keys::ssh_key::AuthorizedKeys;
 use russh::keys::{Certificate, PublicKey, PublicKeyBase64};
-use russh::server::{Auth, ChannelOpenHandle, Msg, Session};
+use russh::server::{Auth, ChannelOpenHandle, Msg, Session, VerifiedPublicKey};
 use russh::{Channel, ChannelId, ChannelMsg, MethodKind, MethodSet, Pty};
 use tokio::sync::oneshot;
 use tonic::Code;
@@ -81,7 +81,7 @@ lazy_static! {
 
 pub(crate) struct Handler {
     config: Arc<Config>,
-    forge_api_client: ForgeApiClient,
+    carbide_api_client: CarbideApiClient,
     bmc_connection_store: BmcConnectionStore,
     /// The machine_id or instance_id the user is attempting to log into. Used as the username in the ssh command line (ie. ssh machine_id@ssh-console)
     authenticated_machine_string: Option<String>,
@@ -102,14 +102,14 @@ impl Handler {
     pub(crate) fn new(
         bmc_connection_store: BmcConnectionStore,
         config: Arc<Config>,
-        forge_api_client: ForgeApiClient,
+        carbide_api_client: CarbideApiClient,
         metrics: Arc<ServerMetrics>,
         peer_addr: Option<SocketAddr>,
     ) -> Self {
         tracing::debug!("spawning new frontend connection handler");
         Self {
             config,
-            forge_api_client,
+            carbide_api_client,
             bmc_connection_store,
             authenticated_machine_string: None,
             per_client_state: HashMap::new(),
@@ -174,6 +174,11 @@ impl Drop for Handler {
 impl russh::server::Handler for Handler {
     type Error = HandlerError;
 
+    #[tracing::instrument(
+        name = "ssh_console_channel_open",
+        skip_all,
+        fields(peer_address = %self.peer_addr, machine = tracing::field::Empty)
+    )]
     async fn channel_open_session(
         &mut self,
         channel: Channel<Msg>,
@@ -187,6 +192,7 @@ impl russh::server::Handler for Handler {
                 method: "channel_open_session",
             });
         };
+        tracing::Span::current().record("machine", machine.as_str());
 
         // fetch the BMC connection
         let channel_id = channel.id();
@@ -195,7 +201,7 @@ impl russh::server::Handler for Handler {
             .get_connection(
                 machine,
                 &self.config,
-                &self.forge_api_client,
+                &self.carbide_api_client,
                 self.metrics.clone(),
             )
             .await
@@ -235,6 +241,11 @@ impl russh::server::Handler for Handler {
         })
     }
 
+    #[tracing::instrument(
+        name = "ssh_console_auth_certificate",
+        skip_all,
+        fields(peer_address = %self.peer_addr, machine = %machine_string)
+    )]
     async fn auth_openssh_certificate(
         &mut self,
         machine_string: &str,
@@ -314,12 +325,18 @@ impl russh::server::Handler for Handler {
         Ok(Auth::Accept)
     }
 
+    #[tracing::instrument(
+        name = "ssh_console_auth_publickey",
+        skip_all,
+        fields(peer_address = %self.peer_addr, machine = %machine_string)
+    )]
     async fn auth_publickey(
         &mut self,
         machine_string: &str,
-        public_key: &PublicKey,
+        public_key: VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
         use HandlerError::*;
+        let public_key = public_key.public_key;
         tracing::trace!(peer_address = self.peer_addr, "auth_publickey");
 
         // Authentication flow:
@@ -335,7 +352,7 @@ impl russh::server::Handler for Handler {
             true
         } else if Uuid::from_str(machine_string).is_ok() {
             // Only try tenant auth if the user is a valid-looking UUID.
-            pubkey_auth_tenant(machine_string, public_key, &self.forge_api_client)
+            pubkey_auth_tenant(machine_string, public_key, &self.carbide_api_client)
                 .await
                 .map_err(|error| PubkeyAuthTenant {
                     instance_id: machine_string.to_owned(),
@@ -436,6 +453,11 @@ impl russh::server::Handler for Handler {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "ssh_console_shell_request",
+        skip_all,
+        fields(peer_address = %self.peer_addr, machine = tracing::field::Empty)
+    )]
     async fn shell_request(
         &mut self,
         channel_id: ChannelId,
@@ -464,6 +486,7 @@ impl russh::server::Handler for Handler {
             return Ok(());
         };
         let machine_id = client_state.bmc_connection.machine_id;
+        tracing::Span::current().record("machine", tracing::field::display(machine_id));
         let Some(from_bmc_rx) = client_state
             .bmc_connection
             .to_frontend_msg_weak_tx
@@ -517,6 +540,11 @@ impl russh::server::Handler for Handler {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "ssh_console_exec_request",
+        skip_all,
+        fields(peer_address = %self.peer_addr)
+    )]
     async fn exec_request(
         &mut self,
         channel_id: ChannelId,
@@ -736,9 +764,9 @@ fn pubkey_auth_admin_authorized_keys(
 async fn pubkey_auth_tenant(
     user: &str,
     public_key: &PublicKey,
-    forge_api_client: &ForgeApiClient,
+    carbide_api_client: &CarbideApiClient,
 ) -> Result<bool, PubkeyAuthError> {
-    let authorized = match forge_api_client
+    let authorized = match carbide_api_client
         .validate_tenant_public_key(ValidateTenantPublicKeyRequest {
             instance_id: user.to_string(),
             tenant_public_key: public_key.public_key_base64(),

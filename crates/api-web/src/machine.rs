@@ -39,6 +39,7 @@ use rpc::forge::get_machine_boot_interfaces_response::reconciliation::State as B
 use rpc::forge::{self as forgerpc, HealthReportApplyMode, MachineInventorySoftwareComponent};
 use serde::Deserialize;
 
+use super::firmware_inventory::FirmwareInventory;
 use super::pagination::{self, PageContext, PaginationParams};
 use super::state_history::StateHistoryTable;
 use super::{Base, filters, health};
@@ -463,8 +464,10 @@ struct MachineDetail<'a> {
     ib_interfaces: Vec<MachineIbInterfaceDisplay>,
     inventory: Vec<MachineInventorySoftwareComponent>,
     health_detail: super::HealthDetail,
-    bmc_info: Option<rpc::forge::BmcInfo>,
-    has_complete_bmc_info: bool,
+    bmc: Option<rpc::forge::BmcEndpoint>,
+    firmware_inventory: FirmwareInventory,
+    bmc_status: Option<rpc::forge::BmcStatus>,
+    has_complete_bmc_endpoint: bool,
     discovery_info_json: String,
     metadata_detail: super::MetadataDetail,
     capabilities: Vec<MachineCapability>,
@@ -824,6 +827,36 @@ pub(super) struct ValidationRun {
     pub(super) start_time: String,
     pub(super) end_time: String,
     pub(super) machine_id: String,
+    pub(super) progress: String,
+    pub(super) current_tests: String,
+    pub(super) current_attempts: String,
+}
+
+impl From<forgerpc::MachineValidationRun> for ValidationRun {
+    fn from(run: forgerpc::MachineValidationRun) -> Self {
+        Self {
+            machine_id: run.machine_id.map(|id| id.to_string()).unwrap_or_default(),
+            status: run
+                .status
+                .as_ref()
+                .and_then(|status| status.machine_validation_state.as_ref())
+                .map(|state| format!("{state:?}"))
+                .unwrap_or_else(|| "Unknown".to_string()),
+            progress: run
+                .status
+                .as_ref()
+                .map(|status| format!("{}/{}", status.completed_tests, status.total))
+                .unwrap_or_default(),
+            context: run.context.unwrap_or_default(),
+            validation_id: run.validation_id.unwrap_or_default().to_string(),
+            start_time: run.start_time.unwrap_or_default().to_string(),
+            end_time: run
+                .end_time
+                .map_or_else(|| "N/A".to_string(), |time| time.to_string()),
+            current_tests: String::new(),
+            current_attempts: String::new(),
+        }
+    }
 }
 
 impl From<forgerpc::Machine> for MachineDetail<'_> {
@@ -967,10 +1000,10 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
             status.health,
             status.health_sources,
         );
-        let has_complete_bmc_info = m
-            .bmc_info
+        let has_complete_bmc_endpoint = m
+            .bmc
             .as_ref()
-            .is_some_and(|bmc_info| bmc_info.ip.is_some() && bmc_info.mac.is_some());
+            .is_some_and(|bmc_endpoint| bmc_endpoint.ip.is_some() && bmc_endpoint.mac.is_some());
 
         MachineDetail {
             id: machine_id.clone(),
@@ -990,8 +1023,10 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
             machine_type: get_machine_type(&machine_id),
             is_host,
             network_config: String::new(), // filled in later
-            bmc_info: m.bmc_info,
-            has_complete_bmc_info,
+            bmc: m.bmc,
+            firmware_inventory: FirmwareInventory::default(),
+            bmc_status: status.bmc_status,
+            has_complete_bmc_endpoint,
             history,
             bios_version,
             board_version,
@@ -1128,6 +1163,11 @@ pub(super) async fn detail(
         .filter_map(|interface| interface.id)
         .collect::<HashSet<_>>();
     let mut display: MachineDetail = machine.into();
+    display.firmware_inventory = FirmwareInventory::load(
+        &state,
+        display.bmc.as_ref().and_then(|bmc| bmc.ip.as_deref()),
+    )
+    .await;
 
     if display.is_host {
         match state
@@ -1213,23 +1253,44 @@ pub(super) async fn detail(
         .await
         .map(|response| response.into_inner())
     {
-        Ok(results) => results
-            .runs
-            .into_iter()
-            .rev() // Show the most recent run first
-            .map(|vr| ValidationRun {
-                machine_id: vr.machine_id.map(|id| id.to_string()).unwrap_or_default(),
-                status:format!("{:?}", vr.status.unwrap_or_default().machine_validation_state.unwrap_or(
-                    rpc::forge::machine_validation_status::MachineValidationState::Completed(
-                        rpc::forge::machine_validation_status::MachineValidationCompleted::Success.into(),
-                    ),
-                )),
-                context: vr.context.unwrap_or_default(),
-                validation_id: vr.validation_id.unwrap_or_default().to_string(),
-                start_time: vr.start_time.unwrap_or_default().to_string(),
-                end_time: vr.end_time.map_or_else(|| "N/A".to_string(), |time| time.to_string()),
-            })
-            .collect(),
+        Ok(results) => {
+            let mut runs = Vec::new();
+            // reverse to show most recent runs first
+            for vr in results.runs.into_iter().rev() {
+                let active_id = vr.validation_id.filter(|_| vr.end_time.is_none());
+                let mut run = ValidationRun::from(vr);
+                if let Some(validation_id) = active_id {
+                    // Only the host's current runs need item lookups, never the fleet list.
+                    match db::machine_validation_execution::find_run_items_by_run_id(
+                        &mut state.db_reader(),
+                        &validation_id,
+                    )
+                    .await
+                    {
+                        Ok(items) => {
+                            let (tests, attempts): (Vec<_>, Vec<_>) = items.into_iter()
+                                .filter(|item| item.state == model::machine_validation::MachineValidationRunItemState::Running)
+                                .map(|item| {
+                                    let attempt = match item.current_attempt_id {
+                                        Some(id) => format!("{} ({id})", item.attempt),
+                                        None => item.attempt.to_string(),
+                                    };
+                                    (item.test_id, attempt)
+                                }).unzip();
+                            run.current_tests = tests.join(", ");
+                            run.current_attempts = attempts.join(", ");
+                        }
+                        Err(err) => {
+                            tracing::warn!(error = %err, %machine_id, %validation_id, "Failed to load current validation work");
+                            run.current_tests = "Unavailable".to_string();
+                            run.current_attempts = "Unavailable".to_string();
+                        }
+                    }
+                }
+                runs.push(run);
+            }
+            runs
+        }
         Err(err) => {
             tracing::warn!(error = %err, %machine_id, "get_machine_validation_runs failed");
             Vec::new() // Empty validation results on error
@@ -1578,6 +1639,63 @@ pub(super) async fn reconcile_boot_interface(
 
 impl super::Base for MachineShow {}
 impl<'a> super::Base for MachineDetail<'a> {}
+
+#[cfg(test)]
+mod machine_detail_tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    #[test]
+    fn bmc_endpoint_and_status_render_independently() {
+        let endpoint = forgerpc::BmcEndpoint {
+            ip: Some("192.0.2.10".to_string()),
+            mac: Some("02:03:04:05:06:07".to_string()),
+            ..Default::default()
+        };
+        let status = forgerpc::BmcStatus {
+            version: Some("BMC-2.0".to_string()),
+            firmware_version: Some("FW-24.10".to_string()),
+        };
+        value_scenarios!(run = |(bmc, bmc_status)| {
+            let display = MachineDetail::from(forgerpc::Machine {
+                bmc,
+                status: Some(forgerpc::MachineStatus {
+                    bmc_status,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            let html = display.render().expect("machine detail renders");
+            let bmc_section = html
+                .split_once("<h3 id=\"bmc_info_view\">BMC</h3>")
+                .unwrap().1
+                .split_once("<h3>Discovery Info</h3>")
+                .unwrap().0;
+            (
+                bmc_section.contains("<th>IP</th>"),
+                bmc_section.contains("<th>Version</th>"),
+                bmc_section.contains("<th>Firmware Version</th>"),
+                bmc_section.contains("id=\"powercontrol_action\""),
+                bmc_section.contains("id=\"bmcreset_action\""),
+                bmc_section.contains("Missing BMC Data"),
+            )
+        };
+            "endpoint and status show details, versions, and actions" {
+                (Some(endpoint.clone()), Some(status.clone())) => (true, true, true, true, true, false),
+            }
+            "endpoint without status retains details and actions" {
+                (Some(endpoint), None) => (true, false, false, true, true, false),
+            }
+            "status without endpoint shows versions without actions" {
+                (None, Some(status)) => (false, true, true, false, false, false),
+            }
+            "neither endpoint nor status shows the empty state" {
+                (None, None) => (false, false, false, false, false, true),
+            }
+        );
+    }
+}
 
 #[cfg(test)]
 mod boot_interface_display_tests {

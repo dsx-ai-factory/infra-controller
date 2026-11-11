@@ -134,6 +134,11 @@ impl UdpDhcpClient {
         ))
     }
 
+    #[cfg(test)]
+    pub(super) fn next_transaction_id(&self) -> u32 {
+        self.next_xid.load(Ordering::Relaxed)
+    }
+
     pub(crate) async fn request_ip(
         &self,
         request_info: DhcpRequestInfo,

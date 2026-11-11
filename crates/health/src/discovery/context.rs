@@ -17,16 +17,21 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
+use carbide_uuid::machine::MachineId;
 use carbide_uuid::nvlink::NvLinkDomainId;
 use carbide_uuid::power_shelf::PowerShelfId;
+use carbide_uuid::rack::RackId;
 use prometheus::{Histogram, HistogramOpts};
 use tokio::sync::Notify;
+use tokio::task::JoinSet;
 
+use super::DiscoveryShutdown;
 use super::reachability::ReachabilitySpec;
 use crate::HealthError;
 use crate::api_client::ApiClientWrapper;
@@ -45,6 +50,7 @@ use crate::config::{
     SensorCollectorConfig as SensorCollectorOptions,
     TelemetryCollectorConfig as TelemetryCollectorOptions,
 };
+use crate::endpoint::{BmcEndpoint, EndpointMetadata};
 use crate::inventory::InventoryMetrics;
 use crate::limiter::RateLimiter;
 use crate::metrics::{MetricsManager, operation_duration_buckets_seconds};
@@ -86,6 +92,36 @@ impl CollectorKind {
     ];
 }
 
+/// Endpoint details that collectors capture at startup and do not refresh.
+///
+/// The endpoint key can stay the same while these change, for example when an
+/// API-discovered MAC reports a new BMC address or a file inventory reassigns
+/// a BMC IP to another rack. The rack and machine are fixed in the client's
+/// BMC latency labels, so a change needs the collectors to pick up a rebuilt
+/// client. Credentials are not tracked: running clients pick up rotated
+/// credentials through their refresh-on-authentication-failure path.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct EndpointConnection {
+    ip: IpAddr,
+    port: Option<u16>,
+    rack_id: Option<RackId>,
+    machine_id: Option<MachineId>,
+}
+
+impl EndpointConnection {
+    pub(super) fn of(endpoint: &BmcEndpoint) -> Self {
+        Self {
+            ip: endpoint.addr.ip,
+            port: endpoint.addr.port,
+            rack_id: endpoint.rack_id.clone(),
+            machine_id: match &endpoint.metadata {
+                Some(EndpointMetadata::Machine(machine)) => machine.machine_id,
+                _ => None,
+            },
+        }
+    }
+}
+
 pub(super) struct CollectorState {
     discovery: HashMap<Cow<'static, str>, Collector>,
     sensors: HashMap<Cow<'static, str>, Collector>,
@@ -106,7 +142,9 @@ pub(super) struct CollectorState {
     machine_domain_uuids: HashMap<Cow<'static, str>, Option<NvLinkDomainId>>,
     switch_metadata: HashMap<Cow<'static, str>, (Option<NvLinkDomainId>, Option<String>)>,
     power_shelf_ids: HashMap<Cow<'static, str>, Option<PowerShelfId>>,
+    endpoint_connections: HashMap<Cow<'static, str>, EndpointConnection>,
     pub(super) reachability_specs: HashMap<Cow<'static, str>, ReachabilitySpec>,
+    stopping: JoinSet<()>,
 }
 
 impl CollectorState {
@@ -150,8 +188,24 @@ impl CollectorState {
             machine_domain_uuids: HashMap::new(),
             switch_metadata: HashMap::new(),
             power_shelf_ids: HashMap::new(),
+            endpoint_connections: HashMap::new(),
             reachability_specs: HashMap::new(),
+            stopping: JoinSet::new(),
         }
+    }
+
+    /// Stops `collectors` in tasks this state owns, so a cancelled caller
+    /// leaves them for [`DiscoveryLoopContext::drain_collectors`].
+    pub(super) fn start_stopping(&mut self, collectors: Vec<Collector>) {
+        for collector in collectors {
+            self.stopping.spawn(collector.stop());
+        }
+    }
+
+    /// Stops `collectors` and waits for every stop this state has started.
+    pub(super) async fn stop(&mut self, collectors: Vec<Collector>) {
+        self.start_stopping(collectors);
+        while self.stopping.join_next().await.is_some() {}
     }
 
     fn map(&self, kind: CollectorKind) -> &HashMap<Cow<'static, str>, Collector> {
@@ -280,6 +334,28 @@ impl CollectorState {
             .retain(|key, _| active_power_shelf_endpoints.contains(key));
     }
 
+    /// Records the latest connection details and reports whether they changed.
+    ///
+    /// The first observation establishes a baseline without forcing a restart.
+    /// Running collectors keep the client and rack captured at startup, so a
+    /// later change requires a restart before new requests and telemetry use it.
+    pub(super) fn observe_endpoint_connection(
+        &mut self,
+        key: &str,
+        connection: EndpointConnection,
+    ) -> bool {
+        Self::observe_value(&mut self.endpoint_connections, key, connection)
+    }
+
+    /// Removes saved connection details for endpoints absent from the discovery pass.
+    pub(super) fn retain_endpoint_connections(
+        &mut self,
+        active_endpoints: &HashSet<Cow<'static, str>>,
+    ) {
+        self.endpoint_connections
+            .retain(|key, _| active_endpoints.contains(key));
+    }
+
     pub(super) fn contains(&self, kind: CollectorKind, key: &str) -> bool {
         self.map(kind).contains_key(key)
     }
@@ -295,6 +371,32 @@ impl CollectorState {
 
     pub(super) fn len(&self, kind: CollectorKind) -> usize {
         self.map(kind).len()
+    }
+
+    /// Removes and returns every started collector, including reachability,
+    /// which `CollectorKind::ALL` omits.
+    fn take_all(&mut self) -> Vec<Collector> {
+        let mut collectors = Vec::new();
+
+        for kind in CollectorKind::ALL
+            .into_iter()
+            .chain(std::iter::once(CollectorKind::Reachability))
+        {
+            collectors.extend(self.map_mut(kind).drain().map(|(_, collector)| collector));
+        }
+
+        collectors
+    }
+
+    /// Counts distinct endpoint keys with registered collectors.
+    /// Retained caches and inventory entries do not contribute.
+    pub(super) fn active_endpoint_count(&self) -> usize {
+        CollectorKind::ALL
+            .into_iter()
+            .chain([CollectorKind::Reachability])
+            .flat_map(|kind| self.map(kind).keys())
+            .collect::<HashSet<_>>()
+            .len()
     }
 
     pub(super) fn removed_keys(
@@ -321,18 +423,23 @@ impl CollectorState {
             .collect()
     }
 
-    pub(super) fn prune_finished_logs(&mut self) {
-        self.logs.retain(|key, collector| {
-            if collector.is_finished() {
-                tracing::info!(
-                    endpoint_key = %key,
-                    "pruning finished logs collector (task exited); discovery will respawn"
-                );
-                false
-            } else {
-                true
-            }
-        });
+    /// Releases Logs parents after auto-mode transitions and gNMI parents after
+    /// supervised failure, allowing the normal spawn pass to replace them.
+    pub(super) fn prune_finished_collectors(&mut self) {
+        for kind in [CollectorKind::Logs, CollectorKind::NvueGnmi] {
+            self.map_mut(kind).retain(|key, collector| {
+                if collector.is_finished() {
+                    tracing::info!(
+                        endpoint_key = %key,
+                        collector_kind = ?kind,
+                        "pruning finished collector (task exited); discovery will respawn"
+                    );
+                    false
+                } else {
+                    true
+                }
+            });
+        }
     }
 }
 
@@ -350,6 +457,7 @@ pub struct DiscoveryLoopContext {
     pub(crate) telemetry_config: Configurable<TelemetryCollectorOptions>,
     pub(crate) logs_config: Configurable<LogsCollectorOptions>,
     pub(crate) firmware_config: Configurable<FirmwareCollectorOptions>,
+    pub(crate) resource_status_processor_enabled: bool,
     pub(crate) manager_config: Configurable<ManagerCollectorOptions>,
     pub(crate) leak_detector_config: Configurable<LeakDetectorCollectorOptions>,
     pub(crate) nmxt_config: Configurable<NmxtCollectorOptions>,
@@ -457,6 +565,7 @@ impl DiscoveryLoopContext {
             telemetry_config: config.collectors.telemetry.clone(),
             logs_config: config.collectors.logs.clone(),
             firmware_config: config.collectors.firmware.clone(),
+            resource_status_processor_enabled: config.processors.resource_status.is_enabled(),
             manager_config: config.collectors.manager.clone(),
             leak_detector_config: config.collectors.leak_detector.clone(),
             nmxt_config: config.collectors.nmxt.clone(),
@@ -486,6 +595,35 @@ impl DiscoveryLoopContext {
             logs_include_diagnostics: config.sinks.includes_log_diagnostics(),
             attributes: config.attributes.clone(),
         })
+    }
+
+    /// Stops every started collector, including those discovery was already
+    /// stopping, concurrently within `timeout`; collectors still running when it
+    /// passes are abandoned and counted as `timed_out`.
+    pub(crate) async fn drain_collectors(&mut self, timeout: Duration) -> DiscoveryShutdown {
+        let collectors = self.collectors.take_all();
+        self.collectors.start_stopping(collectors);
+        let mut stopping = std::mem::take(&mut self.collectors.stopping);
+        let total = stopping.len();
+
+        if total == 0 {
+            return DiscoveryShutdown::default();
+        }
+
+        let mut closed = 0;
+
+        tokio::time::timeout(timeout, async {
+            while stopping.join_next().await.is_some() {
+                closed += 1;
+            }
+        })
+        .await
+        .ok();
+
+        DiscoveryShutdown {
+            closed,
+            timed_out: total - closed,
+        }
     }
 }
 
@@ -532,12 +670,52 @@ mod tests {
     use std::borrow::Cow;
     use std::collections::HashSet;
 
+    use carbide_test_support::{Check, check_values};
+
     use super::*;
     use crate::collectors::Collector;
     use crate::config::MtlsProfileConfig;
 
     fn noop_collector() -> Collector {
         Collector::spawn_task(|_| async {})
+    }
+
+    #[tokio::test]
+    async fn active_endpoint_count_deduplicates_collectors_and_excludes_retained_state() {
+        check_values(
+            [
+                Check {
+                    scenario: "retained state without collectors",
+                    input: vec![],
+                    expect: 0,
+                },
+                Check {
+                    scenario: "distinct endpoints across overlapping collector types",
+                    input: vec![
+                        (CollectorKind::Sensor, "bmc"),
+                        (CollectorKind::Metrics, "bmc"),
+                        (CollectorKind::NvueRest, "switch"),
+                    ],
+                    expect: 2,
+                },
+                Check {
+                    scenario: "reachability without other collectors",
+                    input: vec![(CollectorKind::Reachability, "host")],
+                    expect: 1,
+                },
+            ],
+            |collectors| {
+                let mut state = CollectorState::new();
+                state.gnmi_cache_for("retained-gnmi");
+                state.inventory_for("retained-inventory");
+
+                for (kind, key) in collectors {
+                    state.insert(kind, Cow::Borrowed(key), noop_collector());
+                }
+
+                state.active_endpoint_count()
+            },
+        );
     }
 
     #[tokio::test]
@@ -587,5 +765,39 @@ mod tests {
             .expect("[tls.switch] config should be present");
 
         assert_eq!(actual_tls_config, &tls_config);
+    }
+
+    #[tokio::test]
+    async fn drain_collectors_stops_the_fleet_within_the_budget() {
+        let mut context = DiscoveryLoopContext::new(
+            Arc::new(crate::limiter::NoopLimiter),
+            Arc::new(MetricsManager::new("drain_collectors").expect("metrics manager")),
+            Arc::new(Config::default()),
+        )
+        .expect("context should initialize");
+
+        context.collectors.insert(
+            CollectorKind::Sensor,
+            Cow::Borrowed("stopping"),
+            noop_collector(),
+        );
+
+        context.collectors.insert(
+            CollectorKind::Reachability,
+            Cow::Borrowed("stopping-reachability"),
+            noop_collector(),
+        );
+
+        context.collectors.insert(
+            CollectorKind::Logs,
+            Cow::Borrowed("stuck"),
+            Collector::spawn_task(|_| async { std::future::pending::<()>().await }),
+        );
+
+        let shutdown = context.drain_collectors(Duration::from_millis(100)).await;
+
+        assert_eq!(shutdown.closed, 2);
+        assert_eq!(shutdown.timed_out, 1);
+        assert!(context.collectors.take_all().is_empty());
     }
 }

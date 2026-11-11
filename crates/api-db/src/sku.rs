@@ -40,16 +40,17 @@ use crate::{DatabaseError, ObjectFilter, Transaction, machine};
 mod test_decode;
 #[cfg(test)]
 mod test_explicit_columns;
+#[cfg(test)]
+mod test_updated_migration;
 
 /// The current version of the SKU format.  The state machine will create older
 /// versions from hardware using the currently assigned sku's version so that
 /// SKUs can maintain backward compatibility
 pub const CURRENT_SKU_VERSION: u32 = 5;
 
-/// Find a SKU that matches the specified SKU using the same comparison that
-/// the SKU validation code uses. (i.e. the description, id and others are not compared)
-///
-/// The specified SKU must not exist in the DB (otherwise it will always be the match).
+/// Find a stored SKU whose requirements match the supplied observed hardware
+/// according to [`diff_skus`]. Authored storage groups and patterns need not
+/// match themselves; this is not a component-definition identity check.
 pub async fn find_matching(
     txn: &mut PgConnection,
     sku: &Sku,
@@ -57,10 +58,26 @@ pub async fn find_matching(
     find_matching_with_exclusion(txn, sku, None).await
 }
 
+/// Apply the same observed-hardware comparison as [`find_matching`], excluding
+/// the specified stored ID. Mutation duplicate checks also compare definitions.
 pub async fn find_matching_with_exclusion(
     txn: &mut PgConnection,
     sku: &Sku,
     excluded_sku_id: Option<&String>,
+) -> Result<Option<Sku>, DatabaseError> {
+    find_matching_sku(txn, sku, excluded_sku_id, SkuMatch::ObservedHardware).await
+}
+
+enum SkuMatch {
+    ObservedHardware,
+    DuplicateDefinition,
+}
+
+async fn find_matching_sku(
+    txn: &mut PgConnection,
+    sku: &Sku,
+    excluded_sku_id: Option<&String>,
+    match_kind: SkuMatch,
 ) -> Result<Option<Sku>, DatabaseError> {
     let mut builder = sqlx::QueryBuilder::new(format!(
         "SELECT {} FROM machine_skus",
@@ -72,13 +89,19 @@ pub async fn find_matching_with_exclusion(
     }
 
     let sql = builder.sql().as_str().to_string();
-    let mut sku_stream = builder.build_query_as().fetch(txn);
+    let mut sku_stream = builder.build_query_as::<Sku>().fetch(txn);
 
     while let Some(result) = sku_stream.next().await {
         match result {
             Ok(existing_sku) => {
-                let diffs = diff_skus(sku, &existing_sku);
-                if diffs.is_empty() {
+                // `diff_skus` treats each candidate storage entry as one drive.
+                // Groups with count > 1 or anchored patterns can miss themselves.
+                // Definition checks add equality; hardware matching stays unchanged.
+                let is_exact_duplicate = matches!(match_kind, SkuMatch::DuplicateDefinition)
+                    && sku.id != existing_sku.id
+                    && sku.schema_version == existing_sku.schema_version
+                    && sku.components == existing_sku.components;
+                if is_exact_duplicate || diff_skus(sku, &existing_sku).is_empty() {
                     return Ok(Some(existing_sku));
                 }
             }
@@ -134,6 +157,11 @@ fn validate_storage_for_create(
     Ok(())
 }
 
+/// `create` saves a current-version SKU with valid storage constraints and a
+/// nonempty ID. Invalid input or a duplicate returns [`DatabaseError::InvalidArgument`].
+/// A duplicate has equal components in the same schema version under another ID,
+/// or matches through [`diff_skus`]. Description and device type are not compared.
+/// An existing ID without such a match returns [`DatabaseError::AlreadyFoundError`].
 pub async fn create(txn: &mut PgConnection, sku: &Sku) -> Result<(), DatabaseError> {
     if sku.schema_version != CURRENT_SKU_VERSION {
         return Err(DatabaseError::InvalidArgument(
@@ -157,7 +185,9 @@ pub async fn create(txn: &mut PgConnection, sku: &Sku) -> Result<(), DatabaseErr
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    if let Some(existing_sku) = find_matching(&mut inner_txn, sku).await? {
+    if let Some(existing_sku) =
+        find_matching_sku(&mut inner_txn, sku, None, SkuMatch::DuplicateDefinition).await?
+    {
         return Err(DatabaseError::InvalidArgument(format!(
             "Specified SKU matches SKU with ID: {}",
             existing_sku.id
@@ -256,16 +286,16 @@ pub async fn update_metadata(
     if let Some(description) = description {
         builder.push(" description = ");
         builder.push_bind(description);
-        if device_type.is_some() {
-            builder.push(",");
-        }
+        builder.push(", ");
     }
 
     if let Some(device_type) = device_type {
         builder.push(" device_type = ");
         builder.push_bind(device_type);
+        builder.push(", ");
     }
 
+    builder.push(" updated = NOW()");
     builder.push(" WHERE id = ");
     builder.push_bind(sku_id);
     builder.push(" RETURNING id");
@@ -279,6 +309,18 @@ pub async fn update_metadata(
     Ok(())
 }
 
+/// `replace` replaces an existing SKU's components, schema version, description,
+/// and device type, then requests verification for associated machines. It
+/// preserves the creation time and machine assignments and returns the saved SKU.
+///
+/// The schema version must equal [`CURRENT_SKU_VERSION`]. An empty ID, unsupported
+/// schema version, invalid storage constraints, or definition matching another
+/// SKU returns [`DatabaseError::InvalidArgument`] before checking for absence.
+/// Another SKU matches when its components and schema version are equal, or when
+/// [`diff_skus`] finds no differences. The target's own ID is excluded.
+/// A valid replacement that does not match another SKU returns
+/// [`DatabaseError::NotFoundError`] when its target ID is absent. Other SQLx
+/// errors are preserved.
 pub async fn replace(txn: &mut PgConnection, sku: &Sku) -> Result<Sku, DatabaseError> {
     validate_replacement(&sku.id, &sku.components, sku.schema_version)?;
     let mut inner_txn = Transaction::begin_inner(txn).await?;
@@ -375,14 +417,16 @@ async fn lock_for_replacement(txn: &mut PgConnection) -> Result<(), DatabaseErro
 /// The caller must hold the table lock from `lock_for_replacement` so the
 /// duplicate check and replacement cannot race another SKU writer.
 async fn replace_locked(txn: &mut PgConnection, sku: &Sku) -> Result<(), DatabaseError> {
-    if let Some(existing_sku) = find_matching_with_exclusion(txn, sku, Some(&sku.id)).await? {
+    if let Some(existing_sku) =
+        find_matching_sku(txn, sku, Some(&sku.id), SkuMatch::DuplicateDefinition).await?
+    {
         return Err(DatabaseError::InvalidArgument(format!(
             "Specified SKU matches SKU with ID: {}",
             existing_sku.id
         )));
     }
 
-    let query = "UPDATE machine_skus set description=$1, components=$2, schema_version=$3, device_type=$4 WHERE id=$5 RETURNING id";
+    let query = "UPDATE machine_skus set description=$1, components=$2, schema_version=$3, device_type=$4, updated=NOW() WHERE id=$5 RETURNING id";
 
     sqlx::query_as::<_, ()>(query)
         .bind(&sku.description)
@@ -392,7 +436,13 @@ async fn replace_locked(txn: &mut PgConnection, sku: &Sku) -> Result<(), Databas
         .bind(&sku.id)
         .fetch_one(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::new("replace sku: update", e))?;
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => DatabaseError::NotFoundError {
+                kind: "SKU",
+                id: sku.id.clone(),
+            },
+            e => DatabaseError::new("replace sku: update", e),
+        })?;
 
     crate::machine::update_sku_status_verify_request_time_for_sku(txn, &sku.id).await
 }
@@ -560,6 +610,7 @@ pub async fn generate_sku_from_machine_at_version_0_or_1(
         id: format!("{} {}", chassis.model, Utc::now()),
         description,
         created,
+        updated: None,
         components: SkuComponents {
             chassis,
             cpus: hardware_info
@@ -660,6 +711,7 @@ pub fn generate_base_sku_from_hardware(
         id: format!("{} {}", chassis.model, Utc::now()),
         description,
         created,
+        updated: None,
         components: SkuComponents {
             chassis,
             cpus,

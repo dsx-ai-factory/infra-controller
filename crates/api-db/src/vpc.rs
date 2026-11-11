@@ -16,6 +16,7 @@
  */
 use std::ops::DerefMut;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
 use config_version::ConfigVersion;
@@ -70,17 +71,16 @@ pub async fn persist(
     status: VpcStatus,
     txn: &mut PgConnection,
 ) -> Result<Vpc, DatabaseError> {
-    let query =
-                "INSERT INTO vpcs (id, name, organization_id, network_security_group_id, version, network_virtualization_type,
+    let query = format!(
+        "INSERT INTO vpcs (id, name, organization_id, network_security_group_id, version, network_virtualization_type,
                 description,
                 labels, routing_profile_type, routing_profile_overrides, vni, status, power_resource_group,
                 slaac_enabled)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-                RETURNING id, version, organization_id, network_security_group_id,
-                network_virtualization_type, routing_profile_type, routing_profile_overrides,
-                power_resource_group, slaac_enabled, vni, status, name, description, labels,
-                created, updated, deleted";
-    sqlx::query_as(query)
+                RETURNING {}",
+        Vpc::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(value.id)
         .bind(&value.metadata.name)
         .bind(&value.tenant_organization_id)
@@ -97,7 +97,7 @@ pub async fn persist(
         .bind(value.slaac_enabled)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 pub async fn find_ids(
@@ -200,17 +200,15 @@ async fn find_by_inner<'a, C: ColumnInfo<'a, TableType = Vpc>>(
     txn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
     row_lock: VpcRowLock,
+    include_deleted: bool,
 ) -> Result<Vec<Vpc>, DatabaseError> {
-    let mut query = FilterableQueryBuilder::new(
-        "SELECT id, version, organization_id, network_security_group_id,
-                network_virtualization_type, routing_profile_type, routing_profile_overrides,
-                power_resource_group, slaac_enabled, vni, status, name, description, labels,
-                created, updated, deleted
-         FROM vpcs",
-    )
-    .filter(&filter);
+    let mut query =
+        FilterableQueryBuilder::new(format!("SELECT {} FROM vpcs", Vpc::db_table_columns()))
+            .filter(&filter);
 
-    query.push(" AND deleted IS NULL");
+    if !include_deleted {
+        query.push(" AND deleted IS NULL");
+    }
     if matches!(row_lock, VpcRowLock::Mutation) {
         query.push(" FOR NO KEY UPDATE");
     }
@@ -228,46 +226,63 @@ pub async fn find_by_with_lock<'a, C: ColumnInfo<'a, TableType = Vpc>>(
     filter: ObjectColumnFilter<'a, C>,
     row_lock: VpcRowLock,
 ) -> Result<Vec<Vpc>, DatabaseError> {
-    find_by_inner(&mut *txn, filter, row_lock).await
+    find_by_inner(&mut *txn, filter, row_lock, false).await
 }
 
 pub async fn find_by<'a, C: ColumnInfo<'a, TableType = Vpc>>(
     txn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<Vpc>, DatabaseError> {
-    find_by_inner(txn, filter, VpcRowLock::None).await
+    find_by_inner(txn, filter, VpcRowLock::None, false).await
+}
+
+/// Finds one VPC by ID while retaining a soft-deleted row so allocation validation can distinguish
+/// a deleted VPC from an identifier that never existed.
+///
+/// Callers that serialize with deletion must lock the `instance_addresses` table before this read.
+pub async fn find_by_id_including_deleted(
+    txn: impl DbReader<'_>,
+    id: VpcId,
+) -> Result<Option<Vpc>, DatabaseError> {
+    Ok(find_by_inner(
+        txn,
+        ObjectColumnFilter::One(IdColumn, &id),
+        VpcRowLock::None,
+        true,
+    )
+    .await?
+    .pop())
 }
 
 pub async fn find_by_vni(txn: &mut PgConnection, vni: i32) -> Result<Vec<Vpc>, DatabaseError> {
-    let query = "SELECT id, version, organization_id, network_security_group_id,
-                network_virtualization_type, routing_profile_type, routing_profile_overrides,
-                power_resource_group, slaac_enabled, vni, status, name, description, labels,
-                created, updated, deleted
-        from vpcs WHERE (status->>'vni')::integer = $1 AND DELETED IS NULL";
+    let query = format!(
+        "SELECT {} from vpcs WHERE (status->>'vni')::integer = $1 AND DELETED IS NULL",
+        Vpc::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(vni)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Pins the configured admin VPC's requested and active VNI together.
 /// Routing-profile transitions preserve creation intent with [`change_routing_profile`].
 pub async fn set_vni(value: &Vpc, txn: &mut PgConnection, vni: i32) -> DatabaseResult<Vpc> {
-    let query = "UPDATE vpcs
-            SET vni=$1, status=jsonb_set(status, '{vni}', to_jsonb($1::integer), true), updated=NOW()
+    let query = format!(
+        "UPDATE vpcs
+            SET vni=$1, status=jsonb_set(status, '{{vni}}', to_jsonb($1::integer), true), updated=NOW()
             WHERE id=$2 AND deleted is null
-            RETURNING id, version, organization_id, network_security_group_id,
-                network_virtualization_type, routing_profile_type, routing_profile_overrides,
-                power_resource_group, slaac_enabled, vni, status, name, description, labels,
-                created, updated, deleted";
-    sqlx::query_as(query)
+            RETURNING {}",
+        Vpc::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(vni)
         .bind(value.id)
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Changes a VPC's named routing profile and active VNI, advancing its version.
@@ -282,16 +297,16 @@ pub async fn change_routing_profile(
     txn: &mut PgConnection,
     vni: i32,
 ) -> DatabaseResult<Vpc> {
-    let query = "UPDATE vpcs
+    let query = format!(
+        "UPDATE vpcs
         SET routing_profile_type = $1,
-            status = jsonb_set(status, '{vni}', to_jsonb($2::integer), true),
+            status = jsonb_set(status, '{{vni}}', to_jsonb($2::integer), true),
             version = $3, updated = NOW()
         WHERE id = $4 AND version = $5 AND deleted IS NULL
-        RETURNING id, version, organization_id, network_security_group_id,
-                network_virtualization_type, routing_profile_type, routing_profile_overrides,
-                power_resource_group, slaac_enabled, vni, status, name, description, labels,
-                created, updated, deleted";
-    let result = sqlx::query_as(query)
+        RETURNING {}",
+        Vpc::db_table_columns(),
+    );
+    let result = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(&value.routing_profile_type)
         .bind(vni)
         .bind(value.if_version_match.increment())
@@ -306,8 +321,21 @@ pub async fn change_routing_profile(
             "vpc",
             value.if_version_match.to_string(),
         )),
-        Err(error) => Err(DatabaseError::query(query, error)),
+        Err(error) => Err(DatabaseError::query(&query, error)),
     }
+}
+
+/// Serializes configured VPC insertion for one name across startup instances.
+/// Recheck the name after taking this transaction-scoped lock. API-created
+/// VPCs can still share names and do not participate in this startup-only lock.
+pub async fn lock_initial_name(txn: &mut PgTransaction<'_>, name: &str) -> DatabaseResult<()> {
+    let query = "SELECT pg_advisory_xact_lock(hashtextextended('initial-vpc:' || $1, 0))";
+    sqlx::query(query)
+        .bind(name)
+        .execute(&mut **txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
 }
 
 pub async fn find_by_name(txn: impl DbReader<'_>, name: &str) -> Result<Vec<Vpc>, DatabaseError> {
@@ -320,13 +348,11 @@ pub async fn find_by_segment(
     txn: impl DbReader<'_>,
     segment_id: NetworkSegmentId,
 ) -> Result<Option<Vpc>, DatabaseError> {
-    let mut query = FilterableQueryBuilder::new(
-        "SELECT v.id, v.version, v.organization_id, v.network_security_group_id,
-                v.network_virtualization_type, v.routing_profile_type, v.routing_profile_overrides,
-                v.power_resource_group, v.slaac_enabled, v.vni, v.status, v.name, v.description,
-                v.labels, v.created, v.updated, v.deleted
-         from vpcs v INNER JOIN network_segments s ON v.id = s.vpc_id",
-    )
+    let mut query = FilterableQueryBuilder::new(format!(
+        "SELECT {} FROM {} INNER JOIN network_segments s ON v.id = s.vpc_id",
+        Vpc::db_aliased_columns(),
+        Vpc::db_aliased_table(),
+    ))
     .filter_relation(
         &ObjectColumnFilter::One(network_segment::IdColumn, &segment_id),
         Some("s"),
@@ -346,32 +372,17 @@ pub async fn find_by_segment(
 /// If the VPC was already deleted, this returns Ok(`None`), even if historical
 /// records still reference it.
 ///
-/// Use an explicit transaction to keep the VPC row locked from the reference
-/// checks until the deletion is committed or rolled back.
+/// Callers that coordinate VPC-attached child mutations must acquire
+/// [`VpcRowLock::Mutation`] on this VPC before calling this function.
 pub async fn try_delete(txn: &mut PgConnection, id: VpcId) -> Result<Option<Vpc>, DatabaseError> {
-    // Domain creation takes the same lock, so it cannot add a reference
-    // between the checks below and the deletion.
-    let vpcs = find_by_with_lock(
-        &mut *txn,
-        ObjectColumnFilter::One(IdColumn, &id),
-        VpcRowLock::Mutation,
-    )
-    .await?;
-    if vpcs.is_empty() {
-        return Ok(None);
-    }
-
-    // A VPC cannot be deleted while it owns a live domain.
-    let domain_query = "SELECT EXISTS(SELECT 1 FROM domains WHERE vpc_id=$1 AND deleted IS NULL)";
-    let has_domains: bool = sqlx::query_scalar(domain_query)
+    let active_vpc_query = "SELECT EXISTS(SELECT 1 FROM vpcs WHERE id=$1 AND deleted IS NULL)";
+    let is_active: bool = sqlx::query_scalar(active_vpc_query)
         .bind(id)
         .fetch_one(&mut *txn)
         .await
-        .map_err(|error| DatabaseError::query(domain_query, error))?;
-    if has_domains {
-        return Err(DatabaseError::FailedPrecondition(format!(
-            "VPC {id} cannot be deleted while live DNS domains reference it"
-        )));
+        .map_err(|e| DatabaseError::query(active_vpc_query, e))?;
+    if !is_active {
+        return Ok(None);
     }
 
     // Block deletion while any active or soft-deleted prefix row still
@@ -410,15 +421,19 @@ pub async fn try_delete(txn: &mut PgConnection, id: VpcId) -> Result<Option<Vpc>
         )));
     }
 
-    let query = "UPDATE vpcs SET updated=NOW(), deleted=NOW() WHERE id=$1 AND deleted IS NULL
-        RETURNING id, version, organization_id, network_security_group_id,
-                network_virtualization_type, routing_profile_type, routing_profile_overrides,
-                power_resource_group, slaac_enabled, vni, status, name, description, labels,
-                created, updated, deleted";
-    match sqlx::query_as(query).bind(id).fetch_one(txn).await {
+    let query = format!(
+        "UPDATE vpcs SET updated=NOW(), deleted=NOW() WHERE id=$1 AND deleted IS NULL
+        RETURNING {}",
+        Vpc::db_table_columns(),
+    );
+    match sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
+        .bind(id)
+        .fetch_one(txn)
+        .await
+    {
         Ok(vpc) => Ok(Some(vpc)),
         Err(sqlx::Error::RowNotFound) => Ok(None),
-        Err(e) => Err(DatabaseError::query(query, e)),
+        Err(e) => Err(DatabaseError::query(&query, e)),
     }
 }
 
@@ -445,17 +460,17 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
     // Set replaces it and clear stores NULL.
     // network_virtualization_type cannot be changed currently
     // TODO check number of changed rows
-    let query = "UPDATE vpcs
+    let query = format!(
+        "UPDATE vpcs
             SET name=$1, version=$2, description=$3, network_security_group_id=$4,
                 labels=$5::json,
                 routing_profile_overrides=COALESCE($6::jsonb, routing_profile_overrides),
                 power_resource_group=CASE WHEN $7 THEN $8 ELSE power_resource_group END,
                 updated=NOW()
             WHERE id=$9 AND version=$10 AND deleted is null
-            RETURNING id, version, organization_id, network_security_group_id,
-                network_virtualization_type, routing_profile_type, routing_profile_overrides,
-                power_resource_group, slaac_enabled, vni, status, name, description, labels,
-                created, updated, deleted";
+            RETURNING {}",
+        Vpc::db_table_columns(),
+    );
     let (update_power_resource_group, power_resource_group) =
         match value.power_resource_group.as_ref() {
             Some(PowerResourceGroupUpdate::Set(resource_group)) => {
@@ -464,7 +479,7 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
             Some(PowerResourceGroupUpdate::Clear) => (true, None),
             None => (false, None),
         };
-    let query_result = sqlx::query_as(query)
+    let query_result = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(&value.metadata.name)
         .bind(next_version)
         .bind(&value.metadata.description)
@@ -493,7 +508,7 @@ pub async fn update(value: &UpdateVpc, txn: &mut PgConnection) -> DatabaseResult
                 current_version.to_string(),
             ))
         }
-        Err(e) => Err(DatabaseError::query(query, e)),
+        Err(e) => Err(DatabaseError::query(&query, e)),
     }
 }
 
@@ -503,13 +518,13 @@ pub async fn update_virtualization(
     // which must happen in a transaction.
     txn: &mut PgTransaction<'_>,
 ) -> DatabaseResult<Vpc> {
-    let query = "UPDATE vpcs
+    let query = format!(
+        "UPDATE vpcs
             SET version=$1, network_virtualization_type=$2, updated=NOW()
             WHERE id=$3 AND version=$4 AND deleted is null
-            RETURNING id, version, organization_id, network_security_group_id,
-                network_virtualization_type, routing_profile_type, routing_profile_overrides,
-                power_resource_group, slaac_enabled, vni, status, name, description, labels,
-                created, updated, deleted";
+            RETURNING {}",
+        Vpc::db_table_columns(),
+    );
 
     let current_version = match value.if_version_match {
         Some(version) => version,
@@ -529,7 +544,7 @@ pub async fn update_virtualization(
     };
     let next_version = current_version.increment();
 
-    let query_result = sqlx::query_as(query)
+    let query_result = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(next_version)
         .bind(value.network_virtualization_type)
         .bind(value.id)
@@ -548,7 +563,7 @@ pub async fn update_virtualization(
                 current_version.to_string(),
             ))
         }
-        Err(e) => Err(DatabaseError::query(query, e)),
+        Err(e) => Err(DatabaseError::query(&query, e)),
     }?;
 
     // Update SVI IP for stretchable segments.

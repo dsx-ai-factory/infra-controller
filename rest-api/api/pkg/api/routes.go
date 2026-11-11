@@ -417,9 +417,14 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		},
 		// Interface endpoints
 		{
+			Path:    apiPathPrefix + "/interface",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllInterfaceHandler(dbSession, tc, cfg, nil),
+		},
+		{
 			Path:    apiPathPrefix + "/instance/:instanceId/interface",
 			Method:  http.MethodGet,
-			Handler: apiHandler.NewGetAllInterfaceHandler(dbSession, tc, cfg),
+			Handler: apiHandler.NewGetAllInstanceInterfaceHandler(dbSession, tc, cfg),
 		},
 		// Instance InfiniBandInterface endpoints
 		{
@@ -770,7 +775,7 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		{
 			Path:    apiPathPrefix + "/machine/:id",
 			Method:  http.MethodDelete,
-			Handler: apiHandler.NewDeleteMachineHandler(dbSession, tc, cfg),
+			Handler: apiHandler.NewDeleteMachineHandler(dbSession, scp),
 		},
 		{
 
@@ -1196,6 +1201,14 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewDeleteSkuHandler(dbSession, scp),
 		},
+		{
+			// `/rack/task/power` preserves the inventory rack ID `task` before
+			// `/rack/task/:id` and `/rack/:id/power` can capture it. `power`
+			// is not a task UUID, so valid task lookups still use their route.
+			Path:    apiPathPrefix + "/rack/task/power",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetRackPowerStateHandler(dbSession, scp).ForRack("task"),
+		},
 		// Task endpoints (Flow). /rack/task/* and /task/* share get/cancel
 		// handlers; filtered lists are also exposed under /rack/{id}/task and
 		// /tray/{id}/task.
@@ -1376,6 +1389,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 		},
 		{
 			Path:    apiPathPrefix + "/rack/:id/power",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetRackPowerStateHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/rack/:id/power",
 			Method:  http.MethodPatch,
 			Handler: apiHandler.NewUpdateRackPowerStateHandler(dbSession, tc, scp, cfg),
 		},
@@ -1434,6 +1452,11 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/tray/:id/health-report/:source",
 			Method:  http.MethodDelete,
 			Handler: apiHandler.NewDeleteTrayHealthReportHandler(dbSession, scp, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/tray/:id/power",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetTrayPowerStateHandler(dbSession, scp),
 		},
 		{
 			Path:    apiPathPrefix + "/tray/:id/power",

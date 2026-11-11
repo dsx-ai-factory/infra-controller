@@ -1,0 +1,64 @@
+#
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+[package]
+name = "bmc-runtime"
+version = "0.1.0"
+description = "Runtime wiring and deterministic driver selection for BMC platforms"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+bmc-drivers = { path = "../bmc-drivers" }
+bmc-platform = { path = "../bmc-platform" }
+carbide-api-model = { path = "../api-model", default-features = false }
+carbide-instrument = { path = "../instrument" }
+carbide-ipmi = { path = "../ipmi" }
+carbide-redfish = { path = "../redfish" }
+carbide-secrets = { path = "../secrets", default-features = false }
+carbide-utils = { path = "../utils", default-features = false }
+mac_address = { features = ["serde"], workspace = true }
+nv-redfish = { features = [
+    "accounts",
+    "bmc-http",
+    "component-integrity",
+    "computer-systems",
+    "job-service",
+    "oem-dell",
+    "secure-boot",
+    "task-service",
+    "update-service",
+], workspace = true }
+serde = { features = ["derive"], workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+bmc-mock = { path = "../bmc-mock" }
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-test-support = { path = "../test-support" }
+eyre = { workspace = true }
+nv-redfish = { features = ["bmc-http"], workspace = true }
+tokio = { features = ["macros", "rt"], workspace = true }
+url = { workspace = true }
+
+[lints]
+workspace = true

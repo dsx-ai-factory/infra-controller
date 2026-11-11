@@ -16,13 +16,13 @@ import (
 	"testing"
 	"time"
 
+	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/fsnotify.v1"
 	coreV1Types "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -155,7 +155,7 @@ func TestReadBootstrapConfigUsesOneProjectedSecretRevision(t *testing.T) {
 	}
 	writeConfig(oldRevision, oldConfig)
 	writeConfig(newRevision, newConfig)
-	require.NoError(t, os.Symlink(filepath.Base(newRevision), filepath.Join(root, kubernetesSecretDataSymlink)))
+	require.NoError(t, os.Symlink(filepath.Base(newRevision), filepath.Join(root, computils.KubernetesSecretDataSymlink)))
 
 	for _, tag := range []string{
 		bootstraptypes.TagUUID,
@@ -163,7 +163,7 @@ func TestReadBootstrapConfigUsesOneProjectedSecretRevision(t *testing.T) {
 		bootstraptypes.TagCredsURL,
 		bootstraptypes.TagCACert,
 	} {
-		targetRevision := kubernetesSecretDataSymlink
+		targetRevision := computils.KubernetesSecretDataSymlink
 		if tag == bootstraptypes.TagUUID {
 			// Simulate a symlink view changing between separate key reads.
 			targetRevision = filepath.Base(oldRevision)
@@ -188,7 +188,7 @@ func TestReadBootstrapConfigUsesOneProjectedSecretRevision(t *testing.T) {
 func TestNewBootstrapConfig(t *testing.T) {
 	const (
 		siteID   = "d2f4b0c6-6f1e-4a0e-9f5a-0b6a6f4c1e77"
-		credsURL = "https://sitemgr.nico-system.svc/v1/sitecreds"
+		credsURL = "https://nico-rest-site-manager.nico-system.svc/v1/sitecreds"
 	)
 	// A real Site Manager CA runs past a thousand characters, so the body has to
 	// outrun the logged prefix for the assertions below to mean anything.
@@ -230,53 +230,6 @@ func TestNewBootstrapConfig(t *testing.T) {
 	assert.NotContains(t, logged.String(), caCert)
 	assert.Contains(t, logged.String(), siteID)
 	assert.Contains(t, logged.String(), credsURL)
-}
-
-func TestIsBootstrapSecretUpdate(t *testing.T) {
-	dir := t.TempDir()
-	otpFile := filepath.Join(dir, bootstraptypes.TagOTP)
-	files := map[string]bool{otpFile: true}
-	tests := []struct {
-		name  string
-		event fsnotify.Event
-		want  bool
-	}{
-		{
-			name:  "tracked file write",
-			event: fsnotify.Event{Name: otpFile, Op: fsnotify.Write},
-			want:  true,
-		},
-		{
-			name:  "tracked file metadata change",
-			event: fsnotify.Event{Name: otpFile, Op: fsnotify.Chmod},
-			want:  true,
-		},
-		{
-			name:  "projected Secret generation swap",
-			event: fsnotify.Event{Name: filepath.Join(dir, kubernetesSecretDataSymlink), Op: fsnotify.Create},
-			want:  true,
-		},
-		{
-			name:  "projected Secret symlink metadata change",
-			event: fsnotify.Event{Name: filepath.Join(dir, kubernetesSecretDataSymlink), Op: fsnotify.Chmod},
-			want:  false,
-		},
-		{
-			name:  "projected Secret staging directory",
-			event: fsnotify.Event{Name: filepath.Join(dir, "..2026_10_12_20_00_00"), Op: fsnotify.Create},
-			want:  false,
-		},
-		{
-			name:  "unrelated file",
-			event: fsnotify.Event{Name: filepath.Join(dir, "unrelated"), Op: fsnotify.Write},
-			want:  false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, isBootstrapSecretUpdate(tt.event, files, dir))
-		})
-	}
 }
 
 func TestBoostrapAPI_ReloadBootstrapCredentials(t *testing.T) {
@@ -676,7 +629,7 @@ func TestBoostrapAPI_CheckRegistration(t *testing.T) {
 				for name, contents := range map[string]string{
 					bootstraptypes.TagUUID:     siteID,
 					bootstraptypes.TagOTP:      otp,
-					bootstraptypes.TagCredsURL: "https://sitemgr.nico-system.svc/v1/sitecreds",
+					bootstraptypes.TagCredsURL: "https://nico-rest-site-manager.nico-system.svc/v1/sitecreds",
 					bootstraptypes.TagCACert:   "-----BEGIN CERTIFICATE-----\nc2l0ZS1jYQ\n-----END CERTIFICATE-----",
 				} {
 					require.NoError(t, os.WriteFile(dir+name, []byte(contents), 0600))

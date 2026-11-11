@@ -512,30 +512,31 @@ impl<'a> MockExploredHost<'a> {
 
         let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::lookup_host_machine_ids_by_dpu_ids(txn.as_mut(), &[dpu_machine_id])
+            db::machine::DpuHostAssociations::load(txn.as_mut(), &[dpu_machine_id])
                 .await
-                .unwrap()[&dpu_machine_id];
+                .unwrap()
+                .host_machine_id(&dpu_machine_id)
+                .unwrap();
 
+        // Scout discovery below needs this intermediate state. Requeued
+        // transitions can otherwise advance to network configuration first.
         self.test_env
-            .run_machine_state_controller_iteration_until_state_matches(
+            .run_machine_state_controller_iteration_until_state_condition_with_requeue(
                 &host_machine_id,
                 10 + (10 * self.dpu_machine_ids.len() as u32),
-                ManagedHostState::DPUInit {
-                    dpu_states: model::machine::DpuInitStates {
-                        states: self
-                            .dpu_machine_ids
-                            .clone()
-                            .into_values()
-                            .map(|machine_id| {
-                                (
-                                    machine_id,
-                                    DpuInitState::DpfStates {
-                                        state: DpfState::WaitingForReady { phase_detail: None },
-                                    },
-                                )
-                            })
-                            .collect::<HashMap<DpuMachineId, DpuInitState>>(),
-                    },
+                false,
+                |machine| match machine.current_state() {
+                    ManagedHostState::DPUInit { dpu_states } => {
+                        self.dpu_machine_ids.values().all(|machine_id| {
+                            matches!(
+                                dpu_states.states.get(machine_id),
+                                Some(DpuInitState::DpfStates {
+                                    state: DpfState::WaitingForReady { phase_detail: None },
+                                })
+                            )
+                        })
+                    }
+                    _ => false,
                 },
             )
             .await;
@@ -609,9 +610,11 @@ impl<'a> MockExploredHost<'a> {
 
         let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::lookup_host_machine_ids_by_dpu_ids(txn.as_mut(), &[dpu_machine_id])
+            db::machine::DpuHostAssociations::load(txn.as_mut(), &[dpu_machine_id])
                 .await
-                .unwrap()[&dpu_machine_id];
+                .unwrap()
+                .host_machine_id(&dpu_machine_id)
+                .unwrap();
 
         for machine_id in self.dpu_machine_ids.values() {
             create_machine_inventory(self.test_env, *machine_id).await;
@@ -714,9 +717,11 @@ impl<'a> MockExploredHost<'a> {
 
         let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::lookup_host_machine_ids_by_dpu_ids(txn.as_mut(), &[dpu_machine_id])
+            db::machine::DpuHostAssociations::load(txn.as_mut(), &[dpu_machine_id])
                 .await
-                .unwrap()[&dpu_machine_id];
+                .unwrap()
+                .host_machine_id(&dpu_machine_id)
+                .unwrap();
 
         for machine_id in self.dpu_machine_ids.values() {
             create_machine_inventory(self.test_env, *machine_id).await;
@@ -831,13 +836,18 @@ impl<'a> MockExploredHost<'a> {
         // if SPDM attestation is enabled, we need to drive it to completion
         if self.test_env.config.spdm.enabled {
             self.test_env
-                .run_machine_state_controller_iteration_until_state_matches(
+                .run_machine_state_controller_iteration_until_state_condition(
                     &host_machine_id,
                     10,
-                    ManagedHostState::HostInit {
-                        machine_state: MachineState::SpdmMeasuring {
-                            spdm_measuring_state: SpdmMeasuringState::PollResult,
-                        },
+                    |machine| {
+                        matches!(
+                            machine.current_state(),
+                            ManagedHostState::HostInit {
+                                machine_state: MachineState::SpdmMeasuring {
+                                    spdm_measuring_state: SpdmMeasuringState::PollResult(_),
+                                },
+                            }
+                        )
                     },
                 )
                 .await;
@@ -868,6 +878,8 @@ impl<'a> MockExploredHost<'a> {
         self.test_env.run_ib_fabric_monitor_iteration().await;
         host_uefi_setup(self.test_env, host_machine_id).await;
 
+        // Requeued transitions can pass BOM validation while we wait for lockdown.
+        // Recognize validation here so its completion is driven below.
         let stop_state = self
             .test_env
             .run_machine_state_controller_iteration_until_state_condition(
@@ -885,6 +897,7 @@ impl<'a> MockExploredHost<'a> {
                                     },
                                 },
                             } | ManagedHostState::BomValidating { .. }
+                                | ManagedHostState::Validation { .. }
                         )
                 },
             )

@@ -98,6 +98,10 @@ NICo uses a focused slice of the RMS API. Each call belongs to a specific workfl
 | Machine slot and tray enrichment | `batch_get_node_device_info` |
 | Switch password rotation and decommissioning | `update_switch_system_password`, `batch_reset_switch_factory_default` |
 
+The RMS power-control backend rejects `AcPowercycle` for compute trays, switches,
+and power shelves with an unsupported-operation error before dispatch. It preserves
+`GracefulRestart` and `ForceRestart` as distinct RMS operations.
+
 Firmware, image, certificate, and fabric calls are asynchronous. RMS returns a job identifier
 immediately and NICo polls the matching status API until the job reaches a terminal state.
 Treat accepted, queued, and in-progress as nonterminal.

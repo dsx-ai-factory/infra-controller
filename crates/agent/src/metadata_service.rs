@@ -112,7 +112,11 @@ fn spawn_bound_metadata_service(
 #[cfg(test)]
 mod tests {
     use carbide_host_support::agent_config::MachineIdentityConfig;
-    use rpc::forge_tls_client::ForgeClientConfig;
+    use carbide_instrument::testing::MetricsCapture;
+    use http_body_util::{BodyExt, Empty};
+    use hyper::body::Bytes;
+    use hyper_util::rt::TokioIo;
+    use rpc::carbide_tls_client::CarbideClientConfig;
 
     use super::*;
     use crate::instrumentation::create_metrics;
@@ -126,7 +130,7 @@ mod tests {
                     .parse()
                     .expect("DPU ID"),
                 "http://127.0.0.1:1".to_string(),
-                Arc::new(ForgeClientConfig::default()),
+                Arc::new(CarbideClientConfig::default()),
                 MachineIdentityConfig::default(),
             )
             .expect("metadata state"),
@@ -153,12 +157,16 @@ mod tests {
     }
 
     /// Both address families must reach the production FMDS router, and cancelling
-    /// the agent must release its listener rather than leave a detached server.
+    /// the agent must finish the server and close its keep-alive connections.
     #[tokio::test]
     async fn ipv6_metadata_listener_serves_both_families_and_stops() {
         if !ipv6_loopback_available() {
             return;
         }
+        // The production router records HTTP metrics on the process-global
+        // meter; hold the capture lock so metric-asserting tests running in
+        // parallel do not count these requests.
+        let _metrics = MetricsCapture::start();
         let mut tasks = JoinSet::new();
         let cancel = CancellationToken::new();
         let address = spawn_metadata_service(
@@ -171,41 +179,65 @@ mod tests {
         )
         .await
         .expect("IPv6 metadata listener");
-        let client = reqwest::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .expect("HTTP client");
+        let mut connections = JoinSet::new();
+        let mut clients = Vec::new();
         for (host, path) in [
             // IPv6-only guests use the same current metadata API as IPv4 guests.
             ("[::1]", "latest"),
             // The dual-stack wildcard keeps the IPv4 compatibility API available.
             ("127.0.0.1", "2009-04-04"),
         ] {
-            let response = client
-                .get(format!(
-                    "http://{host}:{}/{path}/meta-data/hostname",
-                    address.port()
-                ))
-                .send()
-                .await
-                .expect("metadata request");
-            assert_eq!(response.status(), reqwest::StatusCode::OK);
-            assert_eq!(
-                response.text().await.expect("metadata body"),
-                "local-dpu-host"
-            );
+            let client = tokio::time::timeout(Duration::from_secs(5), async {
+                let stream = tokio::net::TcpStream::connect(format!("{host}:{}", address.port()))
+                    .await
+                    .expect("metadata connection");
+                let (mut client, connection) =
+                    hyper::client::conn::http1::handshake(TokioIo::new(stream))
+                        .await
+                        .expect("HTTP handshake");
+                connections.spawn(async move {
+                    connection.await.expect("metadata connection shutdown");
+                });
+                let request = hyper::Request::builder()
+                    .uri(format!("/{path}/meta-data/hostname"))
+                    .header(hyper::header::HOST, host)
+                    .body(Empty::<Bytes>::new())
+                    .expect("metadata request");
+                let response = client
+                    .send_request(request)
+                    .await
+                    .expect("metadata response");
+                assert_eq!(response.status(), hyper::StatusCode::OK);
+                assert_eq!(
+                    response
+                        .into_body()
+                        .collect()
+                        .await
+                        .expect("metadata body")
+                        .to_bytes(),
+                    "local-dpu-host"
+                );
+                assert!(
+                    !client.is_closed(),
+                    "metadata connection stays open until cancellation"
+                );
+                client
+            })
+            .await
+            .expect("metadata request deadline");
+            clients.push(client);
         }
 
-        drop(client);
+        // Keep the clients alive so only server shutdown closes these connections.
+        // Rebinding the released port races with other tests claiming it.
         cancel.cancel();
-        tokio::time::timeout(Duration::from_secs(6), tasks.join_all())
-            .await
-            .expect("metadata shutdown");
-        let rebound = metrics_endpoint::bind_tcp_listener(address)
-            .await
-            .expect("cancelled metadata listener released its port");
-        assert_eq!(rebound.local_addr().expect("rebound address"), address);
+        tokio::time::timeout(Duration::from_secs(6), async {
+            tasks.join_all().await;
+            connections.join_all().await;
+        })
+        .await
+        .expect("metadata shutdown");
+        assert!(clients.iter().all(|client| client.is_closed()));
     }
 
     /// Startup errors must reach the caller before a background task is accepted;
@@ -267,7 +299,6 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("IPv4 fallback socket");
-        let address = listener.local_addr().expect("fallback address");
         let mut tasks = JoinSet::new();
         let error = spawn_bound_metadata_service(
             listener,
@@ -280,9 +311,6 @@ mod tests {
         .expect_err("IPv4 fallback must be rejected");
         assert!(error.to_string().contains("fell back to IPv4"), "{error:#}");
         assert!(tasks.is_empty());
-        tokio::net::TcpListener::bind(address)
-            .await
-            .expect("rejected socket released");
     }
 
     /// Probe IPv6 independently of the binder under test so an IPv4 fallback

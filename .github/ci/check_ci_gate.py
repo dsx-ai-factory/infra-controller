@@ -75,6 +75,10 @@ CORE_POLICY = GatePolicy(
             "This administrative job reports the completed build to Slack on "
             "protected refs."
         ),
+        "prune-sccache": (
+            "This housekeeping job deletes superseded sccache archives on main "
+            "and does not validate build output."
+        ),
         "core-ci-pass": "A job cannot depend on itself.",
     },
 )
@@ -316,6 +320,11 @@ CORE_JOBS_BY_PREPARE_OUTPUT: Mapping[str, frozenset[str]] = {
             "merge-manifests-machine-validation",
             "merge-manifests-machine-validation-basic-plugin",
             "merge-manifests-machine-lifecycle-test",
+        }
+    ),
+    # PR manifests publish independently of Helm uploads and production promotion.
+    "publish_release": frozenset(
+        {
             "build-push-helm-chart",
             "build-push-helm-prereqs-chart",
             "build-push-bluefield-helm-charts",
@@ -327,7 +336,9 @@ CORE_JOBS_BY_PREPARE_OUTPUT: Mapping[str, frozenset[str]] = {
             "build-machine-a-tron",
             "build-mat-k8s-controller",
             "build-site-health-probe",
+            "build-scale-test-acceptance",
             "test-mat-k8s-controller",
+            "test-scale-test",
             "lint-police",
         }
     ),
@@ -343,7 +354,9 @@ CORE_JOBS_BY_PREPARE_OUTPUT: Mapping[str, frozenset[str]] = {
     "core_rpc_proto_files_changed": frozenset({"check-rest-core-proto-sync"}),
 }
 
-CORE_PR_ONLY_JOBS = frozenset({"lint-police", "migration-police", "proto-police"})
+CORE_PR_ONLY_JOBS = frozenset(
+    {"lint-police", "migration-police", "proto-police", "test-dev-dhcp-image"}
+)
 CORE_UPSTREAM_ONLY_JOB = "promote-to-be-scanned-image"
 
 

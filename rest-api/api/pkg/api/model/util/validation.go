@@ -90,6 +90,11 @@ func ValidateExpectedBmcIPAddress(value interface{}) error {
 	return validateSingleInterfaceIPAddress("BmcIpAddress", value)
 }
 
+// ValidateExpectedNvosIPAddress rejects addresses that cannot identify one NVOS port.
+func ValidateExpectedNvosIPAddress(value interface{}) error {
+	return validateSingleInterfaceIPAddress("ipAddress", value)
+}
+
 // ValidateExpectedFixedIPAddress applies the BmcIpAddress rule to an expected
 // interface's fixed IP, which Core reserves in the same way.
 func ValidateExpectedFixedIPAddress(value interface{}) error {

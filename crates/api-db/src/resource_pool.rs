@@ -34,10 +34,10 @@ use model::resource_pool::common::{
 };
 use model::resource_pool::define::{ResourcePoolDef, ResourcePoolType};
 use model::resource_pool::{
-    OwnerType, ResourcePool, ResourcePoolEntry, ResourcePoolEntryState, ResourcePoolError,
-    ResourcePoolSnapshot, ResourcePoolStats, ValueType,
+    OwnerType, ResourcePool, ResourcePoolBackendKind, ResourcePoolBinding, ResourcePoolEntry,
+    ResourcePoolEntryState, ResourcePoolError, ResourcePoolSnapshot, ResourcePoolStats, ValueType,
 };
-use sqlx::{PgConnection, Postgres};
+use sqlx::{PgConnection, Postgres, Row};
 
 use super::BIND_LIMIT;
 use crate::config_drift::{ConfigDefinitionDrifted, ConfigDriftKind, ConfigResourceKind};
@@ -540,6 +540,72 @@ pub async fn find_pool_overlap(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
+/// `find_integer_pool_overlap` compares all stored values of two integer pools.
+/// Allocation state and assignment partition do not restrict membership.
+pub async fn find_integer_pool_overlap(
+    txn: &mut PgConnection,
+    first_pool: &str,
+    second_pool: &str,
+) -> Result<Option<i64>, DatabaseError> {
+    let query = "SELECT first_pool.value::bigint FROM resource_pool first_pool
+        JOIN resource_pool second_pool ON first_pool.value = second_pool.value
+        WHERE first_pool.name = $1 AND second_pool.name = $2
+        LIMIT 1";
+    sqlx::query_scalar(query)
+        .bind(first_pool)
+        .bind(second_pool)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// `find_pool_overlap_with_ranges` returns one persisted integer value contained
+/// in the supplied inclusive intervals. It includes every assignment partition
+/// and allocation state, including inventory added by growth. The query compares
+/// compact intervals in PostgreSQL without returning the pool's inventory.
+pub async fn find_pool_overlap_with_ranges(
+    txn: &mut PgConnection,
+    pool_name: &str,
+    ranges: &[(i64, i64)],
+) -> Result<Option<i64>, DatabaseError> {
+    let mut ranges: Vec<_> = ranges
+        .iter()
+        .copied()
+        .filter(|(start, end)| start <= end)
+        .collect();
+    ranges.sort_unstable();
+    let mut starts = Vec::with_capacity(ranges.len());
+    let mut ends: Vec<i64> = Vec::with_capacity(ranges.len());
+    // width_bucket returns the 1-based index of the last lower bound (0 below
+    // all bounds). Merge overlaps so that index selects the matching upper end,
+    // even for nested intervals or duplicate starts, with one search per row.
+    for (start, end) in ranges {
+        if let Some(last_end) = ends.last_mut()
+            && start <= *last_end
+        {
+            *last_end = (*last_end).max(end);
+        } else {
+            starts.push(start);
+            ends.push(end);
+        }
+    }
+    // SQL may evaluate casts before filtering by name. Keep the name guards
+    // inside the casts so another pool's addresses cannot be parsed as integers.
+    let query = "SELECT value::bigint FROM resource_pool
+        WHERE name = $1 AND CASE WHEN name = $1 THEN value::bigint END
+            <= ($3::bigint[])[width_bucket(
+                CASE WHEN name = $1 THEN value::bigint END, $2::bigint[]
+            )]
+        LIMIT 1";
+    sqlx::query_scalar(query)
+        .bind(pool_name)
+        .bind(starts)
+        .bind(ends)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// `ResourcePoolAllocationNotOwned` means `release` found no allocation for
 /// the expected owner. The value is missing, free, or allocated to another owner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -629,6 +695,55 @@ RETURNING id
         Some(_) => ConditionalWrite::Applied(()),
         None => ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned),
     })
+}
+
+/// A single materialized pool value's assignment partition and current state.
+#[derive(Debug, Clone)]
+pub struct PoolValueInfo {
+    /// Whether the value is in the auto-assign partition. A value that is
+    /// auto-assignable cannot be explicitly requested via [`allocate`], so a
+    /// deterministic reservation must target a non-auto-assign value.
+    pub auto_assign: bool,
+    /// Free, or Allocated with its owner. A new or changed reservation must
+    /// target a Free value; an already-allocated value belongs to some DPU.
+    pub state: ResourcePoolEntryState,
+}
+
+/// Look up one value in a pool without locking or claiming it.
+///
+/// Returns `None` when the value is not a member of the pool. Callers use this
+/// to validate a requested reservation up front: it must exist, sit in the
+/// non-auto-assign partition, and be free (not already allocated to a DPU). The
+/// pool's own constraints remain the authority at allocation time.
+pub async fn find_value_in_pool<T>(
+    pool: &ResourcePool<T>,
+    db: impl DbReader<'_>,
+    value: &T,
+) -> Result<Option<PoolValueInfo>, DatabaseError>
+where
+    T: ToString + FromStr + Send + Sync + 'static,
+    <T as FromStr>::Err: std::error::Error,
+{
+    let query = "SELECT auto_assign, state FROM resource_pool WHERE name = $1 AND value = $2";
+    let row = sqlx::query(query)
+        .bind(pool.name())
+        .bind(value.to_string())
+        .fetch_optional(db)
+        .await
+        .map_err(|err| DatabaseError::query(query, err))?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let auto_assign: bool = row
+        .try_get("auto_assign")
+        .map_err(|err| DatabaseError::query(query, err))?;
+    let state: sqlx::types::Json<ResourcePoolEntryState> = row
+        .try_get("state")
+        .map_err(|err| DatabaseError::query(query, err))?;
+    Ok(Some(PoolValueInfo {
+        auto_assign,
+        state: state.0,
+    }))
 }
 
 pub async fn stats<'c, E>(executor: E, name: &str) -> Result<ResourcePoolStats, DatabaseError>
@@ -1015,6 +1130,8 @@ pub async fn define_all_from(
     }
     Ok(())
 }
+/// `pool_has_rows` reports whether Integrated inventory exists for this pool,
+/// including rows already allocated. It does not query a remote backend.
 pub async fn pool_has_rows(txn: &mut PgConnection, name: &str) -> Result<bool, DatabaseError> {
     let query: &str = "SELECT EXISTS(SELECT 1 FROM resource_pool WHERE name = $1)";
     let (exists,): (bool,) = sqlx::query_as(query)
@@ -1026,13 +1143,12 @@ pub async fn pool_has_rows(txn: &mut PgConnection, name: &str) -> Result<bool, D
 }
 
 /// Reconcile declared pool definitions against what was previously seeded.
-/// Each declared pool is classified independently by its `(snapshot, pool)`
-/// state.
+/// Each declared pool is classified by its saved snapshot and whether it has
+/// inventory rows or a remote gRPC binding. Either makes the pool present below.
 ///
-///   1. **New** (no snapshot, pool absent from `resource_pool`): seed
-///      and snapshot.
+///   1. **New** (no snapshot, pool absent): seed and snapshot.
 ///   2. **Backfill** (no snapshot, pool present): record the snapshot only.
-///   3. **In sync** (snapshot matches declaration): no-op.
+///   3. **In sync** (snapshot matches declaration, pool present): no-op.
 ///   4. **Drift** (snapshot differs from declaration, pool present): warn
 ///      and leave both in place. Operator must reconcile by hand.
 ///   5. **Anomaly** (snapshot present, pool absent): error-log and skip.
@@ -1042,16 +1158,25 @@ pub async fn pool_has_rows(txn: &mut PgConnection, name: &str) -> Result<bool, D
 /// Pools that appear in the snapshot table but are no longer declared
 /// ("dropped" from `InitialObjectsConfig.pools`) are warned about, but
 /// not removed.
+/// Remote pools save the same seed snapshot and drift diagnostics without
+/// creating local inventory; provider registration uses that saved seed later.
 pub async fn reconcile_pool_defs(
     txn: &mut PgConnection,
     declared: &HashMap<String, ResourcePoolDef>,
 ) -> Result<(), DefineResourcePoolError> {
     let stored = all_stored_defs(&mut *txn).await?;
+    let remote_pools: HashSet<_> = binding::all(&mut *txn)
+        .await?
+        .into_iter()
+        .filter(|pool| pool.backend_kind == ResourcePoolBackendKind::Grpc)
+        .map(|pool| pool.pool_name)
+        .collect();
 
     for (name, def) in declared {
-        let pool_exists = pool_has_rows(&mut *txn, name).await?;
-        match (stored.get(name), pool_exists) {
-            // Snapshot exists but pool is missing from resource_pool.
+        let has_inventory_or_remote_binding =
+            remote_pools.contains(name) || pool_has_rows(&mut *txn, name).await?;
+        match (stored.get(name), has_inventory_or_remote_binding) {
+            // Snapshot exists but neither inventory nor a remote binding remains.
             // Anomaly: e.g., partial DB restore. Don't auto-heal — operator
             // must reconcile by hand.
             (Some(stored_def), false) => {
@@ -1074,15 +1199,11 @@ pub async fn reconcile_pool_defs(
                     declared: Some(format!("{def:?}")),
                 });
             }
-            // Pool exists in resource_pool but has no snapshot yet.
-            // Pre-migration deployment, or a pool re-added after a snapshot
-            // was manually deleted. Record the snapshot only.
+            // Remote pools have no local inventory to populate. Existing
+            // Integrated rows also need only their missing seed snapshot.
             (None, true) => {
                 insert_pool_def(txn, name, def).await?;
-                tracing::info!(
-                    pool_name = name,
-                    "Backfilled pool definition snapshot for pre-existing pool"
-                );
+                tracing::info!(pool_name = name, "Recorded Resource Pool seed definition");
             }
             // New — seed and snapshot.
             (None, false) => {
@@ -1529,7 +1650,8 @@ fn expand_int_range(start_s: &str, end_s: &str) -> Result<Vec<i64>, eyre::Report
     Ok((start..end).collect())
 }
 
-/// Build the shared pool handles after checking that mandatory pools have free values.
+/// Build shared pool handles after checking mandatory pool readiness. Integrated
+/// or unbound pools need free local values; remote pools need an accepted definition.
 pub async fn create_common_pools(
     db: sqlx::PgPool,
     ib_fabric_ids: HashSet<String>,
@@ -1568,10 +1690,35 @@ pub async fn create_common_pools(
         ValueType::Integer,
     ));
 
-    // We can't run if any of the mandatory pools are missing
+    // Mandatory pools need local capacity when Integrated or unbound, and an
+    // accepted provider definition when remote.
     for name in &pool_names {
-        if stats(&db, name).await?.free == 0 {
-            eyre::bail!("resource pool '{name}' missing or full. edit config file and restart");
+        match binding::load(&db, name).await? {
+            Some(ResourcePoolBinding {
+                backend_kind: ResourcePoolBackendKind::Grpc,
+                binding_id,
+                ..
+            }) => {
+                // Local inventory cannot establish remote readiness. Provider
+                // capacity is checked when allocating.
+                if registration::latest_accepted(&db, binding_id)
+                    .await?
+                    .is_none()
+                {
+                    eyre::bail!("remote resource pool '{name}' has no accepted definition");
+                }
+            }
+            None
+            | Some(ResourcePoolBinding {
+                backend_kind: ResourcePoolBackendKind::Integrated,
+                ..
+            }) => {
+                if stats(&db, name).await?.free == 0 {
+                    eyre::bail!(
+                        "resource pool '{name}' missing or full. edit config file and restart"
+                    );
+                }
+            }
         }
     }
 
@@ -1622,6 +1769,69 @@ mod tests {
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     use super::*;
+
+    /// Compact lookup preserves gaps and inclusive endpoints even when intervals
+    /// arrive nested or unsorted, without parsing values from another pool type.
+    #[crate::sqlx_test]
+    async fn range_overlap_uses_normalized_intervals_and_ignores_other_pool_types(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let pool_handle = ResourcePool::<i32>::new("range-overlap".to_owned(), ValueType::Integer);
+        let unrelated = ResourcePool::<Ipv4Addr>::new("unrelated-ip".to_owned(), ValueType::Ipv4);
+        let mut txn = pool.begin().await?;
+        populate(&pool_handle, &mut txn, vec![7], true).await?;
+        populate(&unrelated, &mut txn, vec![Ipv4Addr::LOCALHOST], true).await?;
+        txn.commit().await?;
+
+        check_cases_async(
+            [
+                Case {
+                    scenario: "empty intervals",
+                    input: vec![],
+                    expect: Yields(None),
+                },
+                Case {
+                    scenario: "below first lower bound",
+                    input: vec![(8, 10)],
+                    expect: Yields(None),
+                },
+                Case {
+                    scenario: "sparse gap",
+                    input: vec![(0, 1), (9, 10)],
+                    expect: Yields(None),
+                },
+                Case {
+                    scenario: "inclusive point boundary",
+                    input: vec![(7, 7)],
+                    expect: Yields(Some(7)),
+                },
+                Case {
+                    scenario: "matching interval after an earlier bucket",
+                    input: vec![(0, 1), (7, 7)],
+                    expect: Yields(Some(7)),
+                },
+                Case {
+                    scenario: "unsorted overlaps and duplicate starts retain the largest upper end",
+                    input: vec![(8, 8), (4, 6), (4, i64::MAX), (6, 6)],
+                    expect: Yields(Some(7)),
+                },
+            ],
+            |ranges| {
+                let pool = &pool;
+                let pool_handle = &pool_handle;
+                async move {
+                    let mut connection = pool.acquire().await.expect("membership connection");
+                    let overlap =
+                        find_pool_overlap_with_ranges(&mut connection, pool_handle.name(), &ranges)
+                            .await
+                            .expect("membership query succeeds with unrelated noninteger values");
+                    Ok::<_, ()>(overlap)
+                }
+            },
+        )
+        .await;
+        Ok(())
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 50)]
     async fn test_parallel() -> Result<(), eyre::Report> {
@@ -2263,7 +2473,7 @@ mod tests {
     }
 
     /// An exhausted auto-assign pool must report [`ResourcePoolError::Empty`]
-    /// (the variant callers such as `allocate_loopback_ip` translate into
+    /// (the variant callers such as `allocate_loopback_ip_v6` translate into
     /// `ResourceExhausted`). This behaviour used to come from the `stats()`
     /// pre-scan; it now comes from the allocation statement's `RowNotFound`.
     #[crate::sqlx_test]
@@ -3046,6 +3256,197 @@ mod tests {
         Ok(())
     }
 
+    /// Readiness follows the saved backend: local rows cannot replace remote
+    /// acceptance, while Integrated and unbound pools still need free values.
+    #[crate::sqlx_test]
+    async fn common_pool_readiness_uses_the_saved_backend(pool: sqlx::PgPool) -> eyre::Result<()> {
+        use model::resource_pool::binding::INTEGRATED_AUTHORITY_ID;
+        use model::resource_pool::registration::ResourcePoolRegistration;
+        use model::resource_pool::{ResourcePoolSelection, ResourcePoolValueDomain};
+
+        let loopback = ResourcePool::<IpAddr>::new(LOOPBACK_IP.to_owned(), ValueType::Ipv4);
+        let vlan = ResourcePool::<i16>::new(VLANID.to_owned(), ValueType::Integer);
+        let vni = ResourcePool::<i32>::new(VNI.to_owned(), ValueType::Integer);
+        let mut txn = pool.begin().await?;
+        populate(&loopback, &mut txn, vec!["192.0.2.1".parse()?], true).await?;
+        for (name, value) in [(VNI, 42), (VPC_VNI, 43)] {
+            let resource_pool = ResourcePool::<i32>::new(name.to_owned(), ValueType::Integer);
+            populate(&resource_pool, &mut txn, vec![value], true).await?;
+        }
+        binding::bind_or_verify(
+            &mut txn,
+            &ResourcePoolSelection {
+                pool_name: VNI.to_owned(),
+                value_domain: ResourcePoolValueDomain::Integer,
+                backend_name: None,
+                backend_kind: ResourcePoolBackendKind::Integrated,
+                authority_id: INTEGRATED_AUTHORITY_ID.to_owned(),
+                remote_pool: VNI.to_owned(),
+            },
+        )
+        .await?;
+        let remote = binding::bind_or_verify(
+            &mut txn,
+            &ResourcePoolSelection {
+                pool_name: VLANID.to_owned(),
+                value_domain: ResourcePoolValueDomain::Integer,
+                backend_name: Some("provider".to_owned()),
+                backend_kind: ResourcePoolBackendKind::Grpc,
+                authority_id: "test-authority".to_owned(),
+                remote_pool: "tenant-vlans".to_owned(),
+            },
+        )
+        .await?;
+        // Leftover local capacity must not make this remote binding ready.
+        populate(&vlan, &mut txn, vec![44], true).await?;
+        txn.commit().await?;
+        assert_eq!(stats(&pool, VLANID).await?.free, 1);
+        let with_local_vlan = resource_pool_inventory(&pool).await?;
+
+        let Err(error) = create_common_pools(pool.clone(), HashSet::new()).await else {
+            panic!("a remote mandatory pool needs an accepted definition");
+        };
+        assert_eq!(
+            error.to_string(),
+            "remote resource pool 'vlan-id' has no accepted definition"
+        );
+        assert_eq!(resource_pool_inventory(&pool).await?, with_local_vlan);
+
+        let mut txn = pool.begin().await?;
+        registration::lock_binding(&mut txn, remote.binding_id).await?;
+        registration::insert(
+            &mut txn,
+            &ResourcePoolRegistration {
+                binding_id: remote.binding_id,
+                revision: 1,
+                // Request decoding belongs to registration's caller. This DB
+                // test exercises only the persisted acceptance decision.
+                request: vec![1, 2, 3],
+                accepted: false,
+            },
+        )
+        .await?;
+        txn.commit().await?;
+
+        let Err(error) = create_common_pools(pool.clone(), HashSet::new()).await else {
+            panic!("a pending definition does not make a remote pool ready");
+        };
+        assert_eq!(
+            error.to_string(),
+            "remote resource pool 'vlan-id' has no accepted definition"
+        );
+        assert_eq!(resource_pool_inventory(&pool).await?, with_local_vlan);
+
+        // A pending successor must not hide the accepted revision, and remote
+        // readiness must not depend on any remaining local values.
+        let mut txn = pool.begin().await?;
+        registration::lock_binding(&mut txn, remote.binding_id).await?;
+        registration::acknowledge(&mut txn, remote.binding_id, 1).await?;
+        registration::insert(
+            &mut txn,
+            &ResourcePoolRegistration {
+                binding_id: remote.binding_id,
+                revision: 2,
+                request: vec![4, 5, 6],
+                accepted: false,
+            },
+        )
+        .await?;
+        sqlx::query("DELETE FROM resource_pool WHERE name = $1")
+            .bind(VLANID)
+            .execute(txn.as_mut())
+            .await?;
+        txn.commit().await?;
+        let without_local_vlan = resource_pool_inventory(&pool).await?;
+        create_common_pools(pool.clone(), HashSet::new()).await?;
+        assert_eq!(resource_pool_inventory(&pool).await?, without_local_vlan);
+        let remote_rows: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM resource_pool WHERE name = $1")
+                .bind(VLANID)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(remote_rows, 0);
+
+        // Acceptance does not bypass the retained Integrated capacity check.
+        let mut txn = pool.begin().await?;
+        assert_eq!(
+            allocate(&vni, &mut txn, OwnerType::Machine, "owner", None).await?,
+            42
+        );
+        txn.commit().await?;
+        let bound_exhausted_inventory = resource_pool_inventory(&pool).await?;
+        let Err(error) = create_common_pools(pool.clone(), HashSet::new()).await else {
+            panic!("an exhausted Integrated mandatory pool must fail readiness");
+        };
+        assert_eq!(
+            error.to_string(),
+            "resource pool 'vni' missing or full. edit config file and restart"
+        );
+        assert_eq!(
+            resource_pool_inventory(&pool).await?,
+            bound_exhausted_inventory
+        );
+        let allocation = find_value(&pool, "42").await?.remove(0);
+        assert_eq!(
+            allocation.state.0,
+            ResourcePoolEntryState::Allocated {
+                owner: "owner".to_owned(),
+                owner_type: OwnerType::Machine.to_string(),
+            }
+        );
+        assert!(allocation.allocated.is_some());
+
+        // Loopback is checked before VNI. Its exact diagnostic distinguishes
+        // the unbound capacity check from the bound pool's existing failure.
+        let mut txn = pool.begin().await?;
+        assert_eq!(
+            allocate(
+                &loopback,
+                &mut txn,
+                OwnerType::Machine,
+                "unbound-owner",
+                None
+            )
+            .await?,
+            "192.0.2.1".parse::<IpAddr>()?
+        );
+        txn.commit().await?;
+        assert_eq!(binding::load(&pool, LOOPBACK_IP).await?, None);
+        let unbound_exhausted_inventory = resource_pool_inventory(&pool).await?;
+        let Err(error) = create_common_pools(pool.clone(), HashSet::new()).await else {
+            panic!("an exhausted unbound mandatory pool must fail readiness");
+        };
+        assert_eq!(
+            error.to_string(),
+            "resource pool 'lo-ip' missing or full. edit config file and restart"
+        );
+        assert_eq!(
+            resource_pool_inventory(&pool).await?,
+            unbound_exhausted_inventory
+        );
+        Ok(())
+    }
+
+    /// Read complete inventory rows so ownership and timestamp changes remain observable.
+    async fn resource_pool_inventory(
+        pool: &sqlx::PgPool,
+    ) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+        sqlx::query_scalar("SELECT to_jsonb(resource_pool) FROM resource_pool ORDER BY name, value")
+            .fetch_all(pool)
+            .await
+    }
+
+    /// Include `seeded_at` so replacing an unchanged seed definition is observable.
+    async fn resource_pool_seed_snapshots(
+        pool: &sqlx::PgPool,
+    ) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT to_jsonb(resource_pool_def) FROM resource_pool_def ORDER BY name",
+        )
+        .fetch_all(pool)
+        .await
+    }
+
     // the pool has never been seeded. `reconcile_pool_defs`
     // should run `define` *and* record the snapshot.
     #[crate::sqlx_test]
@@ -3135,6 +3536,71 @@ mod tests {
         Ok(())
     }
 
+    /// A failed binding read propagates its query error. After caller rollback,
+    /// committed inventory and seed snapshots remain unchanged.
+    #[crate::sqlx_test]
+    async fn reconcile_pool_defs_binding_read_failure_preserves_inventory(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::resource_pool::Range;
+
+        let original = ResourcePoolDef {
+            prefix: None,
+            ranges: vec![Range {
+                start: "600".to_owned(),
+                end: "605".to_owned(),
+                auto_assign: true,
+            }],
+            pool_type: ResourcePoolType::Integer,
+            delegate_prefix_len: None,
+        };
+        let mut txn = pool.begin().await?;
+        define(&mut txn, "existing", &original).await?;
+        insert_pool_def(&mut txn, "existing", &original).await?;
+        txn.commit().await?;
+        let inventory_before = resource_pool_inventory(&pool).await?;
+        let snapshots_before = resource_pool_seed_snapshots(&pool).await?;
+
+        // This test owns its database. Renaming the table fails the real binding
+        // query while leaving snapshots and inventory available for inspection.
+        sqlx::query(
+            "ALTER TABLE resource_pool_binding RENAME TO unavailable_resource_pool_binding",
+        )
+        .execute(&pool)
+        .await?;
+        let declared = HashMap::from([
+            ("existing".to_owned(), original.clone()),
+            ("prospective".to_owned(), original),
+        ]);
+        let mut txn = pool.begin().await?;
+        let error = reconcile_pool_defs(&mut txn, &declared)
+            .await
+            .expect_err("a failed binding read must fail reconciliation");
+        let DefineResourcePoolError::DatabaseError(DatabaseError::Sqlx(query_error)) = &error
+        else {
+            panic!("expected a binding query failure, got {error:?}");
+        };
+        assert!(
+            query_error
+                .to_string()
+                .contains("SELECT * FROM resource_pool_binding ORDER BY pool_name")
+        );
+        assert_eq!(
+            query_error
+                .source
+                .as_database_error()
+                .expect("undefined table is a database error")
+                .code()
+                .as_deref(),
+            Some("42P01")
+        );
+        txn.rollback().await?;
+
+        assert_eq!(resource_pool_inventory(&pool).await?, inventory_before);
+        assert_eq!(resource_pool_seed_snapshots(&pool).await?, snapshots_before);
+        Ok(())
+    }
+
     // snapshot exists and matches the declared def. Reconcile
     // should be a silent no-op.
     #[crate::sqlx_test]
@@ -3157,20 +3623,26 @@ mod tests {
 
         define(&mut txn, "stable", &def).await?;
         insert_pool_def(&mut txn, "stable", &def).await?;
+        txn.commit().await?;
+        let inventory_before = resource_pool_inventory(&pool).await?;
+        let snapshots_before = resource_pool_seed_snapshots(&pool).await?;
 
         let declared: HashMap<String, ResourcePoolDef> =
             [("stable".to_string(), def.clone())].into_iter().collect();
 
-        reconcile_pool_defs(&mut txn, &declared).await?;
+        let mut txn = pool.begin().await?;
+        let (result, logs) = capture_logs_async(reconcile_pool_defs(&mut txn, &declared)).await;
+        result?;
+        txn.commit().await?;
 
-        let stored = stored_def(txn.as_mut(), "stable").await?;
-        assert_eq!(
-            stored.as_ref(),
-            Some(&def),
-            "snapshot must remain unchanged"
+        assert_eq!(resource_pool_seed_snapshots(&pool).await?, snapshots_before);
+        assert_eq!(resource_pool_inventory(&pool).await?, inventory_before);
+        assert!(
+            logs.iter().all(|log| {
+                log.field("name") != Some("stable") && log.field("pool_name") != Some("stable")
+            }),
+            "an unchanged pool must not produce reseed or drift diagnostics"
         );
-
-        txn.rollback().await?;
         Ok(())
     }
 
@@ -3207,22 +3679,32 @@ mod tests {
 
         define(&mut txn, "drifty", &original).await?;
         insert_pool_def(&mut txn, "drifty", &original).await?;
+        txn.commit().await?;
+        let inventory_before = resource_pool_inventory(&pool).await?;
+        let snapshots_before = resource_pool_seed_snapshots(&pool).await?;
 
         let declared: HashMap<String, ResourcePoolDef> = [("drifty".to_string(), drifted.clone())]
             .into_iter()
             .collect();
 
-        reconcile_pool_defs(&mut txn, &declared).await?;
+        let mut txn = pool.begin().await?;
+        let (result, logs) = capture_logs_async(reconcile_pool_defs(&mut txn, &declared)).await;
+        result?;
+        txn.commit().await?;
 
-        // The stored snapshot must still reflect the original
-        let stored = stored_def(txn.as_mut(), "drifty").await?;
-        assert_eq!(
-            stored.as_ref(),
-            Some(&original),
-            "drift path must not overwrite the snapshot"
-        );
-
-        txn.rollback().await?;
+        assert_eq!(resource_pool_seed_snapshots(&pool).await?, snapshots_before);
+        assert_eq!(resource_pool_inventory(&pool).await?, inventory_before);
+        let drift_logs: Vec<_> = logs
+            .iter()
+            .filter(|log| {
+                log.metadata_name == "config_definition_drifted"
+                    && log.field("name") == Some("drifty")
+            })
+            .collect();
+        assert_eq!(drift_logs.len(), 1);
+        assert_eq!(drift_logs[0].level, tracing::Level::WARN);
+        assert_eq!(drift_logs[0].field("resource_kind"), Some("resource_pool"));
+        assert_eq!(drift_logs[0].field("drift_kind"), Some("changed"));
         Ok(())
     }
 
@@ -3249,31 +3731,29 @@ mod tests {
         // Pre-seed only the snapshot — skip define() so the pool has no
         // rows in resource_pool.
         insert_pool_def(&mut txn, "orphaned-snapshot", &def).await?;
+        txn.commit().await?;
+        let snapshots_before = resource_pool_seed_snapshots(&pool).await?;
 
         let declared: HashMap<String, ResourcePoolDef> =
             [("orphaned-snapshot".to_string(), def.clone())]
                 .into_iter()
                 .collect();
 
-        // Reconcile must succeed (warn-only), not error.
-        reconcile_pool_defs(&mut txn, &declared).await?;
+        // Reconciliation succeeds but leaves an error diagnostic for the operator.
+        let mut txn = pool.begin().await?;
+        let (result, logs) = capture_logs_async(reconcile_pool_defs(&mut txn, &declared)).await;
+        result?;
+        txn.commit().await?;
 
-        // The snapshot is unchanged.
-        let stored = stored_def(txn.as_mut(), "orphaned-snapshot").await?;
-        assert_eq!(
-            stored.as_ref(),
-            Some(&def),
-            "anomaly path must not modify the snapshot"
-        );
-
-        // The pool was NOT seeded by reconcile.
-        let pool_rows = all(txn.as_mut()).await?;
-        assert!(
-            !pool_rows.iter().any(|s| s.name == "orphaned-snapshot"),
-            "anomaly path must not auto-seed the missing pool"
-        );
-
-        txn.rollback().await?;
+        assert_eq!(resource_pool_seed_snapshots(&pool).await?, snapshots_before);
+        assert!(resource_pool_inventory(&pool).await?.is_empty());
+        let anomaly_logs: Vec<_> = logs
+            .iter()
+            .filter(|log| log.field("pool_name") == Some("orphaned-snapshot"))
+            .collect();
+        assert_eq!(anomaly_logs.len(), 1);
+        assert_eq!(anomaly_logs[0].level, tracing::Level::ERROR);
+        assert!(anomaly_logs[0].message.contains("manual recovery required"));
         Ok(())
     }
 }

@@ -28,6 +28,7 @@ trap 'rm -rf "$temp_dir"' EXIT
 source "$script_under_test"
 
 log_output="$temp_dir/disk-imaging.log"
+configure_curl_args
 mock_blkid_status=0
 mock_blkid_stdout=
 mock_blkid_stderr=
@@ -76,6 +77,7 @@ set_blkid_result() {
 }
 
 blkid() {
+	printf '%s\n' "$@" >"$temp_dir/blkid-args"
 	printf '%s' "$mock_blkid_stdout"
 	printf '%s' "$mock_blkid_stderr" >&2
 	return "$mock_blkid_status"
@@ -295,14 +297,14 @@ curl() {
 	# remote naming, malformed operands, and unrelated arguments.
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
-			--retry)
+			--retry|--proto-redir)
 				if [ "$#" -lt 2 ]; then
 					return 2
 				fi
 				shift 2
 				continue
 				;;
-			--retry-all-errors|-k|-L)
+			--fail|--retry-all-errors|-k|-L)
 				shift
 				continue
 				;;
@@ -524,10 +526,11 @@ image_url="https://images.example/image.qcow2"
 image_auth=()
 curl_url "$image_url"
 read_mock_curl_args
-assert_eq "unauthenticated curl arg count" "8" "${#mock_curl_args[@]}"
-assert_eq "unauthenticated curl output flag" "--output" "${mock_curl_args[5]}"
-assert_eq "unauthenticated curl output filename" "$file" "${mock_curl_args[6]}"
-assert_eq "unauthenticated curl url is the last argument" "$image_url" "${mock_curl_args[7]}"
+assert_eq "unauthenticated curl arg count" "10" "${#mock_curl_args[@]}"
+assert_eq "unauthenticated curl treats HTTP errors as failures" "--fail" "${mock_curl_args[0]}"
+assert_eq "unauthenticated curl output flag" "--output" "${mock_curl_args[7]}"
+assert_eq "unauthenticated curl output filename" "$file" "${mock_curl_args[8]}"
+assert_eq "unauthenticated curl url is the last argument" "$image_url" "${mock_curl_args[9]}"
 
 file=
 query_marker="synthetic-query-marker"
@@ -551,19 +554,178 @@ fi
 curl_url "$image_url" "${image_auth[@]}"
 read_mock_curl_args
 assert_eq "authenticated query selects the path filename" "image.qcow2" "$file"
-assert_eq "authenticated curl arg count" "10" "${#mock_curl_args[@]}"
-assert_eq "authenticated curl auth flag" "-K" "${mock_curl_args[5]}"
+assert_eq "authenticated curl arg count" "12" "${#mock_curl_args[@]}"
+assert_eq "authenticated curl auth flag" "-K" "${mock_curl_args[7]}"
 assert_eq "authenticated curl auth value is the header file, not the token" \
-	"$image_auth_header_file" "${mock_curl_args[6]}"
-assert_eq "authenticated curl output flag" "--output" "${mock_curl_args[7]}"
-assert_eq "authenticated curl output filename" "$file" "${mock_curl_args[8]}"
-assert_eq "authenticated curl url preserves the query" "$image_url" "${mock_curl_args[9]}"
+	"$image_auth_header_file" "${mock_curl_args[8]}"
+assert_eq "authenticated curl output flag" "--output" "${mock_curl_args[9]}"
+assert_eq "authenticated curl output filename" "$file" "${mock_curl_args[10]}"
+assert_eq "authenticated curl url preserves the query" "$image_url" "${mock_curl_args[11]}"
 for arg in "${mock_curl_args[@]}"; do
 	case "$arg" in
 		*my-token*) fail "token leaked into curl's argument list: $arg" ;;
 	esac
 done
 rm -f "$image_auth_header_file"
+
+# Isolate path bindings and download fixtures from the host filesystem.
+echo "shared TLS policy for image, checksum, and cloud-init downloads"
+run_tls_policy_tests() (
+	local cloud_init_function
+	cloud_init_function=$(declare -f add_cloud_init)
+	eval "${cloud_init_function//\/mnt/$temp_dir/cloud-root}"
+	mkdir -p "$temp_dir/tls-policy"
+	cd "$temp_dir/tls-policy" || exit 1
+	local distro_arch
+	case "$(uname -m)" in
+		x86_64) distro_arch=amd64 ;;
+		aarch64) distro_arch=arm64 ;;
+		*) distro_arch=$(uname -m) ;;
+	esac
+	curl() {
+		printf '%s\n' request "$@" >>"$temp_dir/tls-args"
+		printf '%064d *ubuntu-24.04-server-cloudimg-%s.img\n' 1 "$distro_arch" >shafile
+	}
+	local scenario expected argument
+	for scenario in \
+		'0|' \
+		'5|insecure_tls=yes' \
+		'0|insecure_tls=YES' \
+		'0|insecure_tls=' \
+		'0|insecure_tls=yes insecure_tls=no' \
+		'5|insecure_tls=no insecure_tls=yes'; do
+		expected=${scenario%%|*}
+		insecure_tls=no
+		for argument in ${scenario#*|}; do
+			parse_kernel_cmdline_argument "$argument" || exit 1
+		done
+		: >"$temp_dir/tls-args"
+		: >"$log_output"
+		configure_curl_args >/dev/null 2>&1
+		if [ "$expected" -ne 0 ]; then
+			assert_log_contains 'insecure_tls=yes disables HTTPS certificate verification'
+		fi
+		file=
+		curl_url https://images.example/image.qcow2 >/dev/null || exit 1
+		distro_name=ubuntu
+		distro_version=24.04
+		get_distro_image >/dev/null || exit 1
+		cloud_init_url=https://cloud.example/seed
+		add_cloud_init >/dev/null || exit 1
+		assert_eq "$scenario download count" 5 "$(grep -cx request "$temp_dir/tls-args")"
+		assert_eq "$scenario insecure download count" "$expected" "$(grep -cx -- -k "$temp_dir/tls-args")"
+	done
+)
+run_tls_policy_tests || exit $?
+
+# Exercise main's cloud-init failure branch with all disk operations replaced.
+# Keep the real cloud-init downloader and its curl/tee status handling.
+echo "required cloud-init failures stop provisioning; optional network-config failures are skipped"
+run_cloud_init_failure_tests() (
+	local cloud_init_function
+	cloud_init_function=$(declare -f add_cloud_init)
+	eval "${cloud_init_function//\/mnt/$temp_dir/cloud-root}"
+	function [() {
+		if [[ "$1" == -b ]]; then return 0; fi
+		if [[ "$1" == '!' && "${2-}" == -b ]]; then return 1; fi
+		builtin [ "$@"
+	}
+	get_serial_port() { :; }
+	read() {
+		kernel_arguments=(image_url=https://images.example/image.qcow2 image_disk=/dev/test
+			'ds=nocloud-net;s=https://cloud.example/seed' update_grub_template=no update_grub_cfg=no insecure_tls=yes)
+	}
+	readlink() { printf '%s\n' /dev/test; }
+	lsblk() { printf '%s\n' disk; }
+	precheck_image_identifiers() { :; }
+	write_image_to_disk() { :; }
+	curl_url() { :; }
+	sgdisk() { :; }
+	partprobe() { :; }
+	pvscan() { :; }
+	vgscan() { :; }
+	lvscan() { :; }
+	udevadm() { :; }
+	get_root_dev() { root_dev=/dev/test1; }
+	mount() { :; }
+	umount() { printf '%s\n' "$*" >>"$temp_dir/unmounts"; }
+	add_testing_user() { touch "$temp_dir/provisioning-continued"; }
+	expand_root_fs() { :; }
+	curl() {
+		local request output_path
+		printf '%s\n' "$@" >>"$temp_dir/cloud-curl-args"
+		while [ "$#" -gt 0 ]; do
+			case "$1" in
+				--output) shift; output_path=$1 ;;
+				https://cloud.example/seed/*) request=$1 ;;
+			esac
+			shift
+		done
+		printf '%s\n' "${request##*/}" >>"$temp_dir/cloud-downloads"
+		if [[ "${request##*/}" == "$failed_file" ]]; then
+			if [[ "$file_state" == partial ]]; then
+				printf 'partial download\n' >"$output_path"
+			fi
+			return "$download_failure"
+		fi
+		printf 'downloaded %s\n' "${request##*/}" >"$output_path"
+	}
+	local scenario failed_file download_failure expected_result file_state
+	local expected_count result main_output network_seed
+	network_seed="$temp_dir/cloud-root/var/lib/cloud/seed/nocloud-net/network-config"
+	mkdir -p "${network_seed%/*}"
+	for scenario in \
+		'user-data|60|1|required' \
+		'meta-data|60|1|required' \
+		'network-config|60|0|stale' \
+		'network-config|22|0|partial' \
+		'none|0|0|present' \
+		'network-config|60|1|cleanup'; do
+		IFS='|' builtin read -r failed_file download_failure expected_result file_state <<<"$scenario"
+		case "$failed_file" in user-data) expected_count=1 ;; meta-data) expected_count=2 ;; *) expected_count=3 ;; esac
+		if [[ "$file_state" == cleanup ]]; then
+			rm -f "$network_seed"
+			mkdir "$network_seed"
+		else
+			printf 'stale network configuration\n' >"$network_seed"
+		fi
+		image_sha=
+		image_auth_token=
+		distro_name=
+		curl_args=()
+		: >"$temp_dir/cloud-downloads"
+		: >"$temp_dir/cloud-curl-args"
+		: >"$temp_dir/unmounts"
+		rm -f "$temp_dir/provisioning-continued"
+		main_output=$(main 2>&1)
+		result=$?
+		assert_eq "$failed_file download attempts" "$expected_count" "$(wc -l <"$temp_dir/cloud-downloads" | tr -d ' ')"
+		assert_eq "$failed_file kernel TLS override" "$expected_count" "$(grep -cx -- -k "$temp_dir/cloud-curl-args")"
+		assert_eq "$failed_file unmount" /mnt "$(cat "$temp_dir/unmounts")"
+		assert_eq "$scenario main status" "$expected_result" "$result"
+		if [[ "$expected_result" == 0 ]]; then
+			[[ -f "$temp_dir/provisioning-continued" ]] || fail "successful provisioning stopped"
+			if [[ "$failed_file" == network-config ]]; then
+				[[ ! -e "$network_seed" ]] || fail "failed optional download left a seed file"
+				[[ "$main_output" == *"Skipping optional cloud-init network-config"* ]] ||
+					fail "main did not report the skipped optional file"
+			else
+				assert_eq "successful network-config contents" 'downloaded network-config' "$(cat "$network_seed")"
+			fi
+		else
+			[[ ! -f "$temp_dir/provisioning-continued" ]] || fail "provisioning continued after $failed_file failed"
+			if [[ "$file_state" == cleanup ]]; then
+				[[ -d "$network_seed" ]] || fail "cleanup failure fixture disappeared"
+				[[ "$main_output" == *"Failed to remove incomplete cloud-init network-config"* ]] ||
+					fail "main did not report the cleanup failure"
+			else
+				[[ "$main_output" == *"Failed to download cloud-init $failed_file"* ]] ||
+					fail "main did not report the failed cloud-init file"
+			fi
+		fi
+	done
+)
+run_cloud_init_failure_tests || exit $?
 
 echo "partition identifier types"
 set_blkid_result 0 "/dev/targetp16" ""
@@ -618,6 +780,23 @@ set_blkid_result 0 "/dev/targetp16" ""
 resolved=$(resolve_fstab_mount_device /boot /dev/target "$fstab") ||
 	fail "PARTLABEL /boot entry was not resolved"
 assert_eq "PARTLABEL /boot device" "/dev/targetp16" "$resolved"
+
+echo "fstab: Ubuntu /boot UUID device path"
+boot_uuid=12345678-1234-5678-9abc-123456789abc
+printf '%s\n' "/dev/disk/by-uuid/$boot_uuid /boot ext4 defaults 0 2" >"$fstab"
+set_blkid_result 0 "/dev/targetp16" ""
+resolve_boot_partition "$fstab" >/dev/null ||
+	fail "UUID device-path /boot entry was not resolved"
+assert_eq "UUID device-path partition" "/dev/targetp16" "$boot_part"
+assert_eq "UUID device-path source" "fstab" "$boot_part_source"
+grep -Fxq -- "UUID=$boot_uuid" "$temp_dir/blkid-args" ||
+	fail "UUID device path was not resolved by its filesystem identifier"
+set_blkid_result 0 "/dev/otherp1" ""
+if resolve_boot_partition "$fstab" >/dev/null 2>&1; then
+	fail "UUID device path on another disk was accepted"
+fi
+assert_log_contains \
+	"Device /dev/otherp1 with UUID=$boot_uuid is not exclusively backed by image disk /dev/target"
 
 echo "fstab: /boot on another disk"
 printf '%s\n' 'LABEL=BOOT	/boot	ext4	defaults	0 2' >"$fstab"
@@ -686,5 +865,120 @@ assert_eq "override partition" "/dev/targetp2" "$boot_part"
 assert_eq "override source" "override" "$boot_part_source"
 assert_log_contains "Resolved /boot from bootfs_uuid=boot-override to /dev/targetp2"
 bootfs_uuid=
+
+echo "verify_sha: accepts a matching digest for every supported length"
+probe_file="$temp_dir/probe.bin"
+printf 'probe data\n' >"$probe_file"
+file="$probe_file"
+for digest_tool in sha1sum sha256sum sha384sum sha512sum; do
+	probe_sha=$("$digest_tool" "$probe_file")
+	verify_sha "${probe_sha%% *}" >/dev/null 2>&1 ||
+		fail "verify_sha rejected a matching $digest_tool digest"
+done
+
+echo "verify_sha: mismatching checksum"
+if verify_sha "$(printf '%064d' 0)" >/dev/null 2>&1; then
+	fail "mismatching sha verification succeeded unexpectedly"
+fi
+
+echo "verify_sha: unknown digest length"
+if verify_sha "short" >/dev/null 2>&1; then
+	fail "invalid sha digest length succeeded unexpectedly"
+fi
+
+echo "curl_url: preserves failure exit code"
+mock_failing_curl() {
+	return "$curl_failure_status"
+}
+curl() {
+	mock_failing_curl
+}
+for curl_failure_status in 22 60; do
+	curl_url "https://example.com/fail.qcow2" >/dev/null 2>&1
+	assert_eq "curl_url failure status" "$curl_failure_status" "$?"
+done
+
+unset -f curl
+
+echo "write_image_to_disk: returns qemu-img's failure, not tee's success"
+qemu-img() { echo "qemu-img: Could not open input" >&2; return 1; }
+file="$temp_dir/missing.qcow2"
+image_disk="$temp_dir/disk.raw"
+write_image_to_disk >/dev/null 2>&1
+assert_eq "write_image_to_disk failure status" 1 "$?"
+assert_log_contains "Imaging failed 1"
+unset -f qemu-img
+
+# get_distro_image writes shafile to the working directory, so run it in temp_dir.
+distro_workdir="$temp_dir/distro"
+mkdir -p "$distro_workdir"
+pushd "$distro_workdir" >/dev/null || fail "cannot enter $distro_workdir"
+distro_name="ubuntu"
+distro_version="24.04"
+case "$(uname -m)" in
+	x86_64) distro_arch=amd64 ;;
+	aarch64) distro_arch=arm64 ;;
+	*) distro_arch=$(uname -m) ;;
+esac
+
+echo "get_distro_image: fails when the checksum download fails, even with a stale shafile"
+printf '%064d *ubuntu-24.04-server-cloudimg-%s.img\n' 1 "$distro_arch" >shafile
+curl() { return 1; }
+if get_distro_image >/dev/null 2>&1; then
+	fail "get_distro_image used a stale shafile after the download failed"
+fi
+assert_log_contains "Failed to download checksum file"
+
+echo "get_distro_image: fails when shafile has no entry for the image"
+curl() { : >shafile; return 0; }
+if get_distro_image >/dev/null 2>&1; then
+	fail "get_distro_image succeeded when the checksum was missing"
+fi
+assert_log_contains "not found in"
+
+popd >/dev/null || fail "cannot leave $distro_workdir"
+unset -f curl
+distro_name=
+distro_version=
+
+echo "entrypoint: reboot suppression on failed main"
+entrypoint_test_script="$temp_dir/test_entrypoint.sh"
+cat << 'EOF' > "$entrypoint_test_script"
+#!/bin/bash
+log_output=/dev/null
+main() { return 1; }
+systemctl() { echo "unexpected systemctl call: $*" >&2; return 0; }
+EOF
+sed -n '/^if \[\[ "\${BASH_SOURCE\[0\]}" == "\$0" \]\]; then/,$p' "$script_under_test" >> "$entrypoint_test_script"
+chmod +x "$entrypoint_test_script"
+entrypoint_output=$("${BASH:-bash}" "$entrypoint_test_script" 2>&1)
+entrypoint_status=$?
+assert_eq "entrypoint failure status" 1 "$entrypoint_status"
+if [[ "$entrypoint_output" =~ "Rebooting" ]]; then
+	fail "entrypoint attempted reboot after main failed: $entrypoint_output"
+fi
+if [[ ! "$entrypoint_output" =~ "Imaging failed; reboot suppressed" ]]; then
+	fail "entrypoint did not indicate reboot was suppressed: $entrypoint_output"
+fi
+
+echo "entrypoint: reboots on successful main"
+entrypoint_success_script="$temp_dir/test_entrypoint_success.sh"
+cat << 'EOF' > "$entrypoint_success_script"
+#!/bin/bash
+log_output=/dev/null
+main() { return 0; }
+systemctl() { echo "systemctl called: $*"; return 0; }
+EOF
+sed -n '/^if \[\[ "\${BASH_SOURCE\[0\]}" == "\$0" \]\]; then/,$p' "$script_under_test" >> "$entrypoint_success_script"
+chmod +x "$entrypoint_success_script"
+entrypoint_success_output=$("${BASH:-bash}" "$entrypoint_success_script" 2>&1)
+entrypoint_success_status=$?
+assert_eq "entrypoint success status" 0 "$entrypoint_success_status"
+if [[ ! "$entrypoint_success_output" =~ "Rebooting" ]]; then
+	fail "entrypoint did not reboot after main succeeded: $entrypoint_success_output"
+fi
+if [[ ! "$entrypoint_success_output" =~ "systemctl called: reboot" ]]; then
+	fail "entrypoint did not invoke systemctl reboot: $entrypoint_success_output"
+fi
 
 echo "disk imaging identifier tests passed"

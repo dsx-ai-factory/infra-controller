@@ -1,0 +1,2642 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+//! The device reader: one sweep reads the census and by-ID records of hosts,
+//! DPUs, switches, power shelves, racks and instances, the expected records
+//! and the open host firmware requests, and publishes one snapshot per
+//! family. A family is published only when every read it needs succeeded and
+//! no unit is unresolved; otherwise it keeps its last snapshot.
+//!
+//! The families of a sweep are built and published one after another, so a
+//! read between two of them sees some families from this sweep and the
+//! others from the last one. A family is consistent with its own sweep only,
+//! and the window is about as long as building the later families.
+//!
+//! DPUs get no by-ID read: a DPU is attached when a host lists it, and takes
+//! that host's state category.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, SystemTime};
+
+use carbide_site_health_probe_api::{
+    DpuFields, ExpectedFields, Family, FirmwareRequest, HostFields, InstanceFields, MismatchKind,
+    RecordType, Source, Stage, Unit, UnitType,
+};
+use carbide_uuid::machine::MachineId;
+use chrono::{DateTime, Utc};
+use rpc::forge;
+use rpc::forge::host_reprovisioning_list_response::HostReprovisioningListItem;
+
+use crate::census::{
+    CensusRead, OTHER, dpu_done_under, host_category, initiator, lifecycle_tag, read_family,
+};
+use crate::config::{HostReadMode, ReaderConfig};
+use crate::framework::{ObservationRecorder, Probe};
+use crate::gate::{CallError, CallGate};
+use crate::nico::host_read::{HostDetail, HostRead, Known};
+use crate::nico::{NicoApi, NicoConnector};
+use crate::readers::{Attempt, Failure, Incomplete};
+use crate::snapshot::{Reader, SnapshotSink, SweepMeta, UnitsBuilder, UnitsData, unix_millis};
+
+/// Unlinked expected records get an explorer read for their reason only up
+/// to this many; above it the reason is a bare `no_device`.
+const EXPLORED_READ_LIMIT: usize = 500;
+
+/// Explored endpoints per explorer read.
+const EXPLORED_BATCH: usize = 25;
+
+/// The families this reader publishes.
+pub(crate) const DEVICE_FAMILIES: [Family; 8] = [
+    Family::Host,
+    Family::Dpu,
+    Family::Switch,
+    Family::PowerShelf,
+    Family::Rack,
+    Family::Instance,
+    Family::Expected,
+    Family::HostFirmwareRequests,
+];
+
+type Built = Result<UnitsData, Failure>;
+
+/// The units of each family's last published snapshot, which a new sweep
+/// shares where they did not change.
+type Previous = BTreeMap<Family, Vec<Arc<Unit>>>;
+
+/// Reads devices from nico-api every interval.
+pub(crate) struct DevicesReader {
+    cfg: ReaderConfig,
+    batch: usize,
+    host_read: HostRead,
+    nico: Arc<dyn NicoConnector>,
+    gate: Arc<CallGate>,
+    sink: Arc<dyn SnapshotSink>,
+    process: u64,
+    seq: AtomicU64,
+    attempt: Attempt,
+    previous: Mutex<Previous>,
+}
+
+impl DevicesReader {
+    pub(crate) fn new(
+        cfg: ReaderConfig,
+        batch: usize,
+        host_read: HostReadMode,
+        nico: Arc<dyn NicoConnector>,
+        gate: Arc<CallGate>,
+        sink: Arc<dyn SnapshotSink>,
+        process_start: SystemTime,
+    ) -> Self {
+        Self {
+            cfg,
+            batch,
+            host_read: HostRead::new(host_read),
+            nico,
+            gate,
+            sink,
+            process: unix_millis(process_start),
+            seq: AtomicU64::new(0),
+            attempt: Attempt::new(Reader::Devices, &DEVICE_FAMILIES),
+            previous: Mutex::new(Previous::new()),
+        }
+    }
+
+    fn previous(&self) -> std::sync::MutexGuard<'_, Previous> {
+        self.previous.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[async_trait::async_trait]
+impl Probe for DevicesReader {
+    fn name(&self) -> &'static str {
+        Reader::Devices.as_str()
+    }
+
+    fn api(&self) -> &'static str {
+        self.gate.api()
+    }
+
+    fn interval(&self) -> Duration {
+        self.cfg.interval
+    }
+
+    fn timeout(&self) -> Duration {
+        self.cfg.timeout
+    }
+
+    fn timed_out(&self) {
+        self.attempt.timed_out(self.sink.as_ref());
+    }
+
+    async fn run(&self, recorder: &ObservationRecorder) -> eyre::Result<()> {
+        let start = crate::clock::now();
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        self.attempt.begin();
+        let base = SweepMeta {
+            process: self.process,
+            seq,
+            reader: Reader::Devices,
+            start,
+            end: start,
+        };
+        let mut failed = Incomplete::default();
+        // Publish complete fast families before reading unrelated devices.
+        let reads = match self.nico.connect().await {
+            Ok(nico) => Ok(Sweep {
+                nico,
+                gate: &self.gate,
+                rec: recorder,
+                batch: self.batch,
+                host_read: &self.host_read,
+                host_compact: AtomicBool::new(self.host_read.begin_sweep()),
+                host_compact_read: AtomicBool::new(false),
+            }
+            .read(self, &base, &mut failed)
+            .await),
+            Err(err) => Err(Failure::call("connect", &err)),
+        };
+        // Slow families retain the full sweep bounds, including their joins.
+        let meta = SweepMeta {
+            process: self.process,
+            seq,
+            reader: Reader::Devices,
+            start,
+            end: crate::clock::now(),
+        };
+        // Each family is built, delivered and dropped before the next, so
+        // only one new family coexists with the published snapshots.
+        match reads {
+            Ok((reads, links)) => self.build(reads, links, &meta, &mut failed),
+            Err(failure) => {
+                for family in DEVICE_FAMILIES {
+                    self.deliver_built(&meta, family, &mut failed, |_| Err(failure.clone()));
+                }
+            }
+        }
+        failed.finish()
+    }
+}
+
+/// One sweep's reads, through one nico-api session.
+struct Sweep<'a> {
+    nico: Arc<dyn NicoApi>,
+    gate: &'a CallGate,
+    rec: &'a ObservationRecorder,
+    batch: usize,
+    host_read: &'a HostRead,
+    /// Whether the host batches of this sweep use the compact read. It
+    /// starts as the process-wide choice and turns false for the rest of the
+    /// sweep when nico-api does not serve the compact read.
+    host_compact: AtomicBool,
+    /// Whether a compact host batch of this sweep was read.
+    host_compact_read: AtomicBool,
+}
+
+/// Every read of one sweep, before the families are built.
+struct Reads {
+    machines: Result<(), Failure>,
+    hosts: Result<CensusRead<HostDetail>, Failure>,
+    dpus: Vec<String>,
+    switches: Result<CensusRead<LifecycleRow>, Failure>,
+    shelves: Result<CensusRead<LifecycleRow>, Failure>,
+    racks: Result<CensusRead<LifecycleRow>, Failure>,
+    firmware: Result<Vec<HostReprovisioningListItem>, Failure>,
+    /// Whether every host batch was read compact.
+    compact_host_read: bool,
+}
+
+struct ExpectedReads {
+    machines: Vec<forge::LinkedExpectedMachine>,
+    switches: Vec<forge::LinkedExpectedSwitch>,
+    shelves: Vec<forge::LinkedExpectedPowerShelf>,
+    racks: Vec<forge::ExpectedRack>,
+    rack_groups: Vec<forge::ExpectedRackGroup>,
+}
+
+impl Sweep<'_> {
+    async fn call<T, F, Fut>(&self, call: &'static str, f: F) -> Result<T, CallError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, CallError>>,
+    {
+        self.gate.call_with_retries(self.rec, call, f).await
+    }
+
+    /// Reads one unit type: census, by-ID batches, and one second census
+    /// for misses.
+    async fn census<Id, R, C, CFut, B, BFut>(
+        &self,
+        what: &str,
+        (census_call, census): (&'static str, C),
+        (by_id_call, by_id): (&'static str, B),
+        id_of: fn(&R) -> String,
+    ) -> Result<CensusRead<R>, Failure>
+    where
+        Id: Clone + ToString,
+        C: Fn() -> CFut,
+        CFut: Future<Output = Result<Vec<Id>, CallError>>,
+        B: Fn(Vec<Id>) -> BFut,
+        BFut: Future<Output = Result<Vec<R>, CallError>>,
+    {
+        let ids = self
+            .call(census_call, &census)
+            .await
+            .map_err(|e| Failure::call(census_call, &e))?;
+        let by_id = &by_id;
+        self.by_ids(
+            what,
+            ids,
+            (census_call, census),
+            move |ids: Vec<Id>| async move { self.call(by_id_call, || by_id(ids.clone())).await },
+            id_of,
+        )
+        .await
+    }
+
+    /// The by-ID half of [`Sweep::census`], for a census already read.
+    /// `fetch` reads one batch through the gate.
+    async fn by_ids<Id, R, C, CFut, B, BFut>(
+        &self,
+        what: &str,
+        ids: Vec<Id>,
+        (census_call, census): (&'static str, C),
+        fetch: B,
+        id_of: fn(&R) -> String,
+    ) -> Result<CensusRead<R>, Failure>
+    where
+        Id: Clone + ToString,
+        C: Fn() -> CFut,
+        CFut: Future<Output = Result<Vec<Id>, CallError>>,
+        B: Fn(Vec<Id>) -> BFut,
+        BFut: Future<Output = Result<Vec<R>, CallError>>,
+    {
+        let typed: BTreeMap<String, Id> = ids.into_iter().map(|id| (id.to_string(), id)).collect();
+        let (typed_ref, fetch, census) = (&typed, &fetch, &census);
+        let read = read_family(
+            typed.keys().cloned().collect(),
+            self.batch,
+            move |batch| fetch(batch.iter().map(|id| typed_ref[id].clone()).collect()),
+            id_of,
+            move || async move {
+                self.call(census_call, census)
+                    .await
+                    .map(|ids| ids.iter().map(ToString::to_string).collect())
+            },
+        )
+        .await
+        .map_err(|e| Failure::call(what, &e))?;
+        if read.unresolved.is_empty() {
+            Ok(read)
+        } else {
+            Err(Failure::unresolved(format!(
+                "{} {what} missing from their by-ID read but still in the census",
+                read.unresolved.len()
+            )))
+        }
+    }
+
+    async fn read_all(
+        &self,
+        publisher: &DevicesReader,
+        base: &SweepMeta,
+        failed: &mut Incomplete,
+    ) -> (Reads, Result<ExpectedReads, Failure>) {
+        let nico = &self.nico;
+        let instances = self
+            .census(
+                "instances",
+                ("find_instance_ids", move || nico.instance_ids()),
+                ("find_instances_by_ids", move |ids: Vec<_>| async move {
+                    let rows = nico.instances_by_ids(&ids).await?;
+                    Ok(rows.into_iter().map(InstanceRow::from).collect())
+                }),
+                |i: &InstanceRow| i.id.clone(),
+            )
+            .await;
+        let meta = SweepMeta {
+            end: crate::clock::now(),
+            ..base.clone()
+        };
+        publisher.deliver_built(&meta, Family::Instance, failed, |previous| {
+            instances.map(|r| instance_units(r.rows, previous))
+        });
+        let host_start = crate::clock::now();
+        let machine_census = self
+            .call("find_machine_ids", || nico.machine_ids())
+            .await
+            .map_err(|e| Failure::call("find_machine_ids", &e));
+        let (machines, hosts, dpus) = match machine_census {
+            Ok(ids) => {
+                let (hosts, dpus): (Vec<_>, Vec<_>) = ids
+                    .into_iter()
+                    .filter(|id| !id.machine_type().is_predicted_host())
+                    .partition(|id| id.machine_type().is_host());
+                let hosts = self.read_hosts(hosts).await;
+                (
+                    Ok(()),
+                    hosts,
+                    dpus.iter().map(ToString::to_string).collect(),
+                )
+            }
+            Err(failure) => (Err(failure.clone()), Err(failure), Vec::new()),
+        };
+        let firmware = self
+            .call("list_hosts_waiting_for_reprovisioning", || {
+                nico.hosts_waiting_for_reprovisioning()
+            })
+            .await
+            .map_err(|e| Failure::call("list_hosts_waiting_for_reprovisioning", &e));
+        let mut reads = Reads {
+            machines,
+            hosts,
+            dpus,
+            firmware,
+            compact_host_read: self.host_compact.load(Ordering::SeqCst),
+            switches: Err(Failure::unresolved("not read".into())),
+            shelves: Err(Failure::unresolved("not read".into())),
+            racks: Err(Failure::unresolved("not read".into())),
+        };
+        publisher.build_fast(
+            &reads,
+            &SweepMeta {
+                start: host_start,
+                end: crate::clock::now(),
+                ..base.clone()
+            },
+            failed,
+        );
+        let switches = self
+            .census(
+                "switches",
+                ("find_switch_ids", move || nico.switch_ids()),
+                ("find_switches_by_ids", move |ids: Vec<_>| async move {
+                    let rows = nico.switches_by_ids(&ids).await?;
+                    Ok(rows.into_iter().map(switch_row).collect())
+                }),
+                |r: &LifecycleRow| r.id.clone(),
+            )
+            .await
+            .map(drop_deleted(|r: &LifecycleRow| r.deleted));
+        let shelves = self
+            .census(
+                "power shelves",
+                ("find_power_shelf_ids", move || nico.power_shelf_ids()),
+                ("find_power_shelves_by_ids", move |ids: Vec<_>| async move {
+                    let rows = nico.power_shelves_by_ids(&ids).await?;
+                    Ok(rows.into_iter().map(shelf_row).collect())
+                }),
+                |r: &LifecycleRow| r.id.clone(),
+            )
+            .await
+            .map(drop_deleted(|r: &LifecycleRow| r.deleted));
+        let racks = self
+            .census(
+                "racks",
+                ("find_rack_ids", move || nico.rack_ids()),
+                ("find_racks_by_ids", move |ids: Vec<_>| async move {
+                    let rows = nico.racks_by_ids(&ids).await?;
+                    Ok(rows.into_iter().map(rack_row).collect())
+                }),
+                |r: &LifecycleRow| r.id.clone(),
+            )
+            .await
+            .map(drop_deleted(|r: &LifecycleRow| r.deleted));
+        let expected = self.read_expected().await;
+        reads.switches = switches;
+        reads.shelves = shelves;
+        reads.racks = racks;
+        (reads, expected)
+    }
+
+    /// Reads every host. A fallback to the full read part way through leaves
+    /// batches of both reads, so a family read that succeeded is read again
+    /// in full: one snapshot is one read. A failed one keeps its failure,
+    /// which the gate has already retried as far as its policy allows.
+    async fn read_hosts(&self, ids: Vec<MachineId>) -> Result<CensusRead<HostDetail>, Failure> {
+        if ids.is_empty() && self.host_compact.load(Ordering::SeqCst) {
+            // No batch asks whether nico-api serves the compact read, so ask
+            // with no IDs, which it rejects as an invalid argument.
+            const CALL: &str = "find_host_states_by_ids";
+            let nico = &self.nico;
+            match self.call(CALL, || nico.host_states_by_ids(&[])).await {
+                Err(err) if self.host_read.fall_back(&err) => {
+                    self.host_compact.store(false, Ordering::SeqCst);
+                }
+                Err(CallError::Status(code)) if code == "gRPC InvalidArgument" => {}
+                Err(err) => return Err(Failure::call(CALL, &err)),
+                Ok(_) => {}
+            }
+        }
+        let again = self
+            .host_compact
+            .load(Ordering::SeqCst)
+            .then(|| ids.clone());
+        let mut read = self.read_host_family(ids).await;
+        if self.host_compact.load(Ordering::SeqCst) {
+            if read.is_ok() {
+                self.host_read.served();
+            }
+        } else if let Some(ids) = again {
+            // Only a sweep that already read a compact batch needs it.
+            if read.is_ok() && self.host_compact_read.load(Ordering::SeqCst) {
+                read = self.read_host_family(ids).await;
+            }
+        }
+        read
+    }
+
+    async fn read_host_family(
+        &self,
+        ids: Vec<MachineId>,
+    ) -> Result<CensusRead<HostDetail>, Failure> {
+        let nico = &self.nico;
+        self.by_ids(
+            "hosts",
+            ids,
+            ("find_machine_ids", move || async move {
+                nico.machine_ids().await.map(|ids| {
+                    ids.into_iter()
+                        .filter(|id| id.machine_type().is_host())
+                        .collect::<Vec<_>>()
+                })
+            }),
+            move |ids| self.host_batch(ids),
+            |h: &HostDetail| h.id.to_string(),
+        )
+        .await
+    }
+
+    /// One batch of hosts with the sweep's host read. Under `auto`, a compact
+    /// read nico-api does not serve is read again in full, and so is the rest
+    /// of the sweep.
+    async fn host_batch(&self, ids: Vec<MachineId>) -> Result<Vec<HostDetail>, CallError> {
+        let nico = &self.nico;
+        if self.host_compact.load(Ordering::SeqCst) {
+            match self
+                .call("find_host_states_by_ids", || nico.host_states_by_ids(&ids))
+                .await
+            {
+                Err(err) if self.host_read.fall_back(&err) => {
+                    self.host_compact.store(false, Ordering::SeqCst);
+                }
+                compact => {
+                    if compact.is_ok() {
+                        self.host_compact_read.store(true, Ordering::SeqCst);
+                    }
+                    return compact;
+                }
+            }
+        }
+        self.call("find_machines_by_ids", || nico.hosts_by_ids(&ids))
+            .await
+    }
+
+    async fn read_expected(&self) -> Result<ExpectedReads, Failure> {
+        let nico = &self.nico;
+        let fail = |call: &'static str| move |e: CallError| Failure::call(call, &e);
+        Ok(ExpectedReads {
+            machines: self
+                .call("get_all_expected_machines_linked", || {
+                    nico.expected_machines_linked()
+                })
+                .await
+                .map_err(fail("get_all_expected_machines_linked"))?,
+            switches: self
+                .call("get_all_expected_switches_linked", || {
+                    nico.expected_switches_linked()
+                })
+                .await
+                .map_err(fail("get_all_expected_switches_linked"))?,
+            shelves: self
+                .call("get_all_expected_power_shelves_linked", || {
+                    nico.expected_power_shelves_linked()
+                })
+                .await
+                .map_err(fail("get_all_expected_power_shelves_linked"))?,
+            racks: self
+                .call("get_all_expected_racks", || nico.expected_racks())
+                .await
+                .map_err(fail("get_all_expected_racks"))?,
+            rack_groups: self
+                .call("get_all_expected_rack_groups", || {
+                    nico.expected_rack_groups()
+                })
+                .await
+                .map_err(fail("get_all_expected_rack_groups"))?,
+        })
+    }
+
+    /// `last_exploration_error` per explored address, read in batches.
+    async fn explored_errors(
+        &self,
+        addresses: Vec<String>,
+    ) -> Result<BTreeMap<String, Option<String>>, Failure> {
+        let mut errors = BTreeMap::new();
+        for chunk in addresses.chunks(EXPLORED_BATCH) {
+            let endpoints = self
+                .call("find_explored_endpoints_by_ids", || {
+                    self.nico.explored_endpoints(chunk)
+                })
+                .await
+                .map_err(|e| Failure::call("find_explored_endpoints_by_ids", &e))?;
+            for endpoint in endpoints {
+                let error = endpoint
+                    .report
+                    .and_then(|report| report.last_exploration_error)
+                    .filter(|e| !e.is_empty());
+                errors.insert(endpoint.address, error);
+            }
+        }
+        Ok(errors)
+    }
+
+    /// Every read of the sweep, the explorer reads for unlinked expected
+    /// records included. Nothing after this calls nico-api.
+    async fn read(
+        &self,
+        publisher: &DevicesReader,
+        base: &SweepMeta,
+        failed: &mut Incomplete,
+    ) -> (Reads, Result<ExpectedLinks, Failure>) {
+        let (reads, expected) = self.read_all(publisher, base, failed).await;
+        let links = match expected {
+            Ok(expected) => self.expected_links(expected, &reads).await,
+            Err(failure) => Err(failure),
+        };
+        (reads, links)
+    }
+
+    /// Links the expected records to this sweep's census, and reads why
+    /// unlinked records have no device. Only IDs of the other families are
+    /// kept, so their rows can go once their own snapshots are built.
+    async fn expected_links(
+        &self,
+        expected: ExpectedReads,
+        reads: &Reads,
+    ) -> Result<ExpectedLinks, Failure> {
+        let hosts = census_ids(&reads.hosts)?;
+        let switches = census_ids(&reads.switches)?;
+        let shelves = census_ids(&reads.shelves)?;
+        let rack_ids = census_ids(&reads.racks)?;
+
+        let mut records = Vec::new();
+        records.extend(link_records(
+            RecordType::Host,
+            expected.machines.iter().map(|row| LinkRow {
+                expected_id: row.expected_machine_id.as_ref().map(|id| id.value.clone()),
+                bmc_mac: &row.bmc_mac_address,
+                explored: row.explored_endpoint_address.as_deref(),
+                device: row.machine_id.map(|id| id.to_string()),
+            }),
+            &hosts,
+        ));
+        records.extend(link_records(
+            RecordType::Switch,
+            expected.switches.iter().map(|row| LinkRow {
+                expected_id: row.expected_switch_id.as_ref().map(|id| id.value.clone()),
+                bmc_mac: &row.bmc_mac_address,
+                explored: row.explored_endpoint_address.as_deref(),
+                device: row.switch_id.map(|id| id.to_string()),
+            }),
+            &switches,
+        ));
+        records.extend(link_records(
+            RecordType::PowerShelf,
+            expected.shelves.iter().map(|row| LinkRow {
+                expected_id: row
+                    .expected_power_shelf_id
+                    .as_ref()
+                    .map(|id| id.value.clone()),
+                bmc_mac: &row.bmc_mac_address,
+                explored: row.explored_endpoint_address.as_deref(),
+                device: row.power_shelf_id.map(|id| id.to_string()),
+            }),
+            &shelves,
+        ));
+
+        // Unlinked records name why: the explorer's last error for their
+        // address, read only while few records are unlinked.
+        let unlinked: Vec<&Record> = records.iter().filter(|r| r.devices.is_empty()).collect();
+        let explored = if unlinked.len() <= EXPLORED_READ_LIMIT {
+            let addresses: Vec<String> = unlinked
+                .iter()
+                .filter_map(|r| r.explored.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            Some(self.explored_errors(addresses).await?)
+        } else {
+            None
+        };
+
+        Ok(ExpectedLinks {
+            records,
+            explored,
+            hosts,
+            switches,
+            shelves,
+            rack_ids,
+            racks: expected.racks,
+            rack_groups: expected.rack_groups,
+        })
+    }
+}
+
+/// The expected records linked to one sweep's census, with the census IDs
+/// the expected family needs.
+struct ExpectedLinks {
+    records: Vec<Record>,
+    /// The explorer's last error per unlinked record address, or `None` when
+    /// too many records are unlinked to read them all.
+    explored: Option<BTreeMap<String, Option<String>>>,
+    hosts: BTreeSet<String>,
+    switches: BTreeSet<String>,
+    shelves: BTreeSet<String>,
+    rack_ids: BTreeSet<String>,
+    racks: Vec<forge::ExpectedRack>,
+    rack_groups: Vec<forge::ExpectedRackGroup>,
+}
+
+impl DevicesReader {
+    /// Builds `family` against its last published units, delivers it, and
+    /// keeps the delivered units for the next sweep. Until delivery
+    /// succeeds the last published units stay.
+    fn deliver_built(
+        &self,
+        meta: &SweepMeta,
+        family: Family,
+        failed: &mut Incomplete,
+        build: impl FnOnce(&[Arc<Unit>]) -> Built,
+    ) {
+        // Copied, not taken, so a panicking build leaves the last units in
+        // place for the next sweep to share against.
+        let previous = self.previous().get(&family).cloned().unwrap_or_default();
+        let built = build(&previous);
+        let units = built.as_ref().ok().map(|data| data.units.clone());
+        let kind = built.as_ref().err().map(|f| f.kind);
+        let delivered = self
+            .attempt
+            .deliver(self.sink.as_ref(), meta, family, built);
+        let keep = match units {
+            Some(units) if delivered => units,
+            _ => previous,
+        };
+        self.previous().insert(family, keep);
+        if !delivered {
+            failed.record(family, kind);
+        }
+    }
+
+    fn build_fast(&self, reads: &Reads, meta: &SweepMeta, failed: &mut Incomplete) {
+        let Reads {
+            machines,
+            hosts,
+            dpus,
+            firmware,
+            compact_host_read,
+            ..
+        } = reads;
+        let compact_host_read = *compact_host_read;
+        // Firmware requests join to this sweep's hosts. Host units carry
+        // their open request, so without the request read a host snapshot
+        // could not tell "no request" from "unknown": the host family then
+        // keeps its last snapshot too. Requests are delivered first, and
+        // only their open-request map waits for the hosts.
+        let mut open = None;
+        self.deliver_built(meta, Family::HostFirmwareRequests, failed, |previous| {
+            let joined = match (firmware.as_ref(), hosts.as_ref()) {
+                (Err(failure), _) => {
+                    open = Some(Err(failure.needed_by(Family::Host)));
+                    return Err(failure.clone());
+                }
+                (_, Err(failure)) => return Err(failure.needed_by(Family::HostFirmwareRequests)),
+                (Ok(items), Ok(read)) => firmware_requests(items, &read.rows, previous),
+            };
+            open = Some(Ok(joined.open));
+            if joined.unjoinable > 0 {
+                return Err(Failure::unresolved(format!(
+                    "{} firmware requests name no host of this sweep",
+                    joined.unjoinable
+                )));
+            }
+            Ok(joined.units)
+        });
+        self.deliver_built(meta, Family::Dpu, failed, |previous| {
+            match (&machines, &hosts) {
+                (Ok(()), Ok(read)) => Ok(dpu_units(dpus, &read.rows, previous)),
+                (Err(failure), _) | (_, Err(failure)) => Err(failure.needed_by(Family::Dpu)),
+            }
+        });
+
+        self.deliver_built(meta, Family::Host, failed, |previous| {
+            match (hosts.as_ref(), open) {
+                (Err(failure), _) => Err(failure.clone()),
+                (Ok(read), Some(Ok(open))) => {
+                    let data = host_units(&read.rows, &open, previous);
+                    // Under the compact read, a host without an answer is a row
+                    // nico-api sent incomplete.
+                    let known = |known: fn(&HostFields) -> bool| {
+                        compact_host_read
+                            && data
+                                .units
+                                .iter()
+                                .filter_map(|unit| unit.host.as_ref())
+                                .all(known)
+                    };
+                    Ok(UnitsData {
+                        compact_host_read,
+                        allocatable_known: known(|host| host.allocatable.is_some()),
+                        update_eligible_known: known(|host| host.update_eligible.is_some()),
+                        ..data
+                    })
+                }
+                (Ok(_), Some(Err(failure))) => Err(failure),
+                (Ok(_), None) => Err(Failure::unresolved(
+                    "the firmware request join did not run".to_string(),
+                )),
+            }
+        });
+    }
+
+    /// Builds and delivers the families of one sweep's reads, one at a time.
+    /// Each family's rows are dropped once its snapshot is built.
+    fn build(
+        &self,
+        reads: Reads,
+        links: Result<ExpectedLinks, Failure>,
+        meta: &SweepMeta,
+        failed: &mut Incomplete,
+    ) {
+        let Reads {
+            switches,
+            shelves,
+            racks,
+            ..
+        } = reads;
+
+        self.deliver_built(meta, Family::Expected, failed, |previous| {
+            links.map(|links| expected_units(links, previous))
+        });
+        self.deliver_built(meta, Family::Switch, failed, |previous| {
+            switches.map(|r| lifecycle_units(UnitType::Switch, r.rows, previous))
+        });
+        self.deliver_built(meta, Family::PowerShelf, failed, |previous| {
+            shelves.map(|r| lifecycle_units(UnitType::PowerShelf, r.rows, previous))
+        });
+        self.deliver_built(meta, Family::Rack, failed, |previous| {
+            racks.map(|r| lifecycle_units(UnitType::Rack, r.rows, previous))
+        });
+    }
+}
+
+/// The expected family: every record with its link, rack and rack group
+/// records, and census devices no record links.
+fn expected_units(links: ExpectedLinks, previous: &[Arc<Unit>]) -> UnitsData {
+    let mut units = UnitsBuilder::new(previous);
+    for record in &links.records {
+        units.extend(record.units(links.explored.as_ref()));
+    }
+    for rack in &links.racks {
+        let Some(id) = rack.rack_id.as_ref().map(ToString::to_string) else {
+            continue;
+        };
+        let linked = links.rack_ids.contains(&id);
+        units.push(plain_record(
+            RecordType::Rack,
+            id.clone(),
+            linked,
+            linked.then_some(id),
+        ));
+    }
+    for group in &links.rack_groups {
+        let Some(id) = group.rack_group_id.as_ref().map(ToString::to_string) else {
+            continue;
+        };
+        // Rack groups have no device of their own to link to.
+        units.push(plain_record(RecordType::RackGroup, id, false, None));
+    }
+    for (record_type, census, linked) in [
+        (
+            RecordType::Host,
+            &links.hosts,
+            linked_devices(&links.records, RecordType::Host),
+        ),
+        (
+            RecordType::Switch,
+            &links.switches,
+            linked_devices(&links.records, RecordType::Switch),
+        ),
+        (
+            RecordType::PowerShelf,
+            &links.shelves,
+            linked_devices(&links.records, RecordType::PowerShelf),
+        ),
+    ] {
+        for device in census.difference(&linked) {
+            units.push(mismatch_unit(
+                record_type,
+                MismatchKind::NoExpectedRecord,
+                device.clone(),
+                Some(device.clone()),
+                None,
+                None,
+            ));
+        }
+    }
+    units.finish(0)
+}
+
+/// The read IDs of a unit type the expected family links against.
+fn census_ids<R>(read: &Result<CensusRead<R>, Failure>) -> Result<BTreeSet<String>, Failure> {
+    match read {
+        Ok(read) => Ok(read.rows.keys().cloned().collect()),
+        Err(failure) => Err(failure.needed_by(Family::Expected)),
+    }
+}
+
+/// Moves soft-deleted rows to `gone`.
+fn drop_deleted<R>(deleted: fn(&R) -> bool) -> impl FnOnce(CensusRead<R>) -> CensusRead<R> {
+    move |mut read| {
+        let ids: Vec<String> = read
+            .rows
+            .iter()
+            .filter(|(_, row)| deleted(row))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            read.rows.remove(&id);
+            read.gone.insert(id);
+        }
+        read
+    }
+}
+
+fn timestamp(ts: Option<rpc::Timestamp>) -> Option<DateTime<Utc>> {
+    ts.and_then(crate::nico::host_read::timestamp)
+}
+
+/// The open firmware requests joined to one host read.
+struct JoinedRequests {
+    units: UnitsData,
+    /// Each joined host's open request.
+    open: BTreeMap<String, FirmwareRequest>,
+    /// Requests whose host is not in the host read: the request family is
+    /// unresolved, while the joined hosts still show their requests.
+    unjoinable: usize,
+}
+
+/// Firmware request units, built one at a time, plus each open request by
+/// host ID.
+fn firmware_requests(
+    items: &[HostReprovisioningListItem],
+    hosts: &BTreeMap<String, HostDetail>,
+    previous: &[Arc<Unit>],
+) -> JoinedRequests {
+    let mut units = UnitsBuilder::new(previous);
+    let mut open = BTreeMap::new();
+    let mut unjoinable = 0;
+    for item in items {
+        let Some(host) = item.id.as_ref().and_then(|id| hosts.get(&id.to_string())) else {
+            unjoinable += 1;
+            continue;
+        };
+        let request = FirmwareRequest {
+            initiator: initiator(&item.initiator),
+            requested_at: timestamp(item.requested_at),
+            initiated_at: timestamp(item.initiated_at),
+        };
+        let id = host.id.to_string();
+        if open.insert(id.clone(), request.clone()).is_some() {
+            continue;
+        }
+        let (category, _) = host_state(&host.state);
+        let mut fields = host_fields(host, None);
+        fields.open_firmware_request = Some(request);
+        units.push(Unit {
+            controller_instance_id: None,
+            rest_machine: None,
+            id,
+            unit_type: UnitType::HostFirmwareRequest,
+            source: Source::NicoApi,
+            stage: Stage::Registered,
+            done: false,
+            state: category.to_string(),
+            reason: Some(if item.state.is_empty() {
+                "open firmware request".to_string()
+            } else {
+                item.state.clone()
+            }),
+            bmc_ip: host.bmc_ip.clone(),
+            host: Some(fields),
+            dpu: None,
+            instance: None,
+            expected: None,
+        });
+    }
+    JoinedRequests {
+        units: units.finish(0),
+        open,
+        unjoinable,
+    }
+}
+
+/// The category and whether it is in the pinned table.
+fn host_state(state: &str) -> (&'static str, bool) {
+    match host_category(state) {
+        Some(category) => (category, true),
+        None => (OTHER, false),
+    }
+}
+
+fn known_flag(known: &Known<Result<(), String>>) -> (Option<bool>, Option<String>) {
+    match known {
+        Known::Value(Ok(())) => (Some(true), None),
+        Known::Value(Err(reason)) => (Some(false), Some(reason.clone())),
+        Known::Unknown(why) => (None, Some((*why).to_string())),
+    }
+}
+
+/// The host fields of a unit, copied from its read row. The row is dropped
+/// once its unit is built.
+fn host_fields(host: &HostDetail, open: Option<&FirmwareRequest>) -> HostFields {
+    let (allocatable, blocking_reason) = known_flag(&host.allocatable);
+    let (update_eligible, update_blocking_reason) = known_flag(&host.update_eligible);
+    HostFields {
+        vendor: host.vendor.clone(),
+        model: host.model.clone(),
+        instance_type: host.instance_type.clone(),
+        bmc_version: host.bmc_version.clone(),
+        uefi_version: host.uefi_version.clone(),
+        version_source: host.version_source,
+        report_at: host.report_at,
+        report_error: host.report_error.clone(),
+        allocatable,
+        blocking_reason,
+        firmware_autoupdate: host.firmware_autoupdate,
+        update_eligible,
+        update_blocking_reason,
+        update_complete: host.update_complete,
+        open_firmware_request: open.cloned(),
+        nvlink_domain: host.nvlink_domain.clone(),
+        rack_id: host.rack_id.clone(),
+        dpu_ids: host.dpu_ids.iter().map(ToString::to_string).collect(),
+    }
+}
+
+/// Stage and done of a unit by its ready and error states.
+fn stage(ready: bool, error: bool) -> Stage {
+    if ready {
+        Stage::Ready
+    } else if error {
+        Stage::Error
+    } else {
+        Stage::Registered
+    }
+}
+
+/// The full state and the controller's message, for units that are not done.
+fn not_done_reason(state: &str, message: Option<&str>) -> String {
+    match message {
+        Some(message) => format!("{state}: {message}"),
+        None => state.to_string(),
+    }
+}
+
+/// Host units, each with its open firmware request.
+fn host_units(
+    hosts: &BTreeMap<String, HostDetail>,
+    open: &BTreeMap<String, FirmwareRequest>,
+    previous: &[Arc<Unit>],
+) -> UnitsData {
+    let mut unknown = 0;
+    let units = hosts.iter().map(|(id, host)| {
+        let (category, known) = host_state(&host.state);
+        if !known {
+            unknown += 1;
+        }
+        let done = category == "Ready";
+        let fields = host_fields(host, open.get(id));
+        Unit {
+            controller_instance_id: None,
+            rest_machine: None,
+            id: id.clone(),
+            unit_type: UnitType::Host,
+            source: Source::NicoApi,
+            stage: stage(done, category == "Failed"),
+            done,
+            state: category.to_string(),
+            reason: (!done).then(|| not_done_reason(&host.state, host.state_reason.as_deref())),
+            bmc_ip: host.bmc_ip.clone(),
+            host: Some(fields),
+            dpu: None,
+            instance: None,
+            expected: None,
+        }
+    });
+    let mut built = UnitsBuilder::new(previous);
+    built.extend(units);
+    built.finish(unknown)
+}
+
+/// DPU units: each census DPU takes the category of the host that lists it.
+fn dpu_units(
+    dpus: &[String],
+    hosts: &BTreeMap<String, HostDetail>,
+    previous: &[Arc<Unit>],
+) -> UnitsData {
+    let owner: BTreeMap<String, &HostDetail> = hosts
+        .values()
+        .flat_map(|host| host.dpu_ids.iter().map(move |dpu| (dpu.to_string(), host)))
+        .collect();
+    let units = dpus
+        .iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|id| match owner.get(id) {
+            Some(host) => {
+                let (category, _) = host_state(&host.state);
+                let done = dpu_done_under(category);
+                Unit {
+                    controller_instance_id: None,
+                    rest_machine: None,
+                    id: id.clone(),
+                    unit_type: UnitType::Dpu,
+                    source: Source::NicoApi,
+                    stage: stage(done, category == "Failed"),
+                    done,
+                    state: category.to_string(),
+                    reason: (!done).then(|| format!("host {}: {}", host.id, host.state)),
+                    bmc_ip: None,
+                    host: None,
+                    dpu: Some(DpuFields {
+                        host_id: Some(host.id.to_string()),
+                    }),
+                    instance: None,
+                    expected: None,
+                }
+            }
+            None => Unit {
+                controller_instance_id: None,
+                rest_machine: None,
+                id: id.clone(),
+                unit_type: UnitType::Dpu,
+                source: Source::NicoApi,
+                stage: Stage::Registered,
+                done: false,
+                state: UNATTACHED.to_string(),
+                reason: Some(UNATTACHED.to_string()),
+                bmc_ip: None,
+                host: None,
+                dpu: Some(DpuFields { host_id: None }),
+                instance: None,
+                expected: None,
+            },
+        });
+    let mut built = UnitsBuilder::new(previous);
+    built.extend(units);
+    built.finish(0)
+}
+
+/// The state of a DPU no host lists.
+pub(crate) const UNATTACHED: &str = "unattached";
+
+/// What a lifecycle-tracked device (switch, shelf, rack) shows, kept from
+/// each by-ID batch instead of the whole record.
+struct LifecycleRow {
+    id: String,
+    lifecycle: Option<forge::LifecycleStatus>,
+    bmc_ip: Option<String>,
+    deleted: bool,
+}
+
+fn switch_row(s: forge::Switch) -> LifecycleRow {
+    LifecycleRow {
+        id: s.id.map(|id| id.to_string()).unwrap_or_default(),
+        lifecycle: s.status.and_then(|st| st.lifecycle),
+        bmc_ip: s.bmc_info.and_then(|b| b.ip),
+        deleted: s.deleted.is_some(),
+    }
+}
+
+fn shelf_row(s: forge::PowerShelf) -> LifecycleRow {
+    LifecycleRow {
+        id: s.id.map(|id| id.to_string()).unwrap_or_default(),
+        lifecycle: s.status.and_then(|st| st.lifecycle),
+        bmc_ip: s.bmc_info.and_then(|b| b.ip),
+        deleted: s.deleted.is_some(),
+    }
+}
+
+fn rack_row(r: forge::Rack) -> LifecycleRow {
+    LifecycleRow {
+        id: r.id.as_ref().map(ToString::to_string).unwrap_or_default(),
+        lifecycle: r.status.and_then(|st| st.lifecycle),
+        bmc_ip: None,
+        deleted: r.deleted.is_some(),
+    }
+}
+
+fn lifecycle_units(
+    unit_type: UnitType,
+    rows: BTreeMap<String, LifecycleRow>,
+    previous: &[Arc<Unit>],
+) -> UnitsData {
+    let mut unknown = 0;
+    let units = rows.into_iter().map(|(id, view)| {
+        let tag = view
+            .lifecycle
+            .as_ref()
+            .and_then(|l| lifecycle_tag(&l.state));
+        if tag.is_none() {
+            unknown += 1;
+        }
+        let state = tag.unwrap_or_else(|| OTHER.to_string());
+        let done = state == "ready";
+        let message = view
+            .lifecycle
+            .as_ref()
+            .and_then(|l| l.state_reason.as_ref())
+            .and_then(|r| r.outcome_msg.as_deref())
+            .filter(|m| !m.is_empty());
+        Unit {
+            controller_instance_id: None,
+            rest_machine: None,
+            id,
+            unit_type,
+            source: Source::NicoApi,
+            stage: stage(done, state == "error"),
+            done,
+            reason: (!done).then(|| not_done_reason(&state, message)),
+            state,
+            bmc_ip: view.bmc_ip.filter(|ip| !ip.is_empty()),
+            host: None,
+            dpu: None,
+            instance: None,
+            expected: None,
+        }
+    });
+    let mut built = UnitsBuilder::new(previous);
+    built.extend(units);
+    built.finish(unknown)
+}
+
+/// What an instance shows, kept from each by-ID batch instead of the whole
+/// record.
+struct InstanceRow {
+    id: String,
+    tenant_status: Option<forge::InstanceTenantStatus>,
+    name: Option<String>,
+    tenant: Option<String>,
+    host_id: Option<String>,
+}
+
+impl From<forge::Instance> for InstanceRow {
+    fn from(instance: forge::Instance) -> Self {
+        Self {
+            id: instance.id.map(|id| id.to_string()).unwrap_or_default(),
+            tenant_status: instance.status.and_then(|s| s.tenant),
+            name: instance.metadata.map(|m| m.name).filter(|n| !n.is_empty()),
+            tenant: instance
+                .config
+                .and_then(|c| c.tenant)
+                .map(|t| t.tenant_organization_id)
+                .filter(|t| !t.is_empty()),
+            host_id: instance.machine_id.map(|id| id.to_string()),
+        }
+    }
+}
+
+fn instance_units(rows: BTreeMap<String, InstanceRow>, previous: &[Arc<Unit>]) -> UnitsData {
+    let mut unknown = 0;
+    let units = rows.into_iter().map(|(id, instance)| {
+        let tenant_status = instance.tenant_status.as_ref();
+        let state = match tenant_status.map(|t| forge::TenantState::try_from(t.state)) {
+            Some(Ok(state)) => state.as_str_name().to_lowercase(),
+            _ => {
+                unknown += 1;
+                OTHER.to_string()
+            }
+        };
+        let done = state == "ready";
+        let details = tenant_status
+            .map(|t| t.state_details.as_str())
+            .filter(|d| !d.is_empty());
+        Unit {
+            controller_instance_id: None,
+            rest_machine: None,
+            id,
+            unit_type: UnitType::Instance,
+            source: Source::NicoApi,
+            stage: stage(done, state == "failed"),
+            done,
+            reason: (!done).then(|| not_done_reason(&state, details)),
+            bmc_ip: None,
+            host: None,
+            dpu: None,
+            instance: Some(InstanceFields {
+                name: instance.name,
+                tenant: instance.tenant,
+                host_id: instance.host_id,
+                status: state.clone(),
+            }),
+            state,
+            expected: None,
+        }
+    });
+    let mut built = UnitsBuilder::new(previous);
+    built.extend(units);
+    built.finish(unknown)
+}
+
+/// One row of a linked expected-record read. Rows repeat when a record joins
+/// several interfaces.
+struct LinkRow<'a> {
+    expected_id: Option<String>,
+    bmc_mac: &'a str,
+    explored: Option<&'a str>,
+    device: Option<String>,
+}
+
+/// One expected host, switch or shelf record and the census devices it
+/// links to.
+struct Record {
+    record_type: RecordType,
+    id: String,
+    bmc_mac: Option<String>,
+    explored: Option<String>,
+    /// Sorted and without repeats. Almost always one device, so a vector
+    /// costs far less than a set.
+    devices: Vec<String>,
+}
+
+impl Record {
+    /// Linked to exactly one device. Two or more is an ambiguous link, which
+    /// does not count as linked.
+    fn linked(&self) -> bool {
+        self.devices.len() == 1
+    }
+
+    /// Linked to two or more devices.
+    fn ambiguous(&self) -> bool {
+        self.devices.len() > 1
+    }
+
+    /// The record's unit, and for an ambiguous link also its mismatch unit:
+    /// the record stays an expected record, unlinked.
+    fn units(&self, explored: Option<&BTreeMap<String, Option<String>>>) -> Vec<Unit> {
+        let mut units = vec![self.record_unit(explored)];
+        if self.ambiguous() {
+            units.push(mismatch_unit(
+                self.record_type,
+                MismatchKind::AmbiguousLink,
+                self.id.clone(),
+                None,
+                self.bmc_mac.clone(),
+                self.explored.clone(),
+            ));
+        }
+        units
+    }
+
+    fn record_unit(&self, explored: Option<&BTreeMap<String, Option<String>>>) -> Unit {
+        let linked = self.linked();
+        let reason = (!linked).then(|| match (&self.explored, explored) {
+            _ if self.ambiguous() => {
+                format!("ambiguous_link: linked to {} devices", self.devices.len())
+            }
+            (_, None) => "no_device".to_string(),
+            (None, Some(_)) => "no_device: not_explored".to_string(),
+            (Some(address), Some(errors)) => match errors.get(address) {
+                Some(Some(error)) => format!("no_device: {error}"),
+                Some(None) => "no_device".to_string(),
+                None => "no_device: not_explored".to_string(),
+            },
+        });
+        Unit {
+            controller_instance_id: None,
+            rest_machine: None,
+            id: self.id.clone(),
+            unit_type: UnitType::ExpectedRecord,
+            source: Source::NicoApi,
+            stage: Stage::Expected,
+            done: linked,
+            state: if linked { "linked" } else { "unlinked" }.to_string(),
+            reason,
+            bmc_ip: self.explored.clone(),
+            host: None,
+            dpu: None,
+            instance: None,
+            expected: Some(ExpectedFields {
+                record_type: self.record_type,
+                linked,
+                device_id: linked.then(|| self.devices.first().cloned()).flatten(),
+                bmc_mac: self.bmc_mac.clone(),
+                explored_address: self.explored.clone(),
+            }),
+        }
+    }
+}
+
+/// Groups linked rows by expected record. Only devices in `census` count as
+/// links.
+fn link_records<'a>(
+    record_type: RecordType,
+    rows: impl Iterator<Item = LinkRow<'a>>,
+    census: &BTreeSet<String>,
+) -> Vec<Record> {
+    let mut records: BTreeMap<String, Record> = BTreeMap::new();
+    for row in rows {
+        let id = row
+            .expected_id
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| format!("bmc-mac:{}", row.bmc_mac));
+        let record = records.entry(id.clone()).or_insert_with(|| Record {
+            record_type,
+            id,
+            bmc_mac: Some(row.bmc_mac.to_string()).filter(|m| !m.is_empty()),
+            explored: None,
+            devices: Vec::new(),
+        });
+        if record.explored.is_none() {
+            record.explored = row.explored.filter(|a| !a.is_empty()).map(str::to_string);
+        }
+        if let Some(device) = row.device.filter(|d| census.contains(d))
+            && let Err(at) = record.devices.binary_search(&device)
+        {
+            record.devices.insert(at, device);
+        }
+    }
+    records.into_values().collect()
+}
+
+/// Census devices some record of `record_type` names, linked or ambiguous.
+fn linked_devices(records: &[Record], record_type: RecordType) -> BTreeSet<String> {
+    records
+        .iter()
+        .filter(|r| r.record_type == record_type)
+        .flat_map(|r| r.devices.iter().cloned())
+        .collect()
+}
+
+/// An expected rack or rack group record.
+fn plain_record(record_type: RecordType, id: String, linked: bool, device: Option<String>) -> Unit {
+    Unit {
+        controller_instance_id: None,
+        rest_machine: None,
+        id,
+        unit_type: UnitType::ExpectedRecord,
+        source: Source::NicoApi,
+        stage: Stage::Expected,
+        done: linked,
+        state: if linked { "linked" } else { "unlinked" }.to_string(),
+        reason: (!linked).then(|| "no_device".to_string()),
+        bmc_ip: None,
+        host: None,
+        dpu: None,
+        instance: None,
+        expected: Some(ExpectedFields {
+            record_type,
+            linked,
+            device_id: device,
+            bmc_mac: None,
+            explored_address: None,
+        }),
+    }
+}
+
+fn mismatch_unit(
+    record_type: RecordType,
+    kind: MismatchKind,
+    id: String,
+    device: Option<String>,
+    bmc_mac: Option<String>,
+    explored: Option<String>,
+) -> Unit {
+    let state = match kind {
+        MismatchKind::AmbiguousLink => "ambiguous_link",
+        MismatchKind::NoExpectedRecord => "no_expected_record",
+    };
+    Unit {
+        controller_instance_id: None,
+        rest_machine: None,
+        id,
+        unit_type: UnitType::IdentityMismatch,
+        source: Source::NicoApi,
+        stage: if device.is_some() {
+            Stage::Registered
+        } else {
+            Stage::Expected
+        },
+        done: false,
+        state: state.to_string(),
+        reason: Some(state.to_string()),
+        bmc_ip: explored.clone(),
+        host: None,
+        dpu: None,
+        instance: None,
+        expected: Some(ExpectedFields {
+            record_type,
+            linked: false,
+            device_id: device,
+            bmc_mac,
+            explored_address: explored,
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_site_health_probe_api::VersionSource;
+
+    use super::*;
+    use crate::framework::Outcome;
+    use crate::gate::MAX_RETRIES;
+    use crate::nico::fake::{self, FakeConnector, FakeNico, FakeSite};
+    use crate::snapshot::FailureKind;
+    use crate::snapshot::testing::FakeSink;
+
+    struct Harness {
+        nico: Arc<FakeNico>,
+        sink: Arc<FakeSink>,
+        reader: DevicesReader,
+    }
+
+    fn harness(site: FakeSite) -> Harness {
+        harness_with(site, HostReadMode::Full)
+    }
+
+    fn harness_with(site: FakeSite, host_read: HostReadMode) -> Harness {
+        let nico = FakeNico::new(site);
+        let sink = Arc::new(FakeSink::default());
+        let reader = DevicesReader::new(
+            ReaderConfig {
+                enabled: true,
+                interval: Duration::from_secs(120),
+                timeout: Duration::from_secs(600),
+            },
+            2,
+            host_read,
+            Arc::new(FakeConnector(Arc::clone(&nico))),
+            Arc::new(CallGate::new(
+                "nico-api",
+                2.0,
+                Duration::from_secs(5),
+                Duration::from_secs(30),
+            )),
+            Arc::clone(&sink) as Arc<dyn SnapshotSink>,
+            SystemTime::now(),
+        );
+        Harness { nico, sink, reader }
+    }
+
+    impl Harness {
+        async fn sweep(&self) -> eyre::Result<()> {
+            self.reader.run(&ObservationRecorder::default()).await
+        }
+
+        fn units(&self, family: Family) -> Vec<Unit> {
+            self.sink
+                .latest::<UnitsData>(family)
+                .map(|(_, data)| data.units.iter().map(|u| Unit::clone(u)).collect())
+                .unwrap_or_default()
+        }
+
+        fn unit(&self, family: Family, id: &str) -> Unit {
+            self.units(family)
+                .into_iter()
+                .find(|u| u.id == id)
+                .unwrap_or_else(|| panic!("{family:?} has no unit {id}"))
+        }
+    }
+
+    /// One rack: hosts 1 to 4 with two DPUs each, two switches, one shelf,
+    /// all with expected records, and one instance.
+    fn small_site() -> FakeSite {
+        let mut site = FakeSite::default();
+        for i in 1..=4 {
+            site.add_host(fake::host(i, "Ready", &[2 * i - 1, 2 * i]));
+            site.expected_machines
+                .push(fake::expected_machine(i, Some(i)));
+        }
+        for i in 1..=2 {
+            site.add_switch(fake::switch(i, "ready"));
+            site.expected_switches
+                .push(fake::expected_switch(i, Some(i)));
+        }
+        site.add_shelf(fake::shelf(1, "ready"));
+        site.expected_shelves.push(fake::expected_shelf(1, Some(1)));
+        site.add_rack(fake::rack(1, "ready"));
+        site.expected_racks.push(fake::expected_rack(1));
+        site.add_instance(fake::instance(1, 1, forge::TenantState::Ready));
+        site
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn fast_families_publish_before_a_failed_slow_read() {
+        for failure in ["none", "instance", "host"] {
+            let h = harness(small_site());
+            for call in [
+                match failure {
+                    "instance" => "find_instance_ids",
+                    "host" => "find_machine_ids",
+                    _ => "find_switch_ids",
+                },
+                "find_switch_ids",
+            ] {
+                for _ in 0..=MAX_RETRIES {
+                    h.nico
+                        .fail_next(call, CallError::Status("unavailable".into()));
+                }
+            }
+            let sink = Arc::clone(&h.sink);
+            h.nico.after("find_switch_ids", move |_| {
+                assert_eq!(
+                    sink.count(Family::Instance),
+                    usize::from(failure != "instance")
+                );
+                assert_eq!(sink.count(Family::Host), usize::from(failure != "host"));
+                assert_eq!(sink.count(Family::Switch), 0);
+            });
+            assert!(h.sweep().await.is_err(), "slow family failed");
+            assert_eq!(
+                h.sink.count(Family::Instance),
+                usize::from(failure != "instance")
+            );
+            assert_eq!(h.sink.count(Family::Host), usize::from(failure != "host"));
+            assert_eq!(h.sink.count(Family::Switch), 0);
+        }
+    }
+
+    fn count_linked(units: &[Unit], record_type: RecordType) -> usize {
+        units
+            .iter()
+            .filter(|u| {
+                u.unit_type == UnitType::ExpectedRecord
+                    && u.expected
+                        .as_ref()
+                        .is_some_and(|e| e.record_type == record_type && e.linked)
+            })
+            .count()
+    }
+
+    /// The reader on the framework's scheduler, publishing into a fake
+    /// sink.
+    fn scheduled(
+        nico: &Arc<FakeNico>,
+        interval: Duration,
+        timeout: Duration,
+        calls_per_second: f64,
+    ) -> (Arc<FakeSink>, Arc<dyn Probe>) {
+        let sink = Arc::new(FakeSink::default());
+        let reader = Arc::new(DevicesReader::new(
+            ReaderConfig {
+                enabled: true,
+                interval,
+                timeout,
+            },
+            100,
+            HostReadMode::Full,
+            Arc::new(FakeConnector(Arc::clone(nico))),
+            Arc::new(CallGate::new(
+                "nico-api",
+                calls_per_second,
+                Duration::from_secs(5),
+                Duration::from_secs(30),
+            )),
+            Arc::clone(&sink) as Arc<dyn SnapshotSink>,
+            SystemTime::now(),
+        ));
+        (sink, reader)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_timeout_records_timeout_and_keeps_snapshot() {
+        let nico = FakeNico::new(small_site());
+        let (sink, reader) = scheduled(
+            &nico,
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+            100.0,
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (mut results, loops) = crate::framework::start(vec![reader], cancel.clone());
+        let drain = tokio::spawn(async move { while results.recv().await.is_some() {} });
+
+        // The first sweep completes.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(sink.count(Family::Host), 1, "first sweep");
+        assert!(sink.failure_kinds(Family::Host).is_empty());
+
+        // The next sweep stalls on slow calls and the scheduler drops it at
+        // its 10 s timeout.
+        nico.set_delay(Duration::from_secs(20));
+        tokio::time::sleep(Duration::from_secs(70)).await;
+        assert_eq!(
+            sink.count(Family::Host),
+            1,
+            "the host family keeps its snapshot"
+        );
+        for family in DEVICE_FAMILIES {
+            assert_eq!(
+                sink.failure_kinds(family),
+                vec![FailureKind::Timeout],
+                "{family:?}"
+            );
+        }
+
+        // Shutdown in the middle of the next sweep records nothing.
+        tokio::time::sleep(Duration::from_secs(50)).await;
+        cancel.cancel();
+        crate::framework::join_loops(loops)
+            .await
+            .expect("loops end");
+        drain.await.expect("drain");
+        assert_eq!(
+            sink.failure_kinds(Family::Host),
+            vec![FailureKind::Timeout],
+            "a cancelled sweep is not a measured failure"
+        );
+    }
+
+    /// A census whose every retry times out before the sweep deadline keeps
+    /// its families' last snapshots and records them as timed out, and the
+    /// scheduler counts the run as a timeout, not a failure: a slow nico-api
+    /// is a different incident from a down one.
+    #[tokio::test(start_paused = true)]
+    async fn exhausted_census_timeouts_are_a_timeout_outcome() {
+        let nico = FakeNico::new(small_site());
+        let (sink, reader) = scheduled(
+            &nico,
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+            1000.0,
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (mut results, loops) = crate::framework::start(vec![reader], cancel.clone());
+
+        // The first sweep publishes every family.
+        let first = results.recv().await.expect("first result");
+        assert_eq!(first.outcome, Outcome::Success);
+        let host = sink.latest::<UnitsData>(Family::Host).expect("host units");
+
+        // Every attempt of the host census times out, exhausting its retries
+        // before the sweep deadline.
+        for _ in 0..1 + MAX_RETRIES {
+            nico.fail_next("find_machine_ids", CallError::Timeout);
+        }
+        tokio::time::sleep(Duration::from_secs(70)).await;
+        let second = results.recv().await.expect("second result");
+        assert_eq!(second.outcome, Outcome::Timeout);
+
+        assert_eq!(
+            sink.latest::<UnitsData>(Family::Host),
+            Some(host),
+            "the host snapshot and its read time are kept",
+        );
+        for family in [Family::Host, Family::Dpu, Family::HostFirmwareRequests] {
+            assert_eq!(
+                sink.failure_kinds(family),
+                vec![FailureKind::Timeout],
+                "{family:?}",
+            );
+        }
+        assert_eq!(sink.count(Family::Host), 1, "no second host publication");
+
+        cancel.cancel();
+        crate::framework::join_loops(loops)
+            .await
+            .expect("loops end");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watchdog_timeout_records_each_family_once() {
+        let nico = FakeNico::new(small_site());
+        let (sink, reader) = scheduled(
+            &nico,
+            Duration::from_secs(2),
+            Duration::from_millis(100),
+            1000.0,
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (mut results, loops) = crate::framework::start(vec![reader], cancel.clone());
+        let drain = tokio::spawn(async move { while results.recv().await.is_some() {} });
+
+        while sink.count(Family::Host) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // The next sweep (at 2 s) blocks its worker thread in the census
+        // past the watchdog (twice the 100 ms timeout), so the run's own
+        // timeout cannot fire until the poll returns at 2.7 s. Check before
+        // the sweep at 4 s. A blocked worker can strand tokio's timers; other
+        // traffic (in production the metrics and API listeners) wakes the
+        // other worker to drive them, which a pinger stands in for here.
+        let pinging = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let pinger = std::thread::spawn({
+            let (handle, pinging) = (tokio::runtime::Handle::current(), Arc::clone(&pinging));
+            move || {
+                while pinging.load(std::sync::atomic::Ordering::SeqCst) {
+                    handle.spawn(async {});
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        });
+        nico.block_next("find_machine_ids", Duration::from_millis(700));
+        // At 2.45 s the run is still blocked: only the watchdog can have
+        // recorded the timeout.
+        tokio::time::sleep(Duration::from_millis(2_410)).await;
+        assert_eq!(
+            sink.failure_kinds(Family::Host),
+            vec![FailureKind::Timeout],
+            "the watchdog records the timeout while the poll is blocked"
+        );
+        tokio::time::sleep(Duration::from_millis(740)).await;
+        pinging.store(false, std::sync::atomic::Ordering::SeqCst);
+        pinger.join().expect("pinger");
+        cancel.cancel();
+        crate::framework::join_loops(loops)
+            .await
+            .expect("loops end");
+        drain.await.expect("drain");
+
+        assert_eq!(sink.count(Family::Host), 1, "the first snapshot stays");
+        for family in DEVICE_FAMILIES {
+            let expected = if family == Family::Instance {
+                assert_eq!(
+                    sink.count(family),
+                    2,
+                    "instance publishes before host stalls"
+                );
+                vec![]
+            } else {
+                vec![FailureKind::Timeout]
+            };
+            assert_eq!(
+                sink.failure_kinds(family),
+                expected,
+                "{family:?}: one timeout from the watchdog, none from the late run"
+            );
+        }
+    }
+
+    #[test]
+    fn known_flags_map_to_value_and_reason() {
+        assert_eq!(known_flag(&Known::Value(Ok(()))), (Some(true), None));
+        assert_eq!(
+            known_flag(&Known::Value(Err("in maintenance".to_string()))),
+            (Some(false), Some("in maintenance".to_string()))
+        );
+        assert_eq!(
+            known_flag(&Known::Unknown("compact_host_read_missing")),
+            (None, Some("compact_host_read_missing".to_string())),
+            "unknown is null with its reason, never false"
+        );
+    }
+
+    /// A unit equal to the last published one is the same allocation. A
+    /// unit that changed, even only its report time, is a new one.
+    #[tokio::test(start_paused = true)]
+    async fn unchanged_units_are_shared_and_changed_ones_are_not() {
+        // The compact read carries the report time.
+        let h = harness_with(small_site(), HostReadMode::Compact);
+        h.sweep().await.expect("first sweep");
+        let first = h.sink.latest::<UnitsData>(Family::Host).expect("hosts").1;
+        {
+            let mut site = h.nico.site.lock().unwrap();
+            let hosts = &mut site.hosts;
+            hosts.get_mut(&fake::host_id(1).to_string()).unwrap().state =
+                "HostInitializing/WaitingForDiscovery".to_string();
+            hosts
+                .get_mut(&fake::host_id(2).to_string())
+                .unwrap()
+                .report_at = Some(DateTime::<Utc>::UNIX_EPOCH);
+        }
+        h.sweep().await.expect("second sweep");
+        let second = h.sink.latest::<UnitsData>(Family::Host).expect("hosts").1;
+        let shared: Vec<bool> = first
+            .units
+            .iter()
+            .zip(&second.units)
+            .map(|(a, b)| Arc::ptr_eq(a, b))
+            .collect();
+        assert_eq!(shared, vec![false, false, true, true]);
+        // Sharing never changes what a unit says.
+        let rebuilt = UnitsData::new(second.units.iter().map(|u| Unit::clone(u)).collect(), 0);
+        assert_eq!(rebuilt.units, second.units);
+    }
+
+    /// With nothing changed, every unit of every family is the last sweep's
+    /// allocation, so each family builds against its own previous units.
+    #[tokio::test(start_paused = true)]
+    async fn every_family_shares_its_unchanged_units() {
+        let h = harness(small_site());
+        h.nico
+            .site
+            .lock()
+            .unwrap()
+            .firmware_requests
+            .push(fake::firmware_request(1, "AdminCli"));
+        h.sweep().await.expect("first sweep");
+        let units = |family| h.sink.latest::<UnitsData>(family).expect("units").1;
+        let first: Vec<_> = DEVICE_FAMILIES.map(units).into();
+        h.sweep().await.expect("second sweep");
+        for (family, first) in DEVICE_FAMILIES.into_iter().zip(first) {
+            let second = units(family);
+            assert_eq!(second.units.len(), first.units.len(), "{family:?}");
+            let shared = first
+                .units
+                .iter()
+                .zip(&second.units)
+                .filter(|(a, b)| Arc::ptr_eq(a, b))
+                .count();
+            assert_eq!(shared, first.units.len(), "{family:?} shares its units");
+        }
+        for family in [
+            Family::Dpu,
+            Family::Expected,
+            Family::Instance,
+            Family::HostFirmwareRequests,
+        ] {
+            assert!(!units(family).units.is_empty(), "{family:?} has units");
+        }
+    }
+
+    /// A build that panics must not cost the family its last units: the next
+    /// sweep still has them to share against.
+    #[tokio::test(start_paused = true)]
+    async fn a_panicking_build_keeps_the_last_units() {
+        let h = harness(small_site());
+        h.sweep().await.expect("first sweep");
+        let kept = h.reader.previous().get(&Family::Switch).cloned();
+        assert_eq!(kept.as_ref().map(Vec::len), Some(2));
+        let meta = h.sink.latest::<UnitsData>(Family::Switch).expect("units").0;
+        let mut failed = Incomplete::default();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            h.reader
+                .deliver_built(&meta, Family::Switch, &mut failed, |_| {
+                    panic!("build panics")
+                });
+        }));
+        assert!(panicked.is_err());
+        let after = h.reader.previous().get(&Family::Switch).cloned();
+        assert_eq!(after, kept, "the last units stay for the next sweep");
+        h.sweep().await.expect("next sweep");
+        let second = h.sink.latest::<UnitsData>(Family::Switch).expect("units").1;
+        assert!(
+            kept.expect("units")
+                .iter()
+                .zip(&second.units)
+                .all(|(a, b)| Arc::ptr_eq(a, b)),
+            "the next sweep shares them"
+        );
+    }
+
+    /// A compact read that nico-api stops serving part way through the host
+    /// family leaves no mix: the whole family is read again in full.
+    #[tokio::test(start_paused = true)]
+    async fn fallback_mid_sweep_reads_every_host_in_full() {
+        let h = harness_with(small_site(), HostReadMode::Auto);
+        h.nico.pass_next("find_host_states_by_ids");
+        h.nico.fail_next(
+            "find_host_states_by_ids",
+            CallError::Status("gRPC Unimplemented".to_string()),
+        );
+        h.sweep().await.expect("sweep");
+        assert_eq!(h.nico.calls("find_host_states_by_ids"), 2);
+        // The failed batch, then both batches again.
+        assert_eq!(h.nico.calls("find_machines_by_ids"), 3);
+        let hosts = h.sink.latest::<UnitsData>(Family::Host).expect("hosts").1;
+        assert!(!hosts.compact_host_read);
+        assert!(!hosts.allocatable_known && !hosts.update_eligible_known);
+        assert_eq!(hosts.units.len(), 4);
+        for unit in &hosts.units {
+            let host = unit.host.as_ref().expect("host fields");
+            assert_eq!(host.version_source, VersionSource::MachineRecord);
+            assert_eq!(host.allocatable, None);
+        }
+    }
+
+    /// A full read that fails after a fallback part way through the host
+    /// family keeps its failure. Reading the family again would retry an
+    /// error answer the gate never retries.
+    #[tokio::test(start_paused = true)]
+    async fn failed_full_read_after_a_mid_sweep_fallback_is_not_read_again() {
+        let h = harness_with(small_site(), HostReadMode::Auto);
+        h.nico.pass_next("find_host_states_by_ids");
+        h.nico.fail_next(
+            "find_host_states_by_ids",
+            CallError::Status("gRPC Unimplemented".to_string()),
+        );
+        h.nico.fail_next(
+            "find_machines_by_ids",
+            CallError::Status("gRPC PermissionDenied".to_string()),
+        );
+        assert!(h.sweep().await.is_err(), "incomplete sweep");
+        assert_eq!(h.nico.calls("find_host_states_by_ids"), 2);
+        assert_eq!(h.nico.calls("find_machines_by_ids"), 1, "no second read");
+        assert!(h.sink.latest::<UnitsData>(Family::Host).is_none());
+        assert_eq!(h.sink.failure_kinds(Family::Host), vec![FailureKind::Rpc]);
+    }
+
+    /// An empty fleet sends no host batch, so the sweep asks nico-api with
+    /// no IDs whether it serves the compact read. Only its invalid-argument
+    /// answer, or a reply, makes the predicates known.
+    #[tokio::test(start_paused = true)]
+    async fn empty_fleet_checks_the_compact_read() {
+        for (code, served) in [
+            ("gRPC InvalidArgument", true),
+            ("gRPC Unimplemented", false),
+            ("gRPC PermissionDenied", false),
+        ] {
+            let h = harness_with(FakeSite::default(), HostReadMode::Auto);
+            h.nico.fail_next(
+                "find_host_states_by_ids",
+                CallError::Status(code.to_string()),
+            );
+            h.sweep().await.expect("sweep");
+            assert_eq!(h.nico.calls("find_host_states_by_ids"), 1, "{code}");
+            let hosts = h.sink.latest::<UnitsData>(Family::Host).expect("hosts").1;
+            let known = (hosts.allocatable_known, hosts.update_eligible_known);
+            assert_eq!(
+                (hosts.compact_host_read, known),
+                (served, (served, served)),
+                "{code}"
+            );
+        }
+    }
+
+    /// A family whose sweep fails keeps its last published units to share
+    /// against, so the next good sweep reuses them. A unit gone for one
+    /// sweep has no previous unit when it comes back, so it is a new one.
+    #[tokio::test(start_paused = true)]
+    async fn units_stay_shared_across_a_failed_sweep() {
+        let h = harness(small_site());
+        let switches = |h: &Harness| {
+            h.sink
+                .latest::<UnitsData>(Family::Switch)
+                .expect("switches")
+                .1
+        };
+        h.sweep().await.expect("first sweep");
+        let first = switches(&h);
+        assert_eq!(first.units.len(), 2);
+
+        h.nico.fail_next(
+            "find_switches_by_ids",
+            CallError::Status("Internal: db".to_string()),
+        );
+        assert!(h.sweep().await.is_err(), "the switch read fails");
+        assert_eq!(h.sink.failure_kinds(Family::Switch), vec![FailureKind::Rpc]);
+        assert_eq!(switches(&h), first, "the switch family keeps its snapshot");
+
+        h.sweep().await.expect("third sweep");
+        let third = switches(&h);
+        assert_eq!(third.units, first.units);
+        assert!(
+            first
+                .units
+                .iter()
+                .zip(&third.units)
+                .all(|(a, b)| Arc::ptr_eq(a, b)),
+            "the good sweep after the failed one shares the first sweep's units"
+        );
+
+        let gone = fake::switch_id(2).to_string();
+        let removed = h
+            .nico
+            .site
+            .lock()
+            .unwrap()
+            .switches
+            .remove(&gone)
+            .expect("switch 2");
+        h.sweep().await.expect("sweep without switch 2");
+        assert_eq!(switches(&h).units.len(), 1);
+        h.nico.site.lock().unwrap().add_switch(removed);
+        h.sweep().await.expect("sweep with switch 2 back");
+        let back = switches(&h);
+        assert_eq!(back.units, third.units, "the same switches again");
+        for (before, after) in third.units.iter().zip(&back.units) {
+            assert_eq!(
+                Arc::ptr_eq(before, after),
+                after.id != gone,
+                "only the switch that was gone is a new unit: {}",
+                after.id
+            );
+        }
+    }
+
+    /// The sweep's families are delivered one at a time. A scrape after
+    /// every delivery sees each published family with its own count, its
+    /// own sweep times and its own sweep counter, and every family of one
+    /// sweep with the same times.
+    #[tokio::test(start_paused = true)]
+    async fn scrape_between_deliveries_pairs_each_family_with_its_sweep() {
+        use crate::snapshot::AnySnapshot;
+        use crate::state::store::SnapshotStore;
+        use crate::state_metrics::{CountingSink, StateCollector};
+
+        struct Scraping {
+            inner: CountingSink,
+            registry: prometheus::Registry,
+            published: Mutex<Vec<(Family, SweepMeta, usize)>>,
+        }
+
+        fn sample(registry: &prometheus::Registry, name: &str, labels: &[(&str, &str)]) -> f64 {
+            registry
+                .gather()
+                .iter()
+                .filter(|family| family.name() == name)
+                .flat_map(|family| family.get_metric().iter())
+                .filter(|metric| {
+                    labels.iter().all(|(k, v)| {
+                        metric
+                            .get_label()
+                            .iter()
+                            .any(|l| l.name() == *k && l.value() == *v)
+                    })
+                })
+                .map(|metric| metric.gauge.value() + metric.counter.value())
+                .sum()
+        }
+
+        impl SnapshotSink for Scraping {
+            fn publish(&self, family: Family, snap: Arc<dyn AnySnapshot>) {
+                let units =
+                    crate::state_metrics::units_of(snap.as_ref()).map_or(0, |d| d.units.len());
+                let meta = snap.meta().clone();
+                self.inner.publish(family, snap);
+                let mut published = self.published.lock().unwrap();
+                published.push((family, meta, units));
+                let secs = |at: SystemTime| {
+                    at.duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs_f64()
+                };
+                for (family, meta, units) in published.iter().rev().fold(
+                    Vec::<(Family, SweepMeta, usize)>::new(),
+                    |mut newest, row| {
+                        if !newest.iter().any(|(f, _, _)| *f == row.0) {
+                            newest.push(row.clone());
+                        }
+                        newest
+                    },
+                ) {
+                    let label = crate::api::spec::wire(family);
+                    let times = [("reader", "devices"), ("family", label.as_str())];
+                    assert_eq!(
+                        sample(
+                            &self.registry,
+                            "carbide_site_health_probe_sweep_complete_timestamp_seconds",
+                            &times
+                        ),
+                        secs(meta.end),
+                        "{family:?} end"
+                    );
+                    assert_eq!(
+                        sample(
+                            &self.registry,
+                            "carbide_site_health_probe_sweep_start_timestamp_seconds",
+                            &times
+                        ),
+                        secs(meta.start),
+                        "{family:?} start"
+                    );
+                    let delivered = published.iter().filter(|(f, _, _)| *f == family).count();
+                    assert_eq!(
+                        sample(
+                            &self.registry,
+                            "carbide_site_health_probe_sweeps_total",
+                            &[("family", label.as_str()), ("result", "complete")]
+                        ),
+                        delivered as f64,
+                        "{family:?} sweep counter"
+                    );
+                    let unit_type = match family {
+                        Family::Host => Some("host"),
+                        Family::Dpu => Some("dpu"),
+                        Family::Switch => Some("switch"),
+                        Family::Rack => Some("rack"),
+                        _ => None,
+                    };
+                    if let Some(unit_type) = unit_type {
+                        assert_eq!(
+                            sample(
+                                &self.registry,
+                                "carbide_site_health_probe_units",
+                                &[("type", unit_type), ("stage", "registered")]
+                            ),
+                            units as f64,
+                            "{family:?} count"
+                        );
+                    }
+                }
+                // Only families built from the same read phase share times.
+                let phase = |f| match f {
+                    Family::Host | Family::Dpu | Family::HostFirmwareRequests => 0,
+                    Family::Instance => 1,
+                    _ => 2,
+                };
+                let (family, this, _) = published.last().unwrap();
+                for (_, meta, _) in published
+                    .iter()
+                    .filter(|(f, m, _)| m.seq == this.seq && phase(*f) == phase(*family))
+                {
+                    assert_eq!(meta, this);
+                }
+            }
+
+            fn failed(&self, reader: Reader, family: Family, kind: FailureKind, error: &str) {
+                self.inner.failed(reader, family, kind, error);
+            }
+        }
+
+        let setup = metrics_endpoint::new_metrics_setup("site-health-probe", "test", false)
+            .expect("metrics setup");
+        let store = Arc::new(SnapshotStore::new(&crate::config::Paging::default()));
+        setup
+            .registry
+            .register(Box::new(StateCollector::new(
+                Arc::clone(&store),
+                SystemTime::now(),
+            )))
+            .expect("register");
+        let sink = Arc::new(Scraping {
+            inner: CountingSink::new(Arc::clone(&store), &setup.meter),
+            registry: setup.registry.clone(),
+            published: Mutex::new(Vec::new()),
+        });
+        let nico = FakeNico::new(small_site());
+        let reader = DevicesReader::new(
+            ReaderConfig {
+                enabled: true,
+                interval: Duration::from_secs(120),
+                timeout: Duration::from_secs(600),
+            },
+            2,
+            HostReadMode::Full,
+            Arc::new(FakeConnector(Arc::clone(&nico))),
+            Arc::new(CallGate::new(
+                "nico-api",
+                2.0,
+                Duration::from_secs(5),
+                Duration::from_secs(30),
+            )),
+            Arc::clone(&sink) as Arc<dyn SnapshotSink>,
+            SystemTime::now(),
+        );
+        reader
+            .run(&ObservationRecorder::default())
+            .await
+            .expect("first sweep");
+        // The second sweep counts differently: a host and its DPUs are gone.
+        nico.site
+            .lock()
+            .unwrap()
+            .hosts
+            .remove(&fake::host_id(4).to_string());
+        nico.site
+            .lock()
+            .unwrap()
+            .expected_machines
+            .retain(|m| m.machine_id != Some(fake::host_id(4)));
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        reader
+            .run(&ObservationRecorder::default())
+            .await
+            .expect("second sweep");
+        assert_eq!(
+            sink.published.lock().unwrap().len(),
+            2 * DEVICE_FAMILIES.len()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sweep_publishes_every_family() {
+        let h = harness(small_site());
+        h.nico.set_delay(Duration::from_secs(1));
+        h.sweep().await.expect("complete sweep");
+        assert_eq!(h.nico.calls("find_machine_ids"), 1, "no second census");
+        assert_eq!(
+            h.nico.calls("find_machines_by_ids"),
+            2,
+            "4 hosts, 2 per batch"
+        );
+        let starts: Vec<_> = h.nico.starts().into_iter().map(|(_, at)| at).collect();
+        for pair in starts.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= Duration::from_secs(1),
+                "one call at a time"
+            );
+        }
+        for family in DEVICE_FAMILIES {
+            assert_eq!(h.sink.count(family), 1, "{family:?}");
+        }
+        assert_eq!(h.units(Family::Host).len(), 4);
+        assert_eq!(h.units(Family::Dpu).len(), 8);
+        assert!(h.units(Family::Dpu).iter().all(|u| u.done));
+        assert_eq!(h.units(Family::Switch).len(), 2);
+        assert_eq!(h.units(Family::PowerShelf).len(), 1);
+        assert_eq!(h.units(Family::Rack).len(), 1);
+        let instance = &h.units(Family::Instance)[0];
+        assert_eq!((instance.state.as_str(), instance.done), ("ready", true));
+        let expected = h.units(Family::Expected);
+        assert_eq!(count_linked(&expected, RecordType::Host), 4);
+        assert_eq!(count_linked(&expected, RecordType::Switch), 2);
+        assert_eq!(count_linked(&expected, RecordType::PowerShelf), 1);
+        assert_eq!(count_linked(&expected, RecordType::Rack), 1);
+        assert!(
+            expected
+                .iter()
+                .all(|u| u.unit_type == UnitType::ExpectedRecord),
+            "no identity mismatch on a clean site"
+        );
+        assert!(h.units(Family::HostFirmwareRequests).is_empty());
+        assert_eq!(h.nico.max_in_flight(), 1, "one call in flight");
+        let (meta, _) = h.sink.latest::<UnitsData>(Family::Host).expect("host");
+        assert!(meta.end >= meta.start);
+        assert_eq!(meta.seq, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn mid_sweep_create_delete_no_double_count_no_partial() {
+        let h = harness(small_site());
+        // Between the census and the by-ID reads: host 2 is deleted and host
+        // 9 is created.
+        h.nico.after("find_machine_ids", |site| {
+            site.hosts.remove(&fake::host_id(2).to_string());
+            site.add_host(fake::host(9, "Ready", &[]));
+        });
+        h.sweep().await.expect("complete sweep");
+        let hosts = h.units(Family::Host);
+        let ids: Vec<&str> = hosts.iter().map(|u| u.id.as_str()).collect();
+        assert_eq!(
+            ids.len(),
+            ids.iter().collect::<BTreeSet<_>>().len(),
+            "no ID twice"
+        );
+        assert_eq!(
+            hosts.len(),
+            3,
+            "the deleted host is gone, the new one not yet read"
+        );
+        assert!(!ids.contains(&fake::host_id(9).to_string().as_str()));
+
+        // A host the by-ID read leaves out while the census still lists it is
+        // unresolved: the host family is not published, the others are.
+        let before = h.sink.count(Family::Host);
+        h.nico
+            .site
+            .lock()
+            .unwrap()
+            .withheld
+            .insert(fake::host_id(3).to_string());
+        assert!(h.sweep().await.is_err(), "incomplete sweep");
+        assert_eq!(
+            h.sink.count(Family::Host),
+            before,
+            "no partial host snapshot"
+        );
+        assert_eq!(
+            h.sink.failure_kinds(Family::Host),
+            vec![FailureKind::Unresolved]
+        );
+        assert_eq!(
+            h.sink.count(Family::Switch),
+            2,
+            "other families still publish"
+        );
+        let census_now = h.nico.site.lock().unwrap().hosts.len();
+        assert!(h.units(Family::Host).len() <= census_now);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_batch_keeps_last_family_snapshot() {
+        let h = harness(small_site());
+        h.sweep().await.expect("first sweep");
+        let (first, hosts_before) = h.sink.latest::<UnitsData>(Family::Host).expect("hosts");
+
+        // A host batch fails with an error answer, which is not retried.
+        h.nico.fail_next(
+            "find_machines_by_ids",
+            CallError::Status("Internal: db".to_string()),
+        );
+        assert!(h.sweep().await.is_err(), "incomplete sweep");
+        let (kept, hosts_after) = h.sink.latest::<UnitsData>(Family::Host).expect("hosts");
+        assert_eq!(kept, first, "the host family keeps its last snapshot");
+        assert_eq!(hosts_after, hosts_before);
+        assert_eq!(h.sink.failure_kinds(Family::Host), vec![FailureKind::Rpc]);
+        // DPUs, expected records and firmware requests need the host read.
+        assert_eq!(h.sink.count(Family::Dpu), 1);
+        assert_eq!(h.sink.count(Family::Expected), 1);
+        assert_eq!(h.sink.count(Family::Switch), 2);
+        assert_eq!(h.sink.count(Family::Instance), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn soft_deleted_rack_is_gone() {
+        let mut site = small_site();
+        site.add_rack(fake::rack(2, "ready"));
+        let h = harness(site);
+        // Rack 2 is soft-deleted between the census and its by-ID read; the
+        // by-ID read still returns it, with `deleted` set.
+        h.nico.after("find_rack_ids", |site| {
+            let rack = site.racks.get_mut(&fake::rack_id(2).to_string()).unwrap();
+            rack.deleted = Some(SystemTime::now().into());
+        });
+        h.sweep().await.expect("complete sweep");
+        let racks = h.units(Family::Rack);
+        assert_eq!(racks.len(), 1);
+        assert_eq!(racks[0].id, fake::rack_id(1).to_string());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dpu_ready_follows_host_category() {
+        let mut site = FakeSite::default();
+        site.add_host(fake::host(1, "Assigned/Ready", &[1]));
+        site.add_host(fake::host(
+            2,
+            "DPUInitializing/WaitingForNetworkConfig",
+            &[2],
+        ));
+        site.add_host(fake::host(3, "Failed/MachineValidation", &[3]));
+        site.add_host(fake::host(4, "Maintenance(PowerCycle)", &[4]));
+        let h = harness(site);
+        h.sweep().await.expect("complete sweep");
+        let dpu = |i| h.unit(Family::Dpu, &fake::dpu_id(i).to_string());
+        assert_eq!((dpu(1).state.as_str(), dpu(1).done), ("Assigned", true));
+        assert_eq!(dpu(1).stage, Stage::Ready);
+        assert_eq!(
+            (dpu(2).state.as_str(), dpu(2).done),
+            ("DPUInitializing", false)
+        );
+        assert_eq!(dpu(2).stage, Stage::Registered);
+        assert_eq!(
+            (dpu(3).state.as_str(), dpu(3).stage),
+            ("Failed", Stage::Error)
+        );
+        assert!(!dpu(3).done);
+        assert!(dpu(4).done, "maintenance comes after DPU setup");
+        assert_eq!(
+            dpu(1).dpu.unwrap().host_id,
+            Some(fake::host_id(1).to_string())
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dpu_not_done_under_configure_astra_created_or_unknown() {
+        let mut site = FakeSite::default();
+        site.add_host(fake::host(1, "ConfigureAstra/Configuring", &[1]));
+        site.add_host(fake::host(2, "Created", &[2]));
+        site.add_host(fake::host(3, "BrandNewState/Sub", &[3]));
+        let h = harness(site);
+        h.sweep().await.expect("complete sweep");
+        for (i, state) in [(1, "ConfigureAstra"), (2, "Created"), (3, OTHER)] {
+            let dpu = h.unit(Family::Dpu, &fake::dpu_id(i).to_string());
+            assert_eq!(dpu.state, state);
+            assert!(!dpu.done, "{state}");
+        }
+        let (_, hosts) = h.sink.latest::<UnitsData>(Family::Host).unwrap();
+        assert_eq!(hosts.unknown_states, 1, "the unknown host state is counted");
+        assert_eq!(
+            h.unit(Family::Host, &fake::host_id(3).to_string()).state,
+            OTHER
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unattached_dpu_is_unresolved_unit() {
+        let mut site = small_site();
+        let orphan = fake::dpu_id(99);
+        site.dpus.insert(orphan.to_string(), orphan);
+        let h = harness(site);
+        h.sweep().await.expect("complete sweep");
+        let dpu = h.unit(Family::Dpu, &orphan.to_string());
+        assert_eq!(dpu.state, UNATTACHED);
+        assert!(!dpu.done);
+        assert_eq!(dpu.dpu.unwrap().host_id, None);
+        assert_eq!(dpu.reason.as_deref(), Some(UNATTACHED));
+        assert_eq!(h.units(Family::Dpu).len(), 9, "still counted as registered");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ambiguous_link_not_counted() {
+        let mut site = small_site();
+        // Expected host 5 links to hosts 3 and 4 (a BMC MAC on two
+        // interfaces), repeating rows.
+        let mut row = fake::expected_machine(5, Some(3));
+        site.expected_machines.push(row.clone());
+        site.expected_machines.push(row.clone());
+        row.machine_id = Some(fake::host_id(4));
+        site.expected_machines.push(row);
+        // Host 6 has no expected record.
+        site.add_host(fake::host(6, "Ready", &[]));
+        let h = harness(site);
+        h.sweep().await.expect("complete sweep");
+        let expected = h.units(Family::Expected);
+        assert_eq!(
+            count_linked(&expected, RecordType::Host),
+            4,
+            "em-5 is not linked"
+        );
+        let host_records: Vec<&Unit> = expected
+            .iter()
+            .filter(|u| {
+                u.unit_type == UnitType::ExpectedRecord
+                    && u.expected.as_ref().unwrap().record_type == RecordType::Host
+            })
+            .collect();
+        assert_eq!(host_records.len(), 5, "em-5 stays an expected record");
+        let record = host_records.iter().find(|u| u.id == "em-5").unwrap();
+        assert!(!record.done && !record.expected.as_ref().unwrap().linked);
+        assert_eq!(record.expected.as_ref().unwrap().device_id, None);
+        assert_eq!(
+            record.reason.as_deref(),
+            Some("ambiguous_link: linked to 2 devices")
+        );
+        let mismatch: Vec<&Unit> = expected
+            .iter()
+            .filter(|u| u.unit_type == UnitType::IdentityMismatch && u.id == "em-5")
+            .collect();
+        assert_eq!(mismatch.len(), 1, "plus one mismatch diagnostic");
+        assert_eq!(mismatch[0].state, "ambiguous_link");
+        let orphan = h.unit(Family::Expected, &fake::host_id(6).to_string());
+        assert_eq!(orphan.unit_type, UnitType::IdentityMismatch);
+        assert_eq!(orphan.state, "no_expected_record");
+        assert_eq!(orphan.expected.unwrap().record_type, RecordType::Host);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rack_linked_by_census() {
+        let mut site = small_site();
+        site.expected_racks.push(fake::expected_rack(2));
+        site.expected_rack_groups
+            .push(fake::expected_rack_group("group-a"));
+        // Expected switch 3 has no switch and an explorer error; expected
+        // shelf 2 has never been explored.
+        site.expected_switches.push(forge::LinkedExpectedSwitch {
+            explored_endpoint_address: Some("10.9.9.9".to_string()),
+            ..fake::expected_switch(3, None)
+        });
+        site.explored.insert(
+            "10.9.9.9".to_string(),
+            rpc::site_explorer::ExploredEndpoint {
+                address: "10.9.9.9".to_string(),
+                report: Some(rpc::site_explorer::EndpointExplorationReport {
+                    last_exploration_error: Some("Unauthorized".to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        site.expected_shelves.push(fake::expected_shelf(2, None));
+        let h = harness(site);
+        h.sweep().await.expect("complete sweep");
+        let rack = |id: &str| h.unit(Family::Expected, id);
+        let linked = rack(fake::rack_id(1).as_str());
+        assert!(linked.done && linked.expected.unwrap().linked);
+        let missing = rack(fake::rack_id(2).as_str());
+        assert!(!missing.done);
+        assert_eq!(missing.expected.unwrap().record_type, RecordType::Rack);
+        let group = rack("group-a");
+        assert_eq!(group.expected.unwrap().record_type, RecordType::RackGroup);
+        assert!(!group.done, "rack groups never link");
+        assert_eq!(
+            h.unit(Family::Expected, "es-3").reason.as_deref(),
+            Some("no_device: Unauthorized")
+        );
+        assert_eq!(
+            h.unit(Family::Expected, "es-3").bmc_ip.as_deref(),
+            Some("10.9.9.9")
+        );
+        assert_eq!(
+            h.unit(Family::Expected, "ep-2").reason.as_deref(),
+            Some("no_device: not_explored")
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unjoinable_firmware_request_keeps_last() {
+        let mut site = small_site();
+        site.firmware_requests
+            .push(fake::firmware_request(1, "Automatic"));
+        site.firmware_requests
+            .push(fake::firmware_request(2, "AdminCli"));
+        let h = harness(site);
+        h.sweep().await.expect("complete sweep");
+        let request = h.unit(Family::HostFirmwareRequests, &fake::host_id(2).to_string());
+        assert_eq!(
+            request
+                .host
+                .unwrap()
+                .open_firmware_request
+                .unwrap()
+                .initiator,
+            carbide_site_health_probe_api::Initiator::Manual
+        );
+        let host = h.unit(Family::Host, &fake::host_id(1).to_string());
+        assert_eq!(
+            host.host.unwrap().open_firmware_request.unwrap().initiator,
+            carbide_site_health_probe_api::Initiator::Automatic
+        );
+
+        // A request for a host this sweep did not read.
+        h.nico
+            .site
+            .lock()
+            .unwrap()
+            .firmware_requests
+            .push(fake::firmware_request(42, "Automatic"));
+        assert!(h.sweep().await.is_err(), "incomplete sweep");
+        assert_eq!(h.sink.count(Family::HostFirmwareRequests), 1, "kept");
+        assert_eq!(
+            h.sink.failure_kinds(Family::HostFirmwareRequests),
+            vec![FailureKind::Unresolved]
+        );
+        assert_eq!(h.sink.count(Family::Host), 2, "hosts still publish");
+        let host = h.unit(Family::Host, &fake::host_id(2).to_string());
+        assert_eq!(
+            host.host.unwrap().open_firmware_request.unwrap().initiator,
+            carbide_site_health_probe_api::Initiator::Manual,
+            "joined hosts keep their requests"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn manager_request_is_automatic() {
+        let mut site = small_site();
+        // The machine update manager's own spelling.
+        site.firmware_requests
+            .push(fake::firmware_request(1, "Automated"));
+        let h = harness(site);
+        h.sweep().await.expect("complete sweep");
+        let id = fake::host_id(1).to_string();
+        for family in [Family::HostFirmwareRequests, Family::Host] {
+            assert_eq!(
+                h.unit(family, &id)
+                    .host
+                    .unwrap()
+                    .open_firmware_request
+                    .unwrap()
+                    .initiator,
+                carbide_site_health_probe_api::Initiator::Automatic,
+                "{family:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_firmware_read_never_shows_no_request() {
+        let mut site = small_site();
+        site.firmware_requests
+            .push(fake::firmware_request(1, "Automatic"));
+        let h = harness(site);
+        h.sweep().await.expect("complete sweep");
+        let (first, _) = h.sink.latest::<UnitsData>(Family::Host).expect("hosts");
+
+        h.nico.fail_next(
+            "list_hosts_waiting_for_reprovisioning",
+            CallError::Status("Internal: db".to_string()),
+        );
+        assert!(h.sweep().await.is_err(), "incomplete sweep");
+        let (kept, _) = h.sink.latest::<UnitsData>(Family::Host).expect("hosts");
+        assert_eq!(kept, first, "hosts keep their last snapshot");
+        assert_eq!(h.sink.failure_kinds(Family::Host), vec![FailureKind::Rpc]);
+        let published = h.sink.published.lock().unwrap();
+        for (family, snap) in published.iter() {
+            if *family != Family::Host {
+                continue;
+            }
+            let units = &snap
+                .as_any()
+                .downcast_ref::<crate::snapshot::FamilySnapshot<UnitsData>>()
+                .unwrap()
+                .data
+                .units;
+            let host = units
+                .iter()
+                .find(|u| u.id == fake::host_id(1).to_string())
+                .unwrap();
+            assert!(
+                host.host.as_ref().unwrap().open_firmware_request.is_some(),
+                "no host snapshot shows the open request as absent"
+            );
+        }
+    }
+}

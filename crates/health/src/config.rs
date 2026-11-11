@@ -31,6 +31,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use tokio::sync::Semaphore;
 use url::Url;
 
+use crate::collectors::CANCELLED_CONNECT_GRACE;
 use crate::metrics::BmcLatencyAttribute;
 
 const MAX_GNMI_RECONCILE_INTERVAL: Duration = Duration::from_secs(366 * 24 * 60 * 60);
@@ -112,6 +113,12 @@ pub struct Config {
     #[serde(with = "humantime_serde")]
     pub endpoint_discovery_interval: Duration,
 
+    /// Budget for draining started collectors on SIGTERM or SIGINT; collectors
+    /// still running when it passes are abandoned. Defaults to 20 seconds and
+    /// must be greater than zero.
+    #[serde(with = "humantime_serde")]
+    pub shutdown_timeout: Duration,
+
     /// BMC proxy URL
     pub bmc_proxy_url: Option<Url>,
 }
@@ -132,6 +139,7 @@ impl Default for Config {
             cache_size: 100,
             bmc_request_concurrency: DEFAULT_BMC_REQUEST_CONCURRENCY,
             endpoint_discovery_interval: Duration::from_secs(300),
+            shutdown_timeout: Duration::from_secs(20),
             bmc_proxy_url: None,
         }
     }
@@ -628,9 +636,26 @@ pub struct TracingSinkConfig {
     pub include_diagnostics: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Startup settings for Prometheus telemetry responses. Changes require a restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct PrometheusSinkConfig {}
+pub struct PrometheusSinkConfig {
+    /// Offer negotiated gzip on `/telemetry`. Defaults to `false`.
+    pub gzip: bool,
+
+    /// Gzip compression level from 1 through 9. Defaults to 1 and is validated
+    /// whenever the sink is enabled, including when gzip is disabled.
+    pub gzip_level: u32,
+}
+
+impl Default for PrometheusSinkConfig {
+    fn default() -> Self {
+        Self {
+            gzip: false,
+            gzip_level: 1,
+        }
+    }
+}
 
 /// Configuration for the JSONL log file sink.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1086,7 +1111,7 @@ pub struct CollectorsConfig {
     /// Firmware collector configuration (if present, firmware collector is enabled)
     pub firmware: Configurable<FirmwareCollectorConfig>,
 
-    /// Power shelf Manager collector configuration (if present, manager collector is enabled).
+    /// Redfish Manager collector configuration (if present, manager collector is enabled).
     pub manager: Configurable<ManagerCollectorConfig>,
 
     /// Leak detector collector configuration (if present, leak detector collector is enabled)
@@ -1364,6 +1389,9 @@ pub struct ProcessorsConfig {
 
     /// Rack-level leak processor: aggregates tray leak reports per rack.
     pub rack_leak: Configurable<RackLeakProcessorConfig>,
+
+    /// Projects source collector observations into structured resource-status logs.
+    pub resource_status: Configurable<ResourceStatusProcessorConfig>,
 }
 
 impl Default for ProcessorsConfig {
@@ -1371,9 +1399,15 @@ impl Default for ProcessorsConfig {
         Self {
             leak_detection: Configurable::Enabled(LeakDetectionProcessorConfig::default()),
             rack_leak: Configurable::Enabled(RackLeakProcessorConfig::default()),
+            resource_status: Configurable::Disabled,
         }
     }
 }
+
+/// Configuration for structured Redfish resource-status log projection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResourceStatusProcessorConfig {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1445,7 +1479,7 @@ impl Default for FirmwareCollectorConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ManagerCollectorConfig {
-    /// Interval between power-shelf manager (PMC) status polls.
+    /// Interval between Redfish Manager polls.
     #[serde(with = "humantime_serde")]
     pub poll_interval: Duration,
 }
@@ -1533,6 +1567,24 @@ pub struct SseLogConfig {
     /// Maximum retry backoff after repeated streaming connection failures.
     #[serde(with = "humantime_serde")]
     pub max_backoff: Duration,
+
+    /// Deadline for deleting the BMC subscription a closed stream opened, and for
+    /// each cap diagnosis: listing the BMC's subscriptions plus any `reap_on_cap`
+    /// sweep. In `sse` and `auto` log modes, validation requires it plus 5 s for a
+    /// cancelled connect to finish to be less than `shutdown_timeout`. Defaults
+    /// to 5 seconds and must be greater than zero.
+    #[serde(with = "humantime_serde")]
+    pub close_timeout: Duration,
+
+    /// Delete every SSE destination on a BMC at its cap. Enable only where
+    /// hw-health is the BMC's sole SSE consumer. Has no effect on BMCs that drop
+    /// a capped SSE open without an HTTP response (LiteOn). Disabled by default.
+    ///
+    /// Each BMC is swept at most once per 30 minutes, and recovery does not
+    /// reset that interval. The DELETEs run one at a time within `close_timeout`,
+    /// so a sweep can stop before reaching every destination; the rest wait for
+    /// the next sweep.
+    pub reap_on_cap: bool,
 }
 
 impl Default for SseLogConfig {
@@ -1540,6 +1592,8 @@ impl Default for SseLogConfig {
         Self {
             initial_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(30),
+            close_timeout: Duration::from_secs(5),
+            reap_on_cap: false,
         }
     }
 }
@@ -1559,6 +1613,10 @@ impl SseLogConfig {
                 "[collectors.logs.sse].max_backoff must be greater than or equal to initial_backoff"
                     .to_string(),
             );
+        }
+
+        if self.close_timeout.is_zero() {
+            return Err("[collectors.logs.sse].close_timeout must be greater than 0".to_string());
         }
 
         Ok(())
@@ -2776,8 +2834,9 @@ impl<P: Provider> Provider for CanonicalNicoApiProvider<P> {
 }
 
 impl Config {
-    /// Loads defaults, an optional TOML file, and `CARBIDE_HEALTH__` environment
-    /// overrides, in that order, then validates the resulting configuration.
+    /// Loads defaults, an optional TOML file, `CARBIDE_HEALTH__` environment
+    /// overrides, and `NICO_HEALTH__` environment overrides, in that order, then
+    /// validates the resulting configuration.
     /// Malformed enabled sections return an error instead of falling back to defaults.
     pub fn load(config_path: Option<&Path>) -> Result<Self, String> {
         let mut figment = Figment::new().merge(Serialized::defaults(Config::default()));
@@ -2786,17 +2845,24 @@ impl Config {
             figment = figment.merge(CanonicalNicoApiProvider(Toml::file(path)));
         }
 
-        figment = figment.merge(CanonicalNicoApiProvider(
-            Env::prefixed("CARBIDE_HEALTH__").split("__"),
-        ));
+        // Dual-prefix for the carbide->nico transition; NICO_HEALTH__ wins if both set.
+        figment = figment
+            .merge(CanonicalNicoApiProvider(
+                Env::prefixed("CARBIDE_HEALTH__").split("__"),
+            ))
+            .merge(CanonicalNicoApiProvider(
+                Env::prefixed("NICO_HEALTH__").split("__"),
+            ));
 
         let config: Config = figment.extract().map_err(|error| {
             let sources = match config_path {
                 Some(path) => format!(
-                    "{} and CARBIDE_HEALTH__ environment variables",
+                    "{} and CARBIDE_HEALTH__/NICO_HEALTH__ environment variables",
                     path.display()
                 ),
-                None => "defaults and CARBIDE_HEALTH__ environment variables".to_string(),
+                None => {
+                    "defaults and CARBIDE_HEALTH__/NICO_HEALTH__ environment variables".to_string()
+                }
             };
 
             let location = if error.path.is_empty() {
@@ -2839,11 +2905,21 @@ impl Config {
             return Err("endpoint_discovery_interval must be greater than 0".to_string());
         }
 
+        if self.shutdown_timeout.is_zero() {
+            return Err("shutdown_timeout must be greater than 0".to_string());
+        }
+
         if self.bmc_request_concurrency.get() > Semaphore::MAX_PERMITS {
             return Err(format!(
                 "bmc_request_concurrency must not exceed {}",
                 Semaphore::MAX_PERMITS
             ));
+        }
+
+        if let Configurable::Enabled(prometheus) = &self.sinks.prometheus
+            && !(1..=9).contains(&prometheus.gzip_level)
+        {
+            return Err("sinks.prometheus.gzip_level must be from 1 through 9".to_string());
         }
 
         self.metrics.validate()?;
@@ -2904,6 +2980,18 @@ impl Config {
 
         if let Configurable::Enabled(logs) = &self.collectors.logs {
             logs.validate()?;
+
+            // A cancelled connect may run for the grace before the DELETE starts.
+            if logs.mode != LogCollectionMode::Periodic
+                && CANCELLED_CONNECT_GRACE
+                    .checked_add(logs.sse_or_default().close_timeout)
+                    .is_none_or(|close| close >= self.shutdown_timeout)
+            {
+                return Err(format!(
+                    "[collectors.logs.sse].close_timeout plus the {}s cancelled-connect grace must be less than shutdown_timeout",
+                    CANCELLED_CONNECT_GRACE.as_secs()
+                ));
+            }
         }
 
         if let Configurable::Enabled(nvue) = &self.collectors.nvue
@@ -3083,6 +3171,40 @@ mod tests {
     use carbide_test_support::{Check, check_values, scenarios, value_scenarios};
 
     use super::*;
+
+    #[test]
+    fn prometheus_gzip_defaults_bounds_and_disabled_payloads() {
+        let invalid_level = "sinks.prometheus.gzip_level must be from 1 through 9";
+
+        value_scenarios!(run = |input: &str| {
+            let config: Config = Figment::new().merge(Toml::string(input)).extract().unwrap();
+
+            let settings = config.sinks.prometheus.as_option().map(|sink| (sink.gzip, sink.gzip_level));
+
+            (settings, config.validate())
+        };
+            "defaults" {
+                "" => (Some((false, 1)), Ok(())),
+                "[sinks.prometheus]\nenabled = true" => (Some((false, 1)), Ok(())),
+            }
+
+            "gzip settings" {
+                "[sinks.prometheus]\ngzip = true" => (Some((true, 1)), Ok(())),
+                "[sinks.prometheus]\ngzip = true\ngzip_level = 9" => (Some((true, 9)), Ok(())),
+            }
+
+            "invalid levels" {
+                "[sinks.prometheus]\ngzip_level = 0" => (Some((false, 0)), Err(invalid_level.into())),
+                "[sinks.prometheus]\ngzip = true\ngzip_level = 10" =>
+                    (Some((true, 10)), Err(invalid_level.into())),
+            }
+
+            "disabled malformed payload" {
+                "[sinks.prometheus]\nenabled = false\ngzip = 1\ngzip_level = \"invalid\"" =>
+                    (None, Ok(())),
+            }
+        );
+    }
 
     #[test]
     fn gnmi_reconciliation_config_contract() {
@@ -3307,6 +3429,7 @@ mod tests {
 
         assert!(config.collectors.sensors.is_enabled());
         assert!(config.collectors.firmware.is_enabled());
+        assert!(config.processors.resource_status.is_enabled());
         if let Configurable::Enabled(ref manager) = config.collectors.manager {
             assert_eq!(manager.poll_interval, Duration::from_secs(120));
         } else {
@@ -3481,6 +3604,7 @@ cache_size = 50
         }
 
         assert!(!config.collectors.firmware.is_enabled());
+        assert!(!config.processors.resource_status.is_enabled());
         if let Configurable::Enabled(ref manager) = config.collectors.manager {
             assert_eq!(manager.poll_interval, Duration::from_secs(300));
         } else {
@@ -3671,6 +3795,13 @@ mac = "00:11:22:33:44:55"
                 Box::new(Config::default()) => Yields(()),
 
                 config_with(|config| {
+                    config.rate_limit = Configurable::Enabled(RateLimitConfig {
+                        bucket_burst: 1,
+                        ..RateLimitConfig::default()
+                    });
+                }) => Yields(()),
+
+                config_with(|config| {
                     config.bmc_request_concurrency =
                         NonZeroUsize::new(Semaphore::MAX_PERMITS)
                             .expect("Tokio supports at least one semaphore permit");
@@ -3722,6 +3853,32 @@ mac = "00:11:22:33:44:55"
                 ),
 
                 config_with(|config| {
+                    config.collectors.logs = Configurable::Enabled(LogsCollectorConfig {
+                        sse: Some(SseLogConfig {
+                            close_timeout: config.shutdown_timeout - CANCELLED_CONNECT_GRACE,
+                            ..SseLogConfig::default()
+                        }),
+                        ..LogsCollectorConfig::default()
+                    });
+                }) => FailsWith(
+                    "[collectors.logs.sse].close_timeout plus the 5s cancelled-connect grace must be less than shutdown_timeout"
+                        .to_string()
+                ),
+
+                // Periodic mode opens no SSE stream, so it has nothing to delete on shutdown.
+                config_with(|config| {
+                    config.collectors.logs = Configurable::Enabled(LogsCollectorConfig {
+                        mode: LogCollectionMode::Periodic,
+                        sse: Some(SseLogConfig {
+                            close_timeout: config.shutdown_timeout,
+                            ..SseLogConfig::default()
+                        }),
+                        periodic: Some(PeriodicLogConfig::default()),
+                        ..LogsCollectorConfig::default()
+                    });
+                }) => Yields(()),
+
+                config_with(|config| {
                     config.bmc_request_concurrency =
                         NonZeroUsize::new(Semaphore::MAX_PERMITS + 1)
                             .expect("the value above Tokio's maximum remains nonzero");
@@ -3745,6 +3902,15 @@ mac = "00:11:22:33:44:55"
                 }) => FailsWith(
                     "bucket_replenish must be greater than 0 when rate limiting is enabled"
                         .to_string()
+                ),
+
+                config_with(|config| {
+                    config.rate_limit = Configurable::Enabled(RateLimitConfig {
+                        bucket_burst: 0,
+                        ..RateLimitConfig::default()
+                    });
+                }) => FailsWith(
+                    "bucket_burst must be greater than 0 when rate limiting is enabled".to_string()
                 ),
 
                 config_with(|config| {
@@ -4571,6 +4737,80 @@ reload_interval = "30s"
                 (&[][..], &["CARBIDE_API", "NICO_API"][..]) => "https://nico-api.example:1079/".to_string(),
             }
         );
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)] // Figment controls the error representation.
+    fn env_prefixes_layer_over_defaults() {
+        // Loads the config inside a jail with only the given environment variables set.
+        let load_with = |vars: &[(&str, &str)]| {
+            let mut config = None;
+            figment::Jail::expect_with(|jail| {
+                jail.clear_env();
+                for (key, value) in vars {
+                    jail.set_env(key, value);
+                }
+                config = Some(Config::load(None).expect("config should load"));
+                Ok(())
+            });
+            config.expect("config should be produced")
+        };
+        let nico_api_url = |config: &Config| {
+            config
+                .endpoint_sources
+                .carbide_api
+                .as_option()
+                .expect("NICo API source should stay enabled")
+                .api_url
+                .to_string()
+        };
+
+        // 1. Nothing set: compiled-in defaults.
+        let config = load_with(&[]);
+        assert_eq!(config.cache_size, 100);
+        assert_eq!(config.shards_count, 1);
+        assert_eq!(config.bmc_proxy_url, None);
+        assert_eq!(
+            nico_api_url(&config),
+            "https://nico-api.nico-system.svc.cluster.local:1079/"
+        );
+
+        // 2. Legacy CARBIDE_HEALTH__ prefix overrides the defaults.
+        let legacy = [
+            ("CARBIDE_HEALTH__CACHE_SIZE", "250"),
+            ("CARBIDE_HEALTH__SHARDS_COUNT", "3"),
+            (
+                "CARBIDE_HEALTH__BMC_PROXY_URL",
+                "https://legacy-proxy.example/",
+            ),
+            (
+                "CARBIDE_HEALTH__ENDPOINT_SOURCES__CARBIDE_API__API_URL",
+                "https://carbide-api.example:1079/",
+            ),
+        ];
+        let config = load_with(&legacy);
+        assert_eq!(config.cache_size, 250);
+        assert_eq!(config.shards_count, 3);
+        assert_eq!(
+            config.bmc_proxy_url.as_ref().map(ToString::to_string),
+            Some("https://legacy-proxy.example/".to_string())
+        );
+        assert_eq!(nico_api_url(&config), "https://carbide-api.example:1079/");
+
+        // 3. NICO_HEALTH__ overrides one legacy key; the other legacy keys still apply.
+        let mut both = legacy.to_vec();
+        both.push(("NICO_HEALTH__CACHE_SIZE", "999"));
+        let config = load_with(&both);
+        assert_eq!(
+            config.cache_size, 999,
+            "NICO_HEALTH__ should win over CARBIDE_HEALTH__"
+        );
+        assert_eq!(config.shards_count, 3);
+        assert_eq!(
+            config.bmc_proxy_url.as_ref().map(ToString::to_string),
+            Some("https://legacy-proxy.example/".to_string())
+        );
+        assert_eq!(nico_api_url(&config), "https://carbide-api.example:1079/");
     }
 
     #[test]
@@ -6545,9 +6785,19 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                 SseLogConfig {
                     initial_backoff: Duration::from_secs(30),
                     max_backoff: Duration::from_secs(1),
+                    ..SseLogConfig::default()
                 } => FailsWith(
                     "[collectors.logs.sse].max_backoff must be greater than or equal to initial_backoff"
                         .to_string()
+                ),
+            }
+
+            "zero close timeout" {
+                SseLogConfig {
+                    close_timeout: Duration::ZERO,
+                    ..SseLogConfig::default()
+                } => FailsWith(
+                    "[collectors.logs.sse].close_timeout must be greater than 0".to_string()
                 ),
             }
         );
@@ -6680,6 +6930,7 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                     sse: Some(SseLogConfig {
                         initial_backoff: Duration::from_secs(30),
                         max_backoff: Duration::from_secs(1),
+                        ..SseLogConfig::default()
                     }),
                     ..LogsCollectorConfig::default()
                 } => FailsWith(
@@ -6957,12 +7208,14 @@ max_backoff = "1m"
                     configured_sse: Some(SseLogConfig {
                         initial_backoff: Duration::from_secs(2),
                         max_backoff: Duration::from_secs(60),
+                        ..SseLogConfig::default()
                     }),
                     configured_periodic: None,
                     configured_auto: None,
                     effective_sse: SseLogConfig {
                         initial_backoff: Duration::from_secs(2),
                         max_backoff: Duration::from_secs(60),
+                        ..SseLogConfig::default()
                     },
                     effective_periodic: PeriodicLogConfig::default(),
                     effective_auto_periodic: PeriodicLogConfig::default(),
@@ -7045,12 +7298,14 @@ max_backoff = "45s"
                     configured_sse: Some(SseLogConfig {
                         initial_backoff: Duration::from_secs(3),
                         max_backoff: Duration::from_secs(45),
+                        ..SseLogConfig::default()
                     }),
                     configured_periodic: None,
                     configured_auto: None,
                     effective_sse: SseLogConfig {
                         initial_backoff: Duration::from_secs(3),
                         max_backoff: Duration::from_secs(45),
+                        ..SseLogConfig::default()
                     },
                     effective_periodic: PeriodicLogConfig::default(),
                     effective_auto_periodic: PeriodicLogConfig::default(),

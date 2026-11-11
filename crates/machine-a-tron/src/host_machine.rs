@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -22,10 +21,12 @@ use std::time::{Duration, Instant};
 use bmc_mock::injection::InjectionStore;
 use bmc_mock::mac_address_pool::{MacAddressPool, PoolConfig as MacAddressPoolConfig};
 use bmc_mock::{
-    ActionError, HostFirmwareVersions, HostMachineInfo, MachineInfo, ResourceResetType,
+    ActionError, DeviceEffect, HostFirmwareVersions, HostMachineInfo, MachineInfo,
+    ResourceResetType,
 };
 use carbide_utils::test_support::certs::create_random_self_signed_cert;
 use carbide_uuid::machine::MachineId;
+#[cfg(test)]
 use eyre::Context;
 use nv_redfish::schema::resource::PowerState;
 use tokio::sync::{mpsc, oneshot};
@@ -54,17 +55,14 @@ pub(super) struct HostMachine {
     app_context: Arc<MachineATronContext>,
     live_state: Arc<RwLock<LiveState>>,
     state_machine: MachineStateMachine,
-    api_state: String,
 
     dpus: Vec<DpuMachineHandle>,
 
     bmc_control_rx: mpsc::UnboundedReceiver<BmcCommand>,
     /// Kept so the handle can drive power the way the BMC mock does.
     bmc_control_tx: mpsc::UnboundedSender<BmcCommand>,
-    // This will be populated with callers waiting for the host to be MachineUp/Ready
-    state_waiters: HashMap<String, Vec<oneshot::Sender<()>>>,
     paused: bool,
-    api_refresh_interval: Interval,
+    desired_firmware_interval: Interval,
     sleep_until: Instant,
 }
 
@@ -212,14 +210,12 @@ impl HostMachine {
             live_state: state_machine.live_state.clone(),
             state_machine,
             dpus,
-            api_state: "Unknown".to_owned(),
 
             bmc_control_rx,
             bmc_control_tx,
-            state_waiters: HashMap::new(),
             paused: true,
             sleep_until: Instant::now(),
-            api_refresh_interval: tokio::time::interval(
+            desired_firmware_interval: tokio::time::interval(
                 app_context.app_config.api_refresh_interval,
             ),
             app_context,
@@ -295,14 +291,12 @@ impl HostMachine {
             live_state: state_machine.live_state.clone(),
             state_machine,
             dpus,
-            api_state: "Unknown".to_owned(),
 
             bmc_control_rx,
             bmc_control_tx,
-            state_waiters: HashMap::new(),
             paused: true,
             sleep_until: Instant::now(),
-            api_refresh_interval: tokio::time::interval(
+            desired_firmware_interval: tokio::time::interval(
                 app_context.app_config.api_refresh_interval,
             ),
             app_context,
@@ -327,13 +321,10 @@ impl HostMachine {
 
         let join_handle = tokio::task::Builder::new()
             .name(&format!("Host {}", self.mat_id))
-            .spawn({
-                let message_tx = message_tx.clone();
-                async move {
-                    loop {
-                        if !self.run_iteration(&mut message_rx, &message_tx).await {
-                            break;
-                        }
+            .spawn(async move {
+                loop {
+                    if !self.run_iteration(&mut message_rx).await {
+                        break;
                     }
                 }
             })
@@ -353,38 +344,15 @@ impl HostMachine {
         }))
     }
 
-    #[instrument(skip_all, fields(mat_host_id = %self.mat_id, api_state = %self.api_state, state = %self.state_machine, booted_os = %self.state_machine.booted_os()))]
+    #[instrument(skip_all, fields(mat_host_id = %self.mat_id, state = %self.state_machine, booted_os = %self.state_machine.booted_os()))]
     async fn run_iteration(
         &mut self,
         actor_message_rx: &mut mpsc::UnboundedReceiver<HostMachineMessage>,
-        actor_message_tx: &mpsc::UnboundedSender<HostMachineMessage>,
     ) -> bool {
-        // If the host is up, and if anyone is waiting for the current state to be
-        // reached, notify them.
-        if self.live_state.read().unwrap().is_up
-            && let Some(waiters) = self.state_waiters.remove(&self.api_state)
-        {
-            for waiter in waiters.into_iter() {
-                _ = waiter.send(());
-            }
-        }
-
         tokio::select! {
             _ = tokio::time::sleep_until(self.sleep_until.into()) => {}
-            _ = self.api_refresh_interval.tick() => {
+            _ = self.desired_firmware_interval.tick() => {
                 self.refresh_desired_host_firmware();
-                // Wake up to refresh the API state
-                if DeviceKind::from(self.host_info.hw_type) == DeviceKind::Machine
-                    && let Some(machine_id) = self.live_state.read().unwrap().observed_machine_id
-                {
-                    let actor_message_tx = actor_message_tx.clone();
-                    self.app_context.api_throttler.get_machine(machine_id, move |machine| {
-                        if let Some(machine) = machine {
-                            // Write the API state back using the actor channel, since we can't just write to self
-                            _ = actor_message_tx.send(HostMachineMessage::SetApiState(machine.state));
-                        }
-                    })
-                }
                 return true; // go back to sleeping
             }
             result = actor_message_rx.recv() => {
@@ -392,10 +360,7 @@ impl HostMachine {
                     tracing::info!("Command channel gone, stopping Host");
                     return false;
                 };
-                match self.handle_actor_message(cmd) {
-                    HandleMessageResult::ContinuePolling => return true,
-                    HandleMessageResult::ProcessStateNow => {},
-                }
+                self.handle_actor_message(cmd);
             }
             Some(cmd) = self.bmc_control_rx.recv() => {
                 tracing::debug!(
@@ -407,6 +372,24 @@ impl HostMachine {
                         let response = self.set_system_power(request);
                         if let Some(reply) = reply {
                             _ = reply.send(response);
+                        }
+                    }
+                    BmcCommand::DeviceEffect { effect, reply } => {
+                        let effect_debug = format!("{effect:?}");
+                        let result = match effect {
+                            DeviceEffect::ResetBmcToDefaults(update) => {
+                                self.state_machine.reset_bmc(update).await
+                            },
+                            effect => self.apply_device_effect(effect),
+                        };
+                        if let Some(reply) = reply {
+                            _ = reply.send(result);
+                        } else if let Err(error) = result {
+                            tracing::error!(
+                                effect = %effect_debug,
+                                %error,
+                                "Could not apply device effect",
+                            );
                         }
                     }
                     BmcCommand::StateRefreshIndication => {
@@ -469,33 +452,15 @@ impl HostMachine {
         self.state_machine.set_desired_host_firmware(desired);
     }
 
-    fn handle_actor_message(&mut self, message: HostMachineMessage) -> HandleMessageResult {
-        match message {
-            HostMachineMessage::WaitUntilMachineUpWithApiState(state, reply) => {
-                if let Some(state_waiters) = self.state_waiters.get_mut(&state) {
-                    state_waiters.push(reply);
-                } else {
-                    self.state_waiters.insert(state, vec![reply]);
-                }
-                HandleMessageResult::ContinuePolling
-            }
-            HostMachineMessage::SetPaused(value) => {
-                if value {
-                    self.pause()
-                } else {
-                    self.resume()
-                }
-                HandleMessageResult::ProcessStateNow
-            }
-            HostMachineMessage::GetApiState(reply) => {
-                _ = reply.send(self.api_state.clone());
-                HandleMessageResult::ContinuePolling
-            }
-            HostMachineMessage::SetApiState(api_state) => {
-                self.api_state = api_state.clone();
-                self.live_state.write().unwrap().api_state = api_state;
-                HandleMessageResult::ContinuePolling
-            }
+    fn handle_actor_message(&mut self, message: HostMachineMessage) {
+        let HostMachineMessage::SetPaused { paused, reply } = message;
+        if paused {
+            self.pause()
+        } else {
+            self.resume()
+        }
+        if let Some(reply) = reply {
+            reply.send(()).ok();
         }
     }
 
@@ -530,6 +495,29 @@ impl HostMachine {
         self.state_machine.set_system_power(request)
     }
 
+    /// Applies a BMC action's effect on the tray, whatever the host's power state is.
+    fn apply_device_effect(&mut self, effect: DeviceEffect) -> Result<(), ActionError> {
+        tracing::debug!(?effect, "Received host device effect");
+        match effect {
+            // The AC cycle drops power to the host and every DPU in the tray and leaves
+            // them off, so this is a forced power-off of all of them. It is applied
+            // directly, so unlike a Redfish `ForceOff` it also succeeds when they are
+            // already off. Powering back on is up to the controller, and a host
+            // power-on reaches the DPUs the same way it does after any other power-off.
+            DeviceEffect::AuxPowerCycle => {
+                for (dpu_index, dpu) in self.dpus.iter().enumerate() {
+                    _ = dpu.aux_power_cycle().inspect_err(|error| {
+                        tracing::error!(%error, dpu_index, "Could not send AC power cycle to DPU");
+                    });
+                }
+                self.state_machine.apply_aux_power_cycle()
+            }
+            DeviceEffect::ResetBmcToDefaults(_) => Err(ActionError::Internal(eyre::eyre!(
+                "BMC reset requires actor dispatch"
+            ))),
+        }
+    }
+
     fn pause(&mut self) {
         let was_paused = self.paused;
         self.paused = true;
@@ -561,17 +549,11 @@ impl HostMachine {
     }
 }
 
-// Shared with DpuMachine
-pub(super) enum HandleMessageResult {
-    ContinuePolling,
-    ProcessStateNow,
-}
-
 enum HostMachineMessage {
-    GetApiState(oneshot::Sender<String>),
-    WaitUntilMachineUpWithApiState(String, oneshot::Sender<()>),
-    SetPaused(bool),
-    SetApiState(String),
+    SetPaused {
+        paused: bool,
+        reply: Option<oneshot::Sender<()>>,
+    },
 }
 
 #[derive(Debug)]
@@ -591,6 +573,17 @@ struct HostMachineActor {
 pub(crate) struct MachineHandle(Arc<HostMachineActor>);
 
 impl MachineHandle {
+    /// Observes live BMC effects without contacting its leased address.
+    /// Returns None when the live BMC resource state is unavailable.
+    pub(crate) fn bmc_effect_snapshot(&self) -> Option<bmc_mock::persistence::BmcEffectSnapshot> {
+        self.0
+            .live_state
+            .read()
+            .unwrap()
+            .bmc_persistence
+            .effect_snapshot()
+    }
+
     /// Drive power through the guard the BMC mock uses, so an RMS power
     /// request obeys the same rules as a Redfish one.
     pub(crate) fn set_system_power(&self, request: ResourceResetType) -> Result<(), ActionError> {
@@ -600,6 +593,10 @@ impl MachineHandle {
 
     pub(crate) fn power_state(&self) -> PowerState {
         self.0.live_state.read().unwrap().power_state
+    }
+
+    pub(super) fn aux_power_cycle_generation(&self) -> u64 {
+        self.0.live_state.read().unwrap().aux_power_cycle_generation
     }
 
     #[cfg(test)]
@@ -681,48 +678,42 @@ impl MachineHandle {
             .map(|m| m.to_owned())
     }
 
-    pub(super) async fn api_state(&self) -> eyre::Result<String> {
-        let (tx, rx) = oneshot::channel();
-        self.0
-            .message_tx
-            .send(HostMachineMessage::GetApiState(tx))?;
-        Ok(rx.await?)
+    pub(super) fn is_up(&self) -> eyre::Result<bool> {
+        eyre::ensure!(!self.0.message_tx.is_closed(), "host actor stopped");
+        Ok(self.0.live_state.read().unwrap().is_up)
     }
 
     pub(crate) fn bmc_injection_store(&self) -> Arc<InjectionStore> {
         self.0.bmc_injection.clone()
     }
 
-    pub(super) async fn wait_until_machine_up_with_api_state(
-        &self,
-        state: &str,
-        timeout: Duration,
-    ) -> eyre::Result<()> {
+    #[cfg(test)]
+    pub(super) async fn pause_and_wait(&self, timeout: Duration) -> eyre::Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.0
-            .message_tx
-            .send(HostMachineMessage::WaitUntilMachineUpWithApiState(
-                state.to_owned(),
-                tx,
-            ))?;
+        self.0.message_tx.send(HostMachineMessage::SetPaused {
+            paused: true,
+            reply: Some(tx),
+        })?;
         tokio::time::timeout(timeout, rx)
             .await
-            .wrap_err_with(|| format!("timed out waiting for machine up with state {state}"))?
-            .wrap_err_with(|| format!("machine stopped while waiting for state {state}"))?;
+            .wrap_err("timed out waiting for host pause")?
+            .wrap_err("host stopped before acknowledging pause")?;
         Ok(())
     }
 
     pub(super) fn pause(&self) -> eyre::Result<()> {
-        self.0
-            .message_tx
-            .send(HostMachineMessage::SetPaused(true))?;
+        self.0.message_tx.send(HostMachineMessage::SetPaused {
+            paused: true,
+            reply: None,
+        })?;
         Ok(())
     }
 
     pub(super) fn resume(&self) -> eyre::Result<()> {
-        self.0
-            .message_tx
-            .send(HostMachineMessage::SetPaused(false))?;
+        self.0.message_tx.send(HostMachineMessage::SetPaused {
+            paused: false,
+            reply: None,
+        })?;
         Ok(())
     }
 
@@ -770,7 +761,6 @@ impl MachineHandle {
                 .map(ToString::to_string),
             hardware_type: Some(self.0.host_info.hw_type),
             mat_state: live_state.state_string.map(ToOwned::to_owned),
-            api_state: live_state.api_state.clone(),
             power_state: live_state.power_state,
             machine_ip: live_state.machine_ip.map(|ip| ip.to_string()),
             nvos_ip: None,
@@ -896,6 +886,115 @@ impl MachineHandle {
 }
 
 #[cfg(test)]
+mod actor_handle_tests {
+    use futures::poll;
+
+    use super::*;
+    use crate::device_handle::DeviceHandle;
+
+    fn host() -> HostMachine {
+        let context = MachineATronContext::for_test();
+        let config = context.app_config.machines["config"].clone();
+        let mac = mac_address::MacAddress::new([2, 0, 0, 0, 0, 0]);
+        let pool_config = MacAddressPoolConfig::new(mac, 24).unwrap();
+        HostMachine::new(
+            context,
+            "test".to_string(),
+            config,
+            &mut MacAddressPool::new_pool(pool_config),
+            pool_config,
+        )
+    }
+
+    fn handle_with_messages() -> (MachineHandle, mpsc::UnboundedReceiver<HostMachineMessage>) {
+        let mut handle = MachineHandle::for_control_test(Vec::new(), None);
+        let (message_tx, message_rx) = mpsc::unbounded_channel();
+        Arc::get_mut(&mut handle.0).unwrap().message_tx = message_tx;
+        (handle, message_rx)
+    }
+
+    #[tokio::test]
+    async fn stopped_host_rejects_retained_up_snapshot() {
+        let handle = host().start(true);
+        handle.0.live_state.write().unwrap().is_up = true;
+        let device = DeviceHandle::machine(handle.clone());
+        assert!(device.is_up().unwrap());
+
+        handle.abort_and_wait().await.unwrap();
+
+        assert!(handle.0.live_state.read().unwrap().is_up);
+        assert!(
+            device
+                .is_up()
+                .unwrap_err()
+                .to_string()
+                .contains("host actor stopped")
+        );
+    }
+
+    #[tokio::test]
+    async fn host_pause_acknowledges_applied_pause() {
+        let mut host = host();
+        host.paused = false;
+        let (handle, mut messages) = handle_with_messages();
+        let pause = handle.pause_and_wait(Duration::from_secs(5));
+        tokio::pin!(pause);
+
+        assert!(poll!(&mut pause).is_pending());
+        let message = messages.try_recv().expect("host pause was not queued");
+        assert!(!host.paused);
+        assert!(poll!(&mut pause).is_pending());
+
+        host.handle_actor_message(message);
+
+        assert!(host.paused);
+        pause.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn host_pause_timeout_preserves_queued_pause() {
+        let mut host = host();
+        host.paused = false;
+        let (handle, mut messages) = handle_with_messages();
+        let timeout = Duration::from_secs(5);
+        let pause = handle.pause_and_wait(timeout);
+        tokio::pin!(pause);
+        assert!(poll!(&mut pause).is_pending());
+
+        tokio::time::advance(timeout).await;
+        let error = pause.await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("timed out waiting for host pause")
+        );
+        assert!(!host.paused);
+
+        let message = messages.try_recv().expect("timed-out host pause was lost");
+        host.handle_actor_message(message);
+        assert!(host.paused);
+    }
+
+    #[tokio::test]
+    async fn host_pause_fails_when_actor_stops() {
+        let (handle, messages) = handle_with_messages();
+        let pause = handle.pause_and_wait(Duration::from_secs(5));
+        tokio::pin!(pause);
+        assert!(poll!(&mut pause).is_pending());
+
+        drop(messages);
+
+        let error = pause.await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("host stopped before acknowledging pause")
+        );
+        assert!(handle.pause_and_wait(Duration::from_secs(5)).await.is_err());
+    }
+}
+
+#[cfg(test)]
 mod firmware_catalog_tests {
     use carbide_test_support::{Check, check_values};
 
@@ -980,5 +1079,89 @@ mod firmware_catalog_tests {
                 )
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod device_effect_tests {
+    use bmc_mock::HardwareType;
+
+    use super::*;
+
+    async fn wait_for_dpu_power(dpus: &[DpuMachineHandle], expected: PowerState) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while dpus.iter().any(|dpu| dpu.power_state() != expected) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("DPUs did not reach {expected:?}"));
+    }
+
+    /// The AC cycle takes the host and every DPU off, whatever their state, and does
+    /// not bring them back: the controller powers the host on, which reaches the
+    /// DPUs the same way as after any other power-off.
+    #[tokio::test]
+    async fn aux_power_cycle_takes_host_and_dpus_off_and_leaves_them_off() {
+        let app_context = MachineATronContext::for_test();
+        let mut config = (*app_context.app_config.machines["config"]).clone();
+        config.hw_type = HardwareType::WiwynnGB200Nvl;
+        let mac = mac_address::MacAddress::new([2, 0, 0, 0, 0, 0]);
+        let pool_config = MacAddressPoolConfig::new(mac, 24).unwrap();
+        let mut host = HostMachine::new(
+            app_context,
+            "test".to_string(),
+            Arc::new(config),
+            &mut MacAddressPool::new_pool(pool_config),
+            pool_config,
+        );
+        assert_eq!(host.dpus.len(), 2);
+        let host_power = |host: &HostMachine| host.live_state.read().unwrap().power_state;
+
+        host.set_system_power(ResourceResetType::On).unwrap();
+        wait_for_dpu_power(&host.dpus, PowerState::On).await;
+        assert_ne!(host_power(&host), PowerState::Off);
+
+        // Applied to an on tray, and again to one that is already off, which a
+        // Redfish ForceOff would reject.
+        for generation in 1..=2 {
+            host.apply_device_effect(DeviceEffect::AuxPowerCycle)
+                .unwrap();
+            assert_eq!(host_power(&host), PowerState::Off);
+            wait_for_dpu_power(&host.dpus, PowerState::Off).await;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while host
+                    .dpus
+                    .iter()
+                    .any(|dpu| dpu.aux_power_cycle_generation() != generation)
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("DPU AC power cycle was not applied");
+            assert_eq!(
+                host.live_state.read().unwrap().aux_power_cycle_generation,
+                generation
+            );
+            // An ordinary power-off must not manufacture AC-reset evidence.
+            host.set_system_power(ResourceResetType::On).unwrap();
+            wait_for_dpu_power(&host.dpus, PowerState::On).await;
+            host.set_system_power(ResourceResetType::ForceOff).unwrap();
+            wait_for_dpu_power(&host.dpus, PowerState::Off).await;
+            assert_eq!(
+                host.live_state.read().unwrap().aux_power_cycle_generation,
+                generation
+            );
+            assert!(
+                host.dpus
+                    .iter()
+                    .all(|dpu| dpu.aux_power_cycle_generation() == generation)
+            );
+        }
+
+        host.set_system_power(ResourceResetType::On).unwrap();
+        assert_ne!(host_power(&host), PowerState::Off);
+        wait_for_dpu_power(&host.dpus, PowerState::On).await;
     }
 }

@@ -16,6 +16,7 @@
  */
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use mac_address::MacAddress;
 
@@ -36,6 +37,15 @@ pub(crate) struct NvidiaSwitchN5700Ld<'a> {
 }
 
 impl NvidiaSwitchN5700Ld<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Nvidia(redfish::oem::NvidiaNamestyle::Uppercase),
+            product: Some("P3809"),
+            redfish_version: "1.17.0",
+            advertises_computer_systems: true,
+        }
+    }
+
     pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
         Some(crate::EventServiceConfig::default())
     }
@@ -89,9 +99,14 @@ impl NvidiaSwitchN5700Ld<'_> {
         }
     }
 
-    pub(crate) fn system_config<C: Callbacks>(&self) -> redfish::computer_system::Config<C> {
+    /// The tray's ComputerSystem. Its power callbacks let a BMC backend
+    /// power-cycle the switch, as a tray BMC can.
+    pub(crate) fn system_config<C: Callbacks>(
+        &self,
+        callbacks: Arc<C>,
+    ) -> redfish::computer_system::Config<C> {
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed("System_0"),
                 manufacturer: Some("NVIDIA".into()),
                 model: Some(SWITCH_MODEL.into()),
@@ -99,7 +114,7 @@ impl NvidiaSwitchN5700Ld<'_> {
                 eth_interfaces: None,
                 serial_number: Some(self.switch_serial_number.to_string().into()),
                 boot_order_mode: redfish::computer_system::BootOrderMode::Generic,
-                callbacks: None,
+                callbacks: Some(callbacks),
                 chassis: vec!["BMC_eeprom".into()],
                 boot_options: None,
                 bios_mode: redfish::computer_system::BiosMode::Generic,
@@ -111,7 +126,7 @@ impl NvidiaSwitchN5700Ld<'_> {
                 base_bios: None,
                 serial_console: None,
                 secure_boot_available: false,
-            }],
+            }]),
         }
     }
 

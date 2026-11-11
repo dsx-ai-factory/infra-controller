@@ -23,6 +23,7 @@ use carbide_instrument::testing::{
 };
 use carbide_instrument::{LabelValue, emit};
 use carbide_test_support::{Check, check_values};
+use model::firmware::loggable_url;
 use sha2::Digest;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -31,31 +32,6 @@ use crate::downloader::*;
 
 const ARTIFACT_UNAVAILABLE_METRIC: &str = "carbide_firmware_artifact_unavailable_total";
 const DOWNLOAD_DURATION_METRIC: &str = "carbide_firmware_download_duration_seconds";
-
-/// Origin credentials and malformed authority text never appear in the logged URL.
-#[test]
-fn loggable_url_removes_credentials() {
-    carbide_test_support::value_scenarios!(loggable_url:
-        "remote URL credentials" {
-            // Removing the query must not leave authority credentials behind.
-            "https://user:password@firmware.example/bmc.fwpkg?X-Amz-Signature=secret#token"
-                => "https://firmware.example/bmc.fwpkg".to_string(),
-        }
-        "fragment without a query" {
-            // A fragment needs removal even when there is no query to truncate.
-            "https://firmware.example/bmc.fwpkg#token"
-                => "https://firmware.example/bmc.fwpkg".to_string(),
-        }
-        "local files" {
-            // Credential removal leaves the local source path intact.
-            "file:///tmp/bmc.fwpkg" => "file:///tmp/bmc.fwpkg".to_string(),
-        }
-        "malformed URL" {
-            // Unparseable authority text cannot safely be echoed back.
-            "https://user:password@[invalid?token=secret" => "<invalid firmware URL>".to_string(),
-        }
-    );
-}
 
 /// Polls until the download-duration histogram has recorded `expect`
 /// observations under `outcome` -- the completion event is the signal that a

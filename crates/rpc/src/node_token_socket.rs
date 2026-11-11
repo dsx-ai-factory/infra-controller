@@ -303,7 +303,7 @@ mod tests {
         let source = SocketTokenSource::spawn(socket.to_string_lossy().into_owned());
         wait_for_token(&source).await.expect("token cached");
 
-        // ForgeClientConfig is Debug-logged, so a cached token must never
+        // CarbideClientConfig is Debug-logged, so a cached token must never
         // appear in the provider's debug output.
         let rendered = format!("{source:?}");
         assert!(

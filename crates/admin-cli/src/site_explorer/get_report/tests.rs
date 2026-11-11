@@ -20,19 +20,19 @@ use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 use clap::Parser;
-use futures::{FutureExt, stream};
+use futures::FutureExt;
+use http_body_util::BodyExt;
 use http_body_util::combinators::UnsyncBoxBody;
-use http_body_util::{BodyExt, StreamBody};
-use hyper::body::{Bytes, Frame, Incoming};
+use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http2;
 use hyper::service::service_fn;
-use hyper::{Request, Response, header};
+use hyper::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message;
 use rpc::admin_cli::OutputFormat;
+use rpc::carbide_api_client::CarbideApiClient;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use rpc::forge::BuildInfo;
-use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use rpc::site_explorer::{
     ExploredDpu, ExploredEndpoint, ExploredEndpointList, ExploredEndpointsByIdsRequest,
     ExploredManagedHost, ExploredManagedHostIdList, ExploredManagedHostList,
@@ -46,6 +46,7 @@ use crate::cfg::dispatch::Dispatch;
 use crate::cfg::runtime::{RuntimeConfig, RuntimeContext};
 use crate::rpc::ApiClient;
 use crate::site_explorer::Cmd;
+use crate::test_support::grpc_response;
 
 fn parse(command: &str, address: &str) -> Result<Cmd, clap::Error> {
     let options = CliOptions::try_parse_from([
@@ -144,13 +145,13 @@ async fn dispatch_report_output(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let request_timeout = Duration::from_secs(5);
-    let client_config = ForgeClientConfig {
+    let client_config = CarbideClientConfig {
         request_timeout: Some(request_timeout),
         ..Default::default()
     };
     let mut captured = CapturedOutput::new();
     let ctx = RuntimeContext {
-        api_client: ApiClient(ForgeApiClient::new(&ApiConfig::new(
+        api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
             &format!("http://{address}"),
             &client_config,
         ))),
@@ -248,23 +249,6 @@ async fn decode_request<T: Message + Default>(request: Request<Incoming>) -> T {
     // The default client sends one uncompressed gRPC frame per unary request.
     assert_eq!(body.first(), Some(&0));
     T::decode(body.get(5..).expect("request has a gRPC frame")).expect("request decodes")
-}
-
-fn grpc_response(message: impl Message) -> Response<UnsyncBoxBody<Bytes, Infallible>> {
-    let mut data = vec![0];
-    data.extend_from_slice(&u32::try_from(message.encoded_len()).unwrap().to_be_bytes());
-    message.encode(&mut data).unwrap();
-    let mut trailers = hyper::HeaderMap::new();
-    trailers.insert("grpc-status", header::HeaderValue::from_static("0"));
-    let body = StreamBody::new(stream::iter([
-        Ok::<_, Infallible>(Frame::data(Bytes::from(data))),
-        Ok(Frame::trailers(trailers)),
-    ]))
-    .boxed_unsync();
-    Response::builder()
-        .header(header::CONTENT_TYPE, "application/grpc+tonic")
-        .body(body)
-        .unwrap()
 }
 
 #[tokio::test]

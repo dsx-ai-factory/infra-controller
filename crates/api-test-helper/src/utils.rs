@@ -201,6 +201,19 @@ pub struct TestApiServerArgs {
 
 pub async fn start_api_server(
     test_env: &mut IntegrationTestEnvironment,
+    args: TestApiServerArgs,
+    cancel_token: CancellationToken,
+) -> eyre::Result<ApiServerHandle> {
+    start_api_server_with_config(test_env, args, cancel_token, toml::Table::new()).await
+}
+
+/// Starts Core with overrides merged into the standard integration configuration.
+///
+/// Nested tables merge recursively; supplied scalars and arrays replace defaults.
+/// An empty table preserves the configuration used by [`start_api_server`].
+/// Core validates the final configuration before reporting readiness.
+pub async fn start_api_server_with_config(
+    test_env: &mut IntegrationTestEnvironment,
     TestApiServerArgs {
         bmc_proxy,
         firmware_directory,
@@ -209,6 +222,7 @@ pub async fn start_api_server(
         insecure_discovery,
     }: TestApiServerArgs,
     cancel_token: CancellationToken,
+    overrides: toml::Table,
 ) -> eyre::Result<ApiServerHandle> {
     let api_address = *test_env
         .carbide_api_addrs
@@ -267,19 +281,22 @@ pub async fn start_api_server(
         let root_dir = root_dir.clone();
         let cancel_token = cancel_token.clone();
         async move {
-            api_server::start(StartArgs {
-                addr: api_address,
-                metrics_addr: metrics_address,
-                root_dir,
-                db_url,
-                bmc_proxy,
-                firmware_directory,
-                cancel_token,
-                ready_channel: ready_tx,
-                credential_config,
-                insecure_discovery,
-                spdm_enabled,
-            })
+            api_server::start_with_config(
+                StartArgs {
+                    addr: api_address,
+                    metrics_addr: metrics_address,
+                    root_dir,
+                    db_url,
+                    bmc_proxy,
+                    firmware_directory,
+                    cancel_token,
+                    ready_channel: ready_tx,
+                    credential_config,
+                    insecure_discovery,
+                    spdm_enabled,
+                },
+                overrides,
+            )
             .await
             .inspect_err(|e| {
                 eprintln!("Failed to start API server: {e:#}");

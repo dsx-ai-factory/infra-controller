@@ -188,7 +188,7 @@ func (rs *FlowServerImpl) GetTaskSchedule(
 ) (*pb.TaskSchedule, error) {
 	id := protobuf.UUIDFrom(req.GetId())
 	if id == uuid.Nil {
-		return nil, errors.New("id is required")
+		return nil, status.Error(codes.InvalidArgument, "id must be a valid non-zero UUID")
 	}
 
 	row, err := rs.taskScheduleStore.Get(ctx, id)
@@ -258,7 +258,7 @@ func (rs *FlowServerImpl) UpdateTaskSchedule(
 ) (*pb.TaskSchedule, error) {
 	id := protobuf.UUIDFrom(req.GetId())
 	if id == uuid.Nil {
-		return nil, errors.New("id is required")
+		return nil, status.Error(codes.InvalidArgument, "id must be a valid non-zero UUID")
 	}
 
 	paths := req.GetUpdateMask().GetPaths()
@@ -339,7 +339,7 @@ func (rs *FlowServerImpl) PauseTaskSchedule(
 ) (*pb.TaskSchedule, error) {
 	id := protobuf.UUIDFrom(req.GetId())
 	if id == uuid.Nil {
-		return nil, errors.New("id is required")
+		return nil, status.Error(codes.InvalidArgument, "id must be a valid non-zero UUID")
 	}
 
 	existing, err := rs.taskScheduleStore.Get(ctx, id)
@@ -348,7 +348,8 @@ func (rs *FlowServerImpl) PauseTaskSchedule(
 	}
 
 	if existing.SpecType == dbmodel.SpecTypeOneTime && existing.NextRunAt == nil {
-		return nil, errors.New(
+		return nil, status.Error(
+			codes.FailedPrecondition,
 			"cannot pause a one-time schedule that has already fired",
 		)
 	}
@@ -785,7 +786,7 @@ func (rs *FlowServerImpl) buildUpdateFields(
 	var fields taskschedule.UpdateFields
 
 	if len(paths) == 0 {
-		return fields, false, errors.New("update_mask is required")
+		return fields, false, status.Error(codes.InvalidArgument, "update_mask is required")
 	}
 
 	if sched == nil {

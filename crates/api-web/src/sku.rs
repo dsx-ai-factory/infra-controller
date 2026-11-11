@@ -145,6 +145,7 @@ struct SkuDetail {
     id: String,
     description: String,
     created: String,
+    updated: String,
     components_json: String,
     associated_machines: Vec<String>,
 }
@@ -155,6 +156,7 @@ impl From<forgerpc::Sku> for SkuDetail {
             id: sku.id,
             description: sku.description.unwrap_or_default(),
             created: sku.created.map(|c| c.to_string()).unwrap_or_default(),
+            updated: sku.updated.map(|c| c.to_string()).unwrap_or_default(),
             components_json: sku
                 .components
                 .map(|c| {

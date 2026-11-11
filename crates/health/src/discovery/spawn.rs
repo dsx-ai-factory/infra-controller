@@ -149,6 +149,7 @@ pub(super) fn collector_eligibility(
                 || ctx.telemetry_config.is_enabled()
                 || logs
                 || ctx.firmware_config.is_enabled()
+                || ctx.resource_status_processor_enabled
                 || (ctx.manager_config.is_enabled()
                     && matches!(endpoint.metadata, Some(EndpointMetadata::PowerShelf(_))))
                 || ctx.leak_detector_config.is_enabled()
@@ -220,7 +221,11 @@ fn spawn_generic_redfish_collectors(
     // entity inventory, so discovery must also run for a logs-only deployment.
     let gpu_identity_enabled = ctx.attributes.gpu_identity;
 
-    if (sensors_enabled || metrics_enabled || gpu_inventory_enabled || gpu_identity_enabled)
+    if (sensors_enabled
+        || metrics_enabled
+        || gpu_inventory_enabled
+        || gpu_identity_enabled
+        || ctx.resource_status_processor_enabled)
         && !ctx.collectors.contains(CollectorKind::Discovery, &key)
     {
         let shared = ctx.collectors.inventory_for(&key);
@@ -233,6 +238,11 @@ fn spawn_generic_redfish_collectors(
             bmc.clone(),
             EntityDiscoveryCollectorConfig {
                 shared,
+                resource_status_sink: if ctx.resource_status_processor_enabled {
+                    data_sink.clone()
+                } else {
+                    None
+                },
                 request_concurrency: ctx.bmc_request_concurrency,
                 collect_shelf_power: power_shelf,
                 gpu_identity: gpu_identity_enabled,
@@ -456,6 +466,8 @@ fn spawn_generic_redfish_collectors(
                             include_diagnostics: ctx.logs_include_diagnostics,
                             request_concurrency: ctx.bmc_request_concurrency,
                             gpu_inventory: sse_gpu_inventory,
+                            close_timeout: sse_cfg.close_timeout,
+                            reap_on_cap: sse_cfg.reap_on_cap,
                         },
                         data_sink,
                         StreamingCollectorStartContext {
@@ -539,6 +551,8 @@ fn spawn_generic_redfish_collectors(
                             include_diagnostics: ctx.logs_include_diagnostics,
                             request_concurrency: ctx.bmc_request_concurrency,
                             gpu_inventory: sse_gpu_inventory,
+                            close_timeout: sse_cfg.close_timeout,
+                            reap_on_cap: sse_cfg.reap_on_cap,
                         },
                         tracked_data_sink,
                         StreamingCollectorStartContext {
@@ -621,6 +635,7 @@ fn spawn_generic_redfish_collectors(
             bmc.clone(),
             FirmwareCollectorConfig {
                 data_sink: data_sink.clone(),
+                emit_resource_status: ctx.resource_status_processor_enabled,
             },
             CollectorStartContext {
                 limiter: ctx.limiter.clone(),
@@ -697,7 +712,7 @@ fn spawn_generic_redfish_collectors(
     }
 
     if let Configurable::Enabled(manager_cfg) = &ctx.manager_config
-        && power_shelf
+        && (power_shelf || ctx.resource_status_processor_enabled)
         && !ctx.collectors.contains(CollectorKind::Manager, &key)
     {
         let collector_registry = Arc::new(ctx.metrics_manager.create_collector_registry(
@@ -709,6 +724,7 @@ fn spawn_generic_redfish_collectors(
             bmc.clone(),
             ManagerCollectorConfig {
                 data_sink: data_sink.clone(),
+                emit_resource_status: ctx.resource_status_processor_enabled,
             },
             CollectorStartContext {
                 limiter: ctx.limiter.clone(),
@@ -724,7 +740,7 @@ fn spawn_generic_redfish_collectors(
                     endpoint_key = %key,
                     rack_id = endpoint.rack_id.as_ref().map(tracing::field::display),
                     manager_collector_count = ctx.collectors.len(CollectorKind::Manager),
-                    "Started manager collection for power-shelf endpoint"
+                    "Started manager collection for BMC endpoint"
                 );
             }
             Err(error) => {
@@ -1262,6 +1278,7 @@ mod tests {
         config.collectors.sensors = Configurable::Enabled(Default::default());
         config.collectors.logs = Configurable::Enabled(Default::default());
         config.collectors.firmware = Configurable::Enabled(Default::default());
+        config.processors.resource_status = Configurable::Enabled(Default::default());
         config.collectors.leak_detector = Configurable::Enabled(Default::default());
         config.collectors.nmxt = Configurable::Disabled;
         config.collectors.nmxc = Configurable::Disabled;
@@ -1285,7 +1302,39 @@ mod tests {
         assert_eq!(ctx.collectors.len(CollectorKind::Sensor), 0);
         assert_eq!(ctx.collectors.len(CollectorKind::Logs), 0);
         assert_eq!(ctx.collectors.len(CollectorKind::Firmware), 0);
+        assert_eq!(ctx.collectors.len(CollectorKind::Discovery), 0);
+        assert_eq!(ctx.collectors.len(CollectorKind::Manager), 0);
         assert_eq!(ctx.collectors.len(CollectorKind::LeakDetector), 0);
+    }
+
+    #[tokio::test]
+    async fn resource_status_processor_starts_source_collectors_for_generic_redfish_endpoints() {
+        let mut config = Config::default();
+        config.collectors.sensors = Configurable::Disabled;
+        config.collectors.manager = Configurable::Enabled(Default::default());
+        config.collectors.logs = Configurable::Disabled;
+        config.collectors.firmware = Configurable::Disabled;
+        config.processors.resource_status = Configurable::Enabled(Default::default());
+        config.collectors.leak_detector = Configurable::Disabled;
+
+        let mut ctx = context_with_config(config, "test_resource_status_start");
+        let endpoint = test_endpoint(
+            Ipv4Addr::new(10, 0, 0, 8),
+            "55:66:77:88:99:bb",
+            Some(machine_metadata()),
+        );
+
+        spawn_collectors_for_endpoint(
+            &mut ctx,
+            &endpoint,
+            Some(Arc::new(NoopSink)),
+            "test_resource_status_start",
+        )
+        .expect("spawn should succeed");
+
+        assert_eq!(ctx.collectors.len(CollectorKind::Discovery), 1);
+        assert_eq!(ctx.collectors.len(CollectorKind::Manager), 1);
+        assert_eq!(ctx.collectors.len(CollectorKind::Firmware), 0);
     }
 
     #[tokio::test]
@@ -1405,6 +1454,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_gnmi_plan_remains_registered_across_discovery_passes() {
+        // Exercise prune and spawn with gNMI enabled but no streams selected.
+        // Its idle parent must survive each pass and still stop normally.
+        let mut gnmi = NvueGnmiConfig {
+            system_events_enabled: false,
+            ..Default::default()
+        };
+        gnmi.paths.components_enabled = false;
+        gnmi.paths.interfaces_enabled = false;
+        gnmi.paths.platform_general_enabled = false;
+        gnmi.paths.leak_sensors_enabled = false;
+        let mut config = Config::default();
+        config.collectors.nvue = Configurable::Enabled(NvueCollectorConfig {
+            rest: Configurable::Disabled,
+            gnmi: Configurable::Enabled(gnmi),
+        });
+        let mut ctx = context_with_config(config, "empty_gnmi_discovery");
+        let endpoint = test_endpoint(
+            Ipv4Addr::new(10, 0, 0, 9),
+            "55:66:77:88:99:cc",
+            Some(switch_metadata_with_role(
+                SwitchEndpointRole::Host,
+                true,
+                false,
+                "empty",
+            )),
+        );
+
+        for _ in 0..2 {
+            ctx.collectors.prune_finished_collectors();
+            spawn_collectors_for_endpoint(&mut ctx, &endpoint, None, "empty_gnmi_discovery")
+                .expect("empty plan must remain registered");
+            tokio::task::yield_now().await;
+            assert_eq!(ctx.collectors.len(CollectorKind::NvueGnmi), 1);
+            assert!(
+                !ctx.collectors
+                    .map_mut(CollectorKind::NvueGnmi)
+                    .get(endpoint.key().as_str())
+                    .unwrap()
+                    .is_finished()
+            );
+        }
+
+        assert!(
+            ctx.metrics_manager
+                .export_metrics()
+                .unwrap()
+                .contains("nvue_gnmi_connection_state")
+        );
+        let collector = ctx
+            .collectors
+            .map_mut(CollectorKind::NvueGnmi)
+            .remove(endpoint.key().as_str())
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), collector.stop())
+            .await
+            .expect("idle collector must stop on cancellation");
+        assert!(
+            !ctx.metrics_manager
+                .export_metrics()
+                .unwrap()
+                .contains("nvue_gnmi")
+        );
+    }
+
+    #[tokio::test]
     async fn test_switch_host_primary_starts_collectors_and_reuses_gnmi_cache() {
         let mut config = Config::default();
         config.collectors.sensors = Configurable::Disabled;
@@ -1488,7 +1603,20 @@ mod tests {
         spawn_collectors_for_endpoint(&mut ctx, &endpoint, Some(sink), "test")
             .expect("respawn should succeed");
 
-        let exported = ctx.metrics_manager.export_telemetry().unwrap();
+        let exported = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let exported = ctx.metrics_manager.export_telemetry().unwrap();
+                if exported.lines().any(|line| {
+                    line.starts_with("test_nvue_gnmi_extended_retained_scalar_count{")
+                        && line.contains("serial_number=\"MT2515600ZYB\"")
+                }) {
+                    break exported;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("replacement stream must republish its retained reading");
 
         let reading = exported
             .lines()
@@ -2119,7 +2247,7 @@ mod tests {
         .await
         .expect("periodic fallback expiry should request immediate reconciliation");
 
-        ctx.collectors.prune_finished_logs();
+        ctx.collectors.prune_finished_collectors();
 
         assert_eq!(ctx.collectors.len(CollectorKind::Logs), 0);
 

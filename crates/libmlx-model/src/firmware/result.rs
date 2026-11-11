@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 /// Older Scout senders may report success without a new burn when no profile
 /// was supplied. Correlated operations instead report `flashed=false` for
 /// that completed request.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirmwareFlashReport {
     /// Whether the burn completed. Older Scout senders also set this when no profile
     /// was supplied; it is not proof of a new flash attempt.

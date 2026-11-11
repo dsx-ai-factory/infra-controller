@@ -91,9 +91,9 @@ func buildInstanceNetworkConfig(auto bool, interfaceConfigs []*corev1.InstanceIn
 	return nc
 }
 
-// loadInstanceInterfaceVpcs validates VPC-selection intent and returns each
+// loadInstanceInterfaceVpcs parses VPC-selection intent and returns each
 // requested REST VPC keyed by its REST ID.
-func loadInstanceInterfaceVpcs(ctx context.Context, logger *zerolog.Logger, dbSession *cdb.Session, interfaces []model.APIInterfaceCreateOrUpdateRequest, tenantID, siteID uuid.UUID) (map[uuid.UUID]*cdbm.Vpc, *cutil.APIError) {
+func loadInstanceInterfaceVpcs(ctx context.Context, logger *zerolog.Logger, dbSession *cdb.Session, interfaces []model.APIInterfaceCreateOrUpdateRequest) (map[uuid.UUID]*cdbm.Vpc, *cutil.APIError) {
 	requestedVpcIDs := make([]uuid.UUID, 0, len(interfaces))
 	seenVpcIDs := make(map[uuid.UUID]struct{}, len(interfaces))
 	for _, ifc := range interfaces {
@@ -130,21 +130,8 @@ func loadInstanceInterfaceVpcs(ctx context.Context, logger *zerolog.Logger, dbSe
 	}
 
 	for _, vpcID := range requestedVpcIDs {
-		vpc, ok := vpcByID[vpcID]
-		if !ok {
+		if _, ok := vpcByID[vpcID]; !ok {
 			return nil, cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request data is not found in DB", vpcID), nil)
-		}
-		if vpc.TenantID != tenantID {
-			return nil, cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request is not owned by Tenant", vpcID), nil)
-		}
-		if vpc.SiteID != siteID {
-			return nil, cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request does not belong to Site", vpcID), nil)
-		}
-		if vpc.ControllerVpcID == nil || vpc.Status != cdbm.VpcStatusReady {
-			return nil, cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request data is not in Ready state", vpcID), nil)
-		}
-		if vpc.NetworkVirtualizationType == nil || *vpc.NetworkVirtualizationType != cdbm.VpcFNN {
-			return nil, cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("VPC: %v specified in Interface request must have FNN network virtualization type", vpcID), nil)
 		}
 	}
 
@@ -631,10 +618,29 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Load VPCs only for interfaces using Core-managed prefix selection.
-	interfaceVpcIDMap, interfaceVpcErr := loadInstanceInterfaceVpcs(ctx, &logger, cih.dbSession, apiRequest.Interfaces, tenant.ID, site.ID)
+	interfaceVpcIDMap, interfaceVpcErr := loadInstanceInterfaceVpcs(ctx, &logger, cih.dbSession, apiRequest.Interfaces)
 	if interfaceVpcErr != nil {
 		logger.Warn().Err(interfaceVpcErr).Msg("failed to validate VPCs specified by Instance interfaces")
 		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
+	}
+
+	// Attaching an Interface to another Tenant's VPC or VPC Prefix needs
+	// crossTenantInterfaceCreation
+	// at the Site. Check it before validating the selectors, so the errors can't reveal another
+	// Tenant's VPC state.
+	if model.HasCrossTenantInterface(apiRequest.Interfaces, tenant.ID, interfaceVpcIDMap, vpcPrefixIDMap) {
+		hasCrossTenantInterfaceCreation, capErr := cdbm.TenantHasCrossTenantInterfaceCreation(ctx, nil, cih.dbSession, tenant, site.ID)
+		if capErr != nil {
+			logger.Error().Err(capErr).Msg("failed to resolve crossTenantInterfaceCreation capability")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve crossTenantInterfaceCreation capability, DB error", nil)
+		}
+		if !hasCrossTenantInterfaceCreation {
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have crossTenantInterfaceCreation capability enabled", nil)
+		}
+	}
+	if apiErr := model.ValidateInterfaceVpcs(interfaceVpcIDMap, apiRequest.Interfaces, site.ID); apiErr != nil {
+		logger.Warn().Err(apiErr).Msg("failed to validate VPCs specified by Instance interfaces")
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
 
 	// Resolve the referenced SpectrumX Partitions before any writes so a bad ID is a 400
@@ -796,11 +802,6 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			if !ok {
 				logger.Warn().Msg(fmt.Sprintf("VPC Prefix: %v specified in request data is not found in DB", vpcPrefixID))
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC Prefix: %v specified in request data is not found in DB", vpcPrefixID), nil)
-			}
-
-			if vpcPrefix.TenantID != tenant.ID {
-				logger.Warn().Msg(fmt.Sprintf("VPC Prefix: %v specified in request is not owned by Tenant", vpcPrefixID))
-				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC Prefix: %v specified in request is not owned by Tenant", vpcPrefixID), nil)
 			}
 
 			if vpcPrefix.Status != cdbm.VpcPrefixStatusReady {
@@ -1005,6 +1006,10 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 		if des.SiteID != site.ID {
 			logger.Warn().Str("Site ID", site.ID.String()).Str("DPU Extension Service ID", desID.String()).Msg("DPU Extension Service does not belong to Site")
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("DPU Extension Service: %s does not belong to Site where Instance is being created", desID.String()), nil)
+		}
+
+		if des.DeploymentType == cdbm.DpuExtensionServiceDeploymentTypeBaseline {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Baseline DPU Extension Services cannot be attached to Instances", nil)
 		}
 
 		versionFound := false
@@ -1264,6 +1269,11 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			// the Ready status check, not just health - consider renaming the parameter later.
 			if apiRequest.AllowUnhealthyMachine != nil {
 				allowUnhealthyMachine = *apiRequest.AllowUnhealthyMachine
+			}
+
+			// A retained deletion record is unavailable even with an unhealthy override.
+			if machine.IsForceDeletionQuarantined() {
+				return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Machine: %s has a force-deletion request and cannot be used for a new Instance", machine.ID), nil)
 			}
 
 			// Check if Machine is missing on site
@@ -2303,7 +2313,7 @@ func (uih UpdateInstanceHandler) handleReboot(c echo.Context, logger *zerolog.Lo
 
 		// Get the instance subnets record from the db
 		ifcDAO := cdbm.NewInterfaceDAO(uih.dbSession)
-		retifc, _, derr = ifcDAO.GetAll(ctx, tx, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{}, []string{cdbm.SubnetRelationName, cdbm.VpcPrefixRelationName})
+		retifc, _, derr = ifcDAO.GetAll(ctx, tx, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{}, []string{cdbm.SubnetRelationName, cdbm.VpcRelationName, cdbm.VpcPrefixRelationName})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error retrieving Instance Subnets Details from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Instance Subnets for Instance", nil)
@@ -2708,7 +2718,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	instanceDAO := cdbm.NewInstanceDAO(uih.dbSession)
 
 	// Check that Instance exists
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName, cdbm.MachineRelationName})
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName, cdbm.MachineRelationName}, false)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error retrieving Instance DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve Instance to update", nil)
@@ -2908,7 +2918,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Load VPCs only for interfaces using Core-managed prefix selection.
-	interfaceVpcIDMap, interfaceVpcErr := loadInstanceInterfaceVpcs(ctx, &logger, uih.dbSession, apiRequest.Interfaces, tenant.ID, site.ID)
+	interfaceVpcIDMap, interfaceVpcErr := loadInstanceInterfaceVpcs(ctx, &logger, uih.dbSession, apiRequest.Interfaces)
 	if interfaceVpcErr != nil {
 		logger.Warn().Err(interfaceVpcErr).Msg("failed to validate VPCs specified by Instance interfaces")
 		return cutil.NewAPIErrorResponse(c, interfaceVpcErr.Code, interfaceVpcErr.Message, interfaceVpcErr.Data)
@@ -2963,15 +2973,16 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 
 	existingSubnetIfcMap := map[uuid.UUID]uint64{}
 	existingVpcPrefixIfcMap := map[uuid.UUID]uint64{}
+	existingIfcsForAuthorization := []cdbm.Interface{}
 	if len(apiRequest.Interfaces) > 0 {
 		ifcDAO := cdbm.NewInterfaceDAO(uih.dbSession)
-		existingIfcsForCapacity, _, err := ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		existingIfcsForAuthorization, _, err = ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: []uuid.UUID{instance.ID}}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
 		if err != nil {
 			logger.Error().Err(err).Msg("error retrieving existing Interfaces for Instance")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve existing Interfaces for Instance", nil)
 		}
-		for i := range existingIfcsForCapacity {
-			eifc := &existingIfcsForCapacity[i]
+		for i := range existingIfcsForAuthorization {
+			eifc := &existingIfcsForAuthorization[i]
 			if eifc.Status == cdbm.InterfaceStatusDeleting {
 				continue
 			}
@@ -2983,6 +2994,32 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 				existingVpcPrefixIfcMap[*eifc.VpcPrefixID]++
 			}
 		}
+	}
+
+	// A new Interface identity that selects another Tenant's VPC or VPC Prefix needs
+	// targetedInstanceCreation at the Site. Compare before validating the selectors so
+	// additions and retargeting cannot reveal another Tenant's VPC state. An unchanged
+	// persisted identity remains usable after capability revocation.
+	hasCrossTenantInterfaceCreation := false
+	requestedIfcsForAuthorization := model.BuildInterfacesForCrossTenantAuthorization(apiRequest.Interfaces, interfaceVpcIDMap, vpcPrefixIDMap)
+	hasNewCrossTenantInterface, attachmentErr := model.HasNewCrossTenantInterface(tenant.ID, requestedIfcsForAuthorization, existingIfcsForAuthorization)
+	if attachmentErr != nil {
+		logger.Error().Err(attachmentErr).Msg("failed to compare requested and persisted Interface identities")
+		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to authorize cross-Tenant VPC attachments", nil)
+	}
+	if hasNewCrossTenantInterface {
+		hasCrossTenantInterfaceCreation, err = cdbm.TenantHasCrossTenantInterfaceCreation(ctx, nil, uih.dbSession, tenant, site.ID)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to resolve crossTenantInterfaceCreation capability")
+			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to resolve crossTenantInterfaceCreation capability, DB error", nil)
+		}
+		if !hasCrossTenantInterfaceCreation {
+			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "Tenant does not have crossTenantInterfaceCreation capability enabled", nil)
+		}
+	}
+	if apiErr := model.ValidateInterfaceVpcs(interfaceVpcIDMap, apiRequest.Interfaces, site.ID); apiErr != nil {
+		logger.Warn().Err(apiErr).Msg("failed to validate VPCs specified by Instance interfaces")
+		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
 
 	// Validate each Interface against fetched data
@@ -3099,11 +3136,6 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			vpcPrefix, ok := vpcPrefixIDMap[vpcPrefixID]
 			if !ok {
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Could not find VPC Prefix with ID specified in request data", nil)
-			}
-
-			if vpcPrefix.TenantID != tenant.ID {
-				logger.Warn().Msg(fmt.Sprintf("VPC Prefix: %v specified in request is not owned by Tenant", vpcPrefixID))
-				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("VPC Prefix: %v specified in request is not owned by Tenant", vpcPrefixID), nil)
 			}
 
 			if vpcPrefix.Status != cdbm.VpcPrefixStatusReady {
@@ -3422,6 +3454,10 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		if des.SiteID != site.ID {
 			logger.Warn().Str("Site ID", site.ID.String()).Str("DPU Extension Service ID", desID.String()).Msg("DPU Extension Service does not belong to Site")
 			return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("DPU Extension Service: %s does not belong to Site where Instance is being created", desID.String()), nil)
+		}
+
+		if des.DeploymentType == cdbm.DpuExtensionServiceDeploymentTypeBaseline {
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Baseline DPU Extension Services cannot be attached to Instances", nil)
 		}
 
 		versionFound := false
@@ -3862,6 +3898,20 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			}
 			newdbIfcs = []cdbm.Interface{}
 		case len(apiRequest.Interfaces) > 0:
+			// Compare identities against the Interfaces reloaded in this transaction, not the read
+			// before it. The Instance update above holds the Instance row lock until commit, so a
+			// concurrent update of this Instance can't remove a reused Interface after this check.
+			if !hasCrossTenantInterfaceCreation {
+				hasNewInterface, attachmentErr := model.HasNewCrossTenantInterface(tenant.ID, dbInterfaces, existingIfcs)
+				if attachmentErr != nil {
+					logger.Error().Err(attachmentErr).Msg("failed to compare requested and persisted Interface identities")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to authorize cross-Tenant VPC attachments", nil)
+				}
+				if hasNewInterface {
+					return cutil.NewAPIError(http.StatusForbidden, "Tenant does not have crossTenantInterfaceCreation capability enabled", nil)
+				}
+			}
+
 			existingIfcMap := make(map[string][]cdbm.Interface, len(existingIfcs))
 			for existingIfcIndex := range existingIfcs {
 				if existingIfcs[existingIfcIndex].Status == cdbm.InterfaceStatusDeleting {
@@ -4051,8 +4101,11 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					newIbIfcs = append(newIbIfcs, *dbibifc)
 				}
 
-				// Update status of existing InfiniBand Interfaces to Deleting
+				// Keep Updated unchanged for deleting rows so reissues do not defer inventory cleanup.
 				for i := range existingIbIfcs {
+					if existingIbIfcs[i].Status == cdbm.InfiniBandInterfaceStatusDeleting {
+						continue
+					}
 					existingIbIfcs[i].Status = cdbm.InfiniBandInterfaceStatusDeleting
 					_, err = ibiDAO.Update(ctx, tx, cdbm.InfiniBandInterfaceUpdateInput{
 						InfiniBandInterfaceID: existingIbIfcs[i].ID,
@@ -4393,16 +4446,19 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					}
 					newNvlIfcs = append(newNvlIfcs, *newNvlIfc)
 				}
-				// Update status of existing NVLink interfaces to Deleting
-				if len(existingNvlIfcs) > 0 {
-					nvlIfcUpdateInputs := make([]cdbm.NVLinkInterfaceUpdateInput, len(existingNvlIfcs))
-					for i := range existingNvlIfcs {
-						existingNvlIfcs[i].Status = cdbm.NVLinkInterfaceStatusDeleting
-						nvlIfcUpdateInputs[i] = cdbm.NVLinkInterfaceUpdateInput{
-							NVLinkInterfaceID: existingNvlIfcs[i].ID,
-							Status:            cutil.GetPtr(cdbm.NVLinkInterfaceStatusDeleting),
-						}
+				// Keep Updated unchanged for deleting rows so reissues do not defer inventory cleanup.
+				nvlIfcUpdateInputs := make([]cdbm.NVLinkInterfaceUpdateInput, 0, len(existingNvlIfcs))
+				for i := range existingNvlIfcs {
+					if existingNvlIfcs[i].Status == cdbm.NVLinkInterfaceStatusDeleting {
+						continue
 					}
+					existingNvlIfcs[i].Status = cdbm.NVLinkInterfaceStatusDeleting
+					nvlIfcUpdateInputs = append(nvlIfcUpdateInputs, cdbm.NVLinkInterfaceUpdateInput{
+						NVLinkInterfaceID: existingNvlIfcs[i].ID,
+						Status:            cutil.GetPtr(cdbm.NVLinkInterfaceStatusDeleting),
+					})
+				}
+				if len(nvlIfcUpdateInputs) > 0 {
 					_, err := nvlIfcDAO.UpdateMultiple(ctx, tx, nvlIfcUpdateInputs)
 					if err != nil {
 						logger.Error().Err(err).Msg("failed to update NVLink Interface records in DB")
@@ -4875,7 +4931,7 @@ func (gih GetInstanceHandler) Handle(c echo.Context) error {
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(gih.dbSession)
 
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, qIncludeRelations)
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, qIncludeRelations, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Instance with specified ID", nil)
@@ -4920,7 +4976,7 @@ func (gih GetInstanceHandler) Handle(c echo.Context) error {
 			InstanceIDs: []uuid.UUID{instance.ID},
 		},
 		cdbp.PageInput{OrderBy: &cdbp.OrderBy{Field: cdbm.InterfaceOrderByCreated, Order: cdbp.OrderAscending}, Limit: cutil.GetPtr(cdbp.TotalLimit)},
-		[]string{cdbm.SubnetRelationName, cdbm.VpcPrefixRelationName},
+		[]string{cdbm.SubnetRelationName, cdbm.VpcRelationName, cdbm.VpcPrefixRelationName},
 	)
 	if err != nil {
 		logger.Error().Err(err).Msg("error retrieving instance Interfaces Details from DB")
@@ -5444,7 +5500,7 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 	// Create a map for instanceID -> set of VPCs
 	vpcsByInstance := map[uuid.UUID]goset.Set[uuid.UUID]{}
 
-	ifcs, _, serr := ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: insIDs}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, []string{cdbm.SubnetRelationName, cdbm.VpcPrefixRelationName})
+	ifcs, _, serr := ifcDAO.GetAll(ctx, nil, cdbm.InterfaceFilterInput{InstanceIDs: insIDs}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, []string{cdbm.SubnetRelationName, cdbm.VpcRelationName, cdbm.VpcPrefixRelationName})
 	if serr != nil {
 		// Log error and continue
 		logger.Error().Err(serr).Msg("error retrieving Instance Subnets for Instance from DB")
@@ -5782,7 +5838,7 @@ func (dih DeleteInstanceHandler) Handle(c echo.Context) error {
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(dih.dbSession)
 
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName})
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName}, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Instance with specified ID", nil)
@@ -6050,7 +6106,7 @@ func (gisdh GetInstanceStatusDetailsHandler) Handle(c echo.Context) error {
 
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(gisdh.dbSession)
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, qIncludeRelations)
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, qIncludeRelations, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Instance with specified ID", nil)

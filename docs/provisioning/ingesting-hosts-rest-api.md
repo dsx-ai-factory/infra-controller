@@ -98,7 +98,11 @@ unset NICO_PASSWORD
 
 `fallbackDPUSerialNumbers` is JSON-only (no flag form) and is needed for DGX-H100 or other machines where the NetworkAdapter serial number is not available in the host Redfish.
 
+During DPU matching, every nonempty serial in `fallbackDPUSerialNumbers` must be discovered and its DPU ready before ingestion, even when host inventory is fully matched. After replacing a DPU (RMA), update or remove its old serial from this list; stale entries block ingestion. See [DPU-host pairing](../architecture/redfish_workflow.md#3-dpu-host-pairing).
+
 `hostLifecycleProfile` is also JSON-only. Set `disableLockdown` to `true` only when the host must remain unlocked during lifecycle management. When the profile is omitted or `disableLockdown` is `false`, NICo applies UEFI lockdown during `HostInit`.
+
+Set `retainHbnConfigOnBoot` to `true` to designate the machine to retain its HBN config on boot. This requires the machine to declare a DpuBmc and a DpuOs interface, and enforces a Fixed or Retained IpAllocation configuration for its HostBmc and both DPU management addresses. Declaring the DPU interfaces is required because an undeclared one gets a DHCP address. A machine whose dpuPolicy attaches no DPU declares neither. This allows the machine to boot while NICO's DHCP and gRPC services are unavailable.
 
 ### Batch (Recommended for Full-Rack Onboarding)
 

@@ -151,7 +151,7 @@ jobs:
     needs:
       - prepare
       - approve-promotion
-    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
     with:
       source: ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide
       source_tag: ${{ needs.prepare.outputs.version }}
@@ -170,7 +170,7 @@ jobs:
     needs:
       - prepare
       - approve-promotion
-    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
     with:
       source: ${{ needs.prepare.outputs.image_registry }}/carbide-release-artifacts-aarch64
       source_tag: ${{ needs.prepare.outputs.version }}
@@ -189,7 +189,7 @@ jobs:
     needs:
       - prepare
       - approve-promotion
-    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
     with:
       source: ${{ needs.prepare.outputs.image_registry }}/carbide-release-artifacts-x86_64
       source_tag: ${{ needs.prepare.outputs.version }}
@@ -216,7 +216,7 @@ jobs:
           persist-credentials: false
 
       - name: Package and push Helm prereqs chart to production NGC
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
         with:
           chart-path: helm-prereqs
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -224,4 +224,5 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NVCR_PROD_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.prod_registry_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3

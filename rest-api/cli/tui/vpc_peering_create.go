@@ -191,7 +191,7 @@ func readyVPCsForSite(vpcs []NamedItem, siteID string) []NamedItem {
 }
 
 func fetchVPCPeeringsForSite(s *Session, siteID string) ([]NamedItem, error) {
-	items, err := s.fetchAll(apiPath(s, "vpc-peering"), map[string]string{"siteId": siteID})
+	items, err := s.fetchAll(context.Background(), apiPath(s, "vpc-peering"), map[string]string{"siteId": siteID})
 	if err != nil {
 		return nil, err
 	}

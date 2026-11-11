@@ -15,6 +15,7 @@ import (
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/bmc"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
@@ -36,6 +37,19 @@ type FieldDiff struct {
 	FieldName     string
 	ExpectedValue string
 	ActualValue   string
+}
+
+// ComponentPatch contains the component fields explicitly supplied by a patch
+// request. Nil fields are left unchanged.
+type ComponentPatch struct {
+	ID              uuid.UUID
+	FirmwareVersion *string
+	Description     *string
+	RackID          *uuid.UUID
+	SlotID          *int
+	TrayIndex       *int
+	HostID          *int
+	BMCsByType      map[devicetypes.BMCType][]bmc.BMC
 }
 
 // Store defines the interface for inventory data persistence.
@@ -63,9 +77,12 @@ type Store interface {
 	GetComponentBySerial(ctx context.Context, manufacturer string, serial string, withRack bool) (*component.Component, error)
 	GetComponentByBMCMAC(ctx context.Context, macAddress string) (*component.Component, error)
 	GetComponentsByExternalIDs(ctx context.Context, externalIDs []string) ([]*component.Component, error)
+	// GetComponentIdentitiesByIDsIncludingDeleted reads retained identities in
+	// unspecified order, omitting missing UUIDs. Empty input performs no query.
+	GetComponentIdentitiesByIDsIncludingDeleted(ctx context.Context, ids []uuid.UUID) ([]component.Identity, error)
 	GetListOfComponents(ctx context.Context, info dbquery.StringQueryInfo, manufacturerFilter *dbquery.StringQueryInfo, modelFilter *dbquery.StringQueryInfo, componentTypes []devicetypes.ComponentType, pagination *dbquery.Pagination, orderBy *dbquery.OrderBy) ([]*component.Component, int32, error)
 	AddComponent(ctx context.Context, comp *component.Component) (uuid.UUID, error)
-	PatchComponent(ctx context.Context, comp *component.Component) error
+	PatchComponent(ctx context.Context, patch ComponentPatch) error
 	DeleteComponent(ctx context.Context, id uuid.UUID) error
 	PurgeComponent(ctx context.Context, id uuid.UUID) error
 

@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+{{- if .Values.state.enabled }}
+{{- $name := include "nico-site-health-probe.name" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}-api
+  namespace: {{ include "nico-site-health-probe.namespace" . }}
+  labels:
+    {{- include "nico-site-health-probe.labels" . | nindent 4 }}
+spec:
+  ipFamilyPolicy: PreferDualStack
+  # The API answers 503 no_complete_sweep until every reader has a complete
+  # sweep, which is also when the pod turns ready. Clients should see that
+  # answer, not a refused connection.
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "nico-site-health-probe.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: api
+      port: {{ .Values.api.port }}
+      targetPort: api
+      protocol: TCP
+{{- end }}

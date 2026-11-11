@@ -328,7 +328,7 @@ pub async fn wait_identity_rate_limit_permit(
 /// `machine_identity.sign_timeout_secs` as the overall deadline.
 pub async fn sign_machine_identity_with_forge(
     forge_api: &str,
-    forge_client_config: &rpc::forge_tls_client::ForgeClientConfig,
+    carbide_client_config: &rpc::carbide_tls_client::CarbideClientConfig,
     call_timeout: Duration,
     audiences: Vec<String>,
 ) -> Result<MachineIdentityResponse, tonic::Status> {
@@ -336,7 +336,7 @@ pub async fn sign_machine_identity_with_forge(
 
     tokio::time::timeout(call_timeout, async {
         let mut client =
-            forge_dpu_agent_utils::utils::create_forge_client(forge_api, forge_client_config)
+            forge_dpu_agent_utils::utils::create_forge_client(forge_api, carbide_client_config)
                 .await
                 .map_err(|e| tonic::Status::internal(e.to_string()))?;
         client

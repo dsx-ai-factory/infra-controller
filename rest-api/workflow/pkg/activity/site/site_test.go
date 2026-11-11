@@ -1223,6 +1223,10 @@ func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Equal(t, &sku.ID, em.SkuID)
+		require.NoError(t, cdbm.NewPendingExpectedMachineBatchDAO(dbSession).Create(ctx, nil, cdbm.PendingExpectedMachineBatch{
+			WorkflowID: "pending-site-" + tag, SiteID: site.ID,
+			Inputs: []cdbm.ExpectedMachineCreateInput{{ExpectedMachineID: em.ID, SiteID: site.ID, BmcMacAddress: em.BmcMacAddress, ChassisSerialNumber: em.ChassisSerialNumber, SkuID: &sku.ID, CreatedBy: ipu.ID}},
+		}))
 		es := util.TestBuildExpectedSwitch(t, dbSession, site, "00:11:22:33:55:0"+tag, "switch-"+tag, ipu)
 		eps := util.TestBuildExpectedPowerShelf(t, dbSession, site, "00:11:22:33:66:0"+tag, "shelf-"+tag, ipu)
 
@@ -1342,6 +1346,7 @@ func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
 	assertGone("dpu_extension_service_deployment", &cdbm.DpuExtensionServiceDeployment{}, "desd.id", site1Resources.dpuDeploymentID)
 	assertGone("sku", &cdbm.SKU{}, "sk.id", site1Resources.skuID)
 	assertGone("expected_machine", &cdbm.ExpectedMachine{}, "em.id", site1Resources.expectedMachineID)
+	assertGone("pending_expected_machine", &cdbm.PendingExpectedMachine{}, "pem.workflow_id", "pending-site-a")
 	assertGone("expected_machine inserted during cleanup", &cdbm.ExpectedMachine{}, "em.id", lateExpectedMachineID)
 	assertGone("expected_switch", &cdbm.ExpectedSwitch{}, "es.id", site1Resources.expectedSwitchID)
 	assertGone("expected_power_shelf", &cdbm.ExpectedPowerShelf{}, "eps.id", site1Resources.expectedShelfID)
@@ -1368,6 +1373,7 @@ func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
 	assertPresent("dpu_extension_service_deployment", &cdbm.DpuExtensionServiceDeployment{}, "desd.id", site2Resources.dpuDeploymentID)
 	assertPresent("sku", &cdbm.SKU{}, "sk.id", site2Resources.skuID)
 	assertPresent("expected_machine", &cdbm.ExpectedMachine{}, "em.id", site2Resources.expectedMachineID)
+	assertPresent("pending_expected_machine", &cdbm.PendingExpectedMachine{}, "pem.workflow_id", "pending-site-b")
 	assertPresent("expected_switch", &cdbm.ExpectedSwitch{}, "es.id", site2Resources.expectedSwitchID)
 	assertPresent("expected_power_shelf", &cdbm.ExpectedPowerShelf{}, "eps.id", site2Resources.expectedShelfID)
 	// Site 2's image OS and its association are independent of site 1

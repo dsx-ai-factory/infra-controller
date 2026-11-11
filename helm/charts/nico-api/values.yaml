@@ -2,8 +2,8 @@
 ## nico-api — Core API server (gRPC + REST)
 ## =============================================================================
 ## Manages machines, provisioning, networking, firmware updates, and the web UI.
-## Requires PostgreSQL and Vault. See PREREQUISITES.md for required Secrets
-## and ConfigMaps.
+## Requires PostgreSQL and, unless vault.enabled is false, Vault. See
+## PREREQUISITES.md for required Secrets and ConfigMaps.
 ## =============================================================================
 
 ## Global settings (overridden by umbrella chart)
@@ -81,6 +81,11 @@ legacyAlias:
       createNamespace: false
 
 replicas: 1
+# Kubernetes Deployment update strategy. Set `type: Recreate` when the API
+# must be stopped before a replacement pod is started, or configure
+# `rollingUpdate` when using the default `RollingUpdate` strategy.
+strategy:
+  type: RollingUpdate
 automountServiceAccountToken: true
 annotations:
   configmap.reloader.stakater.com/reload: '{{ include "nico-api.name" . }}-config-files,{{ include "nico-api.name" . }}-site-config-files'
@@ -308,11 +313,22 @@ command: |
       --site-config-path /etc/forge/carbide-api/site/carbide-api-site-config.toml
   fi
 
+## Enable trace sampling at startup. Export also requires an OTLP/gRPC endpoint
+## in env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT or [tracing].otlp_endpoint in TOML.
+## A custom configFiles.nicoApiConfig replaces the generated tracing section;
+## siteConfig.nicoApiSiteConfig takes precedence over the generated config.
+tracing:
+  enabled: false
+
 ## Environment variables for nico-api
 env:
+  ## Injected only while vault.enabled is true.
   VAULT_PKI_ROLE_NAME: "nico-cluster"
   RUST_BACKTRACE: "full"
   RUST_LIB_BACKTRACE: "0"
+  ## Optional OTLP/gRPC URL (for example, http://tempo.observability:4317).
+  ## Empty omits the variable; the binary falls back to [tracing].otlp_endpoint.
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ""
 
 ## Optional operator-managed static credential file. The chart mounts one key
 ## from an existing Secret and configures nico-api to watch it; no credential
@@ -414,7 +430,8 @@ rms:
   apiUrl: "https://rms-api-server.rack-manager.svc.cluster.local:8801"
   ## Enforce TLS when connecting to RMS. The standard RMS deployment serves
   ## mTLS (apiServer.tls.enabled + caEnabled) with a certificate minted from
-  ## the same vault-nico-issuer that signs nico-api's SPIFFE cert.
+  ## the ClusterIssuer that signs nico-api's SPIFFE cert (vault-nico-issuer,
+  ## or site-issuer on a site installed without Vault).
   enforceTls: true
   ## Optional mTLS material overrides — paths inside the nico-api container.
   ## Leave empty: the RMS client (nv-rms-client) auto-discovers nico-api's
@@ -455,7 +472,30 @@ webAuth:
       name: ""
       key: password
 
-## External secret/configmap references mounted into the pod
+## Vault runtime configuration. While enabled, the Deployment injects the
+## VAULT_* environment (VAULT_ROLE_ID, VAULT_SECRET_ID, VAULT_TOKEN, VAULT_ADDR,
+## VAULT_NAMESPACE, VAULT_KV_MOUNT_LOCATION, VAULT_PKI_MOUNT_LOCATION,
+## VAULT_PKI_ROLE_NAME) from the Secrets and ConfigMap named under envFrom, which
+## the nico-prereqs chart creates. Set enabled: false only on a site that runs
+## without Vault (`setup.sh --skip-vault` passes --set nico-api.vault.enabled=false);
+## nico-api then fails at startup, naming the missing settings, if its
+## configuration still needs Vault, which it does while any of these hold
+## (docs/configuration/secrets-storage.md, "How It Works"):
+##   - the site TOML has no [secrets] section, or its backends list or writer
+##     includes "vault", or it sets import_from = "vault";
+##   - any [secrets.kms.providers.*] entry has type = "transit";
+##   - global.certificate.useCertManager or useCertManagerUfm is false, because
+##     a certificate type without cert-manager uses the Vault PKI backend.
+## A Vault-free site also needs an issuer that does not depend on Vault:
+## global.certificate.issuerRef.name=site-issuer from the nico-prereqs chart.
+## vaultClusterInfo must stay empty while enabled is false (the render fails
+## otherwise). Toggling enabled changes the pod template, so the Deployment
+## rolls on the next upgrade.
+vault:
+  enabled: true
+
+## External secret/configmap references mounted into the pod.
+## The vault* entries are read only while vault.enabled is true.
 envFrom:
   vaultApproleTokens:
     secretName: nico-vault-approle-tokens
@@ -602,6 +642,9 @@ dpf:
 ## NICo Web UI hostname (always created as ConfigMap)
 hostname: "nico.local"
 
+## Optional: create the envFrom.vaultClusterInfo ConfigMap from values instead
+## of using the one the nico-prereqs chart creates. Leave it empty while
+## vault.enabled is false; the render fails otherwise.
 vaultClusterInfo: {}
 #  VAULT_SERVICE: "https://vault.example.com"
 #  VAULT_NAMESPACE: "admin/team-a"

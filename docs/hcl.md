@@ -6,27 +6,28 @@ To add support for hardware that the NICo development team does not have access 
 
 ## Hosts
 
-**Last Updated: August 31, 2026**
+**Last Updated: November 5, 2026**
 
 | Host Machine | BMC/Management Firmware Version | BIOS/UEFI Version | Misc. Firmware Version (FPGA, CPLD, LXPM, etc.) |
 | ------------ | ------------------------------- | ----------------- | ----------------------------------------------- |
 | ARS-121L-DNR | 01.08.02 / 01.03.16 (LCC) | 2.2a / 2.0 (LCC) | SAA Ver = 1.2.0-p6 / SUM = 2.14.0-p6 (LCC) |
 | ARS-221GL-NR | 1.03.16 | 2.0 |  |
 | Dell PowerEdge R640 | iDRAC 7.00.00.182 | 2.24.0 | 1.0.6 |
+| Dell PowerEdge R660 | iDRAC 7.30.10.50 | 2.10.1 | CPLD 1.2.7 |
 | Dell PowerEdge R750 | iDRAC 7.20.60.50 | 1.18.1 | 1.1.1 |
 | Dell PowerEdge R760 | iDRAC 7.20.60.50 | 2.7.5 | 1.2.6 |
 | Dell PowerEdge XE9680 | iDRAC 7.20.60.50 | 2.7.4 | 1.6.0 |
-| Dell R670 | iDRAC 1.20.80.51 | 1.7.5 |  |
-| Dell R760xd2 | iDRAC 7.20.80.50 | 2.9.4 | 1.1.2 |
-| Dell R770 | iDRAC 1.20.80.51 | 1.7.5 |  |
+| Dell R670 | iDRAC 1.30.30.50 | 1.8.5 | 109.128.104 |
+| Dell R760xd2 | iDRAC 7.30.10.50 | 2.10.1 | 1.1.2 |
+| Dell R770 | iDRAC 1.30.30.50 | 1.8.5 | 109.128.104 |
 | DGX H100 | 25.06.27 (DGXH100_H200_25.06.4 pkg) | 1.06.07 (DGXH100_H200_25.06.4 pkg) |  |
 | DL380 Gen12 | 1.20.00 | 1.62_02-06-2026 |  |
 | GB200 Compute Tray (1RU) | 1.3.2GA | 1.3.2GA | 1.3.2GA |
 | GB200 NVL - Wiwynn | 25.06-2_NV_WW_02 | 1.3.2GA | 1.3.2GA |
 | HPE ProLiant DL385 Gen10 Plus v2 | 3.15 | 3.80_09-05-2025 |  |
-| Lenovo GB300 Compute Tray | 3.0.0 | 1.0.0GA | 1.0.0GA |
-| Lenovo HS350X V3 | 1.20 | 2.17.0 |  |
-| Lenovo SR650 V4 | 1.90 | 1.30 | 5.03.00 |
+| Lenovo GB300 Compute Tray | 3.0.0/3.03.0 | GBHC01A_01.03.1/GBHC01A_01.05.1 | 1.0.0GA/1.0.5 |
+| Lenovo HS350X V3 | 1.27.260418 | 02.20.00 | Motherboard CPLD 02.02.01; SCM CPLD 01.01.02 |
+| Lenovo SR650 V4 | XCC 2.97 | 1.51 | LXPM 5.03.01; HPM-FPGA 4.40 |
 | Lenovo ThinkSystem SR650 | 10.40 | 4.30 | 2.13 |
 | Lenovo ThinkSystem SR650 V2 | 5.70 | 3.60 | 3.31.01 |
 | Lenovo ThinkSystem SR650 V2 OVX* | 5.70 | 3.60 | 3.31.01 |
@@ -40,6 +41,7 @@ To add support for hardware that the NICo development team does not have access 
 | NVSwitch Tray DGX | 1.3.2GA | 1.3.2GA | 1.3.2GA |
 | NVSwitch Tray - Wiwynn | 1.3.2GA | 1.3.2GA | 1.3.2GA |
 | SSG-121E-NES24R | 01.04.19 | 2.7 | SAA Ver = 1.3.0-p1 |
+| SSG-222B-NE3X24R | 01.06.01.00 | 1.4b | Motherboard CPLD 20.1A.17 |
 | SYS-121H-TNR | X1.05.10 | 2.7 | SAA Ver = 1.3.0-p5 |
 | SYS-221H-TN24R | X1.05.10 | 2.7 | SAA Ver = 1.3.0-p5 |
 | SYS-221H-TNR | 1.03.18 | 2.7 | SAA Ver = 1.3.0-p7 |

@@ -273,6 +273,12 @@ impl NvueState {
         self.accounts.set_password(username, new_password)
     }
 
+    /// Restores the profile's factory NVOS administrator without changing
+    /// hardware identity, sensor readings or health.
+    pub fn reset_to_defaults(&self) {
+        self.accounts.reset_to_defaults(&self.config.admin);
+    }
+
     /// Sets what the leak sensor `sensor` reports.
     pub fn set_leak_state(&self, sensor: &str, state: LeakState) -> Result<(), UnknownLeakSensor> {
         let mut leaks = lock(&self.leaks);
@@ -792,6 +798,68 @@ mod tests {
             health["issues"]["LEAKAGE-2"]["issue"],
             json!("leak detected")
         );
+    }
+
+    #[tokio::test]
+    async fn factory_reset_restores_profile_credentials_and_preserves_hardware() {
+        let mut config = host(HardwareType::NvidiaSwitchN5700Ld)
+            .nvue_config()
+            .expect("a switch profile has NVOS");
+        config.admin = super::Account::new("profile-admin", "profile-factory-password");
+        let state = Arc::new(NvueState::from_config(config));
+        let router = super::router(state.clone(), Arc::new(InjectionStore::new()));
+        state.set_password("profile-admin", "rotated").unwrap();
+        state.set_leak_state("LEAKAGE-2", LeakState::Leak).unwrap();
+        state.set_system_health(
+            SystemHealthStatus::NotOk,
+            [("LEAKAGE-2".to_string(), "leak detected".to_string())],
+        );
+
+        let paths = [
+            "/nvue_v1/platform",
+            "/nvue_v1/platform/environment/leakage",
+            "/nvue_v1/system/health",
+        ];
+        let mut before = Vec::new();
+        for path in paths {
+            let (status, _, body) = exchange(
+                &router,
+                Method::GET,
+                path,
+                Some(&basic("profile-admin", "rotated")),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            before.push(body);
+        }
+
+        state.reset_to_defaults();
+        assert_eq!(
+            state.admin_credentials(),
+            (
+                "profile-admin".to_string(),
+                "profile-factory-password".to_string()
+            )
+        );
+        let (status, _, _) = exchange(
+            &router,
+            Method::GET,
+            paths[0],
+            Some(&basic("profile-admin", "rotated")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        for (path, before) in paths.into_iter().zip(before) {
+            let (status, _, body) = exchange(
+                &router,
+                Method::GET,
+                path,
+                Some(&basic("profile-admin", "profile-factory-password")),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, before, "reset changed {path}");
+        }
     }
 
     /// Only switch profiles have an NVOS to serve.

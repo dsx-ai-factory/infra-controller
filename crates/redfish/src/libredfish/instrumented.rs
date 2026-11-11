@@ -36,17 +36,18 @@
 //!
 //! Two kinds of methods are written out by hand rather than by the
 //! delegation macro. Password-bearing operations supply their password
-//! arguments to the instrumentation boundary, which sanitizes the error
-//! before either logging or returning it. And
-//! [`Redfish::ac_powercycle_supported_by_power`] is a local capability
-//! check with no BMC I/O to meter, so it delegates plainly.
+//! arguments to the instrumentation boundary, which sanitizes returned errors.
+//! [`Redfish::ac_powercycle_supported_by_power`] is a local capability check
+//! with no BMC I/O to meter, so it delegates plainly.
+//!
+//! All decorated consumers receive categorical NICo failure diagnostics without
+//! URLs or response text. Enabled dependency logs are separate from this boundary.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use carbide_instrument::red;
-use carbide_utils::redfish::log_redfish_http_error;
 use libredfish::model::account_service::ManagerAccount;
 use libredfish::model::certificate::Certificate;
 use libredfish::model::component_integrity::{CaCertificate, ComponentIntegrities, Evidence};
@@ -77,7 +78,7 @@ pub(super) const REDFISH_BACKEND: &str = "redfish";
 /// A [`Redfish`] client whose every call records the RED triad.
 pub(super) struct InstrumentedRedfish {
     inner: Box<dyn Redfish>,
-    /// Retained only to scrub an untrusted BMC response before it is logged or returned.
+    /// Retained to scrub known secrets from an untrusted BMC error before returning it.
     authentication_sensitive_values: Vec<String>,
 }
 
@@ -97,7 +98,8 @@ impl InstrumentedRedfish {
 
     /// Times a single Redfish call on the shared RED instrument. The client's
     /// authentication secrets and any password arguments belonging to this
-    /// operation are union-redacted before an error is logged or returned.
+    /// operation are union-redacted before an error is returned. The diagnostic
+    /// uses a fixed category, independently of the dependency's error text.
     async fn instrumented_redfish<'a, T, const N: usize>(
         &'a self,
         operation: &'static str,
@@ -130,6 +132,11 @@ pub(super) async fn instrumented_redfish_initialization<'a, T>(
 /// Records `NotSupported` as an expected `unsupported` outcome for ordinary
 /// operations, while initialization deliberately passes `false` so it keeps
 /// the pre-existing error contract. All other failures emit one WARN.
+#[tracing::instrument(
+    name = "redfish_call",
+    skip_all,
+    fields(backend = REDFISH_BACKEND, operation = operation, outcome = tracing::field::Empty)
+)]
 async fn instrumented_redfish_call<'a, T>(
     operation: &'static str,
     not_supported_is_expected: bool,
@@ -147,7 +154,8 @@ async fn instrumented_redfish_call<'a, T>(
     let result = call.await;
     let external_duration = started.elapsed();
 
-    // Scrub untrusted response text before either logging or returning it.
+    // Returned errors retain their existing detail after known-secret scrubbing.
+    // The NICo diagnostic below never formats dependency text or URLs.
     let result = if sensitive_values.is_empty() {
         result
     } else {
@@ -160,6 +168,7 @@ async fn instrumented_redfish_call<'a, T>(
         Err(_) if is_expected_not_supported => "unsupported",
         Err(_) => "error",
     };
+    tracing::Span::current().record("outcome", outcome);
     red::record(
         REDFISH_BACKEND,
         operation,
@@ -169,23 +178,20 @@ async fn instrumented_redfish_call<'a, T>(
     if let Err(error) = &result
         && !is_expected_not_supported
     {
+        // The existing `error` field intentionally contains a fixed category,
+        // independent of the scrubbed dependency detail returned to the caller.
         match error {
-            RedfishError::HTTPErrorCode {
-                url,
-                status_code,
-                response_body,
-            } => log_redfish_http_error(
-                REDFISH_BACKEND,
+            RedfishError::HTTPErrorCode { status_code, .. } => tracing::warn!(
+                backend = REDFISH_BACKEND,
                 operation,
-                url,
-                status_code.as_u16(),
-                response_body,
-                sensitive_values.iter().copied(),
+                http_status = status_code.as_u16(),
+                error = "http_error",
+                "external call failed"
             ),
             _ => tracing::warn!(
                 backend = REDFISH_BACKEND,
                 operation,
-                error = %error,
+                error = "redfish_error",
                 "external call failed"
             ),
         }
@@ -233,6 +239,7 @@ impl Redfish for InstrumentedRedfish {
         fn get_software_inventories<'a>(&'a self) -> Vec<String>;
         fn get_tasks<'a>(&'a self) -> Vec<String>;
         fn get_task<'a>(&'a self, id: &'a str) -> Task;
+        fn cancel_task<'a>(&'a self, id: &'a str) -> bool;
         fn get_power_state<'a>(&'a self) -> PowerState;
         fn get_service_root<'a>(&'a self) -> ServiceRoot;
         fn get_systems<'a>(&'a self) -> Vec<String>;
@@ -281,6 +288,8 @@ impl Redfish for InstrumentedRedfish {
             &'a self,
             boot_interface: Option<BootInterfaceRef<'a>>,
         ) -> MachineSetupStatus;
+        fn set_enable_onboard_nics<'a>(&'a self, enable_onboard_nics: EnabledDisabled) -> ();
+        fn are_onboard_nics_enabled<'a>(&'a self) -> Option<EnabledDisabled>;
         fn is_bios_setup<'a>(&'a self, boot_interface: Option<BootInterfaceRef<'a>>) -> bool;
         fn set_machine_password_policy<'a>(&'a self) -> ();
         fn lockdown<'a>(&'a self, target: EnabledDisabled) -> ();
@@ -430,6 +439,18 @@ impl Redfish for InstrumentedRedfish {
         ))
     }
 
+    fn enable_ipmi_account_access<'a>(
+        &'a self,
+        account_id: &'a str,
+        password: &'a str,
+    ) -> RedfishFuture<'a, Result<(), RedfishError>> {
+        Box::pin(self.instrumented_redfish(
+            "enable_ipmi_account_access",
+            [password],
+            self.inner.enable_ipmi_account_access(account_id, password),
+        ))
+    }
+
     fn create_user<'a>(
         &'a self,
         username: &'a str,
@@ -479,7 +500,7 @@ impl Redfish for InstrumentedRedfish {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture};
+    use carbide_instrument::testing::{CapturedFieldKind, MetricsCapture, capture_logs_async};
     use carbide_secrets::credentials::{CredentialKey, CredentialType};
     use carbide_utils::redfish::redfish_basic_authorization_context;
 
@@ -500,6 +521,72 @@ mod tests {
             .await
             .expect("sim client");
         InstrumentedRedfish::new(client, Vec::new())
+    }
+
+    #[tokio::test]
+    async fn task_cancellation_delegates_and_records_metrics() {
+        let sim = RedfishSim::default();
+        let client = sim_client(&sim).await;
+        let metrics = MetricsCapture::start();
+
+        // Protocol cases belong in libredfish; this proves the adapter forwards
+        // the task ID and meters cancellation through the same path as other calls.
+        assert!(
+            !client
+                .cancel_task("task-1")
+                .await
+                .expect("pending cancellation")
+        );
+        assert_eq!(sim.task_cancellation_requests(), vec!["task-1"]);
+        assert_eq!(
+            metrics.histogram_count_delta(
+                "carbide_external_call_duration_milliseconds",
+                &[
+                    ("backend", "redfish"),
+                    ("operation", "cancel_task"),
+                    ("outcome", "ok"),
+                ],
+            ),
+            1,
+        );
+    }
+
+    #[tokio::test]
+    async fn ipmi_account_access_is_delegated() {
+        let sim = RedfishSim::default();
+        sim.seed_user("1", "site_pass");
+        let client = sim_client(&sim).await;
+        client
+            .enable_ipmi_account_access("1", "site_pass")
+            .await
+            .unwrap();
+        assert!(sim.ipmi_account_access_enabled("1"));
+    }
+
+    #[tokio::test]
+    async fn onboard_nics_methods_delegate_to_vendor_client() {
+        let sim = RedfishSim::default();
+        let client = sim_client(&sim).await;
+        assert_eq!(client.are_onboard_nics_enabled().await.unwrap(), None);
+        let timepoint = sim.timepoint();
+        for target in [EnabledDisabled::Enabled, EnabledDisabled::Disabled] {
+            client.set_enable_onboard_nics(target).await.unwrap();
+            assert_eq!(
+                client.are_onboard_nics_enabled().await.unwrap(),
+                Some(target)
+            );
+        }
+        assert_eq!(
+            sim.actions_since(&timepoint).for_host("localhost"),
+            vec![
+                crate::libredfish::test_support::RedfishSimAction::SetEnableOnboardNics(
+                    EnabledDisabled::Enabled
+                ),
+                crate::libredfish::test_support::RedfishSimAction::SetEnableOnboardNics(
+                    EnabledDisabled::Disabled
+                ),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -531,15 +618,24 @@ mod tests {
         let sim = RedfishSim::default();
         let client = sim_client(&sim).await;
 
+        // The simulator echoes the missing account ID in a non-HTTP error.
+        // Preserve that returned error while the owned diagnostic stays categorical.
+        const PRIVATE_ACCOUNT: &str = "private-non-http-account";
         let metrics = MetricsCapture::start();
-        let error = client
-            .change_password_by_id("2", "site_pass")
-            .await
-            .expect_err("no account id 2 is seeded");
-        assert!(
-            matches!(&error, RedfishError::UserNotFound(id) if id == "2"),
-            "expected UserNotFound(\"2\"), got {error:?}",
-        );
+
+        let (result, logs) =
+            capture_logs_async(client.change_password_by_id(PRIVATE_ACCOUNT, "site_pass")).await;
+
+        let error = result.expect_err("the account is not seeded");
+        assert!(matches!(&error, RedfishError::UserNotFound(id) if id == PRIVATE_ACCOUNT));
+        let log = logs
+            .iter()
+            .find(|log| log.message == "external call failed")
+            .expect("failure diagnostic");
+        assert_eq!(log.field("error"), Some("redfish_error"));
+        assert_eq!(log.field("backend"), Some(REDFISH_BACKEND));
+        assert_eq!(log.field("operation"), Some("change_password_by_id"));
+        assert!(!format!("{log:?}").contains(PRIVATE_ACCOUNT));
 
         assert_eq!(
             metrics.histogram_count_delta(
@@ -555,20 +651,21 @@ mod tests {
     }
 
     #[test]
-    fn initialization_failure_is_redacted_before_logging_and_returning() {
+    fn initialization_wrapper_emits_category_and_scrubs_returned_password() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("current-thread runtime");
+        let metrics = MetricsCapture::start();
         let mut result = None;
         let logs = carbide_instrument::testing::capture_logs(|| {
             result = Some(rt.block_on(instrumented_redfish_initialization::<()>(
                 "create_client",
                 ["secret"],
                 std::future::ready(Err(RedfishError::HTTPErrorCode {
-                    url: "https://bmc.example/redfish/v1".to_string(),
+                    url: "https://private-initialization-url/redfish/v1".to_string(),
                     status_code: http::StatusCode::UNAUTHORIZED,
                     response_body:
-                        r#"{"error":{"message":"credential s\u0065cret rejected"}}"#.to_string(),
+                        r#"{"error":{"message":"credential s\u0065cret rejected private-init-marker https://private-artifact-token/firmware"}}"#.to_string(),
                 })),
             )));
         });
@@ -581,11 +678,43 @@ mod tests {
         };
         let response: serde_json::Value =
             serde_json::from_str(&response_body).expect("redacted body remains valid JSON");
-        assert_eq!(response["error"]["message"], "credential REDACTED rejected");
+        assert_eq!(
+            response["error"]["message"],
+            "credential REDACTED rejected private-init-marker https://private-artifact-token/firmware"
+        );
 
         let log = logs.first().expect("one initialization failure log");
         assert_eq!(logs.len(), 1);
-        assert_eq!(log.field("error"), Some("credential REDACTED rejected"));
+        assert_eq!(log.field("error"), Some("http_error"));
+        for secret in ["secret", r#"s\u0065cret"#] {
+            assert!(
+                logs.iter().all(|log| !format!("{log:?}").contains(secret)),
+                "{secret}"
+            );
+        }
+        assert_eq!(log.field("backend"), Some(REDFISH_BACKEND));
+        assert_eq!(log.field("operation"), Some("create_client"));
+        assert_eq!(log.field("http_status"), Some("401"));
+        assert_eq!(log.field_kind("http_status"), Some(CapturedFieldKind::U64));
+        assert_eq!(log.field("url"), None);
+        for marker in [
+            "private-init-marker",
+            "private-artifact-token",
+            "private-initialization-url",
+        ] {
+            assert!(!format!("{log:?}").contains(marker), "{marker}");
+        }
+        assert_eq!(
+            metrics.histogram_count_delta(
+                "carbide_external_call_duration_milliseconds",
+                &[
+                    ("backend", "redfish"),
+                    ("operation", "create_client"),
+                    ("outcome", "error")
+                ],
+            ),
+            1,
+        );
     }
 
     /// The three-way outcome split: a vendor's local `NotSupported` answer
@@ -615,12 +744,12 @@ mod tests {
                     true,
                     [],
                     std::future::ready(Err(RedfishError::HTTPErrorCode {
-                        url: "https://bmc.example/redfish/v1/Systems/1".to_string(),
+                        url: "https://private-operation-url/redfish/v1/Systems/1".to_string(),
                         status_code: http::StatusCode::INTERNAL_SERVER_ERROR,
                         response_body: r#"{
                             "error": {
                                 "@Message.ExtendedInfo": [{
-                                    "Message": "internal service error"
+                                    "Message": "private-operation-marker https://private-operation-artifact/firmware"
                                 }]
                             }
                         }"#
@@ -646,13 +775,17 @@ mod tests {
         );
         assert_eq!(log.field("backend"), Some(REDFISH_BACKEND));
         assert_eq!(log.field("operation"), Some("lockdown_status"));
-        assert_eq!(
-            log.field("url"),
-            Some("https://bmc.example/redfish/v1/Systems/1")
-        );
+        assert_eq!(log.field("url"), None);
         assert_eq!(log.field("http_status"), Some("500"));
         assert_eq!(log.field_kind("http_status"), Some(CapturedFieldKind::U64));
-        assert_eq!(log.field("error"), Some("internal service error"));
+        assert_eq!(log.field("error"), Some("http_error"));
+        for marker in [
+            "private-operation-marker",
+            "private-operation-artifact",
+            "private-operation-url",
+        ] {
+            assert!(!format!("{log:?}").contains(marker), "{marker}");
+        }
         assert_eq!(
             metrics.histogram_count_delta(
                 "carbide_external_call_duration_milliseconds",
@@ -680,7 +813,7 @@ mod tests {
     /// Verifies ordinary client failures remove plaintext, complete Basic
     /// header, and bare payload forms before crossing the client boundary.
     #[test]
-    fn ordinary_failure_redacts_authentication_secrets_before_logging_and_returning() {
+    fn decorated_http_failure_emits_category_and_scrubs_returned_authentication() {
         // Build a decorated client with the same redaction context retained by
         // the production pool for direct Basic authentication.
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -717,7 +850,8 @@ mod tests {
             )));
         });
 
-        // The returned error and emitted diagnostic must expose neither form.
+        // The returned error must scrub every authentication form. This NICo
+        // diagnostic uses a fixed category rather than the returned body.
         let error = result
             .expect("captured result")
             .expect_err("the simulated HTTP failure remains an error");
@@ -734,11 +868,18 @@ mod tests {
         let log = logs.first().expect("one ordinary failure log");
         assert_eq!(logs.len(), 1);
         assert_eq!(log.field("operation"), Some("get_system"));
-        assert_eq!(
-            log.field("error"),
-            Some(
-                "credential REDACTED or REDACTED or basic REDACTED or BASIC REDACTED or REDACTED rejected"
-            )
-        );
+        assert_eq!(log.field("error"), Some("http_error"));
+        // Inspect every captured field, not only the categorical `error` field.
+        for secret in [
+            "secret",
+            r#"s\u0065cret"#,
+            basic_authorization.as_str(),
+            basic_payload.as_str(),
+        ] {
+            assert!(
+                logs.iter().all(|log| !format!("{log:?}").contains(secret)),
+                "{secret}"
+            );
+        }
     }
 }

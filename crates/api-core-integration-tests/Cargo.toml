@@ -42,9 +42,16 @@ carbide-api-db = { path = "../api-db", default-features = false, features = [
 ] }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-authn = { path = "../authn" }
+carbide-credential-rotation = { path = "../credential-rotation" }
+carbide-health-metrics = { path = "../health-metrics" }
 carbide-health-report = { path = "../health-report" }
 carbide-ib-fabric = { path = "../ib-fabric", features = ["test-support"] }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-ipmi = { path = "../ipmi" }
+carbide-machine-controller = { path = "../machine-controller" }
+carbide-nvlink-manager = { path = "../nvlink-manager", features = ["test-support"] }
+carbide-rack = { path = "../rack" }
+carbide-redfish = { path = "../redfish", features = ["test-support"] }
 carbide-rpc = { path = "../rpc", features = ["model", "sqlx", "test-support"] }
 carbide-secrets = { path = "../secrets", features = ["test-support"] }
 carbide-site-explorer = { path = "../site-explorer", features = [
@@ -56,12 +63,15 @@ carbide-uuid = { path = "../uuid", features = ["sqlx"] }
 carbide-version = { path = "../version" }
 component-manager = { path = "../component-manager" }
 config-version = { path = "../config-version", features = ["sqlx"] }
+state-controller = { path = "../state-controller" }
 
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+async-trait = { workspace = true }
 chrono = { workspace = true }
 const_format = { workspace = true }
 data-encoding = { workspace = true }
 eyre = { workspace = true }
+futures-util = { workspace = true }
 http = { workspace = true }
 ipnetwork = { workspace = true }
 itertools = { workspace = true }

@@ -258,6 +258,12 @@ async fn lenovo_gb300_legacy_client_raw_push_activates_bmc() {
     assert_eq!(inventory()["Version"], "bmc-old");
     client.bmc_reset(None).await.unwrap();
     assert_eq!(inventory()["Version"], "bmc-new");
+    let task_after_reset = client.get_task(&task.id).await.unwrap();
+    assert_eq!(task_after_reset.id, task.id);
+    assert_eq!(
+        serde_json::to_value(task_after_reset).unwrap()["TaskState"],
+        "Completed"
+    );
     assert_eq!(
         state.update_service_state.find_firmware_inventory("UEFI"),
         None,

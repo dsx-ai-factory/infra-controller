@@ -21,10 +21,12 @@
 #   0. NCX stack           (nico-rest helm, temporal, keycloak, ncx postgres)
 #   1. nico core        (separate helm release, if installed)
 #   1b. DPF stack          (DPF CRs, dpf-operator helm release — if installed)
-#   2. helmfile releases   (nico-prereqs, external-secrets, vault, cert-manager,
-#                           postgres-operator, Contour/Envoy, DPF prereqs when installed)
+#   2. helmfile releases   (nico-prereqs, external-secrets, vault when installed,
+#                           cert-manager, postgres-operator, Contour/Envoy, DPF
+#                           prereqs when installed)
 #   3. cluster-scoped hook resources (ClusterIssuers, ClusterSecretStore, etc.)
-#   4. vault init secrets  (vault-cluster-keys, vaultunsealkeys, vaultroottoken)
+#   4. vault init secrets  (vault-cluster-keys, vaultunsealkeys, vaultroottoken;
+#                           when installed — every Vault delete tolerates absence)
 #   5. namespaces          (nico-system, cert-manager, vault, external-secrets,
 #                           postgres, dpf-operator-system)
 #   6. local-path-persistent PVs owned by this stack (Retain policy — not deleted with namespace;
@@ -43,7 +45,7 @@ cd "${SCRIPT_DIR}"
 # ---------------------------------------------------------------------------
 echo "=== [0/8] Uninstalling NICo REST stack ==="
 # Flow goes first — it talks to Temporal + nico-api and depends on credentials
-# from both nico-prereqs (DB creds, vault tokens) and the REST stack.
+# from both nico-prereqs (DB creds, Vault tokens when installed) and the REST stack.
 helm uninstall flow                 -n flow                            2>/dev/null || true
 kubectl delete ns flow --wait=false --ignore-not-found                 2>/dev/null || true
 # --no-hooks: the rack-manager chart ships a pre-delete drop-database hook

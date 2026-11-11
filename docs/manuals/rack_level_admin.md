@@ -104,8 +104,8 @@ After NICo imports the expected inventory, it goes through the following workflo
 1. NICo discovers compute, switch, and powershelf trays via DHCP requests.
 2. NICo explores these trays and ingest them for management.
 3. The site administrator tells NICo to start the rack bringup.
-4. NICo waits for and verifies that all compute, switch, and powershelf trays have been discovered and ingested, updates their FW to achieve consistency and compatibility, and perform the required power control sequence to ready the use of the rack components.
-5. Once all the components are ready, the rack is considered *ready*.
+4. NICo starts rack ingestion when the discovered and ready switch counts meet the rack profile minimum. Missing compute or powershelf trays remain visible in rack health without blocking ingestion. NICo then updates firmware and performs the configured bringup operations. See the [rack state machine](../architecture/state_machines/rackstatemachine.md#discovering-r_discovering) for the transition contract.
+5. After maintenance and rack validation complete, the rack is considered *ready*. Missing trays continue to raise rack health alerts.
 
 </Step>
 
@@ -185,6 +185,7 @@ for component inclusion and list ordering.
 - [GET /v2/org/{org}/nico/tray/{id}](api:GET/v2/org/:org/nico/tray/:id): Retrieve a tray and its health snapshot with the specified ID.
 - [GET /v2/org/{org}/nico/tray/validation](api:GET/v2/org/:org/nico/tray/validation): Validate all or selected trays in the site by comparing the expected inventory data to the actual inventory data.
 - [GET /v2/org/{org}/nico/tray/{id}/validation](api:GET/v2/org/:org/nico/tray/:id/validation): Validate the specified tray by comparing the expected inventory data to the actual inventory data.
+- [GET /v2/org/{org}/nico/tray/{id}/power](api:GET/v2/org/:org/nico/tray/:id/power): Retrieve the actual power state, stored desired power policy, tracked power actions, and outstanding power tasks for the specified tray.
 - [PATCH /v2/org/{org}/nico/tray/power](api:PATCH/v2/org/:org/nico/tray/power): Control the power of all or selected trays in the site.
 - [PATCH /v2/org/{org}/nico/tray/{id}/power](api:PATCH/v2/org/:org/nico/tray/:id/power): Control the power of the specified tray.
 - [PATCH /v2/org/{org}/nico/tray/firmware](api:PATCH/v2/org/:org/nico/tray/firmware): Update the firmware on all or selected trays in the site.
