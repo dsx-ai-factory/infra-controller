@@ -31101,6 +31101,7 @@ components:
         - dmiData
         - bmcInfo
         - gpus
+        - disks
         - networkInterfaces
         - infinibandInterfaces
         - lifecycleState
@@ -31128,6 +31129,12 @@ components:
               totalMemory: 81559 MiB
               frequency: 1755 MHz
               pciBusId: '00000000:17:00.0'
+          disks:
+            - type: nvme
+              model: Dell BOSS-N1
+              serial: CN0WW56VFCP0042T04MQ
+              sizeMb: null
+              pciPath: /devices/pci0000:00/0000:00:0a.0/0000:01:00.0/nvme/nvme2
           networkInterfaces:
             - macAddress: 'c8:4b:d6:7b:ac:a8'
               vendor: Broadcom Inc. and subsidiaries
@@ -31180,6 +31187,11 @@ components:
           items:
             $ref: '#/components/schemas/MachineGPUInfo'
           description: 'GPU inventory reported for the Machine'
+        disks:
+          type: array
+          items:
+            $ref: '#/components/schemas/MachineDisk'
+          description: 'Disks reported by the Machine. Use model and serial to pick the disk for imageDisk when creating an image-based Operating System'
         networkInterfaces:
           type: array
           items:
@@ -31402,6 +31414,50 @@ components:
             - string
             - 'null'
           description: 'DMI system vendor reported by the Machine'
+    MachineDisk:
+      title: MachineDisk
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - sizeMb
+        - pciPath
+      description: Describes a disk of a Machine
+      required:
+        - type
+        - model
+        - serial
+        - sizeMb
+        - pciPath
+      examples:
+        - type: nvme
+          model: Dell BOSS-N1
+          serial: CN0WW56VFCP0042T04MQ
+          sizeMb: null
+          pciPath: /devices/pci0000:00/0000:00:0a.0/0000:01:00.0/nvme/nvme2
+      properties:
+        type:
+          type: string
+          enum:
+            - nvme
+            - disk
+          description: 'Kind of disk reported by the Machine'
+        model:
+          type: string
+          description: 'Model of the disk'
+        serial:
+          type: string
+          description: 'Serial number of the disk'
+        sizeMb:
+          type:
+            - integer
+            - 'null'
+          format: uint32
+          description: 'Size of the disk in megabytes, when the Machine reports it'
+        pciPath:
+          type:
+            - string
+            - 'null'
+          description: 'PCI sysfs path of the disk, when the Machine reports it'
     MachineGPUInfo:
       title: MachineGPUInfo
       type: object
