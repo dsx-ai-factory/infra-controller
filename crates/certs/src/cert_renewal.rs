@@ -23,8 +23,8 @@ use ::rpc::carbide_tls_client::{self, ApiConfig, CarbideClientConfig};
 use ::rpc::forge as rpc;
 use carbide_host_support::registration;
 use carbide_instrument::{Event, Outcome, emit};
+use carbide_tls::client_config::{ClientCert, MAX_CERT_RENEWAL_TIME_SECS};
 use eyre::Context;
-use forge_tls::client_config::{ClientCert, MAX_CERT_RENEWAL_TIME_SECS};
 use rand::RngExt;
 
 /// Certificates are renewed between in these 2 time intervals
