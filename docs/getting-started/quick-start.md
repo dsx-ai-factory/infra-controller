@@ -507,6 +507,20 @@ before continuing.
 | 7h | **NICo Flow** |
 | 7i | **NICo REST site-agent** |
 
+After you accept Core deployment (including with `-y`), Phase 6 creates missing
+namespaces for enabled API and PXE legacy aliases (`forge-system` by default)
+before installing Core. It uses the final rendered Core configuration, leaves
+existing namespaces unchanged, and leaves chart-rendered namespaces to Helm.
+Rendering, parsing, lookup, or creation errors stop Core installation.
+`--skip-core` and declining Core deployment skip this preparation.
+
+Setup-created alias namespaces have no Helm ownership metadata. API aliases keep
+`createNamespace: false` by default; enabling it later does not automatically
+adopt these namespaces and can fail Helm ownership checks. Manual Helm and GitOps
+deployments must prepare alias namespaces themselves or explicitly opt in to API
+namespace creation for a new namespace with no other owner. PXE has no namespace
+creation option. See [Legacy alias namespaces](https://github.com/dsx-ai-factory/infra-controller/blob/main/helm/README.md#legacy-alias-namespaces).
+
 The following components are deployed:
 
 ```text

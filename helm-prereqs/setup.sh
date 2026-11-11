@@ -532,6 +532,67 @@ _append_bmc_v0_core_values() {
     )
 }
 
+_prepare_core_legacy_alias_namespaces() {
+    local _namespaces _namespace _existing
+
+    # Reuse the final release, chart and options after `helm upgrade --install`.
+    # Stream manifests so --debug never prints rendered Secrets. An empty alias
+    # template is valid, so do not select it with Helm's --show-only option.
+    if ! _namespaces="$(
+        (cd "${SCRIPT_DIR}/.." && helm template "${NICO_CORE_CMD[@]:3}") |
+            python3 -c '
+import re
+import sys
+import yaml
+
+def namespace_name(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?", value):
+        raise ValueError("invalid namespace")
+    return value
+
+aliases = set()
+chart_namespaces = set()
+try:
+    for manifest in yaml.safe_load_all(sys.stdin):
+        if manifest is None:
+            continue
+        metadata = manifest.get("metadata", {})
+        if manifest.get("kind") == "Namespace":
+            chart_namespaces.add(namespace_name(metadata["name"]))
+        elif (manifest.get("kind") == "Service"
+              and manifest.get("spec", {}).get("type") == "ExternalName"
+              and "nico.nvidia.com/legacy-alias-of" in metadata.get("labels", {})):
+            namespace = metadata.get("namespace")
+            # An omitted namespace uses the already-prepared release namespace.
+            if namespace not in (None, ""):
+                aliases.add(namespace_name(namespace))
+except (yaml.YAMLError, AttributeError, KeyError, TypeError, ValueError):
+    print("Error: invalid legacy-alias namespace metadata in the Core chart.", file=sys.stderr)
+    sys.exit(1)
+
+for namespace in sorted(aliases - chart_namespaces):
+    print(namespace)
+'
+    )"; then
+        echo "Error: could not determine legacy-alias namespaces from the Core chart." >&2
+        return 1
+    fi
+
+    while IFS= read -r _namespace; do
+        [[ -n "${_namespace}" ]] || continue
+        if ! _existing="$(kubectl get namespace "${_namespace}" --ignore-not-found -o name)"; then
+            echo "Error: could not inspect legacy-alias namespace ${_namespace}." >&2
+            return 1
+        fi
+        if [[ -z "${_existing}" ]]; then
+            if ! kubectl create namespace "${_namespace}"; then
+                echo "Error: could not create legacy-alias namespace ${_namespace}." >&2
+                return 1
+            fi
+        fi
+    done <<< "${_namespaces}"
+}
+
 _nico_api_credential_file_secret_name() {
     local _file="$1"
     local _rendered=""
@@ -2317,6 +2378,7 @@ else
         fi
         _SETUP_PHASE="[6/6] NICo Core"
         echo "=== [6/6] NICo Core ==="
+        _prepare_core_legacy_alias_namespaces
         # The nico-api chart hashes its ConfigMap inputs into the pod
         # template. A rerun with an unchanged image but changed site config
         # therefore performs the required rollout within this single Helm
@@ -2337,6 +2399,8 @@ else
         echo "or pass --skip-dpf to deploy without DPF."
     else
         echo "Skipped. To deploy manually, run from $(dirname "${SCRIPT_DIR}"):"
+        echo "  First ensure the enabled API and PXE legacy-alias namespaces exist (forge-system by default)."
+        echo "  Create missing namespaces, or opt in to nico-api.legacyAlias.aliases[].createNamespace only for namespaces the chart should own."
         echo "  ${_NICO_CORE_CMD_DISPLAY}"
     fi
 fi

@@ -410,6 +410,22 @@ It supports these common deployment modes:
 | `--with-observability` | Also install the local monitoring stack (metrics + logs + traces) after Core. Runs in every mode, including `--skip-rest`. Can also be run standalone at any time: `observability/install-observability.sh`. See [observability/README.md](observability/README.md). |
 | `--debug` | Enable bash tracing. This can print secrets, so avoid it in shared logs. |
 
+After you accept Core deployment (including with `-y`), setup renders the Core
+chart with its final values and overrides, then creates missing namespaces for
+enabled API and PXE legacy aliases (`forge-system` by default) before the Phase 6
+Helm install. Namespaces rendered by the chart itself are left to Helm. Existing
+namespaces are unchanged, and newly created alias namespaces receive no Helm
+ownership metadata. Rendering, YAML parsing, namespace lookup, or creation errors
+stop Core installation. `--skip-core` and declining Core deployment skip this
+namespace preparation.
+
+API aliases keep `createNamespace: false` by default. Changing it to `true` later
+does not automatically adopt a namespace that setup created and can fail Helm
+ownership checks. For a manual Helm command or GitOps deployment, prepare alias
+namespaces through your site's namespace management, or explicitly opt in to API
+namespace creation for a new namespace with no other owner. PXE has no namespace
+creation option. Refer to [Legacy alias namespaces](../helm/README.md#legacy-alias-namespaces).
+
 Preflight errors return exit code `1` in both interactive and `-y` runs unless
 `--ignore-preflight-errors` is set. The override prints the errors and an explicit
 continuation message. It also works with standalone `bash ./preflight.sh`.

@@ -25,19 +25,20 @@ global:
 ## Override the release namespace (defaults to helm install -n <namespace>)
 namespaceOverride: ""
 
-## Legacy name aliases — opt-in ExternalName Services so binaries that
+## Legacy name aliases — ExternalName Services enabled by default so binaries that
 ## hardcode the pre-rename hostname (e.g. `carbide-pxe.forge-system.svc.
 ## cluster.local`) continue to resolve to this chart's nico-pxe Service.
-## See helm/charts/nico-api/values.yaml `legacyAlias` for the full
-## explanation; this chart's variant creates only the Service. The alias
-## namespace is owned by nico-api's legacyAlias template, so enable
-## nico-api.legacyAlias in tandem.
+## Each alias creates only a Service; PXE has no createNamespace option.
+## helm-prereqs/setup.sh prepares missing alias namespaces after Core deployment
+## is accepted. Direct Helm/GitOps installs must prepare them separately or share
+## a namespace explicitly created by an API alias with createNamespace: true.
+## Enabling API aliases alone does not create namespaces; that option defaults
+## to false. See helm/charts/nico-api/values.yaml for namespace ownership rules.
 legacyAlias:
   # On by default to match the chart's cert SAN posture (the `nico-pxe`
   # Certificate already includes `carbide-pxe.forge-system.svc.cluster.local`
   # as a SAN). Flip to false on all-modern fleets where no client uses the
-  # legacy hostname. Requires `nico-api.legacyAlias.enabled` to be true so
-  # the `forge-system` namespace is owned by nico-api's template.
+  # legacy hostname.
   enabled: true
   aliases:
     - name: carbide-pxe
