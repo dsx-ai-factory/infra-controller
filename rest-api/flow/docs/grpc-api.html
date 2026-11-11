@@ -443,11 +443,59 @@
                 </li>
 
                 <li>
+                  <a href="#v1.FirmwareActionDetails"><span class="badge">M</span>FirmwareActionDetails</a>
+                </li>
+
+                <li>
+                  <a href="#v1.FirmwareActualDetails"><span class="badge">M</span>FirmwareActualDetails</a>
+                </li>
+
+                <li>
                   <a href="#v1.FirmwareAuthenticationData"><span class="badge">M</span>FirmwareAuthenticationData</a>
                 </li>
 
                 <li>
                   <a href="#v1.FirmwareControlTaskOperation"><span class="badge">M</span>FirmwareControlTaskOperation</a>
+                </li>
+
+                <li>
+                  <a href="#v1.FirmwareDesiredDetails"><span class="badge">M</span>FirmwareDesiredDetails</a>
+                </li>
+
+                <li>
+                  <a href="#v1.FirmwareOperations"><span class="badge">M</span>FirmwareOperations</a>
+                </li>
+
+                <li>
+                  <a href="#v1.FirmwareRequestedTargets"><span class="badge">M</span>FirmwareRequestedTargets</a>
+                </li>
+
+                <li>
+                  <a href="#v1.FirmwareTargetForType"><span class="badge">M</span>FirmwareTargetForType</a>
+                </li>
+
+                <li>
+                  <a href="#v1.FirmwareTargetMetadata"><span class="badge">M</span>FirmwareTargetMetadata</a>
+                </li>
+
+                <li>
+                  <a href="#v1.FirmwareTargetsByType"><span class="badge">M</span>FirmwareTargetsByType</a>
+                </li>
+
+                <li>
+                  <a href="#v1.FirmwareTaskDetails"><span class="badge">M</span>FirmwareTaskDetails</a>
+                </li>
+
+                <li>
+                  <a href="#v1.FirmwareTaskDetailsList"><span class="badge">M</span>FirmwareTaskDetailsList</a>
+                </li>
+
+                <li>
+                  <a href="#v1.FirmwareTaskExternalTargets"><span class="badge">M</span>FirmwareTaskExternalTargets</a>
+                </li>
+
+                <li>
+                  <a href="#v1.FirmwareTaskWaitingContext"><span class="badge">M</span>FirmwareTaskWaitingContext</a>
                 </li>
 
                 <li>
@@ -572,6 +620,14 @@
 
                 <li>
                   <a href="#v1.GetTasksByIDsResponse"><span class="badge">M</span>GetTasksByIDsResponse</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetTrayFirmwareDetailsRequest"><span class="badge">M</span>GetTrayFirmwareDetailsRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.GetTrayFirmwareDetailsResponse"><span class="badge">M</span>GetTrayFirmwareDetailsResponse</a>
                 </li>
 
                 <li>
@@ -935,6 +991,10 @@
                 </li>
 
                 <li>
+                  <a href="#v1.RackOperationStatusDetails"><span class="badge">M</span>RackOperationStatusDetails</a>
+                </li>
+
+                <li>
                   <a href="#v1.RackPosition"><span class="badge">M</span>RackPosition</a>
                 </li>
 
@@ -1035,7 +1095,19 @@
                 </li>
 
                 <li>
+                  <a href="#v1.TrayFirmwareDetails"><span class="badge">M</span>TrayFirmwareDetails</a>
+                </li>
+
+                <li>
                   <a href="#v1.TrayPowerDetails"><span class="badge">M</span>TrayPowerDetails</a>
+                </li>
+
+                <li>
+                  <a href="#v1.TrayStatusCounts"><span class="badge">M</span>TrayStatusCounts</a>
+                </li>
+
+                <li>
+                  <a href="#v1.TrayStatusCountsByType"><span class="badge">M</span>TrayStatusCountsByType</a>
                 </li>
 
                 <li>
@@ -1125,6 +1197,14 @@
 
                 <li>
                   <a href="#v1.FirmwareControlOperation"><span class="badge">E</span>FirmwareControlOperation</a>
+                </li>
+
+                <li>
+                  <a href="#v1.FirmwareDetailsReadError"><span class="badge">E</span>FirmwareDetailsReadError</a>
+                </li>
+
+                <li>
+                  <a href="#v1.FirmwareTargetKind"><span class="badge">E</span>FirmwareTargetKind</a>
                 </li>
 
                 <li>
@@ -3468,6 +3548,68 @@ this operation. </p></td>
 
 
 
+        <h3 id="v1.FirmwareActionDetails">FirmwareActionDetails</h3>
+        <p>Core stored and backend work, preserving their separate availability.</p><p>Nested Core targets/results are forwarded unchanged; consumers must treat</p><p>their absence as unsupported evidence, not completed or empty work.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>value</td>
+                  <td><a href="https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto">forge.ComponentFirmwareActions</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.FirmwareDetailsReadError">FirmwareDetailsReadError</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.FirmwareActualDetails">FirmwareActualDetails</h3>
+        <p>A Core installed collection, including member failures, or Flow read failure.</p><p>Core payloads are forwarded unchanged. Consumers must treat absent nested</p><p>results as unsupported evidence, never as a successful empty observation.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>value</td>
+                  <td><a href="https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto">forge.ComponentFirmwareInstalled</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.FirmwareDetailsReadError">FirmwareDetailsReadError</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.FirmwareAuthenticationData">FirmwareAuthenticationData</h3>
         <p>FirmwareAuthenticationData selects either one value shared by every target</p><p>or values scoped to supported firmware tray types.</p>
 
@@ -3562,6 +3704,421 @@ every firmware sub-part supported by that component. </p></td>
                   <td></td>
                   <td><p>Overrides firmware version-based checks when the selected component
 backend applies the update. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.FirmwareDesiredDetails">FirmwareDesiredDetails</h3>
+        <p>Existing effective defaults/comparison, independent of a task's requested input.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>value</td>
+                  <td><a href="https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto">forge.ComponentFirmwareExpected</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.FirmwareDetailsReadError">FirmwareDetailsReadError</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.FirmwareOperations">FirmwareOperations</h3>
+        <p>Core requests/jobs and Flow tasks are distinct, without a correlation ID.</p><p>Running Flow work does not establish an active Core or hardware operation.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>actions</td>
+                  <td><a href="#v1.FirmwareActionDetails">FirmwareActionDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>tasks</td>
+                  <td><a href="#v1.FirmwareTaskDetailsList">FirmwareTaskDetailsList</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.FirmwareRequestedTargets">FirmwareRequestedTargets</h3>
+        <p>Shared input or explicit type-specific sections, without interpreting membership.</p><p>Every returned task selects shared or by_type; an unset selection is not emitted.</p><p>Unavailable display metadata uses FIRMWARE_TARGET_KIND_UNAVAILABLE instead.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>shared</td>
+                  <td><a href="#v1.FirmwareTargetMetadata">FirmwareTargetMetadata</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>by_type</td>
+                  <td><a href="#v1.FirmwareTargetsByType">FirmwareTargetsByType</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.FirmwareTargetForType">FirmwareTargetForType</h3>
+        <p>A recorded type section, distinct from task target selection.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>component_type</td>
+                  <td><a href="#v1.ComponentType">ComponentType</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>target</td>
+                  <td><a href="#v1.FirmwareTargetMetadata">FirmwareTargetMetadata</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.FirmwareTargetMetadata">FirmwareTargetMetadata</h3>
+        <p>Display-only metadata; versions/manifest IDs retain exact stored spelling.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>kind</td>
+                  <td><a href="#v1.FirmwareTargetKind">FirmwareTargetKind</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>value</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Empty for unavailable/default metadata; no artifact URLs or manifest body. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.FirmwareTargetsByType">FirmwareTargetsByType</h3>
+        <p>Only the explicitly supplied type sections, in component-type order.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>entries</td>
+                  <td><a href="#v1.FirmwareTargetForType">FirmwareTargetForType</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.FirmwareTaskDetails">FirmwareTaskDetails</h3>
+        <p>Sanitized stored firmware intent; not installed or effective expected firmware.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>operation</td>
+                  <td><a href="#v1.FirmwareControlOperation">FirmwareControlOperation</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>targets</td>
+                  <td><a href="#v1.ComponentsByType">ComponentsByType</a></td>
+                  <td></td>
+                  <td><p>Full recorded Flow UUID/type selection, sorted by type then UUID. </p></td>
+                </tr>
+
+                <tr>
+                  <td>status</td>
+                  <td><a href="#v1.TaskStatus">TaskStatus</a></td>
+                  <td></td>
+                  <td><p>Recorded Flow status; Running does not prove hardware dispatch. </p></td>
+                </tr>
+
+                <tr>
+                  <td>created_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>updated_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>started_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td></td>
+                  <td><p>Absent if no start was recorded; not proof of hardware dispatch. </p></td>
+                </tr>
+
+                <tr>
+                  <td>requested_targets</td>
+                  <td><a href="#v1.FirmwareRequestedTargets">FirmwareRequestedTargets</a></td>
+                  <td></td>
+                  <td><p>Always set on returned tasks, with shared or by_type selected. </p></td>
+                </tr>
+
+                <tr>
+                  <td>sub_targets</td>
+                  <td><a href="#string">string</a></td>
+                  <td>repeated</td>
+                  <td><p>Recorded component selectors; empty retains backend defaults. </p></td>
+                </tr>
+
+                <tr>
+                  <td>override_readiness_check</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p>Recorded request flag to bypass the updater&#39;s readiness check. </p></td>
+                </tr>
+
+                <tr>
+                  <td>override_version_check</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p>Recorded request flag to bypass the updater&#39;s version check. </p></td>
+                </tr>
+
+                <tr>
+                  <td>start_time</td>
+                  <td><a href="#int64">int64</a></td>
+                  <td>optional</td>
+                  <td><p>Recorded Unix seconds; absent for stored zero/omitted bounds. </p></td>
+                </tr>
+
+                <tr>
+                  <td>end_time</td>
+                  <td><a href="#int64">int64</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>waiting_context</td>
+                  <td><a href="#v1.FirmwareTaskWaitingContext">FirmwareTaskWaitingContext</a></td>
+                  <td></td>
+                  <td><p>Set for Waiting tasks with references or an error; absent for other statuses. </p></td>
+                </tr>
+
+                <tr>
+                  <td>external_targets</td>
+                  <td><a href="#v1.FirmwareTaskExternalTargets">FirmwareTaskExternalTargets</a></td>
+                  <td></td>
+                  <td><p>Always set on returned tasks, with complete identities or a read error. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.FirmwareTaskDetailsList">FirmwareTaskDetailsList</h3>
+        <p>Waiting/Pending/Running firmware tasks in creation-time then UUID order.</p><p>Tray results select recorded UUID/type membership in the current rack only;</p><p>a power-shelf firmware task is listed only for the shelf it selects.</p><p>Missing rack is NotLinked. A failed rack query or invalid stored row makes</p><p>the whole task section unavailable, before filtering for this tray.</p><p>More than 256 outstanding rack firmware tasks makes the whole section</p><p>unavailable even when fewer select this tray. Error is absent on success,</p><p>including empty; entries is empty on failure. No execution reports are exposed.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>entries</td>
+                  <td><a href="#v1.FirmwareTaskDetails">FirmwareTaskDetails</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.FirmwareDetailsReadError">FirmwareDetailsReadError</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.FirmwareTaskExternalTargets">FirmwareTaskExternalTargets</h3>
+        <p>Retained inventory identifiers for every recorded target, in recorded order.</p><p>Includes soft-deleted members without requiring current rack membership.</p><p>These identities are read-time facts, not historical identity copies.</p><p>Success includes a nonempty rack ID and every target (possibly empty). Failure</p><p>leaves rack_id/targets empty with a categorized error; never a UUID fallback.</p><p>Every returned task has this message, with a successful selection or an error.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>rack_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>targets</td>
+                  <td><a href="#v1.ExternalRef">ExternalRef</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.FirmwareDetailsReadError">FirmwareDetailsReadError</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.FirmwareTaskWaitingContext">FirmwareTaskWaitingContext</h3>
+        <p>Informational conflict evidence, not a saved waiting reason or readiness check.</p><p>Membership/order follow current conflict rules and creation-time/UUID order;</p><p>equal-time waiters are excluded. More than 256 nonterminal rack tasks makes</p><p>context unavailable without hiding firmware tasks. Error is absent on success;</p><p>both lists are empty on failure. Populated lists may be omitted as LimitExceeded.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>active_conflicts</td>
+                  <td><a href="#v1.TaskBrief">TaskBrief</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>earlier_waiting</td>
+                  <td><a href="#v1.TaskBrief">TaskBrief</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#v1.FirmwareDetailsReadError">FirmwareDetailsReadError</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
                 </tr>
 
             </tbody>
@@ -4497,6 +5054,54 @@ and returns OperationRun.stats. </p></td>
                   <td>tasks</td>
                   <td><a href="#v1.Task">Task</a></td>
                   <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetTrayFirmwareDetailsRequest">GetTrayFirmwareDetailsRequest</h3>
+        <p>Uses the same inventory ID or BMC/PMC MAC selector as tray inventory.</p><p>Empty IDs return InvalidArgument, missing IDs NotFound, ambiguous IDs</p><p>FailedPrecondition. Only compute, NVLink switch and power shelf are supported.</p><p>Other component types return InvalidArgument. Inventory dependency failures</p><p>return sanitized Unavailable or Internal errors.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.GetTrayFirmwareDetailsResponse">GetTrayFirmwareDetailsResponse</h3>
+        <p>Contains independent installed firmware, configured expectations and work.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>details</td>
+                  <td><a href="#v1.TrayFirmwareDetails">TrayFirmwareDetails</a></td>
+                  <td></td>
                   <td><p> </p></td>
                 </tr>
 
@@ -7848,6 +8453,13 @@ conflict_strategy is CONFLICT_STRATEGY_QUEUE. </p></td>
                   <td><p>Public rack-group domain identities. </p></td>
                 </tr>
 
+                <tr>
+                  <td>operation_status_details</td>
+                  <td><a href="#v1.RackOperationStatusDetails">RackOperationStatusDetails</a></td>
+                  <td></td>
+                  <td><p>Output only. Absent on older servers; ignored on inventory writes. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -7893,6 +8505,33 @@ inventory member has a managed Core identity. </p></td>
                   <td><a href="#v1.PowerActionDetails">PowerActionDetails</a></td>
                   <td></td>
                   <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.RackOperationStatusDetails">RackOperationStatusDetails</h3>
+        <p>RackOperationStatusDetails explains operation_status, not operation admission.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>tray_counts_by_type</td>
+                  <td><a href="#v1.TrayStatusCountsByType">TrayStatusCountsByType</a></td>
+                  <td></td>
+                  <td><p>Counts of active Compute, NVSwitch and PowerShelf inventory records from
+the same snapshot used for operation_status, independent of expansion.
+Undiscovered records and other component types are excluded. No freshness
+or expected-inventory completeness guarantee is implied. </p></td>
                 </tr>
 
             </tbody>
@@ -9066,6 +9705,73 @@ e.g. &#34;Power Reset (forced)&#34; or &#34;Upgrade Firmware to v2.3.1&#34;. </p
 
 
 
+        <h3 id="v1.TrayFirmwareDetails">TrayFirmwareDetails</h3>
+        <p>Live Core evidence and stored Flow intent describe separately collected facts.</p><p>Every section contains a value or an explicit read error; an empty collection</p><p>never substitutes for unavailable evidence. No field proves whole-update</p><p>completion, active/staged image choice or a universal compliance verdict.</p><p>Inventory and child reads share at most 30 seconds from entry, ending one</p><p>second before an earlier caller deadline. Caller cancellation fails the RPC</p><p>after children are joined; other child failures preserve completed sections.</p><p>A failed or timed-out Core RPC makes all three Core sections unavailable;</p><p>Flow cannot recover partial Core evidence from a failed transport response.</p><p>The encoded proxy response is bounded to 1,991,680 bytes. On overflow, remove</p><p>populated waiting references first, then successful external identities, then</p><p>the whole task section, each with LimitExceeded and a size recheck. If the</p><p>remaining response is too large, return ResourceExhausted. Never clip targets.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>component_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>Managed inventory ID, absent until linked to Core; never a Flow UUID. </p></td>
+                </tr>
+
+                <tr>
+                  <td>component_type</td>
+                  <td><a href="#v1.ComponentType">ComponentType</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p>Internal rack assignment, absent for a rackless tray. </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>Retained inventory rack identifier, including deleted racks; no UUID fallback.
+Absent for a rackless tray or when its rack identity cannot be read. </p></td>
+                </tr>
+
+                <tr>
+                  <td>actual</td>
+                  <td><a href="#v1.FirmwareActualDetails">FirmwareActualDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>desired</td>
+                  <td><a href="#v1.FirmwareDesiredDetails">FirmwareDesiredDetails</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>operations</td>
+                  <td><a href="#v1.FirmwareOperations">FirmwareOperations</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.TrayPowerDetails">TrayPowerDetails</h3>
         <p>Power details remain readable by MAC before a managed Core ID exists.</p><p>Every section is populated with either its value or a categorized error.</p><p>Inventory and both child reads share at most 30 seconds from RPC entry, capped</p><p>at one second before a caller deadline. Completed sections survive another</p><p>section's failure. Core hardware, policy, and actions may describe different</p><p>instants from Flow tasks; Running tasks do not imply active Core actions.</p><p>The encoded proxy response is limited to 1,991,680 bytes (1945 KiB).</p><p>If the response is oversized, populated waiting-context lists are replaced</p><p>with context-level LimitExceeded first, then successful external target results</p><p>are replaced with LimitExceeded. If it still exceeds the limit, the entire</p><p>task section is replaced with LimitExceeded. If the rest still exceeds the</p><p>limit, the RPC returns ResourceExhausted. No task targets are truncated.</p>
 
@@ -9126,6 +9832,103 @@ Absent until the inventory member has a managed Core identity. </p></td>
                   <td><p>The inventory rack identifier used by REST rack and tray resources.
 Includes retained soft-deleted racks. Absent when no rack identity can be
 read; older services or proxies also omit it. Never uses the Flow UUID. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.TrayStatusCounts">TrayStatusCounts</h3>
+        <p>TrayStatusCounts partitions participating trays by their operation phase.</p><p>An empty rack has all zero counts and operation_status Unknown. A missing or</p><p>unrecognized status on an existing participating tray increments unknown.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>ready</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays in Ready. </p></td>
+                </tr>
+
+                <tr>
+                  <td>in_use</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays in InUse. </p></td>
+                </tr>
+
+                <tr>
+                  <td>initializing</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays in Initializing. </p></td>
+                </tr>
+
+                <tr>
+                  <td>error</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays in Error. </p></td>
+                </tr>
+
+                <tr>
+                  <td>deleting</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays in Deleting. </p></td>
+                </tr>
+
+                <tr>
+                  <td>unknown</td>
+                  <td><a href="#uint32">uint32</a></td>
+                  <td></td>
+                  <td><p>Trays with unknown, missing or unrecognized status. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.TrayStatusCountsByType">TrayStatusCountsByType</h3>
+        <p>TrayStatusCountsByType always includes all three types, with zero counts for</p><p>types without participating records. Empty types do not affect rack phase.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>compute</td>
+                  <td><a href="#v1.TrayStatusCounts">TrayStatusCounts</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>nv_switch</td>
+                  <td><a href="#v1.TrayStatusCounts">TrayStatusCounts</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>power_shelf</td>
+                  <td><a href="#v1.TrayStatusCounts">TrayStatusCounts</a></td>
+                  <td></td>
+                  <td><p> </p></td>
                 </tr>
 
             </tbody>
@@ -9997,6 +10800,108 @@ Wire value 1 preserves backward compatibility with the former bool true (queue).
                 <td>FIRMWARE_CONTROL_OPERATION_ROLLBACK</td>
                 <td>3</td>
                 <td><p></p></td>
+              </tr>
+
+          </tbody>
+        </table>
+
+        <h3 id="v1.FirmwareDetailsReadError">FirmwareDetailsReadError</h3>
+        <p>Flow failures are separate from safe typed failures inside Core evidence.</p><p>Dependency diagnostics, authentication, reports and raw manifests are excluded.</p>
+        <table class="enum-table">
+          <thead>
+            <tr><td>Name</td><td>Number</td><td>Description</td></tr>
+          </thead>
+          <tbody>
+
+              <tr>
+                <td>FIRMWARE_DETAILS_READ_ERROR_UNSPECIFIED</td>
+                <td>0</td>
+                <td><p>Never emitted as a failure.</p></td>
+              </tr>
+
+              <tr>
+                <td>FIRMWARE_DETAILS_READ_ERROR_NOT_LINKED</td>
+                <td>1</td>
+                <td><p>Required managed/rack/inventory identity is absent.</p></td>
+              </tr>
+
+              <tr>
+                <td>FIRMWARE_DETAILS_READ_ERROR_NOT_CONFIGURED</td>
+                <td>2</td>
+                <td><p>No NICo provider client is configured.</p></td>
+              </tr>
+
+              <tr>
+                <td>FIRMWARE_DETAILS_READ_ERROR_UNSUPPORTED</td>
+                <td>3</td>
+                <td><p>Missing RPC/capability or required Core section/result.</p></td>
+              </tr>
+
+              <tr>
+                <td>FIRMWARE_DETAILS_READ_ERROR_DEADLINE_EXCEEDED</td>
+                <td>4</td>
+                <td><p>Caller, provider or shared read deadline expired.</p></td>
+              </tr>
+
+              <tr>
+                <td>FIRMWARE_DETAILS_READ_ERROR_READ_FAILED</td>
+                <td>5</td>
+                <td><p>Other dependency failures, including actual authorization denial.
+PermissionDenied alone cannot identify an older Core server.
+Unreadable or invalid stored task data also reports ReadFailed.</p></td>
+              </tr>
+
+              <tr>
+                <td>FIRMWARE_DETAILS_READ_ERROR_INVALID_RESPONSE</td>
+                <td>6</td>
+                <td><p>Wrong Core response identity/cardinality or inconsistent inventory identities.</p></td>
+              </tr>
+
+              <tr>
+                <td>FIRMWARE_DETAILS_READ_ERROR_LIMIT_EXCEEDED</td>
+                <td>7</td>
+                <td><p>Rack task/context count or encoded response exceeded its bound.</p></td>
+              </tr>
+
+          </tbody>
+        </table>
+
+        <h3 id="v1.FirmwareTargetKind">FirmwareTargetKind</h3>
+        <p>What safe target metadata was retained; no kind establishes update success.</p>
+        <table class="enum-table">
+          <thead>
+            <tr><td>Name</td><td>Number</td><td>Description</td></tr>
+          </thead>
+          <tbody>
+
+              <tr>
+                <td>FIRMWARE_TARGET_KIND_UNSPECIFIED</td>
+                <td>0</td>
+                <td><p>Never emitted by this service.</p></td>
+              </tr>
+
+              <tr>
+                <td>FIRMWARE_TARGET_KIND_UNAVAILABLE</td>
+                <td>1</td>
+                <td><p>Stored input has no safe display metadata; value is empty.</p></td>
+              </tr>
+
+              <tr>
+                <td>FIRMWARE_TARGET_KIND_CONFIGURED_DEFAULT</td>
+                <td>2</td>
+                <td><p>No explicit target was requested; the updater resolves its configured default.</p></td>
+              </tr>
+
+              <tr>
+                <td>FIRMWARE_TARGET_KIND_VERSION</td>
+                <td>3</td>
+                <td><p>Exact recorded scalar version; not a statement about installed firmware.</p></td>
+              </tr>
+
+              <tr>
+                <td>FIRMWARE_TARGET_KIND_MANIFEST</td>
+                <td>4</td>
+                <td><p>Recorded manifest identity only; no manifest body or artifact location.</p></td>
               </tr>
 
           </tbody>
@@ -11521,6 +12426,14 @@ When pagination is omitted, offset defaults to 0 and limit defaults to 100.</p><
                 <td><p>Reads live Core power details and outstanding Flow power tasks independently.
 This is not an atomic snapshot and does not change power or task state.
 Caller cancellation fails the RPC; child read failures remain section errors.</p></td>
+              </tr>
+
+              <tr>
+                <td>GetTrayFirmwareDetails</td>
+                <td><a href="#v1.GetTrayFirmwareDetailsRequest">GetTrayFirmwareDetailsRequest</a></td>
+                <td><a href="#v1.GetTrayFirmwareDetailsResponse">GetTrayFirmwareDetailsResponse</a></td>
+                <td><p>Reads live Core firmware evidence and outstanding Flow firmware tasks.
+Passive and non-atomic; child failures remain independent section errors.</p></td>
               </tr>
 
               <tr>

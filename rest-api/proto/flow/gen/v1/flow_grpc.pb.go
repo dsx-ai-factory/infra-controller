@@ -100,6 +100,7 @@ const (
 	Flow_AdvanceOperationRunPhase_FullMethodName = "/v1.Flow/AdvanceOperationRunPhase"
 	Flow_CancelOperationRun_FullMethodName       = "/v1.Flow/CancelOperationRun"
 	Flow_GetTrayPowerDetails_FullMethodName      = "/v1.Flow/GetTrayPowerDetails"
+	Flow_GetTrayFirmwareDetails_FullMethodName   = "/v1.Flow/GetTrayFirmwareDetails"
 	Flow_GetRackPowerDetails_FullMethodName      = "/v1.Flow/GetRackPowerDetails"
 )
 
@@ -205,6 +206,9 @@ type FlowClient interface {
 	// This is not an atomic snapshot and does not change power or task state.
 	// Caller cancellation fails the RPC; child read failures remain section errors.
 	GetTrayPowerDetails(ctx context.Context, in *GetTrayPowerDetailsRequest, opts ...grpc.CallOption) (*GetTrayPowerDetailsResponse, error)
+	// Reads live Core firmware evidence and outstanding Flow firmware tasks.
+	// Passive and non-atomic; child failures remain independent section errors.
+	GetTrayFirmwareDetails(ctx context.Context, in *GetTrayFirmwareDetailsRequest, opts ...grpc.CallOption) (*GetTrayFirmwareDetailsResponse, error)
 	// Reads full current rack membership once, with batched Core details and one
 	// power-task list. This is informational, not an atomic snapshot.
 	// It does not change power or task state.
@@ -989,6 +993,16 @@ func (c *flowClient) GetTrayPowerDetails(ctx context.Context, in *GetTrayPowerDe
 	return out, nil
 }
 
+func (c *flowClient) GetTrayFirmwareDetails(ctx context.Context, in *GetTrayFirmwareDetailsRequest, opts ...grpc.CallOption) (*GetTrayFirmwareDetailsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetTrayFirmwareDetailsResponse)
+	err := c.cc.Invoke(ctx, Flow_GetTrayFirmwareDetails_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *flowClient) GetRackPowerDetails(ctx context.Context, in *GetRackPowerDetailsRequest, opts ...grpc.CallOption) (*GetRackPowerDetailsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetRackPowerDetailsResponse)
@@ -1101,6 +1115,9 @@ type FlowServer interface {
 	// This is not an atomic snapshot and does not change power or task state.
 	// Caller cancellation fails the RPC; child read failures remain section errors.
 	GetTrayPowerDetails(context.Context, *GetTrayPowerDetailsRequest) (*GetTrayPowerDetailsResponse, error)
+	// Reads live Core firmware evidence and outstanding Flow firmware tasks.
+	// Passive and non-atomic; child failures remain independent section errors.
+	GetTrayFirmwareDetails(context.Context, *GetTrayFirmwareDetailsRequest) (*GetTrayFirmwareDetailsResponse, error)
 	// Reads full current rack membership once, with batched Core details and one
 	// power-task list. This is informational, not an atomic snapshot.
 	// It does not change power or task state.
@@ -1344,6 +1361,9 @@ func (UnimplementedFlowServer) CancelOperationRun(context.Context, *CancelOperat
 }
 func (UnimplementedFlowServer) GetTrayPowerDetails(context.Context, *GetTrayPowerDetailsRequest) (*GetTrayPowerDetailsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetTrayPowerDetails not implemented")
+}
+func (UnimplementedFlowServer) GetTrayFirmwareDetails(context.Context, *GetTrayFirmwareDetailsRequest) (*GetTrayFirmwareDetailsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetTrayFirmwareDetails not implemented")
 }
 func (UnimplementedFlowServer) GetRackPowerDetails(context.Context, *GetRackPowerDetailsRequest) (*GetRackPowerDetailsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetRackPowerDetails not implemented")
@@ -2754,6 +2774,24 @@ func _Flow_GetTrayPowerDetails_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Flow_GetTrayFirmwareDetails_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetTrayFirmwareDetailsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(FlowServer).GetTrayFirmwareDetails(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Flow_GetTrayFirmwareDetails_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(FlowServer).GetTrayFirmwareDetails(ctx, req.(*GetTrayFirmwareDetailsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Flow_GetRackPowerDetails_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetRackPowerDetailsRequest)
 	if err := dec(in); err != nil {
@@ -3086,6 +3124,10 @@ var Flow_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetTrayPowerDetails",
 			Handler:    _Flow_GetTrayPowerDetails_Handler,
+		},
+		{
+			MethodName: "GetTrayFirmwareDetails",
+			Handler:    _Flow_GetTrayFirmwareDetails_Handler,
 		},
 		{
 			MethodName: "GetRackPowerDetails",

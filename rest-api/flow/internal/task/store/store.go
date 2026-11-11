@@ -78,8 +78,8 @@ type Store interface {
 	// established by RunInTransaction, or uses the store connection otherwise.
 	// Errors return no tasks: *taskcommon.FirmwareTaskLimitError above
 	// MaxFirmwareTasksPerRack rows, ctx.Err() after query cancellation/expiry,
-	// or sanitized Internal for other read/conversion failures. This internal
-	// reader has no RPC consumer; transport callers must translate the limit error.
+	// or sanitized Internal for other read/conversion failures. Transport callers
+	// must translate the limit error.
 	ListFirmwareTasksForRack(ctx context.Context, rackID uuid.UUID) ([]taskdef.FirmwareTaskDetails, error)
 
 	// ListTaskContextForRack returns nonterminal metadata ordered by creation

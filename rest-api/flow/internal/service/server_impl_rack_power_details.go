@@ -33,7 +33,7 @@ func (rs *FlowServerImpl) GetRackPowerDetails(ctx context.Context, req *pb.GetRa
 	if req.GetId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "rack identifier is required")
 	}
-	readCtx, cancel := powerDetailsReadContext(ctx)
+	readCtx, cancel := detailsReadContext(ctx)
 	defer cancel()
 	if readCtx.Err() != nil {
 		return nil, status.FromContextError(readCtx.Err()).Err()
@@ -112,7 +112,7 @@ func (rs *FlowServerImpl) GetRackPowerDetails(ctx context.Context, req *pb.GetRa
 		uniqueTasks[id] = true
 		details.Operations.Tasks.Entries = append(details.Operations.Tasks.Entries, fullTasks[i])
 		for j, member := range members {
-			if !supportsPowerDetails(member.Type) {
+			if !supportsComponentDetails(member.Type) {
 				continue
 			}
 			relevance := task.RelevanceFor(member.Info.ID, member.Type)
@@ -135,7 +135,7 @@ func (rs *FlowServerImpl) GetRackPowerDetails(ctx context.Context, req *pb.GetRa
 			tray.Operations.Tasks = &pb.PowerTaskReferenceList{Error: details.Operations.Tasks.Error}
 		}
 		kind := members[i].Type
-		if !supportsPowerDetails(kind) {
+		if !supportsComponentDetails(kind) {
 			code := pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_UNSUPPORTED
 			tray.Operations.Tasks = &pb.PowerTaskReferenceList{Error: &code}
 		}
@@ -162,12 +162,12 @@ func (rs *FlowServerImpl) GetRackPowerDetails(ctx context.Context, req *pb.GetRa
 // budget. Member task references are never removed: the response keeps them
 // all or fails with ResourceExhausted.
 func boundRackPowerDetailsResponse(response *pb.GetRackPowerDetailsResponse) error {
-	fits, err := powerDetailsResponseFits(response)
+	fits, err := detailsResponseFits(response)
 	if err != nil || fits {
 		return err
 	}
 	limitPowerTaskWaitingContexts(response.GetDetails().GetOperations().GetTasks().GetEntries())
-	fits, err = powerDetailsResponseFits(response)
+	fits, err = detailsResponseFits(response)
 	if err != nil || fits {
 		return err
 	}
@@ -191,12 +191,12 @@ func (rs *FlowServerImpl) readRackCorePowerDetails(ctx context.Context, rackID u
 	for i, member := range members {
 		code := pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_NOT_LINKED
 		switch {
-		case supportsPowerDetails(member.Type):
+		case supportsComponentDetails(member.Type):
 			if member.ComponentID != "" {
 				if rs.powerReader == nil {
 					code = pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_NOT_CONFIGURED
 				} else {
-					id, valid := normalizeCorePowerTarget(member.Type, member.ComponentID)
+					id, valid := normalizeCoreComponentTarget(member.Type, member.ComponentID)
 					if !valid {
 						trays[i].Actual, trays[i].Desired, trays[i].Operations.Actions = unavailableCorePowerDetails(pb.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_READ_FAILED)
 						continue
@@ -234,7 +234,7 @@ func (rs *FlowServerImpl) readRackCorePowerDetails(ctx context.Context, rackID u
 			valid := err == nil && len(response.GetEntries()) == len(batch)
 			if valid {
 				for i, entry := range response.Entries {
-					if !sameCorePowerIdentity(ids[i], entry.GetComponentId()) {
+					if !sameCoreComponentIdentity(ids[i], entry.GetComponentId()) {
 						valid = false
 						break
 					}
@@ -270,7 +270,7 @@ func summarizeRackPower(trays []*pb.RackTrayPowerDetails) (*pb.RackPowerSummary,
 	desired := &pb.RackPowerSummary{Coverage: &pb.RackPowerCoverage{}}
 	for _, tray := range trays {
 		actual.Coverage.Total++
-		unsupportedType := !supportsPowerDetails(protobuf.ComponentTypeFrom(tray.ComponentType))
+		unsupportedType := !supportsComponentDetails(protobuf.ComponentTypeFrom(tray.ComponentType))
 		observation := tray.GetActual().GetValue()
 		state, observed := observation.GetOutcome().(*corev1.ComponentPowerObservation_State)
 		switch {

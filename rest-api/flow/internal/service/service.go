@@ -344,7 +344,7 @@ func (s *Service) Start(ctx context.Context) (retErr error) {
 		s.operationRunManager,
 		s.eventRuleManager,
 		s.conf.DataCipher,
-		powerReaderFromRegistry(s.conf.ProviderRegistry),
+		detailsReaderFromRegistry(s.conf.ProviderRegistry),
 	)
 	if err != nil {
 		return err

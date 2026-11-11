@@ -96,9 +96,9 @@ func (s *powerDetailsTaskStore) ListTaskContextForRack(ctx context.Context, rack
 	return s.contextRead(ctx)
 }
 
-// powerDetailsInventory records the resolver's budget before a test delays or
+// detailsInventory records the resolver's budget before a test delays or
 // fails inventory lookup. The embedded manager retains real selector behavior.
-type powerDetailsInventory struct {
+type detailsInventory struct {
 	*mockManager
 	calls            int
 	deadline         time.Time
@@ -113,7 +113,7 @@ type powerDetailsInventory struct {
 }
 
 // GetComponentsByExternalIDs applies the test's delay or failure before resolution.
-func (m *powerDetailsInventory) GetComponentsByExternalIDs(ctx context.Context, ids []string) ([]*component.Component, error) {
+func (m *detailsInventory) GetComponentsByExternalIDs(ctx context.Context, ids []string) ([]*component.Component, error) {
 	m.calls++
 	m.deadline, _ = ctx.Deadline()
 	if m.beforeRead != nil {
@@ -127,7 +127,7 @@ func (m *powerDetailsInventory) GetComponentsByExternalIDs(ctx context.Context, 
 
 // GetComponentIdentitiesByIDsIncludingDeleted records the separate task-target
 // lookup so selector resolution cannot conceal an accidental per-target query.
-func (m *powerDetailsInventory) GetComponentIdentitiesByIDsIncludingDeleted(ctx context.Context, ids []uuid.UUID) ([]component.Identity, error) {
+func (m *detailsInventory) GetComponentIdentitiesByIDsIncludingDeleted(ctx context.Context, ids []uuid.UUID) ([]component.Identity, error) {
 	m.identityCalls++
 	m.identityIDs = append([]uuid.UUID(nil), ids...)
 	m.identityDeadline, _ = ctx.Deadline()
@@ -146,7 +146,7 @@ func (m *powerDetailsInventory) GetComponentIdentitiesByIDsIncludingDeleted(ctx 
 
 // GetRacksByIDsIncludingDeleted exposes the fallback boundary separately from
 // selector lookup so a delayed rack read cannot be mistaken for initial lookup.
-func (m *powerDetailsInventory) GetRacksByIDsIncludingDeleted(ctx context.Context, ids []uuid.UUID, withComponents bool) ([]*rack.Rack, error) {
+func (m *detailsInventory) GetRacksByIDsIncludingDeleted(ctx context.Context, ids []uuid.UUID, withComponents bool) ([]*rack.Rack, error) {
 	m.rackCalls++
 	m.rackDeadline, _ = ctx.Deadline()
 	if m.rackRead != nil {
@@ -163,7 +163,7 @@ type powerDetailsFixture struct {
 	core         *powerDetailsCoreReader
 	store        *powerDetailsTaskStore
 	entry        *corev1.ComponentPowerDetails
-	inventory    *powerDetailsInventory
+	inventory    *detailsInventory
 	wantTasks    *pb.PowerTaskDetailsList
 	wantDeadline time.Time
 }
@@ -195,7 +195,7 @@ func newPowerDetailsFixture() *powerDetailsFixture {
 		return &corev1.GetComponentPowerDetailsResponse{Entries: []*corev1.ComponentPowerDetails{entry}}, nil
 	}}
 	store := &powerDetailsTaskStore{read: func(context.Context) ([]taskdef.PowerTaskDetails, error) { return nil, nil }}
-	inventory := &powerDetailsInventory{mockManager: newMockManager()}
+	inventory := &detailsInventory{mockManager: newMockManager()}
 	inventory.components[tray.Info.ID] = tray
 	inventory.componentsByMAC["aa:bb:cc:dd:ee:ff"] = tray
 	return &powerDetailsFixture{
@@ -974,9 +974,9 @@ func TestFlowServerImpl_readCorePowerDetails(t *testing.T) {
 	}
 }
 
-// TestSameCorePowerIdentity permits Core's hash normalization without matching a
+// TestSameCoreComponentIdentity permits Core's hash normalization without matching a
 // different typed identity or treating malformed Base32 suffixes as equivalent.
-func TestSameCorePowerIdentity(t *testing.T) {
+func TestSameCoreComponentIdentity(t *testing.T) {
 	canonical := powerDetailsCanonicalMachineID
 	uppercase := canonical[:7] + strings.ToUpper(canonical[7:])
 	badTrailingBits := canonical[:58] + "h"
@@ -997,14 +997,14 @@ func TestSameCorePowerIdentity(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			require.Equal(t, test.want, sameCorePowerIdentity(test.expected, test.observed))
+			require.Equal(t, test.want, sameCoreComponentIdentity(test.expected, test.observed))
 		})
 	}
 }
 
-// TestPowerReaderFromRegistry ensures production construction borrows the exact
+// TestDetailsReaderFromRegistry ensures production construction borrows the exact
 // configured client and allows a Flow deployment with no NICo provider.
-func TestPowerReaderFromRegistry(t *testing.T) {
+func TestDetailsReaderFromRegistry(t *testing.T) {
 	for _, configured := range []bool{false, true} {
 		t.Run(map[bool]string{false: "no provider", true: "shared provider client"}[configured], func(t *testing.T) {
 			registry := providerapi.NewProviderRegistry()
@@ -1013,13 +1013,16 @@ func TestPowerReaderFromRegistry(t *testing.T) {
 				require.NoError(t, registry.Register(nicoprovider.NewFromClient(client)))
 			}
 
-			reader := powerReaderFromRegistry(registry)
+			reader := detailsReaderFromRegistry(registry)
 			server, err := newServerImplementation(nil, nil, nil, nil, nil, nil, nil, nil, reader)
 			require.NoError(t, err)
 			require.Equal(t, reader, server.powerReader)
+			require.Equal(t, reader, server.firmwareReader)
 
 			if configured {
 				require.Same(t, client, reader)
+				require.Same(t, client, server.powerReader)
+				require.Same(t, client, server.firmwareReader)
 			} else {
 				require.Nil(t, reader)
 			}
@@ -1147,14 +1150,14 @@ func TestBoundPowerDetailsResponse(t *testing.T) {
 			message, err := protojson.Marshal(response)
 			require.NoError(t, err)
 			if test.wantTasksError {
-				require.LessOrEqual(t, len(message), powerDetailsResponseBytes, "protojson alone must miss the wrapper expansion")
+				require.LessOrEqual(t, len(message), detailsResponseBytes, "protojson alone must miss the wrapper expansion")
 			}
 			encoded, err := json.Marshal(grpcproxy.Response{ResponseJSON: message})
 			require.NoError(t, err)
 			if test.wantContextErrors || test.wantTasksError || test.wantExternalErrors {
-				require.Greater(t, len(encoded), powerDetailsResponseBytes, "fixture must exercise overflow")
+				require.Greater(t, len(encoded), detailsResponseBytes, "fixture must exercise overflow")
 			} else {
-				require.LessOrEqual(t, len(encoded), powerDetailsResponseBytes)
+				require.LessOrEqual(t, len(encoded), detailsResponseBytes)
 			}
 
 			err = boundPowerDetailsResponse(response)
@@ -1165,7 +1168,7 @@ func TestBoundPowerDetailsResponse(t *testing.T) {
 			require.NoError(t, err)
 			encoded, err = json.Marshal(grpcproxy.Response{ResponseJSON: message})
 			require.NoError(t, err)
-			require.LessOrEqual(t, len(encoded), powerDetailsResponseBytes, "returned proxy response must fit")
+			require.LessOrEqual(t, len(encoded), detailsResponseBytes, "returned proxy response must fit")
 		})
 	}
 }
