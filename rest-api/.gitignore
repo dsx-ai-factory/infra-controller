@@ -8,7 +8,5 @@ build/
 .idea/
 ref/
 .debug/
-.cursor
-.claude/
 .tools/
 .tools-stamp

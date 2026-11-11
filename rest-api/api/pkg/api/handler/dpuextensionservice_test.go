@@ -28,6 +28,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -138,8 +139,13 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 					}
 				}
 			}
+			responseDeploymentType := capturedCreateRequest.DeploymentType
+			if serviceName == "baseline-core-mismatch" {
+				responseDeploymentType = corev1.DpuExtensionServiceDeploymentType_DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_DEMAND_DRIVEN
+			}
 			*ptr = &corev1.DpuExtensionService{
 				ServiceName:       serviceName,
+				DeploymentType:    responseDeploymentType,
 				Description:       description,
 				ServiceType:       serviceType,
 				LatestVersionInfo: responseVersionInfo,
@@ -213,6 +219,17 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 	dpfUnknownLifecycleBody := dpfBody
 	dpfUnknownLifecycleBody.Name = dpfUnknownLifecycleServiceName
 	dpfUnknownLifecycleBodyBytes, _ := json.Marshal(dpfUnknownLifecycleBody)
+
+	baselineBody := dpfBody
+	baselineBody.Name = "baseline-service"
+	baselineBody.DeploymentType = cutil.GetPtr(cdbm.DpuExtensionServiceDeploymentTypeBaseline)
+	baselineBody.DpuTarget = nil
+	baselineBodyBytes, err := json.Marshal(baselineBody)
+	require.NoError(t, err)
+	mismatchedBaselineBody := baselineBody
+	mismatchedBaselineBody.Name = "baseline-core-mismatch"
+	mismatchedBaselineBodyBytes, err := json.Marshal(mismatchedBaselineBody)
+	require.NoError(t, err)
 
 	nameClashBody := okBody
 	nameClashBody.Name = "existing-service"
@@ -339,6 +356,21 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 			expectedStatus: http.StatusBadRequest,
 		},
 		{
+			name:           "success creating baseline DPF Helm chart DPU Extension Service",
+			reqOrgName:     tnOrg,
+			reqBody:        string(baselineBodyBytes),
+			user:           tnu1,
+			expectedStatus: http.StatusCreated,
+		},
+		{
+			name:        "error when Core returns a different deployment type",
+			reqOrgName:  tnOrg,
+			reqBody:     string(mismatchedBaselineBodyBytes),
+			user:        tnu1,
+			expectedErr: true, expectedStatus: http.StatusInternalServerError,
+		},
+
+		{
 			name:           "success creating DPU Extension Service",
 			reqOrgName:     tnOrg,
 			reqBody:        string(okBodyBytes),
@@ -391,6 +423,14 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
 
+			if tt.name == "error when Core returns a different deployment type" {
+				// The failed remote confirmation must not leave a misleading local registration.
+				rows, _, getErr := cdbm.NewDpuExtensionServiceDAO(dbSession).GetAll(ctx, nil,
+					cdbm.DpuExtensionServiceFilterInput{Names: []string{mismatchedBaselineBody.Name}}, cdbp.PageInput{}, nil)
+				require.NoError(t, getErr)
+				assert.Empty(t, rows)
+			}
+
 			if tt.expectedErrorData != nil {
 				var response struct {
 					Data map[string]string `json:"data"`
@@ -405,6 +445,9 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 				require.NoError(t, err)
 				expectedBody := okBody
 				switch {
+				case strings.Contains(tt.name, "baseline DPF"):
+					expectedBody = baselineBody
+					assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, apiDES.Status)
 				case strings.Contains(tt.name, "unknown Core lifecycle state"):
 					// Core did not report a usable state, so the service stays Pending
 					expectedBody = dpfUnknownLifecycleBody
@@ -417,6 +460,15 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 				}
 				assert.Equal(t, expectedBody.Name, apiDES.Name)
 				assert.Equal(t, expectedBody.ServiceType, apiDES.ServiceType)
+				// Independently reload the committed row to prove response placement is durable.
+				stored, getErr := cdbm.NewDpuExtensionServiceDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(apiDES.ID), nil)
+				require.NoError(t, getErr)
+				expectedPolicy := cdbm.DpuExtensionServiceDeploymentTypeDemandDriven
+				if expectedBody.DeploymentType != nil {
+					expectedPolicy = *expectedBody.DeploymentType
+				}
+				assert.Equal(t, expectedPolicy, stored.DeploymentType)
+				assert.Equal(t, expectedPolicy, apiDES.DeploymentType)
 				assert.Equal(t, expectedBody.DpuTarget, apiDES.DpuTarget)
 				assert.Equal(t, expectedBody.SiteID, apiDES.SiteID)
 				assert.Equal(t, version, *apiDES.Version)
@@ -426,8 +478,13 @@ func TestCreateDpuExtensionServiceHandler_Handle(t *testing.T) {
 				assert.Equal(t, expectedBody.Name, capturedCreateRequest.ServiceName)
 				assert.Equal(t, expectedBody.Data, capturedCreateRequest.Data)
 				if expectedBody.ServiceType == model.DpuExtensionServiceTypeDpfHelmChart {
-					require.NotNil(t, capturedCreateRequest.DpuTarget)
-					assert.Equal(t, corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE, *capturedCreateRequest.DpuTarget)
+					if expectedPolicy == cdbm.DpuExtensionServiceDeploymentTypeBaseline {
+						assert.Equal(t, corev1.DpuExtensionServiceDeploymentType_DPU_EXTENSION_SERVICE_DEPLOYMENT_TYPE_BASELINE, capturedCreateRequest.DeploymentType)
+						assert.Nil(t, capturedCreateRequest.DpuTarget)
+					} else {
+						require.NotNil(t, capturedCreateRequest.DpuTarget)
+						assert.Equal(t, corev1.DpuExtensionServiceDpuTarget_DPU_EXTENSION_SERVICE_DPU_TARGET_ALL_ACTIVE, *capturedCreateRequest.DpuTarget)
+					}
 					assert.Nil(t, capturedCreateRequest.Credential)
 					assert.Nil(t, capturedCreateRequest.Observability)
 					return

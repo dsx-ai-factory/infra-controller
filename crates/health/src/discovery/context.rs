@@ -423,18 +423,23 @@ impl CollectorState {
             .collect()
     }
 
-    pub(super) fn prune_finished_logs(&mut self) {
-        self.logs.retain(|key, collector| {
-            if collector.is_finished() {
-                tracing::info!(
-                    endpoint_key = %key,
-                    "pruning finished logs collector (task exited); discovery will respawn"
-                );
-                false
-            } else {
-                true
-            }
-        });
+    /// Releases Logs parents after auto-mode transitions and gNMI parents after
+    /// supervised failure, allowing the normal spawn pass to replace them.
+    pub(super) fn prune_finished_collectors(&mut self) {
+        for kind in [CollectorKind::Logs, CollectorKind::NvueGnmi] {
+            self.map_mut(kind).retain(|key, collector| {
+                if collector.is_finished() {
+                    tracing::info!(
+                        endpoint_key = %key,
+                        collector_kind = ?kind,
+                        "pruning finished collector (task exited); discovery will respawn"
+                    );
+                    false
+                } else {
+                    true
+                }
+            });
+        }
     }
 }
 
@@ -452,6 +457,7 @@ pub struct DiscoveryLoopContext {
     pub(crate) telemetry_config: Configurable<TelemetryCollectorOptions>,
     pub(crate) logs_config: Configurable<LogsCollectorOptions>,
     pub(crate) firmware_config: Configurable<FirmwareCollectorOptions>,
+    pub(crate) resource_status_processor_enabled: bool,
     pub(crate) manager_config: Configurable<ManagerCollectorOptions>,
     pub(crate) leak_detector_config: Configurable<LeakDetectorCollectorOptions>,
     pub(crate) nmxt_config: Configurable<NmxtCollectorOptions>,
@@ -559,6 +565,7 @@ impl DiscoveryLoopContext {
             telemetry_config: config.collectors.telemetry.clone(),
             logs_config: config.collectors.logs.clone(),
             firmware_config: config.collectors.firmware.clone(),
+            resource_status_processor_enabled: config.processors.resource_status.is_enabled(),
             manager_config: config.collectors.manager.clone(),
             leak_detector_config: config.collectors.leak_detector.clone(),
             nmxt_config: config.collectors.nmxt.clone(),

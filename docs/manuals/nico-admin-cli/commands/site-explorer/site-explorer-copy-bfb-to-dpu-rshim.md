@@ -20,7 +20,9 @@ nico-admin-cli site-explorer copy-bfb-to-dpu-rshim [--mac]
 
 `--mac <MAC>`
 
-The MAC address the BMC sent DHCP from
+Expected DPU BMC MAC address. Must match the interface assigned to the
+IP. If omitted, the resolved interface MAC is retained. Recovery fails
+if the mapping changes before BFB copy or host power-off.
 
 `--host-bmc-ip <HOST_BMC_IP>`
 
@@ -56,12 +58,13 @@ Print help (see a summary with -h)
 
 `<ADDRESS>`
 
-BMC IP address or hostname with optional port
+DPU BMC IP address
 
 ## Examples
 
 ```sh
 nico-admin-cli site-explorer copy-bfb-to-dpu-rshim 192.0.2.10 --host-bmc-ip 192.0.2.20
+nico-admin-cli site-explorer copy-bfb-to-dpu-rshim 192.0.2.10 --host-bmc-ip 192.0.2.20 --mac 00:11:22:33:44:55
 nico-admin-cli site-explorer copy-bfb-to-dpu-rshim 192.0.2.10 --host-bmc-ip 192.0.2.20 --pre-copy-powercycle
 ```
 

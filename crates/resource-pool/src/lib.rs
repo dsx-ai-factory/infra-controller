@@ -36,8 +36,9 @@
 //! [`ResourcePoolRegistry`] saves and checks backend selections. API startup owns
 //! remote recovery and cleanup metrics. Production configuration rejects
 //! remote selection; tests exercise the shared API below that gate.
-//! Shared allocation supports automatic and requested manual values. Exact
-//! selection across both partitions remains on the Integrated adapter.
+//! Shared foreground allocation supports automatic, requested manual, and exact values.
+//! [`ResourcePoolRegistry::inspect_allocations`] reports typed ownership and
+//! unfinished cleanup without exposing provider records to consumers.
 
 #![cfg_attr(test, allow(txn_held_across_await, txn_without_commit))]
 
@@ -49,6 +50,7 @@ mod tests;
 mod allocation;
 mod cleanup;
 pub mod grpc;
+mod membership;
 mod owned;
 pub mod registration;
 mod registry;
@@ -63,7 +65,7 @@ pub use cleanup::AllocationCleanup;
 use db::resource_pool::{ResourcePoolAllocationNotOwned, ResourcePoolDatabaseError};
 use db::{ConditionalWrite, DatabaseError};
 use model::resource_pool::{OwnerType, ResourcePool};
-pub use owned::OwnedAllocation;
+pub use owned::{AllocationCleanupStatus, AllocationStatus, OwnedAllocation};
 use registration::RegistrationError;
 pub use registry::{
     PoolDefinitionSource, ResolvedResourcePool, ResourcePoolRegistry, ResourcePoolRegistryError,
@@ -191,6 +193,18 @@ impl IntegratedResourcePoolBackend {
 /// while identifying when a controller must clean up its previous request.
 #[derive(Debug, thiserror::Error)]
 pub enum ResourcePoolBackendError {
+    /// The caller stopped waiting for a local preparation or admission step.
+    #[error("{operation} was cancelled")]
+    Cancelled {
+        /// The step that was interrupted, such as a DPU loopback lookup.
+        operation: &'static str,
+    },
+    /// A local preparation or admission step exceeded its time budget.
+    #[error("{operation} timed out")]
+    DeadlineExceeded {
+        /// The step that did not finish before its deadline.
+        operation: &'static str,
+    },
     /// A database read, write, or transaction failed.
     #[error(transparent)]
     Database(#[from] DatabaseError),

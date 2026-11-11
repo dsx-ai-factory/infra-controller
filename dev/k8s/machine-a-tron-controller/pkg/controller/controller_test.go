@@ -75,7 +75,6 @@ func TestServiceBuilder_BuildService(t *testing.T) {
 		MatID:        "host-uuid-12345678",
 		MachineID:    ptr("nico-machine-id"),
 		HardwareType: ptr("GB200"),
-		APIState:     "Ready",
 		PowerState:   "On",
 		BMC: matclient.BMCStatus{
 			IP: ptr("192.168.1.100"),
@@ -100,7 +99,7 @@ func TestServiceBuilder_BuildService(t *testing.T) {
 
 	// Check annotations
 	assert.Equal(t, "192.168.1.100", svc.Annotations[AnnotationBMCIP])
-	assert.Equal(t, "Ready", svc.Annotations[AnnotationAPIState])
+	assert.NotContains(t, svc.Annotations, AnnotationAPIState)
 	assert.Equal(t, "On", svc.Annotations[AnnotationPowerState])
 	assert.Equal(t, "GB200", svc.Annotations[AnnotationHardwareType])
 	assert.Equal(t, "8443", svc.Annotations[AnnotationRedfishListenPort])
@@ -129,7 +128,6 @@ func TestServiceBuilder_BuildService_StateAnnotationsDisabled(t *testing.T) {
 		MatID:        "host-uuid-12345678",
 		MachineID:    ptr("nico-machine-id"),
 		HardwareType: ptr("GB200"),
-		APIState:     "Ready",
 		PowerState:   "On",
 		BMC: matclient.BMCStatus{
 			IP: ptr("192.168.1.100"),
@@ -143,8 +141,8 @@ func TestServiceBuilder_BuildService_StateAnnotationsDisabled(t *testing.T) {
 	svc := builder.BuildService(machine, MachineTypeHost, "", "")
 
 	// State annotations should be absent
-	assert.Empty(t, svc.Annotations[AnnotationAPIState])
-	assert.Empty(t, svc.Annotations[AnnotationPowerState])
+	assert.NotContains(t, svc.Annotations, AnnotationAPIState)
+	assert.NotContains(t, svc.Annotations, AnnotationPowerState)
 
 	// Static annotations should still be present
 	assert.Equal(t, "192.168.1.100", svc.Annotations[AnnotationBMCIP])
@@ -162,7 +160,6 @@ func TestServiceBuilder_BuildService_WithIPMI(t *testing.T) {
 
 	machine := &matclient.MachineStatus{
 		MatID:      "host-uuid-12345678",
-		APIState:   "Ready",
 		PowerState: "On",
 		BMC: matclient.BMCStatus{
 			IP: ptr("192.168.1.100"),
@@ -217,7 +214,6 @@ func TestServiceBuilder_BuildService_WithSSH(t *testing.T) {
 
 	machine := &matclient.MachineStatus{
 		MatID:      "dpu-uuid-12345678",
-		APIState:   "Ready",
 		PowerState: "On",
 		BMC: matclient.BMCStatus{
 			IP: ptr("192.168.1.101"),
@@ -253,7 +249,6 @@ func TestServiceBuilder_BuildService_DPU(t *testing.T) {
 	dpu := &matclient.MachineStatus{
 		MatID:      "dpu-uuid-12345678",
 		MachineID:  ptr("dpu-machine-id"),
-		APIState:   "Ready",
 		PowerState: "On",
 		BMC: matclient.BMCStatus{
 			IP: ptr("192.168.1.101"),
@@ -281,7 +276,6 @@ func TestServiceBuilder_BuildService_BMCIPAsExternalIP(t *testing.T) {
 
 	machine := &matclient.MachineStatus{
 		MatID:      "host-uuid-12345678",
-		APIState:   "Ready",
 		PowerState: "On",
 		BMC: matclient.BMCStatus{
 			IP: ptr("10.100.0.20"),
@@ -315,7 +309,6 @@ func TestServiceBuilder_BuildNvosService(t *testing.T) {
 		MatID:        "switch-uuid-12345678",
 		DeviceKind:   matclient.DeviceKindSwitch,
 		HardwareType: ptr("nvidia_switch_nd5200_ld"),
-		APIState:     "Unknown",
 		PowerState:   "On",
 		NvosIP:       ptr("10.100.1.20"),
 		BMC: matclient.BMCStatus{
@@ -337,7 +330,7 @@ func TestServiceBuilder_BuildNvosService(t *testing.T) {
 	assert.Equal(t, "10.100.1.20", svc.Annotations[AnnotationNvosIP])
 	assert.Equal(t, "nvidia_switch_nd5200_ld", svc.Annotations[AnnotationHardwareType])
 	assert.NotContains(t, svc.Annotations, AnnotationBMCIP)
-	assert.NotContains(t, svc.Annotations, AnnotationAPIState, "state annotations follow the same gate as BMC Services")
+	assert.NotContains(t, svc.Annotations, AnnotationAPIState)
 	assert.NotContains(t, svc.Annotations, AnnotationPowerState)
 
 	require.Len(t, svc.Spec.Ports, 2)
@@ -354,7 +347,7 @@ func TestServiceBuilder_BuildNvosService(t *testing.T) {
 
 	builder.EnableStateAnnotations = true
 	svc = builder.BuildNvosService(sw, "mat-0")
-	assert.Equal(t, "Unknown", svc.Annotations[AnnotationAPIState])
+	assert.NotContains(t, svc.Annotations, AnnotationAPIState)
 	assert.Equal(t, "On", svc.Annotations[AnnotationPowerState])
 }
 
@@ -469,7 +462,6 @@ func TestServiceBuilder_BuildServicesFromStatus(t *testing.T) {
 	machine := func(matID string, ip *string, dpus ...matclient.MachineStatus) matclient.MachineStatus {
 		return matclient.MachineStatus{
 			MatID:      matID,
-			APIState:   "Ready",
 			PowerState: "On",
 			BMC: matclient.BMCStatus{
 				IP:      ip,
@@ -554,6 +546,7 @@ func TestComputeServiceDiff(t *testing.T) {
 		wantDeleteCount   int
 		wantRecreateCount int
 		wantErrorCount    int
+		check             func(*testing.T, ServiceDiff)
 	}{
 		{
 			name:            "empty to empty",
@@ -613,13 +606,18 @@ func TestComputeServiceDiff(t *testing.T) {
 				makeTestService("svc-1", "mat-id-1"),
 			},
 			wantUpdateCount: 1,
+			check: func(t *testing.T, diff ServiceDiff) {
+				require.Len(t, diff.Update, 1)
+				require.Len(t, diff.Update[0].Spec.Ports, 1)
+				assert.Equal(t, intstr.FromInt32(9999), diff.Update[0].Spec.Ports[0].TargetPort)
+			},
 		},
 		{
 			name: "update annotation change",
 			desired: []*corev1.Service{
 				func() *corev1.Service {
 					svc := makeTestService("svc-1", "mat-id-1")
-					svc.Annotations[AnnotationAPIState] = "NotReady"
+					svc.Annotations[AnnotationPowerState] = "Off"
 					return svc
 				}(),
 			},
@@ -627,6 +625,10 @@ func TestComputeServiceDiff(t *testing.T) {
 				makeTestService("svc-1", "mat-id-1"),
 			},
 			wantUpdateCount: 1,
+			check: func(t *testing.T, diff ServiceDiff) {
+				require.Len(t, diff.Update, 1)
+				assert.Equal(t, "Off", diff.Update[0].Annotations[AnnotationPowerState])
+			},
 		},
 		{
 			name: "ignore foreign label and annotation changes",
@@ -871,6 +873,9 @@ func TestComputeServiceDiff(t *testing.T) {
 			assert.Len(t, diff.Delete, tt.wantDeleteCount)
 			assert.Len(t, diff.Recreate, tt.wantRecreateCount)
 			assert.Len(t, diff.Errors, tt.wantErrorCount)
+			if tt.check != nil {
+				tt.check(t, diff)
+			}
 		})
 	}
 }
@@ -893,19 +898,23 @@ func TestComputeServiceDiff_LeaseChangeUpdatesExternalIPsInPlace(t *testing.T) {
 	assert.Equal(t, "42", updated.ResourceVersion)
 }
 
-func TestComputeServiceDiff_PreservesForeignMetadataOnUpdate(t *testing.T) {
+func TestComputeServiceDiff_RemovesObsoleteAPIStateAndPreservesForeignMetadata(t *testing.T) {
 	desired := makeTestService("svc-1", "mat-id-1")
-	desired.Spec.Ports[0].TargetPort = intstr.FromInt32(9999)
 	existing := makeTestService("svc-1", "mat-id-1")
+	existing.Annotations[AnnotationAPIState] = "Ready"
 	existing.Labels["external.example.com/owner"] = "operator"
 	existing.Annotations["external.example.com/note"] = "keep"
 
 	diff := computeServiceDiff([]*corev1.Service{desired}, []*corev1.Service{existing}, zerolog.Nop())
 
 	require.Len(t, diff.Update, 1)
+	assert.Empty(t, diff.Create)
+	assert.Empty(t, diff.Delete)
+	assert.Empty(t, diff.Recreate)
+	assert.NotContains(t, diff.Update[0].Annotations, AnnotationAPIState)
+	assert.Equal(t, "On", diff.Update[0].Annotations[AnnotationPowerState])
 	assert.Equal(t, "operator", diff.Update[0].Labels["external.example.com/owner"])
 	assert.Equal(t, "keep", diff.Update[0].Annotations["external.example.com/note"])
-	assert.Equal(t, "9999", diff.Update[0].Spec.Ports[0].TargetPort.String())
 }
 
 func TestComputeServiceDiff_PreservesForeignMetadataOnRecreate(t *testing.T) {
@@ -918,7 +927,11 @@ func TestComputeServiceDiff_PreservesForeignMetadataOnRecreate(t *testing.T) {
 			// Lease changed, so the legacy clusterIP is not a published BMC IP
 			name:      "legacy with changed lease",
 			desiredIP: "10.100.0.21",
-			existing:  makeLegacyClusterIPService("svc-1", "mat-id-1", "10.100.0.20"),
+			existing: func() *corev1.Service {
+				svc := makeLegacyClusterIPService("svc-1", "mat-id-1", "10.100.0.20")
+				svc.Annotations[AnnotationAPIState] = "Ready"
+				return svc
+			}(),
 		},
 		{
 			name:      "clusterIP collides with published BMC IP",
@@ -937,6 +950,7 @@ func TestComputeServiceDiff_PreservesForeignMetadataOnRecreate(t *testing.T) {
 
 			require.Len(t, diff.Recreate, 1)
 			assert.Empty(t, diff.Update)
+			assert.NotContains(t, diff.Recreate[0].Annotations, AnnotationAPIState)
 			assert.Equal(t, "operator", diff.Recreate[0].Labels["external.example.com/owner"])
 			assert.Equal(t, "keep", diff.Recreate[0].Annotations["external.example.com/note"])
 			assert.Equal(t, tt.desiredIP, diff.Recreate[0].Annotations[AnnotationBMCIP])
@@ -962,7 +976,6 @@ func TestReconcileLogic(t *testing.T) {
 		Machines: []matclient.MachineStatus{
 			{
 				MatID:      "host-1234",
-				APIState:   "Ready",
 				PowerState: "On",
 				BMC: matclient.BMCStatus{
 					IP: ptr("192.168.1.100"),
@@ -1088,7 +1101,6 @@ func makeTestService(name, matID string) *corev1.Service {
 				LabelMachineType: MachineTypeHost,
 			},
 			Annotations: map[string]string{
-				AnnotationAPIState:   "Ready",
 				AnnotationPowerState: "On",
 			},
 		},
@@ -1173,9 +1185,8 @@ func ptr[T any](v T) *T {
 func testMachineStatus() *matclient.MachinesStatusResponse {
 	return &matclient.MachinesStatusResponse{
 		Machines: []matclient.MachineStatus{{
-			MatID:    "mat-id-1",
-			APIState: "Ready",
-			BMC:      matclient.BMCStatus{IP: ptr("10.0.0.1"), Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 1266}},
+			MatID: "mat-id-1",
+			BMC:   matclient.BMCStatus{IP: ptr("10.0.0.1"), Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 1266}},
 		}},
 	}
 }
@@ -1265,8 +1276,7 @@ func TestReconciler_OwnerReferences(t *testing.T) {
 	machineStatus := &matclient.MachinesStatusResponse{
 		Machines: []matclient.MachineStatus{
 			{
-				MatID:    "mat-id-12345",
-				APIState: "Ready",
+				MatID: "mat-id-12345",
 				BMC: matclient.BMCStatus{
 					IP:      &ip,
 					Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 1266},
@@ -1396,7 +1406,6 @@ func TestReconciler_MigratesLegacyClusterIPService(t *testing.T) {
 		return &matclient.MachinesStatusResponse{
 			Machines: []matclient.MachineStatus{{
 				MatID:      "host-1234",
-				APIState:   "Ready",
 				PowerState: "On",
 				BMC:        matclient.BMCStatus{IP: ptr(ip), Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8443}},
 			}},
@@ -1452,7 +1461,6 @@ func TestReconciler_RecreatesServiceHoldingAnotherBMCIPAsClusterIP(t *testing.T)
 	machine := func(matID, ip string) matclient.MachineStatus {
 		return matclient.MachineStatus{
 			MatID:      matID,
-			APIState:   "Ready",
 			PowerState: "On",
 			BMC:        matclient.BMCStatus{IP: ptr(ip), Redfish: matclient.EndpointStatus{ReachablePort: 443, ListenPort: 8443}},
 		}

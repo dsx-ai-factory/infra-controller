@@ -793,7 +793,8 @@ impl From<NmxcPartitionOperationType> for NmxcMetricOperation {
         match value {
             NmxcPartitionOperationType::Create => NmxcMetricOperation::Create,
             NmxcPartitionOperationType::Remove(_) => NmxcMetricOperation::Remove,
-            NmxcPartitionOperationType::RemoveUnknownPartition(_) => {
+            NmxcPartitionOperationType::RemoveDefaultPartition(_)
+            | NmxcPartitionOperationType::RemoveUnknownPartition(_) => {
                 NmxcMetricOperation::RemoveDefaultPartition
             }
             NmxcPartitionOperationType::Update(_) => NmxcMetricOperation::Update,

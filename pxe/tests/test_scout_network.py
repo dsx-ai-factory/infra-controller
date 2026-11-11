@@ -5,6 +5,7 @@
 
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -34,8 +35,17 @@ class ScoutNetworkTest(unittest.TestCase):
         self.config.mkdir()
         self.dhcp = self.config / "dhcp.network"
         self.dhcp.write_text("[Match]\nName=enx* enp* enP*\n[Network]\nDHCP=yes\n")
+        # Redirect only the monotonic clock in the test copy. The sleep stub
+        # advances it so subprocess startup time cannot consume polling budgets.
+        self.uptime = self.directory / "uptime"
+        self.uptime.write_text("0 0\n")
+        self.script = self.directory / "forge-scout-network.sh"
+        source = SCRIPT.read_text()
+        self.assertEqual(source.count("/proc/uptime"), 1)
+        self.script.write_text(source.replace("/proc/uptime", shlex.quote(str(self.uptime))))
         self.env = {
             **os.environ,
+            "PATH": str(self.directory) + os.pathsep + os.environ["PATH"],
             "SCOUT_CMDLINE_FILE": str(self.cmdline),
             "SCOUT_SYS_CLASS_NET": str(self.network),
             "SCOUT_IP_COMMAND": str(self.directory / "ip"),
@@ -67,7 +77,12 @@ class ScoutNetworkTest(unittest.TestCase):
             command = Path(sys.argv[0]).name
             with (root / "calls").open("a") as calls:
                 calls.write(command + " " + " ".join(args) + "\\n")
-            if command == "ip":
+            if command == "sleep":
+                assert len(args) == 1 and args[0].isdigit(), args
+                uptime = root / "uptime"
+                seconds = int(uptime.read_text().split()[0]) + int(args[0])
+                uptime.write_text(str(seconds) + " 0\\n")
+            elif command == "ip":
                 if args[:4] == ["-o", "address", "show", "dev"]:
                     if args[4] == "enp1s0":
                         assert args == ["-o", "address", "show", "dev", "enp1s0", "scope", "global", "-tentative", "-dadfailed"], args
@@ -155,7 +170,7 @@ class ScoutNetworkTest(unittest.TestCase):
                     sys.exit(7)
         '''))
         stub.chmod(0o700)
-        for command in ("ip", "networkctl", "systemctl", "wait-online"):
+        for command in ("ip", "networkctl", "systemctl", "wait-online", "sleep"):
             (self.directory / command).symlink_to(stub)
 
     def add_interfaces(self):
@@ -168,7 +183,7 @@ class ScoutNetworkTest(unittest.TestCase):
 
     def run_helper(self, *args, expected=0):
         result = subprocess.run(
-            ["sh", str(SCRIPT), *map(str, args)], env=self.env,
+            ["sh", str(self.script), *map(str, args)], env=self.env,
             capture_output=True, text=True, timeout=10,
         )
         stub_error = self.directory / "stub_error"

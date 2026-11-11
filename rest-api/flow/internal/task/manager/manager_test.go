@@ -1567,6 +1567,10 @@ func (s *managerTaskStore) ListPowerTasksForRack(_ context.Context, _ uuid.UUID)
 	panic("managerTaskStore.ListPowerTasksForRack: not implemented")
 }
 
+func (s *managerTaskStore) ListFirmwareTasksForRack(_ context.Context, _ uuid.UUID) ([]taskdef.FirmwareTaskDetails, error) {
+	panic("managerTaskStore.ListFirmwareTasksForRack: not implemented")
+}
+
 func (s *managerTaskStore) LatestLeakageShutdownTaskStatuses(
 	_ context.Context,
 	_ []uuid.UUID,

@@ -157,7 +157,8 @@ func DefaultRule() *eventrule.Rule {
 					Name: "power_off_affected_components",
 					Spec: &eventrule.SubmitTask{
 						Operation: &operations.PowerControlTaskInfo{
-							Operation: operations.PowerOperationForcePowerOff,
+							Operation:              operations.PowerOperationForcePowerOff,
+							OverrideReadinessCheck: true,
 						},
 						TargetStrategy:   eventrule.TargetStrategyAffectedComponents,
 						ConflictStrategy: eventrule.ConflictStrategyQueue,

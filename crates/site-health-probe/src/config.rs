@@ -150,14 +150,15 @@ impl Default for Caps {
     }
 }
 
-/// How host details are read. Only `full` (FindMachinesByIds) exists until
-/// nico-api serves a compact host read.
+/// How host details are read: `full` with FindMachinesByIds, `compact` with
+/// FindHostStatesByIds, and `auto` compact while nico-api serves it, else
+/// full.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum HostReadMode {
-    #[default]
     Full,
     Compact,
+    #[default]
     Auto,
 }
 
@@ -179,7 +180,7 @@ impl Default for NicoApiStateConfig {
     fn default() -> Self {
         Self {
             target: "nico-api.nico-system.svc.cluster.local:1079".to_string(),
-            host_read: HostReadMode::Full,
+            host_read: HostReadMode::Auto,
             batch_size: 100,
             max_decoding_message_size: 64 << 20,
             tls: TlsConfig::default(),
@@ -206,6 +207,16 @@ pub(crate) struct ProviderAccount {
     pub auth: RestCredentials,
 }
 
+/// Optional dedicated tenant fixture. Provider ownership would make allocation stats site-wide.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TenantAccount {
+    pub org: String,
+    pub tenant_id: String,
+    pub instance_type: String,
+    pub auth: RestCredentials,
+}
+
 /// The nico-rest-api side of the state readers. GET only.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -215,6 +226,10 @@ pub(crate) struct RestStateConfig {
     /// Optional extra CA bundle path for the REST endpoint.
     pub ca: String,
     pub provider: ProviderAccount,
+    pub tenant: Option<TenantAccount>,
+    /// Skips the machine, rack and tray totals (family `rest_totals`), for a
+    /// site whose REST API cannot answer them in time.
+    pub skip_totals: bool,
 }
 
 /// One reader's schedule. A sweep may outlast its interval: the next tick is
@@ -523,12 +538,6 @@ impl StateConfig {
                         .to_string(),
                 );
             }
-            if nico.host_read != HostReadMode::Full {
-                errs.push(
-                    "state.nico_api.host_read must be full: nico-api has no compact host read yet"
-                        .to_string(),
-                );
-            }
             if !(1..=100).contains(&nico.batch_size) {
                 errs.push("state.nico_api.batch_size must be between 1 and 100".to_string());
             }
@@ -549,6 +558,19 @@ impl StateConfig {
                 errs.push("state.rest.provider.org is required".to_string());
             }
             validate_credentials("state.rest.provider.auth", &rest.provider.auth, errs);
+            if let Some(t) = &rest.tenant {
+                if t.org.is_empty()
+                    || t.org == rest.provider.org
+                    || t.tenant_id.is_empty()
+                    || t.instance_type.is_empty()
+                {
+                    errs.push(
+                        "state.rest.tenant needs a distinct org, tenant_id and instance_type"
+                            .to_string(),
+                    );
+                }
+                validate_credentials("state.rest.tenant.auth", &t.auth, errs);
+            }
         }
 
         if self.paging.keep_seconds == 0 {
@@ -992,7 +1014,7 @@ state:
             state.nico_api.target,
             "nico-api.nico-system.svc.cluster.local:1079"
         );
-        assert_eq!(state.nico_api.host_read, HostReadMode::Full);
+        assert_eq!(state.nico_api.host_read, HostReadMode::Auto);
         assert_eq!(state.nico_api.batch_size, 100);
         assert_eq!(state.nico_api.max_decoding_message_size, 67_108_864);
         let schedule = |r: &ReaderConfig| (r.enabled, r.interval.as_secs(), r.timeout.as_secs());
@@ -1165,11 +1187,6 @@ state:
                 "state.nico_api.tls requires ca, cert, and key paths",
             ),
             (
-                "compact host read not available",
-                "state:\n  enabled: true\n  nico_api: {host_read: auto}\n",
-                "state.nico_api.host_read must be full",
-            ),
-            (
                 "batch above max_find_by_ids",
                 "state:\n  enabled: true\n  nico_api: {batch_size: 101}\n",
                 "state.nico_api.batch_size must be between 1 and 100",
@@ -1178,6 +1195,16 @@ state:
                 "rest credentials are one kind",
                 "state:\n  enabled: true\n  rest: {provider: {auth: {token_file: f, client_id: c}}}\n",
                 "state.rest.provider.auth takes token_file or client credentials, not both",
+            ),
+            (
+                "tenant differs from provider",
+                "state:\n  enabled: true\n  readers: {rest_inventory: {enabled: true, interval: 120s, timeout: 600s}}\n  rest: {provider: {org: p}, tenant: {org: p, tenant_id: t, instance_type: i, auth: {token_file: f}}}\n",
+                "state.rest.tenant needs a distinct org",
+            ),
+            (
+                "tenant credentials are required",
+                "state:\n  enabled: true\n  readers: {rest_inventory: {enabled: true, interval: 120s, timeout: 600s}}\n  rest: {provider: {org: p}, tenant: {org: t, tenant_id: t, instance_type: i, auth: {}}}\n",
+                "state.rest.tenant.auth",
             ),
             (
                 "partial reader rejected",
@@ -1425,7 +1452,7 @@ state:
     max_backoff: "30s"
   nico_api:
     target: "nico-api.nico-system.svc.cluster.local:1079"
-    host_read: full
+    host_read: auto
     batch_size: 100
     max_decoding_message_size: 67108864
     tls:
@@ -1508,6 +1535,7 @@ state:
     #[test]
     fn chart_minimal_state_config_passes_validation() {
         let cfg = load_str(CHART_MINIMAL).expect("the minimal rendering passes validation");
+        assert_eq!(cfg.state.nico_api.host_read, HostReadMode::Auto);
         let readers = &cfg.state.readers;
         assert!(readers.devices.enabled);
         assert!(
@@ -1519,6 +1547,7 @@ state:
     #[test]
     fn chart_rendered_state_config_loads() {
         let cfg = load_str(CHART_RENDERED).expect("the chart's rendering loads");
+        assert_eq!(cfg.state.nico_api.host_read, HostReadMode::Full);
         assert!(cfg.state.enabled);
         assert_eq!(cfg.state.rest.provider.org, "provider-org");
         assert_eq!(cfg.api_listen_addr().expect("api").port(), 9010);

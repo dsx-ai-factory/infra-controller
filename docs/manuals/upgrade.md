@@ -264,7 +264,16 @@ credential rotation is tracked by
 [Credential Sources](../configuration/credential-sources.md#site-wide-bmc-root-version-0-ownership-policy).
 
 <Warning>
-`setup.sh -y` does **not** stop on preflight errors. With `-y` set, hard errors are printed and the run continues ("Things may fail"). The preflight gate is only enforced interactively, so genuinely resolve every error here rather than relying on the script to stop you. The one exception is the database checks for Temporal and Keycloak. When a value would repoint either one away from its data, or can't be honored, setup stops even with `-y`. That covers a move off the standalone `postgres` StatefulSet without a valid migration receipt, and `false` on a database already on `nico-pg-cluster`. It also covers an invalid value, a database host `setup.sh` doesn't manage, a `KEYCLOAK_NS` that differs from `keycloak.namespace`, and cluster state preflight can't read.
+`setup.sh -y` accepts routine prompts and preflight warnings, but stops on
+preflight errors with exit code `1`. Fix the reported errors before upgrading.
+The separate `--ignore-preflight-errors` option permits continuation despite
+ordinary errors reported in the preflight summary and prints an explicit
+continuation message. Temporal and Keycloak database safety errors still stop
+setup with that override. These include a move off the standalone `postgres`
+StatefulSet without a valid migration receipt, `false` on a database already on
+`nico-pg-cluster`, an invalid value, a database host `setup.sh` doesn't manage, a
+`KEYCLOAK_NS` that differs from `keycloak.namespace`, and cluster state preflight
+can't read.
 </Warning>
 
 </Steps>
@@ -417,6 +426,22 @@ Do not roll back to an API that lacks this behavior. It deletes peerings without
 waiting for the DPUs, and restoring a database backup does not undo their network
 changes. For the network-version and migration details, refer to the
 [configuration reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#vpc-peering-deletion).
+
+### 2.4 → 2.5: Keycloak service account orgs are required
+
+**Impact:** A deployment with `keycloak.serviceAccount: true` fails to start unless it also lists `keycloak.serviceAccountOrgs`, with exactly one org in disconnected mode. The `helm-prereqs` values already list `ncx`. Before upgrading a deployment that uses its own values file, list each org whose client holds both `PROVIDER_ADMIN` and `TENANT_ADMIN`:
+
+```yaml
+nico-rest-api:
+  config:
+    keycloak:
+      serviceAccount: true
+      serviceAccountOrgs: [ncx]
+```
+
+Only a client in a listed org is a service account, and only for requests to that org. A client credentials token from any other client is now authorized by its roles in the requested org, like a user token. That includes `serviceAccount: false`, where it used to get `401`. A disconnected config with more than one `isServiceAccount: true` claim mapping across custom issuers also fails to start.
+
+In connected mode, `serviceAccountOrgs` can list more than one org. Custom issuer `isServiceAccount` mappings, which used to require disconnected mode, are now accepted in connected mode with no limit on their number.
 
 ### 2.3 → 2.4: Standalone Temporal/Keycloak PostgreSQL deprecated
 

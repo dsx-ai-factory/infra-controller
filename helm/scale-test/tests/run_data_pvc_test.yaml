@@ -1,0 +1,71 @@
+suite: scale-test run-data claim
+templates:
+  - run-data-pvc.yaml
+release:
+  name: run
+  namespace: scale-ns
+tests:
+  - it: renders nothing by default
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: creates a ReadWriteOnce claim when the journal suite is enabled
+    set:
+      journal.enabled: true
+      persistence.storageClass: fast
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: PersistentVolumeClaim
+      - equal:
+          path: metadata.name
+          value: run-scale-test-run-data
+      - equal:
+          path: spec.accessModes
+          value: ["ReadWriteOnce"]
+      - equal:
+          path: spec.storageClassName
+          value: fast
+      - equal:
+          path: spec.resources.requests.storage
+          value: 4Gi
+      - equal:
+          path: metadata.labels["app.kubernetes.io/component"]
+          value: run-data
+      # Only the runner keeps the claim on uninstall.
+      - notExists:
+          path: metadata.annotations
+
+  - it: creates the shared claim on its own for a later suite to reuse
+    set:
+      persistence.create: true
+      persistence.storageClass: fast
+      persistence.claimName: shared-run-data
+      persistence.size: 2Gi
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: metadata.name
+          value: shared-run-data
+      - equal:
+          path: spec.resources.requests.storage
+          value: 2Gi
+
+  - it: fails when the storage class is missing
+    set:
+      journal.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: persistence.storageClass is required when the run-data claim is created (journal.enabled, persistence.create or runner.enabled)
+
+  - it: fails when the claim size is missing
+    set:
+      journal.enabled: true
+      persistence.storageClass: fast
+      persistence.size: null
+    asserts:
+      - failedTemplate:
+          errorMessage: persistence.size is required when the run-data claim is created

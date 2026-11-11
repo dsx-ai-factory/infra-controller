@@ -23,6 +23,8 @@ use carbide_machine_controller::health_report::create_host_update_health_report_
 use common::api_fixtures::{
     TestEnv, create_managed_host, create_managed_host_multi_dpu, create_test_env,
 };
+use figment::Figment;
+use figment::providers::{Format, Toml};
 use model::machine::LoadSnapshotOptions;
 use model::machine_update_module::{
     AutomaticFirmwareUpdateReference, HOST_UPDATE_HEALTH_REPORT_SOURCE,
@@ -40,6 +42,11 @@ use crate::tests::dpu_machine_update::{get_all_snapshots, update_nic_firmware_ve
 #[crate::sqlx_test]
 async fn test_start_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
+    let work_lock = env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("test-dpu-firmware-admission".into())
+        .await?;
     let managed_host = create_managed_host(&env).await;
     let mut txn = env.pool.begin().await?;
     managed_host.update_nic_firmware_version(&mut txn).await?;
@@ -62,7 +69,7 @@ async fn test_start_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     let metrics = MetricsCapture::start();
 
     let started_count = dpu_nic_firmware_update
-        .start_updates(&env.pool, 10, &HashSet::default(), &snapshots)
+        .start_updates(&env.pool, &work_lock, 10, &HashSet::default(), &snapshots)
         .await?;
 
     assert_eq!(started_count.len(), 1);
@@ -97,6 +104,11 @@ async fn test_classic_updates_outlive_dpf_admission_deadline(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
+    let work_lock = env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("test-dpu-firmware-admission".into())
+        .await?;
     let hosts = [
         create_managed_host(&env).await,
         create_managed_host(&env).await,
@@ -123,7 +135,7 @@ async fn test_classic_updates_outlive_dpf_admission_deadline(
         .fetch_one(writer.as_mut())
         .await?;
     let updating_hosts = HashSet::new();
-    let admission = updater.start_updates(&env.pool, 2, &updating_hosts, &snapshots);
+    let admission = updater.start_updates(&env.pool, &work_lock, 2, &updating_hosts, &snapshots);
     tokio::pin!(admission);
     tokio::select! {
         result = &mut admission => panic!("classic admission did not wait for the DPU lock: {result:?}"),
@@ -167,6 +179,11 @@ async fn test_start_updates_with_multidpu(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
+    let work_lock = env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("test-dpu-firmware-admission".into())
+        .await?;
 
     let mh = create_managed_host_multi_dpu(&env, 2).await;
     let host = mh.host().rpc_machine().await;
@@ -194,7 +211,7 @@ async fn test_start_updates_with_multidpu(
         .expect("Failed to create transaction");
 
     let dpus_started = dpu_nic_firmware_update
-        .start_updates(&env.pool, 10, &HashSet::default(), &snapshots)
+        .start_updates(&env.pool, &work_lock, 10, &HashSet::default(), &snapshots)
         .await?;
 
     assert_eq!(dpus_started.len(), 1);
@@ -216,6 +233,11 @@ async fn test_get_updates_in_progress(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
+    let work_lock = env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("test-dpu-firmware-admission".into())
+        .await?;
     let managed_host = create_managed_host(&env).await;
     let mut txn = env.pool.begin().await?;
     managed_host.update_nic_firmware_version(&mut txn).await?;
@@ -242,7 +264,7 @@ async fn test_get_updates_in_progress(
     assert!(updating_count.is_empty());
 
     let started_count = dpu_nic_firmware_update
-        .start_updates(&env.pool, 10, &HashSet::default(), &snapshots)
+        .start_updates(&env.pool, &work_lock, 10, &HashSet::default(), &snapshots)
         .await?;
 
     let updating_count = dpu_nic_firmware_update
@@ -304,6 +326,11 @@ async fn test_wrong_version_failures_count_once_per_outcome(
     use carbide_instrument::testing::MetricsCapture;
 
     let env = create_test_env(pool).await;
+    let work_lock = env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock("test-dpu-firmware-admission".into())
+        .await?;
     let mh = create_managed_host(&env).await;
     let mut txn = env.pool.begin().await?;
     mh.update_nic_firmware_version(&mut txn).await?;
@@ -317,7 +344,7 @@ async fn test_wrong_version_failures_count_once_per_outcome(
     };
     let snapshots = get_all_snapshots(&env).await;
     dpu_nic_firmware_update
-        .start_updates(&env.pool, 10, &HashSet::default(), &snapshots)
+        .start_updates(&env.pool, &work_lock, 10, &HashSet::default(), &snapshots)
         .await?;
 
     let land_on_version = |version: &'static str, env: &TestEnv| {
@@ -394,6 +421,7 @@ async fn test_wrong_version_failures_count_once_per_outcome(
     dpu_nic_firmware_update
         .start_updates(
             &env.pool,
+            &work_lock,
             10,
             &HashSet::default(),
             &get_all_snapshots(&env).await,
@@ -497,4 +525,255 @@ impl TestManagedHost {
     ) -> CarbideResult<()> {
         update_nic_firmware_version(txn, &self.dpu().id, "11.10.1000").await
     }
+}
+
+// Replacing the manager owner must reject the actual DPU write, even when the
+// earlier snapshot still describes a valid automatic-update candidate.
+#[crate::sqlx_test]
+async fn stale_work_lock_cannot_admit_dpu_firmware(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let host = create_managed_host(&env).await;
+    let mut txn = env.pool.begin().await?;
+    host.update_nic_firmware_version(&mut txn).await?;
+    txn.commit().await?;
+    let updater = DpuNicFirmwareUpdate {
+        reported_wrong_versions: std::sync::Mutex::new(HashSet::new()),
+        metrics: None,
+        config: env.config.clone(),
+        dpf: None,
+    };
+    let snapshots = get_all_snapshots(&env).await;
+    assert_eq!(updater.check_for_updates(&snapshots).await.len(), 1);
+    let work_key = "stale-dpu-firmware-admission";
+    let work_lock = env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock(work_key.into())
+        .await?;
+    let changed =
+        sqlx::query("UPDATE work_locks SET worker_id = gen_random_uuid() WHERE work_key = $1")
+            .bind(work_key)
+            .execute(&env.pool)
+            .await?;
+    assert_eq!(changed.rows_affected(), 1);
+
+    let error = updater
+        .start_updates(&env.pool, &work_lock, 1, &HashSet::new(), &snapshots)
+        .await
+        .expect_err("the previous worker must not admit a DPU update");
+    assert!(matches!(error, crate::CarbideError::FailedPrecondition(_)));
+    let mut txn = env.pool.begin().await?;
+    let retained = host.snapshot(&mut txn).await;
+    assert!(
+        retained
+            .dpu_snapshots
+            .iter()
+            .all(|dpu| dpu.reprovision_requested.is_none())
+    );
+    txn.commit().await?;
+    Ok(())
+}
+
+// A failed accounting read cannot make every occupied DPU slot appear free.
+#[crate::sqlx_test]
+async fn outstanding_dpu_read_failure_is_returned(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = Figment::new()
+        .merge(Toml::file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/cfg/test_data/full_config.toml"
+        )))
+        .extract()?;
+    let updater = DpuNicFirmwareUpdate {
+        reported_wrong_versions: std::sync::Mutex::new(HashSet::new()),
+        metrics: None,
+        config: std::sync::Arc::new(config),
+        dpf: None,
+    };
+    let mut txn = pool.begin().await?;
+    sqlx::query("SELECT 1 / 0")
+        .execute(txn.as_mut())
+        .await
+        .expect_err("abort only the accounting transaction");
+    let error = updater
+        .get_updates_in_progress(txn.as_mut())
+        .await
+        .expect_err("an aborted read must not advertise zero occupied slots");
+    assert!(matches!(error, crate::CarbideError::DBError(_)));
+    txn.rollback().await?;
+    Ok(())
+}
+
+// The admission transaction must retain its fence while waiting for a DPU row.
+// A new worker can take ownership only after the original request commits.
+#[crate::sqlx_test]
+async fn dpu_admission_keeps_work_lock_ownership_until_commit(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let host = create_managed_host(&env).await;
+    let mut txn = env.pool.begin().await?;
+    host.update_nic_firmware_version(&mut txn).await?;
+    txn.commit().await?;
+    let updater = DpuNicFirmwareUpdate {
+        reported_wrong_versions: std::sync::Mutex::new(HashSet::new()),
+        metrics: None,
+        config: env.config.clone(),
+        dpf: None,
+    };
+    let work_key = "fenced-dpu-admission";
+    let work_lock = env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock(work_key.into())
+        .await?;
+    let snapshots = get_all_snapshots(&env).await;
+    let updating_hosts = HashSet::new();
+
+    // Pause the real writer after its fence, before it can save the request.
+    let mut blocker = env.pool.begin().await?;
+    db::machine::lock_by_id_for_update(blocker.as_mut(), &host.dpu().id.into()).await?;
+    let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(blocker.as_mut())
+        .await?;
+    let admission = updater.start_updates(&env.pool, &work_lock, 1, &updating_hosts, &snapshots);
+    tokio::pin!(admission);
+    let admission_pid = tokio::select! {
+        result = &mut admission => panic!("admission did not wait for the DPU row: {result:?}"),
+        pid = wait_for_blocked_query(&env.pool, blocker_pid, "SELECT reprovisioning_requested IS NOT NULL") => pid,
+    };
+
+    let takeover =
+        sqlx::query("UPDATE work_locks SET worker_id = gen_random_uuid() WHERE work_key = $1")
+            .bind(work_key)
+            .execute(&env.pool);
+    tokio::pin!(takeover);
+    tokio::select! {
+        result = &mut admission => panic!("admission escaped the held DPU row: {result:?}"),
+        result = &mut takeover => panic!("ownership changed before admission committed: {result:?}"),
+        _ = wait_for_blocked_query(&env.pool, admission_pid, "UPDATE work_locks SET worker_id") => {},
+    }
+
+    // The database has observed both waits, so release the DPU row without
+    // relying on a guessed delay or expiring the real work lease.
+    blocker.commit().await?;
+    let (admitted, taken_over) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(admission, takeover)
+    })
+    .await
+    .expect("admission and takeover must finish after the DPU row is released");
+    assert_eq!(admitted?, HashSet::from([host.id.into()]));
+    assert_eq!(taken_over?.rows_affected(), 1);
+    let mut txn = env.pool.begin().await?;
+    let dpu = host.dpu().db_machine(&mut txn).await;
+    assert!(
+        dpu.reprovision_requested
+            .expect("the request must commit before ownership changes")
+            .update_firmware
+    );
+    txn.commit().await?;
+    Ok(())
+}
+
+// A contended admission with no operator timeout must release its fence under
+// the statement cap, so another replica can process unrelated work-lock commands.
+#[crate::sqlx_test]
+async fn contended_dpu_admission_releases_another_work_manager(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let host = create_managed_host(&env).await;
+    let mut txn = env.pool.begin().await?;
+    host.update_nic_firmware_version(&mut txn).await?;
+    txn.commit().await?;
+    let updater = DpuNicFirmwareUpdate {
+        reported_wrong_versions: std::sync::Mutex::new(HashSet::new()),
+        metrics: None,
+        config: env.config.clone(),
+        dpf: None,
+    };
+    let writer_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                sqlx::query("SET statement_timeout = '0'")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(env.pool.connect_options().as_ref().clone())
+        .await?;
+    let mut tasks = tokio::task::JoinSet::new();
+    let contender =
+        db::work_lock_manager::start(&mut tasks, env.pool.clone(), Default::default()).await?;
+    let work_key = "contended-dpu-admission";
+    let work_lock = env
+        .api
+        .work_lock_manager_handle
+        .try_acquire_lock(work_key.into())
+        .await?;
+    let snapshots = get_all_snapshots(&env).await;
+    let updating = HashSet::new();
+    let mut blocker = env.pool.begin().await?;
+    db::machine::lock_by_id_for_update(blocker.as_mut(), &host.dpu().id.into()).await?;
+    let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(blocker.as_mut())
+        .await?;
+    let (admission, acquire_same, unrelated) = {
+        let admission = updater.start_updates(&writer_pool, &work_lock, 1, &updating, &snapshots);
+        tokio::pin!(admission);
+        let admission_pid = tokio::select! {
+            result = &mut admission => panic!("admission did not reach the held DPU row: {result:?}"),
+            pid = wait_for_blocked_query(&env.pool, blocker_pid, "SELECT reprovisioning_requested IS NOT NULL") => pid,
+        };
+
+        // Real acquisition waits in the second manager's FIFO, even though the
+        // lease has not expired and this attempt will eventually be rejected.
+        let acquire_same = contender.try_acquire_lock(work_key.into());
+        tokio::pin!(acquire_same);
+        tokio::select! {
+            result = &mut admission => panic!("admission expired before the competing acquire was observed: {result:?}"),
+            result = &mut acquire_same => panic!("competing acquire escaped the admission fence: {}", result.is_ok()),
+            _ = wait_for_blocked_query(&env.pool, admission_pid, "INSERT INTO work_locks") => {},
+        }
+        let unrelated = contender.try_acquire_lock("unrelated-dpu-admission-work".into());
+        tokio::time::timeout(Duration::from_secs(8), async {
+            tokio::join!(admission, acquire_same, unrelated)
+        })
+        .await
+        .expect(
+            "the statement cap must unblock both work-lock commands while the DPU row stays locked",
+        )
+    };
+    assert!(matches!(admission, Err(crate::CarbideError::DBError(_))));
+    assert!(matches!(
+        acquire_same,
+        Err(db::work_lock_manager::AcquireLockError::WorkAlreadyLocked(
+            _
+        ))
+    ));
+    unrelated?.release().await?;
+    let limit: String = sqlx::query_scalar("SHOW statement_timeout")
+        .fetch_one(&writer_pool)
+        .await?;
+    assert_eq!(limit, "0");
+    blocker.commit().await?;
+    let mut txn = env.pool.begin().await?;
+    assert!(
+        host.dpu()
+            .db_machine(&mut txn)
+            .await
+            .reprovision_requested
+            .is_none()
+    );
+    txn.commit().await?;
+    drop(work_lock);
+    drop(contender);
+    writer_pool.close().await;
+    tasks.shutdown().await;
+    Ok(())
 }

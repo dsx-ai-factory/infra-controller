@@ -398,6 +398,9 @@ tests:
       - matchRegex:
           path: data["config.yaml"]
           pattern: 'max_kept_snapshots: 16'
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'host_read: auto'
       - notMatchRegex:
           path: data["config.yaml"]
           pattern: 'metrics_store'
@@ -760,7 +763,22 @@ tests:
       - failedTemplate:
           errorPattern: 'duration "90" must be numbers with units'
 
-  - it: rejects a compact host read
+  - it: renders the hostRead a deployer pins
+    template: templates/configmap.yaml
+    set:
+      state:
+        enabled: true
+        siteId: site-1
+        nicoApi:
+          hostRead: full
+      nicoApiClientCert:
+        existingSecret: nico-admin-cert
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'host_read: full'
+
+  - it: rejects an unknown hostRead
     # The failure surfaces through deployment.yaml, whose config-checksum
     # annotation renders the configmap first.
     template: templates/deployment.yaml
@@ -769,12 +787,12 @@ tests:
         enabled: true
         siteId: site-1
         nicoApi:
-          hostRead: auto
+          hostRead: fast
       nicoApiClientCert:
         existingSecret: nico-admin-cert
     asserts:
       - failedTemplate:
-          errorPattern: 'state.nicoApi.hostRead must be full'
+          errorPattern: 'state.nicoApi.hostRead must be auto, full or compact, not "fast"'
 
   - it: requires the REST target while the REST reader is on
     # The failure surfaces through deployment.yaml, whose config-checksum
@@ -1258,3 +1276,99 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: 'state.metrics.selector label "app-name" is not a label name'
+
+  - it: renders tenant fixture credentials and their secret mount
+    set:
+      state:
+        enabled: true
+        siteId: site-id
+        readers:
+          devices: {enabled: false}
+          restInventory: {enabled: true}
+        rest:
+          target: https://rest.example
+          provider:
+            org: provider
+            auth: {tokenFile: /provider-token}
+          tenant:
+            org: tenant-org
+            tenantId: tenant-id
+            instanceType: type-id
+            auth:
+              existingSecret: {name: tenant-token, key: token}
+    asserts:
+      - template: templates/configmap.yaml
+        matchRegex:
+          path: data["config.yaml"]
+          pattern: 'tenant_id: "tenant-id"'
+      - template: templates/configmap.yaml
+        matchRegex:
+          path: data["config.yaml"]
+          pattern: 'token_file: "/var/secrets/state-tenant/token"'
+      - template: templates/deployment.yaml
+        contains:
+          path: spec.template.spec.volumes
+          content:
+            name: state-tenant
+            secret: {secretName: tenant-token}
+      - template: templates/deployment.yaml
+        contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: state-tenant
+            mountPath: /var/secrets/state-tenant
+            readOnly: true
+
+  - it: skips the REST totals only when restInventory.totals is false
+    template: templates/configmap.yaml
+    set:
+      state.enabled: true
+      state.siteId: site-id
+      state.rest.target: https://rest.example
+      state.rest.provider.org: provider
+      state.rest.provider.auth.tokenFile: /provider-token
+      state.readers.devices.enabled: false
+      state.readers.restInventory.enabled: true
+      state.readers.restInventory.totals: false
+    asserts:
+      - matchRegex:
+          path: data["config.yaml"]
+          pattern: 'skip_totals: true'
+  - it: reads the REST totals by default
+    template: templates/configmap.yaml
+    set:
+      state.enabled: true
+      state.siteId: site-id
+      state.rest.target: https://rest.example
+      state.rest.provider.org: provider
+      state.rest.provider.auth.tokenFile: /provider-token
+      state.readers.devices.enabled: false
+      state.readers.restInventory.enabled: true
+    asserts:
+      - notMatchRegex:
+          path: data["config.yaml"]
+          pattern: 'skip_totals'
+
+  - it: omits tenant secrets while the fixture is disabled
+    template: templates/deployment.yaml
+    set:
+      state.enabled: true
+      state.siteId: site-id
+      state.readers.devices.enabled: false
+      state.readers.restInventory.enabled: true
+      state.rest.target: https://rest.example
+      state.rest.provider.org: provider
+      state.rest.provider.auth.tokenFile: /provider-token
+      state.rest.tenant.org: ""
+      state.rest.tenant.auth.existingSecret.name: deleted-tenant-token
+    asserts:
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: state-tenant
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: state-tenant
+          any: true

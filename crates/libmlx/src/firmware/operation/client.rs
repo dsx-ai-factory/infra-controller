@@ -27,7 +27,8 @@ use rpc::protos::firmware_supervisor::{
     CancelFirmwareOperationRequest, GetFirmwareOperationRequest, GetSupervisorStatusRequest,
     GetSupervisorStatusResponse, ObserveFirmwareOperationResponse, ObserveFirmwareUpdateRequest,
     ObserverExitBehavior as ObserverExitBehaviorPb, SubmitFirmwareOperationRequest,
-    SupervisorIdentity, observe_firmware_operation_response,
+    SubmitFirmwareOperationResponse, SupervisorIdentity, observe_firmware_operation_response,
+    submit_firmware_operation_response,
 };
 use rpc::protos::mlx_device::FirmwareOperation as FirmwareOperationPb;
 use thiserror::Error;
@@ -36,8 +37,9 @@ use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 
 use crate::firmware::config::{FirmwareFlasherProfile, FirmwareUpdateContext};
+use crate::firmware::core_download::CoreFirmwareDownloadConfig;
 
-pub(super) const PROTOCOL_VERSION: u32 = 4;
+pub(super) const PROTOCOL_VERSION: u32 = 5;
 pub(super) const MESSAGE_LIMIT: usize = 128 * 1024;
 // Local admission and receipt reads are short operations. This cumulative bound
 // includes channel readiness and reconnection, not the firmware job's lifetime.
@@ -74,7 +76,8 @@ pub enum FirmwareOperationObservation {
     },
 }
 
-/// An input, connection, or receipt failure; no error resolves an earlier submission.
+/// A request failure or explicit rejection of one Submit.
+/// No error resolves an earlier submission.
 #[derive(Debug, Error)]
 pub enum FirmwareSupervisorClientError {
     /// Local request validation or path resolution failed; no submission RPC was sent.
@@ -89,9 +92,22 @@ pub enum FirmwareSupervisorClientError {
     /// Connection, channel readiness, or a response exceeded five seconds overall.
     #[error("firmware supervisor request exceeded its five-second deadline")]
     Deadline,
-    /// A successful response omitted or contradicted required receipt data.
+    /// A successful response omitted or contradicted required data.
     #[error("invalid firmware supervisor response: {0}")]
     InvalidResponse(String),
+    /// This submission failed to acquire an occupied host mutation claim after
+    /// passing earlier checks. The response matches the original operation ID
+    /// and pinned protocol, PCI slot, boot, and execution device. It never
+    /// resolves an earlier uncertain attempt, even with the same operation ID.
+    #[error(
+        "this submission of firmware operation {operation_id} was not admitted by supervisor {supervisor_instance_id}"
+    )]
+    NotAdmitted {
+        /// Exact original Submit ID that this helper rejected before admission.
+        operation_id: String,
+        /// Rejecting helper's opaque token: 1-256 printable nonspace ASCII bytes.
+        supervisor_instance_id: String,
+    },
     /// The supervisor's private API revision does not match this client's revision.
     #[error("unsupported firmware supervisor protocol version {0}")]
     UnsupportedProtocol(u32),
@@ -165,11 +181,47 @@ impl FirmwareSupervisorClient {
     /// Explicit SSH-agent authentication
     /// uses the supervisor's `SSH_AUTH_SOCK`; host verification uses its
     /// default known-hosts file. Those environments are not forwarded per request.
+    /// An occupied host mutation claim returns a gRPC `ResourceExhausted` error.
+    /// Use [`Self::submit_with_rejection_details`] to request an explicit
+    /// rejection for this submission instead.
     pub async fn submit(
+        &mut self,
+        operation_id: &str,
+        profile: Option<FirmwareFlasherProfile>,
+        observer_exit_behavior: ObserverExitBehavior,
+    ) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
+        self.submit_with_reporting(operation_id, profile, observer_exit_behavior, false)
+            .await
+    }
+
+    /// `submit_with_rejection_details` submits once, returning a durable receipt
+    /// or [`FirmwareSupervisorClientError::NotAdmitted`] when this submission
+    /// passes earlier checks but fails to acquire an occupied host mutation claim.
+    /// The rejection must match the operation ID and pinned handshake identity:
+    /// protocol, PCI slot, boot, and exact execution device. Its helper instance
+    /// token identifies the rejecting service.
+    ///
+    /// Inputs, path handling, and the five-second deadline follow [`Self::submit`].
+    /// Transport failures and deadlines leave admission uncertain; other gRPC
+    /// statuses are preserved. Older protocol-v5 helpers may still return
+    /// `ResourceExhausted` for an occupied claim. Calls are never retried, and a
+    /// rejection never resolves an earlier uncertain attempt, even for the same ID.
+    pub async fn submit_with_rejection_details(
+        &mut self,
+        operation_id: &str,
+        profile: Option<FirmwareFlasherProfile>,
+        observer_exit_behavior: ObserverExitBehavior,
+    ) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
+        self.submit_with_reporting(operation_id, profile, observer_exit_behavior, true)
+            .await
+    }
+
+    async fn submit_with_reporting(
         &mut self,
         operation_id: &str,
         mut profile: Option<FirmwareFlasherProfile>,
         observer_exit_behavior: ObserverExitBehavior,
+        report_rejection_details: bool,
     ) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
         if let Some(profile) = &mut profile {
             // Absolute inputs and remote URLs remain usable after the caller's
@@ -184,11 +236,13 @@ impl FirmwareSupervisorClient {
                 })?;
         }
         let request = SubmitFirmwareOperationRequest {
+            report_rejection_details,
             operation_id: operation_id.to_string(),
             profile: profile.map(Into::into),
             observer_exit_behavior: ObserverExitBehaviorPb::from(observer_exit_behavior).into(),
             expected_identity: Some(self.identity.clone().into()),
             update_context: None,
+            core_download_config: None,
             expected_supervisor_instance_id: None,
         };
         self.submit_request(request).await
@@ -222,6 +276,7 @@ impl FirmwareSupervisorClient {
             context,
             observer_exit_behavior,
             None,
+            None,
         )
         .await
     }
@@ -247,6 +302,31 @@ impl FirmwareSupervisorClient {
             context,
             observer_exit_behavior,
             Some(expected_supervisor_instance_id),
+            None,
+        )
+        .await
+    }
+
+    /// Submit a SiteCache update using Scout's resolved Core transport settings.
+    /// These runtime settings are not fingerprinted or journaled. The instance
+    /// token guards admission after a read-first lookup, as for other updates.
+    /// A matching receipt never replaces the accepted worker's configuration.
+    pub async fn submit_update_via_core(
+        &mut self,
+        operation_id: &str,
+        profile: FirmwareFlasherProfile,
+        context: FirmwareUpdateContext,
+        observer_exit_behavior: ObserverExitBehavior,
+        expected_supervisor_instance_id: &str,
+        config: CoreFirmwareDownloadConfig,
+    ) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
+        self.submit_update_with_instance(
+            operation_id,
+            profile,
+            context,
+            observer_exit_behavior,
+            Some(expected_supervisor_instance_id),
+            Some(config),
         )
         .await
     }
@@ -258,6 +338,7 @@ impl FirmwareSupervisorClient {
         context: FirmwareUpdateContext,
         observer_exit_behavior: ObserverExitBehavior,
         expected_supervisor_instance_id: Option<&str>,
+        core_download_config: Option<CoreFirmwareDownloadConfig>,
     ) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
         if expected_supervisor_instance_id.is_some_and(|id| !is_valid_supervisor_instance_id(id)) {
             return Err(FirmwareSupervisorClientError::InvalidRequest(
@@ -268,12 +349,19 @@ impl FirmwareSupervisorClient {
             .validate(&profile)
             .map_err(|error| FirmwareSupervisorClientError::InvalidRequest(error.to_string()))?;
         self.submit_request(SubmitFirmwareOperationRequest {
+            report_rejection_details: false,
             operation_id: operation_id.into(),
             profile: Some(profile.into()),
             observer_exit_behavior: ObserverExitBehaviorPb::from(observer_exit_behavior).into(),
             expected_identity: Some(self.identity.clone().into()),
             update_context: Some(context.into()),
             expected_supervisor_instance_id: expected_supervisor_instance_id.map(str::to_owned),
+            core_download_config: core_download_config
+                .map(TryInto::try_into)
+                .transpose()
+                .map_err(|error: crate::firmware::error::FirmwareError| {
+                    FirmwareSupervisorClientError::InvalidRequest(error.to_string())
+                })?,
         })
         .await
     }
@@ -283,13 +371,15 @@ impl FirmwareSupervisorClient {
         request: SubmitFirmwareOperationRequest,
     ) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
         let operation_id = request.operation_id.clone();
+        let report_rejection_details = request.report_rejection_details;
+        let identity = self.identity.clone().into();
         tokio::time::timeout(RPC_TIMEOUT, async {
             let response = self
                 .client
                 .submit_firmware_operation(request)
                 .await?
                 .into_inner();
-            decode_operation(response.operation, &operation_id)
+            decode_submission_response(response, &operation_id, &identity, report_rejection_details)
         })
         .await
         .map_err(|_| FirmwareSupervisorClientError::Deadline)?
@@ -413,6 +503,10 @@ impl From<FirmwareUpdateContext> for rpc::protos::firmware_supervisor::FirmwareU
     fn from(context: FirmwareUpdateContext) -> Self {
         Self {
             phase_id: context.phase_id,
+            delivery_mode: rpc::protos::mlx_device::FirmwareDeliveryMode::from(
+                context.delivery_mode,
+            )
+            .into(),
             expected_digests: Some(context.expected_digests.into()),
             expected_device: context.expected_device.map(Into::into),
         }
@@ -443,6 +537,46 @@ impl TryFrom<GetSupervisorStatusResponse> for SupervisorStatus {
             boot_id: response.boot_id,
             execution_device: response.execution_device,
         })
+    }
+}
+
+fn decode_submission_response(
+    response: SubmitFirmwareOperationResponse,
+    operation_id: &str,
+    identity: &SupervisorIdentity,
+    report_rejection_details: bool,
+) -> Result<FirmwareOperation, FirmwareSupervisorClientError> {
+    match response.result {
+        Some(submit_firmware_operation_response::Result::NotAdmitted(rejected)) => {
+            if !report_rejection_details {
+                return Err(FirmwareSupervisorClientError::InvalidResponse(
+                    "submission did not request explicit rejection".into(),
+                ));
+            }
+            if rejected.operation_id != operation_id {
+                return Err(FirmwareSupervisorClientError::InvalidResponse(
+                    "rejection operation ID does not match the submission".into(),
+                ));
+            }
+            if !is_valid_supervisor_instance_id(&rejected.supervisor_instance_id) {
+                return Err(FirmwareSupervisorClientError::InvalidResponse(
+                    "rejection supervisor instance ID is invalid".into(),
+                ));
+            }
+            if rejected.identity.as_ref() != Some(identity) {
+                return Err(FirmwareSupervisorClientError::InvalidResponse(
+                    "rejection identity does not match the pinned handshake".into(),
+                ));
+            }
+            Err(FirmwareSupervisorClientError::NotAdmitted {
+                operation_id: rejected.operation_id,
+                supervisor_instance_id: rejected.supervisor_instance_id,
+            })
+        }
+        Some(submit_firmware_operation_response::Result::Operation(operation)) => {
+            decode_operation(Some(operation), operation_id)
+        }
+        None => decode_operation(None, operation_id),
     }
 }
 
@@ -505,8 +639,7 @@ mod tests {
         FirmwareSupervisor, FirmwareSupervisorServer,
     };
     use rpc::protos::firmware_supervisor::{
-        CancelFirmwareOperationResponse, GetFirmwareOperationResponse,
-        ObserveFirmwareOperationResponse, SubmitFirmwareOperationResponse,
+        CancelFirmwareOperationResponse, FirmwareOperationNotAdmitted, GetFirmwareOperationResponse,
     };
     use rpc::protos::mlx_device::{
         FirmwareFlashReport, FirmwareOperationMissingReceipt, FirmwareOperationPhase,
@@ -520,8 +653,8 @@ mod tests {
     use super::*;
     use crate::firmware::config::FirmwareArtifactDigests;
 
-    /// Expose retained work and check cancellation identity without running
-    /// firmware tools. Count operation calls to prove local validation order.
+    /// Expose retained work and reject submissions as an occupied claim would,
+    /// without running firmware tools. Count calls to prove validation order.
     struct SupervisorFixture {
         identity: SupervisorIdentity,
         receipt: FirmwareOperationPb,
@@ -532,12 +665,23 @@ mod tests {
     impl FirmwareSupervisor for SupervisorFixture {
         async fn submit_firmware_operation(
             &self,
-            _request: Request<SubmitFirmwareOperationRequest>,
+            request: Request<SubmitFirmwareOperationRequest>,
         ) -> Result<Response<SubmitFirmwareOperationResponse>, Status> {
             self.operation_calls.fetch_add(1, Ordering::Relaxed);
-            Err(Status::unimplemented(
-                "the fixture must not receive submissions",
-            ))
+            let request = request.into_inner();
+            assert_eq!(request.expected_identity.as_ref(), Some(&self.identity));
+            if !request.report_rejection_details {
+                return Err(Status::resource_exhausted("fixture host claim is occupied"));
+            }
+            Ok(Response::new(SubmitFirmwareOperationResponse {
+                result: Some(submit_firmware_operation_response::Result::NotAdmitted(
+                    FirmwareOperationNotAdmitted {
+                        operation_id: request.operation_id,
+                        supervisor_instance_id: "fixture-helper".into(),
+                        identity: Some(self.identity.clone()),
+                    },
+                )),
+            }))
         }
 
         async fn get_firmware_operation(
@@ -594,6 +738,58 @@ mod tests {
                 execution_device: self.identity.execution_device.clone(),
             }))
         }
+    }
+
+    /// The public wrapper must send the opt-in flag and validate the rejection
+    /// returned over the same transport used for ordinary submissions.
+    #[tokio::test]
+    async fn submission_reports_rejection_only_when_requested() {
+        let directory = tempfile::tempdir().expect("create socket directory");
+        let socket = directory.path().join("supervisor.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fixture socket");
+        let operation_calls = Arc::new(AtomicUsize::new(0));
+        let supervisor = SupervisorFixture {
+            identity: SupervisorIdentity {
+                protocol_version: PROTOCOL_VERSION,
+                device_identity: "0000:03:00".into(),
+                boot_id: "boot".into(),
+                execution_device: "0000:03:00.1".into(),
+            },
+            receipt: FirmwareOperationPb::default(),
+            operation_calls: operation_calls.clone(),
+        };
+        let (shutdown, mut stopping) = watch::channel(false);
+        let server = tonic::transport::Server::builder()
+            .add_service(FirmwareSupervisorServer::new(supervisor))
+            .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async move {
+                stopping.changed().await.expect("request fixture shutdown");
+            });
+        let (server_result, ()) = tokio::time::timeout(Duration::from_secs(30), async {
+            tokio::join!(server, async {
+                let mut client = FirmwareSupervisorClient::connect(&socket)
+                    .await
+                    .expect("connect to supervisor");
+                assert!(matches!(
+                    client
+                        .submit_with_rejection_details("pending", None, ObserverExitBehavior::Continue)
+                        .await,
+                    Err(FirmwareSupervisorClientError::NotAdmitted {
+                        operation_id,
+                        supervisor_instance_id,
+                    }) if operation_id == "pending" && supervisor_instance_id == "fixture-helper"
+                ));
+                assert!(matches!(
+                    client.submit("pending", None, ObserverExitBehavior::Continue).await,
+                    Err(FirmwareSupervisorClientError::Rpc(status))
+                        if status.code() == tonic::Code::ResourceExhausted
+                ));
+                assert_eq!(operation_calls.load(Ordering::Relaxed), 2);
+                shutdown.send(true).expect("stop supervisor fixture");
+            })
+        })
+        .await
+        .expect("supervisor fixture must stop within thirty seconds");
+        server_result.expect("serve supervisor fixture");
     }
 
     /// Receipt recovery retains the handshake identity, while an invalid
@@ -676,6 +872,7 @@ firmware_url = "https://host/image.bin"
                 )
                 .expect("parse valid checked profile");
                 let context = FirmwareUpdateContext {
+                    delivery_mode: Default::default(),
                     phase_id: "dispatch".into(),
                     expected_digests: FirmwareArtifactDigests {
                         image_sha256: [0; 32],
@@ -771,6 +968,157 @@ firmware_url = "https://host/image.bin"
             result,
             Err(FirmwareSupervisorClientError::Deadline)
         ));
+    }
+
+    /// A rejection can describe only the opted-in Submit on its pinned peer;
+    /// an unsolicited or mismatched response must not resolve uncertain work.
+    #[test]
+    fn nonadmission_proof_requires_exact_original_operation_and_handshake() {
+        let identity = SupervisorIdentity {
+            protocol_version: PROTOCOL_VERSION,
+            device_identity: "0000:03:00".into(),
+            boot_id: "boot".into(),
+            execution_device: "0000:03:00.1".into(),
+        };
+        let rejection = FirmwareOperationNotAdmitted {
+            operation_id: "pending".into(),
+            supervisor_instance_id: "helper".into(),
+            identity: Some(identity.clone()),
+        };
+        check_values(
+            [
+                Check {
+                    scenario: "exact explicit rejection",
+                    input: (rejection.clone(), true),
+                    expect: Some(("pending".into(), "helper".into())),
+                },
+                Check {
+                    scenario: "legacy request did not opt in",
+                    input: (rejection.clone(), false),
+                    expect: None,
+                },
+                Check {
+                    scenario: "another operation was rejected",
+                    input: (
+                        FirmwareOperationNotAdmitted {
+                            operation_id: "other".into(),
+                            ..rejection.clone()
+                        },
+                        true,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "rejecting helper token is missing",
+                    input: (
+                        FirmwareOperationNotAdmitted {
+                            supervisor_instance_id: String::new(),
+                            ..rejection.clone()
+                        },
+                        true,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "rejecting helper token contains whitespace",
+                    input: (
+                        FirmwareOperationNotAdmitted {
+                            supervisor_instance_id: "invalid helper".into(),
+                            ..rejection.clone()
+                        },
+                        true,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "handshake identity is missing",
+                    input: (
+                        FirmwareOperationNotAdmitted {
+                            identity: None,
+                            ..rejection.clone()
+                        },
+                        true,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "handshake protocol differs",
+                    input: (
+                        FirmwareOperationNotAdmitted {
+                            identity: Some(SupervisorIdentity {
+                                protocol_version: PROTOCOL_VERSION + 1,
+                                ..identity.clone()
+                            }),
+                            ..rejection.clone()
+                        },
+                        true,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "handshake PCI slot differs",
+                    input: (
+                        FirmwareOperationNotAdmitted {
+                            identity: Some(SupervisorIdentity {
+                                device_identity: "0000:04:00".into(),
+                                ..identity.clone()
+                            }),
+                            ..rejection.clone()
+                        },
+                        true,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "handshake execution device differs",
+                    input: (
+                        FirmwareOperationNotAdmitted {
+                            identity: Some(SupervisorIdentity {
+                                execution_device: "0000:03:00.0".into(),
+                                ..identity.clone()
+                            }),
+                            ..rejection.clone()
+                        },
+                        true,
+                    ),
+                    expect: None,
+                },
+                Check {
+                    scenario: "replacement handshake identity",
+                    input: (
+                        FirmwareOperationNotAdmitted {
+                            identity: Some(SupervisorIdentity {
+                                boot_id: "replacement".into(),
+                                ..identity.clone()
+                            }),
+                            ..rejection
+                        },
+                        true,
+                    ),
+                    expect: None,
+                },
+            ],
+            |(rejection, report_rejection_details)| {
+                let response = SubmitFirmwareOperationResponse {
+                    result: Some(submit_firmware_operation_response::Result::NotAdmitted(
+                        rejection,
+                    )),
+                };
+                match decode_submission_response(
+                    response,
+                    "pending",
+                    &identity,
+                    report_rejection_details,
+                ) {
+                    Err(FirmwareSupervisorClientError::NotAdmitted {
+                        operation_id,
+                        supervisor_instance_id,
+                    }) => Some((operation_id, supervisor_instance_id)),
+                    Err(FirmwareSupervisorClientError::InvalidResponse(_)) => None,
+                    unexpected => panic!("unexpected submission result: {unexpected:?}"),
+                }
+            },
+        );
     }
 
     /// A supported handshake must identify the slot, boot, and exact execution function.
@@ -898,22 +1246,43 @@ firmware_url = "https://host/image.bin"
         check_values(
             [
                 Check {
-                    scenario: "the requested receipt is accepted",
-                    input: (Some(receipt.clone()), "expected"),
-                    expect: true,
+                    scenario: "the requested receipt is accepted by default",
+                    input: (Some(receipt.clone()), "expected", false),
+                    expect: Some(receipt.clone()),
                 },
                 Check {
-                    scenario: "an empty successful response is rejected",
-                    input: (None, "expected"),
-                    expect: false,
+                    scenario: "the requested receipt is accepted with opt-in",
+                    input: (Some(receipt.clone()), "expected", true),
+                    expect: Some(receipt.clone()),
                 },
                 Check {
-                    scenario: "another operation's receipt is rejected",
-                    input: (Some(receipt), "different"),
-                    expect: false,
+                    scenario: "an empty default response is invalid",
+                    input: (None, "expected", false),
+                    expect: None,
+                },
+                Check {
+                    scenario: "an empty opted-in response is invalid",
+                    input: (None, "expected", true),
+                    expect: None,
+                },
+                Check {
+                    scenario: "another operation's receipt is invalid",
+                    input: (Some(receipt), "different", false),
+                    expect: None,
                 },
             ],
-            |(receipt, expected_id)| decode_operation(receipt, expected_id).is_ok(),
+            |(receipt, expected_id, report_rejection_details)| match decode_submission_response(
+                SubmitFirmwareOperationResponse {
+                    result: receipt.map(submit_firmware_operation_response::Result::Operation),
+                },
+                expected_id,
+                &SupervisorIdentity::default(),
+                report_rejection_details,
+            ) {
+                Ok(operation) => Some(FirmwareOperationPb::from(operation)),
+                Err(FirmwareSupervisorClientError::InvalidResponse(_)) => None,
+                unexpected => panic!("unexpected receipt result: {unexpected:?}"),
+            },
         );
     }
 

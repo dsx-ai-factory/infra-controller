@@ -34,9 +34,9 @@ use eyre::Context;
 use mac_address::MacAddress;
 use nmxc_mock::NmxcMockConfig;
 use rms_mock::RmsMockConfig;
+use rpc::carbide_tls_client::CarbideClientConfig;
 use rpc::forge::DesiredFirmwareVersionEntry;
-use rpc::forge_tls_client::ForgeClientConfig;
-use rpc::protos::forge_api_client::ForgeApiClient;
+use rpc::protos::carbide_api_client::CarbideApiClient;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use ufm_mock::UfmMockConfig;
@@ -44,7 +44,6 @@ use uuid::Uuid;
 
 use crate::BmcMockRegistry;
 use crate::api_client::ApiClient;
-use crate::api_throttler::ApiThrottler;
 use crate::lifecycle_timings::LifecycleTimingOverrides;
 use crate::machine_state_machine::OsImage;
 use crate::rack::{RackMemberRegistration, RackRegistration};
@@ -572,9 +571,9 @@ pub struct MachineATronConfig {
     #[serde(default)]
     pub dpu_bmc_password: Option<String>,
 
-    /// How often to refresh the API state from the server. Longer durations are appropriate for
-    /// mocking lots of hosts, shorter durations are appropriate for integration tests where the
-    /// interval should be shorter than the state controller update interval
+    /// Interval for the binary's desired-firmware fetches and for host actors to
+    /// adopt the shared firmware targets. Library callers arrange their own fetches.
+    /// Defaults to two seconds. Machine lifecycle states are not polled.
     #[serde(
         default = "default_api_refresh_interval",
         deserialize_with = "deserialize_duration",
@@ -1084,22 +1083,24 @@ pub struct MacAddressRangesConfig {
 
 pub struct MachineATronContext {
     pub app_config: MachineATronConfig,
-    pub forge_client_config: ForgeClientConfig,
+    pub carbide_client_config: CarbideClientConfig,
     pub bmc_mock_certs_dir: Option<PathBuf>,
     pub bmc_registry: BmcMockRegistry,
-    pub api_throttler: ApiThrottler,
     /// These are the firmware versions the server wants us to be on. If not configured for other
     /// firmware, DPU's can mock that they already have this installed. Refreshed in the
     /// background by `spawn_desired_firmware_refresher`.
     pub desired_firmware_versions: std::sync::RwLock<Vec<DesiredFirmwareVersionEntry>>,
-    pub forge_api_client: ForgeApiClient,
+    pub carbide_api_client: CarbideApiClient,
     pub dhcp_client: crate::dhcp_wrapper::DhcpClient,
     pub mac_address_pool: Arc<Mutex<MacAddressPool>>,
+    /// Test-only fixed delay for every scheduled BMC DHCP retry, replacing backoff and jitter.
+    #[cfg(test)]
+    pub(crate) bmc_dhcp_retry_delay: Option<Duration>,
 }
 
 impl MachineATronContext {
     pub fn api_client(&self) -> ApiClient {
-        self.forge_api_client.clone().into()
+        self.carbide_api_client.clone().into()
     }
 }
 
@@ -1123,29 +1124,26 @@ scout_run_interval = "5s"
 "#,
         )
         .expect("test config must parse");
-        let forge_client_config = ForgeClientConfig::new(String::new(), None);
-        let api_config = rpc::forge_tls_client::ApiConfig::new(
+        let carbide_client_config = CarbideClientConfig::new(String::new(), None);
+        let api_config = rpc::carbide_tls_client::ApiConfig::new(
             &app_config.carbide_api_url,
-            &forge_client_config,
+            &carbide_client_config,
         );
-        let forge_api_client = ForgeApiClient::new(&api_config);
-        let api_client: ApiClient = forge_api_client.clone().into();
+        let carbide_api_client = CarbideApiClient::new(&api_config);
+        let api_client: ApiClient = carbide_api_client.clone().into();
         let pool_config =
             bmc_mock::mac_address_pool::PoolConfig::new(MacAddress::new([2, 0, 0, 0, 0, 0]), 24)
                 .expect("test MAC pool must be valid");
         Arc::new(Self {
             app_config,
-            forge_client_config,
+            carbide_client_config,
             bmc_mock_certs_dir: None,
             bmc_registry: BmcMockRegistry::default(),
-            api_throttler: crate::api_throttler::run(
-                tokio::time::interval(Duration::from_secs(2)),
-                api_client.clone(),
-            ),
             desired_firmware_versions: std::sync::RwLock::new(Vec::new()),
-            forge_api_client,
+            carbide_api_client,
             dhcp_client: crate::dhcp_wrapper::DhcpClient::Api(api_client),
             mac_address_pool: Arc::new(Mutex::new(MacAddressPool::new_pool(pool_config))),
+            bmc_dhcp_retry_delay: None,
         })
     }
 }

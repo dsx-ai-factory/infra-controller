@@ -19,6 +19,7 @@
 // than huge inline rust strings.
 
 use lazy_static::lazy_static;
+use model::machine::HardwareInfoScope;
 
 static MANAGED_HOSTS_TEMPLATE: &str = include_str!("sql/managed_hosts.sql.template");
 static MANAGED_HOSTS_COMPACT_TEMPLATE: &str =
@@ -29,6 +30,12 @@ static MANAGED_HOST_HISTORY_JOIN_SNIPPET: &str =
 static MACHINE_SNAPSHOT_HISTORY_JOIN_SNIPPET: &str =
     include_str!("sql/machine_snapshot_history_join.snippet");
 static HISTORY_SELECT_SNIPPET: &str = include_str!("sql/history_select.snippet");
+static TOPOLOGY_SNIPPET: &str = include_str!("sql/topology.snippet");
+// Removes the component lists from `discovery_data.Info`, so its key list must
+// match the `HardwareInfo` field names. `jsonb_set` returns NULL when `Info` is
+// missing, and `COALESCE` then falls back to the full topology.
+static TOPOLOGY_WITHOUT_COMPONENTS_SNIPPET: &str =
+    include_str!("sql/topology_without_components.snippet");
 
 fn replace_sql<F: Fn(&str) -> Option<&str>>(input: &str, f: F) -> String {
     input
@@ -44,24 +51,28 @@ fn replace_sql<F: Fn(&str) -> Option<&str>>(input: &str, f: F) -> String {
         .join(" ")
 }
 
+fn managed_hosts(include_history: bool, hardware_info_scope: HardwareInfoScope) -> String {
+    replace_sql(MANAGED_HOSTS_TEMPLATE, |line| match line {
+        "__HISTORY_SELECT__" => include_history.then_some(HISTORY_SELECT_SNIPPET),
+        "__HISTORY_JOIN__" => include_history.then_some(MANAGED_HOST_HISTORY_JOIN_SNIPPET),
+        "__TOPOLOGY__" => Some(match hardware_info_scope {
+            HardwareInfoScope::Full => TOPOLOGY_SNIPPET,
+            HardwareInfoScope::WithoutComponents => TOPOLOGY_WITHOUT_COMPONENTS_SNIPPET,
+        }),
+        default => Some(default),
+    })
+}
+
 lazy_static! {
     pub static ref MANAGED_HOSTS_COMPACT: String =
         replace_sql(MANAGED_HOSTS_COMPACT_TEMPLATE, |line| Some(line));
     pub static ref MANAGED_HOSTS_WITH_HISTORY: String =
-        replace_sql(MANAGED_HOSTS_TEMPLATE, |line| {
-            match line {
-                "__HISTORY_SELECT__" => Some(HISTORY_SELECT_SNIPPET),
-                "__HISTORY_JOIN__" => Some(MANAGED_HOST_HISTORY_JOIN_SNIPPET),
-                default => Some(default),
-            }
-        });
-    pub static ref MANAGED_HOSTS_NO_HISTORY: String = replace_sql(MANAGED_HOSTS_TEMPLATE, |line| {
-        match line {
-            "__HISTORY_SELECT__" => None,
-            "__HISTORY_JOIN__" => None,
-            default => Some(default),
-        }
-    });
+        managed_hosts(true, HardwareInfoScope::Full);
+    pub static ref MANAGED_HOSTS_NO_HISTORY: String = managed_hosts(false, HardwareInfoScope::Full);
+    pub(crate) static ref MANAGED_HOSTS_WITHOUT_COMPONENTS_WITH_HISTORY: String =
+        managed_hosts(true, HardwareInfoScope::WithoutComponents);
+    pub(crate) static ref MANAGED_HOSTS_WITHOUT_COMPONENTS_NO_HISTORY: String =
+        managed_hosts(false, HardwareInfoScope::WithoutComponents);
     pub static ref MACHINE_SNAPSHOTS_WITH_HISTORY: String =
         replace_sql(MACHINE_SNAPSHOTS_TEMPLATE, |line| {
             match line {

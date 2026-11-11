@@ -373,14 +373,15 @@ VIP requirements below apply to enabled external `LoadBalancer` Services.
 
 ## Setup options
 
-`setup.sh` runs preflight validation automatically before making cluster changes.
+`setup.sh` runs preflight validation automatically before the installation phases.
 Core VIP validation requires Python 3 with PyYAML installed in the `python3` environment. It parses `--core-values` as YAML, so indentation and Boolean capitalization do not affect VIP validation for enabled external `LoadBalancer` Services. Existing `externalService` configurations may omit VIP annotations for automatic allocation; explicitly blank annotations are errors. An enabled DHCPv6 external Service requires an explicit IPv6 VIP annotation. Configurable `externalService.type` values such as `NodePort` and `ClusterIP` do not require VIPs; the DHCPv6 external Service always uses `LoadBalancer`. Missing parser dependencies or invalid YAML produce a preflight error. This VIP check is skipped with `--skip-core`. A VIP used by more than one Service is a warning unless every Service on it has the same `allow-shared-ip` value, the same `externalTrafficPolicy`, and distinct protocol and port pairs, and `Local` Services share only within one chart; these warnings do not stop `setup.sh`.
 
 It supports these common deployment modes:
 
 | Option | Description |
 |--------|-------------|
-| `-y` | Non-interactive mode; accept setup prompts automatically. |
+| `-y` | Accept routine setup prompts and preflight warnings automatically. Preflight errors still stop setup. |
+| `--ignore-preflight-errors` | Continue despite ordinary errors reported in the preflight summary. Database safety errors remain fatal. Combine with `-y` to also accept routine prompts. |
 | `--skip-core` | Install prerequisites and REST, but skip the NICo Core Helm release. |
 | `--skip-rest` | Install prerequisites and Core, but skip all REST phases and REST repo checks. |
 | `--skip-core --skip-rest` | Infrastructure-only run; image tags, image registry, and REST repo are not required. |
@@ -392,6 +393,11 @@ It supports these common deployment modes:
 | `--site-overlay <dir>` | Apply a site kustomize overlay after Core deploys. |
 | `--with-observability` | Also install the local monitoring stack (metrics + logs + traces) after Core. Runs in every mode, including `--skip-rest`. Can also be run standalone at any time: `observability/install-observability.sh`. See [observability/README.md](observability/README.md). |
 | `--debug` | Enable bash tracing. This can print secrets, so avoid it in shared logs. |
+
+Preflight errors return exit code `1` in both interactive and `-y` runs unless
+`--ignore-preflight-errors` is set. The override prints the errors and an explicit
+continuation message. It also works with standalone `bash ./preflight.sh`.
+Warnings alone still prompt for confirmation unless `-y` is set.
 
 `REGISTRY_PULL_SECRET` is optional. When it is unset, setup does not create or
 inject image pull secrets; images must be public, preloaded, or configured with

@@ -47,6 +47,7 @@ mod computer_system;
 mod drives;
 mod error;
 pub mod hw;
+mod identity;
 mod inventories;
 mod manager;
 mod network_adapter;
@@ -63,13 +64,15 @@ use component_integrity::ExploredComponentIntegrity;
 use computer_system::ExploredComputerSystem;
 use drives::ExploredDrives;
 pub use error::Error;
+pub use identity::{platform_identity, service_root_identity};
 use inventories::ExploredInventories;
 use itertools::Itertools;
 use mac_address::MacAddress;
 use manager::ExploredManager;
 use model::site_explorer::{
     ComputerSystem, EndpointExplorationReport, EndpointType, InternalLockdownStatus,
-    LockdownStatus, MachineSetupDiff, MachineSetupStatus, derive_hardware_class,
+    LockdownStatus, MachineSetupDiff, MachineSetupStatus, ServiceRoot as ModelServiceRoot,
+    derive_hardware_class,
 };
 use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::computer_system::BootOption;
@@ -97,6 +100,22 @@ pub enum ErrorClass {
 }
 
 pub type ErrorClassifier<'a, B> = &'a (dyn Fn(&<B as Bmc>::Error) -> Option<ErrorClass> + Sync);
+
+/// The [`ErrorClassifier`] for nv-redfish's HTTP client.
+pub fn nv_redfish_error_class(
+    error: &nv_redfish::bmc_http::reqwest::BmcError,
+) -> Option<ErrorClass> {
+    match error {
+        nv_redfish::bmc_http::reqwest::BmcError::InvalidResponse { status, .. } => {
+            match status.as_u16() {
+                404 => Some(ErrorClass::NotFound),
+                500 => Some(ErrorClass::InternalServerError),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
 
 fn is_bluefield_system_id(id: &str) -> bool {
     matches!(id, "Bluefield" | "BlueField_0")
@@ -181,13 +200,20 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
     let explored_inventories = ExploredInventories::explore(&root).await?;
     let explored_component_integrities = ExploredComponentIntegrity::explore(&root).await;
 
-    // Delta power shelves do not expose a `/redfish/v1/Systems` collection (and
-    // report no vendor in the service root, so nv-redfish fabricates the path
-    // and gets a 404). Detect them from the chassis and synthesize the report
-    // from chassis + manager data instead of fetching a ComputerSystem.
-    if explored_chassis.is_delta_powershelf() {
-        return build_delta_powershelf_report(
+    // Keep the temporary ComputerSystem compatibility for power shelves.
+    // Check the advertised link before calling systems(): older nv-redfish
+    // versions fetch an undeclared /Systems for these BMCs.
+    let powershelf_hw_type = if explored_chassis.is_delta_powershelf() {
+        Some(hw::HwType::DeltaPowerShelf)
+    } else if root.root.systems.is_none() && explored_chassis.is_liteon_powershelf() {
+        Some(hw::HwType::LiteonPowerShelf)
+    } else {
+        None
+    };
+    if let Some(hw_type) = powershelf_hw_type {
+        return build_powershelf_report(
             &root,
+            hw_type,
             explored_chassis,
             explored_inventories,
             explored_component_integrities,
@@ -450,6 +476,7 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         component_integrities: component_integrities.entries,
         component_integrity_unavailable: component_integrities.unavailable,
         vendor: hw_type.and_then(|hw_type| hw_type.bmc_vendor()),
+        service_root: Some(service_root(&root)),
         hardware_class: Some(hardware_class),
         versions: HashMap::default(),
         model: None,
@@ -486,20 +513,17 @@ fn should_fetch_supplemental_network_adapter_ports(
     hw_type == Some(hw::HwType::Lenovo) && has_system_mac_address && !linked_chassis_ids.is_empty()
 }
 
-/// Builds an exploration report for a Delta power shelf.
+/// Builds a compatibility report for a power shelf without advertised Systems.
 ///
-/// Delta BMCs do not serve `/redfish/v1/Systems`, so the standard flow (which
-/// unconditionally fetches a `ComputerSystem`) fails with a 404. Here we skip
-/// that fetch and synthesize a `ComputerSystem` from the chassis, matching the
-/// behavior of the libredfish Delta power-shelf path.
-async fn build_delta_powershelf_report<B: Bmc>(
+/// The synthesized system is temporary until report consumers support power
+/// shelves with empty systems, matching the legacy Delta discovery behavior.
+async fn build_powershelf_report<B: Bmc>(
     root: &ServiceRoot<B>,
+    hw_type: hw::HwType,
     explored_chassis: ExploredChassisCollection<B>,
     explored_inventories: ExploredInventories<B>,
     explored_component_integrities: ExploredComponentIntegrity<B>,
 ) -> Result<EndpointExplorationReport, Error<B>> {
-    let hw_type = hw::HwType::DeltaPowerShelf;
-
     let manager = root
         .managers()
         .await
@@ -529,6 +553,7 @@ async fn build_delta_powershelf_report<B: Bmc>(
         component_integrities: component_integrities.entries,
         component_integrity_unavailable: component_integrities.unavailable,
         vendor: hw_type.bmc_vendor(),
+        service_root: Some(service_root(root)),
         hardware_class: Some(hardware_class),
         versions: HashMap::default(),
         model: None,
@@ -548,6 +573,23 @@ async fn build_delta_powershelf_report<B: Bmc>(
 
 /// The class recorded for an endpoint: the host system's reported identity,
 /// with the service root standing in for the fields it left empty.
+/// The service root fields the report records.
+fn service_root<B: Bmc>(root: &ServiceRoot<B>) -> ModelServiceRoot {
+    ModelServiceRoot {
+        vendor: root.vendor().map(|vendor| vendor.into_inner().to_string()),
+        product: root
+            .product()
+            .map(|product| product.into_inner().to_string()),
+        oem_keys: root
+            .root
+            .oem
+            .as_ref()
+            .and_then(|oem| oem.additional_properties.as_object())
+            .map(|oem| oem.keys().cloned().collect())
+            .unwrap_or_default(),
+    }
+}
+
 fn hardware_class<B: Bmc>(root: &ServiceRoot<B>, system: &ComputerSystem) -> String {
     derive_hardware_class(
         Some(system),

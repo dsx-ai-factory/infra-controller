@@ -202,7 +202,9 @@ pub mod profile {
 /// Model for SPDM attestation via Redfish
 pub mod spdm {
 
-    use model::attestation::spdm::{SpdmAttestationStatus, SpdmDeviceAttestationDetails};
+    use model::attestation::spdm::{
+        SpdmAttestationStatus, SpdmCancellationTarget, SpdmDeviceAttestationDetails,
+    };
 
     use crate as rpc;
 
@@ -212,7 +214,14 @@ pub mod spdm {
                 machine_id: Some(value.machine_id),
                 completed_at: value.completed_at.map(|x| x.into()),
                 started_at: Some(value.started_at.into()),
-                cancelled_at: value.cancelled_at.map(|x| x.into()),
+                // The legacy wire timestamp now describes the latest request for either target.
+                cancelled_at: value.cancellation_requested_at.map(|x| x.into()),
+                cancellation_target: value.cancellation_target.map(|target| match target {
+                    SpdmCancellationTarget::Waive => {
+                        rpc::forge::SpdmCancellationTarget::Waive as i32
+                    }
+                    SpdmCancellationTarget::Fail => rpc::forge::SpdmCancellationTarget::Fail as i32,
+                }),
                 state: format!("{:?}", value.state),
                 device_id: value.device_id,
             }
@@ -223,7 +232,7 @@ pub mod spdm {
         fn from(value: SpdmAttestationStatus) -> Self {
             match value {
                 SpdmAttestationStatus::InProgress => Self::SpdmAttInProgress,
-                SpdmAttestationStatus::Cancelled => Self::SpdmAttCancelled,
+                SpdmAttestationStatus::Waived => Self::SpdmAttWaived,
                 SpdmAttestationStatus::Passed => Self::SpdmAttPassed,
                 SpdmAttestationStatus::Failed => Self::SpdmAttFailed,
             }

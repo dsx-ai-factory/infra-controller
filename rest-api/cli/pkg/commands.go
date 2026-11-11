@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"sort"
@@ -70,6 +71,12 @@ func (operation resolvedOp) execute(client *Client, pathParams, queryParams map[
 	return client.Do(operation.method, operation.path, pathParams, queryParams, body)
 }
 
+// executeWithQueryValues preserves repeated generated query flags while using
+// the same resolved operation method and path as scalar callers.
+func (operation resolvedOp) executeWithQueryValues(client *Client, pathParams map[string]string, queryParams url.Values, body []byte) ([]byte, http.Header, error) {
+	return client.doWithQueryValues(operation.method, operation.path, pathParams, queryParams, body)
+}
+
 // bodyField tracks a request body property for type-aware flag reading.
 type bodyField struct {
 	jsonName   string
@@ -81,6 +88,26 @@ type bodyField struct {
 
 var exactlyOneBodyFieldsByOperation = map[string][]string{
 	"create-vpc-prefix": {"prefix", "prefixLength"},
+}
+
+type queryParameterKey struct {
+	operationID string
+	name        string
+}
+
+// repeatableQueryParameters records legacy scalar OpenAPI parameters whose
+// handlers consume every repeated query value. Keep this operation-scoped so
+// generic names such as "type" and "name" remain scalar elsewhere.
+var repeatableQueryParameters = map[queryParameterKey]struct{}{
+	{operationID: "get-all-allocation", name: "tenantId"}:     {},
+	{operationID: "get-all-machine", name: "hwSkuDeviceType"}: {},
+	{operationID: "get-all-operating-system", name: "type"}:   {},
+	{operationID: "get-all-rack", name: "manufacturer"}:       {},
+	{operationID: "get-all-rack", name: "name"}:               {},
+	{operationID: "validate-racks", name: "manufacturer"}:     {},
+	{operationID: "validate-racks", name: "name"}:             {},
+	{operationID: "validate-trays", name: "manufacturer"}:     {},
+	{operationID: "validate-trays", name: "name"}:             {},
 }
 
 // GeneratedCommandFlag describes a flag accepted by an OpenAPI-generated
@@ -117,6 +144,7 @@ type GeneratedCommandQueryParameter struct {
 	FlagName    string
 	Description string
 	Required    bool
+	Repeatable  bool
 	Type        SchemaType
 	Enum        []string
 }
@@ -282,13 +310,81 @@ func RunGeneratedCommand(spec *Spec, client *Client, name string, args []string)
 		},
 	})
 	app := &cli.App{
-		Name:     binaryName,
-		Commands: commands,
+		Name:                      binaryName,
+		Commands:                  commands,
+		DisableSliceFlagSeparator: true,
+		Before: func(c *cli.Context) error {
+			return validateMissingFlagValues(c.Args().Slice(), commands)
+		},
 	}
 	appArgs := []string{binaryName}
 	appArgs = append(appArgs, strings.Fields(name)...)
 	appArgs = append(appArgs, args...)
 	return app.Run(appArgs)
+}
+
+// validateMissingFlagValues prevents urfave/cli from consuming a following
+// recognized flag as the value of a value-taking leaf flag. Values supplied in
+// --flag=value form are unambiguous and remain untouched, including values
+// whose first character is a dash.
+func validateMissingFlagValues(args []string, commands []*cli.Command) error {
+	var command *cli.Command
+	for len(args) > 0 {
+		var nextCommand *cli.Command
+		for _, candidate := range commands {
+			if candidate.HasName(args[0]) {
+				nextCommand = candidate
+				break
+			}
+		}
+		if nextCommand == nil {
+			break
+		}
+		command = nextCommand
+		args = args[1:]
+		commands = command.Subcommands
+	}
+	if command == nil {
+		return nil
+	}
+
+	valueFlags := make(map[string]bool)
+	knownFlags := make(map[string]bool)
+	for _, commandFlag := range command.Flags {
+		takesValue := false
+		documentedFlag, ok := commandFlag.(cli.DocGenerationFlag)
+		if ok {
+			takesValue = documentedFlag.TakesValue()
+		}
+		for _, name := range commandFlag.Names() {
+			valueFlags[name] = takesValue
+			knownFlags[name] = true
+		}
+	}
+
+	flagName := func(value string) string {
+		name, _, _ := strings.Cut(strings.TrimLeft(value, "-"), "=")
+		return name
+	}
+	for index := 0; index < len(args); index++ {
+		argument := args[index]
+		if argument == "--" || !strings.HasPrefix(argument, "-") {
+			break
+		}
+		if strings.Contains(argument, "=") {
+			continue
+		}
+		name := flagName(argument)
+		if !valueFlags[name] || index+1 >= len(args) {
+			continue
+		}
+		next := args[index+1]
+		if strings.HasPrefix(next, "-") && knownFlags[flagName(next)] {
+			return fmt.Errorf("flag needs an argument: -%s", name)
+		}
+		index++
+	}
+	return nil
 }
 
 func buildCommands(spec *Spec, options commandBuildOptions) []*cli.Command {
@@ -600,6 +696,18 @@ func isListAction(action string) bool {
 	return action == "list" || strings.HasPrefix(action, "list-")
 }
 
+var defaultTableRelationsByOperation = map[string][]string{
+	vpcPeeringListOperationID: {"Vpc1", "Vpc2"},
+}
+
+func addDefaultTableRelations(queryParams url.Values, operationID string) {
+	for _, relation := range defaultTableRelationsByOperation[operationID] {
+		if !slices.Contains(queryParams["includeRelation"], relation) {
+			queryParams.Add("includeRelation", relation)
+		}
+	}
+}
+
 func buildActionCommand(spec *Spec, ro resolvedOp, subResource string) *cli.Command {
 	return buildActionCommandWithOptions(spec, ro, subResource, commandBuildOptions{})
 }
@@ -609,7 +717,7 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 		&cli.StringFlag{
 			Name:   "output",
 			Usage:  "Output format: json, yaml, table",
-			Value:  "json",
+			Value:  defaultOutputFormat(ro.op.OperationID),
 			Action: validateOutputFlag,
 		},
 	}
@@ -636,13 +744,14 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 			continue
 		}
 		if p.In == "query" {
-			flag := paramToFlag(p)
+			flag := paramToFlag(ro.op.OperationID, p)
 			flags = append(flags, flag)
 			queryParameter := GeneratedCommandQueryParameter{
 				Name:        p.Name,
 				FlagName:    flag.Names()[0],
 				Description: p.Description,
 				Required:    p.Required,
+				Repeatable:  isRepeatableQueryParameter(ro.op.OperationID, p),
 			}
 			if schema := spec.ResolveSchema(p.Schema); schema != nil {
 				queryParameter.Type = schema.Type
@@ -781,14 +890,20 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 				pathParams[ap] = c.Args().Get(i)
 			}
 
-			queryParams := make(map[string]string)
+			queryParams := make(url.Values)
 			for _, p := range allParams {
 				if p.In != "query" {
 					continue
 				}
-				if v := readFlagValue(c, p); v != "" {
-					queryParams[p.Name] = v
+				for _, value := range readFlagValues(c, ro.op.OperationID, p) {
+					if value != "" {
+						queryParams.Add(p.Name, value)
+					}
 				}
+			}
+
+			if c.String("output") == "table" {
+				addDefaultTableRelations(queryParams, ro.op.OperationID)
 			}
 
 			var body []byte
@@ -804,10 +919,10 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 			}
 
 			if isList && c.Bool("all") {
-				return fetchAllPages(client, ro.method, ro.path, pathParams, queryParams, c.String("output"))
+				return fetchAllPages(client, ro.method, ro.path, pathParams, queryParams, c.String("output"), ro.op.OperationID)
 			}
 
-			respBody, respHeaders, err := ro.execute(client, pathParams, queryParams, body)
+			respBody, respHeaders, err := ro.executeWithQueryValues(client, pathParams, queryParams, body)
 			if err != nil {
 				return err
 			}
@@ -818,7 +933,7 @@ func buildActionCommandWithOptions(spec *Spec, ro resolvedOp, subResource string
 				return nil
 			}
 
-			return FormatOutput(respBody, c.String("output"))
+			return formatOutputWithOperation(respBody, c.String("output"), ro.op.OperationID)
 		},
 	}
 
@@ -1057,24 +1172,49 @@ func detectMisorderedFlagsInArgs(args, argParams []string, usageText string) err
 	return fmt.Errorf("%s", strings.TrimRight(msg.String(), "\n"))
 }
 
-func readFlagValue(c *cli.Context, p Parameter) string {
+// readFlagValues returns every value supplied for a query flag while retaining
+// scalar omission and type-conversion behavior.
+func readFlagValues(c *cli.Context, operationID string, p Parameter) []string {
 	flagName := toKebab(p.Name)
 	if p.Schema == nil {
-		return c.String(flagName)
+		if isRepeatableQueryParameter(operationID, p) {
+			return c.StringSlice(flagName)
+		}
+		return []string{c.String(flagName)}
 	}
-	switch p.Schema.Type {
+	// Array parameters use their item type when selecting and reading the flag.
+	schemaType := p.Schema.Type
+	if schemaType == "array" && p.Schema.Items != nil {
+		schemaType = p.Schema.Items.Type
+	}
+	// Typed slice access keeps integer validation while preserving all repeats.
+	switch {
+	case isRepeatableQueryParameter(operationID, p) && schemaType == "integer":
+		if !c.IsSet(flagName) {
+			return nil
+		}
+		values := c.IntSlice(flagName)
+		result := make([]string, 0, len(values))
+		for _, value := range values {
+			result = append(result, strconv.Itoa(value))
+		}
+		return result
+	case isRepeatableQueryParameter(operationID, p):
+		return c.StringSlice(flagName)
+	}
+	switch schemaType {
 	case "integer":
 		if c.IsSet(flagName) {
-			return fmt.Sprintf("%d", c.Int(flagName))
+			return []string{fmt.Sprintf("%d", c.Int(flagName))}
 		}
-		return ""
+		return nil
 	case "boolean":
 		if c.IsSet(flagName) {
-			return fmt.Sprintf("%t", c.Bool(flagName))
+			return []string{fmt.Sprintf("%t", c.Bool(flagName))}
 		}
-		return ""
+		return nil
 	default:
-		return c.String(flagName)
+		return []string{c.String(flagName)}
 	}
 }
 
@@ -1190,23 +1330,23 @@ func printPaginationSummary(headers http.Header) {
 	}
 }
 
-func fetchAllPages(client *Client, method, path string, pathParams, queryParams map[string]string, outputFormat string) error {
+func fetchAllPages(client *Client, method, path string, pathParams map[string]string, queryParams url.Values, outputFormat, operationID string) error {
 	const maxPageSize = 100
 	const maxPages = 1000
 	pageNumber := 1
 
 	if queryParams == nil {
-		queryParams = make(map[string]string)
+		queryParams = make(url.Values)
 	}
-	queryParams["pageSize"] = strconv.Itoa(maxPageSize)
+	queryParams.Set("pageSize", strconv.Itoa(maxPageSize))
 
 	allItems := make([]json.RawMessage, 0)
 	totalFromHeader := 0
 
 	for {
-		queryParams["pageNumber"] = strconv.Itoa(pageNumber)
+		queryParams.Set("pageNumber", strconv.Itoa(pageNumber))
 
-		respBody, respHeaders, err := client.Do(method, path, pathParams, queryParams, nil)
+		respBody, respHeaders, err := client.doWithQueryValues(method, path, pathParams, queryParams, nil)
 		if err != nil {
 			return err
 		}
@@ -1214,7 +1354,7 @@ func fetchAllPages(client *Client, method, path string, pathParams, queryParams 
 		var pageItems []json.RawMessage
 		if len(respBody) > 0 {
 			if err := json.Unmarshal(respBody, &pageItems); err != nil {
-				return FormatOutput(respBody, outputFormat)
+				return formatOutputWithOperation(respBody, outputFormat, operationID)
 			}
 		}
 		allItems = append(allItems, pageItems...)
@@ -1248,7 +1388,7 @@ func fetchAllPages(client *Client, method, path string, pathParams, queryParams 
 	if err != nil {
 		return err
 	}
-	return FormatOutput(merged, outputFormat)
+	return formatOutputWithOperation(merged, outputFormat, operationID)
 }
 
 func coerceValue(v string, schemaType SchemaType) (interface{}, error) {
@@ -1357,7 +1497,7 @@ func clientFromContext(c *cli.Context) (*Client, error) {
 	return client, nil
 }
 
-func paramToFlag(p Parameter) cli.Flag {
+func paramToFlag(operationID string, p Parameter) cli.Flag {
 	flagName := toKebab(p.Name)
 	usage := p.Description
 	if p.Deprecated {
@@ -1371,8 +1511,25 @@ func paramToFlag(p Parameter) cli.Flag {
 		usage += " [" + strings.Join(p.Schema.Enum, ", ") + "]"
 	}
 
+	if isRepeatableQueryParameter(operationID, p) {
+		if p.Schema != nil {
+			schemaType := p.Schema.Type
+			if schemaType == "array" && p.Schema.Items != nil {
+				schemaType = p.Schema.Items.Type
+			}
+			if schemaType == "integer" {
+				return &cli.IntSliceFlag{Name: flagName, Usage: usage}
+			}
+		}
+		return &cli.StringSliceFlag{Name: flagName, Usage: usage, KeepSpace: true}
+	}
+
 	if p.Schema != nil {
-		switch p.Schema.Type {
+		schemaType := p.Schema.Type
+		if schemaType == "array" && p.Schema.Items != nil {
+			schemaType = p.Schema.Items.Type
+		}
+		switch schemaType {
 		case "integer":
 			f := &cli.IntFlag{Name: flagName, Usage: usage}
 			if p.Schema.Default != nil {
@@ -1387,6 +1544,38 @@ func paramToFlag(p Parameter) cli.Flag {
 	}
 
 	return &cli.StringFlag{Name: flagName, Usage: usage}
+}
+
+// isRepeatableQueryParameter identifies parameters whose API contract accepts
+// repeated query keys so generated flags can preserve every supplied value.
+func isRepeatableQueryParameter(operationID string, p Parameter) bool {
+	// Shared relation handlers consume includeRelation as a list even where
+	// older OpenAPI descriptions do not state the repeatability explicitly.
+	if p.Name == "includeRelation" {
+		return true
+	}
+	if p.Schema != nil && p.Schema.Type == "array" {
+		return true
+	}
+	_, ok := repeatableQueryParameters[queryParameterKey{operationID: operationID, name: p.Name}]
+	if ok {
+		return true
+	}
+	// Legacy scalar schemas state repeatability in their descriptions.
+	description := strings.ToLower(p.Description)
+	for _, phrase := range []string{
+		"multiple times",
+		"multiple query parameters",
+		"repeat the parameter",
+		"repeated params",
+		"repeated values",
+		"may be repeated",
+	} {
+		if strings.Contains(description, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func tagToCommand(tag string) string {

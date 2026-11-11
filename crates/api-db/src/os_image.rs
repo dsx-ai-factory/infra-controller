@@ -112,11 +112,12 @@ async fn persist(
     update: bool,
 ) -> Result<OsImage, DatabaseError> {
     let os_image = if update {
-        let query = "UPDATE os_images SET name = $1, description = $2, auth_type = $3, auth_token = $4, rootfs_id = $5, rootfs_label = $6, boot_disk = $7, bootfs_id = $8, efifs_id = $9, modified_at = $10, status = $11, status_message = $12 WHERE id = $13
-            RETURNING id, name, description, source_url, digest, organization_id,
-                auth_type, auth_token, rootfs_id, rootfs_label, boot_disk, bootfs_id,
-                efifs_id, capacity, status, status_message, created_at, modified_at";
-        sqlx::query_as(query)
+        let query = format!(
+            "UPDATE os_images SET name = $1, description = $2, auth_type = $3, auth_token = $4, rootfs_id = $5, rootfs_label = $6, boot_disk = $7, bootfs_id = $8, efifs_id = $9, modified_at = $10, status = $11, status_message = $12 WHERE id = $13
+            RETURNING {}",
+            OsImage::db_table_columns(),
+        );
+        sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
             .bind(&value.attributes.name)
             .bind(&value.attributes.description)
             .bind(&value.attributes.auth_type)
@@ -132,17 +133,18 @@ async fn persist(
             .bind(value.attributes.id)
             .fetch_one(txn)
             .await
-            .map_err(|e| DatabaseError::query(query, e))?
+            .map_err(|e| DatabaseError::query(&query, e))?
     } else {
         let capacity = match value.attributes.capacity {
             Some(x) => x as i64,
             None => 0,
         };
-        let query = "INSERT INTO os_images(id, name, description, source_url, digest, organization_id, auth_type, auth_token, rootfs_id, rootfs_label, boot_disk, bootfs_id, efifs_id, capacity, status, status_message, created_at, modified_at) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
-            RETURNING id, name, description, source_url, digest, organization_id,
-                auth_type, auth_token, rootfs_id, rootfs_label, boot_disk, bootfs_id,
-                efifs_id, capacity, status, status_message, created_at, modified_at";
-        sqlx::query_as(query)
+        let query = format!(
+            "INSERT INTO os_images(id, name, description, source_url, digest, organization_id, auth_type, auth_token, rootfs_id, rootfs_label, boot_disk, bootfs_id, efifs_id, capacity, status, status_message, created_at, modified_at) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+            RETURNING {}",
+            OsImage::db_table_columns(),
+        );
+        sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
             .bind(value.attributes.id)
             .bind(&value.attributes.name)
             .bind(&value.attributes.description)
@@ -163,7 +165,7 @@ async fn persist(
             .bind(&value.modified_at)
             .fetch_one(txn)
             .await
-            .map_err(|e| DatabaseError::query(query, e))?
+            .map_err(|e| DatabaseError::query(&query, e))?
     };
     Ok(os_image)
 }

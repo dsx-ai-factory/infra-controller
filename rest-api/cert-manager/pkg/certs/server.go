@@ -9,7 +9,6 @@ import (
 	"os"
 
 	"github.com/NVIDIA/infra-controller/rest-api/cert-manager/pkg/core"
-	"github.com/getsentry/sentry-go"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
@@ -28,7 +27,6 @@ type Options struct {
 	// verification only consults the certificate's SANs.
 	DNSNames  []string
 	CABaseDNS string
-	sentryDSN string
 }
 
 // Server defines a server
@@ -68,12 +66,6 @@ func NewServerWithIssuer(ctx context.Context, o Options, certIssuer CertificateI
 	insec.Path("/v1/pki/ca/pem").Handler(s.PKICACertificateHandler(ctx)).Methods("GET")
 	s.insecService = insec
 
-	if o.sentryDSN != "" {
-		sentry.Init(sentry.ClientOptions{
-			Dsn:   o.sentryDSN,
-			Debug: true,
-		})
-	}
 	return s, nil
 }
 
@@ -113,7 +105,7 @@ func (s *Server) PKICACertificateHandler(_ context.Context) http.Handler {
 		certificateIssuer: s.certificateIssuer,
 	}
 
-	return s.withWraps(h, "ccm-get-ca")
+	return otelhttp.NewHandler(h, "ccm-get-ca")
 }
 
 // PKICloudCertificateHandler returns pkiCloudCertificateHandler
@@ -122,7 +114,7 @@ func (s *Server) PKICloudCertificateHandler(_ context.Context) http.Handler {
 		certificateIssuer: s.certificateIssuer,
 	}
 
-	return s.withWraps(h, "ccm-get-cert")
+	return otelhttp.NewHandler(h, "ccm-get-cert")
 }
 
 func (s *Server) tlsSetup(ctx context.Context) error {
@@ -143,14 +135,4 @@ func (s *Server) tlsSetup(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-// withWraps applies the required wrappers to the handlers
-func (s *Server) withWraps(h http.Handler, oper string) http.Handler {
-	oh := otelhttp.NewHandler(h, oper)
-	if s.sentryDSN != "" {
-		return &sentryWrap{h: oh}
-	}
-
-	return oh
 }

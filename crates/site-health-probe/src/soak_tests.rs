@@ -24,7 +24,9 @@
 //! fail, a request names a gone host, sweeps are cancelled, clients page
 //! across publications and abandon cursors, and every publication is scraped
 //! and JSON-encoded while it lands. Only the API's REST reader flag is
-//! toggled: no REST inventory reader runs here.
+//! toggled: no REST inventory reader runs here. The fake connector hands the
+//! reader pre-projected host rows, so decoding nico-api's protobuf replies is
+//! not covered.
 //!
 //! Pass rule: every sweep ends as planned (complete, the planned families
 //! failed, or cancelled). Every family keeps exactly its current and its kept
@@ -57,7 +59,7 @@ use prometheus::proto::MetricFamily;
 use rpc::forge::TenantState;
 
 use crate::api::{ApiState, router};
-use crate::config::{ReaderConfig, StateConfig};
+use crate::config::{HostReadMode, ReaderConfig, StateConfig};
 use crate::e2e_tests::get;
 use crate::framework::{ObservationRecorder, Probe};
 use crate::gate::{CallError, CallGate};
@@ -152,7 +154,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 static GLOBAL: CountingAllocator = CountingAllocator;
 
 /// A soak's site: hosts (two DPUs each), switches, power shelves, racks,
-/// and whether every host runs an instance.
+/// whether every host runs an instance, and how hosts are read.
 #[derive(Clone, Copy)]
 struct Scale {
     hosts: u32,
@@ -160,6 +162,7 @@ struct Scale {
     shelves: u32,
     racks: u32,
     instances: bool,
+    read: HostReadMode,
     /// The most heap the soak's sweeps may hold at their peak, above the
     /// fake site. Measured, with room for allocator and ordering noise.
     max_peak: i64,
@@ -171,6 +174,7 @@ const RACKS_250: Scale = Scale {
     shelves: 2_000,
     racks: 250,
     instances: false,
+    read: HostReadMode::Full,
     max_peak: 45 << 20,
 };
 
@@ -180,6 +184,7 @@ const RACKS_1000: Scale = Scale {
     shelves: 8_000,
     racks: 1_000,
     instances: true,
+    read: HostReadMode::Full,
     max_peak: 200 << 20,
 };
 
@@ -190,6 +195,7 @@ const RACKS_SMALL: Scale = Scale {
     shelves: 20,
     racks: 5,
     instances: false,
+    read: HostReadMode::Full,
     max_peak: i64::MAX,
 };
 
@@ -497,6 +503,19 @@ struct Retained {
 }
 
 /// The least-squares slope of `points`, per step.
+/// The sweep counters go through the meter provider, not the state
+/// collector. A scrape that lacks them, or shows them at 0 after sweeps,
+/// means the exporter is dead and the soak does not measure it.
+fn assert_sweeps_scraped(scraped: &[MetricFamily]) {
+    let sweeps: f64 = scraped
+        .iter()
+        .filter(|family| family.name() == "carbide_site_health_probe_sweeps_total")
+        .flat_map(|family| family.get_metric())
+        .map(|metric| metric.counter.value())
+        .sum();
+    assert!(sweeps > 0.0, "the sweep counters are not scraped");
+}
+
 fn slope(points: &[(f64, f64)]) -> f64 {
     let n = points.len() as f64;
     let (sx, sy) = points
@@ -543,6 +562,9 @@ struct Soak {
     sink: Arc<Tracking>,
     collector: Arc<StateCollector>,
     registry: prometheus::Registry,
+    /// Keeps the meter provider alive: when its last handle drops the
+    /// exporter shuts down and the sweep counters stop being scraped.
+    _setup: metrics_endpoint::MetricsSetup,
     nico: Arc<FakeNico>,
     reader: DevicesReader,
     app: axum::Router,
@@ -561,15 +583,12 @@ struct Soak {
 impl Soak {
     fn new(scale: Scale) -> Self {
         let t0 = crate::clock::now();
-        let cfg = StateConfig::default();
+        let mut cfg = StateConfig::default();
+        cfg.nico_api.host_read = scale.read;
         let setup = metrics_endpoint::new_metrics_setup("site-health-probe", "test", false)
             .expect("metrics setup");
         let store = Arc::new(SnapshotStore::new(&cfg.paging));
-        let collector = Arc::new(StateCollector::new(
-            Arc::clone(&store),
-            t0,
-            cfg.nico_api.host_read,
-        ));
+        let collector = Arc::new(StateCollector::new(Arc::clone(&store), t0));
         setup
             .registry
             .register(Box::new(Shared(Arc::clone(&collector))))
@@ -587,6 +606,7 @@ impl Soak {
                 timeout: Duration::from_secs(600),
             },
             cfg.nico_api.batch_size,
+            cfg.nico_api.host_read,
             Arc::new(FakeConnector(Arc::clone(&nico))),
             Arc::new(CallGate::new(
                 "nico-api",
@@ -610,7 +630,8 @@ impl Soak {
             store,
             sink,
             collector,
-            registry: setup.registry,
+            registry: setup.registry.clone(),
+            _setup: setup,
             nico,
             reader,
             app,
@@ -844,12 +865,9 @@ impl Soak {
             let _ = self.store.by_id(family, "expire-now");
         }
         drop(self.registry.gather());
-        let series = self
-            .registry
-            .gather()
-            .iter()
-            .map(|family| family.get_metric().len())
-            .sum();
+        let scraped = self.registry.gather();
+        assert_sweeps_scraped(&scraped);
+        let series = scraped.iter().map(|family| family.get_metric().len()).sum();
         self.nico.clear_calls();
         Quiescent {
             bytes: live_bytes() - self.base.0,
@@ -965,6 +983,26 @@ async fn soak_1000_racks_full_read() {
     soak("1,000 racks, full read", RACKS_1000).await;
 }
 
+#[tokio::test(start_paused = true)]
+#[ignore = "slow: 500 sweeps at 250 racks; run alone in release with --ignored"]
+async fn soak_250_racks_compact_read() {
+    let scale = Scale {
+        read: HostReadMode::Compact,
+        ..RACKS_250
+    };
+    soak("250 racks, compact read", scale).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[ignore = "slow: 500 sweeps at 1,000 racks; run alone in release with --ignored"]
+async fn soak_1000_racks_compact_read() {
+    let scale = Scale {
+        read: HostReadMode::Compact,
+        ..RACKS_1000
+    };
+    soak("1,000 racks, compact read", scale).await;
+}
+
 /// A cursor taken before a publication pages the units of its own snapshot,
 /// while a new listing reads the new snapshot with the churned hosts.
 #[tokio::test(start_paused = true)]
@@ -976,4 +1014,5 @@ async fn cursor_pages_its_own_snapshot_across_publications() {
         next = tokio::time::Instant::now() + INTERVAL;
         soak.sweep(k).await;
     }
+    assert_sweeps_scraped(&soak.registry.gather());
 }

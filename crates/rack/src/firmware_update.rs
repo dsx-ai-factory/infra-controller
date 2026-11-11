@@ -57,7 +57,7 @@ pub async fn load_rack_firmware_inventory(
     credential_manager: &dyn CredentialManager,
     rack_id: &RackId,
 ) -> Result<RackFirmwareInventory> {
-    let (machine_ids, machine_topologies, bmc_ips) = {
+    let machine_ids = {
         let mut txn = db_pool.begin().await?;
 
         let machine_ids = db_machine::find_machine_ids::<HostMachineId>(
@@ -69,14 +69,44 @@ pub async fn load_rack_firmware_inventory(
         )
         .await?;
 
+        txn.commit().await?;
+        machine_ids
+    };
+    let machines =
+        load_compute_firmware_inventory(db_pool, credential_manager, &machine_ids).await?;
+
+    let RackSwitchFirmwareInventory {
+        switch_ids,
+        switches,
+    } = load_rack_switch_firmware_inventory(db_pool, credential_manager, rack_id).await?;
+
+    Ok(RackFirmwareInventory {
+        machine_ids,
+        machines,
+        switch_ids,
+        switches,
+    })
+}
+
+/// Loads firmware targets and live BMC credentials for the selected compute hosts.
+///
+/// Returns an error if a selected host lacks topology, BMC identity, a live BMC
+/// address, or readable credentials. Unselected hosts are not inspected.
+pub async fn load_compute_firmware_inventory(
+    db_pool: &PgPool,
+    credential_manager: &dyn CredentialManager,
+    machine_ids: &[HostMachineId],
+) -> Result<Vec<FirmwareUpgradeDeviceInfo>> {
+    let (machine_topologies, bmc_ips) = {
+        let mut txn = db_pool.begin().await?;
         let machine_topologies =
-            db_machine_topology::find_latest_by_machine_ids(txn.as_mut(), &machine_ids).await?;
+            db_machine_topology::find_latest_by_machine_ids(txn.as_mut(), machine_ids).await?;
         // The BMC IP is live network state -- read it from machine_interfaces, not the
         // discovery topology snapshot, so a released or changed lease can't surface a stale IP.
         let bmc_ips: std::collections::HashMap<_, _> =
             db_machine_topology::find_machine_bmc_pairs_by_machine_id(
                 txn.as_mut(),
-                machine_ids.clone(),
+                machine_ids.to_vec(),
             )
             .await?
             .into_iter()
@@ -84,11 +114,11 @@ pub async fn load_rack_firmware_inventory(
             .collect();
 
         txn.commit().await?;
-        (machine_ids, machine_topologies, bmc_ips)
+        (machine_topologies, bmc_ips)
     };
 
     let mut machines = Vec::with_capacity(machine_ids.len());
-    for machine_id in &machine_ids {
+    for machine_id in machine_ids {
         let topology = machine_topologies
             .get(machine_id)
             .ok_or_else(|| eyre!("machine {} missing topology", machine_id))?;
@@ -116,17 +146,7 @@ pub async fn load_rack_firmware_inventory(
         });
     }
 
-    let RackSwitchFirmwareInventory {
-        switch_ids,
-        switches,
-    } = load_rack_switch_firmware_inventory(db_pool, credential_manager, rack_id).await?;
-
-    Ok(RackFirmwareInventory {
-        machine_ids,
-        machines,
-        switch_ids,
-        switches,
-    })
+    Ok(machines)
 }
 
 pub async fn load_rack_switch_firmware_inventory(

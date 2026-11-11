@@ -20,7 +20,12 @@
 //! An admitted [`NicFirmwareOperation`] freezes its cards, firmware requests
 //! and execution choices. Supervisor receipts describe what execution did;
 //! fresh ordinary inventory establishes that a card runs the requested version.
+//! Unknown fields in workflow-owned state structures are rejected rather than
+//! dropped: ignoring a future effect or ownership guard would make resuming that
+//! state unsafe. Embedded shared catalog and execution types retain their own
+//! decoding contracts.
 
+use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
 use carbide_libmlx_model::firmware::operation::{
     FirmwareOperation, FirmwareOperationPhase, FirmwareOperationState,
 };
@@ -41,6 +46,7 @@ mod tests;
 
 /// One admitted host workflow, processing its frozen targets in order.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NicFirmwareOperation {
     /// Stable workflow identity: 1..=256 printable nonspace ASCII bytes,
     /// without the `dpa-firmware:` prefix reserved for DPA state entries.
@@ -54,6 +60,10 @@ pub struct NicFirmwareOperation {
     pub targets: Vec<NicFirmwareTarget>,
     /// Execution choices sent unchanged with every card's request.
     pub options: NicFirmwareExecutionOptions,
+    /// Delivery chosen at admission, independent of subsequent site settings.
+    /// Omission preserves the original Direct behavior of an older workflow.
+    #[serde(default, skip_serializing_if = "FirmwareDeliveryMode::is_direct")]
+    pub delivery_mode: FirmwareDeliveryMode,
     /// Where the workflow stands. A step must be stored before its commands go
     /// out, so a restart resumes from it.
     pub phase: NicFirmwarePhase,
@@ -64,6 +74,7 @@ pub struct NicFirmwareOperation {
 
 /// The lifecycle that admitted the workflow and owns its successful continuation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum NicFirmwarePurpose {
     /// Establish or update the tenant-free baseline.
     Baseline {
@@ -88,18 +99,22 @@ pub enum NicFirmwarePurpose {
 
 /// Supported tenant-free continuation points, without arbitrary host states.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum NicFirmwareBaselineContinuation {
     /// Resume the discovered host's existing boot configuration and preparation.
     InitialPreparation {
         /// Preserve the discovered host's existing reboot-wait choice.
         skip_reboot_wait: bool,
     },
-    /// Return an idle, already prepared host to the allocation pool.
+    /// Return an idle, already prepared host to the allocation pool. Admission
+    /// must qualify that the recipe preserves its readiness checks; firmware
+    /// version and lockdown evidence alone cannot establish that qualification.
     Ready,
 }
 
 /// A frozen card request and the evidence accepted for that exact request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NicFirmwareTarget {
     /// Stable card identity. Scout checks it against the live card before any
     /// mutation, and later inventory must report it too.
@@ -112,24 +127,56 @@ pub struct NicFirmwareTarget {
     /// Lockdown policy read before the update and restored afterward,
     /// including the original key context.
     pub original_lockdown: NicFirmwareLockdownPolicy,
-    /// Helper instance first observed without this card's receipt. Never
-    /// refreshed once set, so a replacement helper that lost its journal
-    /// cannot authorize a new burn. Without it, the card can only be observed:
+    /// Helper instance observed without this card's receipt. It may change
+    /// during initial observation, before a submission could be authorized.
+    /// After that phase a replacement cannot authorize a new burn. Without it,
+    /// the card can only be observed:
     /// `validate` rejects `Unlocking` and `UpdatingFirmware` for a card that has
     /// neither this value nor a receipt. Present values contain 1..=256
     /// printable nonspace ASCII bytes.
     pub supervisor_instance_id: Option<String>,
     /// Last accepted correlated receipt; a terminal receipt cannot regress.
     pub receipt: Option<FirmwareOperation>,
-    /// Latest diagnostic from a correlated execution report. A new receipt or
-    /// the first helper instance clears it.
+    /// Nonsecret workflow diagnostic from correlated delivery, missing-receipt,
+    /// or lockdown reports. An accepted new receipt, a receipt-free initial
+    /// helper change, or a consumed successful lockdown report clears it.
     pub diagnostic: Option<String>,
+    /// Classification of the last correlated delivery error. An accepted
+    /// receipt clears it. Unavailable or missing answers cannot replace a
+    /// permanent failure; absence alone never renews submission permission.
+    pub delivery_error_code: Option<NicFirmwareDeliveryErrorCode>,
+}
+
+/// Delivery failures retain their class so recovery never parses diagnostic
+/// text or treats an unavailable answer as proof that no work was admitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NicFirmwareDeliveryErrorCode {
+    /// The frozen request is invalid.
+    InvalidTask,
+    /// This identity already names different immutable inputs.
+    Conflict,
+    /// The implementation cannot honor the required contract.
+    Unsupported,
+    /// Receipt lookup failed and admission may already have occurred.
+    Unavailable,
+}
+
+impl NicFirmwareDeliveryErrorCode {
+    /// Whether unchanged frozen inputs require operator intervention rather
+    /// than another submission. Status-only observation remains permitted.
+    pub fn requires_intervention(self) -> bool {
+        match self {
+            Self::InvalidTask | Self::Conflict | Self::Unsupported => true,
+            Self::Unavailable => false,
+        }
+    }
 }
 
 /// Execution choices frozen at admission. Core sends them unchanged with every
 /// card's request, so a retry keeps the supervisor's request identity; omitted
 /// timing stays absent for the same reason.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NicFirmwareExecutionOptions {
     /// Ask the supervisor to compare each burned card with the staged image.
     pub verify_image: bool,
@@ -142,6 +189,7 @@ pub struct NicFirmwareExecutionOptions {
 /// How burned cards start running their new firmware. One choice covers every
 /// card in the operation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum NicFirmwareActivation {
     /// The supervisor resets each card after its burn, then runs any requested
     /// verification.
@@ -158,13 +206,14 @@ pub enum NicFirmwareActivation {
         post_reset_verify_timeout_seconds: Option<u32>,
     },
     /// One host reboot after the last burn activates every card at once. Its
-    /// requests set `reset: false` and leave `reset_level` at the supervisor's
-    /// default, which Core does not store.
+    /// requests set `reset: false` and `reset_level` to the supervisor's default.
+    /// Core stores no per-operation reset level for this mode.
     HostReboot,
 }
 
 /// Lockdown policy read before changing the card; credentials are never saved.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum NicFirmwareLockdownPolicy {
     /// Leave a card that was already unlocked unlocked.
     Unlocked,
@@ -189,6 +238,7 @@ pub enum NicFirmwareLockdownStatus {
 
 /// `NicFirmwareLockdownProgress` keeps a lockdown change separate from its readback.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NicFirmwareLockdownProgress {
     /// The lockdown command for the current phase.
     pub step: NicFirmwareLockdownStep,
@@ -211,6 +261,7 @@ pub enum NicFirmwareLockdownStep {
 /// `NicFirmwareLockdownResult` is a card's answer to a lockdown command: a
 /// status read, a completed change, or an error.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum NicFirmwareLockdownResult {
     /// Lock status read from the exact selected card.
     Status(NicFirmwareLockdownStatus),
@@ -226,6 +277,7 @@ pub enum NicFirmwareLockdownResult {
 
 /// The controller's recovery point, separate from supervisor execution phases.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum NicFirmwarePhase {
     /// Read the card's receipt before letting this helper submit.
     ObservingSupervisor {
@@ -279,6 +331,28 @@ pub enum NicFirmwarePhase {
 }
 
 impl NicFirmwareOperation {
+    /// Return the lock status requested by the current lockdown phase.
+    pub fn desired_lockdown(&self) -> Option<NicFirmwareLockdownStatus> {
+        match self.phase {
+            NicFirmwarePhase::Unlocking { .. } => Some(NicFirmwareLockdownStatus::Unlocked),
+            NicFirmwarePhase::RestoringLockdown { .. } => {
+                self.current_target()
+                    .map(|target| match target.original_lockdown {
+                        NicFirmwareLockdownPolicy::Unlocked => NicFirmwareLockdownStatus::Unlocked,
+                        NicFirmwareLockdownPolicy::Locked { .. } => {
+                            NicFirmwareLockdownStatus::Locked
+                        }
+                    })
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve a card phase's target without trusting a persisted index.
+    pub fn current_target(&self) -> Option<&NicFirmwareTarget> {
+        self.targets.get(self.current_target_index()?)
+    }
+
     /// Return the card the current phase works on, or absence for host-wide phases.
     fn current_target_index(&self) -> Option<usize> {
         match self.phase {
@@ -339,15 +413,18 @@ impl NicFirmwareOperation {
         }
         target.receipt = Some(receipt);
         target.diagnostic = None;
+        target.delivery_error_code = None;
         true
     }
 
     /// Record the helper that answered a correlated read without a receipt.
-    /// The first such answer during initial observation sets
-    /// `supervisor_instance_id`. Later missing evidence records uncertainty
-    /// without replacing that identity or a terminal receipt. Malformed
-    /// identities and unrelated results are ignored. The return value says
-    /// whether the operation changed.
+    /// During receipt-free initial observation, an answer may refresh
+    /// `supervisor_instance_id`; no update can have been authorized in that
+    /// phase. A later replacement without a receipt records a permanent
+    /// conflict without replacing the saved identity. Other missing evidence
+    /// records uncertainty without replacing a receipt. Malformed identities,
+    /// unrelated results and answers after a permanent failure are ignored.
+    /// The return value says whether the operation changed.
     pub fn accept_missing_receipt(
         &mut self,
         operation_id: &str,
@@ -362,33 +439,52 @@ impl NicFirmwareOperation {
         let Some(target) = self.reporting_target_mut(operation_id, phase_id, pci_name) else {
             return false;
         };
-        if observing && target.supervisor_instance_id.is_none() && target.receipt.is_none() {
+        if target
+            .delivery_error_code
+            .is_some_and(NicFirmwareDeliveryErrorCode::requires_intervention)
+        {
+            return false;
+        }
+        if observing && target.receipt.is_none() {
+            if target.supervisor_instance_id.as_ref() == Some(&supervisor_instance_id) {
+                return false;
+            }
             target.supervisor_instance_id = Some(supervisor_instance_id);
             target.diagnostic = None;
+            target.delivery_error_code = None;
             return true;
         }
-        let diagnostic = if target.receipt.is_some() {
-            "previously accepted firmware receipt is unavailable; observing without resubmitting"
+        let (diagnostic, code) = if target.receipt.is_some() {
+            (
+                "previously accepted firmware receipt is unavailable; observing without resubmitting",
+                None,
+            )
         } else if target.supervisor_instance_id.as_ref() != Some(&supervisor_instance_id) {
-            "firmware supervisor instance changed without a receipt; initial submission permission is not renewed"
+            (
+                "firmware supervisor instance changed without a receipt; initial submission permission is not renewed",
+                Some(NicFirmwareDeliveryErrorCode::Conflict),
+            )
         } else {
             return false;
         };
-        if target.diagnostic.as_deref() == Some(diagnostic) {
+        if target.diagnostic.as_deref() == Some(diagnostic) && target.delivery_error_code == code {
             return false;
         }
         target.diagnostic = Some(diagnostic.to_string());
+        target.delivery_error_code = code;
         true
     }
 
     /// Retain a correlated delivery failure without replacing settled execution
-    /// evidence. This diagnostic never authorizes another helper instance.
-    /// The return value says whether the operation changed.
+    /// evidence. An unavailable answer cannot downgrade a retained permanent
+    /// failure or its diagnostic. This diagnostic never authorizes another
+    /// helper instance. The return value says whether the operation changed.
     pub fn accept_error(
         &mut self,
         operation_id: &str,
         phase_id: &str,
         pci_name: &str,
+        code: NicFirmwareDeliveryErrorCode,
         diagnostic: String,
     ) -> bool {
         // The wire carries a nonempty diagnostic of at most 2048 bytes; anything
@@ -399,10 +495,20 @@ impl NicFirmwareOperation {
         let Some(target) = self.reporting_target_mut(operation_id, phase_id, pci_name) else {
             return false;
         };
-        if target.diagnostic.as_ref() == Some(&diagnostic) {
+        if code == NicFirmwareDeliveryErrorCode::Unavailable
+            && target
+                .delivery_error_code
+                .is_some_and(NicFirmwareDeliveryErrorCode::requires_intervention)
+        {
+            return false;
+        }
+        if target.delivery_error_code == Some(code)
+            && target.diagnostic.as_ref() == Some(&diagnostic)
+        {
             return false;
         }
         target.diagnostic = Some(diagnostic);
+        target.delivery_error_code = Some(code);
         true
     }
 
@@ -556,6 +662,38 @@ impl NicFirmwareOperation {
             ));
         }
         Ok(())
+    }
+}
+
+impl NicFirmwarePurpose {
+    /// Check the attached instance and its deletion status before delivery or
+    /// continuation. General instance configuration edits preserve ownership.
+    /// Cleanup may outlive its deleted owner, but cannot attach to a replacement.
+    pub fn matches_owner(&self, owner: Option<(InstanceId, bool)>) -> bool {
+        match (self, owner) {
+            (Self::Baseline { .. } | Self::RestoreBaseline { .. }, None) => true,
+            (Self::Allocation { instance_id }, Some((current_id, deleted))) => {
+                *instance_id == current_id && !deleted
+            }
+            (Self::RestoreBaseline { instance_id, .. }, Some((current_id, deleted))) => {
+                *instance_id == current_id && deleted
+            }
+            _ => false,
+        }
+    }
+}
+
+impl std::fmt::Display for NicFirmwarePhase {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::ObservingSupervisor { .. } => "ObservingSupervisor",
+            Self::Unlocking { .. } => "Unlocking",
+            Self::UpdatingFirmware { .. } => "UpdatingFirmware",
+            Self::Rebooting { .. } => "Rebooting",
+            Self::Reobserving { .. } => "Reobserving",
+            Self::RestoringLockdown { .. } => "RestoringLockdown",
+            Self::Failed { .. } => "Failed",
+        })
     }
 }
 

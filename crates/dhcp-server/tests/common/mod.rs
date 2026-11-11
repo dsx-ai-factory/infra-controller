@@ -41,8 +41,8 @@ use hyper::{Request, Response, header};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use lru::LruCache;
 use prost::Message as _;
+use rpc::carbide_tls_client::CarbideClientConfig;
 use rpc::forge::{BuildInfo, DhcpDiscovery, DhcpRecord};
-use rpc::forge_tls_client::ForgeClientConfig;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
@@ -136,8 +136,8 @@ pub(super) fn base_dhcp_config(api_url: Option<String>) -> DhcpConfig {
 }
 
 /// Disable TLS for the loopback mock API used by controller-mode tests.
-fn forge_config() -> ForgeClientConfig {
-    ForgeClientConfig::new(String::new(), None)
+fn forge_config() -> CarbideClientConfig {
+    CarbideClientConfig::new(String::new(), None)
 }
 
 /// Build a client DHCPv6 message with optional IA_NA and server selection.

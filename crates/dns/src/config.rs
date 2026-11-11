@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use forge_tls::client_config::ClientCert;
-use rpc::forge_tls_client::ForgeClientConfig;
+use rpc::carbide_tls_client::CarbideClientConfig;
 use serde::{Deserialize, Serialize};
 use tonic::codegen::http;
 
@@ -207,7 +207,7 @@ where
 }
 
 impl Config {
-    pub fn forge_client_config(&self) -> ForgeClientConfig {
+    pub fn carbide_client_config(&self) -> CarbideClientConfig {
         let forge_root_ca = self
             .root_ca_path
             .to_str()
@@ -225,7 +225,7 @@ impl Config {
                 .expect("client key path is not valid UTF-8")
                 .to_string(),
         };
-        ForgeClientConfig::new(forge_root_ca, Some(client_cert))
+        CarbideClientConfig::new(forge_root_ca, Some(client_cert))
     }
 
     /// The ServFail cache TTL as a `Duration`, clamped to the supported

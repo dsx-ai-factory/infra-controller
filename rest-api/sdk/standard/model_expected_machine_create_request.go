@@ -22,7 +22,7 @@ import (
 // checks if the ExpectedMachineCreateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &ExpectedMachineCreateRequest{}
 
-// ExpectedMachineCreateRequest Request data to create a new ExpectedMachine.  Note: BMC credentials (username/password) are only accepted during creation and updates but are not returned in responses.
+// ExpectedMachineCreateRequest Request data to create a new Expected Machine, or to declare a machine in a complete inventory replacement.  Note: BMC credentials (username/password) are only accepted during creation and updates but are not returned in responses.
 type ExpectedMachineCreateRequest struct {
 	// ID of the site the Expected Machine belongs to
 	SiteId string `json:"siteId"`
@@ -36,8 +36,10 @@ type ExpectedMachineCreateRequest struct {
 	ChassisSerialNumber string `json:"chassisSerialNumber"`
 	// Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
 	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers,omitempty"`
-	// Optional expected host NIC declarations. Omission or null creates an empty list.
+	// Physical-interface and DPU-loopback declarations. For a new machine, omission or null creates an empty list.  In a complete inventory replacement, this list replaces the physical-interface subset; omission, null, or an empty list clears that subset. For a retained BMC MAC, stored loopbacks are preserved unless the list includes a DpuLoopback declaration (including one whose omitted role is preserved), or replaceDpuLoopbacks is true. Either case replaces the complete loopback subset with the supplied loopback declarations.
 	Interfaces []ExpectedMachineInterface `json:"interfaces,omitempty"`
+	// When true, replace the complete DPU-loopback subset with the loopback declarations in interfaces, clearing stored loopbacks omitted from the list. Requires non-null interfaces; an empty list clears all interface declarations. Omission, null, or false preserves stored loopbacks unless the interfaces list includes a DpuLoopback declaration (including one whose omitted role is preserved). This is request-only intent and is not stored on the Expected Machine.
+	ReplaceDpuLoopbacks NullableBool `json:"replaceDpuLoopbacks,omitempty"`
 	// Optional ID of an existing SKU at this Expected Machine's Site. Omission or null leaves the SKU association unset. REST rejects an empty string with HTTP 400.
 	SkuId NullableString `json:"skuId,omitempty"`
 	// Optional rack identifier for this component
@@ -79,6 +81,8 @@ func NewExpectedMachineCreateRequest(siteId string, bmcMacAddress string, chassi
 	this.SiteId = siteId
 	this.BmcMacAddress = bmcMacAddress
 	this.ChassisSerialNumber = chassisSerialNumber
+	var replaceDpuLoopbacks bool = false
+	this.ReplaceDpuLoopbacks = *NewNullableBool(&replaceDpuLoopbacks)
 	return &this
 }
 
@@ -87,6 +91,8 @@ func NewExpectedMachineCreateRequest(siteId string, bmcMacAddress string, chassi
 // but it doesn't guarantee that properties required by API are set
 func NewExpectedMachineCreateRequestWithDefaults() *ExpectedMachineCreateRequest {
 	this := ExpectedMachineCreateRequest{}
+	var replaceDpuLoopbacks bool = false
+	this.ReplaceDpuLoopbacks = *NewNullableBool(&replaceDpuLoopbacks)
 	return &this
 }
 
@@ -310,6 +316,49 @@ func (o *ExpectedMachineCreateRequest) HasInterfaces() bool {
 // SetInterfaces gets a reference to the given []ExpectedMachineInterface and assigns it to the Interfaces field.
 func (o *ExpectedMachineCreateRequest) SetInterfaces(v []ExpectedMachineInterface) {
 	o.Interfaces = v
+}
+
+// GetReplaceDpuLoopbacks returns the ReplaceDpuLoopbacks field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *ExpectedMachineCreateRequest) GetReplaceDpuLoopbacks() bool {
+	if o == nil || IsNil(o.ReplaceDpuLoopbacks.Get()) {
+		var ret bool
+		return ret
+	}
+	return *o.ReplaceDpuLoopbacks.Get()
+}
+
+// GetReplaceDpuLoopbacksOk returns a tuple with the ReplaceDpuLoopbacks field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *ExpectedMachineCreateRequest) GetReplaceDpuLoopbacksOk() (*bool, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.ReplaceDpuLoopbacks.Get(), o.ReplaceDpuLoopbacks.IsSet()
+}
+
+// HasReplaceDpuLoopbacks returns a boolean if a field has been set.
+func (o *ExpectedMachineCreateRequest) HasReplaceDpuLoopbacks() bool {
+	if o != nil && o.ReplaceDpuLoopbacks.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetReplaceDpuLoopbacks gets a reference to the given NullableBool and assigns it to the ReplaceDpuLoopbacks field.
+func (o *ExpectedMachineCreateRequest) SetReplaceDpuLoopbacks(v bool) {
+	o.ReplaceDpuLoopbacks.Set(&v)
+}
+
+// SetReplaceDpuLoopbacksNil sets the value for ReplaceDpuLoopbacks to be an explicit nil
+func (o *ExpectedMachineCreateRequest) SetReplaceDpuLoopbacksNil() {
+	o.ReplaceDpuLoopbacks.Set(nil)
+}
+
+// UnsetReplaceDpuLoopbacks ensures that no value is present for ReplaceDpuLoopbacks, not even an explicit nil
+func (o *ExpectedMachineCreateRequest) UnsetReplaceDpuLoopbacks() {
+	o.ReplaceDpuLoopbacks.Unset()
 }
 
 // GetSkuId returns the SkuId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -916,6 +965,9 @@ func (o ExpectedMachineCreateRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if o.Interfaces != nil {
 		toSerialize["interfaces"] = o.Interfaces
+	}
+	if o.ReplaceDpuLoopbacks.IsSet() {
+		toSerialize["replaceDpuLoopbacks"] = o.ReplaceDpuLoopbacks.Get()
 	}
 	if o.SkuId.IsSet() {
 		toSerialize["skuId"] = o.SkuId.Get()

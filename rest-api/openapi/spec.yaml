@@ -402,6 +402,10 @@ paths:
         Retrieve Service Account status for current org
 
         API service must be configured for Service Account access at the time of deployment. It cannot be enabled or disabled via API.
+
+        `enabled` is returned `true` when:
+        - Custom JWT issuer auth is configured and `isServiceAccount` is `true` in claim mapping for the org in request
+        - Keycloak auth is configured with `keycloak.serviceAccount` set to `true`, the token is a client credentials token, `keycloak.serviceAccountOrgs` lists the org in request, and the token carries both roles with both `PROVIDER_ADMIN` and `TENANT_ADMIN` suffix
       parameters: []
       tags:
         - Service Account
@@ -4643,7 +4647,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An Expected Machine with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Machine with a conflicting identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers. An earlier unconfirmed batch creation also blocks a create using its reserved MAC address or chassis serial number at this Site. Wait for batch reconciliation before retrying that identity.
           $ref: '#/components/responses/ConflictError'
         '422':
           description: The supplied `skuId` does not identify a SKU at this Expected Machine's Site. REST checks your access to the Site before looking up the SKU.
@@ -4756,6 +4760,8 @@ paths:
       description: |-
         Replace the complete Expected Machine set for one Site. Entries omitted from the request are deleted, and entries in the request are created with new REST IDs. The `expectedMachines` array may be empty to clear the Site's set.
 
+        For a BMC MAC retained in the replacement set, stored DPU loopbacks are preserved unless its `interfaces` include a `DpuLoopback` declaration (including one whose omitted role is preserved), or its `replaceDpuLoopbacks` is true. Either case replaces the complete loopback subset. Physical interfaces are always replaced; omitted, null, or empty `interfaces` clears the physical subset.
+
         Every entry must use the top-level `siteId`. BMC MAC addresses and chassis serial numbers must be unique within the replacement set. Referenced SKUs must exist at the Site.
 
         Org must have an Infrastructure Provider entity and the caller must have Provider Admin access, or the caller must be a Tenant Admin with effective `TargetedInstanceCreation` access to the Site.
@@ -4779,7 +4785,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Machine replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is in progress, or an earlier Expected Machine batch creation is awaiting confirmation at this Site. This complete replacement is rejected before mutation because it would also replace pending machines. Retry after the conflicting operation or batch reconciliation finishes.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -4808,7 +4814,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Machine deletion is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is in progress, or an earlier Expected Machine batch creation is awaiting confirmation at this Site. This complete deletion is rejected before mutation because it would also delete pending machines. Retry after the conflicting operation or batch reconciliation finishes.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -5058,7 +5064,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine update is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Machine update is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers. An earlier unconfirmed batch creation also blocks updates to its reserved machine IDs or chassis serial numbers. Wait for batch reconciliation before retrying those identities.
           $ref: '#/components/responses/ConflictError'
         '422':
           description: The supplied `skuId` does not identify a SKU at this Expected Machine's Site. REST checks your access to the Site before looking up the SKU.
@@ -5104,7 +5110,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Machine deletion is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Machine deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers. An earlier unconfirmed batch creation also blocks deletion of its reserved machine IDs. Wait for batch reconciliation before retrying those IDs.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -5127,6 +5133,12 @@ paths:
         Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also create Expected Machines if they have an account with the Site's Infrastructure Provider.
 
         Maximum batch size: 100 Expected Machines per request.
+
+        A successful response confirms that Core created every requested machine and REST saved the corresponding records. HTTP 500 can mean the batch was rejected or that REST could not confirm or save its creation. The status alone does not establish whether creation succeeded or may still finish.
+
+        When durable batch recovery is enabled on the server, REST reserves the requested machine IDs, MAC addresses, and chassis serial numbers until it can confirm creation or establish failure. Durable batch recovery is disabled by default. Creates, updates, and deletes using those identities return HTTP 409 while confirmation is pending. The reservation also blocks replacement or deletion of all Expected Machines at the Site.
+
+        Check Expected Machine inventory before retrying an unconfirmed request. A missing machine is not proof that creation failed. If the server cannot establish the result, a batch with durable recovery keeps its reservation without automatic expiration.
       requestBody:
         content:
           application/json:
@@ -5177,8 +5189,11 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This batch Expected Machine creation is rejected before data is mutated and can be retried.
+          description: A conflicting Expected Inventory mutation or Expected Machine inventory reconciliation is in progress, or an earlier batch creation is awaiting confirmation for a submitted MAC address or chassis serial number at this Site. This batch is rejected before dispatch to Core. Retry after the conflicting operation or batch reconciliation finishes; a conflict does not establish whether the earlier batch was created.
           $ref: '#/components/responses/ConflictError'
+        '500':
+          description: The batch was rejected, or REST could not schedule, confirm, or save its creation. Core may already have created the machines or may still finish. With durable recovery enabled, an unconfirmed batch retains its identity reservations, so retrying can return HTTP 409. Check inventory before retrying; a missing record is not proof that creation failed.
+          $ref: '#/components/responses/GenericHttpError'
       tags:
         - Expected Machine
     patch:
@@ -5187,7 +5202,7 @@ paths:
       description: |-
         Update multiple Expected Machines in a single request. All machines must belong to the same site.
 
-        All items in a batch update must provide the same set of fields, except that `bmcIpAddress` may be omitted or set to `null` to preserve that machine's current BMC IP address.
+        All items in a batch update must provide the same set of fields, except that `bmcIpAddress` may be omitted or set to `null` to preserve that machine's current BMC IP address, and `replaceDpuLoopbacks` is independent per machine.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -5225,7 +5240,7 @@ paths:
         description: |-
           Array of Expected Machine update requests.
 
-          Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Every item must use the same field set except bmcIpAddress; values may differ between items.
+          Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Every item must use the same field set except bmcIpAddress and replaceDpuLoopbacks; values may differ between items.
         required: true
       responses:
         '200':
@@ -5247,7 +5262,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
         '409':
-          description: One or more target Expected Machines changed before they could be locked, or another complete Expected Inventory mutation is in progress for the same Site. The batch can be retried.
+          description: One or more target Expected Machines changed before they could be locked, or a conflicting Expected Inventory mutation is in progress for the same Site. Batches that set chassis serial numbers require exclusive access and can conflict with other Expected Inventory mutations or Expected Machine inventory reconciliation. Batches that omit `chassisSerialNumber` or set it to null use shared access and can conflict with complete inventory replacements or deletions and Expected Machine batches that set serial numbers. The batch can be retried. An earlier unconfirmed batch creation also blocks a batch update targeting its reserved machine IDs or chassis serial numbers. Wait for batch reconciliation before retrying those identities.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Machine
@@ -5299,7 +5314,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An Expected Power Shelf with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Power Shelf with a conflicting identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
@@ -5415,7 +5430,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Power Shelf replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Power Shelf replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
@@ -5444,7 +5459,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Power Shelf deletion is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Power Shelf deletion is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
@@ -5540,7 +5555,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Power Shelf update is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Power Shelf update is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
@@ -5566,7 +5581,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Power Shelf deletion is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Power Shelf deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Power Shelf
@@ -5625,7 +5640,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An Expected Rack with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Rack with a conflicting identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -5762,7 +5777,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -5806,7 +5821,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -5837,7 +5852,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack deletion is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack deletion is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -5936,7 +5951,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack update is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Rack update is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -5961,7 +5976,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack deletion is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Rack deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack
@@ -6023,7 +6038,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An Expected Rack Group with a conflicting identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Rack Group with a conflicting identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6173,7 +6188,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6217,7 +6232,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack Group replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6248,7 +6263,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Rack Group deletion is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Rack Group deletion is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6351,7 +6366,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack Group update is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Rack Group update is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6376,7 +6391,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Rack Group deletion is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Rack Group deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Rack Group
@@ -6434,7 +6449,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: An Expected Switch with a conflicting BMC or NVOS identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Switch with a conflicting BMC or NVOS identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
@@ -6550,7 +6565,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Switch replacement is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Switch replacement is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
@@ -6579,7 +6594,7 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: Another Expected Inventory mutation is already in progress for the same Site. This complete Expected Switch deletion is rejected before data is mutated and can be retried.
+          description: Another Expected Inventory mutation or Expected Machine inventory reconciliation is already in progress for the same Site. This complete Expected Switch deletion is rejected before data is mutated and can be retried.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
@@ -6675,13 +6690,50 @@ paths:
               schema:
                 $ref: '#/components/schemas/ExpectedSwitch'
         '400':
-          $ref: '#/components/responses/ValidationError'
+          description: |-
+            Invalid request data or an Expected Switch update that cannot be applied. This includes:
+
+            - An invalid Expected Switch ID, a body `id` that does not match the URL ID, or malformed request data.
+            - Changing the physical BMC MAC address through `bmcMacAddress`.
+            - An empty `nvosInterfaces` list, invalid or duplicate NVOS MAC addresses, or more than one interface marked primary.
+            - Setting `nvosInterfaces[].ipAddress` when the replacement list does not contain exactly one interface, or supplying an empty, malformed, unspecified, multicast, or IPv4 limited-broadcast NVOS address.
+            - An invalid non-empty `bmcIpAddress`, invalid credentials or metadata, or a partial NVOS credential update without the corresponding stored username or password.
+
+            Field validation errors include details in `data`. Other rejections may return `data: null` and explain the failure in `message`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+              examples:
+                invalid-nvos-ip-address:
+                  value:
+                    source: nico
+                    message: Failed to validate ExpectedSwitch update request data
+                    data:
+                      nvosInterfaces: ipAddress must be a valid IPv4 or IPv6 address that is not unspecified, multicast, or limited broadcast
+                nvos-ip-address-requires-single-interface:
+                  value:
+                    source: nico
+                    message: Failed to validate ExpectedSwitch update request data
+                    data:
+                      nvosInterfaces: ipAddress requires exactly one nvosInterfaces entry
+                immutable-bmc-mac-address:
+                  value:
+                    source: nico
+                    message: Failed to validate Expected Switch update data
+                    data:
+                      bmcMacAddress: BMC MAC address cannot be changed after creation
+                mismatched-expected-switch-id:
+                  value:
+                    source: nico
+                    message: If provided, Expected Switch ID specified in request data must match URL request value
+                    data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: An Expected Switch with a conflicting NVOS identity already exists, or another complete Expected Inventory mutation is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried.
+          description: An Expected Switch with a conflicting NVOS identity already exists, or an Expected Inventory mutation requiring exclusive access is in progress for the same Site. Lock conflicts are rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
@@ -6707,7 +6759,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: Another complete Expected Inventory mutation is already in progress for the same Site. This Expected Switch deletion is rejected before data is mutated and can be retried.
+          description: An Expected Inventory mutation requiring exclusive access is already in progress for the same Site. This Expected Switch deletion is rejected before data is mutated and can be retried. Exclusive access is required for complete inventory replacements or deletions, batch Expected Machine creation, and batch Expected Machine updates that set chassis serial numbers.
           $ref: '#/components/responses/ConflictError'
       tags:
         - Expected Switch
@@ -7839,6 +7891,8 @@ paths:
                 example-1:
                   value:
                     message: Deletion request was accepted
+        '404':
+          $ref: '#/components/responses/NotFoundError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       description: |-
@@ -11948,6 +12002,32 @@ paths:
         - Machine
       summary: Delete a Machine from a Site
       operationId: delete-machine
+      parameters:
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: force
+          description: Request forced deletion on the Site, including host, DPU, and BMC interfaces. Starting a new attempt requires a Registered Site; a confirmed-complete retained request is replayed locally. Machines marked missing on Site can be force deleted without waiting 24 hours, including when their missing-status history is unavailable. This alone does not override attached Instances, assigned Instance Types, or Allocation Constraints. BMC credentials, discovery suppressions, and retained boot-interface pairs are preserved; orphaned DPF resources are not overridden.
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: allowDeleteWithInstanceType
+          description: Requires force=true when enabled. Authorize removing an assigned Instance Type on the Site. This does not authorize deletion of an attached Instance or violating Allocation Constraints.
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: allowDeleteWithInstance
+          description: Requires force=true when enabled. Authorize deletion of the attached Instance control-plane record on the Site without first requesting a graceful workload shutdown; cleanup may forcibly restart the host. Also authorizes removal of its Instance Type, even if allowDeleteWithInstanceType=false. REST Machine, Instance, interfaces, capabilities, and Instance Type associations are retained for deliberate cleanup by their owners. Allocation Constraints require a separate acknowledgment.
+        - schema:
+            type: boolean
+            default: false
+          in: query
+          name: allowDeleteWithAllocation
+          description: Requires force=true when enabled. Acknowledge that removing this Machine may leave fewer Machines than existing Instance Type Allocation Constraints require. Without this acknowledgment, such a request is rejected before Site deletion. When capacity would be insufficient, the Site deletion proceeds while REST Machine records and Instance Type associations are retained and Allocation Constraints remain unchanged. Machines with a recorded force-deletion attempt do not count toward capacity in later Allocation or deletion checks, even before inventory marks them missing. Does not imply either Instance or Instance Type deletion permission.
+
       responses:
         '202':
           description: Deletion request was accepted
@@ -11956,7 +12036,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/MessageResponse'
               examples:
-                example-1:
+                normal-deletion:
                   value:
                     message: Deletion request was accepted
         '400':
@@ -11966,13 +12046,84 @@ paths:
         '404':
           description: Describes an error response for 404 Not Found
           $ref: '#/components/responses/GenericHttpError'
+        '409':
+          description: Site cleanup is incomplete, an attempt changed concurrently, or ordinary REST-only cleanup lacks confirmed completion. A Retry-After header of 5 indicates a confirmed incomplete Core result; wait at least 5 seconds and repeat the forced DELETE with the same options. A pending attempt is recovered by its recorded workflow ID. No automatic continuation is scheduled, and the Machine remains unavailable for placement.
+          headers:
+            Retry-After:
+              description: Minimum delay in seconds before repeating a forced deletion after a confirmed incomplete Core result. Other conflicts may omit this header.
+              schema:
+                type: integer
+                example: 5
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '412':
+          description: The Machine deletion preconditions were not met.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '429':
+          $ref: '#/components/responses/ResourceExhaustedError'
         '422':
           description: Describes an error response for 422 Unprocessable Content
           $ref: '#/components/responses/GenericHttpError'
         '500':
           description: Describes an error response for 500 Internal Server Error
           $ref: '#/components/responses/GenericHttpError'
-      description: Org must have an Infrastructure Provider entity. Machine must belong to the Provider. User must have authorization role with `PROVIDER_ADMIN` suffix. Machine must meet certain criteria to be eligible for deletion.
+        '503':
+          description: A dependency required to delete the Machine is temporarily unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '504':
+          description: The Machine deletion request timed out.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+      description: >-
+        Requires Provider Admin access to the Machine's Infrastructure Provider.
+        Regular deletion requires the Machine to be missing on Site for at least 24 hours,
+        with no attached Instance or assigned Instance Type. The confirmed-complete
+        retained-deletion recovery exception is described below.
+
+        Starting forced deletion requires a Registered Site and the applicable overrides.
+        Authoritative Core Instance-consent enforcement and the Instance Type override
+        require Core builds containing https://github.com/dsx-ai-factory/infra-controller/pull/5394.
+        Older Core ignores the new protobuf fields; REST-side checks against REST records
+        do not establish Core's current ownership state or replace server-side enforcement.
+        It also supports missing Machines without waiting 24 hours. Before contacting Core,
+        REST records an attempt ID and makes the Machine unavailable for every Instance
+        placement path and for new Allocation capacity. A timeout, transport failure, or
+        unavailable workflow history keeps that attempt and quarantine. Retrying retrieves
+        the exact recorded execution instead of issuing another Core deletion. If no result
+        is available, including after a crash before dispatch, provide the attempt ID from
+        the error to the Site operator; ordinary deletion remains blocked.
+
+        A definitive Core precondition or validation rejection allows a corrected forced
+        request to start a new attempt. A confirmed incomplete result returns HTTP 409 with
+        `Retry-After: 5`; repeat the same forced DELETE after at least 5 seconds. No automatic
+        continuation is scheduled. Only a confirmed complete result or an actual Core
+        NotFound response records completion. Missing Temporal history is not completion.
+
+        Forced deletion returns HTTP 202 only after confirmed Site completion. REST records
+        are removed only when no Instance deletion was requested, no Instance remains
+        attached, and remaining Allocation capacity is sufficient. Otherwise, owner records
+        remain. Allocation Constraints are never deleted by this operation. Present inventory
+        cannot clear the retained marker, and completed forced requests replay locally
+        without deleting a newly rediscovered Core Machine. A later REST cleanup failure
+        preserves completion proof for local replay without workflow history.
+
+        After confirmed completion, owners may remove the retained Instance and all Machine
+        Instance Type associations; existing quota guards may require them to reduce or
+        rebalance Allocation Constraints before unlinking. Ordinary DELETE, with force omitted or false and no
+        overrides, then removes only REST Machine records even if Core reports the Machine
+        present and no missing inventory was observed. The Machine must be unassigned and
+        have neither an Instance Type ID nor association rows. This cleanup never calls Core
+        and returns HTTP 202; a later fresh inventory may restore the rediscovered Machine.
   '/v2/org/{org}/nico/machine/{machineId}/bmc/reset':
     parameters:
       - schema:
@@ -13454,6 +13605,11 @@ paths:
                       serialNumber: SN-RACK-001
                       description: Primary compute rack
                       operationStatus: Ready
+                      operationStatusDetails:
+                        trayCountsByType:
+                          compute: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+                          nvSwitch: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+                          powerShelf: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
                       nvLinkDomainIds:
                         - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
                       taskStats:
@@ -13546,6 +13702,11 @@ paths:
                     serialNumber: SN-RACK-001
                     description: Primary compute rack
                     operationStatus: Ready
+                    operationStatusDetails:
+                      trayCountsByType:
+                        compute: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+                        nvSwitch: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+                        powerShelf: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
                     nvLinkDomainIds:
                       - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
                     taskStats:
@@ -13911,7 +14072,9 @@ paths:
       summary: Power control Racks
       operationId: power-control-racks
       description: |-
-        Power control Racks with optional filters. If no filter is specified, targets all racks in the Site.
+        Power control explicitly named Racks. Provide a nonempty `filter.names` list.
+        An omitted, null, or empty filter, including an empty names list, is rejected before task creation.
+        For a site-wide operation, list every intended rack.
 
         Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
         Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
@@ -13924,9 +14087,13 @@ paths:
             schema:
               $ref: '#/components/schemas/BatchUpdateRackPowerStateRequest'
             examples:
-              power-off-all:
+              power-off-racks:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
+                  filter:
+                    names:
+                      - Rack-001
+                      - Rack-002
                   state: 'Off'
               power-on-filtered:
                 value:
@@ -14036,7 +14203,9 @@ paths:
       summary: Firmware update Racks
       operationId: firmware-update-racks
       description: |-
-        Update firmware on Racks with optional name filter. If no filter is specified, targets all racks in the Site.
+        Update firmware on explicitly named Racks. Provide a nonempty `filter.names` list.
+        An omitted, null, or empty filter, including an empty names list, is rejected before task creation.
+        For a site-wide update, list every intended rack.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -14140,7 +14309,9 @@ paths:
       summary: Bring up Racks
       operationId: bringup-racks
       description: |-
-        Bring up Racks with optional name filter. If no filter is specified, targets all racks in the Site.
+        Bring up explicitly named Racks. Provide a nonempty `filter.names` list.
+        An omitted, null, or empty filter, including an empty names list, is rejected before task creation.
+        For a site-wide operation, list every intended rack.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
       requestBody:
@@ -14150,9 +14321,13 @@ paths:
             schema:
               $ref: '#/components/schemas/BatchBringUpRackRequest'
             examples:
-              all-racks:
+              named-racks:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
+                  filter:
+                    names:
+                      - Rack-001
+                      - Rack-002
               filtered:
                 value:
                   siteId: 550e8400-e29b-41d4-a716-446655440000
@@ -14336,6 +14511,7 @@ paths:
                   $ref: '#/components/schemas/Tray'
               examples:
                 example-1:
+                  summary: Compute tray
                   value:
                     - id: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
                       type: Compute
@@ -14352,6 +14528,51 @@ paths:
                         slotId: 1
                         trayIdx: 0
                         hostId: 1
+                      rackId: rack-01
+                      nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+                      nvosPorts: null
+                      taskStats:
+                        pendingTaskCount: 0
+                        activeTaskCount: 0
+                      health: null
+                nvswitch:
+                  summary: NVSwitch tray
+                  value:
+                    - id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+                      type: NVSwitch
+                      name: rack-01-nvswitch-01
+                      manufacturer: NVIDIA
+                      model: NVL-Switch
+                      serialNumber: MT2541X000123
+                      description: '{"nvos_ip":"192.0.2.20","rack_role":"nvlink-fabric"}'
+                      firmwareVersion: 2.1.0
+                      powerState: 'on'
+                      operationStatus: Ready
+                      leakStatus: NoLeak
+                      leakHandlingStatus: None
+                      position:
+                        slotId: 19
+                        trayIdx: 0
+                        hostId: 0
+                      bmcs:
+                        - type: BmcTypeHost
+                          macAddress: '02:00:00:01:00:10'
+                          ipAddress: 192.0.2.10
+                      nvosPorts:
+                        - mac: '02:00:00:01:00:20'
+                          servicePort: 22
+                          addresses:
+                            - addressFamily: IPv4
+                              address: 192.0.2.20
+                            - addressFamily: IPv6
+                              address: '2001:db8:1::20'
+                          isPrimary: true
+                        - mac: '02:00:00:01:00:21'
+                          servicePort: null
+                          addresses:
+                            - addressFamily: IPv4
+                              address: 198.51.100.21
+                          isPrimary: false
                       rackId: rack-01
                       nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
                       taskStats:
@@ -15958,10 +16179,60 @@ paths:
                       hostId: 1
                     rackId: rack-01
                     nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+                    nvosPorts: null
                     taskStats:
                       pendingTaskCount: 0
                       activeTaskCount: 0
                     health: null
+                nvswitch:
+                  summary: NVSwitch tray
+                  description: Illustrative NVSwitch inventory with separate BMC and NVOS addresses; the primary NVOS port has both IPv4 and IPv6 addresses.
+                  value:
+                    id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+                    type: NVSwitch
+                    name: rack-01-nvswitch-01
+                    manufacturer: NVIDIA
+                    model: NVL-Switch
+                    serialNumber: MT2541X000123
+                    description: '{"nvos_ip":"192.0.2.20","rack_role":"nvlink-fabric"}'
+                    firmwareVersion: 2.1.0
+                    powerState: 'on'
+                    operationStatus: Ready
+                    leakStatus: NoLeak
+                    leakHandlingStatus: None
+                    position:
+                      slotId: 19
+                      trayIdx: 0
+                      hostId: 0
+                    bmcs:
+                      - type: BmcTypeHost
+                        macAddress: '02:00:00:01:00:10'
+                        ipAddress: 192.0.2.10
+                    nvosPorts:
+                      - mac: '02:00:00:01:00:20'
+                        servicePort: 22
+                        addresses:
+                          - addressFamily: IPv4
+                            address: 192.0.2.20
+                          - addressFamily: IPv6
+                            address: '2001:db8:1::20'
+                        isPrimary: true
+                      - mac: '02:00:00:01:00:21'
+                        servicePort: null
+                        addresses:
+                          - addressFamily: IPv4
+                            address: 198.51.100.21
+                        isPrimary: false
+                    rackId: rack-01
+                    nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+                    taskStats:
+                      pendingTaskCount: 0
+                      activeTaskCount: 0
+                    health:
+                      source: switch-aggregate-health
+                      observedAt: '2026-11-05T14:30:00Z'
+                      successes: []
+                      alerts: []
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -26788,11 +27059,16 @@ components:
     Rack:
       title: Rack
       type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - health
+        - operationStatusDetails
       description: Rack represents a physical rack in the datacenter
       required:
         - health
         - nvLinkDomainIds
         - operationStatus
+        - operationStatusDetails
         - taskStats
       examples:
         - id: rack-01
@@ -26802,6 +27078,11 @@ components:
           serialNumber: SN-RACK-001
           description: Primary compute rack
           operationStatus: Ready
+          operationStatusDetails:
+            trayCountsByType:
+              compute: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+              nvSwitch: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+              powerShelf: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
           nvLinkDomainIds:
             - 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
           taskStats:
@@ -26869,6 +27150,16 @@ components:
             - Deleting
           description: >-
             Operability phase aggregated from tray operationStatus values.
+        operationStatusDetails:
+          oneOf:
+            - $ref: '#/components/schemas/RackOperationStatusDetails'
+            - type: 'null'
+          readOnly: true
+          description: >-
+            Explanation of operationStatus. Null when the upstream Flow server
+            does not provide tray counts. Available on both list and detail
+            responses, independently of includeComponents. This is an inventory
+            snapshot, not a guarantee that an operation is permitted.
         nvLinkDomainIds:
           type: array
           description: Domain external IDs (rack group IDs) containing this Rack. Empty when no rack-group Domain is assigned.
@@ -26889,6 +27180,74 @@ components:
             - $ref: '#/components/schemas/AggregateHealth'
             - type: 'null'
           description: Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
+    RackOperationStatusDetails:
+      type: object
+      required:
+        - trayCountsByType
+      properties:
+        trayCountsByType:
+          $ref: '#/components/schemas/TrayStatusCountsByType'
+    TrayStatusCountsByType:
+      type: object
+      description: >-
+        Counts by component type from the same snapshot used for operationStatus.
+        All three types are returned, with six zero counts for types without
+        participating records. Empty types do not affect the aggregate phase.
+      required: [compute, nvSwitch, powerShelf]
+      properties:
+        compute:
+          $ref: '#/components/schemas/TrayStatusCounts'
+        nvSwitch:
+          $ref: '#/components/schemas/TrayStatusCounts'
+        powerShelf:
+          $ref: '#/components/schemas/TrayStatusCounts'
+      example:
+        compute: {ready: 1, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+        nvSwitch: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+        powerShelf: {ready: 0, inUse: 0, initializing: 0, error: 0, deleting: 0, unknown: 0}
+    TrayStatusCounts:
+      type: object
+      description: >-
+        Counts of non-deleted tray inventory records for one component type,
+        partitioned by operationStatus. Records across all three types determine the
+        rack phase using Unknown > Error > Initializing > Deleting > InUse > Ready.
+        Other component types and undiscovered records are excluded. Missing or
+        unrecognized status on a participating record counts as unknown. An empty
+        rack has all zero counts and rack phase Unknown. Counts do not establish
+        snapshot freshness or expected-inventory completeness. All six fields
+        are returned, including zero; their sum is the participating count for this type.
+      required: [ready, inUse, initializing, error, deleting, unknown]
+      properties:
+        ready:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Number of trays in Ready.
+        inUse:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Number of trays in InUse.
+        initializing:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Number of trays in Initializing.
+        error:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Number of trays in Error.
+        deleting:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Number of trays in Deleting.
+        unknown:
+          type: integer
+          format: uint32
+          minimum: 0
+          description: Number of trays with unknown, missing or unrecognized status.
     RackLocation:
       title: RackLocation
       type: object
@@ -27082,10 +27441,14 @@ components:
     Tray:
       title: Tray
       type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - nvosPorts
       description: 'Tray represents a component within a rack (e.g. compute node, NVSwitch, power shelf)'
       required:
         - health
         - nvLinkDomainId
+        - nvosPorts
         - taskStats
       examples:
         - id: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
@@ -27109,12 +27472,58 @@ components:
               ipAddress: 192.168.1.100
           rackId: rack-01
           nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+          nvosPorts: null
           taskStats:
             pendingTaskCount: 3
             activeTaskCount: 1
           health:
             source: aggregate-host-health
             observedAt: '2026-09-28T12:00:00Z'
+            successes: []
+            alerts: []
+        - id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+          type: NVSwitch
+          name: rack-01-nvswitch-01
+          manufacturer: NVIDIA
+          model: NVL-Switch
+          serialNumber: MT2541X000123
+          description: '{"nvos_ip":"192.0.2.20","rack_role":"nvlink-fabric"}'
+          firmwareVersion: 2.1.0
+          powerState: 'on'
+          operationStatus: Ready
+          leakStatus: NoLeak
+          leakHandlingStatus: None
+          position:
+            slotId: 19
+            trayIdx: 0
+            hostId: 0
+          bmcs:
+            - type: BmcTypeHost
+              macAddress: '02:00:00:01:00:10'
+              ipAddress: 192.0.2.10
+          nvosPorts:
+            - mac: '02:00:00:01:00:20'
+              servicePort: 22
+              addresses:
+                - addressFamily: IPv4
+                  address: 192.0.2.20
+                - addressFamily: IPv6
+                  address: '2001:db8:1::20'
+              isPrimary: true
+            - mac: '02:00:00:01:00:21'
+              servicePort: null
+              addresses:
+                - addressFamily: IPv4
+                  address: 198.51.100.21
+              isPrimary: false
+          rackId: rack-01
+          nvLinkDomainId: 59202b81-65fb-45ec-b3b8-91ab0ad3f34a
+          taskStats:
+            pendingTaskCount: 0
+            activeTaskCount: 0
+          health:
+            source: switch-aggregate-health
+            observedAt: '2026-11-05T14:30:00Z'
             successes: []
             alerts: []
       properties:
@@ -27143,7 +27552,7 @@ components:
           description: Serial number of the tray
         description:
           type: string
-          description: Description of the tray
+          description: Description of the tray.
         firmwareVersion:
           type: string
           description: Firmware version of the tray
@@ -27177,6 +27586,12 @@ components:
           description: BMC (Baseboard Management Controller) entries for the tray
           items:
             $ref: '#/components/schemas/BMCInfo'
+        nvosPorts:
+          x-go-required-nullable: true
+          type: [array, 'null']
+          description: Observed NVOS management ports for NVSwitch trays, including ports without addresses. Empty when no port data is available; null for other tray types.
+          items:
+            $ref: '#/components/schemas/SwitchNvosPortInfo'
         rackId:
           type: string
           description: ID of the Rack this Tray belongs to
@@ -27192,6 +27607,59 @@ components:
             - $ref: '#/components/schemas/AggregateHealth'
             - type: 'null'
           description: Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
+    SwitchNvosPortInfo:
+      title: SwitchNvosPortInfo
+      type: object
+      x-go-has-nullable-required-properties: true
+      x-go-nullable-required-properties:
+        - mac
+        - servicePort
+      description: Observed NVOS management port.
+      required: [mac, servicePort, addresses, isPrimary]
+      properties:
+        mac:
+          type: [string, 'null']
+          description: MAC address of the NVOS management port, or null when unavailable.
+        servicePort:
+          type: [integer, 'null']
+          format: int64
+          minimum: 0
+          maximum: 4294967295
+          description: TCP service port for NVOS, or null when unavailable.
+        addresses:
+          type: array
+          description: Observed IP addresses. Empty when the port has no addresses.
+          items:
+            $ref: '#/components/schemas/IPAddress'
+        isPrimary:
+          type: boolean
+          description: Whether this is the operator-declared primary (eth0) NVOS port.
+      examples:
+        - mac: '00:11:22:33:44:55'
+          servicePort: 22
+          addresses:
+            - addressFamily: IPv4
+              address: 192.0.2.20
+          isPrimary: true
+    IPAddress:
+      title: IPAddress
+      type: object
+      description: IP address and its address family.
+      required: [addressFamily, address]
+      properties:
+        addressFamily:
+          type: string
+          enum:
+            - Unspecified
+            - IPv4
+            - IPv6
+          description: Address family reported for this IP address.
+        address:
+          type: string
+          description: IPv4 or IPv6 address.
+      examples:
+        - addressFamily: IPv4
+          address: 192.0.2.20
     TrayPosition:
       title: TrayPosition
       type: object
@@ -27212,13 +27680,17 @@ components:
     RackFilter:
       title: RackFilter
       type: object
-      description: Filter criteria for selecting racks in batch operations. If omitted or empty, all racks in the site are targeted.
+      description: |-
+        Select racks by name for batch power, firmware, and bring-up operations.
+        Provide a nonempty `names` list. Omitted, null, or empty filters, including
+        an empty names list, are rejected before task creation. To target every
+        rack in a site, list every intended rack name.
       properties:
         names:
           type: array
           items:
             type: string
-          description: Filter racks by name
+          description: Names of the racks to target. Provide at least one rack name.
     TrayFilter:
       title: TrayFilter
       type: object
@@ -27737,7 +28209,7 @@ components:
           - Unknown
         operation:
           type: string
-          description: Recorded operation. `Reset` does not preserve the original graceful/forced/AC-cycle distinction.
+          description: Recorded operation. For `Reset`, graceful=true identifies an explicit graceful host reboot; legacy records do not preserve the original restart mode.
           enum:
           - PowerOn
           - PowerOff
@@ -27759,7 +28231,7 @@ components:
           type:
           - boolean
           - 'null'
-          description: 'Present for `PowerOff` only: true is graceful, false is forced. Null for other operations.'
+          description: 'For `PowerOff`, true is graceful and false is forced. For an explicit graceful host reboot, operation is `Reset` and graceful is true. Null for legacy Reset records and other operations.'
         chassisId:
           type:
           - string
@@ -31002,10 +31474,15 @@ components:
             - boolean
             - 'null'
           description: When true, the server is not locked down during host lifecycle management. When omitted, the existing value is preserved.
+        retainHbnConfigOnBoot:
+          type:
+            - boolean
+            - 'null'
+          description: When true, the machine is designated to retain HBN configuration on boot. This allows the machine to boot while NICO's DHCP and gRPC services are unavailable. A designated machine must declare a dpu_bmc and a dpu_os interface, and requires a fixed or retained IP allocation on the host BMC and on both DPU interfaces. A machine whose dpuPolicy attaches no DPU declares neither. When omitted, the existing value is preserved.
     ExpectedMachineInterface:
       title: ExpectedMachineInterface
       type: object
-      description: Expected interface declaration. Each supplied list entry replaces the corresponding declaration, so preserve all returned attributes when editing it. Core validates role, primary selection, and allocation against the Site configuration.
+      description: Expected interface declaration. Each supplied list entry replaces the corresponding declaration, so preserve all returned attributes when editing it. Core validates role, primary selection, and allocation against the Site configuration. DpuLoopback reserves an underlay loopback for the DPU identified by its OS/admin MAC, which may also appear in a DpuOs entry. It requires a MAC identifier and fixedIp; ipAllocation may be Fixed, omitted, null, or Unspecified (which infer Fixed). Astra names, nicType, fixedMask, non-empty fixedGateway, primary (including false), and networkSegmentType are not supported for DpuLoopback. Each DPU MAC may declare one loopback per address family; an undeclared family keeps automatic allocation. Changes apply upon DPU deletion and re-ingestion, without readdressing a live DPU.
       examples:
         - identifier:
             macAddress: '02:00:00:00:00:10'
@@ -31052,19 +31529,19 @@ components:
           description: Optional IPv4 or IPv6 gateway. Omission, null, or an empty string clears it when replacing the declaration.
         primary:
           type: [boolean, 'null']
-          description: Host boot-interface selection. At most one Host interface per machine may set true. Omission or null clears the declaration. DpuOs and DpuBmc must omit it; HostBmc also accepts false.
+          description: Host boot-interface selection. At most one Host interface per machine may set true. Omission or null clears the declaration. DpuOs, DpuBmc, and DpuLoopback must omit it; HostBmc also accepts false.
         networkSegmentType:
           type: [string, 'null']
           enum: [Tenant, Admin, Underlay, HostInband, null]
-          description: Optional segment constraint that takes precedence over nicType. Omission or null clears it. For explicit allocation policies and DPU roles it constrains relay-selected or fixed-address segments; legacy Host declarations without an explicit policy use it only for initial DHCP segment selection.
+          description: Optional segment constraint that takes precedence over nicType. Omission or null clears it. For explicit allocation policies and physical DPU roles it constrains relay-selected or fixed-address segments; legacy Host declarations without an explicit policy use it only for initial DHCP segment selection. DpuLoopback must omit it.
         role:
           type: [string, 'null']
-          enum: [Unspecified, Host, DpuOs, DpuBmc, HostBmc, null]
-          description: Interface owner. On create, omission, null, or Unspecified means Host. On update, omission or null preserves a matching stored role; Unspecified resets it to Host. At most one HostBmc is allowed, with the same MAC as bmcMacAddress.
+          enum: [Unspecified, Host, DpuOs, DpuBmc, HostBmc, DpuLoopback, null]
+          description: Interface owner. On create, omission, null, or Unspecified means Host. On update, omission or null preserves a matching stored role; preserving DpuLoopback requires an unchanged MAC and fixedIp, so changing its address requires explicit DpuLoopback. Unspecified resets the role to Host. At most one HostBmc is allowed, with the same MAC as bmcMacAddress.
         ipAllocation:
           type: [string, 'null']
           enum: [Unspecified, Dynamic, Fixed, Retained, null]
-          description: On create, omission, null, or Unspecified infers Fixed from fixedIp, otherwise Retained for HostBmc and Dynamic for other roles. On update, omission or null preserves a matching stored policy while fixedIp presence is unchanged; Unspecified resets inference. Fixed requires fixedIp; Dynamic and Retained forbid it. Explicit Fixed, inferred DPU Fixed, and inferred HostBmc Fixed with a segment constraint require a containing managed prefix; legacy Host or inferred HostBmc Fixed without a constraint may use static assignments. Retained keeps a DHCP-allocated address for the interface row lifetime.
+          description: On create, omission, null, or Unspecified infers Fixed from fixedIp, otherwise Retained for HostBmc and Dynamic for other roles. On update, omission or null preserves a matching stored policy while fixedIp presence is unchanged; Unspecified resets inference. Fixed requires fixedIp; Dynamic and Retained forbid it. DpuLoopback supports only Fixed and requires an address in the non-auto-assign partition of the Site's lo-ip or lo-ip-v6 pool. Other explicit Fixed, inferred DPU Fixed, and inferred HostBmc Fixed with a segment constraint require a containing managed prefix; legacy Host or inferred HostBmc Fixed without a constraint may use static assignments. Retained keeps a DHCP-allocated address for the interface row lifetime.
     ExpectedMachineInterfaceIdentifier:
       title: ExpectedMachineInterfaceIdentifier
       type: object
@@ -31275,7 +31752,7 @@ components:
       title: ExpectedMachineCreateRequest
       type: object
       description: |-
-        Request data to create a new ExpectedMachine.
+        Request data to create a new Expected Machine, or to declare a machine in a complete inventory replacement.
 
         Note: BMC credentials (username/password) are only accepted during creation and updates but are not returned in responses.
       examples:
@@ -31343,9 +31820,16 @@ components:
           type:
             - array
             - 'null'
-          description: Optional expected host NIC declarations. Omission or null creates an empty list.
+          description: |-
+            Physical-interface and DPU-loopback declarations. For a new machine, omission or null creates an empty list.
+
+            In a complete inventory replacement, this list replaces the physical-interface subset; omission, null, or an empty list clears that subset. For a retained BMC MAC, stored loopbacks are preserved unless the list includes a DpuLoopback declaration (including one whose omitted role is preserved), or replaceDpuLoopbacks is true. Either case replaces the complete loopback subset with the supplied loopback declarations.
           items:
             $ref: '#/components/schemas/ExpectedMachineInterface'
+        replaceDpuLoopbacks:
+          type: [boolean, 'null']
+          default: false
+          description: When true, replace the complete DPU-loopback subset with the loopback declarations in interfaces, clearing stored loopbacks omitted from the list. Requires non-null interfaces; an empty list clears all interface declarations. Omission, null, or false preserves stored loopbacks unless the interfaces list includes a DpuLoopback declaration (including one whose omitted role is preserved). This is request-only intent and is not stored on the Expected Machine.
         skuId:
           type:
             - string
@@ -31426,7 +31910,7 @@ components:
     ExpectedMachineList:
       title: ExpectedMachineList
       type: object
-      description: Complete replacement set of Expected Machines for one Site. Every entry must use the top-level `siteId`; the array may be empty to clear the set.
+      description: Complete replacement set of Expected Machines for one Site. Every entry must use the top-level `siteId`; omitted machines are deleted, and an empty array clears the set. For retained BMC MACs, each entry replaces physical interfaces while preserving stored loopbacks unless its interfaces list includes a DpuLoopback declaration (including one whose omitted role is preserved), or replaceDpuLoopbacks is true.
       examples:
         - siteId: f97df110-f4de-492e-8849-4a6af68026b0
           expectedMachines:
@@ -31531,9 +32015,16 @@ components:
           type:
             - array
             - 'null'
-          description: Complete expected host NIC list. Omission or null preserves the current list; an explicit empty list clears it.
+          description: |-
+            Expected physical-interface and DPU-loopback declarations. Omission or null preserves the current list. A non-null list replaces the physical-interface subset; an empty list clears that subset.
+
+            Stored loopbacks are preserved unless the list includes a DpuLoopback declaration (including one whose omitted role is preserved), or replaceDpuLoopbacks is true. Either case replaces the complete loopback subset with the supplied loopback declarations, clearing any omitted loopbacks.
           items:
             $ref: '#/components/schemas/ExpectedMachineInterface'
+        replaceDpuLoopbacks:
+          type: [boolean, 'null']
+          default: false
+          description: When true, replace the complete DPU-loopback subset with the loopback declarations in interfaces, clearing stored loopbacks omitted from the list. Requires non-null interfaces; an empty list clears all interface declarations. Omission, null, or false preserves stored loopbacks unless the interfaces list includes a DpuLoopback declaration (including one whose omitted role is preserved). This is request-only intent and is not stored on the Expected Machine.
         skuId:
           type:
             - string
@@ -32551,6 +33042,13 @@ components:
           type: string
           pattern: '^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$'
           description: MAC address of this NVOS ethernet port.
+        ipAddress:
+          type:
+            - string
+            - 'null'
+          minLength: 1
+          description: Optional static IPv4 or IPv6 address. May be set only when the Expected Switch has exactly one NVOS interface. It must not be unspecified, multicast, or IPv4 limited broadcast.
+          example: '192.0.2.20'
         isPrimary:
           type: boolean
           description: Whether this port is the primary (eth0) NVOS port that NICo manages through RMS. At most one port per switch can be primary; when no port is marked, the first port on a multi-port switch defaults to primary and a single-port switch is always its own primary.
@@ -32915,9 +33413,11 @@ components:
           writeOnly: true
           description: NvOS password for the Expected Switch. Omission or null preserves the value. A non-empty value can be supplied without nvOsUsername. Provide both fields when setting NVOS credentials for the first time.
         nvosInterfaces:
-          type: array
+          type:
+            - array
+            - 'null'
           minItems: 1
-          description: Replace the Expected Switch's NVOS ethernet port set. Omission preserves the stored ports; an empty array is rejected because a switch must keep at least one NVOS port. Mark one entry primary to choose eth0. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
+          description: Replace the Expected Switch's NVOS ethernet port set, including its optional static IP address. Omission or null preserves the stored ports and address; an empty array is rejected because a switch must keep at least one NVOS port. A supplied list without an ipAddress clears the previous NVOS address. Mark one entry primary to choose eth0. The deprecated `nvosMacAddresses` field is ignored even when both fields are supplied.
           items:
             $ref: '#/components/schemas/NvosInterface'
         nvosMacAddresses:
@@ -34371,12 +34871,13 @@ components:
     DpuExtensionService:
       title: DpuExtensionService
       type: object
-      description: DPU Extension Service allows user defined services to run on DPUs of their Instances
+      description: DPU Extension Service runs user-defined services on DPUs through instance attachment or baseline deployment
       examples:
         - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
           name: busybox
           description: 'Single, multi-call executable that contains stripped-down versions of common Unix utilities'
           serviceType: KubernetesPod
+          deploymentType: DemandDriven
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
           tenantId: f97df110-f4de-492e-8849-4a6af68026b0
           version: V1-T1761856992374052
@@ -34426,9 +34927,11 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        deploymentType:
+          $ref: '#/components/schemas/DpuExtensionServiceDeploymentType'
         dpuTarget:
           $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
-          description: Immutable DPU placement policy for DpfHelmChart services; null for KubernetesPod services
+          description: Immutable host-scoped placement for `DemandDriven` Helm services; null for `Baseline` Helm and KubernetesPod services
         siteId:
           type: string
           format: uuid
@@ -34478,6 +34981,23 @@ components:
         - Error
         - Updating
         - Deleting
+    DpuExtensionServiceDeploymentType:
+      title: DpuExtensionServiceDeploymentType
+      type: string
+      description: |-
+        Immutable deployment policy. Omitted or null on create defaults to `DemandDriven`,
+        which deploys through instance attachment. `Baseline` is supported only for
+        DpfHelmChart services and requests deployment to all DPUs managed by DPF at
+        creation, without a DPU target. Baseline services cannot be attached to instances.
+        Empty and unknown values are rejected. Responses always include the stored policy.
+        This field cannot be changed through updates.
+      default: DemandDriven
+      enum:
+        - DemandDriven
+        - Baseline
+      examples:
+        - DemandDriven
+        - Baseline
     DpuExtensionServiceDpuTarget:
       title: DpuExtensionServiceDpuTarget
       type:
@@ -34491,11 +35011,12 @@ components:
     DpuExtensionServiceSummary:
       title: DpuExtensionServiceSummary
       type: object
-      description: DPU Extension Service allows user defined services to run on DPUs of their Instances
+      description: DPU Extension Service runs user-defined services on DPUs through instance attachment or baseline deployment
       examples:
         - id: 497f6eca-6276-4993-bfeb-53cbbbba6f08
           name: busybox
           serviceType: KubernetesPod
+          deploymentType: DemandDriven
           latestVersion: V1-T1761856992374052
           status: Ready
       properties:
@@ -34513,9 +35034,11 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        deploymentType:
+          $ref: '#/components/schemas/DpuExtensionServiceDeploymentType'
         dpuTarget:
           $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
-          description: Immutable DPU placement policy for DpfHelmChart services; null for KubernetesPod services
+          description: Immutable host-scoped placement for `DemandDriven` Helm services; null for `Baseline` Helm and KubernetesPod services
         latestVersion:
           type:
             - string
@@ -34687,6 +35210,7 @@ components:
         - name: busybox
           description: 'Single, multi-call executable that contains stripped-down versions of common Unix utilities'
           serviceType: KubernetesPod
+          deploymentType: DemandDriven
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
           data: 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: busybox-deployment\n  labels:\n    app: busybox\nspec:\n  replicas: 1 # You can adjust the number of desired replicas here\n  selector:\n    matchLabels:\n      app: busybox\n  template:\n    metadata:\n      labels:\n        app: busybox\n    spec:\n      containers:\n      - name: busybox-container\n        image: busybox:latest # You can specify a different BusyBox image tag\n        command: ["sh", "-c", "echo \''BusyBox container running\'' && sleep 3600"]'
           credentials:
@@ -34702,6 +35226,7 @@ components:
         - name: storage-client
           description: DPF-managed storage client
           serviceType: DpfHelmChart
+          deploymentType: DemandDriven
           dpuTarget: AllActive
           siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
           data: '{"repoURL":"https://helm-registry.example/dpf","chartName":"storage-client","chartVersion":"2.0.0","serviceID":"storage-client-v2","deployInCluster":false,"security":{"privileged":true,"spiffe":{}},"serviceDaemonSet":{"labels":{"app.kubernetes.io/name":"storage-client"},"annotations":{},"resources":{"nvidia.com/bf_sf":"1"},"updateStrategy":{"type":"RollingUpdate","rollingUpdate":{"maxUnavailable":1}}}}'
@@ -34720,9 +35245,13 @@ components:
           enum:
             - KubernetesPod
             - DpfHelmChart
+        deploymentType:
+          oneOf:
+            - $ref: '#/components/schemas/DpuExtensionServiceDeploymentType'
+            - type: 'null'
         dpuTarget:
           $ref: '#/components/schemas/DpuExtensionServiceDpuTarget'
-          description: Required for DpfHelmChart services and unsupported for KubernetesPod services
+          description: Required for `DemandDriven` DpfHelmChart services; omitted or null for `Baseline` Helm and KubernetesPod services
         siteId:
           type: string
           format: uuid
@@ -35199,12 +35728,14 @@ components:
             This is determined per request from how the token's issuer is configured
             at deployment time (the issuer config in the `nico-rest-api-config`
             ConfigMap); it cannot be toggled via the API. Rules by issuer origin:
-              - `keycloak`: true for a client-credentials (service-to-service) token —
-                i.e. the token carries a client ID — when the issuer is deployed with
-                `keycloak.serviceAccount: true`.
+              - `keycloak`: true for a client-credentials (service-to-service) token
+                that holds both `PROVIDER_ADMIN` and `TENANT_ADMIN` in the requested
+                org, when the issuer is deployed with `keycloak.serviceAccount: true`
+                and the org is listed in `keycloak.serviceAccountOrgs`. Disconnected
+                mode allows only one listed org.
               - `custom`: true when the `claimMapping` matched for this org sets
-                `isServiceAccount: true`. Only permitted when the API runs in
-                disconnected mode.
+                `isServiceAccount: true`. Disconnected mode allows only one such
+                mapping.
               - `kas-ssa` / `kas-legacy`: always false; service accounts are not
                 supported for these origins.
 

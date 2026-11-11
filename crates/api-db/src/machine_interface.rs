@@ -39,7 +39,7 @@ use model::machine_interface::InterfaceType;
 use model::machine_interface_address::{InterfaceAssociationType, MachineInterfaceAssociation};
 use model::network_prefix::NetworkPrefix;
 use model::network_segment::{AllocationStrategy, NetworkSegment, NetworkSegmentType};
-use model::predicted_machine_interface::PredictedMachineInterface;
+use model::predicted_machine_interface::{NewPredictedMachineInterface, PredictedMachineInterface};
 use sqlx::{FromRow, PgConnection, PgTransaction};
 
 use super::{ColumnInfo, FilterableQueryBuilder, ObjectColumnFilter};
@@ -99,6 +99,9 @@ impl ColumnInfo<'_> for IdColumn {
     }
 }
 
+mod collection;
+pub use collection::MachineInterfaces;
+
 mod host_address_candidates;
 
 #[cfg(test)]
@@ -107,6 +110,8 @@ mod allocation_benchmark;
 mod ip_allocator;
 #[cfg(test)]
 mod test_allocation_removal;
+#[cfg(test)]
+mod test_dpu_oob_interface;
 #[cfg(test)]
 mod test_duplicate_mac;
 #[cfg(test)]
@@ -281,6 +286,60 @@ pub async fn set_primary_interface(
         crate::dns::domain::bump_serial_for_interface(txn, *interface_id).await?;
     }
     Ok(id)
+}
+
+/// Updates a group of primary flags and invalidates DNS for the changed rows.
+pub async fn set_primary_interfaces(
+    interface_ids: &[MachineInterfaceId],
+    primary: bool,
+    txn: &mut PgConnection,
+) -> DatabaseResult<()> {
+    if interface_ids.is_empty() {
+        return Ok(());
+    }
+    let query = "UPDATE machine_interfaces SET primary_interface=$1 \
+                 WHERE id=ANY($2) AND primary_interface IS DISTINCT FROM $1 RETURNING id";
+    let changed: Vec<MachineInterfaceId> = sqlx::query_scalar(query)
+        .bind(primary)
+        .bind(interface_ids)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    crate::dns::domain::bump_serial_for_interfaces(txn, &changed).await
+}
+
+/// Associates a group of interfaces after their primary flags have been settled.
+pub async fn associate_interfaces_with_machine(
+    interface_ids: &[MachineInterfaceId],
+    machine_id: &MachineId,
+    txn: &mut PgConnection,
+) -> DatabaseResult<()> {
+    if interface_ids.is_empty() {
+        return Ok(());
+    }
+    let query = "UPDATE machine_interfaces SET machine_id=$1, association_type='Machine'::association_type WHERE id=ANY($2)";
+    sqlx::query(query)
+        .bind(machine_id)
+        .bind(interface_ids)
+        .execute(txn)
+        .await
+        .map_err(|error| match error {
+            sqlx::Error::Database(ref e)
+                if e.constraint() == Some(SQL_VIOLATION_ONE_PRIMARY_INTERFACE) =>
+            {
+                DatabaseError::OnePrimaryInterface
+            }
+            sqlx::Error::Database(ref e)
+                if e.constraint() == Some(SQL_VIOLATION_MAX_ONE_ASSOCIATION) =>
+            {
+                DatabaseError::MaxOneInterfaceAssociation
+            }
+            error => DatabaseError::query(query, error),
+        })?;
+    for id in interface_ids {
+        tracing::info!(machine_interface_id = %id, %machine_id, "Migrating unowned machine_interface to managed host");
+    }
+    Ok(())
 }
 
 /// Clears `primary_interface` on every interface a machine currently owns.
@@ -502,6 +561,85 @@ pub async fn find_by_mac_address(
     find_by(txn, ObjectColumnFilter::One(MacAddressColumn, &macaddr)).await
 }
 
+/// Loads all interface rows for report MACs, including unowned and BMC rows.
+pub async fn find_by_mac_addresses(
+    db: impl DbReader<'_>,
+    mac_addresses: &[MacAddress],
+) -> DatabaseResult<Vec<MachineInterfaceSnapshot>> {
+    find_by(
+        db,
+        ObjectColumnFilter::List(MacAddressColumn, mac_addresses),
+    )
+    .await
+}
+
+/// Associates an unowned OOB interface with the supplied DPU or predicts it before DHCP.
+///
+/// Returns `true` when an interface is associated or a prediction is created.
+/// Already-owned interfaces and matching predictions are left unchanged. A prediction
+/// owned by another machine returns [`DatabaseError::AlreadyFoundError`]. All reads
+/// and writes use the caller's transaction.
+pub async fn ensure_dpu_oob_interface_ownership(
+    txn: &mut PgConnection,
+    dpu_machine_id: &MachineId,
+    oob_mac_address: MacAddress,
+) -> DatabaseResult<bool> {
+    let interfaces = find_by_mac_address(&mut *txn, oob_mac_address).await?;
+
+    if let Some(interface) = interfaces.first()
+        && interface.machine_id.is_none()
+    {
+        tracing::info!(
+            machine_interface_id = %interface.id,
+            machine_id = %dpu_machine_id,
+            "Associating machine interface with machine"
+        );
+        associate_interface_with_machine(
+            &interface.id,
+            MachineInterfaceAssociation::Machine(*dpu_machine_id),
+            txn,
+        )
+        .await?;
+        associate_interface_with_dpu_machine(&interface.id, dpu_machine_id, txn).await?;
+        return Ok(true);
+    }
+
+    if interfaces.is_empty() {
+        if let Some(prediction) =
+            crate::predicted_machine_interface::find_by_mac_address(&mut *txn, oob_mac_address)
+                .await?
+        {
+            if prediction.machine_id != *dpu_machine_id {
+                return Err(DatabaseError::AlreadyFoundError {
+                    kind: "PredictedMachineInterface",
+                    id: oob_mac_address.to_string(),
+                });
+            }
+            return Ok(false);
+        }
+
+        crate::predicted_machine_interface::create(
+            NewPredictedMachineInterface {
+                machine_id: dpu_machine_id,
+                mac_address: oob_mac_address,
+                expected_network_segment_type: NetworkSegmentType::Underlay,
+                boot_interface_id: None,
+                primary_interface: true,
+            },
+            txn,
+        )
+        .await?;
+        tracing::info!(
+            machine_id = %dpu_machine_id,
+            mac_address = %oob_mac_address,
+            "Created predicted DPU OOB interface"
+        );
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 /// This function returns only an IP for efficiency, we don't need to fetch/deserialize the entire
 /// MachineInterfaceSnapshot
 pub async fn lookup_bmc_ip_by_mac_address(
@@ -654,6 +792,25 @@ where
         }
     })
     .into_group_map())
+}
+
+/// `lock_for_machine_cleanup` locks every interface currently owned by, or
+/// attached to a DPU in, `machine_ids`, including BMC interfaces, in interface
+/// ID order. Take the required segment and exploration locks first, then call
+/// this before locking machine rows for cleanup.
+pub async fn lock_for_machine_cleanup(
+    txn: &mut PgConnection,
+    machine_ids: &[MachineId],
+) -> DatabaseResult<()> {
+    let query = "SELECT id FROM machine_interfaces
+        WHERE machine_id = ANY($1) OR attached_dpu_machine_id = ANY($1)
+        ORDER BY id FOR UPDATE";
+    sqlx::query(query)
+        .bind(machine_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
 }
 
 /// `find_by_machine_id_for_update` locks one machine's non-BMC interface rows in
@@ -2750,6 +2907,10 @@ async fn insert_machine_interface(
     is_primary_interface: bool,
     interface_type: InterfaceType,
 ) -> DatabaseResult<MachineInterfaceId> {
+    if let Some(domain_id) = domain_id {
+        crate::dns::domain::lock_live_for_reference(txn, domain_id).await?;
+    }
+
     let query = "INSERT INTO machine_interfaces
         (segment_id, mac_address, hostname, domain_id, primary_interface, interface_type)
         VALUES
@@ -2779,7 +2940,10 @@ async fn insert_machine_interface(
     Ok(interface_id)
 }
 
-async fn find_by<'a, C: ColumnInfo<'a, TableType = MachineInterfaceSnapshot>>(
+/// Reads interface snapshots matching `filter`, including BMC interfaces.
+/// Addresses and DHCP vendor strings are included; result order is unspecified.
+/// This read performs no refresh or mutation and propagates database failures.
+pub async fn find_by<'a, C: ColumnInfo<'a, TableType = MachineInterfaceSnapshot>>(
     txn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<MachineInterfaceSnapshot>, DatabaseError> {
@@ -4037,6 +4201,31 @@ async fn delete_dhcp_addresses_from_interface(
     Ok(removed)
 }
 
+/// Validates a new Domain reference under the interface row lock.
+/// Retained references may already point at a deleted Domain. Address cleanup
+/// can preserve or clear those references; only adding or rebinding needs a live
+/// target. Read the current reference after locking so a concurrent rebind
+/// cannot make the same-ID exception apply to a stale snapshot.
+async fn validate_domain_reference_update(
+    txn: &mut PgConnection,
+    interface_id: MachineInterfaceId,
+    domain_id: Option<DomainId>,
+) -> DatabaseResult<()> {
+    let Some(domain_id) = domain_id else {
+        return Ok(());
+    };
+    let query = "SELECT domain_id FROM machine_interfaces WHERE id = $1 FOR UPDATE";
+    let current_domain: Option<Option<DomainId>> = sqlx::query_scalar(query)
+        .bind(interface_id)
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if current_domain.is_some_and(|current| current != Some(domain_id)) {
+        crate::dns::domain::lock_live_for_reference(txn, domain_id).await?;
+    }
+    Ok(())
+}
+
 /// Updates hostname and domain together for a machine interface.
 async fn update_hostname_and_domain(
     txn: &mut PgConnection,
@@ -4044,6 +4233,8 @@ async fn update_hostname_and_domain(
     hostname: &str,
     domain_id: Option<DomainId>,
 ) -> DatabaseResult<bool> {
+    validate_domain_reference_update(txn, interface_id, domain_id).await?;
+
     // The old zone loses the name and the new zone gains it, so both serials
     // advance when the row actually changed. The sub-select in RETURNING runs
     // under the statement's snapshot, which cannot see the row this same
@@ -4155,6 +4346,8 @@ pub async fn update_segment_id(
     segment_id: NetworkSegmentId,
     domain_id: Option<DomainId>,
 ) -> DatabaseResult<()> {
+    validate_domain_reference_update(txn, interface_id, domain_id).await?;
+
     // The interface's names leave the old zone and appear in the new one, so
     // both serials advance when the row actually changed. The sub-select in
     // RETURNING sees the pre-update row, so it yields the old domain_id; see

@@ -31,7 +31,7 @@ use carbide_rvs::partitions::Partitions;
 use carbide_rvs::{artifact, client, rack, scenario, validation};
 use clap::Parser;
 use forge_tls::client_config::ClientCert;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 use tracing::level_filters::LevelFilter;
@@ -92,7 +92,8 @@ async fn main() -> Result<(), RvsError> {
         cert_path: cfg.tls.identity_pemfile_path.clone(),
         key_path: cfg.tls.identity_keyfile_path.clone(),
     };
-    let client_config = ForgeClientConfig::new(cfg.tls.root_cafile_path.clone(), Some(client_cert));
+    let client_config =
+        CarbideClientConfig::new(cfg.tls.root_cafile_path.clone(), Some(client_cert));
     let api_config = ApiConfig::new(&cfg.nico.url, &client_config);
     let nico = client::NicoClient::new(&api_config);
 

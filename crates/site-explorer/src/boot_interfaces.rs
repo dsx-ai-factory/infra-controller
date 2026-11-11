@@ -19,10 +19,16 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 
 use carbide_utils::none_if_empty::NoneIfEmpty;
+use carbide_uuid::machine::PredictedHostMachineId;
 use db::{DatabaseError, Transaction};
 use mac_address::MacAddress;
-use model::machine_boot_interface::MachineBootInterface;
-use model::site_explorer::ExploredEndpoint;
+use model::machine_boot_interface::{
+    BootInterfaceSelectionSource, MachineBootInterface, MachineBootInterfaceTarget,
+};
+use model::site_explorer::{ExploredEndpoint, HostPrimaryInterfaceSelection};
+use sqlx::PgConnection;
+
+use crate::errors::SiteExplorerResult;
 
 /// Selected boot interfaces for host endpoints.
 pub(super) struct HostBootInterfaces {
@@ -146,5 +152,144 @@ impl NicBootInterfaces {
         }
 
         Ok(())
+    }
+}
+
+/// Returns `ExpectedMachine` when the declared MAC became durable, otherwise
+/// returns the report source only when its MAC matches the durable target.
+/// `LegacyUnknown` covers every other target, including one chosen by a report
+/// fallback when Redfish could not resolve the declared interface and the
+/// fallback selected a different MAC.
+pub(super) fn initial_selection_source(
+    target: &MachineBootInterfaceTarget,
+    report_selection: Option<HostPrimaryInterfaceSelection>,
+    declared_primary: Option<MacAddress>,
+) -> BootInterfaceSelectionSource {
+    let target_mac = target.mac_address();
+    if declared_primary == Some(target_mac) {
+        return BootInterfaceSelectionSource::ExpectedMachine;
+    }
+
+    report_selection
+        .filter(|selection| selection.mac_address == target_mac)
+        .map_or(BootInterfaceSelectionSource::LegacyUnknown, |selection| {
+            selection.source
+        })
+}
+
+/// Selects declared or retained primary intent while preserving an existing primary.
+pub(super) async fn zero_dpu_primary_mac(
+    txn: &mut PgConnection,
+    existing_machine_id: Option<PredictedHostMachineId>,
+    mac_addresses: &[MacAddress],
+    declared_primary: Option<MacAddress>,
+    retained_boot_interface_window: Option<chrono::Duration>,
+) -> SiteExplorerResult<Option<MacAddress>> {
+    let has_existing_primary = if declared_primary.is_none()
+        && let Some(machine_id) = existing_machine_id
+    {
+        db::machine_interface::machine_has_primary_interface(&machine_id, &mut *txn).await?
+            || db::predicted_machine_interface::find_by_machine_id(&mut *txn, &machine_id)
+                .await?
+                .iter()
+                .any(|prediction| prediction.primary_interface)
+    } else {
+        false
+    };
+    Ok(match declared_primary {
+        Some(declared) => Some(declared),
+        None if !has_existing_primary => {
+            let mut recovered = None;
+            for mac_address in mac_addresses {
+                if db::retained_boot_interface::find_by_mac(
+                    &mut *txn,
+                    *mac_address,
+                    retained_boot_interface_window,
+                )
+                .await?
+                .is_some()
+                {
+                    recovered = Some(*mac_address);
+                    break;
+                }
+            }
+            recovered
+        }
+        None => None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::{Check, check_values};
+
+    use super::*;
+
+    #[test]
+    fn initial_selection_source_must_match_the_durable_target() {
+        let target_mac = MacAddress::new([0x02, 0, 0, 0, 0, 1]);
+        let other_mac = MacAddress::new([0x02, 0, 0, 0, 0, 2]);
+        let target = MachineBootInterfaceTarget::MacOnly(target_mac);
+        let selection = |mac_address, source| HostPrimaryInterfaceSelection {
+            mac_address,
+            source,
+        };
+
+        check_values(
+            [
+                Check {
+                    scenario: "matching ExpectedMachine declaration wins over report fallback",
+                    input: (
+                        Some(selection(
+                            other_mac,
+                            BootInterfaceSelectionSource::RedfishSerialNumber,
+                        )),
+                        Some(target_mac),
+                    ),
+                    expect: BootInterfaceSelectionSource::ExpectedMachine,
+                },
+                Check {
+                    scenario: "matching UEFI selection is retained",
+                    input: (
+                        Some(selection(
+                            target_mac,
+                            BootInterfaceSelectionSource::RedfishUefiPci,
+                        )),
+                        None,
+                    ),
+                    expect: BootInterfaceSelectionSource::RedfishUefiPci,
+                },
+                Check {
+                    scenario: "matching serial fallback is retained",
+                    input: (
+                        Some(selection(
+                            target_mac,
+                            BootInterfaceSelectionSource::RedfishSerialNumber,
+                        )),
+                        None,
+                    ),
+                    expect: BootInterfaceSelectionSource::RedfishSerialNumber,
+                },
+                Check {
+                    scenario: "different report selection is not attributed to target",
+                    input: (
+                        Some(selection(
+                            other_mac,
+                            BootInterfaceSelectionSource::RedfishUefiPci,
+                        )),
+                        None,
+                    ),
+                    expect: BootInterfaceSelectionSource::LegacyUnknown,
+                },
+                Check {
+                    scenario: "unexplained target stays explicitly unknown",
+                    input: (None, None),
+                    expect: BootInterfaceSelectionSource::LegacyUnknown,
+                },
+            ],
+            |(report_selection, declared_primary)| {
+                initial_selection_source(&target, report_selection, declared_primary)
+            },
+        );
     }
 }

@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use carbide_rpc_utils::dhcp::{HostConfig, InterfaceInfo, InterfaceInfoV6, ServiceReservation};
+use carbide_rpc_utils::dhcp::{HostConfig, InterfaceInfo, InterfaceInfoV6, ServiceDhcpReservation};
 use carbide_uuid::machine::MachineInterfaceId;
 use lru::LruCache;
 use rpc::forge::{DhcpDiscovery, DhcpRecord, MessageKind};
@@ -103,7 +103,7 @@ impl DhcpMode for Dpu {
         config: &'a Config,
         receiving_interface: &str,
         client_mac: &str,
-    ) -> Result<Option<&'a ServiceReservation>, DhcpError> {
+    ) -> Result<Option<&'a ServiceDhcpReservation>, DhcpError> {
         let service_config = config.service_config();
         // Only explicitly configured service interfaces suppress normal host discovery.
         if !service_config.has_interface(receiving_interface) {
@@ -252,7 +252,8 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use carbide_rpc_utils::dhcp::{
-        InterfaceInfoV6, ServiceConfig, ServiceInterfaceReservations, ServiceLink, ServiceLinkV4,
+        InterfaceInfoV6, ServiceConfig, ServiceDhcpInterfaceReservations, ServiceLink,
+        ServiceLinkV4,
     };
     use carbide_test_support::Outcome::*;
     use carbide_test_support::scenarios;
@@ -261,8 +262,8 @@ mod tests {
 
     /// Builds one valid service reservation so lookup tests exercise interface and MAC selection
     /// rather than validation.
-    fn service_reservation() -> ServiceReservation {
-        ServiceReservation {
+    fn service_reservation() -> ServiceDhcpReservation {
+        ServiceDhcpReservation {
             attachment_id: "11111111-1111-1111-1111-111111111111".parse().unwrap(),
             interface_ordinal: 0,
             internal_uuid: "22222222-2222-2222-2222-222222222222".parse().unwrap(),
@@ -307,11 +308,11 @@ mod tests {
         // Configure one populated service interface and one explicit empty slot, leaving an unrelated interface outside service ownership.
         let reservation = service_reservation();
         let service_config = ServiceConfig::try_new(vec![
-            ServiceInterfaceReservations {
+            ServiceDhcpInterfaceReservations {
                 receiving_interface: "pf0sf1".to_string(),
                 reservations: vec![reservation.clone()],
             },
-            ServiceInterfaceReservations {
+            ServiceDhcpInterfaceReservations {
                 receiving_interface: "pf0sf2".to_string(),
                 reservations: vec![],
             },
@@ -321,7 +322,7 @@ mod tests {
             Default::default(),
             None,
             67,
-            rpc::forge_tls_client::ForgeClientConfig::new(String::new(), None),
+            rpc::carbide_tls_client::CarbideClientConfig::new(String::new(), None),
         )
         .with_service_config(service_config);
         let mode = Dpu {};

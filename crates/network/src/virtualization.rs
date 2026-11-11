@@ -22,6 +22,12 @@ use std::str::FromStr;
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+mod route_targets;
+pub use route_targets::{
+    ExportPrefixMatchType, PrefixRouteTargetConfig, PrefixRouteTargetConfigError,
+    RouteTargetContributions, RouteTargets,
+};
+
 /// DEFAULT_NETWORK_VIRTUALIZATION_TYPE is what to default to if the Cloud API
 /// doesn't send it to NICo (which it never does), or if the NICo API
 /// doesn't send it to the DPU agent.

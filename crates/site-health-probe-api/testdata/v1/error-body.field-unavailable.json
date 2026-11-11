@@ -1,0 +1,1 @@
+{"error":{"code":"field_unavailable","message":"allocatability is unknown until nico-api serves the compact host read","field":"allocatable"}}

@@ -29,15 +29,17 @@ mod conditional_write;
 mod config_drift;
 pub mod credential_rotation;
 pub mod db_read;
+mod db_session;
 pub mod desired_firmware;
 pub mod dhcp_entry;
 pub mod dhcp_record;
-pub mod direct_dispatch_firmware_job;
+pub mod direct_dispatch_rms_job;
 pub mod dns;
 pub mod dpa_interface;
 pub mod dpu_agent_upgrade_policy;
 pub mod dpu_machine_update;
 pub mod dpu_remediation;
+pub mod expected_dpu_loopback_reservation;
 pub mod expected_machine;
 pub mod expected_nvlink_domain;
 pub mod expected_power_shelf;
@@ -119,6 +121,7 @@ mod writable_pool;
 pub use conditional_write::{
     ConditionalWrite, ControllerStateNotCurrent, MaintenanceRequestNotCurrent,
 };
+pub use db_session::DbSessionGuard;
 pub use writable_pool::writable_pool_options;
 
 #[cfg(any(test, feature = "test-support"))]

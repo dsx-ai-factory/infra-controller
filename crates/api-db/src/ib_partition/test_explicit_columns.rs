@@ -118,6 +118,7 @@ async fn exercise_ib_partition_queries(
     for found in [
         for_tenant(txn.as_mut(), "projection-tenant".to_string()).await?,
         find_by(txn.as_mut(), ObjectColumnFilter::One(IdColumn, &id)).await?,
+        find_active_for_share(txn.as_mut(), &[id]).await?,
     ] {
         assert_eq!(found.len(), 1);
         assert_partition(&found[0], &expected);
@@ -154,6 +155,18 @@ async fn exercise_ib_partition_queries(
     assert_eq!(found.len(), 1);
     assert_partition(&found[0], &expected);
 
+    let deleted = mark_as_deleted(&expected, txn.as_mut()).await?;
+    expected.deleted = Some(
+        sqlx::query_scalar("SELECT NOW()")
+            .fetch_one(txn.as_mut())
+            .await?,
+    );
+    assert_partition(&deleted, &expected);
+    assert_eq!(
+        find_pkey_by_partition_id(txn.as_mut(), id).await?,
+        Some(u16::from(pkey))
+    );
+
     // Older rows can have no legacy PKey, status, or controller result.
     sqlx::query(
         "UPDATE ib_partitions SET pkey = NULL, status = NULL, controller_state_outcome = NULL
@@ -165,13 +178,6 @@ async fn exercise_ib_partition_queries(
     expected.config.pkey = None;
     expected.status = None;
     expected.controller_state_outcome = None;
-    let deleted = mark_as_deleted(&expected, txn.as_mut()).await?;
-    expected.deleted = Some(
-        sqlx::query_scalar("SELECT NOW()")
-            .fetch_one(txn.as_mut())
-            .await?,
-    );
-    assert_partition(&deleted, &expected);
     let found = for_tenant(txn.as_mut(), "projection-tenant".to_string()).await?;
     assert_eq!(found.len(), 1);
     assert_partition(&found[0], &expected);

@@ -39,6 +39,15 @@ pub(crate) struct NvidiaDgxH100<'a> {
 }
 
 impl NvidiaDgxH100<'_> {
+    pub(crate) fn service_root_config(&self) -> redfish::service_root::Config {
+        redfish::service_root::Config {
+            vendor: redfish::oem::BmcVendor::Ami,
+            product: Some("AMI Redfish Server"),
+            redfish_version: "1.11.0",
+            advertises_computer_systems: true,
+        }
+    }
+
     pub(crate) fn event_service_config(&self) -> Option<crate::EventServiceConfig> {
         Some(crate::EventServiceConfig::default())
     }
@@ -169,7 +178,7 @@ impl NvidiaDgxH100<'_> {
         .collect::<Vec<_>>();
 
         redfish::computer_system::Config {
-            systems: vec![
+            systems: Some(vec![
                 redfish::computer_system::SingleSystemConfig {
                     id: system_id.into(),
                     manufacturer: Some("NVIDIA".into()),
@@ -212,7 +221,7 @@ impl NvidiaDgxH100<'_> {
                     serial_console: None,
                     secure_boot_available: false,
                 },
-            ],
+            ]),
         }
     }
 
