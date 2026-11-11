@@ -17,7 +17,6 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -75,7 +74,7 @@ use carbide_vpc_prefix_controller::context::VpcPrefixStateHandlerServices;
 use carbide_vpc_prefix_controller::handler::VpcPrefixStateHandler;
 use carbide_vpc_prefix_controller::io::VpcPrefixStateControllerIO;
 use db::Transaction;
-use db::machine::{update_dpu_asns, update_dpu_loopback_ips_v6};
+use db::machine::update_dpu_loopback_ips_v6;
 use db::resource_pool::DefineResourcePoolError;
 use eyre::WrapErr;
 use futures_util::TryFutureExt;
@@ -627,7 +626,6 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             .site_explorer
             .rotate_switch_nvos_credentials
             .clone(),
-        carbide_config.site_explorer.explore_mode,
         carbide_config.site_explorer.explore_drive_firmware,
         db_pool.clone(),
     );
@@ -640,7 +638,10 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     let nvlink_config = carbide_config.nvlink_config.clone().unwrap_or_default();
 
     let mut nmxc_builder = libnmxc::NmxcClientPool::builder();
-    if let Some(tls) = nmxc_tls_config_from_nvlink(&nvlink_config) {
+    if let Some(tls) = nvlink_config
+        .nmx_c_tls_config()
+        .wrap_err("invalid nvlink_config")?
+    {
         nmxc_builder = nmxc_builder.tls(tls);
     }
     let nmxc_client_pool = nmxc_builder
@@ -1824,14 +1825,18 @@ async fn initialize_and_start_controllers<'a>(
                 );
             })?;
         let mut txn = Transaction::begin(db_pool).await?;
-        crate::handlers::expected_machine::create_missing_from(&mut txn, &expected_machines)
-            .await
-            .inspect_err(|err| {
-                tracing::error!(
-                    error = %err,
-                    "Unable to update database from expected_machines list, bailing",
-                );
-            })?;
+        crate::handlers::expected_machine::create_missing_from(
+            &mut txn,
+            common_pools,
+            &expected_machines,
+        )
+        .await
+        .inspect_err(|err| {
+            tracing::error!(
+                error = %err,
+                "Unable to update database from expected_machines list, bailing",
+            );
+        })?;
         txn.commit().await?;
         tracing::info!("Successfully wrote expected machines to db, continuing startup.");
     } else {
@@ -1916,7 +1921,14 @@ async fn initialize_and_start_controllers<'a>(
         );
     }
 
-    if let Err(e) = update_dpu_asns(db_pool, common_pools).await {
+    if let Err(e) = carbide_site_explorer::dpu_asn::update_dpu_asns(
+        db_pool,
+        &api_service.resource_pool_registry,
+        common_pools,
+        &cancel_token,
+    )
+    .await
+    {
         tracing::warn!(
             error = %e,
             "Failed to update ASN for DPUs",
@@ -2341,6 +2353,7 @@ async fn initialize_and_start_controllers<'a>(
             .state_handler(Arc::new(SpdmAttestationStateHandler::new(
                 verifier,
                 nras_config,
+                carbide_config.spdm_state_controller.cancellation_timeout,
             )))
             .build_and_spawn(join_set, cancel_token.clone())
             .expect("Unable to build SpdmStateController");
@@ -2555,6 +2568,7 @@ async fn initialize_and_start_controllers<'a>(
         meter.clone(),
         endpoint_exploration_service.clone(),
         api_service.bmc_client.clone(),
+        api_service.resource_pool_registry.clone(),
         common_pools.clone(),
         work_lock_manager_handle.clone(),
         carbide_config.rack_profiles.clone(),
@@ -2627,27 +2641,6 @@ async fn initialize_and_start_controllers<'a>(
     tracing::info!("initialize_and_start_controllers: all controllers initialized and started");
 
     Ok(())
-}
-
-fn nmxc_tls_config_from_nvlink(
-    cfg: &carbide_nvlink_manager::config::NvLinkConfig,
-) -> Option<libnmxc::NmxcTlsConfig> {
-    let ca = cfg.nmx_c_tls_ca_cert_path.as_ref().map(PathBuf::from);
-    let client_cert = cfg.nmx_c_tls_client_cert_path.as_ref().map(PathBuf::from);
-    let client_key = cfg.nmx_c_tls_client_key_path.as_ref().map(PathBuf::from);
-    if ca.is_none()
-        && client_cert.is_none()
-        && client_key.is_none()
-        && cfg.nmx_c_tls_authority.is_none()
-    {
-        return None;
-    }
-    Some(libnmxc::NmxcTlsConfig {
-        ca_cert_path: ca,
-        client_cert_path: client_cert,
-        client_key_path: client_key,
-        authority: cfg.nmx_c_tls_authority.clone(),
-    })
 }
 
 #[cfg(test)]

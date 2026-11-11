@@ -189,6 +189,255 @@ prefix = "2001:db8:2389::/126"
     Ok(())
 }
 
+/// Runtime growth commits before backfill without conflating database failures.
+#[crate::sqlx_test]
+async fn test_grow_ipv6_loopback_pool_preserves_error_kinds_after_commit(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    use std::error::Error as _;
+    use std::time::Duration;
+
+    use futures_util::future::maybe_done;
+    use tokio::time::timeout;
+
+    use crate::errors::{CarbideError, CarbideErrorWithLocation};
+
+    let env = create_test_env(db_pool.clone()).await;
+    let dpu_id =
+        MachineId::from_str("fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80")?;
+    let mut setup = db_pool.begin().await?;
+    db::machine::create(
+        setup.as_mut(),
+        None,
+        &dpu_id,
+        ManagedHostState::Ready,
+        None,
+        2,
+    )
+    .await?;
+    assert!(!db::resource_pool::pool_has_rows(setup.as_mut(), LOOPBACK_IP_V6).await?);
+    setup.commit().await?;
+    let before = db::machine::find_one(&db_pool, &dpu_id, Default::default())
+        .await?
+        .expect("the standalone Ready DPU exists");
+    assert!(before.network_config.loopback_ip_v6.is_none());
+    let grow = || rpc::forge::GrowResourcePoolRequest {
+        text: r#"
+[lo-ip-v6]
+type = "ipv6"
+prefix = "2001:db8:2390::/126"
+"#
+        .to_string(),
+    };
+
+    let mut gate = db_pool.begin().await?;
+    sqlx::query("SELECT id FROM machines WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(dpu_id)
+        .fetch_one(gate.as_mut())
+        .await?;
+    let api = env.api.clone();
+    let request = grow();
+    let task = tokio::spawn(async move {
+        api.admin_grow_resource_pool(tonic::Request::new(request))
+            .await
+    });
+    let abort_grow = task.abort_handle();
+    let task = maybe_done(task);
+    tokio::pin!(task);
+    let completed_while_held = timeout(Duration::from_secs(10), &mut task).await.is_ok();
+    let at_gate = timeout(Duration::from_secs(10), async {
+        let current = db::machine::find_one(&db_pool, &dpu_id, Default::default())
+            .await?
+            .ok_or_else(|| eyre::eyre!("the gated DPU is missing"))?;
+        let stats = db::resource_pool::stats(&db_pool, LOOPBACK_IP_V6).await?;
+        let allocations: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM resource_pool_allocations WHERE pool_name = $1 AND owner_id = $2",
+        )
+        .bind(LOOPBACK_IP_V6)
+        .bind(dpu_id.to_string())
+        .fetch_one(&db_pool)
+        .await?;
+        let bindings = db::resource_pool::binding::all(&db_pool).await?;
+        Ok::<_, eyre::Report>((current, stats, allocations, bindings))
+    })
+    .await;
+    let released = gate.rollback().await;
+    let joined_after_release = timeout(Duration::from_secs(30), &mut task).await.is_ok();
+    if !joined_after_release {
+        abort_grow.abort();
+        timeout(Duration::from_secs(30), &mut task)
+            .await
+            .expect("cancelled GrowResourcePool must join after releasing the DPU");
+    }
+    let result = task
+        .as_mut()
+        .take_output()
+        .expect("GrowResourcePool task joined");
+    tracing::info!(
+        ?completed_while_held,
+        ?joined_after_release,
+        ?result,
+        "Joined pool growth before checking committed growth and rejected backfill"
+    );
+    released?;
+    assert!(
+        completed_while_held,
+        "NOWAIT backfill must finish while the eligible DPU remains busy"
+    );
+    assert!(
+        joined_after_release,
+        "GrowResourcePool required cancellation after gate release"
+    );
+    let (current, stats, allocations, bindings) =
+        at_gate.expect("observe committed growth while the DPU remains locked")?;
+    let error = result?.expect_err("the busy DPU must leave backfill incomplete");
+    let message = "resource pool growth committed; IPv6 loopback backfill is busy";
+    assert_eq!(error.code(), tonic::Code::Unavailable);
+    assert_eq!(error.message(), message);
+    assert_eq!(
+        error.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-503"
+    );
+    assert_eq!(error.metadata().get("nico-error-text").unwrap(), message);
+    assert_eq!(
+        error.metadata().get("nico-error-mitigation").unwrap(),
+        "Pool growth has committed. Check the current pool configuration and remaining IPv6 loopback assignments before retrying the same growth request after database contention clears."
+    );
+    let wrapped = error
+        .source()
+        .expect("standard typed status source")
+        .downcast_ref::<CarbideErrorWithLocation>()
+        .expect("Carbide error and location");
+    let CarbideError::Ipv6LoopbackBackfillContended { source } = &wrapped.error else {
+        panic!("expected the source-bearing backfill error: {wrapped:?}");
+    };
+    assert!(wrapped.location.contains("handlers/resource_pool.rs"));
+    let db::DatabaseError::Sqlx(annotated) = source.as_ref() else {
+        panic!("expected the original annotated SQLx error: {source:?}");
+    };
+    assert_eq!(
+        annotated
+            .source
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("55P03")
+    );
+    assert_eq!(current.state.value, ManagedHostState::Ready);
+    assert_eq!(current.state.version, before.state.version);
+    assert_eq!(current.network_config.value, before.network_config.value);
+    assert_eq!(
+        current.network_config.version,
+        before.network_config.version
+    );
+    assert_eq!(
+        allocations, 0,
+        "failed backfill attempts must release reservations"
+    );
+    assert_eq!(stats.used, 0);
+    assert_eq!(stats.free, 4, "the IPv6 pool growth remains committed");
+    let binding = bindings
+        .iter()
+        .find(|binding| binding.pool_name == LOOPBACK_IP_V6)
+        .expect("the growth binding commits with the pool values");
+    assert_eq!(binding.backend_kind, ResourcePoolBackendKind::Integrated);
+    assert_eq!(binding.value_domain, ResourcePoolValueDomain::IpAddress);
+    assert_eq!(binding.authority_id, INTEGRATED_AUTHORITY_ID);
+
+    env.api
+        .admin_grow_resource_pool(tonic::Request::new(grow()))
+        .await?;
+    let reconciled = db::machine::get_network_config(&db_pool, &dpu_id).await?;
+    let mut expected = before.network_config.value;
+    expected.loopback_ip_v6 = reconciled.loopback_ip_v6;
+    assert!(expected.loopback_ip_v6.is_some());
+    assert_eq!(reconciled.value, expected);
+    assert_eq!(
+        reconciled.version.version_nr(),
+        before.network_config.version.version_nr() + 1
+    );
+    assert_eq!(db::resource_pool::binding::all(&db_pool).await?, bindings);
+    let stats = db::resource_pool::stats(&db_pool, LOOPBACK_IP_V6).await?;
+    assert_eq!(stats.used, 1);
+    assert_eq!(stats.free, 3);
+
+    // Reuse the committed pool for a distinct failure boundary: a non-lock
+    // SQLx error must keep its ordinary Internal conversion after growth.
+    let second_dpu =
+        MachineId::from_str("fm100ds27v4uuq7sgs4gsjummskt0b3tedugtpevjrbfh6su081n9jufcq0")?;
+    let mut setup = db_pool.begin().await?;
+    db::machine::create(
+        setup.as_mut(),
+        None,
+        &second_dpu,
+        ManagedHostState::Ready,
+        None,
+        2,
+    )
+    .await?;
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_test_ipv6_backfill() RETURNS trigger AS $$
+         BEGIN
+             RAISE EXCEPTION 'test backfill constraint failure' USING ERRCODE = '23514';
+         END;
+         $$ LANGUAGE plpgsql;
+         CREATE TRIGGER reject_test_ipv6_backfill
+             BEFORE UPDATE OF network_config ON machines
+             FOR EACH ROW WHEN (NEW.network_config->>'loopback_ip_v6' IS NOT NULL)
+             EXECUTE FUNCTION reject_test_ipv6_backfill()",
+    )
+    .execute(setup.as_mut())
+    .await?;
+    setup.commit().await?;
+    let more_capacity = || rpc::forge::GrowResourcePoolRequest {
+        text: "[lo-ip-v6]\ntype = \"ipv6\"\nprefix = \"2001:db8:2391::/126\"\n".to_string(),
+    };
+    let error = env
+        .api
+        .admin_grow_resource_pool(tonic::Request::new(more_capacity()))
+        .await
+        .expect_err("the injected non-lock database failure must propagate");
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(error.message(), "internal database error");
+    let wrapped = error
+        .source()
+        .unwrap()
+        .downcast_ref::<CarbideErrorWithLocation>()
+        .unwrap();
+    let CarbideError::DBError(annotated) = &wrapped.error else {
+        panic!("non-lock failures must retain the ordinary DBError: {wrapped:?}");
+    };
+    assert_eq!(
+        annotated
+            .source
+            .as_database_error()
+            .unwrap()
+            .code()
+            .as_deref(),
+        Some("23514")
+    );
+    let stats = db::resource_pool::stats(&db_pool, LOOPBACK_IP_V6).await?;
+    assert_eq!(stats.used, 1);
+    assert_eq!(stats.free, 7, "the second growth also remains committed");
+    assert_eq!(db::resource_pool::binding::all(&db_pool).await?, bindings);
+    sqlx::raw_sql(
+        "DROP TRIGGER reject_test_ipv6_backfill ON machines;
+         DROP FUNCTION reject_test_ipv6_backfill()",
+    )
+    .execute(&db_pool)
+    .await?;
+    env.api
+        .admin_grow_resource_pool(tonic::Request::new(more_capacity()))
+        .await?;
+    assert!(
+        db::machine::get_network_config(&db_pool, &second_dpu)
+            .await?
+            .loopback_ip_v6
+            .is_some()
+    );
+    Ok(())
+}
+
 #[crate::sqlx_test]
 async fn test_simple(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     let mut txn = db_pool.begin().await?;

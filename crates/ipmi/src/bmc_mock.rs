@@ -22,7 +22,6 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use carbide_utils::HostPortPair;
-use carbide_uuid::machine::MachineId;
 use eyre::eyre;
 
 use crate::IPMITool;
@@ -164,7 +163,6 @@ impl IPMITool for IPMIToolHttpImpl {
 
     async fn restart(
         &self,
-        _machine_id: &MachineId,
         bmc_address: SocketAddr,
         legacy_boot: bool,
         credential_key: &CredentialKey,

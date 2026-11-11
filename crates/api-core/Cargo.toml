@@ -29,6 +29,9 @@ name = "carbide_api_core"
 [dependencies]
 cert-manager = { path = "../cert-manager" }
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+bmc-drivers = { path = "../bmc-drivers" }
+bmc-runtime = { path = "../bmc-runtime" }
+bmc-explorer = { path = "../bmc-explorer" }
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-test-support = { path = "../test-support", optional = true }

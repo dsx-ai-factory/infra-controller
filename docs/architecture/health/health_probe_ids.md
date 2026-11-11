@@ -130,6 +130,78 @@ Indicates that NMX-C reported `Unhealthy` or `UnhealthyDbCorrupted` controller
 health for an NVLink domain. A `Healthy` report clears the probe. `Degraded` and
 `Unknown` do not generate a domain health report.
 
+## NVLink rack health probe identifiers
+
+### `NmxcUnreachable`
+
+Raised on a rack when the NVLink partition monitor could not use the rack's
+NMX-C for `nvlink_config.partition_monitor_unreachable_alert_after` consecutive
+passes (default `3`): no switch yielded an endpoint, the endpoint URL was
+invalid, the client could not be created, `Hello` failed, or `Hello` returned
+no usable domain UUID. The monitor writes a `Merge` report on the rack under the
+source `nvlink-partition-monitor`, with one alert whose `target` is the NMX-C
+endpoint URL the monitor resolved, absent when none resolved, and whose
+`message` names the failing step. The alert carries
+[`Hardware`](health_alert_classifications.md#hardware) only; it does not block
+allocations. A single failed pass is not reported, since a keepalive timeout on
+a loaded site is routine, and the stored alert is not rewritten while the outage
+continues. Only passes that contact the rack count: a rack skipped by change
+detection is not checked, so an outage on an otherwise unchanged rack is first
+noticed at its next full check, up to
+`nvlink_config.partition_monitor_full_check_interval` later (default `10m`),
+and the consecutive-pass count starts there. The first pass that reaches NMX-C
+removes the report, as does a rack that no longer has managed hosts for the
+monitor to reconcile. Only passes without a stored report count towards the
+threshold, so removing the report by hand during an ongoing outage suppresses
+it for another `partition_monitor_unreachable_alert_after` consecutive failed
+passes. The alert's `in_alert_since` is the first failed pass of the run that
+raised it, not the pass that wrote it. A report write that fails is retried on
+the next pass, including the removal of a report from a rack that has since
+recovered and is being skipped by change detection. Standalone chassis mapped
+through
+`nvlink_nmxc_endpoints` have no rack and receive no such alert.
+
+## Switch reachability health probe identifiers
+
+Both probes are raised by the switch reachability monitor in `nico-api`, which
+runs whenever `nvlink_config.enabled` is `true` unless
+`nvlink_config.switch_reachability.enabled` overrides it. Each pass opens a TCP
+connection to every switch in the `ready` controller state; switches in other
+states, and switches whose NVOS management interface has no IP address yet, are
+not probed and keep no report. Alerts are stored as one `Merge` report on the
+switch under the source `switch-reachability-monitor`, one alert per service,
+each carrying [`Hardware`](health_alert_classifications.md#hardware) only, so
+neither blocks allocations. Each service is debounced separately: its alert is
+raised after `nvlink_config.switch_reachability.unreachable_alert_after`
+consecutive failed checks (default `3`, one per `run_interval`, default `60s`)
+and removed on the first check that connects. Only checks without a stored
+alert count toward the threshold, so removing an alert by hand during an
+ongoing outage suppresses it for another `unreachable_alert_after` checks. The
+alert's `in_alert_since` is the first failed check of the run that raised it. A
+report write that fails is retried on the next pass. One `nico-api` replica owns
+the monitor at a time and keeps its work lock across passes so the counts see
+every pass; when that replica stops or loses its lease, the next owner counts
+from zero, so a takeover restarts the debounce without touching stored alerts. A switch that leaves the
+`ready` state has its report removed on the next pass. A
+successful TCP connection proves only that the service accepts connections,
+not that it answers requests.
+
+### `SwitchUnreachable`
+
+The switch's NVOS management address did not accept a TCP connection on
+`nvlink_config.switch_reachability.nvos_port` (default `443`). The alert's
+`target` is the probed `address:port` and its `message` includes the last
+connection error.
+
+### `NmxtUnreachable`
+
+The NMX-T telemetry listener on a primary switch did not accept a TCP
+connection on `nvlink_config.switch_reachability.nmx_t_port` (default `9352`).
+Only switches marked `is_primary` host NMX-T, so other switches never receive
+this alert, and a primary that is demoted has the alert removed on the next
+pass while its `SwitchUnreachable` checks continue. The alert's `target` is
+the probed `address:port` and its `message` includes the last connection error.
+
 ## NVLink GPU health probe identifiers
 
 ### `NvlinkUnhealthy`
@@ -284,7 +356,14 @@ Indicates issues regarding the start of the DHCP relay on the DPU
 
 ### `DhcpServer`
 
-Indicates issues regarding the start of the DHCP server on the DPU
+Indicates that the DHCP server on the DPU is not working. Its meaning depends on how `dpu-agent` configures HBN:
+
+- ContainerExec: the DHCP server process in the HBN container is not running. While HBN is up, the agent checks it on the primary DPU and on any DPU that uses the tenant network. The alert prevents allocations and host state changes.
+- NVUE, which DPF uses: the agent's latest attempt to update the DHCP server failed, and the message contains the error. On a secondary DPU that uses the admin network, the update stops the server. If service VPC slots are configured, it instead keeps the server running for those slots only. On DPF, the DHCP server runs in its own pod. The agent skips the update while HBN is down and reports no result then. The alert prevents allocations but not host state changes, so instance release can proceed.
+
+### `Fmds`
+
+Indicates that `dpu-agent` could not connect to FMDS or push configuration to it in its latest iteration, and the message contains the error. Only the NVUE path, which DPF uses, reports this probe. On every iteration, the agent connects to the external FMDS that DPF deploys, so the alert also appears when FMDS is down on a host without an instance. The alert prevents allocations but not host state changes, so instance release can proceed.
 
 ### `Ifreload`
 

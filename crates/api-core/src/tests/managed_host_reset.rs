@@ -1244,7 +1244,8 @@ async fn reset_set_accepts_predicted_host_after_dpf_failure(pool: sqlx::PgPool) 
         .await
         .unwrap();
 
-    env.run_machine_state_controller_iteration().await;
+    env.run_machine_state_controller_iteration_without_requeue()
+        .await;
 
     let mut txn = env.db_txn().await;
     let snapshot = predicted_host.snapshot(&mut txn).await;

@@ -36,6 +36,7 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 figment = { workspace = true, features = ["toml", "env"] }
+flate2 = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
@@ -95,6 +96,7 @@ nv-redfish = { workspace = true, features = [
   "oem-nvidia",
   "power-supplies",
   "processors",
+  "resource-serialization",
   "sensors",
   "storages",
   "telemetry-service",

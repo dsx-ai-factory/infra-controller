@@ -16,19 +16,21 @@ nico-admin-cli component-manager get-reset-status [OPTIONS] --action <ACTION> <C
 ## DESCRIPTION
 
 Get the tracked reset status for each device and the required reset
-action. Only SDN reset status for switches is implemented. NICo looks up
-its latest successfully recorded RMS job reference; callers do not
-supply a job ID. After a failed or ambiguous submission, this reference
-may still belong to an earlier reset. A missing reference or unavailable
-RMS job does not establish whether a reset ran. RMS restart or job
-expiry can make previously observed completion unavailable. Failed
-resets and observation errors print results and exit unsuccessfully.
+action. The RMS backend supports SDN and NVOS reset status for switches.
+NICo looks up its latest successfully recorded RMS job reference for the
+selected action; callers do not supply a job ID. After a failed or
+ambiguous submission, this reference may still belong to an earlier
+reset. A missing reference or unavailable RMS job does not establish
+whether a reset ran. RMS restart or job expiry can make previously
+observed completion unavailable. Failed resets and observation errors
+print results and exit unsuccessfully.
 
 ## OPTIONS
 
 `--action <ACTION>`
 
-Reset action to inspect; only sdn-factory-reset is implemented
+Reset action to inspect; the RMS backend supports sdn-factory-reset and
+nvos-factory-reset
 
 *Possible values:*
 
@@ -66,7 +68,7 @@ Print help (see a summary with -h)
 
 ```sh
 nico-admin-cli component-manager get-reset-status --action sdn-factory-reset switch --switch-id sw100nsner0op5osl6n85t7772j010jmhafm934n7oej4mlome3okrn9b60
-nico-admin-cli -f json component-manager get-reset-status --action sdn-factory-reset switch --mac-address 00:11:22:33:44:55
+nico-admin-cli -f json component-manager get-reset-status --action nvos-factory-reset switch --mac-address 00:11:22:33:44:55
 ```
 
 ## Subcommands

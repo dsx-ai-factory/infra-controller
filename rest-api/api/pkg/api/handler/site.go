@@ -31,7 +31,7 @@ import (
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	csm "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/sitemgr"
+	csm "github.com/NVIDIA/infra-controller/rest-api/site-manager/pkg/sites"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"

@@ -2897,7 +2897,11 @@ pub(crate) async fn batch_validate_spx_partition_ownership(
     Ok(())
 }
 
-/// Batch validate IB partition ownership for multiple (partition_id, tenant_id) pairs
+/// Uses `db::ib_partition::find_active_for_share` to lock active partitions and
+/// validate every requested reference. Missing or deleted partitions return
+/// "IB partition {id} is not created"; a tenant mismatch returns
+/// "IB partition {id} is not owned by the tenant {tenant}".
+/// The caller must persist the Instance configuration before committing `txn`.
 pub(crate) async fn batch_validate_ib_partition_ownership(
     txn: &mut PgConnection,
     validations: &[(IBPartitionId, &TenantOrganizationId)],
@@ -2906,19 +2910,9 @@ pub(crate) async fn batch_validate_ib_partition_ownership(
         return Ok(());
     }
 
-    // Batch query all unique partitions
-    let unique_partition_ids: Vec<_> = validations
-        .iter()
-        .map(|(id, _)| *id)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+    let partition_ids: Vec<_> = validations.iter().map(|(id, _)| *id).collect();
 
-    let partitions = db::ib_partition::find_by(
-        txn,
-        ObjectColumnFilter::List(ib_partition::IdColumn, &unique_partition_ids),
-    )
-    .await?;
+    let partitions = db::ib_partition::find_active_for_share(txn, &partition_ids).await?;
 
     let partition_map: HashMap<_, _> = partitions.into_iter().map(|p| (p.id, p)).collect();
 
@@ -2939,7 +2933,11 @@ pub(crate) async fn batch_validate_ib_partition_ownership(
     Ok(())
 }
 
-/// Check whether the tenant of instance is consistent with the tenant of the ib partition
+/// Applies `batch_validate_ib_partition_ownership` to every requested interface.
+/// An IB change retaining a deleted partition is rejected, even when another
+/// interface is the one being changed. Removing the deleted reference remains
+/// allowed because only requested references are validated. Keep `txn` open
+/// through the Instance write, as required by the batch contract.
 pub(crate) async fn validate_ib_partition_ownership(
     txn: &mut PgConnection,
     instance_tenant: &TenantOrganizationId,

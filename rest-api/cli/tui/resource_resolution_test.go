@@ -165,7 +165,7 @@ func TestSession_fetchLabelKeys(t *testing.T) {
 			defer server.Close()
 			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
 			session.Scope.SiteID = "site-1"
-			items, err := session.fetchLabelKeys(test.resource)
+			items, err := session.fetchLabelKeys(context.Background(), test.resource)
 			if test.wantError != "" {
 				require.ErrorContains(t, err, test.wantError)
 				return
@@ -243,7 +243,7 @@ func TestSession_fetchMachineChassis(t *testing.T) {
 			defer server.Close()
 			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
 			session.Scope.SiteID = "different-active-site"
-			items, err := session.fetchMachineChassis("machine-1")
+			items, err := session.fetchMachineChassis(context.Background(), "machine-1")
 			assert.Equal(t, test.wantEndpointRequests, endpointRequests)
 			assert.Equal(t, "different-active-site", session.Scope.SiteID)
 			if test.wantError != "" {

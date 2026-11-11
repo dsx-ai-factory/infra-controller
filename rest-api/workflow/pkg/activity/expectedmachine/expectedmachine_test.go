@@ -84,6 +84,8 @@ func testExpectedMachineSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create ExpectedMachine table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.ExpectedMachine)(nil))
 	require.NoError(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.PendingExpectedMachine)(nil))
+	require.NoError(t, err)
 	// create User table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.User)(nil))
 	require.NoError(t, err)
@@ -171,6 +173,8 @@ func (h *testExpectedMachineWriteHook) AfterQuery(_ context.Context, event *bun.
 }
 
 func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
+	t.Run("pending batch recovery", testExpectedMachinePendingRecovery)
+
 	ctx := context.Background()
 
 	dbSession := testExpectedMachineInitDB(t)
@@ -1479,6 +1483,9 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 			FixedMask: cutil.GetPtr("255.255.255.0"), FixedGateway: cutil.GetPtr("192.0.2.1"), Primary: cutil.GetPtr(true),
 			NetworkSegmentType: cutil.GetPtr(cdbm.ExpectedInterfaceNetworkSegmentTypeHostInband),
 			Role:               cutil.GetPtr(cdbm.ExpectedInterfaceRoleHost), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
+		}, {
+			MacAddress: cutil.GetPtr("02:00:00:00:00:20"), FixedIP: cutil.GetPtr("198.51.100.20"),
+			Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuLoopback), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
 		}}
 		changed := []cdbm.ExpectedMachineInterface{{
 			MacAddress: cutil.GetPtr("02:00:00:00:00:09"), NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.10"),
@@ -1856,6 +1863,8 @@ func TestNewManageExpectedMachine(t *testing.T) {
 			got := NewManageExpectedMachine(tt.args.dbSession, tt.args.siteClientPool)
 			assert.Equal(t, tt.want.dbSession, got.dbSession, "dbSession should match")
 			assert.Equal(t, tt.want.siteClientPool, got.siteClientPool, "siteClientPool should match")
+			assert.Equal(t, pendingBatchHistoryBudget, got.historyObservationBudget, "history observation must retain its aggregate bound")
+			assert.Equal(t, pendingBatchRecoveryBudget, got.recoveryBudget, "recovery must retain its activity-wide bound")
 		})
 	}
 }

@@ -165,3 +165,29 @@ func TestQuerySetsOnlySetFields(t *testing.T) {
 		t.Error("an unknown type made a query")
 	}
 }
+
+func TestLatestAttemptEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields string
+		want         *bool
+	}{
+		{"older probe", "", nil},
+		{"success", `,"lastAttemptSucceeded":true`, new(true)},
+		{"failed", `,"lastAttemptSucceeded":false,"lastAttemptError":"timeout"`, new(false)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var response CountResponse
+			body := strings.TrimSuffix(count("s"), "}") + tc.fields + "}"
+			if err := jsonx.Decode([]byte(body), &response); err != nil {
+				t.Fatal(err)
+			}
+			got := response.LastAttemptSucceeded
+			if (got == nil) != (tc.want == nil) || got != nil && *got != *tc.want {
+				t.Fatalf("success evidence = %v", got)
+			}
+			if got != nil && !*got && (response.LastAttemptError == nil || *response.LastAttemptError != "timeout") {
+				t.Fatal("failure evidence lost")
+			}
+		})
+	}
+}

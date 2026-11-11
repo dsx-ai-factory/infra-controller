@@ -32,6 +32,7 @@ use ::rpc::forge::BootInterfaceSelectionSource as RpcBootInterfaceSelectionSourc
 use ::rpc::forge::get_machine_boot_interfaces_response::Reconciliation as BootInterfaceReconciliationStatus;
 use ::rpc::forge::get_machine_boot_interfaces_response::reconciliation::State as BootInterfaceReconciliationState;
 use config_version::{ConfigVersion, Versioned};
+use db::machine_interface::MachineInterfaces;
 use mac_address::MacAddress;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{ManagedHostState, ReadyBootConfigState};
@@ -60,12 +61,8 @@ pub(crate) async fn get_machine_boot_interfaces(
 
     let mut txn = api.txn_begin().await?;
 
-    // Store 1: owned interface rows -- the authoritative store for a machine
-    // that exists. `find_by_machine_ids` returns a per-machine map.
-    let owned_interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[machine_id])
-        .await?
-        .remove(&machine_id)
-        .unwrap_or_default();
+    // Stores 1 and 2: owned non-BMC rows and pending interface predictions.
+    let interfaces = MachineInterfaces::load(txn.as_mut(), &machine_id).await?;
 
     // Load the desired target, last observation, and controller state through
     // one machine snapshot. The reconciliation label only makes sense when
@@ -79,11 +76,6 @@ pub(crate) async fn get_machine_boot_interfaces(
         },
     )
     .await?;
-
-    // Store 2: predictions -- the boot candidates a host offers before its
-    // first DHCP lease creates an owned row.
-    let predicted_interfaces =
-        db::predicted_machine_interface::find_by_machine_id(txn.as_mut(), &machine_id).await?;
 
     // Store 3: the explored endpoint default. The machine's BMC IP(s) map it to
     // the explored endpoints site-explorer recorded a default against.
@@ -110,10 +102,11 @@ pub(crate) async fn get_machine_boot_interfaces(
     // predicted (store 2) MACs, plus each explored endpoint's recorded boot MAC
     // (store 3): a retained record keyed on the explored boot MAC is surfaced
     // too, even when no owned/predicted row carries that MAC.
-    let macs: Vec<MacAddress> = owned_interfaces
+    let macs: Vec<MacAddress> = interfaces
+        .interfaces
         .iter()
         .map(|i| i.mac_address)
-        .chain(predicted_interfaces.iter().map(|p| p.mac_address))
+        .chain(interfaces.predictions.iter().map(|p| p.mac_address))
         .chain(
             explored_endpoints
                 .iter()
@@ -133,7 +126,7 @@ pub(crate) async fn get_machine_boot_interfaces(
     // The effective boot interface: `pick_boot_interface` over the owned rows
     // (primary wins, else the lowest-MAC non-underlay NIC). This is what the
     // controller and admin actions resolve.
-    let effective = model::machine::pick_boot_interface(&owned_interfaces);
+    let effective = interfaces.boot_interface();
     let effective_mac = effective.map(|i| i.mac_address);
     let effective_boot_interface = effective.and_then(|i| i.boot_interface());
 
@@ -141,7 +134,7 @@ pub(crate) async fn get_machine_boot_interfaces(
     // what the automation would choose if nothing were declared. Reported so
     // the candidates view can show whether a primary designation is
     // overriding the automatic choice.
-    let default_pick = model::machine::pick_default_boot_interface(&owned_interfaces);
+    let default_pick = interfaces.default_boot_interface();
     let default_boot_interface = boot_interface_message(
         default_pick.map(|i| i.mac_address),
         default_pick.and_then(|i| i.boot_interface()),
@@ -150,7 +143,7 @@ pub(crate) async fn get_machine_boot_interfaces(
     // The predicted pick: what `pick_boot_prediction` would boot from while
     // the machine is still waiting on its first DHCP lease. `None` also when
     // the pick refuses to guess among several undeclared predictions.
-    let predicted_pick = model::machine::pick_boot_prediction(&predicted_interfaces);
+    let predicted_pick = interfaces.boot_prediction();
     let predicted_boot_interface = boot_interface_message(
         predicted_pick.map(|p| p.mac_address),
         predicted_pick.and_then(|p| p.boot_interface()),
@@ -172,7 +165,7 @@ pub(crate) async fn get_machine_boot_interfaces(
             boot_macs.insert(mac);
         }
     }
-    for prediction in &predicted_interfaces {
+    for prediction in &interfaces.predictions {
         if prediction.primary_interface {
             boot_macs.insert(prediction.mac_address);
         }
@@ -181,7 +174,8 @@ pub(crate) async fn get_machine_boot_interfaces(
 
     Ok(Response::new(rpc::GetMachineBootInterfacesResponse {
         machine_id: Some(machine_id),
-        machine_interfaces: owned_interfaces
+        machine_interfaces: interfaces
+            .interfaces
             .iter()
             .map(|i| rpc::MachineInterfaceBootInterface {
                 mac_address: i.mac_address.to_string(),
@@ -191,7 +185,8 @@ pub(crate) async fn get_machine_boot_interfaces(
                 interface_id: Some(i.id),
             })
             .collect(),
-        predicted_interfaces: predicted_interfaces
+        predicted_interfaces: interfaces
+            .predictions
             .iter()
             .map(|p| rpc::PredictedBootInterface {
                 mac_address: p.mac_address.to_string(),

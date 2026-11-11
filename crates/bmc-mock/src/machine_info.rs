@@ -782,7 +782,8 @@ impl HostMachineInfo {
     fn wiwynn_gb200_nvl(&self) -> hw::wiwynn_gb200_nvl::WiwynnGB200Nvl<'_> {
         let mut dpus = self.dpus.iter();
         hw::wiwynn_gb200_nvl::WiwynnGB200Nvl {
-            system_serial_number: Cow::Borrowed(&self.serial),
+            // Chassis_0 and System_0 expose the PDB serial; the tray serial is in Assembly.
+            system_serial_number: format!("{}-pdb", self.serial).into(),
             chassis_serial_number: Cow::Borrowed(&self.serial),
             compute_board: [
                 hw::nvidia_gb200::BiancaBoard {
@@ -1419,7 +1420,7 @@ mod tests {
             };
             let config =
                 host.system_config(Arc::new(crate::test_support::TestCallbacks::default()));
-            let options = config.systems[0]
+            let options = config.systems.as_ref().expect("supported Systems")[0]
                 .boot_options
                 .as_ref()
                 .expect("boot inventory");

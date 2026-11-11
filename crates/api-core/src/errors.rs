@@ -191,6 +191,18 @@ pub enum CarbideError {
     #[error("resource pool database error: {0}")]
     ResourcePoolDatabaseError(#[source] ResourcePoolDatabaseError),
 
+    /// Pool growth committed, but contention left IPv6 loopback backfill incomplete.
+    #[error("resource pool growth committed; IPv6 loopback backfill is busy")]
+    Ipv6LoopbackBackfillContended {
+        /// The original database error that stopped backfill.
+        #[source]
+        source: Box<DatabaseError>,
+    },
+
+    /// Discovery released its rejected transaction after database contention.
+    #[error("{0}")]
+    DiscoveryContended(String),
+
     /// A remote allocation could not complete; its saved request may need cleanup.
     #[error(transparent)]
     RemoteResourcePool(Box<RemoteResourcePoolError>),
@@ -282,6 +294,20 @@ pub enum CarbideError {
     #[error("service unavailable: {0}")]
     UnavailableError(String),
 
+    /// A caller cancelled a local pool preparation or admission step.
+    #[error("{operation} was cancelled")]
+    ResourcePoolCancelled {
+        /// The local step that stopped, such as `DPU loopback lookup`.
+        operation: &'static str,
+    },
+
+    /// A local pool preparation or admission step did not finish in time.
+    #[error("{operation} timed out")]
+    ResourcePoolDeadlineExceeded {
+        /// The local step whose wait budget expired, such as `DPU admin lock admission`.
+        operation: &'static str,
+    },
+
     #[error("permission denied: {0}")]
     PermissionDeniedError(String),
 
@@ -363,6 +389,12 @@ impl From<RemoteResourcePoolError> for CarbideError {
 impl From<ResourcePoolBackendError> for CarbideError {
     fn from(error: ResourcePoolBackendError) -> Self {
         match error {
+            ResourcePoolBackendError::Cancelled { operation } => {
+                Self::ResourcePoolCancelled { operation }
+            }
+            ResourcePoolBackendError::DeadlineExceeded { operation } => {
+                Self::ResourcePoolDeadlineExceeded { operation }
+            }
             ResourcePoolBackendError::Database(error) => error.into(),
             ResourcePoolBackendError::Integrated(error) => error.into(),
             ResourcePoolBackendError::Remote(error) => error.into(),
@@ -572,7 +604,11 @@ impl OperatorError for CarbideError {
             | CarbideError::TenantSitePrefixQuotaExceeded { .. }
             | CarbideError::SitePrefixIsolationLimitExceeded { .. }
             | CarbideError::DhcpError(_) => ErrorCode::nico(Api, 429),
-            CarbideError::UnavailableError(_) => ErrorCode::nico(Api, 503),
+            CarbideError::UnavailableError(_)
+            | CarbideError::DiscoveryContended(_)
+            | CarbideError::Ipv6LoopbackBackfillContended { .. } => ErrorCode::nico(Api, 503),
+            CarbideError::ResourcePoolCancelled { .. } => ErrorCode::nico(Api, 499),
+            CarbideError::ResourcePoolDeadlineExceeded { .. } => ErrorCode::nico(Api, 504),
             CarbideError::RemoteResourcePool(error) => ErrorCode::nico(
                 Api,
                 match remote_resource_pool_status_code(error) {
@@ -602,6 +638,14 @@ impl OperatorError for CarbideError {
             }
             CarbideError::RedfishError(_) | CarbideError::RedfishClientCreation { .. } => {
                 Some("Check BMC reachability, credentials, and Redfish service health.")
+            }
+            CarbideError::Ipv6LoopbackBackfillContended { .. } => Some(
+                "Pool growth has committed. Check the current pool configuration and remaining IPv6 \
+                 loopback assignments before retrying the same growth request after database \
+                 contention clears.",
+            ),
+            CarbideError::DiscoveryContended(_) => {
+                Some("Retry discovery with a fresh request after database contention clears.")
             }
             CarbideError::UnavailableError(_) => Some(
                 "A dependent NICo service is temporarily unavailable. Retry the same request \
@@ -751,6 +795,11 @@ impl From<CarbideError> for tonic::Status {
             e @ CarbideError::BmcMacIpMismatch { .. } => Status::invalid_argument(e.to_string()),
             CarbideError::UnhealthyHost => Status::failed_precondition(error.to_string()),
             CarbideError::ResourceExhausted(kind) => Status::resource_exhausted(kind),
+            CarbideError::Ipv6LoopbackBackfillContended { source } => {
+                tracing::error!(error = %source, "IPv6 loopback backfill contention");
+                Status::unavailable(error.to_string())
+            }
+            CarbideError::DiscoveryContended(message) => Status::unavailable(message),
             CarbideError::RemoteResourcePool(remote) => {
                 Status::new(remote_resource_pool_status_code(remote), remote.to_string())
             }
@@ -777,6 +826,12 @@ impl From<CarbideError> for tonic::Status {
                 Status::unauthenticated(error.to_string())
             }
             CarbideError::UnavailableError(msg) => Status::unavailable(msg),
+            CarbideError::ResourcePoolCancelled { operation } => {
+                Status::cancelled(format!("{operation} was cancelled"))
+            }
+            CarbideError::ResourcePoolDeadlineExceeded { operation } => {
+                Status::deadline_exceeded(format!("{operation} timed out"))
+            }
             CarbideError::PermissionDeniedError(msg) => Status::permission_denied(msg),
             CarbideError::AlreadyInProgress(msg) => Status::already_exists(msg),
             other => Status::internal(other.to_string()),
@@ -961,6 +1016,29 @@ fn database_domain_status_messages_are_preserved() {
             )
         },
     );
+}
+
+#[tokio::test]
+async fn ipv6_backfill_contention_logs_the_original_database_cause() {
+    let source = DatabaseError::query(
+        "SELECT private_column FROM private_table",
+        sqlx::Error::protocol("private backfill diagnostic"),
+    );
+    let diagnostic = source.to_string();
+    let (status, logs) = carbide_instrument::testing::capture_logs_async(async {
+        tonic::Status::from(CarbideError::Ipv6LoopbackBackfillContended {
+            source: Box::new(source),
+        })
+    })
+    .await;
+
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    assert!(!status.message().contains("private"));
+    assert!(logs.iter().any(|log| {
+        log.level == tracing::Level::ERROR
+            && log.message == "IPv6 loopback backfill contention"
+            && log.field("error") == Some(diagnostic.as_str())
+    }));
 }
 
 #[test]
@@ -1208,6 +1286,26 @@ fn resource_pool_errors_preserve_status() {
                     "missing request",
                 )),
                 expect: (tonic::Code::Internal, "NICO-API-500".to_owned(), None),
+            },
+            Check {
+                // Local cancellation keeps the caller's status without implying provider work.
+                scenario: "local pool lookup cancellation preserves cancelled status",
+                input: CarbideError::from(ResourcePoolBackendError::Cancelled {
+                    operation: "DPU loopback lookup",
+                }),
+                expect: (tonic::Code::Cancelled, "NICO-API-499".to_owned(), None),
+            },
+            Check {
+                // Admission exhaustion is a deadline, not unavailable remote capacity.
+                scenario: "local pool admission timeout preserves deadline status",
+                input: CarbideError::from(ResourcePoolBackendError::DeadlineExceeded {
+                    operation: "DPU admin lock admission",
+                }),
+                expect: (
+                    tonic::Code::DeadlineExceeded,
+                    "NICO-API-504".to_owned(),
+                    None,
+                ),
             },
         ],
         |error| {

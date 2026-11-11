@@ -40,7 +40,7 @@ impl HpeProliantDl380aGen11<'_> {
             vendor: redfish::oem::BmcVendor::Hpe,
             product: Some("ProLiant DL380a Gen11"),
             redfish_version: "1.13.0",
-            exposes_computer_systems: true,
+            advertises_computer_systems: true,
         }
     }
 
@@ -118,7 +118,7 @@ impl HpeProliantDl380aGen11<'_> {
             .collect::<Vec<_>>();
 
         redfish::computer_system::Config {
-            systems: vec![redfish::computer_system::SingleSystemConfig {
+            systems: Some(vec![redfish::computer_system::SingleSystemConfig {
                 id: Cow::Borrowed(system_id),
                 manufacturer: Some("HPE".into()),
                 model: Some(MODEL.into()),
@@ -158,7 +158,7 @@ impl HpeProliantDl380aGen11<'_> {
                             "VirtualSerialPort": "Com1Irq4",
                         })),
                 ),
-            }],
+            }]),
         }
     }
 

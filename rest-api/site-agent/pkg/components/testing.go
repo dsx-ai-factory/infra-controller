@@ -194,7 +194,7 @@ func SetupTestBootstrapSecret(t *testing.T, conf *conftypes.Config) string {
 	data := bootstrapSecretData{
 		SiteID:              conf.Temporal.ClusterID,
 		OTP:                 testOTPBootstrap,
-		SiteManagerCredsURL: "https://sitemgr.cloud-site-manager:8100/v1/sitecreds",
+		SiteManagerCredsURL: "https://nico-rest-site-manager.site-manager:8100/v1/sitecreds",
 		SiteManagerCACert:   base64.StdEncoding.EncodeToString(siteManagerCACert),
 	}
 

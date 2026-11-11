@@ -38,6 +38,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
+	tclient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -70,6 +71,8 @@ func testExpectedMachineInitDB(t *testing.T) *cdb.Session {
 	err = dbSession.DB.ResetModel(ctx, (*cdbm.TenantSite)(nil))
 	assert.Nil(t, err)
 	err = dbSession.DB.ResetModel(ctx, (*cdbm.SKU)(nil))
+	assert.Nil(t, err)
+	err = dbSession.DB.ResetModel(ctx, (*cdbm.PendingExpectedMachine)(nil))
 	assert.Nil(t, err)
 	err = dbSession.DB.ResetModel(ctx, (*cdbm.InstanceType)(nil))
 	assert.Nil(t, err)
@@ -155,6 +158,7 @@ func (h *testExpectedMachineSKULookupFailureHook) BeforeQuery(ctx context.Contex
 func (h *testExpectedMachineSKULookupFailureHook) AfterQuery(context.Context, *bun.QueryEvent) {}
 
 func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
+	t.Run("pending batch identity conflict", func(t *testing.T) { testExpectedMachinePendingOverlap(t, "single create") })
 	scenarios := []struct {
 		name string
 		run  func(*testing.T)
@@ -1615,6 +1619,7 @@ func TestBmcMacUnchanged(t *testing.T) {
 }
 
 func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
+	t.Run("pending batch identity conflict", func(t *testing.T) { testExpectedMachinePendingOverlap(t, "single update") })
 	t.Run("complete mutation conflict", func(t *testing.T) {
 		testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "single update"})
 	})
@@ -1629,6 +1634,7 @@ func TestUpdateExpectedMachineHandler_Handle(t *testing.T) {
 		{name: "request validation and metadata", run: testUpdateExpectedMachineRequest},
 		{name: "BMC address presence", run: testUpdateExpectedMachineBmcIpAddress},
 		{name: "encrypted BMC credentials", run: testUpdateExpectedMachineBmcCredentials},
+		{name: "loopback replacement intent", run: testUpdateExpectedMachineLoopbacks},
 	}
 	for _, test := range tests {
 		t.Run(test.name, test.run)
@@ -2267,6 +2273,7 @@ func testUpdateExpectedMachineBmcIpAddress(t *testing.T) {
 }
 
 func TestDeleteExpectedMachineHandler_Handle(t *testing.T) {
+	t.Run("pending batch identity conflict", func(t *testing.T) { testExpectedMachinePendingOverlap(t, "single delete") })
 	t.Run("complete mutation conflict", func(t *testing.T) {
 		testExpectedMachineMutationRejectsInventoryLock(t, expectedMachineMutationLockCase{mutation: "single delete"})
 	})
@@ -2852,6 +2859,11 @@ func TestTenantWithTargetedInstanceCreationCapability(t *testing.T) {
 
 // TestCreateExpectedMachinesHandler_Handle tests the batch create handler
 func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
+	t.Run("default-off legacy batch creation", testExpectedMachineLegacyBatch)
+	t.Run("enabled durable batch recovery", testExpectedMachineBatchRecovery)
+	t.Run("admission failure does not dispatch", testExpectedMachineBatchAdmissionFailure)
+
+	t.Run("pending batch identity conflict", func(t *testing.T) { testExpectedMachinePendingOverlap(t, "batch create") })
 	mutationTests := []struct {
 		name string
 		run  func(*testing.T)
@@ -2894,7 +2906,7 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 	dbSession := testExpectedMachineInitDB(t)
 	defer dbSession.Close()
 
-	cfg := common.GetTestConfig()
+	cfg := expectedMachineBatchRecoveryConfig(t)
 
 	// Prepare client pool for workflow calls
 	tcfg, _ := cfg.GetTemporalConfig()
@@ -2920,7 +2932,7 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 	// Add mock temporal client for the site
 	mockTemporalClient := &tmocks.Client{}
 	mockWorkflowRun := &tmocks.WorkflowRun{}
-	mockWorkflowRun.On("GetID").Return("test-workflow-id")
+	mockWorkflowRun.On("GetRunID").Return("batch-create-run")
 
 	// Track workflow request to generate corresponding results
 	var capturedRequest interface{}
@@ -2934,8 +2946,8 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 		}).
 		Return(mockWorkflowRun, nil)
 
-	// Mock Get to populate results based on captured request
-	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).
+	// Mock the exact run result based on the captured request
+	mockWorkflowRun.Mock.On("GetWithOptions", mock.Anything, mock.Anything, tclient.WorkflowRunGetOptions{DisableFollowingRuns: true}).
 		Run(func(args mock.Arguments) {
 			// Cast result to BatchExpectedMachineOperationResponse and populate
 			if resultPtr, ok := args.Get(1).(*corev1.BatchExpectedMachineOperationResponse); ok {
@@ -3587,6 +3599,7 @@ func testUpdateExpectedMachineBmcCredentials(t *testing.T) {
 			assert.Equal(t, http.StatusOK, rec.Code, "Response: %s", rec.Body.String())
 			require.NotNil(t, capturedPatch, "workflow should have received a request")
 			assert.Equal(t, []string{tt.expectedPath}, capturedPatch.UpdateMask.Paths)
+			assert.False(t, capturedPatch.ExpectedMachine.ReplaceDpuLoopbacks)
 			assert.Equal(t, tt.expectedUsername, capturedPatch.ExpectedMachine.BmcUsername)
 			assert.Equal(t, tt.expectedPassword, capturedPatch.ExpectedMachine.BmcPassword)
 			if tt.expectedPath == "host_nics" {
@@ -3605,11 +3618,120 @@ func testUpdateExpectedMachineBmcCredentials(t *testing.T) {
 	}
 }
 
+func testUpdateExpectedMachineLoopbacks(t *testing.T) {
+	dbSession := testExpectedMachineInitDB(t)
+	t.Cleanup(func() { dbSession.Close() })
+	ctx := context.Background()
+	const org = "test-org"
+	_, site := testExpectedMachineSetupTestData(t, dbSession, org)
+	user := &cdbm.User{OrgData: cdbm.OrgData{org: cdbm.Org{Name: org, Roles: []string{authz.ProviderAdminRole}}}}
+	dao := cdbm.NewExpectedMachineDAO(dbSession)
+	physical := cdbm.ExpectedMachineInterface{
+		MacAddress: cutil.GetPtr("02:00:00:00:00:20"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuOs),
+		FixedIP: cutil.GetPtr("192.0.2.20"), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
+	}
+	loopback := cdbm.ExpectedMachineInterface{
+		MacAddress: physical.MacAddress, Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuLoopback),
+		FixedIP: cutil.GetPtr("198.51.100.20"), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
+	}
+	existing, err := dao.Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
+		ExpectedMachineID: uuid.New(), SiteID: site.ID, BmcMacAddress: "00:11:22:33:44:20", ChassisSerialNumber: "LOOPBACK-PATCH",
+	})
+	require.NoError(t, err)
+	client := &tmocks.Client{}
+	run := &tmocks.WorkflowRun{}
+	var captured corev1.PatchExpectedMachineRequest
+	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+		Run(func(args mock.Arguments) {
+			captured = corev1.PatchExpectedMachineRequest{}
+			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), &captured)
+		}).Return(run, nil)
+	run.On("Get", mock.Anything, mock.Anything).Return(nil)
+	pool := sc.NewClientPool(nil)
+	pool.IDClientMap[site.ID.String()] = client
+	handler := NewUpdateExpectedMachineHandler(dbSession, pool, common.GetTestConfig())
+	physicalJSON := `{"macAddress":"02:00:00:00:00:20","role":"DpuOs","fixedIp":"192.0.2.20","ipAllocation":"Fixed"}`
+	tests := []struct {
+		name               string
+		body               string
+		wantPhysical       bool
+		wantLoopback       string
+		wantWireCount      int
+		wantReplace        bool
+		editAfterPreflight bool
+	}{
+		{
+			name:         "physical update preserves reservation edited after preflight",
+			body:         `{"interfaces":[` + physicalJSON + `]}`,
+			wantPhysical: true, wantLoopback: "198.51.100.30", wantWireCount: 1, editAfterPreflight: true,
+		},
+		{
+			name: "empty physical list preserves reservation",
+			body: `{"interfaces":[]}`, wantLoopback: "198.51.100.20",
+		},
+		{
+			name:         "explicit clear retains submitted physical declaration",
+			body:         `{"interfaces":[` + physicalJSON + `],"replaceDpuLoopbacks":true}`,
+			wantPhysical: true, wantWireCount: 1, wantReplace: true,
+		},
+		{
+			name:         "supplied loopback replaces prior declaration without flag",
+			body:         `{"interfaces":[{"macAddress":"02:00:00:00:00:20","role":"DpuLoopback","fixedIp":"2001:db8::20","ipAllocation":"Fixed"}]}`,
+			wantLoopback: "2001:db8::20", wantWireCount: 1,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := dao.Update(ctx, nil, cdbm.ExpectedMachineUpdateInput{
+				ExpectedMachineID: existing.ID, Interfaces: []cdbm.ExpectedMachineInterface{physical, loopback},
+			})
+			require.NoError(t, err)
+			if test.editAfterPreflight {
+				hook := &expectedMachineQueryHook{
+					queryPrefix: `SELECT "em".`, armed: true,
+					afterQuery: func(_ *bun.QueryEvent) {
+						changed := loopback
+						changed.FixedIP = cutil.GetPtr("198.51.100.30")
+						_, err := dao.Update(ctx, nil, cdbm.ExpectedMachineUpdateInput{
+							ExpectedMachineID: existing.ID, Interfaces: []cdbm.ExpectedMachineInterface{physical, changed},
+						})
+						require.NoError(t, err)
+					},
+				}
+				dbSession.DB.AddQueryHook(hook)
+				t.Cleanup(func() { require.True(t, hook.fired, "reservation edit must happen after preflight") })
+			}
+			recorder := invokeExpectedInventoryMutationHandler(t, user, org, http.MethodPatch,
+				"/v2/org/test-org/nico/expected-machine/"+existing.ID.String(), test.body, existing.ID.String(), handler.Handle)
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			require.NotNil(t, captured.ExpectedMachine)
+			require.Equal(t, []string{"host_nics"}, captured.UpdateMask.Paths)
+			require.Equal(t, test.wantReplace, captured.ExpectedMachine.ReplaceDpuLoopbacks)
+			require.Len(t, captured.ExpectedMachine.HostNics, test.wantWireCount, "only submitted declarations should reach Core")
+			stored, err := dao.Get(ctx, nil, existing.ID, nil, false)
+			require.NoError(t, err)
+			want := []cdbm.ExpectedMachineInterface{}
+			if test.wantPhysical {
+				want = append(want, physical)
+			}
+			if test.wantLoopback != "" {
+				reservation := loopback
+				reservation.FixedIP = cutil.GetPtr(test.wantLoopback)
+				want = append(want, reservation)
+			}
+			require.Equal(t, want, stored.Interfaces)
+			var response model.APIExpectedMachine
+			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+			require.Equal(t, model.NewAPIExpectedMachine(stored).Interfaces, response.Interfaces)
+		})
+	}
+}
+
 func TestExpectedMachineUpdateFields(t *testing.T) {
-	t.Run("tracks every request field except ID and BMC IP address", func(t *testing.T) {
+	t.Run("tracks every request field except ID and per-machine exceptions", func(t *testing.T) {
 		requestFieldCount := reflect.TypeOf(model.APIExpectedMachineUpdateRequest{}).NumField()
 		updateFieldCount := reflect.TypeOf(expectedMachineUpdateFieldSet{}).NumField()
-		assert.Equal(t, requestFieldCount-2, updateFieldCount)
+		assert.Equal(t, requestFieldCount-3, updateFieldCount)
 	})
 
 	fieldPresenceTests := []struct {
@@ -3625,6 +3747,11 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 		{
 			name:      "BMC IP address may vary per machine",
 			setField:  func(req *model.APIExpectedMachineUpdateRequest) { req.BmcIpAddress = cutil.GetPtr("192.0.2.10") },
+			wantEqual: true,
+		},
+		{
+			name:      "loopback replacement intent may vary per machine",
+			setField:  func(req *model.APIExpectedMachineUpdateRequest) { req.ReplaceDpuLoopbacks = cutil.GetPtr(true) },
 			wantEqual: true,
 		},
 		{
@@ -3745,6 +3872,7 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 }
 
 func TestUpdateExpectedMachinesHandler_Handle(t *testing.T) {
+	t.Run("pending batch identity conflict", func(t *testing.T) { testExpectedMachinePendingOverlap(t, "batch update") })
 	tests := []struct {
 		name string
 		run  func(*testing.T)
@@ -3870,7 +3998,11 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 		BmcMacAddress:            "00:11:22:33:44:10",
 		ChassisSerialNumber:      "BATCH-UPDATE-001",
 		FallbackDpuSerialNumbers: []string{"DPU010"},
-		Labels:                   map[string]string{"env": "test"},
+		Interfaces: []cdbm.ExpectedMachineInterface{{
+			MacAddress: cutil.GetPtr("02:00:00:00:00:20"), FixedIP: cutil.GetPtr("198.51.100.20"),
+			Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuLoopback), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
+		}},
+		Labels: map[string]string{"env": "test"},
 	})
 	assert.Nil(t, err)
 
@@ -3888,7 +4020,11 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 		BmcMacAddress:            "00:11:22:33:44:11",
 		ChassisSerialNumber:      "BATCH-UPDATE-002",
 		FallbackDpuSerialNumbers: []string{"DPU011"},
-		Labels:                   map[string]string{"env": "test"},
+		Interfaces: []cdbm.ExpectedMachineInterface{{
+			MacAddress: cutil.GetPtr("02:00:00:00:00:21"), FixedIP: cutil.GetPtr("198.51.100.21"),
+			Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuLoopback), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
+		}},
+		Labels: map[string]string{"env": "test"},
 	})
 	assert.Nil(t, err)
 
@@ -3958,6 +4094,52 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 		rejectsSKU         bool
 		validateResp       func(t *testing.T, body []byte)
 	}{
+		{
+			name: "batch preserves loopbacks unless each machine requests replacement",
+			requestBody: []model.APIExpectedMachineUpdateRequest{
+				{ID: cutil.GetPtr(testEM1.ID.String()), Interfaces: model.APIExpectedMachineInterfaces{}},
+				{ID: cutil.GetPtr(testEM2.ID.String()), ReplaceDpuLoopbacks: cutil.GetPtr(true), Interfaces: model.APIExpectedMachineInterfaces{{
+					MacAddress: cutil.GetPtr("02:00:00:00:00:21"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuOs),
+				}}},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusOK,
+			validateResp: func(t *testing.T, body []byte) {
+				require.NotNil(t, capturedRequest)
+				require.Len(t, capturedRequest.Patches, 2)
+				for _, patch := range capturedRequest.Patches {
+					assert.Equal(t, []string{"host_nics"}, patch.UpdateMask.Paths)
+					clearing := patch.ExpectedMachine.GetId().GetValue() == testEM2.ID.String()
+					assert.Equal(t, clearing, patch.ExpectedMachine.ReplaceDpuLoopbacks)
+					if clearing {
+						require.Len(t, patch.ExpectedMachine.HostNics, 1)
+						assert.Equal(t, corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_DPU_OS, patch.ExpectedMachine.HostNics[0].GetRole())
+					} else {
+						assert.Empty(t, patch.ExpectedMachine.HostNics, "cached loopbacks must not be sent as fresh intent")
+					}
+				}
+				var response []model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(body, &response))
+				require.Len(t, response, 2)
+				for _, machine := range response {
+					stored, err := emDAO.Get(ctx, nil, machine.ID, nil, false)
+					require.NoError(t, err)
+					require.Len(t, stored.Interfaces, 1)
+					require.Len(t, machine.Interfaces, 1)
+					wantRole := cdbm.ExpectedInterfaceRoleDpuLoopback
+					if machine.ID == testEM2.ID {
+						wantRole = cdbm.ExpectedInterfaceRoleDpuOs
+					}
+					assert.Equal(t, cutil.GetPtr(wantRole), stored.Interfaces[0].Role)
+					assert.Equal(t, stored.Interfaces[0].Role, machine.Interfaces[0].Role)
+					assert.Equal(t, stored.Interfaces[0].FixedIP, machine.Interfaces[0].FixedIP)
+				}
+			},
+		},
 		{
 			name: "batch password-only updates remain correlated and encrypted",
 			requestBody: []model.APIExpectedMachineUpdateRequest{
@@ -4449,7 +4631,7 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 		})
 	}
 
-	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 5)
+	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 6)
 	storedEM1, err := emDAO.Get(ctx, nil, testEM1.ID, nil, false)
 	require.NoError(t, err)
 	storedEM2, err := emDAO.Get(ctx, nil, testEM2.ID, nil, false)

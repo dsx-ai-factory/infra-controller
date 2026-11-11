@@ -34,7 +34,7 @@ Field importance levels:
 
 ## Systems
 
-**Code**: `get_systems()`, `get_system()` in libredfish; exploration in `site_explorer/redfish.rs`
+**Code**: `get_systems()`, `get_system()` in libredfish; exploration through nv-redfish in `crates/bmc-explorer/`
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
@@ -184,7 +184,7 @@ Field importance levels:
 
 ## PCIe Devices
 
-**Code**: `pcie_devices()` in libredfish; site_explorer exploration
+**Code**: `pcie_devices()` in libredfish; exploration through nv-redfish in `crates/bmc-explorer/`
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|

@@ -115,7 +115,7 @@ GetNodeToken                      mints as above           (identical
 **Minting the JWT (client side, `rpc::node_jwt`)**
 
 - The agent's gRPC client was built with
-  `ForgeClientConfig::new(root_ca, ClientCert{...}).with_node_jwt()`, so a
+  `CarbideClientConfig::new(root_ca, ClientCert{...}).with_node_jwt()`, so a
   `NodeJwtMinter` watches those two file paths.
 - On the next outgoing RPC, the minter reads cert+key from disk (re-encoding
   Vault's SEC1 key PEM to PKCS#8) and signs an **ES256 JWT**: header
@@ -187,8 +187,8 @@ paths converge on the same SPIFFE URI → `SpiffeMachineIdentifier` mapping
 through the same `SpiffeContext`, so RBAC (Casbin policy, role mapping) is
 completely unchanged. A node presenting both credentials gets the same
 principal twice — harmless. Scout configures a bearer-token provider with
-`ForgeClientConfig::with_node_jwt()` and DPU-agent with
-`ForgeClientConfig::with_token_provider()`, regardless of whether node-auth is
+`CarbideClientConfig::with_node_jwt()` and DPU-agent with
+`CarbideClientConfig::with_token_provider()`, regardless of whether node-auth is
 enabled. The provider attaches the `Authorization` header only when it can
 obtain a token; before the certificate exists, requests carry no bearer header.
 A server with node-auth disabled ignores any header that is present.
@@ -342,7 +342,7 @@ taking the whole CA with it — needs revocation checking we do not do yet.
 | Piece | Where |
 | --- | --- |
 | Client mint + cache + header injection | `crates/rpc/src/node_jwt.rs` (`NodeJwtMinter`, `BearerAuthService`, `NodeTokenProvider`) |
-| Client opt-in | `ForgeClientConfig::with_node_jwt()` / `with_token_provider()` (`crates/rpc/src/forge_tls_client.rs`); called in scout `client.rs` and dpu-agent `lib.rs` |
+| Client opt-in | `CarbideClientConfig::with_node_jwt()` / `with_token_provider()` (`crates/rpc/src/carbide_tls_client.rs`); called in scout `client.rs` and dpu-agent `lib.rs` |
 | Key-less token source | `crates/rpc/src/node_token_socket.rs` (`SocketTokenSource`), consumed by fmds via `--node-token-socket` |
 | Broker service | `AgentLocal/GetNodeToken` in `crates/agent/proto/agent_local.proto`, with bindings generated once by `carbide-rpc` and served by `crates/agent/src/local_api.rs` |
 | Server validation | `crates/api-core/src/node_auth.rs` (`NodeJwtValidator`) |

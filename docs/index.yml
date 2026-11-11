@@ -411,6 +411,22 @@ navigation:
               path: development/tls.md
             - page: nico-admin-cli
               path: manuals/nico-admin-cli.md
+            - page: SPDM Attestation Jobs
+              path: design/attestation/spdm-jobs.md
+            - page: SPDM Job Commands
+              path: manuals/nico-admin-cli/commands/attestation/attestation-spdm-job.md
+            - page: SPDM Job Waiver
+              path: manuals/nico-admin-cli/commands/attestation/attestation-spdm-job-waive.md
+            - page: SPDM Job Failure
+              path: manuals/nico-admin-cli/commands/attestation/attestation-spdm-job-fail.md
+            - page: SPDM Job Details
+              path: manuals/nico-admin-cli/commands/attestation/attestation-spdm-job-get.md
+            - page: SPDM Job List
+              path: manuals/nico-admin-cli/commands/attestation/attestation-spdm-job-list.md
+            - page: SPDM Machine Commands
+              path: manuals/nico-admin-cli/commands/attestation/attestation-spdm-machines.md
+            - page: SPDM Machine Attestation Status
+              path: manuals/nico-admin-cli/commands/attestation/attestation-spdm-machines-list.md
             - section: Routing Profile CLI Reference
               contents:
                 - link: Routing Profile Overview

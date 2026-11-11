@@ -18,8 +18,8 @@ use std::ffi::CString;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ptr;
 
+use ::rpc::carbide_tls_client::{self, ApiConfig, CarbideClientConfig};
 use ::rpc::forge as rpc;
-use ::rpc::forge_tls_client::{self, ApiConfig, ForgeClientConfig};
 use carbide_dhcp_common::MachineArchitecture::*;
 use carbide_dhcp_common::VendorClass;
 use ipnetwork::IpNetwork;
@@ -74,10 +74,10 @@ impl Machine {
         discovery: Discovery,
         carbide_api_url: &str,
         vendor_class: Option<VendorClass>,
-        client_config: &ForgeClientConfig,
+        client_config: &CarbideClientConfig,
     ) -> Result<Self, String> {
         let api_config = ApiConfig::new(carbide_api_url, client_config);
-        match forge_tls_client::ForgeTlsClient::retry_build(&api_config).await {
+        match carbide_tls_client::CarbideTlsClient::retry_build(&api_config).await {
             Ok(mut client) => {
                 let request = tonic::Request::new(rpc::DhcpDiscovery {
                     mac_address: discovery.mac_address.to_string(),

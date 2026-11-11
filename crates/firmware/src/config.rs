@@ -35,6 +35,18 @@ pub struct FirmwareConfigSnapshot {
 }
 
 impl FirmwareConfigSnapshot {
+    /// Apply runtime configurations after this catalog's static entries, in
+    /// iteration order. This composition performs no filesystem reads.
+    pub fn with_overrides(
+        mut self,
+        overrides: impl IntoIterator<Item = HostFirmwareConfig>,
+    ) -> Self {
+        for firmware in overrides {
+            merge_firmware_override(&mut self.data, firmware);
+        }
+        self
+    }
+
     pub fn values(&self) -> impl Iterator<Item = &Firmware> {
         self.data.values()
     }
@@ -67,7 +79,7 @@ impl FirmwareConfigSnapshot {
             .cloned();
         tracing::debug!(
             %key,
-            firmware = ?ret,
+            found = ret.is_some(),
             "Firmware config lookup completed",
         );
         ret
@@ -140,10 +152,9 @@ impl FirmwareConfig {
         {
             // Fake configs to merge for unit tests
             for ovrd in &self.test_overrides {
-                if let Err(err) = self.merge_from_string(&mut data, ovrd.clone()) {
+                if self.merge_from_string(&mut data, ovrd.clone()).is_err() {
                     tracing::error!(
-                        override_config = %ovrd,
-                        error = %err,
+                        error_category = "invalid_metadata",
                         "Failed to merge test firmware override",
                     );
                 }
@@ -159,11 +170,7 @@ impl FirmwareConfig {
         &self,
         overrides: impl IntoIterator<Item = HostFirmwareConfig>,
     ) -> FirmwareConfigSnapshot {
-        let mut snapshot = self.create_snapshot();
-        for firmware in overrides {
-            merge_firmware_override(&mut snapshot.data, firmware);
-        }
-        snapshot
+        self.create_snapshot().with_overrides(overrides)
     }
 
     pub fn config_update_time(&self) -> Option<std::time::SystemTime> {
@@ -208,10 +215,17 @@ impl FirmwareConfig {
                     continue;
                 }
             };
-            if let Err(e) = self.merge_from_string(map, metadata) {
+            if let Err(error) = self.merge_from_string(map, metadata) {
+                // TOML errors can quote signed artifact URLs. The numeric byte
+                // span locates the failure without logging its message or source.
+                let span = error
+                    .downcast_ref::<toml::de::Error>()
+                    .and_then(|error| error.span());
                 tracing::error!(
                     metadata_directory = ?dir.path(),
-                    error = %e,
+                    error_category = "invalid_metadata",
+                    error_byte_start = span.as_ref().map(|span| span.start as u64),
+                    error_byte_end = span.as_ref().map(|span| span.end as u64),
                     "Failed to merge firmware metadata",
                 );
             }

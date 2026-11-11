@@ -258,6 +258,7 @@ per-host fields and compatibility controls. It reads a snake_case
   [Host BMC compatibility fields](ip-and-network-configuration.md#host-bmc-compatibility-fields)
   for field interactions and the supported shared HostInband topology.
 - **`host_lifecycle_profile.disable_lockdown`** (bool, default `false`): When `true`, the state machine does not lock down the host during lifecycle management, which suits automation workflows that keep lockdown disabled.
+- **`host_lifecycle_profile.retain_hbn_config_on_boot`** (bool, default `false`): When `true`, designates the machine to retain its HBN config on boot. A designated machine must declare a `dpu_bmc` and a `dpu_os` interface, and must use a `Fixed` or `Retained` `ip_allocation` on the host BMC and on both DPU interfaces; the API rejects the designation otherwise. Declaring the DPU interfaces is required because an undeclared one gets a DHCP address. A machine whose `dpu_policy` attaches no DPU declares neither. Host data interfaces are not restricted. This allows the machine to boot while NICO's DHCP and gRPC services are unavailable.
 
 The previous `host_nics` manifest key and `--host_nics` CLI option remain
 aliases for `interfaces` and `--interfaces`. Existing manifests do not need
@@ -373,6 +374,10 @@ This command copies the NICo BFB image directly to the DPU via rshim (SSH to the
 <Note>
 The `--host-bmc-ip` flag is required. NICo uses it to power-cycle the host after the BFB copy completes. Use `--pre-copy-powercycle` if the host needs to release rshim control to the DPU BMC before the copy can start.
 </Note>
+
+The DPU BMC IP must belong to a known machine interface. Optionally pass `--mac` to require that interface to match the expected DPU BMC MAC; this option does not override credential lookup. NICo saves the resolved MAC even when `--mac` is omitted. An invalid or mismatching MAC rejects the request without queuing recovery or changing the host's remediation pause.
+
+Before copying the BFB or powering off the host, NICo checks the saved DPU identity again. A missing or changed IP-to-interface mapping fails recovery and releases the host's remediation pause. Recovery states without a saved MAC also require a new request before another copy or power-off. Verify the DPU BMC IP and MAC, then rerun the command to retry. A recovery in the host power-on phase restores host power before checking the DPU identity again.
 
 For additional DPU-specific troubleshooting including Secure Boot configuration, BMC password resets, and firmware version checks, see [Adding New Machines to an Existing Site](../playbooks/stuck_objects/adding_new_machines.md).
 

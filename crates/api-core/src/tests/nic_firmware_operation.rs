@@ -3396,23 +3396,20 @@ async fn firmware_activation_preserves_the_ipmi_route_and_committed_request_time
 
     #[derive(Default)]
     struct RecordingIpmi {
-        calls: Mutex<Vec<(MachineId, SocketAddr, bool, CredentialKey)>>,
+        calls: Mutex<Vec<(SocketAddr, bool, CredentialKey)>>,
     }
     #[async_trait]
     impl carbide_ipmi::IPMITool for RecordingIpmi {
         async fn restart(
             &self,
-            machine_id: &MachineId,
             address: SocketAddr,
             legacy_boot: bool,
             credential_key: &CredentialKey,
         ) -> Result<(), eyre::Report> {
-            self.calls.lock().unwrap().push((
-                *machine_id,
-                address,
-                legacy_boot,
-                credential_key.clone(),
-            ));
+            self.calls
+                .lock()
+                .unwrap()
+                .push((address, legacy_boot, credential_key.clone()));
             Ok(())
         }
         async fn bmc_cold_reset(
@@ -3490,8 +3487,7 @@ async fn firmware_activation_preserves_the_ipmi_route_and_committed_request_time
     {
         let calls = ipmi.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
-        let (machine_id, address_used, legacy_boot, credential_key) = &calls[0];
-        assert_eq!(*machine_id, host_id.into());
+        let (address_used, legacy_boot, credential_key) = &calls[0];
         assert_eq!(
             *address_used,
             SocketAddr::new(address, carbide_ipmi::DEFAULT_IPMI_PORT)

@@ -200,7 +200,7 @@ func GetInstanceFromIDString(ctx context.Context, tx *cdb.Tx, instanceID string,
 	if err != nil {
 		return nil, ErrInvalidID
 	}
-	return cdbm.NewInstanceDAO(dbSession).GetByID(ctx, tx, instanceid, nil)
+	return cdbm.NewInstanceDAO(dbSession).GetByID(ctx, tx, instanceid, nil, false)
 }
 
 // GetVpcFromIDString gets the vpc DB model from the id string
@@ -746,14 +746,6 @@ func GetAllAllocationConstraintsForInstanceType(ctx context.Context, tx *cdb.Tx,
 	}
 
 	return acs, tot, nil
-}
-
-// RollbackTx is called deferred in functions that create a transaction
-// if transaction was committed, this will do nothing
-func RollbackTx(ctx context.Context, tx *cdb.Tx, committed *bool) {
-	if committed != nil && !*committed {
-		tx.Rollback()
-	}
 }
 
 // HandleTxError translates an error returned by cdb.WithTx / cdb.WithTxResult

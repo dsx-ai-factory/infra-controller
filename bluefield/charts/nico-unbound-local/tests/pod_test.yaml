@@ -1,0 +1,193 @@
+suite: resolver pod
+templates:
+  - daemonset.yaml
+values:
+  - ./values.yaml
+tests:
+  # The pod is one Unbound process that only binds port 53. It meets the agent
+  # in the two directories under dnsDir and mounts nothing else: no
+  # /opt/forge/pub or /opt/forge/run, because nothing in this pod holds a
+  # credential. Both directories are hostPath type Directory, so the pod waits
+  # for the agent to create them instead of creating root-owned ones itself.
+  - it: runs unbound alone with the agent's directories mounted
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+      - notExists:
+          path: spec.template.spec.hostNetwork
+      - lengthEqual:
+          path: spec.template.spec.containers
+          count: 1
+      - equal:
+          path: spec.template.spec.containers[0].name
+          value: unbound
+      - notExists:
+          path: spec.template.spec.containers[0].args
+      - equal:
+          path: spec.template.spec.containers[0].securityContext
+          value:
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [NET_BIND_SERVICE]
+      - equal:
+          path: spec.template.spec.containers[0].ports
+          value:
+            - name: dns-udp
+              containerPort: 53
+              protocol: UDP
+            - name: dns-tcp
+              containerPort: 53
+              protocol: TCP
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts
+          value:
+            - name: config
+              mountPath: /etc/unbound
+              readOnly: true
+            - name: run
+              mountPath: /opt/forge/dns/00000000-0000-0000-0000-00000000000a/run
+            - name: zone
+              mountPath: /opt/forge/dns/00000000-0000-0000-0000-00000000000a/zone
+              readOnly: true
+      - equal:
+          path: spec.template.spec.volumes
+          value:
+            - name: config
+              configMap:
+                name: RELEASE-NAME
+            - name: run
+              hostPath:
+                path: /opt/forge/dns/00000000-0000-0000-0000-00000000000a/run
+                type: Directory
+            - name: zone
+              hostPath:
+                path: /opt/forge/dns/00000000-0000-0000-0000-00000000000a/zone
+                type: Directory
+
+  # Unbound exits on a missing zonefile, so the pod waits for the agent to
+  # write it, reusing the Unbound image's busybox shell so no second image is
+  # needed. The image's default user is not root and the agent creates the
+  # zone directory 0700 root, so the wait must run as UID 0 to see the file.
+  - it: waits for the zonefile before starting
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.initContainers
+          count: 2
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: wait-for-zone
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext
+          value:
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+      - equal:
+          path: spec.template.spec.initContainers[0].image
+          value: example.invalid/nico-unbound:0.1.0
+      # The loop is the wait. The messages around it name the same path, so
+      # match the test the loop repeats, not the path alone.
+      - matchRegex:
+          path: spec.template.spec.initContainers[0].command[2]
+          pattern: 'while \[ ! -f /opt/forge/dns/00000000-0000-0000-0000-00000000000a/zone/zonefile \]; do'
+      - equal:
+          path: spec.template.spec.initContainers[0].volumeMounts
+          value:
+            - name: zone
+              mountPath: /opt/forge/dns/00000000-0000-0000-0000-00000000000a/zone
+              readOnly: true
+
+  # Multus attaches the slot interface bare. nic-init is the only holder of
+  # NET_ADMIN: it adds the resolver addresses and the per-family return route
+  # from the rendered values, which reach the script only as environment.
+  - it: numbers the slot interface before unbound starts
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[1].name
+          value: nic-init
+      - equal:
+          path: spec.template.spec.initContainers[1].image
+          value: example.invalid/nico-unbound:0.1.0
+      - equal:
+          path: spec.template.spec.initContainers[1].securityContext
+          value:
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [NET_ADMIN]
+      - equal:
+          path: spec.template.spec.initContainers[1].env
+          value:
+            - name: INTERFACE
+              value: svc0
+            - name: IPV4_ADDRESS
+              value: 198.51.100.251/31
+            - name: IPV4_GATEWAY
+              value: 198.51.100.250
+            - name: IPV6_ADDRESS
+              value: 2001:db8::251/127
+            - name: IPV6_GATEWAY
+              value: 2001:db8::250
+      # -e is what turns any failed step into a stopped pod; the script's
+      # behaviour is exercised by tests/test_nic_init_command.py.
+      - equal:
+          path: spec.template.spec.initContainers[1].command[0]
+          value: /busybox/sh
+      - equal:
+          path: spec.template.spec.initContainers[1].command[1]
+          value: -ec
+      - notExists:
+          path: spec.template.spec.initContainers[1].volumeMounts
+
+  # A VPC without a private zone runs a recursion-only resolver: nothing to
+  # wait for and no zone directory, while the control socket directory and
+  # the interface setup stay.
+  - it: renders no zone mount or zone wait without a zone name
+    set:
+      zoneName: ""
+    asserts:
+      - lengthEqual:
+          path: spec.template.spec.initContainers
+          count: 1
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: nic-init
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts
+          value:
+            - name: config
+              mountPath: /etc/unbound
+              readOnly: true
+            - name: run
+              mountPath: /opt/forge/dns/00000000-0000-0000-0000-00000000000a/run
+      - equal:
+          path: spec.template.spec.volumes
+          value:
+            - name: config
+              configMap:
+                name: RELEASE-NAME
+            - name: run
+              hostPath:
+                path: /opt/forge/dns/00000000-0000-0000-0000-00000000000a/run
+                type: Directory
+
+  # Placement and sizing belong to DPF: with nothing supplied the DaemonSet
+  # has no affinity, nodeSelector or resource requests and limits.
+  - it: renders no placement or resources of its own
+    asserts:
+      - notExists:
+          path: spec.template.spec.affinity
+      - notExists:
+          path: spec.template.spec.nodeSelector
+      - notExists:
+          path: spec.template.spec.containers[0].resources
+      - notExists:
+          path: spec.template.spec.initContainers[1].resources

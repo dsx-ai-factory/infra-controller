@@ -116,7 +116,7 @@ mod tests {
     use http_body_util::{BodyExt, Empty};
     use hyper::body::Bytes;
     use hyper_util::rt::TokioIo;
-    use rpc::forge_tls_client::ForgeClientConfig;
+    use rpc::carbide_tls_client::CarbideClientConfig;
 
     use super::*;
     use crate::instrumentation::create_metrics;
@@ -130,7 +130,7 @@ mod tests {
                     .parse()
                     .expect("DPU ID"),
                 "http://127.0.0.1:1".to_string(),
-                Arc::new(ForgeClientConfig::default()),
+                Arc::new(CarbideClientConfig::default()),
                 MachineIdentityConfig::default(),
             )
             .expect("metadata state"),

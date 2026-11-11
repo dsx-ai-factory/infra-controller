@@ -77,7 +77,7 @@ fn fixture_tenant_config() -> rpc::TenantConfig {
 }
 
 /// Seeds a tenant-managed SitePrefix at the requested lifecycle boundary.
-async fn seed_tenant_managed_site_prefix(
+pub(super) async fn seed_tenant_managed_site_prefix(
     env: &TestEnv,
     tenant_organization_id: &str,
     prefix: &str,
@@ -307,6 +307,7 @@ fn attached_segment_request(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         segment_type: segment_type as i32,
         infer_slaac_eui64_addresses: false,
@@ -334,6 +335,7 @@ fn unattached_host_inband_segment_request(
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }],
         segment_type: rpc::forge::NetworkSegmentType::HostInband as i32,
         infer_slaac_eui64_addresses: false,
@@ -732,6 +734,25 @@ async fn eligible_exact_overlap_uses_distinct_vpc_scopes(
     let vpc_b = create_fnn_vpc_for_tenant(&env, tenant_b, "overlap VPC B", Some("OVERLAP")).await;
     let same_tenant_vpc =
         create_fnn_vpc_for_tenant(&env, tenant_a, "same tenant VPC", Some("OVERLAP")).await;
+    // Free external inventory can share an internal VNI. Prefix isolation
+    // depends on actual ownership, not disjointness of the entire pools.
+    let mut txn = env.pool.begin().await?;
+    let active_vni = db::resource_pool::find_owned_allocation(
+        &env.common_pools.ethernet.pool_vpc_vni,
+        &mut txn,
+        OwnerType::Vpc,
+        &vpc_a.to_string(),
+    )
+    .await?
+    .expect("VPC A owns its active VNI");
+    db::resource_pool::populate(
+        &env.common_pools.ethernet.pool_external_vpc_vni,
+        &mut txn,
+        vec![active_vni],
+        false,
+    )
+    .await?;
+    txn.commit().await?;
     let root_a = seed_tenant_managed_site_prefix(
         &env,
         tenant_a,
