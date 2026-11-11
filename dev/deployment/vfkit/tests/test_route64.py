@@ -59,6 +59,7 @@ class Route64Tests(unittest.TestCase):
             'ipv6 endpoint': EXPORT.replace('192.0.2.1', '[2001:db8::1]'),
             'mtu': EXPORT.replace('[Peer]', 'MTU = 1500\n[Peer]'),
             'defaults': '[DEFAULT]\nMTU = 1400\n' + EXPORT,
+            'noncanonical key': EXPORT.replace(KEY, KEY[:-2] + '9='),
             'duplicate secret': EXPORT.replace('[Peer]', f'PrivateKey = {KEY}\n[Peer]'),
             'appended command': EXPORT + 'ping 2001:4860:ffff::1\n',
         }
@@ -68,6 +69,7 @@ class Route64Tests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'invalid Route64 export') as raised:
                     route64.configuration(self.export)
                 self.assertNotIn(KEY, str(raised.exception))
+                self.assertNotIn(KEY[:-2] + '9=', str(raised.exception))
 
     def import_without_boot(self):
         # Stop at dependency discovery after the real import/persistence path.
