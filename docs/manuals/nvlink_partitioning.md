@@ -338,8 +338,8 @@ unreachable_alert_after = 3
 | Field | Purpose |
 | ----- | ------- |
 | `nmx_c_tls_ca_cert_path` | PEM containing the CAs that verify NMX-C over HTTPS. It is the only trust source: neither the partition monitor nor the certificate monitor uses the system trust store |
-| `nmx_c_tls_client_cert_path` | Optional client certificate for mTLS to NMX-C |
-| `nmx_c_tls_client_key_path` | Optional client key matching the certificate above |
+| `nmx_c_tls_client_cert_path` | Optional client certificate for mTLS to NMX-C. Set it together with `nmx_c_tls_client_key_path`. `nico-api` rejects a configuration with only one of these paths during configuration loading, even when `nvlink_config.enabled = false`. |
+| `nmx_c_tls_client_key_path` | Optional client key matching the certificate above. Set it together with `nmx_c_tls_client_cert_path`. `nico-api` rejects a configuration with only one of these paths during configuration loading, even when `nvlink_config.enabled = false`. |
 | `nmx_c_tls_authority` | Optional override for the expected server name during certificate verification (SNI / hostname check) |
 | `nmx_c_endpoint_port` | Optional gRPC port used when deriving an endpoint from a switch NVOS IP; defaults to `9370` |
 | `allow_insecure` | Development option that can select plaintext HTTP for rack-derived endpoints when no client certificate and key are configured. It does not disable certificate-monitor TLS verification |
@@ -360,13 +360,13 @@ schedule the change accordingly.
 When either setting is `true`, `nico-api` fills in unset TLS settings at
 startup:
 
-- **Client certificate, key, and authority.** When none of the four
+* **Client certificate, key, and authority.** When none of the four
   `nmx_c_tls_*` keys is set, `nico-api` uses `tls.crt` and `tls.key` from the
   nico-api Helm chart's `nvSwitchTls.nicoClient` mount,
   `/var/run/secrets/nvswitch-client`, and sets `nmx_c_tls_authority` to
   `initial_domain_name`. Setting any `nmx_c_tls_*` key disables these three
   defaults.
-- **CA bundle.** When `nmx_c_tls_ca_cert_path` is unset and NMX-C is reached
+* **CA bundle.** When `nmx_c_tls_ca_cert_path` is unset and NMX-C is reached
   over HTTPS, `nico-api` uses `ca.crt` from that mount, or else
   `/var/run/secrets/nico-roots/ca.crt`. This applies regardless of the other
   keys.

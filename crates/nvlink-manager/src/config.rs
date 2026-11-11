@@ -15,8 +15,11 @@
  * limitations under the License.
  */
 
+use std::path::PathBuf;
+
 use carbide_utils::config::as_std_duration;
 use duration_str::deserialize_duration;
+use libnmxc::{NmxcClientIdentity, NmxcTlsConfig};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -38,10 +41,12 @@ pub struct NvLinkConfig {
     /// PEM file path: extra CA bundle for verifying the NMX-C server over HTTPS (optional).
     #[serde(default)]
     pub nmx_c_tls_ca_cert_path: Option<String>,
-    /// PEM file path: client certificate for mTLS to NMX-C (optional; pair with `nmx_c_tls_client_key_path`).
+    /// PEM file path: client certificate for mTLS to NMX-C (optional). Set it together with
+    /// `nmx_c_tls_client_key_path`; nico-api refuses to start when only one of them is set.
     #[serde(default)]
     pub nmx_c_tls_client_cert_path: Option<String>,
-    /// PEM file path: client private key for mTLS to NMX-C (optional; pair with `nmx_c_tls_client_cert_path`).
+    /// PEM file path: client private key for mTLS to NMX-C (optional). Set it together with
+    /// `nmx_c_tls_client_cert_path`; nico-api refuses to start when only one of them is set.
     #[serde(default)]
     pub nmx_c_tls_client_key_path: Option<String>,
     /// TLS server name for NMX-C HTTPS: a DNS name or bare IP address.
@@ -198,6 +203,19 @@ impl Default for SwitchReachabilityConfig {
     }
 }
 
+/// An NMX-C client certificate or key configured without the other half of the pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum NmxCTlsConfigError {
+    #[error(
+        "nmx_c_tls_client_cert_path is set without nmx_c_tls_client_key_path; set both or neither"
+    )]
+    CertificateWithoutKey,
+    #[error(
+        "nmx_c_tls_client_key_path is set without nmx_c_tls_client_cert_path; set both or neither"
+    )]
+    KeyWithoutCertificate,
+}
+
 /// Outcome of [`NvLinkConfig::apply_default_nmx_c_tls`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DefaultNmxCTls {
@@ -245,6 +263,37 @@ impl NvLinkConfig {
         self.nmx_c_certificate_rotation
             .enabled
             .unwrap_or(self.enabled)
+    }
+
+    /// NMX-C TLS settings for [`libnmxc::NmxcClientPool`], or `None` when no `nmx_c_tls_*` key is
+    /// set.
+    ///
+    /// The client certificate and key form one identity and must be set together. CA-only and
+    /// authority-only settings are kept and authenticate the server without a client certificate.
+    pub fn nmx_c_tls_config(&self) -> Result<Option<NmxcTlsConfig>, NmxCTlsConfigError> {
+        let client_identity = match (
+            &self.nmx_c_tls_client_cert_path,
+            &self.nmx_c_tls_client_key_path,
+        ) {
+            (Some(cert_path), Some(key_path)) => Some(NmxcClientIdentity {
+                cert_path: PathBuf::from(cert_path),
+                key_path: PathBuf::from(key_path),
+            }),
+            (None, None) => None,
+            (Some(_), None) => return Err(NmxCTlsConfigError::CertificateWithoutKey),
+            (None, Some(_)) => return Err(NmxCTlsConfigError::KeyWithoutCertificate),
+        };
+        if self.nmx_c_tls_ca_cert_path.is_none()
+            && client_identity.is_none()
+            && self.nmx_c_tls_authority.is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(NmxcTlsConfig {
+            ca_cert_path: self.nmx_c_tls_ca_cert_path.as_ref().map(PathBuf::from),
+            client_identity,
+            authority: self.nmx_c_tls_authority.clone(),
+        }))
     }
 
     /// Whether the switch reachability monitor runs: `switch_reachability.enabled`
@@ -619,6 +668,66 @@ mod test {
         assert!(!config.enabled);
         assert!(!config.allow_insecure);
         assert!(!config.certificate_rotation_enabled());
+    }
+
+    #[test]
+    fn nmx_c_tls_config_requires_the_client_certificate_and_key_together() {
+        use carbide_test_support::Outcome::{FailsWith, Yields};
+        use carbide_test_support::scenarios;
+
+        let identity = || {
+            Some(NmxcClientIdentity {
+                cert_path: PathBuf::from("/tls/tls.crt"),
+                key_path: PathBuf::from("/tls/tls.key"),
+            })
+        };
+        scenarios!(run = |(ca, cert, key, authority): (
+            Option<&str>,
+            Option<&str>,
+            Option<&str>,
+            Option<&str>,
+        )| {
+            NvLinkConfig {
+                nmx_c_tls_ca_cert_path: ca.map(str::to_owned),
+                nmx_c_tls_client_cert_path: cert.map(str::to_owned),
+                nmx_c_tls_client_key_path: key.map(str::to_owned),
+                nmx_c_tls_authority: authority.map(str::to_owned),
+                ..NvLinkConfig::default()
+            }
+            .nmx_c_tls_config()
+        };
+            "no NMX-C TLS setting" {
+                (None, None, None, None) => Yields(None),
+            }
+            "server verification without a client certificate" {
+                (Some("/tls/ca.crt"), None, None, None) => Yields(Some(NmxcTlsConfig {
+                    ca_cert_path: Some(PathBuf::from("/tls/ca.crt")),
+                    ..NmxcTlsConfig::default()
+                })),
+                (None, None, None, Some("nmxc.example")) => Yields(Some(NmxcTlsConfig {
+                    authority: Some("nmxc.example".to_string()),
+                    ..NmxcTlsConfig::default()
+                })),
+            }
+            "complete client identity" {
+                (None, Some("/tls/tls.crt"), Some("/tls/tls.key"), None) => Yields(Some(NmxcTlsConfig {
+                    client_identity: identity(),
+                    ..NmxcTlsConfig::default()
+                })),
+                (Some("/tls/ca.crt"), Some("/tls/tls.crt"), Some("/tls/tls.key"), Some("nmxc.example")) =>
+                    Yields(Some(NmxcTlsConfig {
+                        ca_cert_path: Some(PathBuf::from("/tls/ca.crt")),
+                        client_identity: identity(),
+                        authority: Some("nmxc.example".to_string()),
+                    })),
+            }
+            "half-set client identity" {
+                (Some("/tls/ca.crt"), Some("/tls/tls.crt"), None, None) =>
+                    FailsWith(NmxCTlsConfigError::CertificateWithoutKey),
+                (None, None, Some("/tls/tls.key"), Some("nmxc.example")) =>
+                    FailsWith(NmxCTlsConfigError::KeyWithoutCertificate),
+            }
+        );
     }
 
     #[test]
