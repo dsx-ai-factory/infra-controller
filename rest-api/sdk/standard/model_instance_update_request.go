@@ -56,7 +56,7 @@ type InstanceUpdateRequest struct {
 	Interfaces []InterfaceCreateRequest `json:"interfaces,omitempty"`
 	// When set, asks NICo to auto-resolve the Instance's network interfaces from the host's underlay (HostInband) segments. `null` leaves the value unchanged; `true` (re-)resolves; `false` returns to explicit interface configuration. When `true`, the Instance's VPC MUST already have `networkVirtualizationType: FLAT`, `interfaces` MUST be empty or omitted, and `secondaryVpcIds` MUST be empty or omitted.
 	AutoNetwork NullableBool `json:"autoNetwork,omitempty"`
-	// Update InfiniBand Interfaces of the Instance
+	// Update InfiniBand Interfaces of the Instance. Omission or null leaves interfaces unchanged; an explicit list (including an empty list []) replaces them entirely. An empty list removes all InfiniBand interfaces without capability validation. A nonempty list is validated against the Instance Type's InfiniBand capabilities; if the Instance Type has none, the Machine's capabilities are used instead. Missing capabilities or invalid selectors return 400. Final Site validation remains authoritative because persisted inventory can lag behind the Site. Each `device`, `deviceInstance`, and `isPhysical` combination may appear only once. An unchanged complete Ready list preserves existing assignments without inserting replacement Pending rows. Removing interfaces from a running Instance immediately detaches the corresponding InfiniBand partitions.
 	InfinibandInterfaces []InfiniBandInterfaceCreateRequest `json:"infinibandInterfaces,omitempty"`
 	// Update SpectrumX Partition attachments of the Instance. Omission or null leaves attachments unchanged; an explicit list replaces them entirely. An empty list removes attachments without capability validation. A nonempty list, including an unchanged list, is validated against the Instance's individual Machine capabilities persisted by inventory reconciliation before any update is persisted. Instance Type capability summaries are not used. Missing capabilities or invalid selectors return 400. Final Site validation remains authoritative because persisted inventory can lag behind the Site. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. Removing attachments from a running Instance immediately stops SpectrumX traffic on the detached NICs, but the guest may retain their IPv4 addresses and routes until the DHCP lease issued by the DOCA Weave DHCP agent expires (1 hour by default). NICo does not set this lease duration. Addresses and routes may remain longer if the guest DHCP client does not honor lease expiry. Replacing attachments on a running Instance, such as moving a NIC to a Partition with a different VNI, may leave the guest using its old address until DHCP renewal. Renew DHCP or restart networking on the affected NICs after replacing attachments.
 	SpectrumXAttachments []InstanceSpectrumXAttachmentCreateOrUpdateRequest `json:"spectrumXAttachments,omitempty"`
@@ -770,9 +770,9 @@ func (o *InstanceUpdateRequest) UnsetAutoNetwork() {
 	o.AutoNetwork.Unset()
 }
 
-// GetInfinibandInterfaces returns the InfinibandInterfaces field value if set, zero value otherwise.
+// GetInfinibandInterfaces returns the InfinibandInterfaces field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *InstanceUpdateRequest) GetInfinibandInterfaces() []InfiniBandInterfaceCreateRequest {
-	if o == nil || IsNil(o.InfinibandInterfaces) {
+	if o == nil {
 		var ret []InfiniBandInterfaceCreateRequest
 		return ret
 	}
@@ -959,7 +959,7 @@ func (o InstanceUpdateRequest) ToMap() (map[string]interface{}, error) {
 	if o.AutoNetwork.IsSet() {
 		toSerialize["autoNetwork"] = o.AutoNetwork.Get()
 	}
-	if !IsNil(o.InfinibandInterfaces) {
+	if o.InfinibandInterfaces != nil {
 		toSerialize["infinibandInterfaces"] = o.InfinibandInterfaces
 	}
 	if o.SpectrumXAttachments != nil {
