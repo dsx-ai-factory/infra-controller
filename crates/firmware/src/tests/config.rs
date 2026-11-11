@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::collections::HashMap;
+
 use carbide_test_support::value_scenarios;
 use model::firmware::{Firmware, FirmwareComponentType, HostFirmwareConfig};
 
@@ -33,6 +35,59 @@ version = "1.27.260418"
 filename = "/opt/carbide/firmware/lenovo-thinksystem_hs350x_v3-bmc-1.27.260418/lnvgy_fw_BMC_igc602j-1.27_anyos_noarch.ima"
 default = true
 "#;
+
+/// Host default lookup reaches these diagnostics from a public passive read.
+/// Keep useful lookup/parse categories without dumping signed artifact URLs or
+/// the source snippets included in TOML parser errors.
+#[test]
+fn catalog_diagnostics_exclude_artifacts_and_invalid_source() -> eyre::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let invalid = directory.path().join("invalid");
+    std::fs::create_dir(&invalid)?;
+    let invalid_source = "version = [private-parser-source";
+    let parse_error = toml::from_str::<Firmware>(invalid_source).expect_err("malformed metadata");
+    let expected_span = parse_error
+        .span()
+        .expect("TOML parser exposes the invalid byte range");
+    std::fs::write(invalid.join("metadata.toml"), invalid_source)?;
+    let mut config = FirmwareConfig::new(directory.path().into(), &HashMap::new(), &HashMap::new());
+    config.add_test_override(
+        LENOVO_CFG
+            .replace("filename =", "url =")
+            .replace("/opt/carbide/firmware/", "https://private-artifact-token/"),
+    );
+
+    let logs = carbide_instrument::testing::capture_logs(|| {
+        assert!(
+            config
+                .create_snapshot()
+                .find(bmc_vendor::BMCVendor::Lenovo, "ThinkSystem HS350X V3")
+                .is_some()
+        );
+    });
+
+    assert!(logs.iter().any(|log| log.field("found") == Some("true")));
+    let parse_log = logs
+        .iter()
+        .find(|log| log.field("error_category") == Some("invalid_metadata"))
+        .expect("invalid metadata retains its diagnostic category");
+    assert_eq!(
+        parse_log.field("error_byte_start"),
+        Some(expected_span.start.to_string().as_str())
+    );
+    assert_eq!(
+        parse_log.field("error_byte_end"),
+        Some(expected_span.end.to_string().as_str())
+    );
+    assert_eq!(parse_log.field("error"), None);
+    for marker in ["private-artifact-token", "private-parser-source"] {
+        assert!(
+            logs.iter().all(|log| !format!("{log:?}").contains(marker)),
+            "{marker}"
+        );
+    }
+    Ok(())
+}
 
 const LENOVOAMI_CFG: &str = r#"
 model = "ThinkSystem HS350X V3"

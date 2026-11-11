@@ -31,6 +31,9 @@ import (
 	appcli "github.com/NVIDIA/infra-controller/rest-api/cli/pkg"
 )
 
+// toolReadTimeout bounds all REST attempts together while leaving room after the REST workflow wait.
+const toolReadTimeout = 55 * time.Second
+
 // BuildServer constructs an *mcp.Server with one tool registered for
 // every GET operation in the supplied OpenAPI spec. Tool names follow
 // the SDD: nico_<snake_case(operationId)>. Each tool handler builds a
@@ -175,14 +178,7 @@ func Run(c *urfave.Context, specData []byte) error {
 		return err
 	}
 
-	httpServer := &http.Server{
-		Addr:              listen,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
+	httpServer := newHTTPServer(listen, mux)
 
 	opts.Log.Infof("nico-mcp: listening on %s, MCP at %s (stateless, JSONResponse)", listen, path)
 
@@ -209,6 +205,19 @@ func Run(c *urfave.Context, specData []byte) error {
 			return fmt.Errorf("graceful shutdown: %w", err)
 		}
 		return nil
+	}
+}
+
+// newHTTPServer leaves five seconds to write a JSON tool error after a slow
+// request body and the complete REST read budget have used their allowances.
+func newHTTPServer(listen string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              listen,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      90 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 }
 
@@ -246,12 +255,21 @@ func registerGET(server *mcp.Server, path string, item *openapi3.PathItem, opts 
 		if err != nil {
 			return errorResult(err), nil, nil
 		}
-		body, respHeader, err := client.Do(http.MethodGet, path, pathParams, queryParams, nil)
-		if err != nil {
-			return errorResult(err), nil, nil
-		}
-		return jsonResult(body, respHeader), nil, nil
+		return readGET(ctx, client, path, pathParams, queryParams), nil, nil
 	})
+}
+
+// readGET bounds retries with a child context. The SDK keeps its parent context
+// alive to serialize the tool error after the REST read deadline expires.
+func readGET(ctx context.Context, client *appcli.Client, path string, pathParams, queryParams map[string]string) *mcp.CallToolResult {
+	readCtx, cancel := context.WithTimeout(ctx, toolReadTimeout)
+	defer cancel()
+
+	body, header, err := client.DoWithContext(readCtx, http.MethodGet, path, pathParams, queryParams, nil)
+	if err != nil {
+		return errorResult(err)
+	}
+	return jsonResult(body, header)
 }
 
 // sameOriginRedirectPolicy preserves net/http's redirect limit and the original

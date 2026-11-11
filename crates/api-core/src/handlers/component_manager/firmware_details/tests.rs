@@ -154,6 +154,71 @@ fn host_fixture() -> HostMachine {
     host
 }
 
+/// A MAC-only rack result may name the primary BMC or an attached alias. A
+/// nonempty typed node ID still wins, so neither MAC can steal another member.
+#[test]
+fn host_rack_records_match_attached_aliases_only_without_node_identity() {
+    let host = host_fixture();
+    let mut rack = rack_fixture();
+    let alias = MacAddress::new([2, 0, 0, 0, 0, 99]);
+    rack.controller_state.value = RackState::Maintenance {
+        maintenance_state: RackMaintenanceState::FirmwareUpgrade {
+            rack_firmware_upgrade: FirmwareUpgradeState::WaitForComplete,
+        },
+    };
+    rack.firmware_upgrade_job = Some(FirmwareUpgradeJob {
+        machines: vec![FirmwareUpgradeDeviceStatus {
+            node_id: String::new(),
+            mac: alias.to_string(),
+            bmc_ip: "192.0.2.1".into(),
+            status: model::rack::FirmwareProgressState::InProgress,
+            job_id: Some("alias-job".into()),
+            parent_job_id: None,
+            error_message: None,
+        }],
+        ..Default::default()
+    });
+
+    check_values(
+        [
+            Check {
+                scenario: "unselected MAC does not match without aliases",
+                input: (alias, vec![]),
+                expect: vec![],
+            },
+            Check {
+                scenario: "attached alias matches a MAC-only record",
+                input: (alias, vec![alias]),
+                expect: vec![Some("alias-job".to_string())],
+            },
+            Check {
+                scenario: "primary BMC matches without supplied aliases",
+                input: (host.status.bmc_info.mac.expect("fixture BMC MAC"), vec![]),
+                expect: vec![Some("alias-job".to_string())],
+            },
+        ],
+        |(mac, aliases)| {
+            let mut rack = rack.clone();
+            rack.firmware_upgrade_job.as_mut().unwrap().machines[0].mac = mac.to_string();
+
+            machine(&host, Some(&rack), &aliases)
+                .current
+                .into_iter()
+                .map(|work| work.job_id)
+                .collect::<Vec<_>>()
+        },
+    );
+    rack.firmware_upgrade_job.as_mut().unwrap().machines[0].node_id =
+        carbide_uuid::machine::MachineId::new(
+            carbide_uuid::machine::MachineIdSource::ProductBoardChassisSerial,
+            [99; 32],
+            carbide_uuid::machine::MachineType::Host,
+        )
+        .to_string();
+
+    assert!(machine(&host, Some(&rack), &[alias]).current.is_empty());
+}
+
 /// This request has no admitted identity; cases may overwrite it or set reset
 /// without changing the operation metadata frozen in a controller state.
 fn host_request() -> HostReprovisionRequest {
@@ -380,7 +445,7 @@ fn active_host_target_and_outstanding_request_remain_independent() {
                 ..host_request()
             });
 
-            let actions = machine(&host, None);
+            let actions = machine(&host, None, &[]);
 
             assert!(!format!("{actions:?}").contains("secret"));
             actions
@@ -470,7 +535,7 @@ fn controller_selection_preserves_uncertain_recovery_requests() {
             host.state.value = case.state;
             host.host_reprovision_requested = case.request;
 
-            let actions = machine(&host, None);
+            let actions = machine(&host, None, &[]);
 
             assert!(!format!("{actions:?}").contains("diagnostic-secret"));
             actions
@@ -1142,7 +1207,7 @@ fn machine_entrypoint_preserves_rack_current_and_both_request_sources() {
         ..Default::default()
     });
 
-    let actions = machine(&host, Some(&rack));
+    let actions = machine(&host, Some(&rack), &[]);
 
     assert_eq!(
         actions,
@@ -1197,7 +1262,7 @@ fn assigned_unapproved_host_keeps_request_after_hardware_completion() {
         ..Default::default()
     });
 
-    let actions = machine(&host, Some(&rack));
+    let actions = machine(&host, Some(&rack), &[]);
 
     assert_eq!(
         actions,
@@ -1236,7 +1301,7 @@ fn host_rack_wait_does_not_associate_a_nonrack_replacement() {
         ended_at: None,
     });
 
-    let actions = machine(&host, None);
+    let actions = machine(&host, None, &[]);
 
     assert_eq!(
         actions,
@@ -1262,7 +1327,7 @@ fn host_rack_wait_does_not_associate_a_nonrack_replacement() {
         ..host_request()
     });
     assert_eq!(
-        machine(&host, None),
+        machine(&host, None, &[]),
         StoredFirmwareActions {
             current: vec![firmware_wait()],
             outstanding_requests: vec![FirmwareRequestEvidence {

@@ -232,6 +232,300 @@ async fn repeated_reader_errors_do_not_poll_a_completed_worker() {
     cache.finish().await;
 }
 
+// The retention owner is released after eviction or reader acquisition, before any
+// download. A failed release must discard either kind of successful open.
+#[tokio::test]
+async fn retention_release_precedes_transfer_and_failure_releases_cache_ownership() {
+    for (scenario, warm, release_succeeds) in [
+        ("download starts after release", false, true),
+        ("failed release settles reservation", false, false),
+        ("failed release drops reader", true, false),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cache(directory.path(), 8, 1);
+        let image = digest(b"data");
+        fs::create_dir_all(&cache.inner.directory).unwrap();
+        if warm {
+            fs::write(cache.inner.path(image), b"data").unwrap();
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source = format!("http://{}/firmware", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let retained = HashSet::from([image]);
+        let (entered_tx, entered) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let mut opening =
+            Box::pin(
+                cache.open_with_retention_lock(&source, image, &retained, async move {
+                    entered_tx.send(()).unwrap();
+                    released.await.unwrap();
+                    if release_succeeds {
+                        Ok(())
+                    } else {
+                        Err(CacheError::RetentionLockRelease)
+                    }
+                }),
+            );
+        assert!(futures_util::poll!(&mut opening).is_pending());
+        within("physical open reaches release", entered)
+            .await
+            .unwrap();
+        assert!(futures_util::poll!(&mut opening).is_pending(), "{scenario}");
+        assert_eq!(
+            cache.inner.state.lock().unwrap().entries[&image]
+                .readers
+                .load(Ordering::Acquire),
+            usize::from(warm),
+            "{scenario}"
+        );
+        {
+            let state = cache.inner.state.lock().unwrap();
+            assert_eq!(state.entries[&image].downloading, !warm, "{scenario}");
+            assert_eq!(
+                state.entries[&image].charged_bytes,
+                if warm { 4 } else { 8 },
+                "{scenario}"
+            );
+        }
+        let mut accepted = Box::pin(listener.accept());
+        assert!(
+            futures_util::poll!(&mut accepted).is_pending(),
+            "no source access before release"
+        );
+
+        release.send(()).unwrap();
+        let result = within("open settles after release", opening).await;
+        if release_succeeds {
+            assert!(matches!(result, Ok(CacheLookup::Pending)), "{scenario}");
+        } else {
+            assert!(
+                matches!(result, Err(CacheError::RetentionLockRelease)),
+                "{scenario}"
+            );
+            assert!(
+                futures_util::poll!(&mut accepted).is_pending(),
+                "failed release starts no transfer"
+            );
+            {
+                let state = cache.inner.state.lock().unwrap();
+                assert_eq!(
+                    state.entries[&image].readers.load(Ordering::Acquire),
+                    0,
+                    "{scenario}"
+                );
+                assert!(!state.entries[&image].downloading, "{scenario}");
+                assert!(
+                    state.entries[&image].failure.is_none(),
+                    "{scenario}: no source transfer failed"
+                );
+                assert_eq!(
+                    state.entries[&image].charged_bytes,
+                    if warm { 4 } else { 0 },
+                    "{scenario}"
+                );
+            }
+            assert!(
+                cache.inner.downloader.try_capacity().is_some(),
+                "{scenario}"
+            );
+            // Actual reuse protects against leaked reader permits or reservations
+            // that would not be visible in the flags alone.
+            let retried = within(
+                "open after failed release",
+                cache.open(&source, image, &retained),
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(retried, CacheLookup::Ready(_)) == warm,
+                "{scenario}"
+            );
+            drop(retried);
+        }
+        if !warm {
+            let (mut stream, _) = within("transfer reaches origin", accepted).await.unwrap();
+            // Bound the entire fixture exchange, including a stalled peer after
+            // connect, and finish transfer before shutting down its owner.
+            within("complete origin exchange", async {
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(stream.read_u8().await.unwrap());
+                }
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndata")
+                    .await
+                    .unwrap();
+            })
+            .await;
+            drop(stream);
+            drop(ready(&cache, &source, image, &retained).await);
+        }
+        cache.finish().await;
+    }
+}
+
+// Early source rejection polls release, while losing registration to shutdown
+// drops the unpolled owner. Neither path may touch storage or retain capacity.
+#[tokio::test]
+async fn retention_owner_cleans_up_on_early_and_registration_rejection() {
+    for (scenario, closed) in [
+        ("invalid source polls the release before returning", false),
+        ("closed registry drops release without polling", true),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cache(directory.path(), 8, 1);
+        if closed {
+            // Model registration losing the race with the shutdown owner after
+            // the caller's earlier cancellation check already passed.
+            cache.inner.work.state.lock().unwrap().closed = true;
+        }
+        let observed = Arc::new(AtomicBool::new(false));
+        let owner = observed.clone();
+        let source = if closed {
+            "http://127.0.0.1:1/unused"
+        } else {
+            "file:///invalid-source"
+        }
+        .parse()
+        .unwrap();
+        let result = cache
+            .open_with_retention_lock(&source, digest(b"data"), &HashSet::new(), async move {
+                owner.store(true, Ordering::Release);
+                Err(CacheError::RetentionLockRelease)
+            })
+            .await;
+        if closed {
+            assert!(matches!(result, Err(CacheError::Cancelled)), "{scenario}");
+        } else {
+            assert!(
+                matches!(result, Err(CacheError::RetentionLockRelease)),
+                "{scenario}"
+            );
+        }
+        assert_eq!(observed.load(Ordering::Acquire), !closed, "{scenario}");
+        assert_eq!(
+            Arc::strong_count(&observed),
+            1,
+            "{scenario}: release owner dropped"
+        );
+        assert!(!cache.inner.directory.exists(), "{scenario}");
+        assert!(
+            cache.inner.downloader.try_capacity().is_some(),
+            "{scenario}"
+        );
+        cache.finish().await;
+    }
+}
+
+// A consumed source failure must still be reported once if releasing exclusion
+// also fails. The release callback runs, but cannot replace that prior error.
+#[tokio::test]
+async fn stored_download_failure_survives_a_simultaneous_release_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = cache(directory.path(), 8, 1);
+    let image = digest(b"data");
+    let retained = HashSet::from([image]);
+    assert!(matches!(
+        cache.inner.clone().open(image, &retained),
+        Ok(OpenResult::Download)
+    ));
+    cache
+        .inner
+        .settle(image, Some("prior transfer failed".into()));
+    let called = Arc::new(AtomicBool::new(false));
+    let observed = called.clone();
+    let result = cache
+        .open_with_retention_lock(
+            &"http://127.0.0.1:1/unused".parse().unwrap(),
+            image,
+            &retained,
+            async move {
+                observed.store(true, Ordering::Release);
+                Err(CacheError::RetentionLockRelease)
+            },
+        )
+        .await;
+    assert!(matches!(result, Err(CacheError::Download(error)) if error == "prior transfer failed"));
+    assert!(called.load(Ordering::Acquire));
+    assert!(
+        cache.inner.state.lock().unwrap().entries[&image]
+            .failure
+            .is_none()
+    );
+    cache.finish().await;
+}
+
+// Dropping the caller future must not drop the retention owner while physical open
+// is queued. The one-thread blocking pool gives an explicit, bounded gate.
+#[test]
+fn cancelled_open_keeps_retention_until_its_physical_worker_finishes() {
+    struct RetentionOwner(Arc<AtomicBool>);
+    impl Drop for RetentionOwner {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = cache(directory.path(), 8, 1);
+        let image = digest(b"data");
+        fs::create_dir_all(&cache.inner.directory).unwrap();
+        fs::write(cache.inner.path(image), b"data").unwrap();
+        let (started_tx, started) = oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            released
+                .recv_timeout(Duration::from_secs(10))
+                .expect("release blocking gate");
+        });
+        within("blocking gate starts", started).await.unwrap();
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let owner = RetentionOwner(dropped.clone());
+        let (finished_tx, finished) = oneshot::channel();
+        let inner = cache.inner.clone();
+        let source = "http://127.0.0.1:1/unused".parse().unwrap();
+        let retained = HashSet::from([image]);
+        let mut opening =
+            Box::pin(
+                cache.open_with_retention_lock(&source, image, &retained, async move {
+                    assert_eq!(
+                        inner.state.lock().unwrap().entries[&image]
+                            .readers
+                            .load(Ordering::Acquire),
+                        1,
+                        "physical reader acquired before retention ends"
+                    );
+                    drop(owner);
+                    finished_tx.send(()).unwrap();
+                    Ok(())
+                }),
+            );
+        assert!(futures_util::poll!(&mut opening).is_pending());
+        // Register and poll the cache task while its physical open cannot run.
+        tokio::task::yield_now().await;
+        drop(opening);
+        assert!(!dropped.load(Ordering::Acquire));
+        assert!(cache.inner.downloader.try_capacity().is_none());
+
+        release.send(()).unwrap();
+        blocker.await.unwrap();
+        within("physical open releases retention", finished)
+            .await
+            .unwrap();
+        assert!(dropped.load(Ordering::Acquire));
+        assert_eq!(fs::read(cache.inner.path(image)).unwrap(), b"data");
+        cache.finish().await;
+    });
+}
+
 // Two URLs naming the same bytes must share one verified file. Later eviction
 // must stay inside the managed namespace, even with a legacy cache next to it.
 #[tokio::test]

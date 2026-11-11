@@ -439,7 +439,11 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
 
     config
         .nvlink_config
-        .get_or_insert_with(NvLinkConfig::default);
+        .get_or_insert_with(NvLinkConfig::default)
+        // Defaulting later fills the certificate, key, and authority together and only when no
+        // nmx_c_tls_* key is set, so a pair complete here stays complete.
+        .nmx_c_tls_config()
+        .wrap_err("invalid nvlink_config")?;
 
     // Publish the configured tool list so the admin-UI sidebar and per-machine
     // "Logs" deep link can read it back via `crate::configured_tools`. The list
@@ -1098,6 +1102,32 @@ route_targets_on_exports_by_prefix = [{ prefix = "::/0", route_targets = [] }]"#
             assert_eq!(
                 warning.fields.get("tls_dir").map(String::as_str),
                 Some(NvLinkConfig::DEFAULT_NMX_C_CLIENT_TLS_DIR)
+            );
+            Ok(())
+        })
+    }
+
+    /// A client certificate without its key stops configuration loading, even with NVLink
+    /// partitioning disabled, and the error names the missing setting.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn nmx_c_client_certificate_without_key_fails_configuration_loading() {
+        figment::Jail::expect_with(|jail| {
+            let config_text = format!(
+                "{}\n[nvlink_config]\nnmx_c_tls_client_cert_path = \"/etc/nico/nmxc/client.crt\"\n",
+                include_str!("test_data/min_config.toml")
+            );
+            jail.create_file("config.toml", &config_text)?;
+
+            let error = parse_carbide_config(Path::new("config.toml"), None)
+                .expect_err("a client certificate without its key must be rejected");
+            let message = format!("{error:#}");
+            assert!(message.contains("invalid nvlink_config"), "{message}");
+            assert!(
+                message.contains(
+                    "nmx_c_tls_client_cert_path is set without nmx_c_tls_client_key_path"
+                ),
+                "{message}"
             );
             Ok(())
         })

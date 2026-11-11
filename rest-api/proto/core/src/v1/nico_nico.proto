@@ -279,7 +279,13 @@ service Forge {
   rpc InvokeInstancePower(InstancePowerRequest) returns (InstancePowerResult);
 
   rpc ForgeAgentControl(ForgeAgentControlRequest) returns (ForgeAgentControlResponse);
-  // PRIVILEGED: Creates a new machine from nothing
+  // PRIVILEGED: Creates a new machine from nothing.
+  // Loopback group admission can return FailedPrecondition when the group
+  // changed or is busy. A lock-unavailable database error during loopback
+  // attachment, or a rejected selected-host row/history check, returns
+  // Unavailable. These rejections roll back the complete entity transaction;
+  // retry discovery with a fresh request after contention clears. These checks
+  // do not bound earlier foreign-key waits or later attached-DPU state writes.
   rpc DiscoverMachine(MachineDiscoveryInfo) returns (MachineDiscoveryResult);
   rpc RenewMachineCertificate(MachineCertificateRenewRequest) returns (MachineCertificateResult);
   rpc DiscoveryCompleted(MachineDiscoveryCompletedRequest) returns (MachineDiscoveryCompletedResponse);
@@ -454,7 +460,16 @@ service Forge {
   // Inspects local and remote pools without treating unknown capacity as zero.
   rpc AdminInspectResourcePools(InspectResourcePoolsRequest) returns (InspectResourcePoolsResponse);
 
-  // Add capacity to a resource pool
+  // Add capacity to a resource pool.
+  // Adding IPv6 loopback capacity commits the pool before DPU backfill.
+  // Backfill makes up to three fresh attempts per DPU. If the reported failure
+  // is lock contention, the call returns Unavailable. Exhausted capacity returns
+  // ResourceExhausted; exhausted version conflicts or a vanished pool return
+  // FailedPrecondition; other database failures return Internal. Earlier DPU
+  // updates and pool growth remain committed after any backfill failure. The
+  // first DPU that exhausts its attempts supplies its last error, unless another
+  // non-retryable error ends the pass. Inspect current capacity and missing
+  // loopbacks before retrying the same growth request.
   rpc AdminGrowResourcePool(GrowResourcePoolRequest) returns (GrowResourcePoolResponse);
 
   // Update the Metadata of a Machine
@@ -1307,6 +1322,17 @@ service Forge {
   // read budgets, whose expiry reports ReadFailed. This method never registers
   // devices, writes policy, or submits power operations.
   rpc GetComponentPowerDetails(GetComponentPowerDetailsRequest) returns (GetComponentPowerDetailsResponse);
+  // Reads installed inventory, existing effective defaults and current firmware
+  // work independently. Flow and ForgeAdminCLI may call this passive method.
+  // Database preparation has five seconds including acquisition and commit.
+  // After release, credentials, manifest fetches and all reads share thirty
+  // seconds. Earlier caller expiry wins, including time waiting for API admission.
+  // Within each request, up to eight public read workflows run concurrently.
+  // Preparation failure, including expiry, aborts the RPC with fixed INTERNAL.
+  // After preparation, completed sections survive peer failures; unfinished
+  // reads report DeadlineExceeded. Cancellation drops pending work. This never
+  // registers devices, writes tracking or advances updates.
+  rpc GetComponentFirmwareDetails(GetComponentFirmwareDetailsRequest) returns (GetComponentFirmwareDetailsResponse);
   // Dispatch a reset directly, without scheduling state-controller maintenance.
   // Valid devices proceed even when other targets cannot be resolved or accepted.
   // The RMS backend supports SDN and NVOS factory reset on switches. SDN reset
@@ -13530,4 +13556,440 @@ message MachineStateList {
 message PowerShelfRackReprovisioningSkip {
   google.protobuf.Timestamp requested_at = 1;
   string reason = 2;
+}
+
+// --- Component firmware details ---
+
+// Selects 1-64 unique managed IDs of one kind. Missing target, empty or oversized
+// lists, duplicates and malformed grpc-timeout return INVALID_ARGUMENT before
+// preparation. A zero timeout is already expired. Preparation failure, including
+// expiry, aborts the RPC with fixed INTERNAL; per-section deadlines apply after
+// preparation succeeds. Malformed typed IDs, including DPU IDs, can return
+// INTERNAL during decoding.
+// Missing managed records return NotFound per section. ForceDeletion and
+// Decommissioning hosts, Decommissioning switches/shelves and deletion-marked
+// switches/shelves return Ineligible without external reads or outstanding-work
+// projection. Other states are readable.
+// Endpoint readiness is checked in the stored snapshot: IP, MAC, role and owner
+// must agree before credentials or hardware reads. Reassignment after that
+// snapshot is not fenced. A missing/deleted owning rack supplies no profile/work.
+//
+// Standalone hosts (no rack and no MNNVL capability) use direct Core Redfish;
+// other inventory uses the selected component backend. An absent capability is
+// Unsupported before credentials. Switch inventory also requires NVOS discovery
+// and credentials. Switch comparisons and job reads require the owned BMC;
+// comparison NVOS details are optional and only use an owned endpoint. Missing
+// or unowned required endpoints report EndpointUnavailable before backend checks.
+// Host defaults use existing effective host configuration only for standalone
+// hosts. Rack state-controller and direct RMS routes use their owning profile's
+// configured firmware object, not a pending request's frozen target. Other direct
+// routes with no configured-default contract, or a selected profile route without
+// its RMS client, return Unsupported. These are configured expectations, not a
+// guarantee that an updater applies every compared component. Missing profile,
+// report or catalog/source selection is ConfigurationUnavailable. An exact
+// owning rack that is absent/deleted reports NotFound/Ineligible in desired and
+// stored rack context without erasing independent device facts. A failed fetch
+// is ManifestUnavailable. A matched host configuration without defaults is empty.
+//
+// Catalog files load synchronously before the database budget and cannot be
+// interrupted; caller expiry is checked before and after. After preparation,
+// all work shares thirty seconds. Inventory/comparison backends additionally
+// enforce thirty seconds; RMS job reads enforce ten. These limits do not promise
+// that every admitted device completes. Public API admission retains its existing
+// configured global/per-client limits and overload policy, including disablement.
+// The eight workflow slots are per request, not an outbound-call cap; credential
+// and backend member/job concurrency remain independently bounded. A job batch
+// supplies its result when complete; unfinished outer expiry has no partial
+// returned batch to publish. Other completed sections remain available.
+message GetComponentFirmwareDetailsRequest {
+  // Required homogeneous selection; never inferred from another identifier.
+  oneof target {
+    // Host IDs only; the typed Rust decoder rejects DPU IDs.
+    common.MachineIdList machine_ids = 1;
+    // Managed NVLink switch IDs.
+    SwitchIdList switch_ids = 2;
+    // Managed power shelf IDs.
+    PowerShelfIdList power_shelf_ids = 3;
+  }
+}
+
+// Firmware evidence for every requested managed ID.
+message GetComponentFirmwareDetailsResponse {
+  // Exactly one entry per requested ID, in request order, including missing IDs.
+  repeated ComponentFirmwareDetails entries = 1;
+}
+
+// Independent installed, expected and current/pending firmware evidence.
+// Supporting servers populate every section and required result. Clients must
+// treat absent sections/results as unsupported data, never successful empty data.
+// With internal RBAC enabled, older servers reject the unknown RPC with
+// PERMISSION_DENIED before dispatch. If gRPC dispatch is reached, they return
+// UNIMPLEMENTED. No field establishes whole-update completion, latest-update
+// identity or exhaustive remote coverage.
+message ComponentFirmwareDetails {
+  // Requested managed ID in its canonical representation.
+  string component_id = 1;
+  // Always present, including unavailable observations.
+  ComponentFirmwareInstalled actual = 2;
+  // Always present; independent of installed inventory and pending targets.
+  ComponentFirmwareExpected desired = 3;
+  // Always present; stored facts survive failed hardware/manifest/job reads.
+  ComponentFirmwareActions actions = 4;
+}
+
+// Bounded evidence sources; component names and versions remain open strings.
+enum ComponentFirmwareSource {
+  // Never emitted; absent optional source means selection did not complete.
+  COMPONENT_FIRMWARE_SOURCE_UNSPECIFIED = 0;
+  // A passive direct BMC Redfish read.
+  COMPONENT_FIRMWARE_SOURCE_REDFISH = 1;
+  // A passive RMS inventory, comparison or tracking read.
+  COMPONENT_FIRMWARE_SOURCE_RMS = 2;
+  // Static/metadata host catalog with persisted runtime overrides applied.
+  COMPONENT_FIRMWARE_SOURCE_EFFECTIVE_HOST_CONFIGURATION = 3;
+}
+
+// Safe failure categories; errors do not establish firmware-update failure.
+enum ComponentFirmwareErrorCode {
+  // Never emitted; clients should require a specific code.
+  COMPONENT_FIRMWARE_ERROR_CODE_UNSPECIFIED = 0;
+  // Managed ID or exact owning rack is absent.
+  COMPONENT_FIRMWARE_ERROR_CODE_NOT_FOUND = 1;
+  // Managed target or owning rack is being removed/deleted.
+  COMPONENT_FIRMWARE_ERROR_CODE_INELIGIBLE = 2;
+  // Component Manager is not configured.
+  COMPONENT_FIRMWARE_ERROR_CODE_DISABLED = 3;
+  // Selected backend/remote protocol has no passive capability.
+  COMPONENT_FIRMWARE_ERROR_CODE_UNSUPPORTED = 4;
+  // Required endpoint is missing or fails snapshot ownership validation.
+  COMPONENT_FIRMWARE_ERROR_CODE_ENDPOINT_UNAVAILABLE = 5;
+  // Required management credentials cannot be loaded.
+  COMPONENT_FIRMWARE_ERROR_CODE_CREDENTIALS_UNAVAILABLE = 6;
+  // Required configured source, report, rack profile or catalog match is absent.
+  COMPONENT_FIRMWARE_ERROR_CODE_CONFIGURATION_UNAVAILABLE = 7;
+  // Configured firmware-object fetch or JSON validation failed.
+  COMPONENT_FIRMWARE_ERROR_CODE_MANIFEST_UNAVAILABLE = 8;
+  // Read failed or its result identity/cardinality was invalid.
+  COMPONENT_FIRMWARE_ERROR_CODE_READ_FAILED = 9;
+  // Backend retained-evidence bounds were exceeded; text is never clipped.
+  COMPONENT_FIRMWARE_ERROR_CODE_LIMIT_EXCEEDED = 10;
+  // Shared caller/read deadline or a backend's local read budget expired.
+  COMPONENT_FIRMWARE_ERROR_CODE_DEADLINE_EXCEEDED = 11;
+  // Persisted current tracking could not be read; no absence is established.
+  COMPONENT_FIRMWARE_ERROR_CODE_TRACKING_READ_FAILED = 12;
+  // Backend reports the retained job ID absent; this is not completion.
+  COMPONENT_FIRMWARE_ERROR_CODE_JOB_NOT_FOUND = 13;
+  // The known-job poll failed before usable evidence was obtained.
+  COMPONENT_FIRMWARE_ERROR_CODE_POLL_FAILED = 14;
+  // Known-job protocol/state/echo is unavailable or unrecognized.
+  COMPONENT_FIRMWARE_ERROR_CODE_STATUS_UNAVAILABLE = 15;
+}
+
+// Fixed safe explanation; never a backend diagnostic, payload or credential.
+message ComponentFirmwareError {
+  // Specific failure category on which callers may branch.
+  ComponentFirmwareErrorCode code = 1;
+  // Fixed text corresponding to code.
+  string message = 2;
+}
+
+// One live inventory collection or an explicit unavailable result.
+message ComponentFirmwareInstalled {
+  // Backend selected for the read, retained if it later fails. Absent if no
+  // backend could be selected.
+  optional ComponentFirmwareSource source = 1;
+  // NICo receipt time, not device time; present only with inventory.
+  google.protobuf.Timestamp observed_at = 2;
+  // Always selected; a default generated getter does not establish success.
+  oneof result {
+    // May be empty or include failed members without discarding healthy peers.
+    // The collection is available only after the backend call returns. If the
+    // public read budget expires first, this section reports DeadlineExceeded;
+    // members buffered inside the unfinished call are not returned.
+    ComponentFirmwareInventory inventory = 3;
+    // No installed collection could be obtained.
+    ComponentFirmwareError error = 4;
+  }
+}
+
+// Backend inventory order, including repeated members; not one tray version.
+message ComponentFirmwareInventory {
+  // Every listed member, including members whose individual read failed.
+  repeated ComponentFirmwareInventoryEntry entries = 1;
+}
+
+// Separately listed member and its metadata/read result.
+message ComponentFirmwareInventoryEntry {
+  // Backend lookup identifier; absent when the backend exposes no separate ID.
+  optional string inventory_id = 1;
+  // Always selected. Member failure does not discard other entries.
+  oneof result {
+    // Selected backend identity/name/version fields; no artifact or update URL.
+    ComponentFirmwareInstalledComponent component = 2;
+    // Categorized failure reading this member.
+    ComponentFirmwareError error = 3;
+  }
+}
+
+// Backend metadata. Reported versions do not establish active/staged image choice.
+// Presence, including an empty string, describes the backend model; proto3
+// backends cannot always distinguish an omitted wire string from explicit empty.
+message ComponentFirmwareInstalledComponent {
+  // Backend component ID, distinct from lookup ID; never inferred.
+  optional string id = 1;
+  // Backend component name; not guaranteed unique and never inferred from ID.
+  optional string name = 2;
+  // Observed version, including backend vendor normalization; never shortened.
+  optional string version = 3;
+}
+
+// Existing effective defaults or logical manifest comparison; not pending intent.
+message ComponentFirmwareExpected {
+  // EffectiveHostConfiguration or Rms after source selection, including failures.
+  optional ComponentFirmwareSource source = 1;
+  // NICo comparison receipt time only; host defaults have no invented timestamp.
+  google.protobuf.Timestamp observed_at = 2;
+  // Always selected; missing configuration is an error, not installed fallback.
+  oneof result {
+    // Configured defaults selected with stored vendor/model identity only.
+    ComponentHostFirmwareExpectations host = 3;
+    // RMS comparisons, not an attribution to each physical inventory instance.
+    ComponentFirmwareComparisons comparisons = 4;
+    // The expected section is unavailable independently of installed/actions.
+    ComponentFirmwareError error = 5;
+  }
+}
+
+// Existing effective host defaults. Report presence is not collection freshness.
+message ComponentHostFirmwareExpectations {
+  // Catalog-selected vendor.
+  string vendor = 1;
+  // Catalog-selected hardware model.
+  string model = 2;
+  // Existing default components sorted by component name; may be empty for a
+  // matched configuration without defaults. No installed version supplies one.
+  repeated ComponentHostFirmwareExpectation entries = 3;
+}
+
+// One configured host component default.
+message ComponentHostFirmwareExpectation {
+  // Existing configuration component spelling, including drive-model selectors.
+  string component = 1;
+  // Existing default version, preserved exactly.
+  string version = 2;
+}
+
+// Logical comparison rows in backend order, including duplicates and empty lists.
+message ComponentFirmwareComparisons {
+  // No row proves physical-instance matching or complete manifest compliance.
+  repeated ComponentFirmwareComparison entries = 1;
+}
+
+// RMS's classification of a logical manifest component/SKU comparison.
+enum ComponentFirmwareComparisonStatus {
+  // RMS supplied no classification.
+  COMPONENT_FIRMWARE_COMPARISON_STATUS_UNSPECIFIED = 0;
+  // RMS reported a matching logical comparison.
+  COMPONENT_FIRMWARE_COMPARISON_STATUS_MATCHED = 1;
+  // RMS reported a differing logical comparison.
+  COMPONENT_FIRMWARE_COMPARISON_STATUS_MISMATCHED = 2;
+  // RMS reported missing comparison inventory.
+  COMPONENT_FIRMWARE_COMPARISON_STATUS_MISSING = 3;
+  // RMS could not verify the logical comparison.
+  COMPONENT_FIRMWARE_COMPARISON_STATUS_UNVERIFIED = 4;
+  // This Core revision does not recognize the classification integer.
+  COMPONENT_FIRMWARE_COMPARISON_STATUS_UNRECOGNIZED = 5;
+}
+
+// Selected logical comparison metadata, without raw targets/URLs or diagnostics.
+message ComponentFirmwareComparison {
+  // Opaque RMS component selector; absent when RMS supplies empty text.
+  optional string component = 1;
+  // Proposed manifest version; absent does not fall back to installed firmware.
+  optional string proposed_version = 2;
+  // Reported SKU selector; absence does not identify a wildcard SKU.
+  optional string sku_id = 3;
+  // Reported logical classification, not locally computed compliance.
+  ComponentFirmwareComparisonStatus status = 4;
+  // Present exactly for Unrecognized, preserving the unknown wire integer.
+  optional int32 unrecognized_status = 5;
+}
+
+// Stored work and independently observed backend work. Neither list is history.
+message ComponentFirmwareActions {
+  // Always present, including unavailable/partial owning-rack context.
+  ComponentStoredFirmwareActions stored = 1;
+  // Always present. No backend record is joined to a replacement request by MAC.
+  ComponentFirmwareBackendWork backend = 2;
+}
+
+// Sanitized controller/request evidence from the preparation snapshot.
+message ComponentStoredFirmwareActions {
+  // Current controller work, including unresolved cleanup, in projector order.
+  repeated ComponentCurrentFirmwareWork current = 1;
+  // Outstanding saved requests; not proof of approval, admission or execution.
+  repeated ComponentFirmwareRequest outstanding_requests = 2;
+  // NotFound/Ineligible for an unreadable managed member; lists are empty then.
+  ComponentFirmwareError error = 3;
+  // NotFound/Ineligible when the member names an absent/deleted rack. Independent
+  // per-device records survive; no metadata is borrowed from another rack.
+  ComponentFirmwareError rack_context_error = 4;
+}
+
+// Selected target facts; payloads, URLs and stored failure text never appear.
+message ComponentFirmwareWorkTarget {
+  // Always selected; an absent leaf field means unknown recorded metadata.
+  oneof target {
+    // Host firmware controller work.
+    ComponentHostFirmwareTarget host = 1;
+    // RMS firmware-object work.
+    ComponentFirmwareObjectTarget firmware_object = 2;
+    // NVOS system-image work, independent of password recovery.
+    ComponentNvosFirmwareTarget nvos = 3;
+  }
+}
+
+// Target frozen by the host controller, not a later effective default.
+message ComponentHostFirmwareTarget {
+  // Existing configuration component spelling, including drive-model selectors;
+  // absent when the phase has no known component.
+  optional string component = 1;
+  // Frozen target version; absent when the phase did not record one.
+  optional string version = 2;
+}
+
+// Firmware object identity only; never inline JSON or an artifact location.
+message ComponentFirmwareObjectTarget {
+  // Recorded Id/object_id, or absent for unavailable/malformed target metadata.
+  optional string object_id = 1;
+}
+
+// Selected recorded NVOS target metadata.
+message ComponentNvosFirmwareTarget {
+  // Recorded firmware-object ID, if known.
+  optional string object_id = 1;
+  // Recorded NVOS version, if known.
+  optional string version = 2;
+}
+
+// Current controller work does not establish that RMS is executing it.
+message ComponentCurrentFirmwareWork {
+  // Recorded operation target; always present.
+  ComponentFirmwareWorkTarget target = 1;
+  // Recorded firmware/image job handle, if known; no synthetic action ID.
+  optional string job_id = 2;
+  // Recorded start time, if known; poll times are not submission times.
+  google.protobuf.Timestamp started_at = 3;
+  // Separate recorded password recovery job, if known.
+  optional string password_recovery_job_id = 4;
+}
+
+// Saved record that supplies request evidence; not a stable operation identity.
+enum ComponentFirmwareRequestSource {
+  // Never emitted.
+  COMPONENT_FIRMWARE_REQUEST_SOURCE_UNSPECIFIED = 0;
+  // Host reprovision request.
+  COMPONENT_FIRMWARE_REQUEST_SOURCE_HOST_REPROVISION = 1;
+  // Switch reprovision request.
+  COMPONENT_FIRMWARE_REQUEST_SOURCE_SWITCH_REPROVISION = 2;
+  // Shelf reprovision request.
+  COMPONENT_FIRMWARE_REQUEST_SOURCE_SHELF_REPROVISION = 3;
+  // Owning rack maintenance request.
+  COMPONENT_FIRMWARE_REQUEST_SOURCE_RACK_MAINTENANCE = 4;
+}
+
+// Outstanding saved request; it may replace work already executing.
+message ComponentFirmwareRequest {
+  // Source record, never Unspecified.
+  ComponentFirmwareRequestSource source = 1;
+  // Saved selected target metadata; always present.
+  ComponentFirmwareWorkTarget target = 2;
+  // Saved request time; absent for legacy records with no boundary.
+  google.protobuf.Timestamp requested_at = 3;
+  // Saved initiator, including supplied empty; absent when not recorded.
+  optional string initiator = 4;
+}
+
+// Passive observations of current tracking references, not exhaustive remote
+// discovery. Association with stored current/replacement requests is unknown.
+// Terminal jobs and abandoned Failed local stages are excluded as history.
+// Empty lists, missing jobs and absent stages never establish whole-update success.
+message ComponentFirmwareBackendWork {
+  // Rms after selection; absent for earlier Disabled/Unsupported/endpoint failures.
+  optional ComponentFirmwareSource source = 1;
+  // NICo receipt time for a completed typed reader reply, including a tracking
+  // failure with no stage. Absent before the batch replies; never the stage's
+  // sample time or a remote job timestamp.
+  google.protobuf.Timestamp observed_at = 2;
+  // Recognized nonterminal observations in firmware-object then image order.
+  repeated ComponentFirmwareActiveJob active_jobs = 3;
+  // Retained references without usable state; these do not assert active work.
+  repeated ComponentFirmwareUnresolvedReference unresolved_references = 4;
+  // Process-local Queued/Submitting sample, independent of tracking failure.
+  // It can change before receipt, differ by replica, or disappear on restart.
+  ComponentFirmwareLocalStage local_stage = 5;
+  // Reader/tracking failure. A sampled stage survives in a completed reply;
+  // an unfinished batch has no returned stage to publish.
+  ComponentFirmwareError error = 6;
+}
+
+// Protocol that owns a retained backend job ID.
+enum ComponentFirmwareJobKind {
+  // Never emitted.
+  COMPONENT_FIRMWARE_JOB_KIND_UNSPECIFIED = 0;
+  // Firmware-object apply.
+  COMPONENT_FIRMWARE_JOB_KIND_FIRMWARE_OBJECT = 1;
+  // Switch NVOS system-image apply.
+  COMPONENT_FIRMWARE_JOB_KIND_SWITCH_SYSTEM_IMAGE = 2;
+}
+
+// Only nonterminal job states are published by this read.
+enum ComponentFirmwareActiveJobState {
+  // Never emitted; unknown states are unresolved references.
+  COMPONENT_FIRMWARE_ACTIVE_JOB_STATE_UNSPECIFIED = 0;
+  // Accepted but not executing.
+  COMPONENT_FIRMWARE_ACTIVE_JOB_STATE_QUEUED = 1;
+  // Executing.
+  COMPONENT_FIRMWARE_ACTIVE_JOB_STATE_IN_PROGRESS = 2;
+  // Backend verification is pending.
+  COMPONENT_FIRMWARE_ACTIVE_JOB_STATE_VERIFYING = 3;
+}
+
+// One recognized nonterminal observation of a current tracking reference.
+message ComponentFirmwareActiveJob {
+  // Protocol used to read this handle.
+  ComponentFirmwareJobKind kind = 1;
+  // Exact retained ID; a remote echoed ID never replaces it.
+  string job_id = 2;
+  // Recognized nonterminal state; never Unspecified.
+  ComponentFirmwareActiveJobState state = 3;
+}
+
+// A current reference whose job existence/state could not be established.
+message ComponentFirmwareUnresolvedReference {
+  // Protocol associated with the retained handle.
+  ComponentFirmwareJobKind kind = 1;
+  // Exact retained ID, even when the backend no longer knows it.
+  string job_id = 2;
+  // Typed uncertainty; not a failed-update classification. Always present.
+  ComponentFirmwareError error = 3;
+}
+
+// Process-local staged firmware-object evidence; no durable admission is implied.
+enum ComponentFirmwareLocalStageState {
+  // Never emitted.
+  COMPONENT_FIRMWARE_LOCAL_STAGE_STATE_UNSPECIFIED = 0;
+  // Firmware-object phase has not been submitted; it may remain queued after
+  // the preceding image job completes, until the updater advances it.
+  COMPONENT_FIRMWARE_LOCAL_STAGE_STATE_QUEUED = 1;
+  // Submission began; this does not prove RMS accepted or rejected it.
+  COMPONENT_FIRMWARE_LOCAL_STAGE_STATE_SUBMITTING = 2;
+}
+
+// The updater's process-local phase sampled before its passive job reads.
+message ComponentFirmwareLocalStage {
+  // Queued or Submitting; terminal Failed samples are excluded.
+  ComponentFirmwareLocalStageState state = 1;
+  // Exact preceding system-image handle, not a whole-update identity.
+  string system_image_job_id = 2;
 }
