@@ -85,8 +85,9 @@ uses the same resources. Additional guests have separate resource allocations.
 
 [Route64](https://www.route64.org/) can supply IPv6 through a WireGuard tunnel
 when the WAN has IPv4 but no usable IPv6. The existing gateway image supports
-both modes. Obtain a WireGuard export from Route64 with an **IPv4 endpoint**,
-and keep it outside the checkout with mode `0600`:
+both modes. If you need a tunnel, register one through the
+[Route64 manager](https://manager.route64.org/). Obtain its WireGuard export with
+an **IPv4 endpoint**, and keep it outside the checkout with mode `0600`:
 
 ```bash
 python3 vm.py --lab-root "$lab_root" --lab-id 3 --lab-uplink nat \
