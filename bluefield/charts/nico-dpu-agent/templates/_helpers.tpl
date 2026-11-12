@@ -19,6 +19,31 @@ Create a default fully qualified app name.
 {{- end }}
 {{- end }}
 
+{{/* Service names must be consistent across DPUClusters. */}}
+{{- define "nico-dpu-agent.serviceName" -}}
+{{- if dig "dpf" "multiClusterSupport" false .Values.AsMap -}}
+{{- dig "dpf" "dpuService" "name" "" .Values.AsMap | default (include "nico-dpu-agent.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- include "nico-dpu-agent.fullname" . -}}
+{{- end -}}
+{{- end }}
+
+{{- define "nico-dpu-agent.serviceNamespace" -}}
+{{- if dig "dpf" "multiClusterSupport" false .Values.AsMap -}}
+{{- dig "dpf" "dpuService" "namespace" "" .Values.AsMap | default .Release.Namespace -}}
+{{- else -}}
+dpf-operator-system
+{{- end -}}
+{{- end }}
+
+{{- define "nico-dpu-agent.serviceHost" -}}
+{{- $name := .name -}}
+{{- if not (dig "dpf" "multiClusterSupport" false .context.Values.AsMap) -}}
+{{- $name = printf "carbide-dpf-cluster-%s" $name -}}
+{{- end -}}
+{{- printf "%s.%s.svc.cluster.local" $name (include "nico-dpu-agent.serviceNamespace" .context) -}}
+{{- end }}
+
 {{/*
 Create chart name and version as used by the chart label.
 */}}

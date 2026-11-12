@@ -1,0 +1,58 @@
+suite: DPF peer service endpoints
+templates:
+  - daemonset.yaml
+release:
+  name: another-cluster-agent
+  namespace: release-namespace
+set:
+  dhcp_server.service_name: dhcp-abc123
+  fmds.service_name: fmds-abc123
+  hbn.nvue_https_address: hbn-abc123
+tests:
+  - it: uses DPUService names and namespace for all peers
+    set:
+      dpf.multiClusterSupport: true
+      dpf.dpuService.namespace: service-namespace
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --dhcp-grpc-server=http://dhcp-abc123.service-namespace.svc.cluster.local:10079
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --fmds-grpc-server=http://fmds-abc123.service-namespace.svc.cluster.local:50052
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NVUE_HTTPS_ADDRESS
+            value: hbn-abc123.service-namespace.svc.cluster.local:8765
+  - it: falls back to the release namespace without DPF identity
+    set:
+      dpf.multiClusterSupport: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --dhcp-grpc-server=http://dhcp-abc123.release-namespace.svc.cluster.local:10079
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --fmds-grpc-server=http://fmds-abc123.release-namespace.svc.cluster.local:50052
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NVUE_HTTPS_ADDRESS
+            value: hbn-abc123.release-namespace.svc.cluster.local:8765
+  - it: preserves legacy endpoints by default even when DPF supplies identity
+    set:
+      dpf.dpuService.name: agent-abc123
+      dpf.dpuService.namespace: service-namespace
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --dhcp-grpc-server=http://carbide-dpf-cluster-dhcp-abc123.dpf-operator-system.svc.cluster.local:10079
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --fmds-grpc-server=http://carbide-dpf-cluster-fmds-abc123.dpf-operator-system.svc.cluster.local:50052
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NVUE_HTTPS_ADDRESS
+            value: carbide-dpf-cluster-hbn-abc123.dpf-operator-system.svc.cluster.local:8765

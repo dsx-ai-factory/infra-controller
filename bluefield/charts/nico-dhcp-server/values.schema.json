@@ -5,6 +5,22 @@
   "type": "object",
   "required": ["serviceDaemonSet"],
   "properties": {
+    "dpf": {
+      "type": "object",
+      "properties": {
+        "multiClusterSupport": {
+          "type": "boolean",
+          "default": false
+        },
+        "dpuService": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "namespace": { "type": "string" }
+          }
+        }
+      }
+    },
     "serviceDaemonSet": {
       "type": "object",
       "description": "Configuration for the service DaemonSet",

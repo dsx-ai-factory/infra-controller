@@ -1,4 +1,11 @@
 ### DPF contract ###
+dpf:
+  # NICo sets this from [dpf].multiClusterSupport. Enable only with compatible
+  # HBN and NICo charts. False preserves legacy Service names and addresses.
+  multiClusterSupport: false
+  dpuService:
+    # Set by DPF. Empty retains the Helm release-based Service name.
+    name: ""
 serviceDaemonSet:
   nodeSelector:
   labels: {}

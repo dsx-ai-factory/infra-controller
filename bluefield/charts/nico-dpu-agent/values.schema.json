@@ -5,6 +5,22 @@
   "type": "object",
   "required": ["serviceDaemonSet", "lldpSidecar"],
   "properties": {
+    "dpf": {
+      "type": "object",
+      "properties": {
+        "multiClusterSupport": {
+          "type": "boolean",
+          "default": false
+        },
+        "dpuService": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "namespace": { "type": "string" }
+          }
+        }
+      }
+    },
     "xplaneMaintenance": {
       "type": "object",
       "additionalProperties": false,
