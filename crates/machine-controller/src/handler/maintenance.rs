@@ -276,7 +276,7 @@ async fn invoke_power_operation(
     })?;
 
     // An AC Powercycle of Vera Rubin Compute Trays enables all onboard NICs even after we disable
-    // them as part of ingesting the compute trays. Resolve cleanup before issuing the command 
+    // them as part of ingesting the compute trays. Resolve cleanup before issuing the command
     // so a failed platform check cannot cause a successfully issued AC cycle to be repeated.
     let restore_onboard_nics =
         if action == PowerAction::AcPowercycle && mh_snapshot.has_managed_dpus() {

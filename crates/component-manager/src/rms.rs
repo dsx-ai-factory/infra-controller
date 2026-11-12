@@ -6651,6 +6651,7 @@ mod tests {
             None,
             Some(pool),
             Some(redfish.clone()),
+            None,
         )
         .await
         .unwrap();

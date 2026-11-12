@@ -74,11 +74,11 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
     )
     .await
     .unwrap();
-    let underlay = db::network_segment::find_by_name(&mut *txn, "UNDERLAY")
+    let underlay = db::network_segment::find_by_name(&mut txn, "UNDERLAY")
         .await
         .unwrap();
     let interface = db::machine_interface::create(
-        &mut *txn,
+        &mut txn,
         std::slice::from_ref(&underlay),
         &"02:00:00:00:00:91".parse().unwrap(),
         false,
@@ -173,6 +173,7 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
         None,
         Some(pool.clone()),
         Some(env.redfish_sim.clone()),
+        None,
     )
     .await
     .unwrap()
