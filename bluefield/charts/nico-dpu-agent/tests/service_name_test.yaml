@@ -6,7 +6,7 @@ release:
 tests:
   - it: uses the DPUService name instead of the cluster-specific release name
     set:
-      dpf.multiClusterSupport: true
+      multiClusterSupport: true
       dpf.dpuService.name: service-abc123
       fullnameOverride: custom-workload
     asserts:
@@ -18,7 +18,7 @@ tests:
           value: another-cluster-service
   - it: preserves the release name without DPF identity
     set:
-      dpf.multiClusterSupport: true
+      multiClusterSupport: true
     asserts:
       - equal:
           path: metadata.name

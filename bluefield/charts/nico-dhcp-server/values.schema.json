@@ -5,13 +5,13 @@
   "type": "object",
   "required": ["serviceDaemonSet"],
   "properties": {
+    "multiClusterSupport": {
+      "type": "boolean",
+      "default": false
+    },
     "dpf": {
       "type": "object",
       "properties": {
-        "multiClusterSupport": {
-          "type": "boolean",
-          "default": false
-        },
         "dpuService": {
           "type": "object",
           "properties": {

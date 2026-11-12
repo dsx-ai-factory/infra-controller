@@ -1200,7 +1200,7 @@ pub(crate) fn mandatory_services(
     );
     let mut otel = otelcol_service(&resolved.base.otel);
     let naming_values = serde_json::json!({
-        "dpf": { "multiClusterSupport": multi_cluster_support }
+        "multiClusterSupport": multi_cluster_support
     });
     // Apply one naming mode after service overrides so publishers and clients stay aligned.
     for service in [&mut dhcp, &mut agent, &mut fmds, &mut otel] {

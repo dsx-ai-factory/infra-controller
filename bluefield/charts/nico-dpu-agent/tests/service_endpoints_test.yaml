@@ -11,7 +11,7 @@ set:
 tests:
   - it: uses DPUService names and namespace for all peers
     set:
-      dpf.multiClusterSupport: true
+      multiClusterSupport: true
       dpf.dpuService.namespace: service-namespace
     asserts:
       - contains:
@@ -27,7 +27,7 @@ tests:
             value: hbn-abc123.service-namespace.svc.cluster.local:8765
   - it: falls back to the release namespace without DPF identity
     set:
-      dpf.multiClusterSupport: true
+      multiClusterSupport: true
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args

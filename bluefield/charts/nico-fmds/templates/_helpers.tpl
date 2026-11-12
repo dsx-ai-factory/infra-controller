@@ -21,7 +21,7 @@ Create a default fully qualified app name.
 
 {{/* Service names must be consistent across DPUClusters. */}}
 {{- define "nico-fmds.serviceName" -}}
-{{- if dig "dpf" "multiClusterSupport" false .Values.AsMap -}}
+{{- if dig "multiClusterSupport" false .Values.AsMap -}}
 {{- dig "dpf" "dpuService" "name" "" .Values.AsMap | default (include "nico-fmds.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
 {{- include "nico-fmds.fullname" . -}}

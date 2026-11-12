@@ -7,7 +7,7 @@ release:
 tests:
   - it: scrapes the DPUService-named agent and FMDS Services
     set:
-      dpf.multiClusterSupport: true
+      multiClusterSupport: true
       dpf.dpuService.namespace: service-namespace
       nico_dpu_agent: agent-abc123
       nico_fmds: fmds-abc123

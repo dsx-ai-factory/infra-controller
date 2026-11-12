@@ -2742,7 +2742,8 @@ mod tests {
                 &mut services.otel,
             ] {
                 service.extra_helm_values = serde_json::json!({
-                    "dpf": { "multiClusterSupport": !expected, "preserved": "value" }
+                    "multiClusterSupport": !expected,
+                    "dpf": { "preserved": "value" }
                 })
                 .as_object()
                 .cloned();
@@ -2758,11 +2759,11 @@ mod tests {
                 .iter()
                 .map(|service| carbide_dpf::build_service_template(service, "test-ns", "bf3"))
                 .filter_map(|template| template.spec.helm_chart.values)
-                .filter(|values| values.get("dpf").is_some())
+                .filter(|values| values.get("multiClusterSupport").is_some())
                 .collect();
             assert_eq!(templates.len(), 4, "{input}");
             for values in templates {
-                assert_eq!(values["dpf"]["multiClusterSupport"], expected, "{input}");
+                assert_eq!(values["multiClusterSupport"], expected, "{input}");
                 assert_eq!(values["dpf"]["preserved"], "value", "{input}");
             }
         }

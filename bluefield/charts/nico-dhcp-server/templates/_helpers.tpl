@@ -21,7 +21,7 @@ Create a default fully qualified app name.
 
 {{/* Service names must be consistent across DPUClusters. */}}
 {{- define "nico-dhcp-server.serviceName" -}}
-{{- if dig "dpf" "multiClusterSupport" false .Values.AsMap -}}
+{{- if dig "multiClusterSupport" false .Values.AsMap -}}
 {{- dig "dpf" "dpuService" "name" "" .Values.AsMap | default (include "nico-dhcp-server.fullname" .) | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
 {{- include "nico-dhcp-server.fullname" . -}}

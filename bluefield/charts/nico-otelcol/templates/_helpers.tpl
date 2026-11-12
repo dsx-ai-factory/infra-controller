@@ -22,7 +22,7 @@ Create a default fully qualified app name.
 {{- define "nico-otelcol.serviceHost" -}}
 {{- $name := .name -}}
 {{- $namespace := "dpf-operator-system" -}}
-{{- if dig "dpf" "multiClusterSupport" false .context.Values.AsMap -}}
+{{- if dig "multiClusterSupport" false .context.Values.AsMap -}}
 {{- $namespace = dig "dpf" "dpuService" "namespace" "" .context.Values.AsMap | default .context.Release.Namespace -}}
 {{- else -}}
 {{- $name = printf "carbide-dpf-cluster-%s" $name -}}
