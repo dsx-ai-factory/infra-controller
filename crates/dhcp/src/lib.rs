@@ -86,6 +86,7 @@ struct CarbideDhcpContext {
     nameservers: Vec<Ipv4Addr>,
     dns_servers_ipv6: Vec<Ipv6Addr>,
     mqtt_server: Option<String>,
+    nico_pxe_service_url: Option<String>,
     ntpservers: Vec<Ipv4Addr>,
     ntp_servers_ipv6: Vec<Ipv6Addr>,
     provisioning_server_ipv4: Option<Ipv4Addr>,
@@ -174,6 +175,7 @@ impl Default for CarbideDhcpContext {
             ], // local ntp servers
             ntp_servers_ipv6: Vec::new(),
             mqtt_server: None,
+            nico_pxe_service_url: None,
             provisioning_server_ipv4: None,
             provisioning_server_ipv6: None,
             rapid_commit_v6: false,
@@ -327,6 +329,35 @@ unsafe fn hook_parameter_string(value: *const c_char, name: &str) -> Option<Stri
             None
         }
     }
+}
+
+/// Set the optional PXE service URL without changing its contents.
+///
+/// # Safety
+/// `value` must point to a readable, NUL-terminated C string for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hook_set_config_nico_pxe_service_url(value: *const c_char) -> bool {
+    // SAFETY: The caller supplies a readable C string; the helper copies it.
+    let Some(value) = (unsafe { hook_parameter_string(value, "nico-pxe-service-url") }) else {
+        return false;
+    };
+    CONFIG.write().unwrap().nico_pxe_service_url = Some(value);
+    true
+}
+
+/// Return URL bytes owned by Rust; release with `machine_free_dhcp_byte_buffer`.
+/// An unset or empty setting returns an empty buffer, omitting the hook suboption.
+#[unsafe(no_mangle)]
+pub extern "C" fn hook_get_config_nico_pxe_service_url() -> machine::DhcpByteBuffer {
+    let config = CONFIG.read().unwrap();
+    machine::DhcpByteBuffer::from_vec(
+        config
+            .nico_pxe_service_url
+            .as_deref()
+            .unwrap_or_default()
+            .as_bytes()
+            .to_vec(),
+    )
 }
 
 /// Take IPv6 DNS servers for DHCPv6 option rendering.
