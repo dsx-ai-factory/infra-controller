@@ -2390,6 +2390,10 @@ func TestNewApp(t *testing.T) {
 		{name: "preserves repeated query flags", run: testNewAppPreservesRepeatedQueryFlags},
 		{name: "preserves repeated filters across pages", run: testNewAppListAllPreservesRepeatedFilters},
 		{name: "power commands", run: testNewAppPowerCommands},
+		{
+			name: "array enum values in help",
+			run:  testNewAppArrayEnumHelp,
+		},
 	}
 
 	for _, tt := range tests {
@@ -2508,5 +2512,36 @@ func sortStrings(s []string) {
 		for j := i; j > 0 && s[j-1] > s[j]; j-- {
 			s[j-1], s[j] = s[j], s[j-1]
 		}
+	}
+}
+
+func testNewAppArrayEnumHelp(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "operating system types",
+			args: []string{"nicocli", "operating-system", "list", "--help"},
+			want: "[Image, iPXE, TemplatedIpxe]",
+		},
+		{
+			name: "machine relations",
+			args: []string{"nicocli", "machine", "get", "--help"},
+			want: "[InfrastructureProvider, Site, InstanceType]",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			app, err := NewApp(openapi.Spec)
+			require.NoError(t, err)
+			var output bytes.Buffer
+			app.Writer = &output
+			app.ErrWriter = &output
+			err = app.Run(test.args)
+			require.NoError(t, err)
+			assert.Contains(t, output.String(), test.want)
+		})
 	}
 }

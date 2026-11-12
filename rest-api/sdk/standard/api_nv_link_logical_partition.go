@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -295,49 +296,49 @@ type ApiGetAllNvlinkInterfaceRequest struct {
 	ctx                      context.Context
 	ApiService               *NVLinkLogicalPartitionAPIService
 	org                      string
-	status                   *string
-	siteId                   *string
-	instanceId               *string
-	nvLinkLogicalPartitionId *string
-	nvLinkDomainId           *string
-	includeRelation          *string
+	status                   *[]string
+	siteId                   *[]string
+	instanceId               *[]string
+	nvLinkLogicalPartitionId *[]string
+	nvLinkDomainId           *[]string
+	includeRelation          *[]string
 	pageNumber               *int32
 	pageSize                 *int32
 	orderBy                  *string
 }
 
 // Filter NVLink Interfaces by Status. Can be specified multiple times to filter on more than one status.
-func (r ApiGetAllNvlinkInterfaceRequest) Status(status string) ApiGetAllNvlinkInterfaceRequest {
+func (r ApiGetAllNvlinkInterfaceRequest) Status(status []string) ApiGetAllNvlinkInterfaceRequest {
 	r.status = &status
 	return r
 }
 
 // Filter NVLink Interfaces by Site ID.  Can be specified multiple times to filter on more than one ID.
-func (r ApiGetAllNvlinkInterfaceRequest) SiteId(siteId string) ApiGetAllNvlinkInterfaceRequest {
+func (r ApiGetAllNvlinkInterfaceRequest) SiteId(siteId []string) ApiGetAllNvlinkInterfaceRequest {
 	r.siteId = &siteId
 	return r
 }
 
 // Filter NVLink Interfaces by Instance ID.  Can be specified multiple times to filter on more than one ID.
-func (r ApiGetAllNvlinkInterfaceRequest) InstanceId(instanceId string) ApiGetAllNvlinkInterfaceRequest {
+func (r ApiGetAllNvlinkInterfaceRequest) InstanceId(instanceId []string) ApiGetAllNvlinkInterfaceRequest {
 	r.instanceId = &instanceId
 	return r
 }
 
 // Filter NVLink Interfaces by NVLink Logical Partition ID.  Can be specified multiple times to filter on more than one ID.
-func (r ApiGetAllNvlinkInterfaceRequest) NvLinkLogicalPartitionId(nvLinkLogicalPartitionId string) ApiGetAllNvlinkInterfaceRequest {
+func (r ApiGetAllNvlinkInterfaceRequest) NvLinkLogicalPartitionId(nvLinkLogicalPartitionId []string) ApiGetAllNvlinkInterfaceRequest {
 	r.nvLinkLogicalPartitionId = &nvLinkLogicalPartitionId
 	return r
 }
 
 // Filter NVLink Interfaces by Core-reported NVLink domain UUID, not the rack group ID returned by the Domain API. Can be specified multiple times to filter on more than one UUID.
-func (r ApiGetAllNvlinkInterfaceRequest) NvLinkDomainId(nvLinkDomainId string) ApiGetAllNvlinkInterfaceRequest {
+func (r ApiGetAllNvlinkInterfaceRequest) NvLinkDomainId(nvLinkDomainId []string) ApiGetAllNvlinkInterfaceRequest {
 	r.nvLinkDomainId = &nvLinkDomainId
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllNvlinkInterfaceRequest) IncludeRelation(includeRelation string) ApiGetAllNvlinkInterfaceRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllNvlinkInterfaceRequest) IncludeRelation(includeRelation []string) ApiGetAllNvlinkInterfaceRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -407,22 +408,70 @@ func (a *NVLinkLogicalPartitionAPIService) GetAllNvlinkInterfaceExecute(r ApiGet
 	localVarFormParams := url.Values{}
 
 	if r.status != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
+		t := *r.status
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "status", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "status", t, "form", "multi")
+		}
 	}
 	if r.siteId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+		t := *r.siteId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", t, "form", "multi")
+		}
 	}
 	if r.instanceId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "instanceId", r.instanceId, "form", "")
+		t := *r.instanceId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "instanceId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "instanceId", t, "form", "multi")
+		}
 	}
 	if r.nvLinkLogicalPartitionId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "nvLinkLogicalPartitionId", r.nvLinkLogicalPartitionId, "form", "")
+		t := *r.nvLinkLogicalPartitionId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "nvLinkLogicalPartitionId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "nvLinkLogicalPartitionId", t, "form", "multi")
+		}
 	}
 	if r.nvLinkDomainId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "nvLinkDomainId", r.nvLinkDomainId, "form", "")
+		t := *r.nvLinkDomainId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "nvLinkDomainId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "nvLinkDomainId", t, "form", "multi")
+		}
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -511,7 +560,7 @@ type ApiGetAllNvlinkLogicalPartitionRequest struct {
 	includeInterfaces *bool
 	includeStats      *bool
 	includeVpcs       *bool
-	includeRelation   *string
+	includeRelation   *[]string
 	pageNumber        *int32
 	pageSize          *int32
 	orderBy           *string
@@ -553,8 +602,8 @@ func (r ApiGetAllNvlinkLogicalPartitionRequest) IncludeVpcs(includeVpcs bool) Ap
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllNvlinkLogicalPartitionRequest) IncludeRelation(includeRelation string) ApiGetAllNvlinkLogicalPartitionRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllNvlinkLogicalPartitionRequest) IncludeRelation(includeRelation []string) ApiGetAllNvlinkLogicalPartitionRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -642,7 +691,15 @@ func (a *NVLinkLogicalPartitionAPIService) GetAllNvlinkLogicalPartitionExecute(r
 		parameterAddToHeaderOrQuery(localVarQueryParams, "includeVpcs", r.includeVpcs, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -729,7 +786,7 @@ type ApiGetNvlinkLogicalPartitionRequest struct {
 	includeInterfaces        *string
 	includeStats             *bool
 	includeVpcs              *bool
-	includeRelation          *string
+	includeRelation          *[]string
 }
 
 // Include all attached NVLink Interfaces in response
@@ -750,8 +807,8 @@ func (r ApiGetNvlinkLogicalPartitionRequest) IncludeVpcs(includeVpcs bool) ApiGe
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetNvlinkLogicalPartitionRequest) IncludeRelation(includeRelation string) ApiGetNvlinkLogicalPartitionRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetNvlinkLogicalPartitionRequest) IncludeRelation(includeRelation []string) ApiGetNvlinkLogicalPartitionRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -815,7 +872,15 @@ func (a *NVLinkLogicalPartitionAPIService) GetNvlinkLogicalPartitionExecute(r Ap
 		parameterAddToHeaderOrQuery(localVarQueryParams, "includeVpcs", r.includeVpcs, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

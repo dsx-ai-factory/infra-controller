@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -472,7 +473,7 @@ type ApiGetAllExpectedRackRequest struct {
 	ApiService      *ExpectedRackAPIService
 	org             string
 	siteId          *string
-	includeRelation *string
+	includeRelation *[]string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
@@ -484,8 +485,8 @@ func (r ApiGetAllExpectedRackRequest) SiteId(siteId string) ApiGetAllExpectedRac
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllExpectedRackRequest) IncludeRelation(includeRelation string) ApiGetAllExpectedRackRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllExpectedRackRequest) IncludeRelation(includeRelation []string) ApiGetAllExpectedRackRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -560,7 +561,15 @@ func (a *ExpectedRackAPIService) GetAllExpectedRackExecute(r ApiGetAllExpectedRa
 		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -655,11 +664,11 @@ type ApiGetExpectedRackRequest struct {
 	ApiService      *ExpectedRackAPIService
 	org             string
 	id              string
-	includeRelation *string
+	includeRelation *[]string
 }
 
-// Related entity to expand
-func (r ApiGetExpectedRackRequest) IncludeRelation(includeRelation string) ApiGetExpectedRackRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetExpectedRackRequest) IncludeRelation(includeRelation []string) ApiGetExpectedRackRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -716,7 +725,15 @@ func (a *ExpectedRackAPIService) GetExpectedRackExecute(r ApiGetExpectedRackRequ
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

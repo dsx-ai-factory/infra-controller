@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -334,23 +335,23 @@ type ApiGetAllSpectrumxPartitionRequest struct {
 	ctx             context.Context
 	ApiService      *SpectrumXPartitionAPIService
 	org             string
-	siteId          *string
-	status          *string
+	siteId          *[]string
+	status          *[]string
 	query           *string
-	includeRelation *string
+	includeRelation *[]string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
 }
 
 // Filter Partitions by Site. Repeat the parameter to match multiple Sites.
-func (r ApiGetAllSpectrumxPartitionRequest) SiteId(siteId string) ApiGetAllSpectrumxPartitionRequest {
+func (r ApiGetAllSpectrumxPartitionRequest) SiteId(siteId []string) ApiGetAllSpectrumxPartitionRequest {
 	r.siteId = &siteId
 	return r
 }
 
 // Filter Partitions by Status. Repeat the parameter to match multiple Statuses.
-func (r ApiGetAllSpectrumxPartitionRequest) Status(status string) ApiGetAllSpectrumxPartitionRequest {
+func (r ApiGetAllSpectrumxPartitionRequest) Status(status []string) ApiGetAllSpectrumxPartitionRequest {
 	r.status = &status
 	return r
 }
@@ -361,8 +362,8 @@ func (r ApiGetAllSpectrumxPartitionRequest) Query(query string) ApiGetAllSpectru
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllSpectrumxPartitionRequest) IncludeRelation(includeRelation string) ApiGetAllSpectrumxPartitionRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllSpectrumxPartitionRequest) IncludeRelation(includeRelation []string) ApiGetAllSpectrumxPartitionRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -432,16 +433,40 @@ func (a *SpectrumXPartitionAPIService) GetAllSpectrumxPartitionExecute(r ApiGetA
 	localVarFormParams := url.Values{}
 
 	if r.siteId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+		t := *r.siteId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", t, "form", "multi")
+		}
 	}
 	if r.status != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
+		t := *r.status
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "status", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "status", t, "form", "multi")
+		}
 	}
 	if r.query != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -529,11 +554,11 @@ type ApiGetSpectrumxPartitionRequest struct {
 	ApiService           *SpectrumXPartitionAPIService
 	org                  string
 	spectrumXPartitionId string
-	includeRelation      *string
+	includeRelation      *[]string
 }
 
-// Related entity to expand
-func (r ApiGetSpectrumxPartitionRequest) IncludeRelation(includeRelation string) ApiGetSpectrumxPartitionRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetSpectrumxPartitionRequest) IncludeRelation(includeRelation []string) ApiGetSpectrumxPartitionRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -590,7 +615,15 @@ func (a *SpectrumXPartitionAPIService) GetSpectrumxPartitionExecute(r ApiGetSpec
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

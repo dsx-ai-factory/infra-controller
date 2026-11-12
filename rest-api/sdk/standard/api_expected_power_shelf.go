@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -466,7 +467,7 @@ type ApiGetAllExpectedPowerShelfRequest struct {
 	ApiService      *ExpectedPowerShelfAPIService
 	org             string
 	siteId          *string
-	includeRelation *string
+	includeRelation *[]string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
@@ -478,8 +479,8 @@ func (r ApiGetAllExpectedPowerShelfRequest) SiteId(siteId string) ApiGetAllExpec
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllExpectedPowerShelfRequest) IncludeRelation(includeRelation string) ApiGetAllExpectedPowerShelfRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllExpectedPowerShelfRequest) IncludeRelation(includeRelation []string) ApiGetAllExpectedPowerShelfRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -554,7 +555,15 @@ func (a *ExpectedPowerShelfAPIService) GetAllExpectedPowerShelfExecute(r ApiGetA
 		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -649,11 +658,11 @@ type ApiGetExpectedPowerShelfRequest struct {
 	ApiService           *ExpectedPowerShelfAPIService
 	org                  string
 	expectedPowerShelfId string
-	includeRelation      *string
+	includeRelation      *[]string
 }
 
-// Related entity to expand
-func (r ApiGetExpectedPowerShelfRequest) IncludeRelation(includeRelation string) ApiGetExpectedPowerShelfRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetExpectedPowerShelfRequest) IncludeRelation(includeRelation []string) ApiGetExpectedPowerShelfRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -710,7 +719,15 @@ func (a *ExpectedPowerShelfAPIService) GetExpectedPowerShelfExecute(r ApiGetExpe
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

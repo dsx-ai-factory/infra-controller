@@ -522,7 +522,7 @@ func NewGetSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg *
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of SSH Key"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Tenant'" collectionFormat(multi)
 // @Success 200 {object} model.APISSHKey
 // @Router /v2/org/{org}/nico/sshkey/{id} [get]
 func (gskh GetSSHKeyHandler) Handle(c echo.Context) error {
@@ -643,7 +643,7 @@ func NewGetAllSSHKeyHandler(dbSession *cdb.Session, tc temporalClient.Client, cf
 // @Param org path string true "Name of NGC organization"
 // @Param sshKeyGroupId query string true "ID of SSH Key Group"
 // @Param query query string false "Query input for full text search"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Tenant'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"

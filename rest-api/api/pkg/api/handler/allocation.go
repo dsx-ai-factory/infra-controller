@@ -506,16 +506,16 @@ func NewGetAllAllocationHandler(dbSession *cdb.Session, tc temporalClient.Client
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param infrastructureProviderId query string false "Deprecated: ID of InfrastructureProvider"
-// @Param tenantId query string false "Filter by Tenant ID (Provider role only; for Tenant role the tenant is inferred from org membership and this param is ignored)"
-// @Param siteId query string false "ID of Site"
-// @Param resourceType query string false "Filter by resource type e.g. 'InstanceType', 'IPBlock'"
-// @Param resourceTypeId query string false "ID of ResourceType"
-// @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
+// @Param tenantId query []string false "Filter by Tenant ID (Provider role only; for Tenant role the tenant is inferred from org membership and this param is ignored)" collectionFormat(multi)
+// @Param siteId query []string false "ID of Site" collectionFormat(multi)
+// @Param resourceType query []string false "Filter by resource type e.g. 'InstanceType', 'IPBlock'" collectionFormat(multi)
+// @Param resourceTypeId query []string false "ID of ResourceType" collectionFormat(multi)
+// @Param status query []string false "Filter Allocations by Status e.g. 'Pending', 'Error'. Can be specified multiple times to filter on more than one Status." collectionFormat(multi)
 // @Param query query string false "Query input for full text search"
-// @Param constraintType query string false "Filter by constraint type e.g. 'Reserved', 'OnDemand', 'Preemptible'"
-// @Param constraintValue query integer false "Filter by constraint value"
-// @Param id query string false "ID of Allocation"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param constraintType query []string false "Filter by constraint type e.g. 'Reserved', 'OnDemand', 'Preemptible'" collectionFormat(multi)
+// @Param constraintValue query []int false "Filter by constraint value" collectionFormat(multi)
+// @Param id query []string false "ID of Allocation" collectionFormat(multi)
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -840,7 +840,7 @@ func NewGetAllocationHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Param id path string true "ID of Allocation"
 // @Param infrastructureProviderId query string false "Deprecated: ID of InfrastructureProvider"
 // @Param tenantId query string false "Deprecated: ID of Tenant"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Success 200 {object} model.APIAllocation
 // @Router /v2/org/{org}/nico/allocation/{id} [get]
 func (gah GetAllocationHandler) Handle(c echo.Context) error {

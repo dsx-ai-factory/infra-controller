@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -302,7 +303,7 @@ type ApiGetAllSiteRequest struct {
 	org                           string
 	infrastructureProviderId      *string
 	tenantId                      *string
-	status                        *string
+	status                        *[]string
 	isNativeNetworkingEnabled     *bool
 	isNetworkSecurityGroupEnabled *bool
 	isNVLinkPartitionEnabled      *bool
@@ -310,7 +311,7 @@ type ApiGetAllSiteRequest struct {
 	includeMachineStats           *bool
 	includeGpuStats               *bool
 	query                         *string
-	includeRelation               *string
+	includeRelation               *[]string
 	pageNumber                    *int32
 	pageSize                      *int32
 	orderBy                       *string
@@ -331,7 +332,7 @@ func (r ApiGetAllSiteRequest) TenantId(tenantId string) ApiGetAllSiteRequest {
 }
 
 // Filter Sites by Status. Can be specified multiple times to filter on more than one status
-func (r ApiGetAllSiteRequest) Status(status string) ApiGetAllSiteRequest {
+func (r ApiGetAllSiteRequest) Status(status []string) ApiGetAllSiteRequest {
 	r.status = &status
 	return r
 }
@@ -378,8 +379,8 @@ func (r ApiGetAllSiteRequest) Query(query string) ApiGetAllSiteRequest {
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllSiteRequest) IncludeRelation(includeRelation string) ApiGetAllSiteRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllSiteRequest) IncludeRelation(includeRelation []string) ApiGetAllSiteRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -455,7 +456,15 @@ func (a *SiteAPIService) GetAllSiteExecute(r ApiGetAllSiteRequest) ([]Site, *htt
 		parameterAddToHeaderOrQuery(localVarQueryParams, "tenantId", r.tenantId, "form", "")
 	}
 	if r.status != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
+		t := *r.status
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "status", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "status", t, "form", "multi")
+		}
 	}
 	if r.isNativeNetworkingEnabled != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "isNativeNetworkingEnabled", r.isNativeNetworkingEnabled, "form", "")
@@ -479,7 +488,15 @@ func (a *SiteAPIService) GetAllSiteExecute(r ApiGetAllSiteRequest) ([]Site, *htt
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -559,10 +576,17 @@ func (a *SiteAPIService) GetAllSiteExecute(r ApiGetAllSiteRequest) ([]Site, *htt
 }
 
 type ApiGetSiteRequest struct {
-	ctx        context.Context
-	ApiService *SiteAPIService
-	org        string
-	siteId     string
+	ctx             context.Context
+	ApiService      *SiteAPIService
+	org             string
+	siteId          string
+	includeRelation *[]string
+}
+
+// Related entities to expand. Repeat the parameter to request multiple relations.
+func (r ApiGetSiteRequest) IncludeRelation(includeRelation []string) ApiGetSiteRequest {
+	r.includeRelation = &includeRelation
+	return r
 }
 
 func (r ApiGetSiteRequest) Execute() (*Site, *http.Response, error) {
@@ -619,6 +643,17 @@ func (a *SiteAPIService) GetSiteExecute(r ApiGetSiteRequest) (*Site, *http.Respo
 	localVarQueryParams := url.Values{}
 	localVarFormParams := url.Values{}
 
+	if r.includeRelation != nil {
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
+	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}
 

@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -391,37 +392,37 @@ type ApiGetAllVpcRequest struct {
 	ctx                      context.Context
 	ApiService               *VPCAPIService
 	org                      string
-	siteId                   *string
-	status                   *string
-	networkSecurityGroupId   *string
-	nvLinkLogicalPartitionId *string
+	siteId                   *[]string
+	status                   *[]string
+	networkSecurityGroupId   *[]string
+	nvLinkLogicalPartitionId *[]string
 	query                    *string
-	includeRelation          *string
+	includeRelation          *[]string
 	pageNumber               *int32
 	pageSize                 *int32
 	orderBy                  *string
 }
 
 // Filter VPCs by Site ID. Can be specified multiple times to filter on more than one Site.
-func (r ApiGetAllVpcRequest) SiteId(siteId string) ApiGetAllVpcRequest {
+func (r ApiGetAllVpcRequest) SiteId(siteId []string) ApiGetAllVpcRequest {
 	r.siteId = &siteId
 	return r
 }
 
 // Filter VPCs by Status. Can be specified multiple times to filter on more than one Status.
-func (r ApiGetAllVpcRequest) Status(status string) ApiGetAllVpcRequest {
+func (r ApiGetAllVpcRequest) Status(status []string) ApiGetAllVpcRequest {
 	r.status = &status
 	return r
 }
 
 // Filter VPCs by Network Security Group ID. Can be specified multiple times to filter on more than one Network Security Group.
-func (r ApiGetAllVpcRequest) NetworkSecurityGroupId(networkSecurityGroupId string) ApiGetAllVpcRequest {
+func (r ApiGetAllVpcRequest) NetworkSecurityGroupId(networkSecurityGroupId []string) ApiGetAllVpcRequest {
 	r.networkSecurityGroupId = &networkSecurityGroupId
 	return r
 }
 
 // Filter VPCs by NVLink Logical Partition ID. Can be specified multiple times to filter on more than one NVLink Logical Partition.
-func (r ApiGetAllVpcRequest) NvLinkLogicalPartitionId(nvLinkLogicalPartitionId string) ApiGetAllVpcRequest {
+func (r ApiGetAllVpcRequest) NvLinkLogicalPartitionId(nvLinkLogicalPartitionId []string) ApiGetAllVpcRequest {
 	r.nvLinkLogicalPartitionId = &nvLinkLogicalPartitionId
 	return r
 }
@@ -432,8 +433,8 @@ func (r ApiGetAllVpcRequest) Query(query string) ApiGetAllVpcRequest {
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllVpcRequest) IncludeRelation(includeRelation string) ApiGetAllVpcRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllVpcRequest) IncludeRelation(includeRelation []string) ApiGetAllVpcRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -503,22 +504,62 @@ func (a *VPCAPIService) GetAllVpcExecute(r ApiGetAllVpcRequest) ([]VPC, *http.Re
 	localVarFormParams := url.Values{}
 
 	if r.siteId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+		t := *r.siteId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", t, "form", "multi")
+		}
 	}
 	if r.status != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
+		t := *r.status
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "status", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "status", t, "form", "multi")
+		}
 	}
 	if r.networkSecurityGroupId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "networkSecurityGroupId", r.networkSecurityGroupId, "form", "")
+		t := *r.networkSecurityGroupId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "networkSecurityGroupId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "networkSecurityGroupId", t, "form", "multi")
+		}
 	}
 	if r.nvLinkLogicalPartitionId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "nvLinkLogicalPartitionId", r.nvLinkLogicalPartitionId, "form", "")
+		t := *r.nvLinkLogicalPartitionId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "nvLinkLogicalPartitionId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "nvLinkLogicalPartitionId", t, "form", "multi")
+		}
 	}
 	if r.query != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -602,11 +643,11 @@ type ApiGetVpcRequest struct {
 	ApiService      *VPCAPIService
 	org             string
 	vpcId           string
-	includeRelation *string
+	includeRelation *[]string
 }
 
-// Related entity to expand
-func (r ApiGetVpcRequest) IncludeRelation(includeRelation string) ApiGetVpcRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetVpcRequest) IncludeRelation(includeRelation []string) ApiGetVpcRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -661,7 +702,15 @@ func (a *VPCAPIService) GetVpcExecute(r ApiGetVpcRequest) (*VPC, *http.Response,
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

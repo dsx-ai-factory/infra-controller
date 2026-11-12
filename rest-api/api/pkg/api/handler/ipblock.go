@@ -309,7 +309,7 @@ func NewGetAllIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Param siteId query string true "ID of Site"
 // @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
 // @Param query query string false "Query input for full text search"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Param includeUsageStats query boolean false "IPBlock usage stats to include in response
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
@@ -557,7 +557,7 @@ func NewGetAllDerivedIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Cl
 // @Param id path string true "ID of IPBlock"
 // @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
 // @Param query query string false "Query input for full text search"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Success 200 {object} model.APIIPBlock
 // @Router /v2/org/{org}/nico/ipblock/{id}/derived [get]
 func (gadipbh GetAllDerivedIPBlockHandler) Handle(c echo.Context) error {
@@ -774,7 +774,7 @@ func NewGetIPBlockHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg 
 // @Param id path string true "ID of IPBlock"
 // @Param infrastructureProviderId query string false "Deprecated: Infrastructure Provider is now inferred from the org's membership"
 // @Param tenantId query string false "Deprecated: Tenant is now inferred from the org's membership"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Param includeUsageStats query boolean false "IPBlock usage stats to include in response
 // @Success 200 {object} model.APIIPBlock
 // @Router /v2/org/{org}/nico/ipblock/{id} [get]

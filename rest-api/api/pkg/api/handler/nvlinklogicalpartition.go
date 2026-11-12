@@ -356,7 +356,7 @@ func NewGetAllNVLinkLogicalPartitionHandler(dbSession *cdb.Session, tc temporalC
 // @Param siteId query string true "ID of Site"
 // @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
 // @Param query query string false "Query input for full text search"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant'" collectionFormat(multi)
 // @Param includeInterfaces query boolean false "Include NVLinkInterfaces in response"
 // @Param includeStats query boolean false "Include NVLinkLogicalPartitionStats in response"
 // @Param includeVpcs query boolean false "Include VPCs in response"
@@ -657,7 +657,7 @@ func NewGetNVLinkLogicalPartitionHandler(dbSession *cdb.Session, tc temporalClie
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of NVLinkLogicalPartition"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'Tenant'" collectionFormat(multi)
 // @Param includeInterfaces query boolean false "Include NVLinkInterfaces in response"
 // @Param includeStats query boolean false "Include NVLinkLogicalPartitionStats in response"
 // @Success 200 {object} model.APINVLinkLogicalPartition

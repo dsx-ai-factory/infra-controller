@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -703,7 +704,7 @@ type ApiGetAllTrayRequest struct {
 	rackId     *string
 	rackName   *string
 	type_      *string
-	id         *string
+	id         *[]string
 	slotId     *int32
 	pageNumber *int32
 	pageSize   *int32
@@ -735,7 +736,7 @@ func (r ApiGetAllTrayRequest) Type_(type_ string) ApiGetAllTrayRequest {
 }
 
 // Filter by component ID. Can be specified multiple times to filter on more than one Tray ID.
-func (r ApiGetAllTrayRequest) Id(id string) ApiGetAllTrayRequest {
+func (r ApiGetAllTrayRequest) Id(id []string) ApiGetAllTrayRequest {
 	r.id = &id
 	return r
 }
@@ -829,7 +830,15 @@ func (a *TrayAPIService) GetAllTrayExecute(r ApiGetAllTrayRequest) ([]Tray, *htt
 		parameterAddToHeaderOrQuery(localVarQueryParams, "type", r.type_, "form", "")
 	}
 	if r.id != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "id", r.id, "form", "")
+		t := *r.id
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "id", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "id", t, "form", "multi")
+		}
 	}
 	if r.slotId != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "slotId", r.slotId, "form", "")
@@ -2241,10 +2250,10 @@ type ApiValidateTraysRequest struct {
 	org          string
 	rackId       *string
 	rackName     *string
-	name         *string
-	manufacturer *string
+	name         *[]string
+	manufacturer *[]string
 	type_        *string
-	id           *string
+	id           *[]string
 	slotId       *int32
 }
 
@@ -2266,14 +2275,14 @@ func (r ApiValidateTraysRequest) RackName(rackName string) ApiValidateTraysReque
 	return r
 }
 
-// Filter trays by name
-func (r ApiValidateTraysRequest) Name(name string) ApiValidateTraysRequest {
+// Filter trays by name. Repeat the parameter to specify multiple values.
+func (r ApiValidateTraysRequest) Name(name []string) ApiValidateTraysRequest {
 	r.name = &name
 	return r
 }
 
-// Filter trays by manufacturer
-func (r ApiValidateTraysRequest) Manufacturer(manufacturer string) ApiValidateTraysRequest {
+// Filter trays by manufacturer. Repeat the parameter to specify multiple values.
+func (r ApiValidateTraysRequest) Manufacturer(manufacturer []string) ApiValidateTraysRequest {
 	r.manufacturer = &manufacturer
 	return r
 }
@@ -2285,7 +2294,7 @@ func (r ApiValidateTraysRequest) Type_(type_ string) ApiValidateTraysRequest {
 }
 
 // Filter by component ID (mutually exclusive with rackId/rackName; use repeated params for multiple values)
-func (r ApiValidateTraysRequest) Id(id string) ApiValidateTraysRequest {
+func (r ApiValidateTraysRequest) Id(id []string) ApiValidateTraysRequest {
 	r.id = &id
 	return r
 }
@@ -2357,16 +2366,40 @@ func (a *TrayAPIService) ValidateTraysExecute(r ApiValidateTraysRequest) (*RackV
 		parameterAddToHeaderOrQuery(localVarQueryParams, "rackName", r.rackName, "form", "")
 	}
 	if r.name != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "name", r.name, "form", "")
+		t := *r.name
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "name", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "name", t, "form", "multi")
+		}
 	}
 	if r.manufacturer != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "manufacturer", r.manufacturer, "form", "")
+		t := *r.manufacturer
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "manufacturer", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "manufacturer", t, "form", "multi")
+		}
 	}
 	if r.type_ != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "type", r.type_, "form", "")
 	}
 	if r.id != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "id", r.id, "form", "")
+		t := *r.id
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "id", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "id", t, "form", "multi")
+		}
 	}
 	if r.slotId != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "slotId", r.slotId, "form", "")

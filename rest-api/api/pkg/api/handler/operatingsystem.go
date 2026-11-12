@@ -781,11 +781,11 @@ func NewGetAllOperatingSystemHandler(dbSession *cdb.Session, tc temporalClient.C
 // @Produce json
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
-// @Param siteId query string true "ID of Site"
-// @Param type query string true "type of Operating System" e.g. 'iPXE', 'Image'"
-// @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
+// @Param siteId query []string false "ID of Site" collectionFormat(multi)
+// @Param type query []string false "Filter Operating Systems by Type e.g. 'iPXE', 'Image'. Repeat the parameter to specify multiple values." collectionFormat(multi)
+// @Param status query []string false "Filter Operating Systems by Status e.g. 'Pending', 'Error'.  Can be specified multiple times to filter on more than one status." collectionFormat(multi)
 // @Param query query string false "Query input for full text search"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -1166,7 +1166,7 @@ func NewGetOperatingSystemHandler(dbSession *cdb.Session, tc temporalClient.Clie
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of OperatingSystem"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Success 200 {object} model.APIOperatingSystem
 // @Router /v2/org/{org}/nico/operating-system/{id} [get]
 func (gsh GetOperatingSystemHandler) Handle(c echo.Context) error {

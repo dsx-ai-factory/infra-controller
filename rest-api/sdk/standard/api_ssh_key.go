@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -288,7 +289,7 @@ type ApiGetAllSshKeyRequest struct {
 	org             string
 	sshKeyGroupId   *string
 	query           *string
-	includeRelation *string
+	includeRelation *[]string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
@@ -306,8 +307,8 @@ func (r ApiGetAllSshKeyRequest) Query(query string) ApiGetAllSshKeyRequest {
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllSshKeyRequest) IncludeRelation(includeRelation string) ApiGetAllSshKeyRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllSshKeyRequest) IncludeRelation(includeRelation []string) ApiGetAllSshKeyRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -383,7 +384,15 @@ func (a *SSHKeyAPIService) GetAllSshKeyExecute(r ApiGetAllSshKeyRequest) ([]SshK
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -463,10 +472,17 @@ func (a *SSHKeyAPIService) GetAllSshKeyExecute(r ApiGetAllSshKeyRequest) ([]SshK
 }
 
 type ApiGetSshKeyRequest struct {
-	ctx        context.Context
-	ApiService *SSHKeyAPIService
-	org        string
-	sshKeyId   string
+	ctx             context.Context
+	ApiService      *SSHKeyAPIService
+	org             string
+	sshKeyId        string
+	includeRelation *[]string
+}
+
+// Related entities to expand. Repeat the parameter to request multiple relations.
+func (r ApiGetSshKeyRequest) IncludeRelation(includeRelation []string) ApiGetSshKeyRequest {
+	r.includeRelation = &includeRelation
+	return r
 }
 
 func (r ApiGetSshKeyRequest) Execute() (*SshKey, *http.Response, error) {
@@ -520,6 +536,17 @@ func (a *SSHKeyAPIService) GetSshKeyExecute(r ApiGetSshKeyRequest) (*SshKey, *ht
 	localVarQueryParams := url.Values{}
 	localVarFormParams := url.Values{}
 
+	if r.includeRelation != nil {
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
+	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}
 

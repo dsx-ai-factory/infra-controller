@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -301,16 +302,16 @@ type ApiGetAllAllocationRequest struct {
 	ApiService               *AllocationAPIService
 	org                      string
 	infrastructureProviderId *string
-	tenantId                 *string
-	siteId                   *string
-	id                       *string
-	resourceType             *string
-	status                   *string
-	resourceTypeId           *string
-	constraintType           *string
-	constraintValue          *int32
+	tenantId                 *[]string
+	siteId                   *[]string
+	id                       *[]string
+	resourceType             *[]string
+	status                   *[]string
+	resourceTypeId           *[]string
+	constraintType           *[]string
+	constraintValue          *[]int32
 	query                    *string
-	includeRelation          *string
+	includeRelation          *[]string
 	pageNumber               *int32
 	pageSize                 *int32
 	orderBy                  *string
@@ -323,50 +324,50 @@ func (r ApiGetAllAllocationRequest) InfrastructureProviderId(infrastructureProvi
 	return r
 }
 
-// Filter Allocations by Tenant ID.
-func (r ApiGetAllAllocationRequest) TenantId(tenantId string) ApiGetAllAllocationRequest {
+// Filter Allocations by Tenant ID. Repeat the parameter to specify multiple values.
+func (r ApiGetAllAllocationRequest) TenantId(tenantId []string) ApiGetAllAllocationRequest {
 	r.tenantId = &tenantId
 	return r
 }
 
 // Filter Allocations by Site ID. Can be specified multiple times to filter on more than one Site ID.
-func (r ApiGetAllAllocationRequest) SiteId(siteId string) ApiGetAllAllocationRequest {
+func (r ApiGetAllAllocationRequest) SiteId(siteId []string) ApiGetAllAllocationRequest {
 	r.siteId = &siteId
 	return r
 }
 
 // Filter Allocations by ID. Can be specified multiple times to filter on more than one ID.
-func (r ApiGetAllAllocationRequest) Id(id string) ApiGetAllAllocationRequest {
+func (r ApiGetAllAllocationRequest) Id(id []string) ApiGetAllAllocationRequest {
 	r.id = &id
 	return r
 }
 
 // Filter Allocations by Constraint Resource Type. Can be specified multiple times to filter on more than one Constraint Resource Type.
-func (r ApiGetAllAllocationRequest) ResourceType(resourceType string) ApiGetAllAllocationRequest {
+func (r ApiGetAllAllocationRequest) ResourceType(resourceType []string) ApiGetAllAllocationRequest {
 	r.resourceType = &resourceType
 	return r
 }
 
 // Filter Allocations by Status. Can be specified multiple times to filter on more than one Status.
-func (r ApiGetAllAllocationRequest) Status(status string) ApiGetAllAllocationRequest {
+func (r ApiGetAllAllocationRequest) Status(status []string) ApiGetAllAllocationRequest {
 	r.status = &status
 	return r
 }
 
 // Filter Allocations by Constraint Resource Type ID. Can be specified multiple times to filter on more than one Constraint Resource Type ID.
-func (r ApiGetAllAllocationRequest) ResourceTypeId(resourceTypeId string) ApiGetAllAllocationRequest {
+func (r ApiGetAllAllocationRequest) ResourceTypeId(resourceTypeId []string) ApiGetAllAllocationRequest {
 	r.resourceTypeId = &resourceTypeId
 	return r
 }
 
 // Filter Allocations by Constraint Type. Can be specified multiple times to filter on more than one Constraint Type.
-func (r ApiGetAllAllocationRequest) ConstraintType(constraintType string) ApiGetAllAllocationRequest {
+func (r ApiGetAllAllocationRequest) ConstraintType(constraintType []string) ApiGetAllAllocationRequest {
 	r.constraintType = &constraintType
 	return r
 }
 
 // Filter Allocations by Constraint Value. Can be specified multiple times to filter on more than one Constraint Value.
-func (r ApiGetAllAllocationRequest) ConstraintValue(constraintValue int32) ApiGetAllAllocationRequest {
+func (r ApiGetAllAllocationRequest) ConstraintValue(constraintValue []int32) ApiGetAllAllocationRequest {
 	r.constraintValue = &constraintValue
 	return r
 }
@@ -377,8 +378,8 @@ func (r ApiGetAllAllocationRequest) Query(query string) ApiGetAllAllocationReque
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllAllocationRequest) IncludeRelation(includeRelation string) ApiGetAllAllocationRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllAllocationRequest) IncludeRelation(includeRelation []string) ApiGetAllAllocationRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -453,34 +454,106 @@ func (a *AllocationAPIService) GetAllAllocationExecute(r ApiGetAllAllocationRequ
 		parameterAddToHeaderOrQuery(localVarQueryParams, "infrastructureProviderId", r.infrastructureProviderId, "form", "")
 	}
 	if r.tenantId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "tenantId", r.tenantId, "form", "")
+		t := *r.tenantId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "tenantId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "tenantId", t, "form", "multi")
+		}
 	}
 	if r.siteId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+		t := *r.siteId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", t, "form", "multi")
+		}
 	}
 	if r.id != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "id", r.id, "form", "")
+		t := *r.id
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "id", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "id", t, "form", "multi")
+		}
 	}
 	if r.resourceType != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "resourceType", r.resourceType, "form", "")
+		t := *r.resourceType
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "resourceType", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "resourceType", t, "form", "multi")
+		}
 	}
 	if r.status != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
+		t := *r.status
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "status", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "status", t, "form", "multi")
+		}
 	}
 	if r.resourceTypeId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "resourceTypeId", r.resourceTypeId, "form", "")
+		t := *r.resourceTypeId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "resourceTypeId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "resourceTypeId", t, "form", "multi")
+		}
 	}
 	if r.constraintType != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "constraintType", r.constraintType, "form", "")
+		t := *r.constraintType
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "constraintType", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "constraintType", t, "form", "multi")
+		}
 	}
 	if r.constraintValue != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "constraintValue", r.constraintValue, "form", "")
+		t := *r.constraintValue
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "constraintValue", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "constraintValue", t, "form", "multi")
+		}
 	}
 	if r.query != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -566,7 +639,7 @@ type ApiGetAllocationRequest struct {
 	allocationId             string
 	infrastructureProviderId *string
 	tenantId                 *string
-	includeRelation          *string
+	includeRelation          *[]string
 }
 
 // Filter Allocations by Infrastructure Provider ID.
@@ -583,8 +656,8 @@ func (r ApiGetAllocationRequest) TenantId(tenantId string) ApiGetAllocationReque
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllocationRequest) IncludeRelation(includeRelation string) ApiGetAllocationRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllocationRequest) IncludeRelation(includeRelation []string) ApiGetAllocationRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -647,7 +720,15 @@ func (a *AllocationAPIService) GetAllocationExecute(r ApiGetAllocationRequest) (
 		parameterAddToHeaderOrQuery(localVarQueryParams, "tenantId", r.tenantId, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

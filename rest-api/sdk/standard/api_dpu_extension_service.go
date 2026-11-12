@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -403,7 +404,7 @@ type ApiGetAllDpuExtensionServiceRequest struct {
 	siteId          *string
 	status          *string
 	query           *string
-	includeRelation *string
+	includeRelation *[]string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
@@ -427,8 +428,8 @@ func (r ApiGetAllDpuExtensionServiceRequest) Query(query string) ApiGetAllDpuExt
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllDpuExtensionServiceRequest) IncludeRelation(includeRelation string) ApiGetAllDpuExtensionServiceRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllDpuExtensionServiceRequest) IncludeRelation(includeRelation []string) ApiGetAllDpuExtensionServiceRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -507,7 +508,15 @@ func (a *DPUExtensionServiceAPIService) GetAllDpuExtensionServiceExecute(r ApiGe
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -591,6 +600,13 @@ type ApiGetDpuExtensionServiceRequest struct {
 	ApiService            *DPUExtensionServiceAPIService
 	org                   string
 	dpuExtensionServiceId string
+	includeRelation       *[]string
+}
+
+// Related entities to expand. Repeat the parameter to request multiple relations.
+func (r ApiGetDpuExtensionServiceRequest) IncludeRelation(includeRelation []string) ApiGetDpuExtensionServiceRequest {
+	r.includeRelation = &includeRelation
+	return r
 }
 
 func (r ApiGetDpuExtensionServiceRequest) Execute() (*DpuExtensionService, *http.Response, error) {
@@ -644,6 +660,17 @@ func (a *DPUExtensionServiceAPIService) GetDpuExtensionServiceExecute(r ApiGetDp
 	localVarQueryParams := url.Values{}
 	localVarFormParams := url.Values{}
 
+	if r.includeRelation != nil {
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
+	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}
 

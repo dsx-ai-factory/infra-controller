@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -552,20 +553,20 @@ type ApiGetAllInstanceRequest struct {
 	ApiService               *InstanceAPIService
 	org                      string
 	infrastructureProviderId *string
-	siteId                   *string
-	vpcId                    *string
-	instanceTypeId           *string
-	operatingSystemId        *string
-	machineId                *string
+	siteId                   *[]string
+	vpcId                    *[]string
+	instanceTypeId           *[]string
+	operatingSystemId        *[]string
+	machineId                *[]string
 	name                     *string
-	status                   *string
-	ipAddress                *string
+	status                   *[]string
+	ipAddress                *[]string
 	query                    *string
-	includeRelation          *string
+	includeRelation          *[]string
 	pageNumber               *int32
 	pageSize                 *int32
 	orderBy                  *string
-	networkSecurityGroupId   *string
+	networkSecurityGroupId   *[]string
 }
 
 // Filter by Infrastructure Provider ID. Deprecated: Instances will no longer be filtered by Infrastructure Provider; results are scoped to the org&#39;s Tenant. Use the siteId parameter to scope results to a specific Infrastructure Provider&#39;s Sites.
@@ -576,31 +577,31 @@ func (r ApiGetAllInstanceRequest) InfrastructureProviderId(infrastructureProvide
 }
 
 // Filter by Site ID. Can be specified multiple times to filter on more than one site.
-func (r ApiGetAllInstanceRequest) SiteId(siteId string) ApiGetAllInstanceRequest {
+func (r ApiGetAllInstanceRequest) SiteId(siteId []string) ApiGetAllInstanceRequest {
 	r.siteId = &siteId
 	return r
 }
 
 // Filter by VPC ID. Can be specified multiple times to filter on more than one VPC.
-func (r ApiGetAllInstanceRequest) VpcId(vpcId string) ApiGetAllInstanceRequest {
+func (r ApiGetAllInstanceRequest) VpcId(vpcId []string) ApiGetAllInstanceRequest {
 	r.vpcId = &vpcId
 	return r
 }
 
 // Filter by instance type ID. Can be specified multiple times to filter on more than one instance type.
-func (r ApiGetAllInstanceRequest) InstanceTypeId(instanceTypeId string) ApiGetAllInstanceRequest {
+func (r ApiGetAllInstanceRequest) InstanceTypeId(instanceTypeId []string) ApiGetAllInstanceRequest {
 	r.instanceTypeId = &instanceTypeId
 	return r
 }
 
 // Filter by operating system ID. Can be specified multiple times to filter on more than one operating system.
-func (r ApiGetAllInstanceRequest) OperatingSystemId(operatingSystemId string) ApiGetAllInstanceRequest {
+func (r ApiGetAllInstanceRequest) OperatingSystemId(operatingSystemId []string) ApiGetAllInstanceRequest {
 	r.operatingSystemId = &operatingSystemId
 	return r
 }
 
 // Filter by machine ID. Can be specified multiple times to filter on more than one machine.
-func (r ApiGetAllInstanceRequest) MachineId(machineId string) ApiGetAllInstanceRequest {
+func (r ApiGetAllInstanceRequest) MachineId(machineId []string) ApiGetAllInstanceRequest {
 	r.machineId = &machineId
 	return r
 }
@@ -612,13 +613,13 @@ func (r ApiGetAllInstanceRequest) Name(name string) ApiGetAllInstanceRequest {
 }
 
 // Filter Instances by Status. Can be specified multiple times to filter on more than one status.
-func (r ApiGetAllInstanceRequest) Status(status string) ApiGetAllInstanceRequest {
+func (r ApiGetAllInstanceRequest) Status(status []string) ApiGetAllInstanceRequest {
 	r.status = &status
 	return r
 }
 
 // Filter by IP address. Can be specified multiple times to filter on more than one IP address.
-func (r ApiGetAllInstanceRequest) IpAddress(ipAddress string) ApiGetAllInstanceRequest {
+func (r ApiGetAllInstanceRequest) IpAddress(ipAddress []string) ApiGetAllInstanceRequest {
 	r.ipAddress = &ipAddress
 	return r
 }
@@ -629,8 +630,8 @@ func (r ApiGetAllInstanceRequest) Query(query string) ApiGetAllInstanceRequest {
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllInstanceRequest) IncludeRelation(includeRelation string) ApiGetAllInstanceRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllInstanceRequest) IncludeRelation(includeRelation []string) ApiGetAllInstanceRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -654,7 +655,7 @@ func (r ApiGetAllInstanceRequest) OrderBy(orderBy string) ApiGetAllInstanceReque
 }
 
 // Filter by Network Security Group ID. Can be specified multiple times to filter on more than one Network Security Group.
-func (r ApiGetAllInstanceRequest) NetworkSecurityGroupId(networkSecurityGroupId string) ApiGetAllInstanceRequest {
+func (r ApiGetAllInstanceRequest) NetworkSecurityGroupId(networkSecurityGroupId []string) ApiGetAllInstanceRequest {
 	r.networkSecurityGroupId = &networkSecurityGroupId
 	return r
 }
@@ -709,34 +710,98 @@ func (a *InstanceAPIService) GetAllInstanceExecute(r ApiGetAllInstanceRequest) (
 		parameterAddToHeaderOrQuery(localVarQueryParams, "infrastructureProviderId", r.infrastructureProviderId, "form", "")
 	}
 	if r.siteId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+		t := *r.siteId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", t, "form", "multi")
+		}
 	}
 	if r.vpcId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "vpcId", r.vpcId, "form", "")
+		t := *r.vpcId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "vpcId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "vpcId", t, "form", "multi")
+		}
 	}
 	if r.instanceTypeId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "instanceTypeId", r.instanceTypeId, "form", "")
+		t := *r.instanceTypeId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "instanceTypeId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "instanceTypeId", t, "form", "multi")
+		}
 	}
 	if r.operatingSystemId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "operatingSystemId", r.operatingSystemId, "form", "")
+		t := *r.operatingSystemId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "operatingSystemId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "operatingSystemId", t, "form", "multi")
+		}
 	}
 	if r.machineId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "machineId", r.machineId, "form", "")
+		t := *r.machineId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "machineId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "machineId", t, "form", "multi")
+		}
 	}
 	if r.name != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "name", r.name, "form", "")
 	}
 	if r.status != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
+		t := *r.status
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "status", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "status", t, "form", "multi")
+		}
 	}
 	if r.ipAddress != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "ipAddress", r.ipAddress, "form", "")
+		t := *r.ipAddress
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "ipAddress", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "ipAddress", t, "form", "multi")
+		}
 	}
 	if r.query != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -752,7 +817,15 @@ func (a *InstanceAPIService) GetAllInstanceExecute(r ApiGetAllInstanceRequest) (
 		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", r.orderBy, "form", "")
 	}
 	if r.networkSecurityGroupId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "networkSecurityGroupId", r.networkSecurityGroupId, "form", "")
+		t := *r.networkSecurityGroupId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "networkSecurityGroupId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "networkSecurityGroupId", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}
@@ -823,21 +896,21 @@ type ApiGetAllInstanceInfinibandInterfaceRequest struct {
 	ApiService      *InstanceAPIService
 	org             string
 	instanceId      string
-	status          *string
-	includeRelation *string
+	status          *[]string
+	includeRelation *[]string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
 }
 
-// Filter InfiniBand Interfaces by Status
-func (r ApiGetAllInstanceInfinibandInterfaceRequest) Status(status string) ApiGetAllInstanceInfinibandInterfaceRequest {
+// Filter InfiniBand Interfaces by Status. Repeat the parameter to specify multiple values.
+func (r ApiGetAllInstanceInfinibandInterfaceRequest) Status(status []string) ApiGetAllInstanceInfinibandInterfaceRequest {
 	r.status = &status
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllInstanceInfinibandInterfaceRequest) IncludeRelation(includeRelation string) ApiGetAllInstanceInfinibandInterfaceRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllInstanceInfinibandInterfaceRequest) IncludeRelation(includeRelation []string) ApiGetAllInstanceInfinibandInterfaceRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -910,10 +983,26 @@ func (a *InstanceAPIService) GetAllInstanceInfinibandInterfaceExecute(r ApiGetAl
 	localVarFormParams := url.Values{}
 
 	if r.status != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
+		t := *r.status
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "status", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "status", t, "form", "multi")
+		}
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -997,21 +1086,21 @@ type ApiGetAllInstanceNvlinkInterfaceRequest struct {
 	ApiService      *InstanceAPIService
 	org             string
 	instanceId      string
-	status          *string
-	includeRelation *string
+	status          *[]string
+	includeRelation *[]string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
 }
 
 // Filter NVLink Interfaces by Status. Can be specified multiple times to filter on more than one status.
-func (r ApiGetAllInstanceNvlinkInterfaceRequest) Status(status string) ApiGetAllInstanceNvlinkInterfaceRequest {
+func (r ApiGetAllInstanceNvlinkInterfaceRequest) Status(status []string) ApiGetAllInstanceNvlinkInterfaceRequest {
 	r.status = &status
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllInstanceNvlinkInterfaceRequest) IncludeRelation(includeRelation string) ApiGetAllInstanceNvlinkInterfaceRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllInstanceNvlinkInterfaceRequest) IncludeRelation(includeRelation []string) ApiGetAllInstanceNvlinkInterfaceRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -1084,10 +1173,26 @@ func (a *InstanceAPIService) GetAllInstanceNvlinkInterfaceExecute(r ApiGetAllIns
 	localVarFormParams := url.Values{}
 
 	if r.status != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
+		t := *r.status
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "status", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "status", t, "form", "multi")
+		}
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -1172,7 +1277,7 @@ type ApiGetAllInterfaceRequest struct {
 	org             string
 	instanceId      string
 	status          *string
-	includeRelation *string
+	includeRelation *[]string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
@@ -1184,8 +1289,8 @@ func (r ApiGetAllInterfaceRequest) Status(status string) ApiGetAllInterfaceReque
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllInterfaceRequest) IncludeRelation(includeRelation string) ApiGetAllInterfaceRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllInterfaceRequest) IncludeRelation(includeRelation []string) ApiGetAllInterfaceRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -1261,7 +1366,15 @@ func (a *InstanceAPIService) GetAllInterfaceExecute(r ApiGetAllInterfaceRequest)
 		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -1345,11 +1458,11 @@ type ApiGetInstanceRequest struct {
 	ApiService      *InstanceAPIService
 	org             string
 	instanceId      string
-	includeRelation *string
+	includeRelation *[]string
 }
 
-// Related entity to expand
-func (r ApiGetInstanceRequest) IncludeRelation(includeRelation string) ApiGetInstanceRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetInstanceRequest) IncludeRelation(includeRelation []string) ApiGetInstanceRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -1404,7 +1517,15 @@ func (a *InstanceAPIService) GetInstanceExecute(r ApiGetInstanceRequest) (*Insta
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}
@@ -1482,13 +1603,14 @@ func (a *InstanceAPIService) GetInstanceExecute(r ApiGetInstanceRequest) (*Insta
 }
 
 type ApiGetInstanceStatusHistoryRequest struct {
-	ctx        context.Context
-	ApiService *InstanceAPIService
-	org        string
-	instanceId string
-	pageNumber *int32
-	pageSize   *int32
-	orderBy    *string
+	ctx             context.Context
+	ApiService      *InstanceAPIService
+	org             string
+	instanceId      string
+	pageNumber      *int32
+	pageSize        *int32
+	orderBy         *string
+	includeRelation *[]string
 }
 
 // Page number for pagination query
@@ -1506,6 +1628,12 @@ func (r ApiGetInstanceStatusHistoryRequest) PageSize(pageSize int32) ApiGetInsta
 // Ordering for pagination query
 func (r ApiGetInstanceStatusHistoryRequest) OrderBy(orderBy string) ApiGetInstanceStatusHistoryRequest {
 	r.orderBy = &orderBy
+	return r
+}
+
+// Related Instance entities to load while retrieving status history. Repeat the parameter to request multiple relations.
+func (r ApiGetInstanceStatusHistoryRequest) IncludeRelation(includeRelation []string) ApiGetInstanceStatusHistoryRequest {
+	r.includeRelation = &includeRelation
 	return r
 }
 
@@ -1566,6 +1694,17 @@ func (a *InstanceAPIService) GetInstanceStatusHistoryExecute(r ApiGetInstanceSta
 	}
 	if r.orderBy != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "orderBy", r.orderBy, "form", "")
+	}
+	if r.includeRelation != nil {
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

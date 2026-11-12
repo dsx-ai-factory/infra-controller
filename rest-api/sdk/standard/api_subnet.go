@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -278,7 +279,7 @@ type ApiGetAllSubnetRequest struct {
 	vpcId             *string
 	status            *string
 	query             *string
-	includeRelation   *string
+	includeRelation   *[]string
 	includeUsageStats *bool
 	pageNumber        *int32
 	pageSize          *int32
@@ -309,8 +310,8 @@ func (r ApiGetAllSubnetRequest) Query(query string) ApiGetAllSubnetRequest {
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllSubnetRequest) IncludeRelation(includeRelation string) ApiGetAllSubnetRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllSubnetRequest) IncludeRelation(includeRelation []string) ApiGetAllSubnetRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -398,7 +399,15 @@ func (a *SubnetAPIService) GetAllSubnetExecute(r ApiGetAllSubnetRequest) ([]Subn
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.includeUsageStats != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "includeUsageStats", r.includeUsageStats, "form", "")
@@ -485,12 +494,12 @@ type ApiGetSubnetRequest struct {
 	ApiService        *SubnetAPIService
 	org               string
 	subnetId          string
-	includeRelation   *string
+	includeRelation   *[]string
 	includeUsageStats *bool
 }
 
-// Related entity to expand
-func (r ApiGetSubnetRequest) IncludeRelation(includeRelation string) ApiGetSubnetRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetSubnetRequest) IncludeRelation(includeRelation []string) ApiGetSubnetRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -551,7 +560,15 @@ func (a *SubnetAPIService) GetSubnetExecute(r ApiGetSubnetRequest) (*Subnet, *ht
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.includeUsageStats != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "includeUsageStats", r.includeUsageStats, "form", "")

@@ -55,7 +55,7 @@ func NewGetAllInstanceInterfaceHandler(dbSession *cdb.Session, tc temporalClient
 // @Param org path string true "Name of NGC organization"
 // @Param instanceId path string true "ID of Instance"
 // @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Instance', 'Subnet'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Instance', 'Subnet'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -108,7 +108,7 @@ func NewGetAllInterfaceHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Param instanceTenantId query string false "Filter by Instance owning Tenant ID"
 // @Param vpcTenantId query string false "Filter by selected VPC or VPC Prefix owning Tenant ID"
 // @Param status query string false "Filter by status"
-// @Param includeRelation query string false "Related entities to include in response"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Instance', 'Subnet', 'VpcPrefix'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
