@@ -37,12 +37,17 @@ use super::resource::Resource;
 use crate::endpoint::SwitchEndpointRole;
 use crate::sink::{
     CollectorEvent, EventContext, HealthReport, HealthReportAlert, HealthReportSuccess,
-    LogSeverity, MetricSample, MetricSemantics, PrometheusSink, RedfishCondition,
-    ResourceStatusInfo, ResourceStatusReport,
+    LogSeverity, MetricSample, MetricSemantics, PrometheusSink, ResourceStatusInfo,
+    ResourceStatusReport,
 };
 
-/// Maximum active conditions serialized for one resource in a resource-status OTLP record.
+/// Maximum active conditions serialized across one resource-status OTLP record.
 const MAX_SERIALIZED_RESOURCE_CONDITIONS: usize = 64;
+/// Leaves headroom below the default 4 MiB OTLP request limit for envelope and resource metadata.
+const MAX_SERIALIZED_RESOURCE_STATUS_BODY_BYTES: usize = 1024 * 1024;
+/// JSON wrapper size reserved with the largest decimal `usize` dropped count.
+const RESOURCE_STATUS_BODY_FIXED_OVERHEAD: usize =
+    r#"{"resources":[],"resourcesDropped":18446744073709551615}"#.len();
 const RESOURCE_STATUS_SCHEMA_VERSION: &str = "v2";
 const RESOURCE_STATUS_SCHEMA_VERSION_KEY: &str = "redfish.resource_status.schema_version";
 const RESOURCE_TYPE_KEY: &str = "redfish.resource.type";
@@ -385,12 +390,6 @@ fn resource_status_attributes(report: &ResourceStatusReport) -> Vec<(&'static st
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ResourceStatusBody<'a> {
-    resources: Vec<ResourceStatusBodyResource<'a>>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct ResourceStatusBodyResource<'a> {
     id: &'a str,
     name: &'a str,
@@ -403,44 +402,128 @@ struct ResourceStatusBodyStatus<'a> {
     state: Option<&'a str>,
     health: Option<&'a str>,
     health_rollup: Option<&'a str>,
-    conditions: Option<Vec<&'a RedfishCondition>>,
+    conditions: Option<Vec<ResourceStatusBodyCondition<'a>>>,
     conditions_dropped: usize,
 }
 
-fn resource_status_body(report: &ResourceStatusReport) -> Result<String, serde_json::Error> {
-    let resources = report
-        .resources
-        .iter()
-        .map(|resource| ResourceStatusBodyResource {
-            id: &resource.id,
-            name: &resource.name,
-            status: resource.status.as_ref().map(|status| {
-                let conditions = status.conditions.as_ref().map(|conditions| {
-                    conditions
-                        .iter()
-                        .take(MAX_SERIALIZED_RESOURCE_CONDITIONS)
-                        .collect()
-                });
-                let conditions_dropped = status.conditions.as_ref().map_or(0, |conditions| {
-                    conditions
-                        .len()
-                        .saturating_sub(MAX_SERIALIZED_RESOURCE_CONDITIONS)
-                });
-                ResourceStatusBodyStatus {
-                    state: status.state.as_deref(),
-                    health: status.health.as_deref(),
-                    health_rollup: status.health_rollup.as_deref(),
-                    conditions,
-                    conditions_dropped,
-                }
-            }),
-        })
-        .collect();
-
-    serde_json::to_string(&ResourceStatusBody { resources })
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceStatusBodyCondition<'a> {
+    timestamp: Option<&'a str>,
+    message_id: &'a str,
+    severity: Option<&'a str>,
+    condition_type: Option<&'a str>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+fn resource_status_body_resource<'a>(
+    resource: &'a ResourceStatusInfo,
+    condition_limit: usize,
+) -> (ResourceStatusBodyResource<'a>, usize) {
+    let mut serialized_condition_count = 0;
+    let status = resource.status.as_ref().map(|status| {
+        let conditions = status.conditions.as_ref().map(|conditions| {
+            let serialized = conditions
+                .iter()
+                .take(condition_limit)
+                .map(|condition| ResourceStatusBodyCondition {
+                    timestamp: condition.timestamp.as_deref(),
+                    message_id: &condition.message_id,
+                    severity: condition.severity.as_deref(),
+                    condition_type: condition.condition_type.as_deref(),
+                })
+                .collect::<Vec<_>>();
+            serialized_condition_count = serialized.len();
+            serialized
+        });
+        let conditions_dropped = status.conditions.as_ref().map_or(0, |conditions| {
+            conditions.len().saturating_sub(serialized_condition_count)
+        });
+        ResourceStatusBodyStatus {
+            state: status.state.as_deref(),
+            health: status.health.as_deref(),
+            health_rollup: status.health_rollup.as_deref(),
+            conditions,
+            conditions_dropped,
+        }
+    });
+
+    (
+        ResourceStatusBodyResource {
+            id: &resource.id,
+            name: &resource.name,
+            status,
+        },
+        serialized_condition_count,
+    )
+}
+
+fn serialize_resource_status_body_resource(
+    resource: &ResourceStatusInfo,
+    condition_limit: usize,
+    max_bytes: usize,
+) -> Result<Option<(String, usize)>, serde_json::Error> {
+    let (detail, included) = resource_status_body_resource(resource, condition_limit);
+    let serialized = serde_json::to_string(&detail)?;
+    if serialized.len() <= max_bytes {
+        return Ok(Some((serialized, included)));
+    }
+
+    let (detail, _) = resource_status_body_resource(resource, 0);
+    let serialized = serde_json::to_string(&detail)?;
+    if serialized.len() > max_bytes {
+        return Ok(None);
+    }
+
+    let mut low = 0;
+    let mut high = included;
+    let mut best = serialized;
+    while low < high {
+        let candidate = low + (high - low).div_ceil(2);
+        let (detail, _) = resource_status_body_resource(resource, candidate);
+        let serialized = serde_json::to_string(&detail)?;
+        if serialized.len() <= max_bytes {
+            low = candidate;
+            best = serialized;
+        } else {
+            high = candidate - 1;
+        }
+    }
+
+    Ok(Some((best, low)))
+}
+
+fn resource_status_body(report: &ResourceStatusReport) -> Result<String, serde_json::Error> {
+    let mut resources = Vec::new();
+    let mut serialized_bytes = RESOURCE_STATUS_BODY_FIXED_OVERHEAD;
+    let mut remaining_conditions = MAX_SERIALIZED_RESOURCE_CONDITIONS;
+
+    for resource in &report.resources {
+        let separator_bytes = usize::from(!resources.is_empty());
+        let available_bytes = MAX_SERIALIZED_RESOURCE_STATUS_BODY_BYTES
+            .saturating_sub(serialized_bytes + separator_bytes);
+        let Some((serialized, included_conditions)) = serialize_resource_status_body_resource(
+            resource,
+            remaining_conditions,
+            available_bytes,
+        )?
+        else {
+            continue;
+        };
+        serialized_bytes += separator_bytes + serialized.len();
+        remaining_conditions = remaining_conditions.saturating_sub(included_conditions);
+        resources.push(serialized);
+    }
+
+    let resources_dropped = report.resources.len().saturating_sub(resources.len());
+    let body = format!(
+        r#"{{"resources":[{}],"resourcesDropped":{resources_dropped}}}"#,
+        resources.join(",")
+    );
+    debug_assert!(body.len() <= MAX_SERIALIZED_RESOURCE_STATUS_BODY_BYTES);
+    Ok(body)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResourceStatusHealth {
     Ok,
     Unknown,
@@ -455,6 +538,15 @@ impl ResourceStatusHealth {
             Self::Unknown => "Unknown",
             Self::Warning => "Warning",
             Self::Critical => "Critical",
+        }
+    }
+
+    const fn worst(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Critical, _) | (_, Self::Critical) => Self::Critical,
+            (Self::Warning, _) | (_, Self::Warning) => Self::Warning,
+            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
+            (Self::Ok, Self::Ok) => Self::Ok,
         }
     }
 }
@@ -478,15 +570,13 @@ fn resource_status_health(info: &ResourceStatusInfo) -> ResourceStatusHealth {
     let mut observed = false;
     for value in values {
         observed = true;
-        match value.as_str() {
-            "Critical" => return ResourceStatusHealth::Critical,
-            "Warning" => health = ResourceStatusHealth::Warning,
-            "OK" => {}
-            _ if health < ResourceStatusHealth::Unknown => {
-                health = ResourceStatusHealth::Unknown;
-            }
-            _ => {}
-        }
+        let value_health = match value.as_str() {
+            "Critical" => ResourceStatusHealth::Critical,
+            "Warning" => ResourceStatusHealth::Warning,
+            "OK" => ResourceStatusHealth::Ok,
+            _ => ResourceStatusHealth::Unknown,
+        };
+        health = health.worst(value_health);
     }
 
     if observed {
@@ -497,12 +587,11 @@ fn resource_status_health(info: &ResourceStatusInfo) -> ResourceStatusHealth {
 }
 
 fn resource_status_report_health(report: &ResourceStatusReport) -> ResourceStatusHealth {
-    report
-        .resources
-        .iter()
-        .map(resource_status_health)
-        .max()
-        .unwrap_or(ResourceStatusHealth::Unknown)
+    let mut resources = report.resources.iter().map(resource_status_health);
+    let Some(first) = resources.next() else {
+        return ResourceStatusHealth::Unknown;
+    };
+    resources.fold(first, ResourceStatusHealth::worst)
 }
 
 fn resource_status_report_severity(report: &ResourceStatusReport) -> LogSeverity {
@@ -1432,6 +1521,7 @@ mod tests {
             let body: serde_json::Value =
                 serde_json::from_str(body_value(record).expect("JSON body")).expect("valid JSON");
             assert_eq!(body["resources"].as_array().map(Vec::len), Some(2));
+            assert_eq!(body["resourcesDropped"], 0);
             assert_eq!(body["resources"][0]["id"], "resource-1");
             assert_eq!(body["resources"][0]["status"]["state"], "Enabled");
             assert_eq!(body["resources"][0]["status"]["health"], "Warning");
@@ -1441,6 +1531,14 @@ mod tests {
                     .as_array()
                     .map(Vec::len),
                 Some(MAX_SERIALIZED_RESOURCE_CONDITIONS)
+            );
+            assert_eq!(
+                body["resources"][0]["status"]["conditions"][0]["messageId"],
+                "ResourceEvent.1.0.Condition0"
+            );
+            assert_eq!(
+                body["resources"][0]["status"]["conditions"][0]["conditionType"],
+                "Alert"
             );
             assert_eq!(
                 body["resources"][0]["status"]["conditionsDropped"],
@@ -1541,6 +1639,10 @@ mod tests {
                 ResourceStatusHealth::Unknown,
             ),
             (
+                vec![info(Some(Some("OK"))), info(Some(Some("Other")))],
+                ResourceStatusHealth::Unknown,
+            ),
+            (
                 vec![info(None), info(Some(Some("Warning")))],
                 ResourceStatusHealth::Warning,
             ),
@@ -1555,6 +1657,108 @@ mod tests {
             };
             assert_eq!(resource_status_report_health(&report), expected);
         }
+    }
+
+    #[test]
+    fn resource_status_report_bounds_the_complete_body() {
+        let resource_type = RedfishResourceType::Firmware;
+        let event = CollectorEvent::ResourceStatus(Box::new(ResourceStatusReport {
+            resource_type,
+            resources: vec![
+                ResourceStatusInfo {
+                    resource_type,
+                    id: "oversized".to_string(),
+                    name: "x".repeat(MAX_SERIALIZED_RESOURCE_STATUS_BODY_BYTES),
+                    status: Some(RedfishStatus {
+                        state: Some("Enabled".to_string()),
+                        health: Some("Critical".to_string()),
+                        health_rollup: None,
+                        conditions: None,
+                    }),
+                },
+                ResourceStatusInfo {
+                    resource_type,
+                    id: "included".to_string(),
+                    name: "Included Resource".to_string(),
+                    status: Some(RedfishStatus {
+                        state: Some("Enabled".to_string()),
+                        health: Some("OK".to_string()),
+                        health_rollup: None,
+                        conditions: None,
+                    }),
+                },
+            ],
+        }));
+
+        let request = build_export_request(&[(test_context(), event)], EXPORT_NANOS, false);
+        let record = &request.resource_logs[0].scope_logs[0].log_records[0];
+        let body_text = body_value(record).expect("JSON body");
+        assert!(body_text.len() <= MAX_SERIALIZED_RESOURCE_STATUS_BODY_BYTES);
+        let body: serde_json::Value = serde_json::from_str(body_text).expect("valid JSON");
+        assert_eq!(body["resources"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["resources"][0]["id"], "included");
+        assert_eq!(body["resourcesDropped"], 1);
+        assert_eq!(
+            attr_int_value(&record.attributes, RESOURCE_COUNT_KEY),
+            Some(2)
+        );
+        assert_eq!(
+            attr_value(&record.attributes, RESOURCE_STATUS_AGGREGATE_HEALTH_KEY),
+            Some("Critical"),
+            "aggregate health covers omitted resource detail"
+        );
+    }
+
+    #[test]
+    fn resource_status_report_limits_conditions_across_all_resources() {
+        let resource_type = RedfishResourceType::Firmware;
+        let resources = ["first", "second"]
+            .into_iter()
+            .map(|id| ResourceStatusInfo {
+                resource_type,
+                id: id.to_string(),
+                name: id.to_string(),
+                status: Some(RedfishStatus {
+                    state: Some("Enabled".to_string()),
+                    health: Some("OK".to_string()),
+                    health_rollup: None,
+                    conditions: Some(
+                        (0..MAX_SERIALIZED_RESOURCE_CONDITIONS)
+                            .map(|index| RedfishCondition {
+                                timestamp: None,
+                                message_id: format!("{id}-{index}"),
+                                severity: Some("OK".to_string()),
+                                condition_type: None,
+                            })
+                            .collect(),
+                    ),
+                }),
+            })
+            .collect();
+        let body = resource_status_body(&ResourceStatusReport {
+            resource_type,
+            resources,
+        })
+        .expect("serializable body");
+        let body: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+
+        assert_eq!(
+            body["resources"][0]["status"]["conditions"]
+                .as_array()
+                .map(Vec::len),
+            Some(MAX_SERIALIZED_RESOURCE_CONDITIONS)
+        );
+        assert_eq!(
+            body["resources"][1]["status"]["conditions"]
+                .as_array()
+                .map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(
+            body["resources"][1]["status"]["conditionsDropped"],
+            MAX_SERIALIZED_RESOURCE_CONDITIONS
+        );
+        assert_eq!(body["resourcesDropped"], 0);
     }
 
     #[test]

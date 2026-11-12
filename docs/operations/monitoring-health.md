@@ -507,12 +507,21 @@ Resource-status records use `event.type = "redfish.resource_status"` and carry t
 |---|---|---|---|
 | `redfish.resource_status.schema_version` | string | Always | `v2` for the contract documented here. |
 | `redfish.resource.type` | string | Always | `system`, `manager`, `chassis`, or `firmware`. |
-| `redfish.resource.count` | integer | Always | Number of resources represented in the body. |
+| `redfish.resource.count` | integer | Always | Number of resources observed in the source iteration, including any whose detail exceeds the body limit. |
 | `redfish.resource_status.aggregate_health` | string | Always | `Critical`, `Warning`, `Unknown`, or `OK` for the complete report. |
 
-The log body is a JSON object with a `resources` array. Each resource contains `id`, `name`, and `status`. Status contains the canonical Redfish `state`, `health`, `healthRollup`, and `conditions` fields. Each condition contains `timestamp`, `messageId`, `severity`, and `conditionType`; all except `messageId` can be `null`. A missing individual value is JSON `null`; if the resource omits the entire `Status` object, `status` is `null`. At most 64 conditions are included per resource, and `conditionsDropped` gives the number omitted after that limit or `0` when `conditions` is `null`.
+The log body is a JSON object with `resources` and `resourcesDropped`. Each resource contains `id`, `name`, and `status`. Status contains the canonical Redfish `state`, `health`, `healthRollup`, and `conditions` fields. Each condition contains `timestamp`, `messageId`, `severity`, and `conditionType`; all except `messageId` can be `null`. A missing individual value is JSON `null`; if the resource omits the entire `Status` object, `status` is `null`.
 
-Aggregate health uses the worst Redfish result represented in the report: any `Critical` health, health rollup, or condition produces `Critical`; otherwise any `Warning` produces `Warning`; otherwise any resource without an available health signal produces `Unknown`; and only reports whose resources all have `OK` health signals produce `OK`. Record severity follows the aggregate result: `ERROR` for `Critical`, `WARN` for `Warning`, and `INFO` for `Unknown` or `OK`. Missing status remains missing rather than being reported as `OK`.
+The body is limited to 1 MiB and at most 64 conditions across the complete report. `conditionsDropped` gives the number omitted for each resource, or `0` when `conditions` is `null`. A resource whose base detail cannot fit is omitted, and `resourcesDropped` gives the number omitted. Aggregate health and `redfish.resource.count` still cover every observed resource, including omitted detail.
+
+Aggregate health uses the first matching result in this order:
+
+1. `Critical` when any resource reports a `Critical` health, health rollup, or condition severity.
+2. `Warning` when any resource reports a `Warning` health, health rollup, or condition severity.
+3. `Unknown` when any resource has no available health signal or reports an unrecognized health value.
+4. `OK` when every resource has an `OK` health signal.
+
+Record severity follows the aggregate result: `ERROR` for `Critical`, `WARN` for `Warning`, and `INFO` for `Unknown` or `OK`. Missing status remains missing rather than being reported as `OK`.
 
 When `[sinks.tracing]` is enabled, each report is also logged as "Redfish resource status report" with `resource_type`, `resource_count`, `resource_ids`, and `resources` fields.
 

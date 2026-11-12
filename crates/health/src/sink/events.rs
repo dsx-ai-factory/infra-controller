@@ -638,8 +638,7 @@ fn redfish_enum_string(value: impl Serialize) -> Option<String> {
 }
 
 /// Bounded, machine-readable detail from one active Redfish condition.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RedfishCondition {
     /// Time at which the condition occurred, when reported.
     pub timestamp: Option<String>,
