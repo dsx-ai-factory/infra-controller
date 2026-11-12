@@ -19069,8 +19069,192 @@ paths:
         '503':
           description: Core gRPC API is unavailable.
           $ref: '#/components/responses/GenericHttpError'
+  '/v2/org/{org}/nico/tray/{id}/factory-reset':
+    post:
+      tags: [Tray]
+      operationId: factory-reset-tray
+      summary: Restore factory defaults on a switch tray
+      description: >-
+        Requires an explicit target of `nvos` or `sdn`; there is no default. Other reset targets are rejected.
+        Provider Admin operation. Target `nvos` clears NVOS configuration and reboots the selected switches;
+        target `sdn` restores their SDN configuration to factory defaults.
+        Only ingested switches are supported. Domain targets expand to their switch members.
+        Flow blocks conflicting rack tasks and applies its rack-host readiness gate without an override.
+        Returns task IDs, one per owning rack; submission does not imply reset completion.
+        Query the Task APIs for completed, failed, or terminated outcomes and the task report.
+        Completion means Core reports reset completed, not that the Domain is operational.
+        NICo does not automatically restore configuration or re-ingest devices in this operation.
+        Core must implement the selected NVOS_FACTORY_RESET or SDN_FACTORY_RESET action; unsupported Core versions fail the task explicitly.
+        Failed or unknown submissions are not automatically repeated. After a timeout or lost response,
+        inspect existing tasks and hardware before submitting again. Core status observes the latest
+        recorded device/action reference; another out-of-band reset can replace that reference.
+      security:
+        - JWTBearerToken: []
+      parameters:
+        - name: org
+          in: path
+          required: true
+          description: Name of the organization whose provider owns the Site.
+          schema: {type: string}
+        - name: id
+          in: path
+          required: true
+          description: Switch inventory identifier
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FactoryResetRequest'
+            example:
+              siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+              target: nvos
+      responses:
+        '202':
+          description: Reset tasks created; hardware work is asynchronous.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FactoryResetResponse'
+              example:
+                taskIds: [497f6eca-6276-4993-bfeb-53cbbbba6f08]
+        '400':
+          description: Invalid request, unregistered site, or unsupported target type.
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: Provider Admin membership is required; site must belong to the provider.
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Target does not exist at the selected site.
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: A conflicting rack task prevents reset admission.
+          $ref: '#/components/responses/ConflictError'
+        '412':
+          description: Selected switches are not linked to actual inventory.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: Internal failure.
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: Flow returned missing or invalid task references.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Flow service is unavailable.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: Submission outcome is unknown; do not automatically resubmit.
+          $ref: '#/components/responses/GenericHttpError'
+  '/v2/org/{org}/nico/domain/nvlink/{id}/factory-reset':
+    post:
+      tags: [Domain]
+      operationId: factory-reset-nvlink-domain
+      summary: Restore factory defaults on an NVLink Domain’s switches
+      description: >-
+        Requires an explicit target of `nvos` or `sdn`; there is no default. Other reset targets are rejected.
+        Provider Admin operation. Target `nvos` clears NVOS configuration and reboots the selected switches;
+        target `sdn` restores their SDN configuration to factory defaults.
+        Only ingested switches are supported. Domain targets expand to their switch members.
+        Flow blocks conflicting rack tasks and applies its rack-host readiness gate without an override.
+        Returns task IDs, one per owning rack; submission does not imply reset completion.
+        Query the Task APIs for completed, failed, or terminated outcomes and the task report.
+        Completion means Core reports reset completed, not that the Domain is operational.
+        NICo does not automatically restore configuration or re-ingest devices in this operation.
+        Core must implement the selected NVOS_FACTORY_RESET or SDN_FACTORY_RESET action; unsupported Core versions fail the task explicitly.
+        Failed or unknown submissions are not automatically repeated. After a timeout or lost response,
+        inspect existing tasks and hardware before submitting again. Core status observes the latest
+        recorded device/action reference; another out-of-band reset can replace that reference.
+      security:
+        - JWTBearerToken: []
+      parameters:
+        - name: org
+          in: path
+          required: true
+          description: Name of the organization whose provider owns the Site.
+          schema: {type: string}
+        - name: id
+          in: path
+          required: true
+          description: Core NVLink Domain ID
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FactoryResetRequest'
+            example:
+              siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+              target: sdn
+      responses:
+        '202':
+          description: Reset tasks created; hardware work is asynchronous.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FactoryResetResponse'
+              example:
+                taskIds: [497f6eca-6276-4993-bfeb-53cbbbba6f08]
+        '400':
+          description: Invalid request, unregistered site, or unsupported target type.
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: Provider Admin membership is required; site must belong to the provider.
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Target does not exist at the selected site.
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          description: A conflicting rack task prevents reset admission.
+          $ref: '#/components/responses/ConflictError'
+        '412':
+          description: Selected switches are not linked to actual inventory.
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: Internal failure.
+          $ref: '#/components/responses/GenericHttpError'
+        '502':
+          description: Flow returned missing or invalid task references.
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: Flow service is unavailable.
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          description: Submission outcome is unknown; do not automatically resubmit.
+          $ref: '#/components/responses/GenericHttpError'
+
+
 components:
   schemas:
+    FactoryResetRequest:
+      type: object
+      example:
+        siteId: 60189e9c-7d12-438c-b9ca-6998d9c364b1
+        target: nvos
+      required: [siteId, target]
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: Registered site owned by the current organization’s provider.
+        target:
+          type: string
+          enum: [nvos, sdn]
+          description: Required reset scope. Accepted values are `nvos` and `sdn`; case-sensitive, with no default.
+    FactoryResetResponse:
+      type: object
+      example:
+        taskIds: [497f6eca-6276-4993-bfeb-53cbbbba6f08]
+      required: [taskIds]
+      properties:
+        taskIds:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            format: uuid
+          description: Asynchronous reset task IDs, one per owning rack; ordering is unspecified.
     PageNumber:
       title: PageNumber
       type: integer
@@ -28882,6 +29066,7 @@ components:
           - BringUp
           - Decommission
           - InjectExpectation
+          - ComponentReset
           - Unknown
         status:
           type: string
