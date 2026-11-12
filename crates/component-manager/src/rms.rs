@@ -2802,11 +2802,27 @@ impl PowerShelfManager for RmsBackend {
                         continue;
                     }
 
-                    let Some(inventory) = response
+                    let mut inventories = response
                         .nodes
                         .into_iter()
-                        .find(|node| node.node_id == resolved.identity.node_id)
-                    else {
+                        .filter(|node| node.node_id == resolved.identity.node_id);
+
+                    let inventory = inventories.next();
+
+                    if inventories.next().is_some() {
+                        results.push(PowerShelfFirmwareVersions {
+                            pmc_mac: ep.pmc_mac,
+                            versions: vec![],
+                            error: Some(
+                                "RMS returned duplicate firmware inventories for power shelf"
+                                    .into(),
+                            ),
+                        });
+
+                        continue;
+                    }
+
+                    let Some(inventory) = inventory else {
                         results.push(PowerShelfFirmwareVersions {
                             pmc_mac: ep.pmc_mac,
                             versions: vec![],
@@ -10743,6 +10759,27 @@ mod tests {
                     }],
                 },
                 "RMS returned no firmware inventory for power shelf",
+            ),
+            (
+                "duplicate inventories for the requested node are rejected",
+                rms::BatchGetFirmwareInventoryResponse {
+                    response: Some(rms::NodeBatchResponse {
+                        status: rms::ReturnCode::Success as i32,
+                        ..Default::default()
+                    }),
+                    nodes: ["1.2.3", "9.9.9"]
+                        .into_iter()
+                        .map(|version| rms::NodeFirmwareInventory {
+                            node_id: node_id.clone(),
+                            firmware_list: vec![rms::FirmwareInventoryInfo {
+                                name: "PMC".into(),
+                                version: version.into(),
+                                ..Default::default()
+                            }],
+                        })
+                        .collect(),
+                },
+                "RMS returned duplicate firmware inventories for power shelf",
             ),
         ];
 
