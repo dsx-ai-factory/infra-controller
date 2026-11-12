@@ -85,7 +85,7 @@ The CLI honors `http_proxy` / `https_proxy` (or their uppercase variants)
 with a "Only SOCKS5 Proxy supported" error. This is enforced in
 `get_proxy_info()`; see `crates/tls/src/client_config.rs`.
 
-The proxy host can be an IP address or a host name. The CLI resolves a name
+For commands that call the NICo API, the proxy host can be an IP address or a host name. The `redfish` and `rms` commands do not use this lookup. The CLI resolves a name
 once at startup with the system resolver, so `/etc/hosts` entries such as
 `localhost` work. If the name has both IPv4 and IPv6 addresses, the CLI uses
 the IPv4 address; to use IPv6, give a bracketed literal such as
