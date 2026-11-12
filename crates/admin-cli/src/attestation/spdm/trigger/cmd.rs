@@ -39,7 +39,7 @@ fn outcome(outcome: i32) -> &'static str {
             "nothing scheduled: the BMC offered nothing eligible"
         }
         Ok(SpdmSchedulingOutcome::PolicyMatchedNothing) => {
-            "nothing scheduled: the selection matched no eligible attester"
+            "nothing scheduled: the selection left no eligible attesters"
         }
         Ok(SpdmSchedulingOutcome::ClassNotRecorded) => {
             "nothing scheduled: no hardware class recorded and no any profile; \
