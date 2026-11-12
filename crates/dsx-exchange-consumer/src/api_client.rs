@@ -20,8 +20,8 @@
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use carbide_tls::client_config::ClientCert;
 use carbide_uuid::rack::RackId;
-use forge_tls::client_config::ClientCert;
 use health_report::HealthReport;
 use rpc::carbide_api_client::CarbideApiClient;
 use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};

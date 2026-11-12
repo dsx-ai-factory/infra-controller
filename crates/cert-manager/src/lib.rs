@@ -14,7 +14,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use carbide_secrets::certificates::{Certificate, CertificateProvider};
 use carbide_secrets::{SecretsError, SpiffeIdentity};
-use forge_tls::client_config::MAX_CERT_RENEWAL_TIME_SECS;
+use carbide_tls::client_config::MAX_CERT_RENEWAL_TIME_SECS;
 use kube::api::{DeleteParams, PostParams};
 use kube::{Api, Client};
 use serde::{Deserialize, Serialize};
