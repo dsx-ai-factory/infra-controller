@@ -33,9 +33,9 @@ type MachineValidationResult struct {
 	Command string `json:"command"`
 	// Arguments supplied to the validation command.
 	Args string `json:"args"`
-	// Standard output from the validation command.
+	// Standard output from the validation command. Empty in results returned to Tenants.
 	StdOut string `json:"stdOut"`
-	// Standard error from the validation command.
+	// Standard error from the validation command. Empty in results returned to Tenants.
 	StdErr string `json:"stdErr"`
 	// Context in which the validation test ran.
 	Context string `json:"context"`

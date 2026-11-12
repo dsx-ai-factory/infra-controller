@@ -240,6 +240,11 @@ is absent or its outcome is unclear, ask the Site operator to verify the Core
 allocation and workflow before creating again. An empty REST result does not
 rule out a Site allocation. Follow the same checks after a lost HTTP response.
 
+With `externalValidationRequestId`, retry an uncertain outcome or a lost HTTP
+response as the identical request with the same ID instead. The retry returns
+the original Instance once allocation finishes, while reusing the ID with
+different inputs returns HTTP 409.
+
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org
 	@return ApiCreateInstanceRequest
@@ -372,6 +377,17 @@ func (a *InstanceAPIService) CreateInstanceExecute(r ApiCreateInstanceRequest) (
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 500 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 501 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
