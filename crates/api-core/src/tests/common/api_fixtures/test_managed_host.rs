@@ -99,11 +99,22 @@ where
         TestMachine::<HostMachineId>::new(self.id.into(), self.api.clone())
     }
 
-    pub(in crate::tests) async fn snapshot(&self, txn: &mut Txn<'_>) -> ManagedHostStateSnapshot {
-        db::managed_host::load_snapshot(txn.as_mut(), self.id.as_machine_id(), Default::default())
+    // Keep snapshots on the heap: tests often retain several across awaits, and
+    // returning them inline also creates large temporaries in the caller's poll frame.
+    pub(in crate::tests) async fn snapshot(
+        &self,
+        txn: &mut Txn<'_>,
+    ) -> Box<ManagedHostStateSnapshot> {
+        Box::new(
+            db::managed_host::load_snapshot(
+                txn.as_mut(),
+                self.id.as_machine_id(),
+                Default::default(),
+            )
             .await
             .unwrap()
-            .unwrap()
+            .unwrap(),
+        )
     }
 
     pub(in crate::tests) async fn dpu_db_machines(&self, txn: &mut Txn<'_>) -> Vec<DpuMachine> {

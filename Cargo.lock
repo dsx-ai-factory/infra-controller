@@ -1632,6 +1632,7 @@ dependencies = [
  "carbide-rms-mock",
  "carbide-rpc",
  "carbide-secrets",
+ "carbide-test-support",
  "carbide-tls",
  "carbide-utils",
  "carbide-uuid",
