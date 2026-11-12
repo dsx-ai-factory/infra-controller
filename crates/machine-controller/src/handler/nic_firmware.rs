@@ -10,9 +10,9 @@
 
 use std::time::Duration;
 
+use bmc_platform::ResetType;
 use carbide_libmlx_model::firmware::operation::FirmwareOperationState;
 use chrono::{DateTime, Utc};
-use libredfish::SystemPowerControl;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::nic_firmware::{
     NicFirmwareActivation, NicFirmwareBaselineContinuation, NicFirmwareLockdownPolicy,
@@ -363,7 +363,7 @@ pub(super) async fn handle(
                 super::handler_host_power_control_with_location(
                     snapshot,
                     ctx,
-                    SystemPowerControl::ForceRestart,
+                    ResetType::ForceRestart,
                     std::panic::Location::caller(),
                     Some(now),
                 ),

@@ -2794,6 +2794,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "bmc-backend",
+ "bmc-platform",
  "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
@@ -3313,6 +3314,7 @@ dependencies = [
  "axum",
  "axum-server",
  "bmc-mock",
+ "bmc-platform",
  "bmc-vendor",
  "carbide-api-model",
  "carbide-instrument",
