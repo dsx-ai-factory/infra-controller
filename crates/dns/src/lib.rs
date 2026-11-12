@@ -25,7 +25,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use carbide_instrument::{DynamicLog, Event, LabelValue, LogAt, emit};
+use carbide_instrument::{DynamicLog, Event, Instrumentation, LabelValue, LogAt};
 use dns_record::DnsResourceRecordType;
 use eyre::Report;
 use hickory_resolver::proto::op::ResponseCode;
@@ -87,6 +87,7 @@ impl std::fmt::Debug for DnsMetrics {
 
 #[derive(Debug)]
 pub struct DnsServer {
+    instrumentation: Instrumentation,
     forge_client: Mutex<CarbideClientT>,
     negative_cache: Arc<NegativeCache>,
     /// Per-request ceiling on the upstream `lookup_record` call.
@@ -556,7 +557,7 @@ impl RequestHandler for DnsServer {
                 // The query never parsed, so its type is unknowable -- it
                 // counts under `other` so the query and response counters
                 // stay comparable even for malformed traffic.
-                emit(DnsQueryReceived {
+                self.instrumentation.emit(DnsQueryReceived {
                     qtype: Qtype::OTHER,
                 });
                 let response_info = response_handle
@@ -566,7 +567,7 @@ impl RequestHandler for DnsServer {
                     )
                     .await
                     .unwrap();
-                emit(DnsResponseSent {
+                self.instrumentation.emit(DnsResponseSent {
                     rcode: Rcode::FormErr,
                 });
                 return response_info;
@@ -576,7 +577,8 @@ impl RequestHandler for DnsServer {
         let qname = request_info.query.name().to_string();
 
         let qtype_label = Qtype::from(qtype);
-        emit(DnsQueryReceived { qtype: qtype_label });
+        self.instrumentation
+            .emit(DnsQueryReceived { qtype: qtype_label });
 
         // Attach the span to the request future with `Instrument` rather than an
         // `Entered` guard. A guard held across an `.await` is not dropped when the
@@ -601,7 +603,7 @@ impl RequestHandler for DnsServer {
                         )
                         .await
                         .unwrap();
-                    emit(DnsResponseSent {
+                    self.instrumentation.emit(DnsResponseSent {
                         rcode: Rcode::NotImp,
                     });
                     return response_info;
@@ -620,7 +622,7 @@ impl RequestHandler for DnsServer {
             let mut response_header = Metadata::response_from_request(request_info.metadata);
 
             let (response_code, records, authority) = if let Some(answer) = cached {
-                emit(DnsNegativeCacheHit {
+                self.instrumentation.emit(DnsNegativeCacheHit {
                     response_code: NegativeCacheResponseCode(answer.code),
                 });
                 response_header.authoritative = answer.authoritative;
@@ -669,7 +671,7 @@ impl RequestHandler for DnsServer {
                         // SOA TTL is clamped to the cache lifetime so this
                         // answer and every replay of it expire together.
                         let authority = if classification.cache_negative {
-                            emit(DnsNegativeCacheMiss {
+                            self.instrumentation.emit(DnsNegativeCacheMiss {
                                 response_code: NegativeCacheResponseCode(classification.code),
                                 error: None,
                             });
@@ -693,7 +695,7 @@ impl RequestHandler for DnsServer {
 
                         // Emit before `record`: every upstream negative is a
                         // cache miss, even when admission evicts another entry.
-                        emit(DnsNegativeCacheMiss {
+                        self.instrumentation.emit(DnsNegativeCacheMiss {
                             response_code: NegativeCacheResponseCode(code),
                             error: Some(e.to_string()),
                         });
@@ -724,7 +726,7 @@ impl RequestHandler for DnsServer {
             };
 
             let duration = start.elapsed();
-            emit(DnsRequestCompleted {
+            self.instrumentation.emit(DnsRequestCompleted {
                 qtype: qtype_label,
                 rcode: Rcode::from(response_code),
                 response_code: format!("{response_code:?}"),
@@ -743,7 +745,7 @@ impl RequestHandler for DnsServer {
             );
 
             let response_info = response_handle.send_response(message).await.unwrap();
-            emit(DnsResponseSent {
+            self.instrumentation.emit(DnsResponseSent {
                 rcode: Rcode::from(response_code),
             });
             response_info
@@ -764,7 +766,14 @@ struct UpstreamReply {
 }
 
 impl DnsServer {
-    pub fn new(forge_client: Mutex<CarbideClientT>, meter: &Meter, config: &Config) -> Self {
+    /// Creates a server with native metrics from `meter` and Event metrics from
+    /// `instrumentation`. Retain their provider while the server is running.
+    pub fn new(
+        forge_client: Mutex<CarbideClientT>,
+        meter: &Meter,
+        instrumentation: Instrumentation,
+        config: &Config,
+    ) -> Self {
         let servfail_ttl = config.servfail_cache_ttl();
         if servfail_ttl.as_secs() != config.negative_cache_servfail_ttl_secs {
             warn!(
@@ -783,6 +792,7 @@ impl DnsServer {
         ));
 
         Self {
+            instrumentation,
             forge_client,
             upstream_lookup_timeout: Duration::from_secs(config.upstream_lookup_timeout_secs),
             // The metrics gauge callback holds a clone of the cache to read its
@@ -895,6 +905,7 @@ impl DnsServer {
 
         // Must keep meter_provider alive for the lifetime of the server;
         // dropping it shuts down the Prometheus exporter.
+        let instrumentation = Instrumentation::from_meter_provider(&metrics_setup.meter_provider);
         let _metrics_guard = metrics_setup.meter_provider;
 
         let metrics_config = MetricsEndpointConfig {
@@ -911,7 +922,7 @@ impl DnsServer {
             }
         });
 
-        let server = DnsServer::new(client, &metrics_setup.meter, &config);
+        let server = DnsServer::new(client, &metrics_setup.meter, instrumentation, &config);
 
         let cache = server.negative_cache.clone();
         let cache_eviction_counter = server.metrics.negative_cache_eviction.clone();
@@ -1374,15 +1385,19 @@ mod tests {
                 },
             ],
             |event| {
-                let metrics = MetricsCapture::start();
+                let setup = new_metrics_setup("dns-tests", "carbide", false).unwrap();
+                let instrumentation = Instrumentation::from_meter_provider(&setup.meter_provider);
+                let metrics = MetricsCapture::for_registry(&setup.registry);
                 let logs = capture_logs(|| match event {
-                    NegativeCacheEvent::Hit(response_code) => emit(DnsNegativeCacheHit {
-                        response_code: NegativeCacheResponseCode(response_code),
-                    }),
+                    NegativeCacheEvent::Hit(response_code) => {
+                        instrumentation.emit(DnsNegativeCacheHit {
+                            response_code: NegativeCacheResponseCode(response_code),
+                        })
+                    }
                     NegativeCacheEvent::Miss {
                         response_code,
                         error,
-                    } => emit(DnsNegativeCacheMiss {
+                    } => instrumentation.emit(DnsNegativeCacheMiss {
                         response_code: NegativeCacheResponseCode(response_code),
                         error: error.map(str::to_string),
                     }),
@@ -1425,18 +1440,20 @@ mod tests {
     fn dns_query_and_response_events_move_their_metrics_without_logging() {
         use carbide_instrument::testing::{MetricsCapture, capture_logs};
 
-        let metrics = MetricsCapture::start();
+        let setup = new_metrics_setup("dns-tests", "carbide", false).unwrap();
+        let instrumentation = Instrumentation::from_meter_provider(&setup.meter_provider);
+        let metrics = MetricsCapture::for_registry(&setup.registry);
         let logs = capture_logs(|| {
-            emit(DnsQueryReceived {
+            instrumentation.emit(DnsQueryReceived {
                 qtype: Qtype(Some(DnsResourceRecordType::A)),
             });
-            emit(DnsQueryReceived {
+            instrumentation.emit(DnsQueryReceived {
                 qtype: Qtype::OTHER,
             });
-            emit(DnsResponseSent {
+            instrumentation.emit(DnsResponseSent {
                 rcode: Rcode::NoError,
             });
-            emit(DnsResponseSent {
+            instrumentation.emit(DnsResponseSent {
                 rcode: Rcode::NotImp,
             });
         });
@@ -1581,9 +1598,11 @@ mod tests {
                     duration,
                     duration_milliseconds,
                 } = case;
-                let metrics = MetricsCapture::start();
+                let setup = new_metrics_setup("dns-tests", "carbide", false).unwrap();
+                let instrumentation = Instrumentation::from_meter_provider(&setup.meter_provider);
+                let metrics = MetricsCapture::for_registry(&setup.registry);
                 let logs = capture_logs(|| {
-                    emit(DnsRequestCompleted {
+                    instrumentation.emit(DnsRequestCompleted {
                         qtype,
                         rcode,
                         response_code: response_code.to_string(),
