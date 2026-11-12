@@ -150,7 +150,12 @@ Each reconciliation pass does the following:
 1. Issues create / update / remove operations to the fabric-management
    service to converge it onto desired state.
 1. Removes NICo's record of any stale physical partition in the chassis's domain
-   that NMX-C has not listed on two consecutive checked passes.
+   that NMX-C has not listed on two consecutive checked passes unless NMX-C lists
+   it again before the pass ends.
+1. After every chassis has been checked, removes NICo's record of any physical
+   partition whose NVLink domain no managed host belongs to, such as after NMX-C
+   restarts with a new domain UUID. Nothing is removed this way while any host's
+   domain is unknown for the pass.
 1. Updates per-machine GPU status observations in the NICo database. The
    per-instance `configs_synced.nvlink` field is derived from these
    observations and is what gates the instance's `Ready` state.
