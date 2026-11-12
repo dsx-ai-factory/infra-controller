@@ -112,6 +112,17 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 
 	instanceDAO := cdbm.NewInstanceDAO(mi.dbSession)
 
+	// The deletion sweep only considers Instances that existed before this page is applied.
+	// An Instance created later is absent from the Site's inventory without being missing.
+	var siteInstanceIDs []uuid.UUID
+	if util.ShouldReconcileDeletions(instanceInventory.GetInventoryPage()) {
+		siteInstanceIDs, err = instanceDAO.GetAllIDs(ctx, nil, cdbm.InstanceFilterInput{SiteIDs: []uuid.UUID{site.ID}})
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get Instance IDs for Site from DB")
+			return nil, err
+		}
+	}
+
 	// Look up only the Instances this page reports. Pages run concurrently, so loading the whole
 	// Site here would make each page's memory grow with the Site's Instance count.
 	// A reported ID matches either the controller Instance ID or the Instance ID.
@@ -1250,12 +1261,6 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
 	if util.ShouldReconcileDeletions(instanceInventory.GetInventoryPage()) {
-		siteInstanceIDs, serr := instanceDAO.GetAllIDs(ctx, nil, cdbm.InstanceFilterInput{SiteIDs: []uuid.UUID{site.ID}})
-		if serr != nil {
-			logger.Error().Err(serr).Msg("failed to get Instance IDs for Site from DB")
-			return nil, serr
-		}
-
 		// REST sets the controller Instance ID to the Instance ID, so unreported IDs are normally
 		// the missing Instances. Only these are loaded in full, then checked by controller Instance ID.
 		unreportedInstanceIDs := []uuid.UUID{}

@@ -195,6 +195,17 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 
 	mDAO := cdbm.NewMachineDAO(mm.dbSession)
 
+	// The deletion sweep only considers Machines that existed before this page is applied.
+	// A Machine created later is absent from the Site's inventory without being missing.
+	var siteMachineIDs []string
+	if util.ShouldReconcileDeletions(machineInventory.GetInventoryPage()) {
+		siteMachineIDs, err = mDAO.GetAllIDs(ctx, nil, cdbm.MachineFilterInput{SiteIDs: []uuid.UUID{site.ID}})
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to retrieve Machine IDs for Site from DB")
+			return err
+		}
+	}
+
 	// Look up only the Machines this page reports. Pages run concurrently, so loading the whole
 	// Site here would make each page's memory grow with the Site's Machine count.
 	pageMachineIDs := []string{}
@@ -808,12 +819,6 @@ func (mm *ManageMachine) UpdateMachinesInDB(ctx context.Context, siteIDStr strin
 	// Set Machine status to error for any machines found in DB but not found in the Site Agent reported inventory
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
 	if util.ShouldReconcileDeletions(machineInventory.GetInventoryPage()) {
-		siteMachineIDs, merr := mDAO.GetAllIDs(ctx, nil, cdbm.MachineFilterInput{SiteIDs: []uuid.UUID{site.ID}})
-		if merr != nil {
-			logger.Error().Err(merr).Msg("failed to retrieve Machine IDs for Site from DB")
-			return merr
-		}
-
 		missingMachineIDs := []string{}
 		for _, machineID := range siteMachineIDs {
 			if !reportedMachineIDMap[machineID] {
