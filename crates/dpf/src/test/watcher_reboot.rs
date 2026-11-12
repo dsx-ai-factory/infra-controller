@@ -93,12 +93,41 @@ async fn test_reboot_bmc_ip() {
         .start()
         .unwrap();
     m.wait_for_watchers(1).await;
-    let mut dpu = make_dpu_reboot(TEST_NS, "d1", "dev", "n1");
-    dpu.spec.bmc_ip = Some("10.0.0.42".into());
+    let dpu = make_dpu_reboot(TEST_NS, "d1", "dev", "n1");
     m.emit_dpu(dpu);
     c.wait_for(1).await;
     assert_eq!(
         c.get(0).unwrap().host_bmc_ip,
         "10.0.0.42".parse::<std::net::IpAddr>().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn test_reboot_uses_host_bmc_label_not_dpu_bmc_field() {
+    let m = Arc::new(WatcherMock::new());
+    let c = Arc::new(Collector::<RebootRequiredEvent>::default());
+    let cc = c.clone();
+    let _h = DpuWatcherBuilder::new(m.clone(), TEST_NS)
+        .on_reboot_required(move |e| {
+            let cc = cc.clone();
+            async move {
+                cc.push(e);
+                Ok(())
+            }
+        })
+        .start()
+        .unwrap();
+    m.wait_for_watchers(1).await;
+    let mut dpu = make_dpu_reboot(TEST_NS, "d1", "dev", "n1");
+    dpu.spec.bmc_ip = Some("10.0.0.28".into());
+    dpu.metadata.labels.as_mut().unwrap().insert(
+        "carbide.nvidia.com/host-bmc-ip".into(),
+        "2620-0000-0000-0000-0000-0000-0000-0001".into(),
+    );
+    m.emit_dpu(dpu);
+    c.wait_for(1).await;
+    assert_eq!(
+        c.get(0).unwrap().host_bmc_ip,
+        "2620::1".parse::<std::net::IpAddr>().unwrap()
     );
 }

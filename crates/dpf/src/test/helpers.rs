@@ -271,7 +271,12 @@ pub(super) fn make_dpu(
 }
 
 pub(super) fn make_dpu_reboot(ns: &str, name: &str, device: &str, node: &str) -> DPU {
-    make_dpu(ns, name, device, node, DpuStatusPhase::Rebooting)
+    let mut dpu = make_dpu(ns, name, device, node, DpuStatusPhase::Rebooting);
+    dpu.metadata.labels = Some(BTreeMap::from([(
+        "carbide.nvidia.com/host-bmc-ip".into(),
+        "10.0.0.42".into(),
+    )]));
+    dpu
 }
 
 #[allow(dead_code)]

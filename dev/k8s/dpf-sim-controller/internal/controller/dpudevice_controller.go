@@ -562,9 +562,9 @@ func (r *DPUDeviceReconciler) ensureDPU(
 	}
 
 	// NICo maps DPU events back to a machine by the machine-id label, and its
-	// Rebooting-phase watcher reads the HOST BMC IP off DPU.spec.bmcIP —
+	// Rebooting-phase watcher reads the HOST BMC IP off the DPU label —
 	// creating the DPU with either one empty persists a mapping NICo can
-	// never use (a missing/invalid bmcIP silently skips the reboot callback,
+	// never use (a missing/invalid label silently skips the reboot callback,
 	// crates/dpf/src/watcher.rs). Wait for NICo to finish populating the
 	// DPUDevice instead.
 	if device.Labels[carbide.LabelDPUMachineID] == "" {
