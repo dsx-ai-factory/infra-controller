@@ -6,6 +6,8 @@ package nico
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"go.temporal.io/sdk/temporal"
 
@@ -13,50 +15,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
-
-// ResetNVOS submits once after the rack-host readiness gate. Success only means
-// accepted and tracked. No status lookup follows any unsuccessful submission.
-func (m *Manager) ResetNVOS(ctx context.Context, target common.Target) error {
-	return m.resetSwitch(ctx, target, corev1.ComponentResetAction_COMPONENT_RESET_ACTION_NVOS_FACTORY_RESET, "NVOS")
-}
-
-func (m *Manager) ResetSDN(ctx context.Context, target common.Target) error {
-	return m.resetSwitch(ctx, target, corev1.ComponentResetAction_COMPONENT_RESET_ACTION_SDN_FACTORY_RESET, "SDN")
-}
-
-func (m *Manager) resetSwitch(ctx context.Context, target common.Target, action corev1.ComponentResetAction, scope string) error {
-	if m.nicoClient == nil {
-		return fmt.Errorf("nico client is not configured")
-	}
-	if target.UsesMACAddresses() || target.Len() != 1 {
-		return fmt.Errorf("%s reset requires one ingested switch", scope)
-	}
-	err := m.ensureTargetOperable(ctx, target, types.OperationTypePowerControl, false)
-	if err != nil {
-		return err
-	}
-	response, err := m.nicoClient.ComponentReset(ctx, &corev1.ComponentResetRequest{
-		Target: &corev1.ComponentResetRequest_SwitchIds{SwitchIds: switchIDsProto(target.Identifiers)},
-		Action: action,
-	})
-	if err != nil {
-		return fmt.Errorf("%s reset submission failed or its outcome is unknown; do not automatically resubmit: %w", scope, err)
-	}
-	if response == nil || len(response.Results) != 1 {
-		return fmt.Errorf("%s reset submission returned no attributable result; outcome is unknown", scope)
-	}
-	result := response.Results[0]
-	if result == nil || result.GetComponentId() != target.Identifiers[0] {
-		return fmt.Errorf("%s reset submission returned a mismatched identity; outcome is unknown", scope)
-	}
-	if result.Status != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
-		if result.Status == corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_OUTCOME_UNKNOWN {
-			return fmt.Errorf("%s reset submission outcome is unknown; do not automatically resubmit", scope)
-		}
-		return temporal.NewNonRetryableApplicationError(fmt.Sprintf("%s reset submission status %s; do not automatically resubmit", scope, result.Status), scope+"ResetRejected", nil)
-	}
-	return nil
-}
 
 // NVOSResetCompleted reads only after this workflow observed a successful submit.
 // Core tracks the latest accepted reference; external submissions may replace it.
@@ -102,4 +60,57 @@ func (m *Manager) switchResetCompleted(ctx context.Context, target common.Target
 	default:
 		return false, fmt.Errorf("%s reset outcome is unknown", scope)
 	}
+}
+
+// PrepareFactoryReset waits once for all target switches' rack hosts.
+func (m *Manager) PrepareFactoryReset(ctx context.Context, target common.Target) error {
+	if m.nicoClient == nil || target.UsesMACAddresses() || target.Len() == 0 {
+		return fmt.Errorf("factory reset requires ingested switches and a configured client")
+	}
+	return m.ensureTargetOperable(ctx, target, types.OperationTypePowerControl, false)
+}
+
+// SubmitFactoryReset submits one switch after a bounded readiness recheck.
+// The preflight is not a reservation: inventory can change between submissions.
+func (m *Manager) SubmitFactoryReset(ctx context.Context, target common.Target, scope string) error {
+	if m.nicoClient == nil || target.UsesMACAddresses() || target.Len() != 1 {
+		return fmt.Errorf("factory reset requires one ingested switch and a configured client")
+	}
+	var action corev1.ComponentResetAction
+	switch scope {
+	case "nvos":
+		action = corev1.ComponentResetAction_COMPONENT_RESET_ACTION_NVOS_FACTORY_RESET
+	case "sdn":
+		action = corev1.ComponentResetAction_COMPONENT_RESET_ACTION_SDN_FACTORY_RESET
+	default:
+		return fmt.Errorf("unsupported factory reset target %q", scope)
+	}
+	scope = strings.ToUpper(scope)
+	gateCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	err := m.ensureTargetOperable(gateCtx, target, types.OperationTypePowerControl, false)
+	if err != nil {
+		return temporal.NewNonRetryableApplicationError("factory reset readiness check failed", "FactoryResetNotReady", err)
+	}
+	response, err := m.nicoClient.ComponentReset(ctx, &corev1.ComponentResetRequest{
+		Target: &corev1.ComponentResetRequest_SwitchIds{SwitchIds: switchIDsProto(target.Identifiers)},
+		Action: action,
+	})
+	if err != nil {
+		return fmt.Errorf("%s reset submission failed or its outcome is unknown; do not automatically resubmit: %w", scope, err)
+	}
+	if response == nil || len(response.Results) != 1 {
+		return fmt.Errorf("%s reset submission returned no attributable result; outcome is unknown", scope)
+	}
+	result := response.Results[0]
+	if result == nil || result.GetComponentId() != target.Identifiers[0] {
+		return fmt.Errorf("%s reset submission returned a mismatched identity; outcome is unknown", scope)
+	}
+	if result.Status != corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_SUCCESS {
+		if result.Status == corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_OUTCOME_UNKNOWN {
+			return fmt.Errorf("%s reset submission outcome is unknown; do not automatically resubmit", scope)
+		}
+		return temporal.NewNonRetryableApplicationError(fmt.Sprintf("%s reset submission status %s; do not automatically resubmit", scope, result.Status), scope+"ResetRejected", nil)
+	}
+	return nil
 }
