@@ -593,6 +593,11 @@ auth:
 machineStateController:
   maxConcurrency: 10
 
+## Power shelf state controller. Enable rack firmware reprovisioning when the
+## site supports the power shelf firmware workflow. The default matches the binary.
+powerShelfStateController:
+  rackFirmwareReprovisioningEnabled: false
+
 ## API admission control. enabled must be true or false, and the chart default
 ## matches the binary default. Keep it enabled on real hardware. Disable it for
 ## a simulated fleet whose agents share one client identity, or as a rollback

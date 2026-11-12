@@ -257,6 +257,7 @@ enabled with a non-empty (and non-null) objectTypes list.
   "hostname" .Values.hostname
   "machineStateController" .Values.machineStateController
   "namespaceOverride" .Values.namespaceOverride
+  "powerShelfStateController" .Values.powerShelfStateController
   "releaseNamespace" .Release.Namespace
   "rms" .Values.rms
   "service" .Values.service

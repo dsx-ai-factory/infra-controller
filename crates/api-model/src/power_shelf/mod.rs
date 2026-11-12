@@ -61,6 +61,19 @@ pub struct PowerShelfStatus {
     pub health_status: String, // "ok", "warning", "critical"
 }
 
+/// A rack reprovisioning request that the power shelf controller consumed
+/// without entering `ReProvisioning`, because
+/// `power_shelf_state_controller.rack_firmware_reprovisioning_enabled` was
+/// false.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PowerShelfRackReprovisioningSkip {
+    /// `requested_at` of the skipped `PowerShelfReprovisionRequest`, which
+    /// identifies the rack maintenance request that the shelf did not run.
+    pub requested_at: DateTime<Utc>,
+    /// Why the shelf skipped the request.
+    pub reason: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct PowerShelf {
     pub id: PowerShelfId,
@@ -117,6 +130,13 @@ pub struct PowerShelf {
     /// `ReProvisioning::WaitingForRackFirmwareUpgrade`.
     pub firmware_upgrade_status: Option<crate::rack::RackFirmwareUpgradeStatus>,
 
+    /// The last rack reprovisioning request skipped while rack firmware
+    /// reprovisioning was disabled. Written when the Ready handler consumes
+    /// such a request and cleared when a later request is admitted with the
+    /// feature enabled. Stored in its own column so `status` keeps the shape
+    /// that earlier binaries decode.
+    pub rack_firmware_reprovisioning_skip: Option<PowerShelfRackReprovisioningSkip>,
+
     // Columns for these exist, but are unused in rust code
     // pub created: DateTime<Utc>,
     // pub updated: DateTime<Utc>,
@@ -151,6 +171,9 @@ impl<'r> FromRow<'r, PgRow> for PowerShelf {
             .try_get::<Option<sqlx::types::Json<HealthReportSources>>, _>("health_reports")?
             .map(|j| j.0)
             .unwrap_or_default();
+        let rack_firmware_reprovisioning_skip: Option<
+            sqlx::types::Json<PowerShelfRackReprovisioningSkip>,
+        > = row.try_get("rack_firmware_reprovisioning_skip")?;
         let labels: sqlx::types::Json<HashMap<String, String>> = row.try_get("labels")?;
         let metadata = Metadata {
             name: row.try_get("name")?,
@@ -181,6 +204,7 @@ impl<'r> FromRow<'r, PgRow> for PowerShelf {
             power_shelf_maintenance_requested: power_shelf_maintenance_requested.map(|r| r.0),
             power_shelf_reprovisioning_requested: power_shelf_reprovisioning_requested.map(|r| r.0),
             firmware_upgrade_status: firmware_upgrade_status.map(|j| j.0),
+            rack_firmware_reprovisioning_skip: rack_firmware_reprovisioning_skip.map(|j| j.0),
             health_reports,
         })
     }

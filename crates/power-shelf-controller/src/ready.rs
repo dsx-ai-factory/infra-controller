@@ -21,7 +21,8 @@ use carbide_uuid::power_shelf::PowerShelfId;
 use component_manager::component_common::{PowerStatePollOutcome, interpret_power_state_poll};
 use db::power_shelf as db_power_shelf;
 use model::power_shelf::{
-    PowerShelf, PowerShelfControllerState, PowerShelfDecommissioningState, PowerShelfStatus,
+    PowerShelf, PowerShelfControllerState, PowerShelfDecommissioningState,
+    PowerShelfRackReprovisioningSkip, PowerShelfStatus,
 };
 use sqlx::PgTransaction;
 use state_controller::state_handler::{
@@ -83,17 +84,28 @@ pub async fn handle_ready(
 
     if let Some(req) = &state.power_shelf_reprovisioning_requested {
         if !ctx.services.rack_firmware_reprovisioning_enabled {
-            tracing::info!(
-                power_shelf_id = %power_shelf_id,
-                initiator = %req.initiator,
-                "Rack reprovision request ignored; rack_firmware_reprovisioning_enabled is false"
-            );
+            let reason = "rack_firmware_reprovisioning_enabled is false";
+            let skip = PowerShelfRackReprovisioningSkip {
+                requested_at: req.requested_at,
+                reason: reason.to_string(),
+            };
             let mut txn = ctx.services.db_pool.begin().await?;
-            db_power_shelf::clear_power_shelf_reprovisioning_requested(
+            if db_power_shelf::skip_power_shelf_reprovisioning_requested(
                 txn.as_mut(),
                 *power_shelf_id,
+                req,
+                &skip,
             )
-            .await?;
+            .await?
+            {
+                tracing::warn!(
+                    power_shelf_id = %power_shelf_id,
+                    initiator = %req.initiator,
+                    reason,
+                    "Skipping power shelf rack reprovisioning"
+                );
+                state.rack_firmware_reprovisioning_skip = Some(skip);
+            }
             return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
         }
 
@@ -133,15 +145,32 @@ pub async fn handle_ready(
             return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
         };
 
+        let txn = if state.rack_firmware_reprovisioning_skip.is_some() {
+            let mut txn = ctx.services.db_pool.begin().await?;
+            if !db_power_shelf::clear_rack_firmware_reprovisioning_skip(
+                txn.as_mut(),
+                *power_shelf_id,
+                req,
+            )
+            .await?
+            {
+                return Ok(StateHandlerOutcome::do_nothing().with_txn(txn));
+            }
+            state.rack_firmware_reprovisioning_skip = None;
+            Some(txn)
+        } else {
+            None
+        };
         tracing::info!(
             ?reprovisioning_state,
             "Rack-level reprovisioning requested — entering ReProvisioning"
         );
-        return Ok(StateHandlerOutcome::transition(
-            PowerShelfControllerState::ReProvisioning {
+        return Ok(
+            StateHandlerOutcome::transition(PowerShelfControllerState::ReProvisioning {
                 reprovisioning_state,
-            },
-        ));
+            })
+            .with_txn_opt(txn),
+        );
     }
 
     // Lowest precedence: only converge the PMC credential once the power shelf is

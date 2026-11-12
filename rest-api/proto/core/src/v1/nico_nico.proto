@@ -2967,6 +2967,9 @@ message PowerShelfStatus {
   repeated HealthSourceOrigin health_sources = 8;
   // Lifecycle related status
   LifecycleStatus lifecycle = 9;
+  // Last request skipped because rack firmware reprovisioning was disabled.
+  // Cleared when a subsequent enabled rack reprovisioning request is admitted.
+  PowerShelfRackReprovisioningSkip rack_firmware_reprovisioning_skip = 10;
 }
 
 // Describe a PowerShelf configuration and status
@@ -13596,6 +13599,12 @@ message MachineStateList {
   // Existing requested machines, sorted by ID, including DPUs without a host
   // or loopback IP. Missing IDs are omitted.
   repeated MachineStateSummary machines = 1;
+}
+
+// Last rack reprovisioning request skipped by a power shelf controller.
+message PowerShelfRackReprovisioningSkip {
+  google.protobuf.Timestamp requested_at = 1;
+  string reason = 2;
 }
 
 // --- Component firmware details ---

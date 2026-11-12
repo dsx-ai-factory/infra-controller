@@ -114,6 +114,10 @@ async fn exercise_power_shelf_reader(
         started_at: Some(timestamp),
         ended_at: None,
     });
+    expected.rack_firmware_reprovisioning_skip = Some(PowerShelfRackReprovisioningSkip {
+        requested_at: timestamp,
+        reason: "rack_firmware_reprovisioning_enabled is false".to_string(),
+    });
     expected.nvlink_domain_uuid = Some("11111111-1111-1111-1111-111111111111".parse()?);
     expected.health_reports.replace = Some(HealthReport::empty("projection-health".to_string()));
     expected.bmc_credential_rotation_requested = true;
@@ -127,7 +131,8 @@ async fn exercise_power_shelf_reader(
          power_shelf_maintenance_requested = $5, power_shelf_reprovisioning_requested = $6,
          firmware_upgrade_status = $7, nvlink_domain_uuid = $8, health_reports = $9,
          bmc_credential_rotation_requested = $10, decommission_requested = $11,
-         deleted = $12, version = $13 WHERE id = $14",
+         deleted = $12, version = $13, rack_firmware_reprovisioning_skip = $14
+         WHERE id = $15",
     )
     .bind(sqlx::types::Json(&expected.status))
     .bind(sqlx::types::Json(&expected.controller_state.value))
@@ -146,6 +151,9 @@ async fn exercise_power_shelf_reader(
     .bind(expected.decommission_requested)
     .bind(expected.deleted)
     .bind(expected.version)
+    .bind(sqlx::types::Json(
+        &expected.rack_firmware_reprovisioning_skip,
+    ))
     .bind(expected.id)
     .execute(txn.as_mut())
     .await?;
@@ -216,6 +224,10 @@ async fn exercise_power_shelf_reader(
     assert_eq!(
         actual.firmware_upgrade_status,
         expected.firmware_upgrade_status
+    );
+    assert_eq!(
+        actual.rack_firmware_reprovisioning_skip,
+        expected.rack_firmware_reprovisioning_skip
     );
     assert_eq!(actual.nvlink_domain_uuid, expected.nvlink_domain_uuid);
     assert_eq!(actual.rack_id, expected.rack_id);

@@ -9,7 +9,9 @@ use carbide_uuid::rack::RackProfileId;
 use librms::protos::rack_manager as rms;
 use model::expected_power_shelf::ExpectedPowerShelf;
 use model::metadata::Metadata;
-use model::power_shelf::{PowerShelfControllerState, PowerShelfStatus};
+use model::power_shelf::{
+    PowerShelfControllerState, PowerShelfRackReprovisioningSkip, PowerShelfStatus,
+};
 use model::test_support::{TEST_RMS_RACK_PROFILE_ID, power_shelf_config, rms_rack_profiles};
 
 use crate::common::{
@@ -90,6 +92,16 @@ async fn ready_persists_observations_and_preserves_them_after_failed_polls(pool:
     db::power_shelf::update(&shelf, pool.acquire().await.unwrap().as_mut())
         .await
         .unwrap();
+    let skipped = PowerShelfRackReprovisioningSkip {
+        requested_at: chrono::Utc::now(),
+        reason: "rack_firmware_reprovisioning_enabled is false".into(),
+    };
+    sqlx::query("UPDATE power_shelves SET rack_firmware_reprovisioning_skip = $1 WHERE id = $2")
+        .bind(sqlx::types::Json(&skipped))
+        .bind(shelf_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let observation = |power_state: Option<&str>| {
         Ok(rms::BatchGetPowerStateResponse {
@@ -147,6 +159,11 @@ async fn ready_persists_observations_and_preserves_them_after_failed_polls(pool:
             stored.controller_state.value,
             PowerShelfControllerState::Ready,
             "{scenario}"
+        );
+        assert_eq!(
+            stored.rack_firmware_reprovisioning_skip.as_ref(),
+            Some(&skipped),
+            "{scenario}: polling must preserve the skip record"
         );
         let status = stored.status.expect("poll should retain the shelf status");
         assert_eq!(status.power_state, expected_state, "{scenario}");
