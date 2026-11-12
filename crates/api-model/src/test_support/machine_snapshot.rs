@@ -489,6 +489,7 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
             created: fixture_time(200),
             updated: fixture_time(1900),
             topology_update_needed: false,
+            dpu_host_pf_inventory: None,
         }],
         bmc_info,
         labels: HashMap::from([
@@ -503,6 +504,8 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
         desired_boot_interface_mac: None,
         desired_boot_interface_id: None,
         desired_boot_interface_version: None,
+        primary_interface_selection_source: None,
+        primary_interface_selection_updated_at: None,
         boot_interface_selection_source: None,
         boot_interface_selection_updated_at: None,
         boot_interface_verified_version: None,

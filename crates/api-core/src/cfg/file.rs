@@ -505,6 +505,11 @@ pub struct CarbideConfig {
     )]
     pub retained_boot_interface_window: Option<chrono::Duration>,
 
+    /// BF4 host-visible PF 0 controller (0 through 255, default 1).
+    /// Read at API startup; changes require coordinated DPF maintenance and an API restart.
+    #[serde(default = "default_dpu_host_pf_pci_controller_id")]
+    pub dpu_host_pf_pci_controller_id: u8,
+
     /// SiteExplorer related configuration
     #[serde(default)]
     pub site_explorer: SiteExplorerConfig,
@@ -1504,6 +1509,17 @@ impl CarbideConfig {
         prefixes
     }
 
+    /// Rejects host PF controller overrides that legacy unscoped DPF resources cannot represent.
+    pub(crate) fn validate_dpu_host_pf_controller(&self) -> eyre::Result<()> {
+        eyre::ensure!(
+            !self.dpf.enabled
+                || self.dpf.deployment_scoped_service_interfaces
+                || self.dpu_host_pf_pci_controller_id == 1,
+            "dpu_host_pf_pci_controller_id overrides require dpf.deployment_scoped_service_interfaces=true"
+        );
+        Ok(())
+    }
+
     pub fn machine_state_handler_site_config(&self) -> MachineStateHandlerSiteConfig {
         MachineStateHandlerSiteConfig {
             pxe_public_base_url: self.pxe_public_base_url.clone(),
@@ -1519,6 +1535,8 @@ impl CarbideConfig {
             ewethers_enabled: self.is_ewethers_enabled(),
             astra_enabled: self.is_astra_enabled(),
             dpf_enabled: self.dpf.enabled,
+            dpu_host_pf_pci_controller_id: self.dpu_host_pf_pci_controller_id,
+            retained_boot_interface_window: self.retained_boot_interface_window,
             dpu_service_sync_enabled: self.dpf.dpu_service_sync_enabled,
             spdm_enabled: self.spdm.enabled,
             bmc_rotation_enabled: self.bmc_rotation_enabled,
@@ -2022,6 +2040,11 @@ pub enum DpfBootstrapCaObjectKind {
 
 fn default_dpf_bootstrap_ca_key() -> String {
     "ca.crt".to_string()
+}
+
+/// Supplies the shared default so inventory binding and DPF forwarding select the same controller.
+fn default_dpu_host_pf_pci_controller_id() -> u8 {
+    carbide_dpf::DEFAULT_DPU_HOST_PF_PCI_CONTROLLER_ID
 }
 
 /// Supplies Serde's legacy PF_TOTAL_SF default when the operator omits the reserve.
@@ -10136,5 +10159,37 @@ helm_repo_url = "oci://registry.example.test/doca"
             bf4_astra: None,
         };
         assert!(many.validate_provisioning_sources().is_ok());
+    }
+
+    /// Verifies controller omission defaults to 1 and explicit values stay within the hardware range.
+    /// Invalid controller settings must fail before startup can publish mismatched forwarding.
+    #[test]
+    fn dpu_host_pf_controller_deserialization_bounds() {
+        use carbide_test_support::Outcome::{Fails, Yields};
+        use carbide_test_support::scenarios;
+
+        // Keep required API fields in the canonical fixture so controller parsing is the only variable.
+        let minimal = include_str!("test_data/min_config.toml");
+        let omitted: CarbideConfig = toml::from_str(minimal).expect("minimal configuration");
+        // Omission must preserve the established controller-1 default.
+        assert_eq!(omitted.dpu_host_pf_pci_controller_id, 1);
+
+        scenarios!(
+            run = |controller: &str| toml::from_str::<CarbideConfig>(&format!(
+                "dpu_host_pf_pci_controller_id = {controller}\n{minimal}"
+            )).map(|config| config.dpu_host_pf_pci_controller_id).map_err(drop);
+            "supported controllers" {
+                // Controller zero is supported independently of the default.
+                "0" => Yields(0),
+                // Preserve the upper hardware limit without truncation.
+                "255" => Yields(255),
+            }
+            "out-of-range controllers" {
+                // Controller IDs cannot be negative.
+                "-1" => Fails,
+                // Reject overflow instead of silently selecting controller zero.
+                "256" => Fails,
+            }
+        );
     }
 }

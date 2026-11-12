@@ -2941,3 +2941,52 @@ async fn reinitialization_preserves_operator_extra_scripts() {
         "a restart must leave the operator's script alone"
     );
 }
+
+/// Verifies SDK initialization publishes the configured controller on both BF4 PF and VF resources.
+/// Keeping this setting through initialization prevents host PF lookup from diverging from published forwarding.
+#[tokio::test]
+async fn bf4_initialization_publishes_one_controller_for_pf_and_vf() {
+    // Use generic BF4 to isolate controller forwarding from Astra's external runtime ConfigMap.
+    let mock = InitializationMock::default();
+    let config = InitDpfResourcesConfigBuilder::default()
+        .deployment_type(DpuDeploymentType::Bf4Generic)
+        .deployment_scoped_service_interfaces(true)
+        .dpu_host_pf_pci_controller_id(7)
+        .bluefield_software(BlueFieldSoftwareParams {
+            os_iso: "http://example.com/bf4.iso".to_string(),
+            pldm_fw_bundle: Some(BTreeMap::from([(
+                "pldmid001".to_string(),
+                "http://example.com/bf4.pldm".to_string(),
+            )])),
+        })
+        .build()
+        .expect("valid scoped BF4 configuration");
+
+    // Run the same public initialization workflow that applies forwarding resources at startup.
+    crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+        .with_labeler(InitializationLabeler)
+        .initialize(&config)
+        .await
+        .expect("initialize BF4 resources");
+
+    // Inspect installed PF and VF CRs to detect a lost setting at any publication call.
+    for name in ["pf0hpf-bf4", "pf0vf0-bf4"] {
+        let resource = mock
+            .service_interfaces
+            .get(&ns_key(TEST_NS, name))
+            .expect("installed PF/VF resource");
+        let spec = &resource.spec.template.spec.template.spec;
+        let controller = spec
+            .pf
+            .as_ref()
+            .and_then(|pf| pf.nic_selector.as_ref())
+            .and_then(|selector| selector.controller_number)
+            .or_else(|| {
+                spec.vf
+                    .as_ref()
+                    .and_then(|vf| vf.nic_selector.as_ref())
+                    .and_then(|selector| selector.controller_number)
+            });
+        assert_eq!(controller, Some(7), "{name}");
+    }
+}

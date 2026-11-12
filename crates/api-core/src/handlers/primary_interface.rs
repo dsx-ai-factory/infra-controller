@@ -17,7 +17,7 @@
 
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{
-    DpuMachineId, MachineIdSubtypeTrait, MachineInterfaceId, StableHostMachineId,
+    AsMachineId, DpuMachineId, MachineIdSubtypeTrait, MachineInterfaceId, StableHostMachineId,
 };
 use db::ConditionalWrite;
 use db::machine::MachineNetworkConfigNotCurrent;
@@ -25,8 +25,8 @@ use model::hardware_info::HardwareInfo;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{Machine, MachineInterfaceSnapshot, MachineState, ManagedHostState};
 use model::machine_boot_interface::{
-    BootInterfaceSelectionSource, MachineBootInterface, MachineBootInterfaceTarget,
-    canonical_redfish_boot_interface_id,
+    BootInterfaceSelectionAuthority, BootInterfaceSelectionSource, MachineBootInterface,
+    MachineBootInterfaceTarget, canonical_redfish_boot_interface_id,
 };
 use model::network_segment::NetworkSegmentType;
 
@@ -72,6 +72,36 @@ fn scout_may_replace_source(source: BootInterfaceSelectionSource) -> bool {
         | BootInterfaceSelectionSource::ScoutReportPci
         | BootInterfaceSelectionSource::LegacyUnknown => false,
     }
+}
+
+/// Allows Scout to replace attributed automatic networking or an unambiguous same-MAC legacy decision, preserving explicit choices when old writers omit primary provenance.
+fn scout_may_replace_primary_selection(machine: &Machine<impl MachineIdSubtypeTrait>) -> bool {
+    if let Some(selection) = machine.config.primary_interface_selection {
+        return scout_may_replace_source(selection.source);
+    }
+
+    // Old writers cannot attribute networking; only matching chassis/serial boot intent identifies their automatic primary.
+    let Some(desired) = machine.config.desired_boot_interface.as_ref() else {
+        return false;
+    };
+    if !machine
+        .config
+        .boot_interface_selection
+        .is_some_and(|selection| scout_may_replace_source(selection.source))
+    {
+        return false;
+    }
+    let mut primaries = machine
+        .status
+        .interfaces
+        .iter()
+        .filter(|interface| interface.primary_interface);
+    primaries.next().is_some_and(|primary| {
+        primary.machine_id == Some(machine.id.to_machine_id())
+            && primary.interface_type != model::machine_interface::InterfaceType::Bmc
+            && primary.attached_dpu_machine_id.is_some()
+            && primary.mac_address == desired.value.mac_address()
+    }) && primaries.next().is_none()
 }
 
 /// Returns whether the machine state permits automatic scout reconciliation.
@@ -264,6 +294,10 @@ async fn update_primary_interface_once(
     if new_primary_interface.primary_interface
         && !force_reconcile
         && selected_target_is_already_operator
+        && machine
+            .config
+            .primary_interface_selection
+            .is_some_and(|selection| selection.source == BootInterfaceSelectionSource::Operator)
     {
         return Err(CarbideError::InvalidArgument(
             "requested interface is already the operator-selected primary interface".to_string(),
@@ -292,7 +326,7 @@ async fn update_primary_interface_once(
         host_machine_id,
         &interface_snapshots,
         new_primary_interface,
-        &boot_target,
+        Some(&boot_target),
         BootInterfaceSelectionSource::Operator,
         force_reconcile,
     )
@@ -320,10 +354,12 @@ async fn update_primary_interface_once(
 /// Compares the PCI slots in a scout report with the stored boot interface.
 ///
 /// When the report can be compared with the stored boot interface, NICo records the initial
-/// comparison in a structured log and increments `carbide_scout_pci_evaluations_total`. Selections not
-/// recorded as `RedfishChassisId` or `RedfishSerialNumber` remain unchanged. When reconciliation
+/// comparison in a structured log and increments `carbide_scout_pci_evaluations_total`. Networking-primary selections not
+/// recorded as `RedfishChassisId` or `RedfishSerialNumber` remain unchanged, except missing primary
+/// attribution may use same-MAC chassis/serial boot evidence left by an old writer. When reconciliation
 /// is enabled and the machine may be changed automatically, the comparison is repeated under the
 /// update locks before the shared primary interface path reconciles the stored selection.
+/// An independent boot selection retains its source precedence when Scout corrects networking.
 pub(super) async fn update_primary_interface_from_scout(
     api: &Api,
     host_machine_id: StableHostMachineId,
@@ -349,10 +385,7 @@ pub(super) async fn update_primary_interface_from_scout(
     comparison.emit(&host_machine_id);
 
     // Then, stop before taking update locks unless this report can drive enabled reconciliation.
-    let source_is_replaceable = machine
-        .config
-        .boot_interface_selection
-        .is_some_and(|selection| scout_may_replace_source(selection.source));
+    let source_is_replaceable = scout_may_replace_primary_selection(&machine);
     if !api.runtime_config.scout_boot_interface_correction_enabled
         || candidate_interface_id.is_none()
         || !source_is_replaceable
@@ -404,7 +437,12 @@ pub(super) async fn update_primary_interface_from_scout(
         host_machine_id,
         &interface_snapshots,
         new_primary_interface,
-        &boot_target,
+        // Preserve boot sources that Scout cannot replace while correcting automatic networking.
+        (!machine
+            .config
+            .boot_interface_selection
+            .is_some_and(|selection| !scout_may_replace_source(selection.source)))
+        .then_some(&boot_target),
         BootInterfaceSelectionSource::ScoutReportPci,
         force_reconcile,
     )
@@ -429,10 +467,7 @@ async fn select_primary_interface_from_scout<'a>(
 ) -> CarbideResult<Option<(&'a MachineInterfaceSnapshot, MachineBootInterfaceTarget)>> {
     // First, confirm that scout can still replace the selection source now that the machine row is
     // locked.
-    let source_is_replaceable = machine
-        .config
-        .boot_interface_selection
-        .is_some_and(|selection| scout_may_replace_source(selection.source));
+    let source_is_replaceable = scout_may_replace_primary_selection(machine);
     if !source_is_replaceable {
         return Ok(None);
     }
@@ -492,13 +527,13 @@ async fn select_primary_interface_from_scout<'a>(
     Ok(Some((candidate, boot_target)))
 }
 
-/// Updates the primary flag and desired boot selection in one locked transaction.
+/// Records the networking-primary selection and an optional boot selection in one locked transaction.
 async fn apply_primary_interface_update(
     txn: &mut db::Transaction<'_>,
     host_machine_id: StableHostMachineId,
     interface_snapshots: &[MachineInterfaceSnapshot],
     new_primary_interface: &MachineInterfaceSnapshot,
-    boot_target: &MachineBootInterfaceTarget,
+    boot_target: Option<&MachineBootInterfaceTarget>,
     source: BootInterfaceSelectionSource,
     force_reconcile: bool,
 ) -> CarbideResult<bool> {
@@ -558,6 +593,38 @@ async fn apply_primary_interface_update(
         }
     }
 
+    db::machine_interface::set_primary_interface_selection(
+        txn,
+        &host_machine_id,
+        source,
+        !primary_is_unchanged,
+    )
+    .await?;
+
+    let Some(boot_target) = boot_target else {
+        if !force_reconcile {
+            return Ok(false);
+        }
+        // Keep the controller's primary-change reconciliation trigger without selecting a different boot interface.
+        let desired = db::machine_desired_boot_interface::get(
+            txn.as_pgconn(),
+            &host_machine_id.into(),
+        )
+        .await?
+        .ok_or_else(|| CarbideError::Internal {
+            message: format!(
+                "machine {host_machine_id} has boot selection metadata without a desired target"
+            ),
+        })?;
+        return Ok(db::machine_desired_boot_interface::force_reconcile(
+            txn,
+            &host_machine_id.into(),
+            &desired.value,
+            BootInterfaceSelectionAuthority::Existing,
+        )
+        .await?
+        .desired_changed);
+    };
     let desired_update = if force_reconcile {
         db::machine_desired_boot_interface::force_set(txn, &host_machine_id, boot_target, source)
             .await?

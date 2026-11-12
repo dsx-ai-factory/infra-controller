@@ -22,6 +22,8 @@ use model::allocation_type::AllocationType;
 use model::expected_machine::{
     ExpectedInterface, ExpectedInterfaceIpAllocation, ExpectedInterfaceRole,
 };
+use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
+use model::machine_boot_interface::{InterfaceSelection, MachineBootInterfaceTarget};
 use model::machine_interface::InterfaceType;
 use model::network_prefix::NewNetworkPrefix;
 use model::network_segment::{
@@ -2477,5 +2479,265 @@ async fn ipv6_admin_prefix_locks_every_admin_segment_exclusively(
         vec!["ExclusiveLock".to_string(); admin_segment_count]
     );
     holder.rollback().await?;
+    Ok(())
+}
+
+/// Preserves legacy Operator choices independently of boot MAC, transfers matching automatic choices, and permits old writers after migration.
+#[crate::sqlx_test]
+async fn migration_baselines_existing_choices_without_coupling_future_boot_writes(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Construct existing primary and boot choices before removing the new schema.
+    let mut txn = pool.begin().await?;
+    let segment = crate::network_segment::persist(
+        crate::test_support::network_segment::admin_segment(
+            "primary-provenance",
+            "192.0.2.0/24",
+            "192.0.2.1",
+            3,
+        ),
+        &mut txn,
+        NetworkSegmentControllerState::Ready,
+    )
+    .await?;
+    let decision_time = DateTime::from_timestamp(1_722_000_000, 0).expect("decision timestamp");
+    let mut expectations = Vec::new();
+    for (index, source, same_mac, expected_source) in [
+        // Ambiguous historical Operator provenance is deliberately preserved as an explicit networking choice.
+        (
+            0,
+            Some(InterfaceSelectionSource::Operator),
+            false,
+            Some(InterfaceSelectionSource::Operator),
+        ),
+        // A matching automatic boot target identifies the primary decision without guessing at a pending declaration.
+        (
+            1,
+            Some(InterfaceSelectionSource::ExpectedMachine),
+            true,
+            Some(InterfaceSelectionSource::ExpectedMachine),
+        ),
+        // A separate automatic boot target cannot attribute the current networking primary.
+        (
+            2,
+            Some(InterfaceSelectionSource::ExpectedMachine),
+            false,
+            None,
+        ),
+        // Machines without boot provenance remain unattributed rather than receiving invented history.
+        (3, None, true, None),
+        // Unknown legacy decisions retain an absent time instead of receiving fabricated history.
+        (
+            4,
+            Some(InterfaceSelectionSource::LegacyUnknown),
+            true,
+            Some(InterfaceSelectionSource::LegacyUnknown),
+        ),
+    ] {
+        let host_id = MachineId::new(MachineIdSource::Tpm, [0x60 + index; 32], MachineType::Host);
+        crate::machine::create(
+            &mut txn,
+            None,
+            &host_id,
+            ManagedHostState::Created,
+            None,
+            CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+        let primary_mac = MacAddress::new([2, 0, 0, 0, index, 1]);
+        let interface = crate::machine_interface::create(
+            &mut txn,
+            std::slice::from_ref(&segment),
+            &primary_mac,
+            true,
+            model::address_selection_strategy::AddressSelectionStrategy::NextAvailableIp,
+            None,
+        )
+        .await?;
+        crate::machine_interface::associate_interface_with_machine(
+            &interface.id,
+            MachineInterfaceAssociation::Machine(host_id),
+            &mut txn,
+        )
+        .await?;
+        if let Some(source) = source {
+            let boot_mac = if same_mac {
+                primary_mac
+            } else {
+                MacAddress::new([2, 0, 0, 0, index, 2])
+            };
+            crate::machine_desired_boot_interface::set(
+                &mut txn,
+                &host_id.try_into()?,
+                &MachineBootInterfaceTarget::MacOnly(boot_mac),
+                source,
+            )
+            .await?;
+            sqlx::query("UPDATE machine_boot_interfaces SET selection_updated_at = $2 WHERE machine_id = $1")
+                .bind(host_id).bind((source != InterfaceSelectionSource::LegacyUnknown).then_some(decision_time)).execute(&mut *txn).await?;
+        }
+        // A secondary interface must not inherit the current primary's decision during backfill.
+        let secondary = crate::machine_interface::create(
+            &mut txn,
+            std::slice::from_ref(&segment),
+            &MacAddress::new([2, 0, 0, 0, index, 3]),
+            false,
+            model::address_selection_strategy::AddressSelectionStrategy::NextAvailableIp,
+            None,
+        )
+        .await?;
+        crate::machine_interface::associate_interface_with_machine(
+            &secondary.id,
+            MachineInterfaceAssociation::Machine(host_id),
+            &mut txn,
+        )
+        .await?;
+        let expected_time =
+            (source != Some(InterfaceSelectionSource::LegacyUnknown)).then_some(decision_time);
+        expectations.push((
+            host_id,
+            interface.id,
+            secondary.id,
+            expected_source,
+            expected_time,
+            source.is_some(),
+        ));
+    }
+
+    // Apply the shipped SQL to the populated predecessor schema, then exercise a boot-only writer.
+    sqlx::raw_sql(
+        "ALTER TABLE machine_interfaces
+         DROP CONSTRAINT machine_interfaces_primary_selection_time_consistent,
+         DROP COLUMN primary_selection_source,
+         DROP COLUMN primary_selection_updated_at",
+    )
+    .execute(&mut *txn)
+    .await?;
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261109170923_primary_interface_selection.sql"
+    ))
+    .execute(&mut *txn)
+    .await?;
+    sqlx::query(
+        "UPDATE machine_boot_interfaces SET desired_mac_address = '02:00:00:ff:00:01',
+        selection_source = 'operator', selection_updated_at = clock_timestamp()",
+    )
+    .execute(&mut *txn)
+    .await?;
+
+    // Create a new owned primary after backfill using predecessor INSERT/association statements that omit the added columns.
+    let late_host = MachineId::new(MachineIdSource::Tpm, [0xfe; 32], MachineType::Host);
+    crate::machine::create(
+        &mut txn,
+        None,
+        &late_host,
+        ManagedHostState::Ready,
+        None,
+        CURRENT_STATE_MODEL_VERSION,
+    )
+    .await?;
+    let late_mac: MacAddress = "02:00:00:fe:00:01".parse()?;
+    let late_primary: MachineInterfaceId = sqlx::query_scalar(
+        "INSERT INTO machine_interfaces (segment_id, mac_address, hostname, domain_id, primary_interface, interface_type)
+         VALUES ($1, $2, 'late-old-writer', NULL, true, 'Data') RETURNING id"
+    ).bind(segment.id).bind(late_mac).fetch_one(&mut *txn).await?;
+    sqlx::query(
+        "UPDATE machine_interfaces SET machine_id = $2, association_type = 'Machine' WHERE id = $1",
+    )
+    .bind(late_primary)
+    .bind(late_host)
+    .execute(&mut *txn)
+    .await?;
+    crate::machine_desired_boot_interface::set(
+        &mut txn,
+        &late_host.try_into()?,
+        &MachineBootInterfaceTarget::MacOnly(late_mac),
+        InterfaceSelectionSource::RedfishChassisId,
+    )
+    .await?;
+
+    // Reload to prove old creation leaves absent primary attribution beside genuine automatic boot provenance after migration.
+    let late = crate::machine::find_one(&mut *txn, &late_host, Default::default())
+        .await?
+        .expect("postmigration old-writer host");
+    assert!(late.config.primary_interface_selection.is_none());
+    assert_eq!(
+        late.config
+            .boot_interface_selection
+            .expect("automatic old-writer boot")
+            .source,
+        InterfaceSelectionSource::RedfishChassisId
+    );
+    assert_eq!(
+        late.config
+            .desired_boot_interface
+            .expect("old-writer target")
+            .value
+            .mac_address(),
+        late_mac
+    );
+
+    // Reload normal machine snapshots so schema defaults, backfill meaning, and boot-only independence are verified together.
+    for (host_id, primary_id, secondary_id, expected_source, expected_time, had_boot_selection) in
+        expectations
+    {
+        let host = crate::machine::find_one(&mut *txn, &host_id, Default::default())
+            .await?
+            .expect("migrated host");
+        assert_eq!(
+            host.config.desired_boot_interface.is_some(),
+            had_boot_selection
+        );
+        if let Some(desired) = &host.config.desired_boot_interface {
+            assert_eq!(
+                desired.value.mac_address(),
+                "02:00:00:ff:00:01".parse::<MacAddress>()?
+            );
+            assert_eq!(
+                host.config
+                    .boot_interface_selection
+                    .expect("old-writer boot selection")
+                    .source,
+                InterfaceSelectionSource::Operator
+            );
+        }
+        assert_eq!(
+            host.config.primary_interface_selection,
+            expected_source.map(|source| InterfaceSelection {
+                source,
+                updated_at: expected_time,
+            })
+        );
+        let secondary_unattributed: bool = sqlx::query_scalar(
+            "SELECT primary_selection_source IS NULL AND primary_selection_updated_at IS NULL
+             FROM machine_interfaces WHERE id = $1",
+        )
+        .bind(secondary_id)
+        .fetch_one(&mut *txn)
+        .await?;
+        assert!(secondary_unattributed);
+
+        // Old binaries change flags and associations without maintaining the new metadata.
+        sqlx::query("UPDATE machine_interfaces SET primary_interface = false WHERE id = $1")
+            .bind(primary_id)
+            .execute(&mut *txn)
+            .await?;
+        let demoted = crate::machine::find_one(&mut *txn, &host_id, Default::default())
+            .await?
+            .expect("demoted host");
+        assert!(demoted.config.primary_interface_selection.is_none());
+        sqlx::query("UPDATE machine_interfaces SET machine_id = NULL, association_type = 'None' WHERE id = $1")
+            .bind(primary_id).execute(&mut *txn).await?;
+        sqlx::query("UPDATE machine_interfaces SET machine_id = $2, association_type = 'Machine', primary_interface = true WHERE id = $1")
+            .bind(primary_id).bind(host_id).execute(&mut *txn).await?;
+        let restored = crate::machine::find_one(&mut *txn, &host_id, Default::default())
+            .await?
+            .expect("old-writer host");
+        assert_eq!(
+            restored.config.primary_interface_selection,
+            host.config.primary_interface_selection
+        );
+    }
+    txn.rollback().await?;
     Ok(())
 }

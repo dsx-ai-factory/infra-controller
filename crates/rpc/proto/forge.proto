@@ -564,8 +564,10 @@ service Forge {
 
   // Gather one machine's boot-interface view from every store that records it
   // (owned interface rows, predictions, the explored endpoint default, and the
-  // retained post-deletion pairs), plus the effective boot interface the
-  // system would select. Read-only; built for troubleshooting and verification.
+  // retained post-deletion pairs), plus the owned candidate and desired target
+  // reconciliation status. Default lifecycle resolution prefers the desired
+  // target over owned and predicted candidates. Read-only; built for
+  // troubleshooting and verification.
   rpc GetMachineBootInterfaces(GetMachineBootInterfacesRequest) returns (GetMachineBootInterfacesResponse);
 
   // Get Network topology
@@ -12427,12 +12429,12 @@ message GetMachineBootInterfacesResponse {
   repeated ExploredBootInterface explored_endpoints = 4;
   repeated RetainedBootInterface retained_interfaces = 5;
 
-  // The boot interface MAC the system would select for this machine right now,
-  // applying `pick_boot_interface` to the owned `machine_interfaces` rows.
-  // Absent when there is no owned candidate yet.
+  // The owned candidate MAC selected by `pick_boot_interface` over
+  // `machine_interfaces`. Default lifecycle resolution uses this candidate when
+  // no desired target is stored. Absent when there is no owned candidate yet.
   optional string effective_boot_interface_mac = 6;
-  // The fully-populated effective boot interface id (MAC + Redfish id), when
-  // the selected row has its interface id captured. Absent otherwise.
+  // The Redfish interface ID of the same owned candidate, when captured.
+  // Absent when no owned candidate exists or its ID has not been captured.
   optional string effective_boot_interface_id = 7;
 
   // True when the stores do not all agree on the boot MAC -- a signal worth a

@@ -37,6 +37,7 @@ use uname::uname;
 
 pub mod dpu;
 mod gpu;
+pub mod host_pfs;
 mod tpm;
 
 /// Path where the init container writes the hardware snapshot, and the containerized agent reads it from.

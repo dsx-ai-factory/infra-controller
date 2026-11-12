@@ -46,7 +46,8 @@ use crate::machine::{
 };
 use crate::machine_boot_interface::{
     BootInterfaceSelection, BootInterfaceSelectionSource, BootInterfaceStatusObservation,
-    MachineBootInterfaceTarget, canonical_redfish_boot_interface_id,
+    InterfaceSelection, InterfaceSelectionSource, MachineBootInterfaceTarget,
+    canonical_redfish_boot_interface_id,
 };
 use crate::metadata::Metadata;
 use crate::nic_firmware::{NicFirmwareCardSelection, NicFirmwareProfileId};
@@ -137,6 +138,10 @@ pub struct MachineSnapshotPgJson {
     pub history: Vec<StateHistoryRecord>,
     pub version: String,
     pub hw_sku: Option<String>,
+    /// Selection mechanism for the owned networking primary, independently of the desired boot target.
+    pub primary_interface_selection_source: Option<InterfaceSelectionSource>,
+    /// Decision time for the networking primary; absence permits unattributed legacy choices.
+    pub primary_interface_selection_updated_at: Option<DateTime<Utc>>,
     pub desired_boot_interface_mac: Option<MacAddress>,
     pub desired_boot_interface_id: Option<String>,
     pub desired_boot_interface_version: Option<String>,
@@ -368,6 +373,12 @@ impl TryFrom<MachineSnapshotPgJson> for AnyMachine {
                 hw_sku: value.hw_sku,
                 desired_boot_interface,
                 boot_interface_selection,
+                primary_interface_selection: value.primary_interface_selection_source.map(
+                    |source| InterfaceSelection {
+                        source,
+                        updated_at: value.primary_interface_selection_updated_at,
+                    },
+                ),
                 maintenance_reference,
                 maintenance_start_time,
             },

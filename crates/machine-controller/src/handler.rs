@@ -147,6 +147,7 @@ mod firmware_artifact;
 mod gb200_host_interface;
 mod helpers;
 mod host_boot_config;
+mod host_pfs;
 mod host_uefi_rotation;
 mod machine_validation;
 mod maintenance;
@@ -4719,9 +4720,9 @@ fn dpu_reprovision_host_boot_failed_state(
 
 /// Load the host's predicted boot-interface candidates -- the interfaces a
 /// zero-DPU or NIC-mode host offers before its first DHCP lease creates real
-/// `machine_interfaces` rows. Empty once the host owns its rows (and for DPU
-/// hosts, which get their primary row at attach), so the resolver simply finds
-/// no prediction to fall back to.
+/// `machine_interfaces` rows. Each prediction disappears when that NIC gains
+/// an owned row; a declared NIC can remain predicted alongside provisional
+/// DPU admin networking.
 async fn load_boot_predictions(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     machine_id: &MachineId,
@@ -4738,7 +4739,8 @@ async fn load_boot_predictions(
 /// interface state.
 ///
 /// An explicit target is complete input, so resolving it does not require
-/// reading mutable prediction rows.
+/// reading mutable prediction rows. Initial HostInit uses the checkpoint's admitted
+/// MAC independently of its retained primary DPU.
 async fn resolve_boot_interface_for_step(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     mh_snapshot: &ManagedHostStateSnapshot,
@@ -6131,6 +6133,18 @@ impl StateHandler for DpuMachineStateHandler {
                     .all(|state| matches!(state, DpuInitState::WaitingForPlatformPowerOff))
             {
                 return self.handle_waiting_for_platform_power_off(state, ctx).await;
+            }
+
+            // Finalize once per host so a repair's Wait cannot be replaced by another DPU iteration.
+            if let ManagedHostState::DPUInit { dpu_states } = &state.managed_state
+                && !dpu_states.states.is_empty()
+                && dpu_states
+                    .states
+                    .values()
+                    .all(|state| matches!(state, DpuInitState::WaitingForNetworkConfig))
+                && let Some(outcome) = self.finalize_registered_host_pfs(state, ctx).await?
+            {
+                return Ok(outcome);
             }
 
             for dpu_snapshot in &state.dpu_snapshots {

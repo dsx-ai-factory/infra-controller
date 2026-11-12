@@ -68,6 +68,7 @@ use model::machine::{
     MachineLastRebootRequested, MachineLastRebootRequestedMode, MachineMaintenanceOperation,
     MachineValidationContext, ManagedHostState, ReprovisionRequest, ResetRequest, UpgradeDecision,
 };
+use model::machine_boot_interface::InterfaceSelectionSource;
 use model::machine_interface_address::MachineInterfaceAssociation;
 use model::metadata::Metadata;
 use model::nic_firmware::NicFirmwareProfileId;
@@ -208,6 +209,21 @@ pub async fn get_or_create(
             txn,
         )
         .await?;
+        // Attribute only a newly adopted primary so re-registration cannot overwrite an owned interface's selection source.
+        if interface.machine_id.is_none()
+            && stable_machine_id.machine_type().is_host()
+            && crate::machine_interface::find_one(&mut *txn, interface.id)
+                .await?
+                .primary_interface
+        {
+            crate::machine_interface::set_primary_interface_selection(
+                txn,
+                stable_machine_id,
+                InterfaceSelectionSource::LegacyUnknown,
+                true,
+            )
+            .await?;
+        }
         Ok(machine)
     } else {
         // Old manual discovery path.
@@ -230,6 +246,15 @@ pub async fn get_or_create(
             txn,
         )
         .await?;
+        if stable_machine_id.machine_type().is_host() && interface.primary_interface {
+            crate::machine_interface::set_primary_interface_selection(
+                txn,
+                stable_machine_id,
+                InterfaceSelectionSource::LegacyUnknown,
+                true,
+            )
+            .await?;
+        }
         Ok(machine)
     }
 }
@@ -3419,6 +3444,11 @@ pub async fn has_recorded_managed_host_failure(
         .any(|details| details.cause != model::machine::FailureCause::NoError))
 }
 
+mod host_pfs;
+pub use host_pfs::{
+    bf4_host_pf_initialization_pending, host_has_bf4_dpu, lock_host_init_network_config,
+};
+
 /// Recheck the lifecycle owner under Instance -> History -> Machine locks.
 /// Missing or stale hosts, an ineligible named owner, and conflicting
 /// attachments or recorded host/DPU failures return
@@ -3505,6 +3535,17 @@ async fn lock_nic_firmware_failure_state(
     txn: &mut PgConnection,
     host_id: &HostMachineId,
 ) -> Result<bool, DatabaseError> {
+    Ok(try_lock_host_interfaces_and_dpus(txn, host_id).await?
+        && !has_recorded_managed_host_failure(txn, host_id).await?)
+}
+
+/// Tries interface and DPU history/row locks after the host lock without waiting behind interface-first writers.
+///
+/// Callers must hold the host history and machine locks and roll back after a false result.
+async fn try_lock_host_interfaces_and_dpus(
+    txn: &mut PgConnection,
+    host_id: &HostMachineId,
+) -> Result<bool, DatabaseError> {
     // Freeze existing interfaces before choosing the DPU set, including BMC
     // rows that could become data interfaces. New host references wait on the
     // host lock. Discovery takes interfaces before machines, so never wait here.
@@ -3543,7 +3584,7 @@ async fn lock_nic_firmware_failure_state(
             return Ok(false);
         }
     }
-    Ok(!has_recorded_managed_host_failure(txn, host_id).await?)
+    Ok(true)
 }
 
 /// `prepare_nic_firmware_owner_release` checks that the original allocation is

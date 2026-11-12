@@ -25,7 +25,9 @@ use std::time::Duration;
 use ::rpc::DiscoveryInfo;
 use ::rpc::carbide_tls_client::CarbideClientConfig;
 use ::rpc::machine_discovery::{DmiData, DpuData};
+use backon::Retryable;
 use carbide_host_support::agent_config::AgentConfig;
+use carbide_host_support::hardware_enumeration::host_pfs::refresh_host_pfs;
 use carbide_host_support::hardware_enumeration::{
     enumerate_and_save_hardware, enumerate_hardware, load_hardware_from_cache,
 };
@@ -911,22 +913,42 @@ async fn register(
         None => eyre::bail!("missing DPU info, should be impossible"),
     };
 
-    let (registration_data, ..) = register_machine(
-        &agent.forge_system.api_server,
-        agent.forge_system.root_ca.clone(),
-        agent.machine.interface_id,
-        hardware_info,
-        true,
-        carbide_host_support::registration::DiscoveryRetry {
-            secs: agent.period.discovery_retry_secs,
-            max: agent.period.discovery_retries_max,
-        },
-        false,
-        !agent.machine.is_fake_dpu,
-        ::rpc::MachineDiscoveryReporter::DpuAgent,
-        Some(carbide_version::v!(build_version).to_string()),
-    )
-    .await?;
+    let requires_host_pfs = !agent.machine.is_fake_dpu
+        && hardware_info.dpu_info.as_ref().is_some_and(|dpu| {
+            carbide_utils::is_bf4_dpu(
+                &dpu.part_number,
+                hardware_info
+                    .dmi_data
+                    .as_ref()
+                    .map_or("", |dmi| dmi.product_name.as_str()),
+            )
+        });
+    let discover = |hardware_info, retry| async move {
+        register_machine(
+            &agent.forge_system.api_server,
+            agent.forge_system.root_ca.clone(),
+            agent.machine.interface_id,
+            hardware_info,
+            true,
+            retry,
+            false,
+            !agent.machine.is_fake_dpu,
+            ::rpc::MachineDiscoveryReporter::DpuAgent,
+            Some(carbide_version::v!(build_version).to_string()),
+        )
+        .await
+        .map_err(eyre::Report::new)
+    };
+    let retry = carbide_host_support::registration::DiscoveryRetry {
+        secs: agent.period.discovery_retry_secs,
+        max: agent.period.discovery_retries_max,
+    };
+    let (registration_data, ..) = if requires_host_pfs {
+        register_bf4_with_retry(hardware_info, Path::new("/sys/class/net"), retry, discover).await?
+    } else {
+        // Preserve the original registration and certificate retry behavior for BF2/BF3 and fake DPUs.
+        discover(hardware_info, retry).await?
+    };
 
     let machine_id = DpuMachineId::try_from(registration_data.machine_id)
         .context("invalid machine_id returned from DiscoverMachine")?;
@@ -936,6 +958,40 @@ async fn register(
         machine_id,
         factory_mac_address,
     })
+}
+
+/// Refreshes live BF4 PF facts before each single-attempt registration under one retry budget so delayed visibility cannot freeze a discovery request.
+///
+/// Callers must select this path only for real BF4 DPUs; legacy discovery retains its own retries.
+async fn register_bf4_with_retry<T, F, Fut>(
+    hardware_info: DiscoveryInfo,
+    net_directory: &Path,
+    retry: carbide_host_support::registration::DiscoveryRetry,
+    discover: F,
+) -> eyre::Result<T>
+where
+    F: Fn(DiscoveryInfo, carbide_host_support::registration::DiscoveryRetry) -> Fut,
+    Fut: Future<Output = eyre::Result<T>>,
+{
+    // Recollect inside the retry so a partially visible PF cannot pin every later request to stale facts.
+    (|| {
+        let mut hardware_info = hardware_info.clone();
+        let discover = &discover;
+        async move {
+            refresh_host_pfs(&mut hardware_info, net_directory)?;
+            discover(
+                hardware_info,
+                carbide_host_support::registration::DiscoveryRetry { secs: 0, max: 0 },
+            )
+            .await
+        }
+    })
+    .retry(
+        backon::ConstantBuilder::default()
+            .with_delay(Duration::from_secs(retry.secs))
+            .with_max_times(retry.max as usize),
+    )
+    .await
 }
 
 /// Builds synthetic DPU discovery information for fake-DPU tests and local development.
@@ -996,6 +1052,7 @@ fn fill_fake_dpu_info(hardware_info: &mut DiscoveryInfo) {
         firmware_version: "1".to_string(),
         firmware_date: "01/01/1970".to_string(),
         switches: vec![],
+        host_pfs: vec![],
     });
 }
 

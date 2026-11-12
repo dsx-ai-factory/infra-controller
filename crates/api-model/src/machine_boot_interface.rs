@@ -20,7 +20,7 @@ use config_version::ConfigVersion;
 use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 
-/// Which selection mechanism established the machine's current boot interface.
+/// Records the mechanism that selected a machine's networking primary or desired boot interface.
 ///
 /// A source records the path NICo used to make the decision, not necessarily a
 /// unique hardware discriminator. This mirrors the
@@ -34,10 +34,10 @@ use serde::{Deserialize, Serialize};
     rename_all = "snake_case"
 )]
 #[serde(rename_all = "snake_case")]
-pub enum BootInterfaceSelectionSource {
+pub enum InterfaceSelectionSource {
     /// An `ExpectedMachine` explicitly declared the primary interface.
     ExpectedMachine,
-    /// An operator explicitly selected the boot interface.
+    /// An operator explicitly selected the interface for the recorded decision.
     Operator,
     /// Redfish UEFI PCI paths determined the ordering.
     RedfishUefiPci,
@@ -64,19 +64,26 @@ pub enum BootInterfaceSelectionAuthority {
     Existing,
 }
 
-/// Persisted explanation for the current desired boot interface selection.
+/// Records the source and decision time independently for networking-primary and boot selections.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BootInterfaceSelection {
+pub struct InterfaceSelection {
     /// Mechanism that established the current selection.
-    pub source: BootInterfaceSelectionSource,
+    pub source: InterfaceSelectionSource,
     /// Time the current target and source decision was established.
     ///
-    /// Adding a Redfish interface ID for the same MAC preserves this time. It is
-    /// absent when NICo cannot recover the decision time, including migrated
-    /// rows and compatibility baselines. It is distinct from Redfish
-    /// observation time, which records convergence.
+    /// Adding only a Redfish interface ID for the same MAC preserves this time.
+    /// Correcting the networking primary's PF MAC also preserves it when the selected
+    /// DPU and source stay the same; replacing a desired boot MAC establishes a new
+    /// decision time. It is absent when NICo cannot recover the decision time,
+    /// including migrated rows and compatibility baselines. It is distinct from
+    /// Redfish observation time, which records convergence.
     pub updated_at: Option<DateTime<Utc>>,
 }
+
+/// Records why the current desired boot interface was selected.
+pub use InterfaceSelection as BootInterfaceSelection;
+/// Names the selection mechanisms used for desired boot interfaces.
+pub use InterfaceSelectionSource as BootInterfaceSelectionSource;
 
 /// Returns the canonical form of a Redfish boot-interface id.
 ///

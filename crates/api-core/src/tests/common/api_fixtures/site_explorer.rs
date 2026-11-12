@@ -502,7 +502,7 @@ impl<'a> MockExploredHost<'a> {
         self
     }
 
-    /// Runs dpu_state_controller with DPF.
+    /// Runs DPF discovery and settles BF4 PF repair before the caller acknowledges networking, so fixtures use the real initialization prerequisites.
     pub(in crate::tests) async fn dpu_state_controller_iterations_with_dpf(self) -> Self {
         if self.managed_host.dpus.is_empty() {
             return self;
@@ -518,7 +518,7 @@ impl<'a> MockExploredHost<'a> {
                 .host_machine_id(&dpu_machine_id)
                 .unwrap();
 
-        // Scout discovery below needs this intermediate state. Requeued
+        // DPU agent discovery below needs this intermediate state. Requeued
         // transitions can otherwise advance to network configuration first.
         self.test_env
             .run_machine_state_controller_iteration_until_state_condition_with_requeue(
@@ -545,8 +545,21 @@ impl<'a> MockExploredHost<'a> {
             create_machine_inventory(self.test_env, *machine_id).await;
         }
 
-        //run scout discovery for dpu(s)
+        // Register through the normal agent path so BF4 facts reach authenticated inventory before network admission.
         for dpu in self.managed_host.dpus.clone() {
+            let mut hardware_info = HardwareInfo::from(&dpu);
+            if hardware_info.is_bf4_dpu() {
+                // The configured PF uses this fixture's host MAC; legacy generations keep their existing report contents.
+                hardware_info
+                    .dpu_info
+                    .as_mut()
+                    .expect("BF4 DPU hardware")
+                    .host_pfs = vec![model::hardware_info::DpuHostPf {
+                    pci_controller_id: self.test_env.config.dpu_host_pf_pci_controller_id,
+                    pf_id: 0,
+                    mac_address: dpu.host_mac_address,
+                }];
+            }
             let machine_interfaces = find_by_mac_address(txn.as_mut(), dpu.oob_mac_address)
                 .await
                 .unwrap();
@@ -554,18 +567,19 @@ impl<'a> MockExploredHost<'a> {
                 .iter()
                 .find(|interface| interface.primary_interface)
                 .unwrap();
-            let _ = self
-                .test_env
+            self.test_env
                 .api
                 .discover_machine(tonic::Request::new(rpc::MachineDiscoveryInfo {
                     machine_interface_id: Some(primary_interface.id),
                     create_machine: true,
                     discovery_data: Some(DiscoveryData::Info(
-                        DiscoveryInfo::try_from(HardwareInfo::from(&dpu)).unwrap(),
+                        DiscoveryInfo::try_from(hardware_info).expect("DPU discovery facts"),
                     )),
+                    discovery_reporter: rpc::MachineDiscoveryReporter::DpuAgent as i32,
                     ..Default::default()
                 }))
-                .await;
+                .await
+                .expect("DPF DPU agent registration");
         }
 
         for machine_id in self.dpu_machine_ids.values() {
@@ -597,6 +611,18 @@ impl<'a> MockExploredHost<'a> {
                 },
             )
             .await;
+
+        if self
+            .managed_host
+            .dpus
+            .iter()
+            .any(|dpu| HardwareInfo::from(dpu).is_bf4_dpu())
+        {
+            // Run synchronized PF repair before the outer fixture fetches and acknowledges its resulting network version.
+            self.test_env
+                .run_machine_state_controller_iteration_without_requeue()
+                .await;
+        }
 
         self
     }

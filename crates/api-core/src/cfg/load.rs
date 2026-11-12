@@ -412,6 +412,7 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
     // Validate that admin-UI tool entries have unique names.
     config.validate_web_ui_sidebar_tools()?;
     config.validate_service_vpc_slots()?;
+    config.validate_dpu_host_pf_controller()?;
     if let Some(fnn) = &config.fnn {
         fnn.validate_route_targets()?;
     }

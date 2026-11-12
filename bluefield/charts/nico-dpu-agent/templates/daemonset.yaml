@@ -230,6 +230,9 @@ spec:
             - name: hw-cache
               mountPath: /data
               readOnly: true
+            - name: sys
+              mountPath: /sys
+              readOnly: true
             - name: host-grpc-socket-dir
               mountPath: /var/run/dpf/weave/grpc
               readOnly: true

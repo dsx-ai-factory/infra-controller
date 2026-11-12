@@ -61,6 +61,7 @@ use crate::tests::common::api_fixtures::tpm_attestation::{
 };
 use crate::tests::common::api_fixtures::{TestEnvOverrides, create_test_env_with_overrides};
 use crate::tests::common::postgres::wait_for_blocked_query;
+use crate::tests::common::rpc_builder::DhcpDiscovery;
 
 fn secure_discovery_config() -> crate::cfg::file::CarbideConfig {
     let mut config = common::api_fixtures::get_config();
@@ -110,6 +111,8 @@ fn discovery_request_from(
 #[derive(Clone, Debug, PartialEq, sqlx::FromRow)]
 struct ScoutPciSelectionState {
     current_primary_mac_address: Option<MacAddress>,
+    primary_selection_source: Option<BootInterfaceSelectionSource>,
+    primary_selection_updated_at: Option<chrono::DateTime<chrono::Utc>>,
     current_primary_address: Option<String>,
     network_config_version: ConfigVersion,
     controller_state: String,
@@ -120,18 +123,15 @@ struct ScoutPciSelectionState {
     selection_source: Option<BootInterfaceSelectionSource>,
 }
 
-/// Loads only the primary, address, network, state, queue, and desired boot interface selection fields.
+/// Loads primary identity and provenance alongside address, network, state, queue and desired boot selection so independent networking decisions participate in preservation checks.
 async fn load_scout_pci_selection_state(
     pool: &sqlx::PgPool,
     host_machine_id: StableHostMachineId,
 ) -> Result<ScoutPciSelectionState, Box<dyn std::error::Error>> {
     let state = sqlx::query_as::<_, ScoutPciSelectionState>(
-        "SELECT (
-                    SELECT mac_address
-                    FROM machine_interfaces
-                    WHERE machine_id = machine.id
-                      AND primary_interface
-                ) AS current_primary_mac_address,
+        "SELECT network_primary.mac_address AS current_primary_mac_address,
+                network_primary.primary_selection_source,
+                network_primary.primary_selection_updated_at,
                 (
                     SELECT address.address::text
                     FROM machine_interface_addresses address
@@ -153,6 +153,10 @@ async fn load_scout_pci_selection_state(
                 boot_interface.desired_version,
                 boot_interface.selection_source
          FROM machines machine
+         LEFT JOIN machine_interfaces network_primary
+           ON network_primary.machine_id = machine.id
+          AND network_primary.primary_interface
+          AND network_primary.interface_type != 'Bmc'
          LEFT JOIN machine_boot_interfaces boot_interface
            ON boot_interface.machine_id = machine.id
          WHERE machine.id = $1",
@@ -248,6 +252,16 @@ async fn set_scout_test_source(
          SET selection_source = $1,
              selection_updated_at = TIMESTAMPTZ '2024-07-24 00:00:00+00'
          WHERE machine_id = $2",
+    )
+    .bind(source)
+    .bind(host_machine_id)
+    .execute(pool)
+    .await?;
+    // These fixtures give both primary and boot selections the supplied source and decision time.
+    sqlx::query(
+        "UPDATE machine_interfaces SET primary_selection_source = $1,
+                 primary_selection_updated_at = TIMESTAMPTZ '2024-07-24 00:00:00+00'
+                 WHERE machine_id = $2 AND primary_interface AND interface_type != 'Bmc'",
     )
     .bind(source)
     .bind(host_machine_id)
@@ -3846,8 +3860,19 @@ async fn test_scout_pci_same_target_updates_only_source(
     .await?;
     assert_eq!(comparisons, ["matches_stored"]);
     let after = load_scout_pci_selection_state(&env.pool, host_machine_id).await?;
+    // A matching report must update primary attribution and decision time without changing the target or controller work.
+    assert!(
+        after
+            .primary_selection_updated_at
+            .expect("Scout primary decision time")
+            > before
+                .primary_selection_updated_at
+                .expect("automatic primary decision time")
+    );
     let mut expected = before;
     expected.selection_source = Some(BootInterfaceSelectionSource::ScoutReportPci);
+    expected.primary_selection_source = Some(BootInterfaceSelectionSource::ScoutReportPci);
+    expected.primary_selection_updated_at = after.primary_selection_updated_at;
     assert_eq!(
         after, expected,
         "a matching comparison must preserve the target, generations, and controller work",
@@ -3870,6 +3895,8 @@ async fn test_scout_pci_different_target_updates_ready_host_and_queues_controlle
     let (host_config, host_machine_id, interfaces) =
         create_scout_test_host(&env, BootInterfaceSelectionSource::RedfishChassisId).await?;
 
+    let before = load_scout_pci_selection_state(&env.pool, host_machine_id).await?;
+
     let comparisons = submit_scout_pci_report(
         &env.api,
         host_machine_id,
@@ -3882,6 +3909,19 @@ async fn test_scout_pci_different_target_updates_ready_host_and_queues_controlle
     assert_eq!(
         after.current_primary_mac_address,
         Some(interfaces.alternate_mac)
+    );
+    // Moving the primary must attribute the new row to Scout rather than inheriting its predecessor's decision time.
+    assert_eq!(
+        after.primary_selection_source,
+        Some(BootInterfaceSelectionSource::ScoutReportPci)
+    );
+    assert!(
+        after
+            .primary_selection_updated_at
+            .expect("new primary decision time")
+            > before
+                .primary_selection_updated_at
+                .expect("previous primary decision time")
     );
     assert!(after.controller_queued);
     assert_eq!(after.desired_mac_address, Some(interfaces.alternate_mac));
@@ -4155,5 +4195,462 @@ async fn test_discovery_updates_scout_version_on_rediscovery(
         Some("v0.12.0-pr-42-gabcdef012")
     );
 
+    Ok(())
+}
+
+/// Verifies secure source-IP registration rejects a partial BF4 report, accepts fresh PF facts, and exposes them through FindMachinesByIds.
+/// Generic BOM refresh may retain the first payload, so accepted PF facts need independent persistence.
+#[crate::sqlx_test]
+async fn dpu_agent_registration_recovers_partial_host_pf_inventory(pool: sqlx::PgPool) {
+    // Lease the reporting DPU's address so discovery must resolve its interface from the source IP.
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(secure_discovery_config()),
+    )
+    .await;
+    let host_config = env.managed_host_config();
+    let dpu = host_config.get_and_assert_single_dpu();
+    let reporting_lease = env
+        .api
+        .discover_dhcp(
+            DhcpDiscovery::builder(dpu.oob_mac_address, FIXTURE_DHCP_RELAY_ADDRESS).tonic_request(),
+        )
+        .await
+        .expect("DPU source lease")
+        .into_inner();
+    let source_ip = reporting_lease.address.parse().expect("DPU source address");
+
+    // Keep DMI identity unchanged while VPD classifies this DPU as BF4.
+    let mut hardware_info = HardwareInfo::from(dpu);
+    let dpu_info = hardware_info.dpu_info.as_mut().expect("fixture DPU");
+    dpu_info.part_number = "900-9D4B4-CWAA-TSA".to_string();
+    dpu_info.host_pfs = vec![model::hardware_info::DpuHostPf {
+        pci_controller_id: 2, // A populated inventory still lacks the configured controller.
+        pf_id: 0,
+        mac_address: "02:00:00:00:00:20".parse().expect("nonselected MAC"),
+    }];
+    let request = |hardware_info: HardwareInfo| {
+        let mut request = discovery_request_from(&hardware_info, None, source_ip);
+        request.get_mut().discovery_reporter = rpc::MachineDiscoveryReporter::DpuAgent as i32;
+        request
+    };
+
+    // Reject first binding while retaining enough committed bootstrap state for another attempt.
+    let missing = env
+        .api
+        .discover_machine(request(hardware_info.clone()))
+        .await
+        .expect_err("configured PF is missing");
+    assert_eq!(missing.code(), tonic::Code::FailedPrecondition);
+    assert!(missing.message().contains("c1pf0"));
+
+    // Submit newly acquired facts instead of reusing the partial report.
+    hardware_info
+        .dpu_info
+        .as_mut()
+        .expect("fixture DPU")
+        .host_pfs
+        .push(model::hardware_info::DpuHostPf {
+            pci_controller_id: 1, // This is the API-selected controller.
+            pf_id: 0,
+            mac_address: "02:00:00:00:00:10".parse().expect("selected MAC"),
+        });
+    let accepted = env
+        .api
+        .discover_machine(request(hardware_info))
+        .await
+        .expect("fresh report accepted")
+        .into_inner();
+    assert_eq!(
+        accepted.machine_interface_id,
+        reporting_lease.machine_interface_id
+    );
+    let machine_id = accepted.machine_id.expect("registered DPU ID");
+
+    // Find the machine afresh to prove the accepted PF facts persisted through snapshot conversion.
+    let found = env
+        .api
+        .find_machines_by_ids(Request::new(rpc::forge::MachinesByIdsRequest {
+            machine_ids: vec![machine_id],
+            include_history: false,
+        }))
+        .await
+        .expect("find registered DPU")
+        .into_inner()
+        .machines
+        .remove(0);
+    let discovery = found
+        .status
+        .expect("machine status")
+        .discovery_info
+        .expect("discovery info");
+    let observed = discovery.dpu_info.expect("DPU info").host_pfs;
+    assert_eq!(
+        observed
+            .iter()
+            .map(|pf| (pf.pci_controller_id, pf.mac_address.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(1, "02:00:00:00:00:10"), (2, "02:00:00:00:00:20")]
+    );
+}
+
+/// Verifies secure Scout, unspecified and unknown reporters cannot establish BF4 PF authority, so generic discovery cannot satisfy the initialization checkpoint.
+#[crate::sqlx_test]
+async fn non_agent_discovery_does_not_establish_host_pf_authority(pool: sqlx::PgPool) {
+    // Authenticate each report by its own DPU lease while varying only the reporter's authority.
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(secure_discovery_config()),
+    )
+    .await;
+    for (scenario, reporter) in [
+        // Scout may report DPU hardware without supplying the agent's accepted PF inventory.
+        (
+            "Scout reporter",
+            rpc::MachineDiscoveryReporter::Scout as i32,
+        ),
+        // Legacy clients omit the reporter and must not gain PF authority by default.
+        (
+            "unspecified reporter",
+            rpc::MachineDiscoveryReporter::Unspecified as i32,
+        ),
+        // Future or unrecognized enum values must retain the non-agent default instead of granting authority.
+        ("unknown reporter", i32::MAX),
+    ] {
+        // Supply complete selected-PF facts so reporter gating is the only reason authority is absent.
+        let host_config = env.managed_host_config();
+        let dpu = host_config.get_and_assert_single_dpu();
+        let reporting_lease = env
+            .api
+            .discover_dhcp(
+                DhcpDiscovery::builder(dpu.oob_mac_address, FIXTURE_DHCP_RELAY_ADDRESS)
+                    .tonic_request(),
+            )
+            .await
+            .expect("DPU source lease")
+            .into_inner();
+        let source_ip = reporting_lease.address.parse().expect("DPU source address");
+        let mut hardware_info = HardwareInfo::from(dpu);
+        let dpu_info = hardware_info.dpu_info.as_mut().expect("fixture DPU");
+        dpu_info.part_number = "900-9D4B4-CWAA-TSA".to_string();
+        dpu_info.host_pfs = vec![model::hardware_info::DpuHostPf {
+            pci_controller_id: env.config.dpu_host_pf_pci_controller_id, // Supplies the required controller.
+            pf_id: 0,
+            mac_address: "02:00:00:00:00:10".parse().expect("selected PF MAC"),
+        }];
+
+        // Accept ordinary discovery without trusting the caller's reporter as the DPU agent.
+        let mut request = discovery_request_from(&hardware_info, None, source_ip);
+        request.get_mut().discovery_reporter = reporter;
+        let discovered = env
+            .api
+            .discover_machine(request)
+            .await
+            .expect("non-agent discovery remains supported")
+            .into_inner();
+        assert_eq!(
+            discovered.machine_interface_id,
+            reporting_lease.machine_interface_id
+        );
+        let dpu_id = DpuMachineId::try_from(discovered.machine_id.expect("registered DPU ID"))
+            .expect("DPU machine ID");
+
+        // Read the authority column itself because generic discovery JSON can also contain host_pfs.
+        let mut read = env.db_txn().await;
+        let topology = db::machine_topology::find_latest_by_machine_ids(&mut read, &[dpu_id])
+            .await
+            .expect("registered topology")
+            .remove(&dpu_id)
+            .expect("DPU topology");
+        assert!(topology.dpu_host_pf_inventory.is_none(), "{scenario}");
+        read.rollback().await.expect("close authority read");
+    }
+}
+
+/// Corrects automatic networking without replacing independent Operator or ExpectedMachine boot selections, so primary correction preserves boot-source precedence.
+#[crate::sqlx_test]
+async fn test_scout_pci_preserves_independent_boot_selection(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(scout_reconciliation_config()),
+    )
+    .await;
+    for (boot_source, needs_new_generation) in [
+        // A pending boot-only Operator request retains its generation when Scout corrects automatic networking.
+        (BootInterfaceSelectionSource::Operator, false),
+        // A stable declaration retains its boot choice while the new network primary requires controller reconciliation.
+        (BootInterfaceSelectionSource::ExpectedMachine, true),
+    ] {
+        // Model independent boot attribution over a replaceable automatic networking primary.
+        let (host_config, host_machine_id, interfaces) =
+            create_scout_test_host(&env, BootInterfaceSelectionSource::RedfishChassisId).await?;
+        if boot_source == BootInterfaceSelectionSource::Operator {
+            // A public boot-only request establishes pending work without changing networking provenance.
+            env.api
+                .set_dpu_first_boot_order(Request::new(rpc::forge::SetDpuFirstBootOrderRequest {
+                    machine_id: Some(host_machine_id.to_string()),
+                    bmc_endpoint_request: None,
+                    boot_interface_mac: Some(interfaces.current_mac.to_string()),
+                }))
+                .await?;
+        } else {
+            // Attribute the verified boot target to a declaration while retaining the working primary's automatic source.
+            let mut setup = env.pool.begin().await?;
+            let boot_target =
+                db::machine_desired_boot_interface::get(&mut *setup, &host_machine_id.into())
+                    .await?
+                    .expect("boot target")
+                    .value;
+            db::machine_desired_boot_interface::set(
+                &mut setup,
+                &host_machine_id.into(),
+                &boot_target,
+                boot_source,
+            )
+            .await?;
+            setup.commit().await?;
+        }
+        // Clear setup's queue entry so only the subsequent Scout report can establish a new enqueue.
+        clear_scout_test_queue(&env.pool, host_machine_id).await?;
+        assert!(
+            !load_scout_pci_selection_state(&env.pool, host_machine_id)
+                .await?
+                .controller_queued
+        );
+        let before = db::machine::find_one(&env.pool, &host_machine_id, Default::default())
+            .await?
+            .expect("host");
+
+        // Check whether existing boot work already provides the controller reconciliation trigger.
+        assert_eq!(
+            before.pending_boot_interface_config_version().is_none(),
+            needs_new_generation
+        );
+
+        // Exercise the public discovery handler with a different, complete Scout PCI winner.
+        submit_scout_pci_report(
+            &env.api,
+            host_machine_id,
+            interfaces.current_id,
+            scout_pci_report(&host_config, interfaces.alternate_mac),
+        )
+        .await?;
+
+        // Reload both decisions to prove networking changed and reconciliation was queued without changing boot target, source, or time.
+        let after = db::machine::find_one(&env.pool, &host_machine_id, Default::default())
+            .await?
+            .expect("host after Scout");
+        assert_eq!(
+            after
+                .status
+                .interfaces
+                .iter()
+                .find(|row| row.primary_interface)
+                .expect("primary")
+                .mac_address,
+            interfaces.alternate_mac
+        );
+        assert_eq!(
+            after
+                .config
+                .primary_interface_selection
+                .expect("primary source")
+                .source,
+            BootInterfaceSelectionSource::ScoutReportPci
+        );
+        let previous_boot = before
+            .config
+            .desired_boot_interface
+            .as_ref()
+            .expect("previous boot target");
+        let retained_boot = after
+            .config
+            .desired_boot_interface
+            .as_ref()
+            .expect("retained boot target");
+        assert_eq!(retained_boot.value, previous_boot.value);
+        assert_eq!(
+            retained_boot.version.version_nr(),
+            previous_boot.version.version_nr() + if needs_new_generation { 1 } else { 0 }
+        );
+        assert_eq!(
+            after.pending_boot_interface_config_version(),
+            Some(retained_boot.version)
+        );
+        assert_eq!(
+            after.config.boot_interface_selection,
+            before.config.boot_interface_selection
+        );
+        assert_ne!(after.network_config.version, before.network_config.version);
+
+        // Pending boot work does not replace the controller wakeup needed for the new networking primary.
+        assert!(
+            load_scout_pci_selection_state(&env.pool, host_machine_id)
+                .await?
+                .controller_queued
+        );
+    }
+    Ok(())
+}
+
+/// Recovers Scout correction for an old writer's unattributed BF3 primary only with matching chassis/serial boot evidence, preserving explicit choices and unrelated boot intent.
+#[crate::sqlx_test]
+async fn test_scout_pci_recovers_missing_primary_provenance(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(scout_reconciliation_config()),
+    )
+    .await;
+    for (boot_source, same_mac, known_operator_primary, corrects) in [
+        // A postmigration old writer's matching chassis choice remains eligible for automatic correction.
+        (
+            BootInterfaceSelectionSource::RedfishChassisId,
+            true,
+            false,
+            true,
+        ),
+        // Serial fallback supplies the other supported automatic provenance without inventing networking intent.
+        (
+            BootInterfaceSelectionSource::RedfishSerialNumber,
+            true,
+            false,
+            true,
+        ),
+        // An independent boot MAC cannot attribute an otherwise unknown networking decision.
+        (
+            BootInterfaceSelectionSource::RedfishChassisId,
+            false,
+            false,
+            false,
+        ),
+        // Historical Operator intent stays conservatively protected when its networking attribution is missing.
+        (BootInterfaceSelectionSource::Operator, true, false, false),
+        // A declaration may independently select boot, so matching MAC alone is insufficient.
+        (
+            BootInterfaceSelectionSource::ExpectedMachine,
+            true,
+            false,
+            false,
+        ),
+        // Known explicit networking always wins over matching automatic boot evidence.
+        (
+            BootInterfaceSelectionSource::RedfishChassisId,
+            true,
+            true,
+            false,
+        ),
+    ] {
+        // Build an ordinary two-DPU BF3 host, then represent the metadata left absent by a predecessor API.
+        let (host_config, host_id, interfaces) = create_scout_test_host(&env, boot_source).await?;
+        sqlx::query("UPDATE machine_interfaces SET primary_selection_source = $2,
+                    primary_selection_updated_at = CASE WHEN $2::boot_interface_selection_source IS NULL THEN NULL ELSE clock_timestamp() END
+                    WHERE machine_id = $1 AND primary_interface")
+            .bind(host_id).bind(known_operator_primary.then_some(BootInterfaceSelectionSource::Operator)).execute(&env.pool).await?;
+        if !same_mac {
+            // Keep automatic boot provenance while making its MAC independent of the current networking primary.
+            sqlx::query(
+                "UPDATE machine_boot_interfaces SET desired_mac_address = $2 WHERE machine_id = $1",
+            )
+            .bind(host_id)
+            .bind(interfaces.alternate_mac)
+            .execute(&env.pool)
+            .await?;
+        }
+        env.run_site_explorer_iteration().await;
+        // Isolate Scout's queue publication from work performed by the preceding Explorer iteration.
+        clear_scout_test_queue(&env.pool, host_id).await?;
+        let before = db::machine::find_one(&env.pool, &host_id, Default::default())
+            .await?
+            .expect("old-writer host");
+        assert_eq!(
+            before.config.primary_interface_selection.is_some(),
+            known_operator_primary
+        );
+        let original_boot = before
+            .config
+            .desired_boot_interface
+            .as_ref()
+            .expect("old boot decision");
+
+        // Submit a different complete PCI winner through public discovery after ordinary Explorer reconciliation.
+        submit_scout_pci_report(
+            &env.api,
+            host_id,
+            interfaces.current_id,
+            scout_pci_report(&host_config, interfaces.alternate_mac),
+        )
+        .await?;
+
+        // Reload primary, provenance and queued work so silently declining the old-writer case cannot pass.
+        let after = db::machine::find_one(&env.pool, &host_id, Default::default())
+            .await?
+            .expect("host after Scout");
+        assert_eq!(
+            after
+                .status
+                .interfaces
+                .iter()
+                .find(|interface| interface.primary_interface)
+                .expect("primary")
+                .mac_address,
+            if corrects {
+                interfaces.alternate_mac
+            } else {
+                interfaces.current_mac
+            }
+        );
+        if corrects {
+            assert_eq!(
+                after
+                    .config
+                    .primary_interface_selection
+                    .expect("corrected source")
+                    .source,
+                BootInterfaceSelectionSource::ScoutReportPci
+            );
+            assert_eq!(
+                after
+                    .config
+                    .desired_boot_interface
+                    .as_ref()
+                    .expect("corrected boot")
+                    .value
+                    .mac_address(),
+                interfaces.alternate_mac
+            );
+            assert!(
+                load_scout_pci_selection_state(&env.pool, host_id)
+                    .await?
+                    .controller_queued
+            );
+        } else {
+            assert_eq!(
+                after.config.primary_interface_selection,
+                before.config.primary_interface_selection
+            );
+            let boot = after
+                .config
+                .desired_boot_interface
+                .as_ref()
+                .expect("retained boot");
+            assert_eq!(
+                (&boot.value, boot.version),
+                (&original_boot.value, original_boot.version)
+            );
+            assert_eq!(
+                after.config.boot_interface_selection,
+                before.config.boot_interface_selection
+            );
+            assert!(
+                !load_scout_pci_selection_state(&env.pool, host_id)
+                    .await?
+                    .controller_queued
+            );
+        }
+    }
     Ok(())
 }

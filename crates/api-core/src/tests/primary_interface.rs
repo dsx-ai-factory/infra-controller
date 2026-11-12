@@ -323,6 +323,7 @@ async fn test_set_primary_interface_does_not_apply_the_zero_dpu_guard(
 // Selecting the ingestion winner is still meaningful when the current
 // source is automatic: it pins that same target as explicit operator intent.
 // Since the target does not change, this must not manufacture controller work.
+/// Pins an automatic current target as Operator intent without new boot work, and rejects an unchanged repeat without rewriting its decision time.
 #[crate::sqlx_test]
 async fn test_set_primary_interface_records_same_target_operator_authority(
     pool: sqlx::PgPool,
@@ -1662,5 +1663,166 @@ async fn test_set_primary_interface_repairs_dpu_host_with_no_admin_primary(
         "exactly the promoted interface should be primary after the repair",
     );
 
+    Ok(())
+}
+
+/// Keeps boot-only Operator decisions separate from networking intent, while both primary commands still update both decisions.
+#[crate::sqlx_test]
+async fn operator_boot_and_primary_selections_are_independent(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Start with an automatically selected primary and a second owned Admin interface.
+    let env = api_fixtures::create_test_env(pool).await;
+    let host =
+        api_fixtures::site_explorer::new_host(&env, ManagedHostConfig::default().with_dpu_count(2))
+            .await?;
+    let host_id = stable_host_id(host.host_snapshot.id);
+    let before = db::machine::find_one(&env.pool, &host_id, Default::default())
+        .await?
+        .expect("host");
+    let primary = before
+        .status
+        .interfaces
+        .iter()
+        .find(|row| row.primary_interface)
+        .expect("primary");
+    let alternate = before
+        .status
+        .interfaces
+        .iter()
+        .find(|row| row.attached_dpu_machine_id.is_some() && !row.primary_interface)
+        .expect("other DPU");
+    let automatic_primary = before
+        .config
+        .primary_interface_selection
+        .expect("automatic primary source");
+    assert_ne!(
+        automatic_primary.source,
+        BootInterfaceSelectionSource::Operator
+    );
+
+    // Boot-only selection of the current MAC must leave automatic networking attribution intact.
+    env.api
+        .machine_setup(tonic::Request::new(forge::MachineSetupRequest {
+            machine_id: Some(host_id.to_string()),
+            bmc_endpoint_request: None,
+            boot_interface_mac: Some(primary.mac_address.to_string()),
+        }))
+        .await?;
+    let boot_only = db::machine::find_one(&env.pool, &host_id, Default::default())
+        .await?
+        .expect("host after setup");
+    assert_eq!(
+        boot_only.config.primary_interface_selection,
+        Some(automatic_primary)
+    );
+    assert_eq!(
+        boot_only.network_config.version,
+        before.network_config.version
+    );
+    assert_eq!(
+        boot_only
+            .config
+            .boot_interface_selection
+            .expect("boot source")
+            .source,
+        BootInterfaceSelectionSource::Operator
+    );
+
+    // Selecting that same primary must still establish networking Operator authority, despite the boot-only request.
+    env.api
+        .set_primary_interface(tonic::Request::new(forge::SetPrimaryInterfaceRequest {
+            host_machine_id: Some(host_id),
+            interface_id: Some(primary.id),
+            ..Default::default()
+        }))
+        .await?;
+    let selected = db::machine::find_one(&env.pool, &host_id, Default::default())
+        .await?
+        .expect("explicit primary");
+    let networking_choice = selected
+        .config
+        .primary_interface_selection
+        .expect("networking source");
+    assert_eq!(
+        networking_choice.source,
+        BootInterfaceSelectionSource::Operator
+    );
+
+    // A different boot-only target must preserve the primary choice and its original decision time.
+    env.api
+        .set_dpu_first_boot_order(tonic::Request::new(forge::SetDpuFirstBootOrderRequest {
+            machine_id: Some(host_id.to_string()),
+            bmc_endpoint_request: None,
+            boot_interface_mac: Some(alternate.mac_address.to_string()),
+        }))
+        .await?;
+    let divergent = db::machine::find_one(&env.pool, &host_id, Default::default())
+        .await?
+        .expect("boot-only change");
+    assert_eq!(
+        divergent.config.primary_interface_selection,
+        Some(networking_choice)
+    );
+    assert_eq!(
+        divergent.network_config.version,
+        before.network_config.version
+    );
+    assert_eq!(
+        divergent
+            .status
+            .interfaces
+            .iter()
+            .find(|row| row.primary_interface)
+            .expect("primary")
+            .id,
+        primary.id
+    );
+    assert_eq!(
+        divergent
+            .config
+            .desired_boot_interface
+            .expect("boot target")
+            .value
+            .mac_address(),
+        alternate.mac_address
+    );
+
+    // SetPrimaryDpu keeps its compatible behavior even when the boot target already names that DPU.
+    env.api
+        .set_primary_dpu(tonic::Request::new(forge::SetPrimaryDpuRequest {
+            host_machine_id: Some(host_id),
+            dpu_machine_id: alternate.attached_dpu_machine_id,
+            ..Default::default()
+        }))
+        .await?;
+    let moved = db::machine::find_one(&env.pool, &host_id, Default::default())
+        .await?
+        .expect("moved primary");
+    assert_eq!(
+        moved
+            .status
+            .interfaces
+            .iter()
+            .find(|row| row.primary_interface)
+            .expect("primary")
+            .id,
+        alternate.id
+    );
+    assert_eq!(
+        moved
+            .config
+            .desired_boot_interface
+            .expect("boot target")
+            .value
+            .mac_address(),
+        alternate.mac_address
+    );
+    let moved_choice = moved
+        .config
+        .primary_interface_selection
+        .expect("moved networking source");
+    assert_eq!(moved_choice.source, BootInterfaceSelectionSource::Operator);
+    assert!(moved_choice.updated_at > networking_choice.updated_at);
     Ok(())
 }

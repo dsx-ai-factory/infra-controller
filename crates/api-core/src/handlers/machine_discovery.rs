@@ -799,6 +799,37 @@ pub(crate) async fn discover_machine(
             }
         }
 
+        if discovery_reporter == rpc::MachineDiscoveryReporter::DpuAgent
+            && let MachineIdSubtype::Dpu(dpu_id) = stable_machine_id.machine_id_subtype()
+        {
+            // Bootstrap must commit first; PF acquisition can retry without removing agent networking.
+            // Recheck the authenticated interface and serialize facts with controller publication.
+            let mut inventory_txn = api.txn_begin().await?;
+            db::machine_interface::lock_for_address_assignment(
+                inventory_txn.as_pgconn(), caller_interface.id,
+            ).await?;
+            let current_interface = db::machine_interface::find_one(
+                inventory_txn.as_pgconn(), caller_interface.id,
+            ).await?;
+            if current_interface.machine_id != Some(stable_machine_id) {
+                return Err(CarbideError::FailedPrecondition(
+                    "DPU discovery interface ownership changed; retry discovery".to_string(),
+                ).into());
+            }
+            let ready = db::machine_topology::record_dpu_host_pfs(
+                inventory_txn.as_pgconn(), &dpu_id, &hardware_info,
+                api.runtime_config.dpu_host_pf_pci_controller_id,
+            ).await?;
+            inventory_txn.commit().await?;
+            // Keep authenticated BF4 classification even when acquisition must retry the selected PF.
+            if !ready {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "DPU {dpu_id} host PF c{}pf0 is unavailable; retry discovery",
+                    api.runtime_config.dpu_host_pf_pci_controller_id,
+                )).into());
+            }
+        }
+
         let machine_certificate = if attest_key_challenge.is_none() {
             if std::env::var("UNSUPPORTED_CERTIFICATE_PROVIDER").is_ok() {
                 Some(rpc::MachineCertificate::default())
