@@ -17,6 +17,7 @@
 
 use std::net::SocketAddr;
 
+use bmc_platform::{PowerState, ResetType};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use libredfish::RoleId;
 use libredfish::model::service_root::RedfishVendor;
@@ -71,17 +72,22 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         interface: &MachineInterfaceSnapshot,
     ) -> Result<(), EndpointExplorationError>;
 
+    /// `report` is the BMC's explored endpoint, which selects its drivers.
+    /// Without one, or when exploration never recorded its service root,
+    /// drivers are selected for the identity the BMC serves live.
     async fn redfish_get_power_state(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
-    ) -> Result<libredfish::PowerState, EndpointExplorationError>;
+        report: Option<&EndpointExplorationReport>,
+    ) -> Result<Option<PowerState>, EndpointExplorationError>;
 
     async fn redfish_power_control(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
-        action: libredfish::SystemPowerControl,
+        report: Option<&EndpointExplorationReport>,
+        action: ResetType,
     ) -> Result<(), EndpointExplorationError>;
 
     /// Reset a Redfish Chassis (e.g. an HGX baseboard) out-of-band via the BMC at
@@ -92,8 +98,9 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         chassis_id: &str,
-        action: libredfish::SystemPowerControl,
+        action: ResetType,
     ) -> Result<(), EndpointExplorationError>;
 
     async fn have_credentials(&self, interface: &MachineInterfaceSnapshot) -> bool;

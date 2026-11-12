@@ -58,10 +58,11 @@ use std::convert::identity;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bmc_platform::ServiceRootIdentity;
+use bmc_platform::{ServiceRootIdentity, manager_index_for, primary_system_index};
 use chassis::ExploredChassisCollection;
 use component_integrity::ExploredComponentIntegrity;
 use computer_system::ExploredComputerSystem;
+pub use computer_system::model_power_state;
 use drives::ExploredDrives;
 pub use error::Error;
 use inventories::ExploredInventories;
@@ -234,16 +235,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         .await
         .map_err(Error::nv_redfish("systems members"))?;
 
-    let primary_index = systems
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find(|(_, system)| system.raw().bios.is_some())
-        .map(|(index, _)| index)
-        .unwrap_or(0);
-    if systems.is_empty() {
-        return Err(Error::bmc_not_provided("at least one computer system")());
-    }
+    let primary_index = primary_system_index(&systems)
+        .ok_or_else(Error::bmc_not_provided("at least one computer system"))?;
     let mut systems = systems;
     let system = systems.swap_remove(primary_index);
     let primary_system_id = system.raw().id.clone();
@@ -285,25 +278,9 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         .await
         .map_err(Error::nv_redfish("managers members"))?;
 
-    // Prefer the manager whose ManagerForServers links the chosen system; fall
-    // back to the first manager for BMCs that don't populate the link.
-    let manager = match managers.iter().position(|m| {
-        m.raw()
-            .links
-            .as_ref()
-            .and_then(|l| l.manager_for_servers.as_ref())
-            .is_some_and(|servers| {
-                servers
-                    .iter()
-                    .any(|s| *s.id() == explored_system.system.raw().odata_id)
-            })
-    }) {
-        Some(i) => managers.swap_remove(i),
-        None => managers
-            .into_iter()
-            .next()
-            .ok_or_else(Error::bmc_not_provided("at least one manager"))?,
-    };
+    let manager_index = manager_index_for(&managers, Some(&explored_system.system))
+        .ok_or_else(Error::bmc_not_provided("at least one manager"))?;
+    let manager = managers.swap_remove(manager_index);
 
     let hw_type = hw_type(&root, explored_system, &explored_chassis);
     let explored_drives = if config.explore_drive_firmware {
@@ -570,36 +547,22 @@ async fn build_powershelf_report<B: Bmc>(
     })
 }
 
-/// The class recorded for an endpoint: the host system's reported identity,
-/// with the service root standing in for the fields it left empty.
 /// The service root fields the report records.
 fn service_root<B: Bmc>(root: &ServiceRoot<B>) -> ModelServiceRoot {
+    let ServiceRootIdentity {
+        vendor,
+        product,
+        oem_keys,
+    } = ServiceRootIdentity::from_service_root(root);
     ModelServiceRoot {
-        vendor: root.vendor().map(|vendor| vendor.into_inner().to_string()),
-        product: root
-            .product()
-            .map(|product| product.into_inner().to_string()),
-        oem_keys: root
-            .root
-            .oem
-            .as_ref()
-            .and_then(|oem| oem.additional_properties.as_object())
-            .map(|oem| oem.keys().cloned().collect())
-            .unwrap_or_default(),
+        vendor,
+        product,
+        oem_keys,
     }
 }
 
-/// The service root part of the identity driver selection matches on, read
-/// from `root` directly. It is all a BMC in factory state serves.
-pub fn service_root_identity<B: Bmc>(root: &ServiceRoot<B>) -> ServiceRootIdentity {
-    let root = service_root(root);
-    ServiceRootIdentity {
-        vendor: root.vendor,
-        product: root.product,
-        oem_keys: root.oem_keys,
-    }
-}
-
+/// The class recorded for an endpoint: the host system's reported identity,
+/// with the service root standing in for the fields it left empty.
 fn hardware_class<B: Bmc>(root: &ServiceRoot<B>, system: &ComputerSystem) -> String {
     derive_hardware_class(
         Some(system),

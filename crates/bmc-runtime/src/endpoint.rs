@@ -101,9 +101,18 @@ impl BmcRef {
         if report.service_root.is_none() {
             return Err(ExploredBmcRefError::NoServiceRoot);
         }
+        Self::from_identity(access, platform_identity(report), rules)
+    }
+
+    /// Builds a runtime reference from canonical access metadata, selecting
+    /// drivers by `rules` for `identity`.
+    pub fn from_identity(
+        access: &BmcAccessInfo,
+        identity: PlatformIdentity,
+        rules: &Rules,
+    ) -> Result<Self, ExploredBmcRefError> {
         let ip = parse_uri_host_ip(&access.host)
             .ok_or_else(|| BmcRefError::InvalidIpAddress(access.host.clone()))?;
-        let identity = platform_identity(report);
         let selection = Drivers::select(rules, &identity)?;
         let credential_key = CredentialKey::BmcCredentials {
             credential_type: BmcCredentialType::BmcRoot {

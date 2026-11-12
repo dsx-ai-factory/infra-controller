@@ -145,7 +145,7 @@ impl Target {
             .fresh_connection()
             .await
             .map_err(|error| format!("connecting: {error}"))?;
-        Ok(bmc_explorer::service_root_identity(
+        Ok(ServiceRootIdentity::from_service_root(
             &connection.service_root,
         ))
     }

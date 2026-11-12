@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bmc_drivers::Rules;
-use bmc_platform::{AuthError, IpmiOps, PlatformError};
+use bmc_platform::{AuthError, IpmiOps, PlatformError, PlatformIdentity};
 use carbide_ipmi::IPMITool;
 use carbide_redfish::nv_redfish::{NvRedfishClientPool, NvRedfishConnection, RedfishBmc};
 use carbide_secrets::credentials::{CredentialReader, Credentials};
@@ -76,20 +76,7 @@ impl ConnectionManager {
         ipmi: Option<Arc<dyn IpmiOps>>,
     ) -> Result<ConnectedBmc<RedfishBmc>, ConnectError> {
         let connection = self.authenticated_connection(&endpoint).await?;
-        let selection = endpoint.selection();
-        tracing::debug!(
-            bmc = %endpoint.address(),
-            drivers = %selection.drivers,
-            quirks = ?selection.quirks,
-            rules_hash = %selection.hash,
-            "BMC connected with its selected drivers"
-        );
-        Ok(ConnectedBmc::new(
-            endpoint,
-            connection.bmc,
-            connection.service_root,
-            ipmi,
-        ))
+        Ok(connected(endpoint, connection, ipmi))
     }
 
     /// Evicts every pooled root for the BMC, re-issues credentials, and rebuilds.
@@ -160,6 +147,22 @@ impl ConnectionManager {
     }
 }
 
+fn connected(
+    endpoint: BmcRef,
+    connection: NvRedfishConnection,
+    ipmi: Option<Arc<dyn IpmiOps>>,
+) -> ConnectedBmc<RedfishBmc> {
+    let selection = endpoint.selection();
+    tracing::debug!(
+        bmc = %endpoint.address(),
+        drivers = %selection.drivers,
+        quirks = ?selection.quirks,
+        rules_hash = %selection.hash,
+        "BMC connected with its selected drivers"
+    );
+    ConnectedBmc::new(endpoint, connection.bmc, connection.service_root, ipmi)
+}
+
 /// Connects a service to BMCs through the drivers a site's rules select,
 /// authenticating with each BMC's stored root credentials.
 pub struct DriverConnector {
@@ -216,15 +219,48 @@ impl DriverConnector {
         report: &EndpointExplorationReport,
     ) -> Result<ConnectedBmc<RedfishBmc>, ExploredConnectError> {
         let endpoint = BmcRef::from_exploration(access, report, &self.rules)?;
-        let ipmi = EndpointIpmiOps::new(
-            self.ipmi_tool.clone(),
-            ipmi_address(&endpoint, report),
-            endpoint.credential_key().clone(),
-        );
-        Ok(self
+        let ipmi = self.ipmi(&endpoint, ipmi_address(&endpoint, report));
+        Ok(self.connections.connect(endpoint, Some(ipmi)).await?)
+    }
+
+    /// Connects to a BMC exploration has not identified, selecting drivers
+    /// for the identity it serves: its service root, primary system, and that
+    /// system's manager. Rules that need chassis or firmware inventory cannot
+    /// match, so callers with an explored report use [`Self::connect`]. IPMI
+    /// is reached at the default port.
+    pub async fn connect_unexplored(
+        &self,
+        access: &BmcAccessInfo,
+    ) -> Result<ConnectedBmc<RedfishBmc>, ExploredConnectError> {
+        // Authenticating reads only the address and credential key, so the
+        // drivers are selected once the connection can read the identity.
+        let unidentified = BmcRef::from_identity(access, PlatformIdentity::default(), &self.rules)?;
+        let connection = self
             .connections
-            .connect(endpoint, Some(Arc::new(ipmi)))
-            .await?)
+            .authenticated_connection(&unidentified)
+            .await?;
+        let identity = observe(
+            &unidentified,
+            None,
+            "fetch_identity",
+            PlatformIdentity::fetch(&connection.service_root),
+        )
+        .await
+        .map_err(ConnectError::Transport)?;
+        let endpoint = BmcRef::from_identity(access, identity, &self.rules)?;
+        let ipmi = self.ipmi(
+            &endpoint,
+            SocketAddr::new(endpoint.address().ip(), carbide_ipmi::DEFAULT_IPMI_PORT),
+        );
+        Ok(connected(endpoint, connection, Some(ipmi)))
+    }
+
+    fn ipmi(&self, endpoint: &BmcRef, address: SocketAddr) -> Arc<dyn IpmiOps> {
+        Arc::new(EndpointIpmiOps::new(
+            self.ipmi_tool.clone(),
+            address,
+            endpoint.credential_key().clone(),
+        ))
     }
 
     /// Connects to the BMC at `access` with `credentials` instead of its
@@ -485,6 +521,26 @@ mod tests {
         assert_eq!(power_state(connected).await, Some(PowerState::On));
         assert_eq!(store.reads(), 1);
         assert!(bmc.authenticated_only_as("root", "password"));
+    }
+
+    /// Without an explored report the BMC is identified by what it serves
+    /// live, naming the system exploration records, and operations act on it.
+    #[tokio::test]
+    async fn an_unexplored_bmc_is_identified_by_what_it_serves() {
+        let bmc = ExploredMock::serve();
+
+        let connected = connector(direct_pool(), &stored_root())
+            .connect_unexplored(&bmc.access)
+            .await
+            .expect("the unexplored BMC connects");
+
+        let identity = connected.endpoint().identity();
+        assert_eq!(identity.service_root.vendor.as_deref(), Some("Lenovo"));
+        assert_eq!(
+            identity.system.as_ref().map(|system| system.id.as_str()),
+            Some(bmc.report.systems[0].id.as_str())
+        );
+        assert_eq!(power_state(connected).await, Some(PowerState::On));
     }
 
     /// Explicit credentials reach the BMC directly even when the stored ones

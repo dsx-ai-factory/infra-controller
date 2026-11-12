@@ -25,8 +25,9 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use bmc_explorer::model_power_state;
+use bmc_platform::{PowerState as BmcPowerState, ResetType};
 use carbide_firmware::FirmwareConfigSnapshot;
-use carbide_redfish::libredfish::conv::IntoModel;
 use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::credentials::CredentialManager;
 use carbide_utils::periodic_timer::PeriodicTimer;
@@ -1580,7 +1581,7 @@ impl SiteExplorer {
                 );
                 metrics.increment_dpu_migration_signal(DpuMigrationSignal::ResetRequested);
 
-                if let Err(err) = self.redfish_powercycle(ep.address).await {
+                if let Err(err) = self.redfish_powercycle(ep).await {
                     tracing::warn!(
                         bmc_ip_address = %ep.address,
                         error = %err,
@@ -2732,10 +2733,7 @@ impl SiteExplorer {
                 "Site Explorer found a host that isn't on. Turning it on now.",
             );
 
-            match self
-                .redfish_power(endpoint, libredfish::SystemPowerControl::On)
-                .await
-            {
+            match self.redfish_power(endpoint, ResetType::On).await {
                 Ok(()) => return,
                 Err(err) => {
                     tracing::error!(
@@ -2945,9 +2943,13 @@ impl SiteExplorer {
         let bmc_target_addr = SocketAddr::new(endpoint.address, bmc_target_port);
 
         self.bmc_client
-            .redfish_get_power_state(bmc_target_addr, endpoint.iface)
+            .redfish_get_power_state(
+                bmc_target_addr,
+                endpoint.iface,
+                endpoint.last_explored.map(|explored| &explored.report),
+            )
             .await
-            .map(IntoModel::into_model)
+            .map(site_power_state)
             .map_err(|err| SiteExplorerError::EndpointExplorationError {
                 action: "redfish_get_power_state",
                 err,
@@ -2957,14 +2959,19 @@ impl SiteExplorer {
     async fn redfish_power(
         &self,
         endpoint: &Endpoint<'_>,
-        action: libredfish::SystemPowerControl,
+        action: ResetType,
     ) -> SiteExplorerResult<()> {
-        let is_reboot = matches!(&action, libredfish::SystemPowerControl::ForceRestart);
+        let is_reboot = action == ResetType::ForceRestart;
         let bmc_target_port = self.config.override_target_port.unwrap_or(443);
         let bmc_target_addr = SocketAddr::new(endpoint.address, bmc_target_port);
 
         self.bmc_client
-            .redfish_power_control(bmc_target_addr, endpoint.iface, action)
+            .redfish_power_control(
+                bmc_target_addr,
+                endpoint.iface,
+                endpoint.last_explored.map(|explored| &explored.report),
+                action,
+            )
             .await
             .map_err(|err| SiteExplorerError::EndpointExplorationError {
                 action: "redfish_power",
@@ -3017,8 +3024,7 @@ impl SiteExplorer {
                 ))
             })?;
 
-        self.redfish_power(endpoint, libredfish::SystemPowerControl::ForceRestart)
-            .await
+        self.redfish_power(endpoint, ResetType::ForceRestart).await
     }
 
     async fn is_managed_host_created_for_endpoint(
@@ -3099,16 +3105,16 @@ impl SiteExplorer {
 
     async fn redfish_power_control(
         &self,
-        bmc_ip_address: IpAddr,
-        action: libredfish::SystemPowerControl,
+        endpoint: &ExploredEndpoint,
+        action: ResetType,
     ) -> SiteExplorerResult<()> {
         let bmc_target_port = self.config.override_target_port.unwrap_or(443);
-        let bmc_target_addr = SocketAddr::new(bmc_ip_address, bmc_target_port);
+        let bmc_target_addr = SocketAddr::new(endpoint.address, bmc_target_port);
 
-        let interface = self.find_machine_interface_for_ip(bmc_ip_address).await?;
+        let interface = self.find_machine_interface_for_ip(endpoint.address).await?;
 
         self.bmc_client
-            .redfish_power_control(bmc_target_addr, &interface, action)
+            .redfish_power_control(bmc_target_addr, &interface, Some(&endpoint.report), action)
             .await
             .map_err(|err| SiteExplorerError::EndpointExplorationError {
                 action: "redfish_power_control",
@@ -3124,9 +3130,10 @@ impl SiteExplorer {
     /// wrappers implement, so the queued change still applies without an
     /// operator. If both are refused the error propagates and the caller
     /// surfaces `ManualPowerCycleRequired`.
-    async fn redfish_powercycle(&self, bmc_ip_address: IpAddr) -> SiteExplorerResult<()> {
+    async fn redfish_powercycle(&self, endpoint: &ExploredEndpoint) -> SiteExplorerResult<()> {
+        let bmc_ip_address = endpoint.address;
         if let Err(power_cycle_err) = self
-            .redfish_power_control(bmc_ip_address, libredfish::SystemPowerControl::PowerCycle)
+            .redfish_power_control(endpoint, ResetType::PowerCycle)
             .await
         {
             tracing::warn!(
@@ -3134,11 +3141,8 @@ impl SiteExplorer {
                 error = %power_cycle_err,
                 "PowerCycle failed; falling back to ACPowercycle to apply the queued NIC mode change",
             );
-            self.redfish_power_control(
-                bmc_ip_address,
-                libredfish::SystemPowerControl::ACPowercycle,
-            )
-            .await?;
+            self.redfish_power_control(endpoint, ResetType::FullPowerCycle)
+                .await?;
         }
 
         let mut txn = self.txn_begin().await?;
@@ -3237,10 +3241,14 @@ impl SiteExplorer {
                     _ => match interface {
                         Some(interface) => self
                             .bmc_client
-                            .redfish_get_power_state(bmc_target_addr, interface)
+                            .redfish_get_power_state(
+                                bmc_target_addr,
+                                interface,
+                                Some(&host_endpoint.report),
+                            )
                             .await
                             .ok()
-                            .map(IntoModel::into_model),
+                            .map(site_power_state),
                         None => None,
                     },
                 }
@@ -3272,7 +3280,8 @@ impl SiteExplorer {
                         .redfish_power_control(
                             bmc_target_addr,
                             interface,
-                            libredfish::SystemPowerControl::On,
+                            Some(&host_endpoint.report),
+                            ResetType::On,
                         )
                         .await
                         .map_err(|err| {
@@ -3385,7 +3394,8 @@ impl SiteExplorer {
                 .redfish_power_control(
                     bmc_target_addr,
                     interface,
-                    libredfish::SystemPowerControl::ForceRestart,
+                    Some(&host_endpoint.report),
+                    ResetType::ForceRestart,
                 )
                 .await
                 .inspect_err(|err| {
@@ -3760,6 +3770,15 @@ fn health_reports_equal_ignoring_observed_at(
     left.observed_at = None;
     right.observed_at = None;
     left == right
+}
+
+/// The site-explorer power state for a BMC's live reading. A state NICo does
+/// not classify is `Unknown`, not the report's `On` default, so remediation
+/// never mistakes it for a host that is on.
+fn site_power_state(state: Option<BmcPowerState>) -> PowerState {
+    state
+        .and_then(model_power_state)
+        .unwrap_or(PowerState::Unknown)
 }
 
 #[cfg(test)]

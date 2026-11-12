@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use bmc_explorer::test_support::generate_managed_host_reports;
 use bmc_mock::HardwareType;
+use bmc_platform::{PowerState as BmcPowerState, ResetType};
 use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_test_harness::network::segment::TestNetworkSegment;
 use carbide_test_harness::prelude::*;
@@ -1511,7 +1512,7 @@ async fn test_handle_redfish_error_powers_on_machine(
         .power_states
         .lock()
         .unwrap()
-        .insert(bmc_ip, libredfish::PowerState::Off);
+        .insert(bmc_ip, BmcPowerState::Off);
 
     explorer.run_single_iteration().await?;
 
@@ -1523,10 +1524,7 @@ async fn test_handle_redfish_error_powers_on_machine(
             .unwrap();
         assert_eq!(
             calls.as_slice(),
-            &[(
-                std::net::SocketAddr::new(bmc_ip, 443),
-                libredfish::SystemPowerControl::On
-            )]
+            &[(std::net::SocketAddr::new(bmc_ip, 443), ResetType::On)]
         );
     }
 
@@ -1613,7 +1611,7 @@ async fn test_rejected_exploration_error_skips_only_its_remediation(
             .power_states
             .lock()
             .unwrap()
-            .insert(endpoint.address, libredfish::PowerState::Off);
+            .insert(endpoint.address, BmcPowerState::Off);
     }
 
     let blocker = explorer.endpoint_explorer().block_next_exploration();
@@ -1674,7 +1672,7 @@ async fn test_rejected_exploration_error_skips_only_its_remediation(
             .as_slice(),
         &[(
             std::net::SocketAddr::new(sibling_endpoint.address, 443),
-            libredfish::SystemPowerControl::On,
+            ResetType::On,
         )],
     );
 
@@ -1753,7 +1751,7 @@ async fn test_rejected_report_is_not_treated_as_refreshed_for_ingestion(
         .power_states
         .lock()
         .unwrap()
-        .insert(address, libredfish::PowerState::Off);
+        .insert(address, BmcPowerState::Off);
 
     // The operator's clear commits while the probe is in flight, so the
     // probe's report is rejected as stale.
@@ -1809,10 +1807,7 @@ async fn test_rejected_report_is_not_treated_as_refreshed_for_ingestion(
             .lock()
             .unwrap()
             .as_slice(),
-        &[(
-            std::net::SocketAddr::new(address, 443),
-            libredfish::SystemPowerControl::On,
-        )],
+        &[(std::net::SocketAddr::new(address, 443), ResetType::On,)],
         "the live reading drives a power-on, not an ingestion"
     );
     Ok(())
@@ -1937,7 +1932,7 @@ async fn test_rejected_successful_report_preserves_only_accepted_topology(
             .power_states
             .lock()
             .unwrap()
-            .insert(endpoint.address, libredfish::PowerState::Off);
+            .insert(endpoint.address, BmcPowerState::Off);
     }
 
     let blocker = explorer.endpoint_explorer().block_next_exploration();
@@ -4480,7 +4475,7 @@ async fn test_site_explorer_retries_matched_dpu_mode_on_next_iteration(
             .redfish_power_control_calls
             .lock()
             .unwrap(),
-        vec![(host_address, libredfish::SystemPowerControl::PowerCycle)],
+        vec![(host_address, ResetType::PowerCycle)],
     );
 
     Ok(())
@@ -4585,7 +4580,7 @@ async fn test_site_explorer_power_cycles_non_dell_host_to_apply_nic_mode(
     assert!(
         power_calls
             .iter()
-            .any(|(_, action)| matches!(action, libredfish::SystemPowerControl::PowerCycle)),
+            .any(|(_, action)| matches!(action, ResetType::PowerCycle)),
         "expected an automatic host PowerCycle on the non-Dell (Lenovo) host to apply the queued NIC mode change; power calls so far: {power_calls:?}"
     );
 
@@ -4655,7 +4650,7 @@ async fn test_site_explorer_falls_back_to_ac_powercycle_when_powercycle_refused(
     // back to the cold `ACPowercycle`.
     explorer
         .endpoint_explorer()
-        .fail_power_control(libredfish::SystemPowerControl::PowerCycle);
+        .fail_power_control(ResetType::PowerCycle);
     explorer.insert_endpoints(
         mock_host
             .exploration_results(Some(host_bmc_ip), &[(0, dpu_bmc_ip)])?
@@ -4686,10 +4681,10 @@ async fn test_site_explorer_falls_back_to_ac_powercycle_when_powercycle_refused(
         .collect::<Vec<_>>();
     let powercycle_pos = host_power_calls
         .iter()
-        .position(|(_, action)| matches!(action, libredfish::SystemPowerControl::PowerCycle));
+        .position(|(_, action)| matches!(action, ResetType::PowerCycle));
     let acpowercycle_pos = host_power_calls
         .iter()
-        .position(|(_, action)| matches!(action, libredfish::SystemPowerControl::ACPowercycle));
+        .position(|(_, action)| matches!(action, ResetType::FullPowerCycle));
     assert!(
         powercycle_pos.is_some(),
         "expected `PowerCycle` to be attempted; power calls so far: {power_calls:?}"
@@ -4786,7 +4781,7 @@ async fn test_site_explorer_resets_inventory_dpu_with_ready_fallback(
             .unwrap(),
         vec![(
             std::net::SocketAddr::new(host_ip, 443),
-            libredfish::SystemPowerControl::PowerCycle,
+            ResetType::PowerCycle,
         )],
     );
     let host_endpoint = db::explored_endpoints::find_by_ips(&env.pool, vec![host_ip])
@@ -4926,7 +4921,7 @@ async fn test_site_explorer_waits_for_all_fallback_dpus(
                 .redfish_power_control_calls
                 .lock()
                 .unwrap(),
-            vec![(host_address, libredfish::SystemPowerControl::PowerCycle); resets],
+            vec![(host_address, ResetType::PowerCycle); resets],
             "{scenario}",
         );
     }
@@ -5080,7 +5075,7 @@ async fn test_site_explorer_enforces_nic_mode_on_fallback_serial_match(
         assert!(
             power_calls
                 .iter()
-                .any(|(_, action)| matches!(action, libredfish::SystemPowerControl::PowerCycle)),
+                .any(|(_, action)| matches!(action, ResetType::PowerCycle)),
             "host should be power-cycled to apply the queued NIC-mode flip; power calls so far: {power_calls:?}"
         );
     }

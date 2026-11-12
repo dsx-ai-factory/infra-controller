@@ -34,6 +34,7 @@ use model::machine_boot_interface::{
     BootInterfaceSelectionAuthority, MachineBootInterface, MachineBootInterfaceTarget,
 };
 use model::site_explorer::{BlueFieldOperatingMode, PreingestionState};
+use nv_redfish::resource::ResetType;
 use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
@@ -810,23 +811,19 @@ pub(crate) async fn admin_power_control(
             .await?;
 
     let action = match action {
-        rpc::admin_power_control_request::SystemPowerControl::On => {
-            libredfish::SystemPowerControl::On
-        }
+        rpc::admin_power_control_request::SystemPowerControl::On => ResetType::On,
         rpc::admin_power_control_request::SystemPowerControl::GracefulShutdown => {
-            libredfish::SystemPowerControl::GracefulShutdown
+            ResetType::GracefulShutdown
         }
-        rpc::admin_power_control_request::SystemPowerControl::ForceOff => {
-            libredfish::SystemPowerControl::ForceOff
-        }
+        rpc::admin_power_control_request::SystemPowerControl::ForceOff => ResetType::ForceOff,
         rpc::admin_power_control_request::SystemPowerControl::GracefulRestart => {
-            libredfish::SystemPowerControl::GracefulRestart
+            ResetType::GracefulRestart
         }
         rpc::admin_power_control_request::SystemPowerControl::ForceRestart => {
-            libredfish::SystemPowerControl::ForceRestart
+            ResetType::ForceRestart
         }
         rpc::admin_power_control_request::SystemPowerControl::AcPowercycle => {
-            libredfish::SystemPowerControl::ACPowercycle
+            ResetType::FullPowerCycle
         }
     };
 
@@ -855,7 +852,7 @@ pub(crate) async fn admin_power_control(
                 .power_options
                 .map(|x| x.desired_power_state)
                 && power_state == model::power_manager::PowerState::On
-                && action == libredfish::SystemPowerControl::ForceOff
+                && action == ResetType::ForceOff
             {
                 msg = Some(
                         "!!WARNING!! Desired power state for the host is set as On while the requested action is Off. Carbide will attempt to bring the host online after some time.".to_string(),
@@ -956,13 +953,18 @@ async fn ipmitool_reset_bmc(
 async fn redfish_power_control(
     api: &Api,
     request: rpc::BmcEndpointRequest,
-    action: libredfish::SystemPowerControl,
+    action: ResetType,
 ) -> Result<Response<()>, Status> {
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
+    let report = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
+        .await?
+        .into_iter()
+        .next()
+        .map(|explored| explored.report);
 
     api.bmc_client
-        .redfish_power_control(bmc_addr, &machine_interface, action)
+        .redfish_power_control(bmc_addr, &machine_interface, report.as_ref(), action)
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 

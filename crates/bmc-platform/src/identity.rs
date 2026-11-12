@@ -16,7 +16,12 @@
  */
 
 use mac_address::MacAddress;
+use nv_redfish::computer_system::ComputerSystem;
+use nv_redfish::manager::Manager;
+use nv_redfish::{Bmc, ServiceRoot};
 use serde::{Deserialize, Serialize};
+
+use crate::{ClassifyBmcError, PlatformError, manager_index_for, primary_system_index};
 
 /// Identity evidence reported by the Redfish service root.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -28,6 +33,26 @@ pub struct ServiceRootIdentity {
     pub product: Option<String>,
     /// Keys of the ServiceRoot `Oem` object, for example `Ami` or `Dell`.
     pub oem_keys: Vec<String>,
+}
+
+impl ServiceRootIdentity {
+    /// The identity `root` serves. It is all a BMC in factory state serves,
+    /// and all that identifies a BMC exploration could not read further.
+    pub fn from_service_root<B: Bmc>(root: &ServiceRoot<B>) -> Self {
+        Self {
+            vendor: root.vendor().map(|vendor| vendor.into_inner().to_string()),
+            product: root
+                .product()
+                .map(|product| product.into_inner().to_string()),
+            oem_keys: root
+                .root
+                .oem
+                .as_ref()
+                .and_then(|oem| oem.additional_properties.as_object())
+                .map(|oem| oem.keys().cloned().collect())
+                .unwrap_or_default(),
+        }
+    }
 }
 
 /// Identity evidence for the selected Redfish Manager resource.
@@ -42,6 +67,20 @@ pub struct ManagerIdentity {
     /// MAC addresses of the manager's network interfaces.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mac_addresses: Vec<MacAddress>,
+}
+
+impl ManagerIdentity {
+    /// The identity `manager` reports, read as exploration records it but
+    /// without MAC addresses, which take a request per network interface.
+    pub fn from_manager<B: Bmc>(manager: &Manager<B>) -> Self {
+        let raw = manager.raw();
+        Self {
+            id: raw.id.clone(),
+            model: raw.model.clone().flatten(),
+            firmware: raw.firmware_version.clone().flatten(),
+            mac_addresses: Vec::new(),
+        }
+    }
 }
 
 /// Identity evidence for the selected Redfish ComputerSystem resource.
@@ -59,6 +98,27 @@ pub struct SystemIdentity {
     pub part_number: Option<String>,
     #[serde(default)]
     pub bios_version: Option<String>,
+}
+
+impl SystemIdentity {
+    /// The identity `system` reports, read as exploration records it.
+    pub fn from_system<B: Bmc>(system: &ComputerSystem<B>) -> Self {
+        let hardware = system.hardware_id();
+        let raw = system.raw();
+        Self {
+            id: raw.id.clone(),
+            manufacturer: hardware.manufacturer.map(|value| value.to_string()),
+            model: hardware.model.map(|value| value.to_string()),
+            sku: system.sku().map(|value| value.to_string()),
+            part_number: raw.part_number.clone().flatten(),
+            bios_version: raw
+                .bios_version
+                .clone()
+                .flatten()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+        }
+    }
 }
 
 /// Identity evidence for one Redfish Chassis resource.
@@ -93,6 +153,41 @@ pub struct PlatformIdentity {
     pub system: Option<SystemIdentity>,
     pub chassis: Vec<ChassisIdentity>,
     pub firmware_inventory: Vec<FirmwareInventoryIdentity>,
+}
+
+impl PlatformIdentity {
+    /// Reads the identity of a BMC exploration has not identified: its
+    /// service root, the system exploration would choose as primary, and that
+    /// system's manager. Chassis and firmware inventory stay empty, so rules
+    /// that need them cannot match.
+    pub async fn fetch<B>(root: &ServiceRoot<B>) -> Result<Self, PlatformError>
+    where
+        B: Bmc,
+        B::Error: ClassifyBmcError,
+    {
+        let systems = match root.systems().await.map_err(PlatformError::from_redfish)? {
+            Some(systems) => systems
+                .members()
+                .await
+                .map_err(PlatformError::from_redfish)?,
+            None => Vec::new(),
+        };
+        let managers = match root.managers().await.map_err(PlatformError::from_redfish)? {
+            Some(managers) => managers
+                .members()
+                .await
+                .map_err(PlatformError::from_redfish)?,
+            None => Vec::new(),
+        };
+        let system = primary_system_index(&systems).map(|index| &systems[index]);
+        let manager = manager_index_for(&managers, system).map(|index| &managers[index]);
+        Ok(Self {
+            service_root: ServiceRootIdentity::from_service_root(root),
+            manager: manager.map(ManagerIdentity::from_manager),
+            system: system.map(SystemIdentity::from_system),
+            ..Self::default()
+        })
+    }
 }
 
 #[cfg(test)]

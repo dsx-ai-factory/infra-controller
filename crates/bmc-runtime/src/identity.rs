@@ -183,4 +183,25 @@ mod tests {
         .unwrap();
         assert_eq!(platform_identity(&report), expected);
     }
+
+    /// A BMC read live is identified by the resources exploration would
+    /// record: the host that reports a BIOS rather than a baseboard listed
+    /// before it, and the manager linked to that host.
+    #[tokio::test]
+    async fn fetched_identity_names_the_host_system_and_its_manager() {
+        let bmc = bmc_mock::test_support::dgx_gb300_bmc().await;
+
+        let identity = PlatformIdentity::fetch(bmc.service_root.as_ref())
+            .await
+            .expect("the identity reads");
+
+        let system = identity.system.expect("the host system is named");
+        assert_eq!(system.id, "System_0");
+        assert!(system.model.is_some());
+        assert_eq!(
+            identity.manager.map(|manager| manager.id).as_deref(),
+            Some("BMC_0")
+        );
+        assert!(identity.service_root.vendor.is_some());
+    }
 }
