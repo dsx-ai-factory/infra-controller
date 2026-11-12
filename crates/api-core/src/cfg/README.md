@@ -1778,6 +1778,8 @@ events, so consumers handle them identically.
 
 Every active DPF deployment must use distinct `deployment_name`, `flavor_name`, and `node_label_key` values. A deployment `node_label_key` must not be `feature.node.kubernetes.io/dpu-enabled`, which marks every DPF-managed node, or `carbide.nvidia.com/host-bmc-ip`, whose per-node contextual value is the host BMC address. These checks use the local configuration and do not query or modify cluster resources.
 
+Before changing a deployment's node selector, add the new labels to every existing DPUNode that should remain selected and verify the match. Applying a selector that excludes an existing node can cause DPF to remove its DPU from the DPUSet and trigger reprovisioning.
+
 The initial service-VPC rollout enables only IPv4 on qualified deployments. A written deployment block must include its required identity fields and provisioning source:
 
 ```toml

@@ -52,6 +52,25 @@ use crate::types::{
     DpuErrorEvent, DpuEvent, DpuPhase, DpuReadyEvent, MaintenanceEvent, RebootRequiredEvent,
 };
 
+// DPU.spec.bmcIP identifies the DPU BMC, while host power operations use the
+// host BMC address recorded on the NICo-managed DPU.
+const HOST_BMC_IP_LABEL: &str = "carbide.nvidia.com/host-bmc-ip";
+
+fn host_bmc_ip_from_label(value: &str) -> Option<std::net::IpAddr> {
+    if let Ok(ip) = value.parse() {
+        return Some(ip);
+    }
+
+    // IPv6 addresses use hyphens in labels because colons are not valid there.
+    let groups = value
+        .split('-')
+        .map(|group| u16::from_str_radix(group, 16))
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    let segments: [u16; 8] = groups.try_into().ok()?;
+    Some(std::net::Ipv6Addr::from(segments).into())
+}
+
 /// Callback for DPU state changes. Implemented automatically for all `Fn(T) -> Future`.
 /// Purpose is to allow for generic async callbacks without having to box and pin the closure.
 pub trait DPUStateCallback<T>: Fn(T) -> Self::Fut + Send + Sync + 'static {
@@ -166,7 +185,10 @@ impl<'a, R: DpuRepository, DE, RB, RD, MN, ER> DpuWatcherBuilder<'a, R, DE, RB, 
     /// Register a callback for when a host reboot is required.
     ///
     /// Invoked on every update where the DPU is in the Rebooting phase, not
-    /// only on transitions into that phase. The handler must be idempotent.
+    /// only on transitions into that phase. The DPU must have a valid
+    /// `carbide.nvidia.com/host-bmc-ip` label: dotted IPv4 or eight hexadecimal
+    /// IPv6 groups separated by hyphens. `DPU.spec.bmcIP` is the DPU BMC and
+    /// does not supply the host reboot address. The handler must be idempotent.
     ///
     /// Return `Ok(())` to acknowledge the event. Return `Err` to have the
     /// repository implementation retry after a backoff period.
@@ -371,8 +393,13 @@ where
             }
 
             if matches!(status_phase, DpuStatusPhase::Rebooting) {
-                let Some(host_bmc_ip) = dpu.spec.bmc_ip.as_deref().and_then(|ip| ip.parse().ok())
-                else {
+                let host_bmc_ip = dpu
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|labels| labels.get(HOST_BMC_IP_LABEL))
+                    .and_then(|ip| host_bmc_ip_from_label(ip));
+                let Some(host_bmc_ip) = host_bmc_ip else {
                     tracing::warn!(dpu_name = %dpu_name, "Skipping reboot event with missing or invalid BMC IP");
                     return Ok(());
                 };
