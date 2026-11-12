@@ -63,6 +63,8 @@ type Rack struct {
 	NVLDomainIDs []uuid.UUID
 	// OperationStatus is Flow's aggregate operability phase for the rack.
 	OperationStatus Phase
+	// OperationStatusDetails is nil when unavailable from the server.
+	OperationStatusDetails *RackOperationStatusDetails
 }
 
 // NVLDomain represents an NVL domain (a group of related racks).

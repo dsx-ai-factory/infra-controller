@@ -39,6 +39,7 @@ pub mod dpa_interface;
 pub mod dpu_agent_upgrade_policy;
 pub mod dpu_machine_update;
 pub mod dpu_remediation;
+pub mod expected_dpu_loopback_reservation;
 pub mod expected_machine;
 pub mod expected_nvlink_domain;
 pub mod expected_power_shelf;
@@ -81,6 +82,7 @@ pub mod network_prefix;
 pub mod network_security_group;
 pub mod network_segment;
 pub mod nic_firmware;
+pub mod nic_firmware_artifact;
 pub mod nvl_logical_partition;
 pub mod nvl_partition;
 pub mod nvlink_domain_health_report;
@@ -489,6 +491,14 @@ impl From<InvalidMachineType> for DatabaseError {
 }
 
 impl DatabaseError {
+    /// Identifies PostgreSQL lock-unavailable errors (55P03), including NOWAIT rejection.
+    /// Roll back the failed transaction before retrying.
+    pub fn is_lock_not_available(&self) -> bool {
+        matches!(self, DatabaseError::Sqlx(error)
+            if error.source.as_database_error().and_then(|error| error.code()).as_deref()
+                == Some("55P03"))
+    }
+
     /// Returns true if the database error wrapps a sqlx::Error::RowNotFound, or if it's our own DatabaseError::NotFoundError
     pub fn is_not_found(&self) -> bool {
         match self {

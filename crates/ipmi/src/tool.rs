@@ -21,7 +21,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use carbide_utils::cmd::{CmdError, CmdResult, TokioCmd};
-use carbide_uuid::machine::MachineId;
 use eyre::eyre;
 
 use crate::IPMITool;
@@ -69,14 +68,7 @@ impl IPMITool for IPMIToolImpl {
         bmc_address: SocketAddr,
         credential_key: &CredentialKey,
     ) -> Result<(), eyre::Report> {
-        let credentials = self
-            .credential_reader
-            .get_credentials(credential_key)
-            .await
-            .map_err(|e| {
-                eyre!("secret engine getting credentilas for key {credential_key:#?}: {e:#?}")
-            })?
-            .ok_or_else(|| eyre!("no credentials for key {credential_key:#?} found"))?;
+        let credentials = self.credentials(credential_key).await?;
 
         match self
             .execute_ipmitool_command(IpmiCommand::BmcColdReset, bmc_address, &credentials)
@@ -89,22 +81,11 @@ impl IPMITool for IPMIToolImpl {
 
     async fn restart(
         &self,
-        machine_id: &MachineId,
         bmc_address: SocketAddr,
         legacy_boot: bool,
         credential_key: &CredentialKey,
     ) -> Result<(), eyre::Report> {
-        let credentials: Credentials = self
-            .credential_reader
-            .get_credentials(credential_key)
-            .await
-            .map_err(|e| {
-                eyre!(
-                    "secret engine error for machine {}: {e}",
-                    machine_id.clone(),
-                )
-            })?
-            .ok_or_else(|| eyre!("no credentials for machine {} found", machine_id.clone()))?;
+        let credentials = self.credentials(credential_key).await?;
 
         let mut errors: Vec<CmdError> = Vec::default();
 
@@ -144,6 +125,19 @@ impl IPMITool for IPMIToolImpl {
 }
 
 impl IPMIToolImpl {
+    async fn credentials(
+        &self,
+        credential_key: &CredentialKey,
+    ) -> Result<Credentials, eyre::Report> {
+        self.credential_reader
+            .get_credentials(credential_key)
+            .await
+            .map_err(|e| {
+                eyre!("secret engine getting credentials for key {credential_key:#?}: {e:#?}")
+            })?
+            .ok_or_else(|| eyre!("no credentials for key {credential_key:#?} found"))
+    }
+
     async fn execute_ipmitool_command(
         &self,
         command: IpmiCommand,

@@ -37,7 +37,7 @@ func TestExpectedRackGroupMember_ToProto(t *testing.T) {
 			require.Equal(t, members, result)
 			stored, err := json.Marshal(result)
 			require.NoError(t, err)
-			require.JSONEq(t, `{"type":"`+string(tc.rest)+`","manufacturer":"NVIDIA","id":"device-01"}`, string(stored))
+			require.JSONEq(t, `{"type":"`+string(tc.rest)+`","manufacturer":"NVIDIA","id":"device-01","cartridgeIndex":null}`, string(stored))
 		})
 	}
 }
@@ -55,6 +55,17 @@ func TestExpectedRackGroupMember_FromProto(t *testing.T) {
 }
 
 func TestExpectedRackGroupProtoConversion(t *testing.T) {
+	t.Run("preserves optional cartridge index", func(t *testing.T) {
+		for _, index := range []*uint32{nil, cutil.GetPtr(uint32(0)), cutil.GetPtr(uint32(7)), cutil.GetPtr(^uint32(0))} {
+			member := ExpectedRackGroupMember{Type: ExpectedRackGroupMemberTypeCompute, Manufacturer: "NVIDIA", ID: "device-01", CartridgeIndex: index}
+			stored, err := json.Marshal(member)
+			require.NoError(t, err)
+			var loaded, result ExpectedRackGroupMember
+			require.NoError(t, json.Unmarshal(stored, &loaded))
+			require.NoError(t, result.FromProto(loaded.ToProto()))
+			require.Equal(t, member, result)
+		}
+	})
 	testExpectedRackGroupMembershipFromProto(t)
 	t.Run("round trips identity profile membership and metadata", func(t *testing.T) {
 		original := &ExpectedRackGroup{

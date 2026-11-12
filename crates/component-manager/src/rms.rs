@@ -2242,14 +2242,16 @@ async fn resolve_pre_ingestion_switch_identities(
         .collect())
 }
 
-fn to_rms_power_operation(action: PowerAction) -> i32 {
+fn to_rms_power_operation(action: PowerAction) -> Result<i32, ComponentManagerError> {
     match action {
-        PowerAction::On => rms::PowerOperation::On as i32,
-        PowerAction::GracefulShutdown => rms::PowerOperation::Off as i32,
-        PowerAction::ForceOff => rms::PowerOperation::ForceOff as i32,
-        PowerAction::GracefulRestart | PowerAction::ForceRestart | PowerAction::AcPowercycle => {
-            rms::PowerOperation::Reset as i32
-        }
+        PowerAction::On => Ok(rms::PowerOperation::On as i32),
+        PowerAction::GracefulShutdown => Ok(rms::PowerOperation::Off as i32),
+        PowerAction::ForceOff => Ok(rms::PowerOperation::ForceOff as i32),
+        PowerAction::GracefulRestart => Ok(rms::PowerOperation::GracefulRestart as i32),
+        PowerAction::ForceRestart => Ok(rms::PowerOperation::ForceRestart as i32),
+        PowerAction::AcPowercycle => Err(ComponentManagerError::Unsupported(
+            "RMS power control does not support AC power cycle".into(),
+        )),
     }
 }
 
@@ -2386,6 +2388,7 @@ impl PowerShelfManager for RmsBackend {
         endpoints: &[PowerShelfEndpoint],
         action: PowerAction,
     ) -> Result<Vec<PowerShelfComponentResult>, ComponentManagerError> {
+        let operation = to_rms_power_operation(action)?;
         let macs: Vec<MacAddress> = endpoints.iter().map(|ep| ep.pmc_mac).collect();
         let mut ids = resolve_power_shelf_identities(&self.db, &macs).await?;
         // Power shelves with no `power_shelves` row yet (pre-ingestion) fall back
@@ -2400,7 +2403,6 @@ impl PowerShelfManager for RmsBackend {
         ids.extend(
             resolve_pre_ingestion_power_shelf_identities(&self.db, &pre_ingestion_macs).await?,
         );
-        let operation = to_rms_power_operation(action);
         let mut results = Vec::with_capacity(endpoints.len());
 
         for ep in endpoints {
@@ -3838,6 +3840,7 @@ impl NvSwitchManager for RmsBackend {
         endpoints: &[SwitchEndpoint],
         action: PowerAction,
     ) -> Result<Vec<SwitchComponentResult>, ComponentManagerError> {
+        let operation = to_rms_power_operation(action)?;
         let macs: Vec<MacAddress> = endpoints.iter().map(|ep| ep.bmc_mac).collect();
         let mut ids = resolve_switch_identities(&self.db, &macs).await?;
         // Switches with no `switches` row yet (pre-ingestion) fall back to the
@@ -3850,7 +3853,6 @@ impl NvSwitchManager for RmsBackend {
             .filter(|m| !ids.contains_key(m))
             .collect();
         ids.extend(resolve_pre_ingestion_switch_identities(&self.db, &pre_ingestion_macs).await?);
-        let operation = to_rms_power_operation(action);
         let mut results = Vec::with_capacity(endpoints.len());
         let hostnames = resolve_switch_machine_interface_hostnames(&self.db, endpoints).await?;
 
@@ -5982,6 +5984,7 @@ impl ComputeTrayManager for RmsBackend {
         endpoints: &[ComputeTrayEndpoint],
         action: PowerAction,
     ) -> Result<Vec<ComputeTrayResult>, ComponentManagerError> {
+        let operation = to_rms_power_operation(action)?;
         // Ingested trays resolve their RMS identity from the machine row by BMC
         // IP.
         let bmc_ips: Vec<IpAddr> = endpoints.iter().map(|ep| ep.bmc_ip).collect();
@@ -5998,12 +6001,6 @@ impl ComputeTrayManager for RmsBackend {
         let pre_ingestion =
             Self::resolve_pre_ingestion_compute_identities(&self.db, &pre_ingestion_macs).await?;
 
-        // Preserve graceful compute reboots without changing switch, shelf, or
-        // legacy force-restart/power-cycle mappings.
-        let operation = match action {
-            PowerAction::GracefulRestart => rms::PowerOperation::GracefulRestart as i32,
-            _ => to_rms_power_operation(action),
-        };
         let mut results = Vec::with_capacity(endpoints.len());
 
         for ep in endpoints {
@@ -6545,22 +6542,75 @@ mod tests {
 
     #[test]
     fn power_action_maps_to_rms_operation() {
-        value_scenarios!(to_rms_power_operation:
+        carbide_test_support::scenarios!(
+            run = |action| to_rms_power_operation(action).map_err(|error| error.to_string());
             "power on" {
-                PowerAction::On => rms::PowerOperation::On as i32,
+                PowerAction::On => Yields(rms::PowerOperation::On as i32),
             }
 
             "power off" {
-                PowerAction::GracefulShutdown => rms::PowerOperation::Off as i32,
-                PowerAction::ForceOff => rms::PowerOperation::ForceOff as i32,
+                PowerAction::GracefulShutdown => Yields(rms::PowerOperation::Off as i32),
+                PowerAction::ForceOff => Yields(rms::PowerOperation::ForceOff as i32),
             }
 
             "reset" {
-                PowerAction::GracefulRestart => rms::PowerOperation::Reset as i32,
-                PowerAction::ForceRestart => rms::PowerOperation::Reset as i32,
-                PowerAction::AcPowercycle => rms::PowerOperation::Reset as i32,
+                PowerAction::GracefulRestart => Yields(rms::PowerOperation::GracefulRestart as i32),
+                PowerAction::ForceRestart => Yields(rms::PowerOperation::ForceRestart as i32),
+            }
+            "unsupported AC cycle" {
+                PowerAction::AcPowercycle => FailsWith(
+                    "unsupported operation: RMS power control does not support AC power cycle".to_string(),
+                ),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn ac_power_cycle_is_rejected_before_rms_dispatch_for_all_components() {
+        // A closed pool makes accidental identity lookups fail immediately.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgresql://localhost/unused")
+            .unwrap();
+        pool.close().await;
+        let mock = Arc::new(MockRmsApi::new());
+        let backend = RmsBackend::new(
+            mock.clone(),
+            Some(mock.clone()),
+            pool,
+            Arc::new(rack_profile_config()),
+            true,
+        );
+        let action = PowerAction::AcPowercycle;
+        for (component, error) in [
+            (
+                "compute",
+                ComputeTrayManager::power_control(
+                    &backend,
+                    &[make_ct_endpoint(CT_IP_1, CT_MAC_1)],
+                    action,
+                )
+                .await
+                .unwrap_err(),
+            ),
+            (
+                "switch",
+                NvSwitchManager::power_control(&backend, &[make_sw_endpoint(SW_MAC_1)], action)
+                    .await
+                    .unwrap_err(),
+            ),
+            (
+                "power shelf",
+                PowerShelfManager::power_control(&backend, &[make_ps_endpoint(PS_MAC_1)], action)
+                    .await
+                    .unwrap_err(),
+            ),
+        ] {
+            assert!(
+                matches!(error, ComponentManagerError::Unsupported(_)),
+                "{component}: {error}"
+            );
+        }
+        assert!(mock.batch_set_power_state_calls().await.is_empty());
     }
 
     #[test]
@@ -12914,8 +12964,7 @@ mod tests {
                 PowerAction::GracefulRestart,
                 rms::PowerOperation::GracefulRestart,
             ),
-            (PowerAction::ForceRestart, rms::PowerOperation::Reset),
-            (PowerAction::AcPowercycle, rms::PowerOperation::Reset),
+            (PowerAction::ForceRestart, rms::PowerOperation::ForceRestart),
         ] {
             let previous_calls = mock.batch_set_power_state_calls().await.len();
             for id in [ct1, ct2] {

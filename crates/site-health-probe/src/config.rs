@@ -207,6 +207,16 @@ pub(crate) struct ProviderAccount {
     pub auth: RestCredentials,
 }
 
+/// Optional dedicated tenant fixture. Provider ownership would make allocation stats site-wide.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TenantAccount {
+    pub org: String,
+    pub tenant_id: String,
+    pub instance_type: String,
+    pub auth: RestCredentials,
+}
+
 /// The nico-rest-api side of the state readers. GET only.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -216,6 +226,10 @@ pub(crate) struct RestStateConfig {
     /// Optional extra CA bundle path for the REST endpoint.
     pub ca: String,
     pub provider: ProviderAccount,
+    pub tenant: Option<TenantAccount>,
+    /// Skips the machine, rack and tray totals (family `rest_totals`), for a
+    /// site whose REST API cannot answer them in time.
+    pub skip_totals: bool,
 }
 
 /// One reader's schedule. A sweep may outlast its interval: the next tick is
@@ -544,6 +558,19 @@ impl StateConfig {
                 errs.push("state.rest.provider.org is required".to_string());
             }
             validate_credentials("state.rest.provider.auth", &rest.provider.auth, errs);
+            if let Some(t) = &rest.tenant {
+                if t.org.is_empty()
+                    || t.org == rest.provider.org
+                    || t.tenant_id.is_empty()
+                    || t.instance_type.is_empty()
+                {
+                    errs.push(
+                        "state.rest.tenant needs a distinct org, tenant_id and instance_type"
+                            .to_string(),
+                    );
+                }
+                validate_credentials("state.rest.tenant.auth", &t.auth, errs);
+            }
         }
 
         if self.paging.keep_seconds == 0 {
@@ -1168,6 +1195,16 @@ state:
                 "rest credentials are one kind",
                 "state:\n  enabled: true\n  rest: {provider: {auth: {token_file: f, client_id: c}}}\n",
                 "state.rest.provider.auth takes token_file or client credentials, not both",
+            ),
+            (
+                "tenant differs from provider",
+                "state:\n  enabled: true\n  readers: {rest_inventory: {enabled: true, interval: 120s, timeout: 600s}}\n  rest: {provider: {org: p}, tenant: {org: p, tenant_id: t, instance_type: i, auth: {token_file: f}}}\n",
+                "state.rest.tenant needs a distinct org",
+            ),
+            (
+                "tenant credentials are required",
+                "state:\n  enabled: true\n  readers: {rest_inventory: {enabled: true, interval: 120s, timeout: 600s}}\n  rest: {provider: {org: p}, tenant: {org: t, tenant_id: t, instance_type: i, auth: {}}}\n",
+                "state.rest.tenant.auth",
             ),
             (
                 "partial reader rejected",

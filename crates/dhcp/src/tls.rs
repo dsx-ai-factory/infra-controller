@@ -16,11 +16,11 @@
  */
 
 use forge_tls::client_config::ClientCert;
-use rpc::forge_tls_client::ForgeClientConfig;
+use rpc::carbide_tls_client::CarbideClientConfig;
 
 use crate::CONFIG;
 
-pub(super) fn build_forge_client_config() -> ForgeClientConfig {
+pub(super) fn build_carbide_client_config() -> CarbideClientConfig {
     let forge_root_ca_path = &CONFIG
         .read()
         .unwrap() // safety: the only way this will panic is if the lock is poisoned,
@@ -42,5 +42,5 @@ pub(super) fn build_forge_client_config() -> ForgeClientConfig {
         key_path: forge_client_key_path.clone(),
     };
 
-    ForgeClientConfig::new(forge_root_ca_path.clone(), Some(client_cert))
+    CarbideClientConfig::new(forge_root_ca_path.clone(), Some(client_cert))
 }

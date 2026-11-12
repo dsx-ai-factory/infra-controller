@@ -146,8 +146,9 @@ pub async fn run_discovery_iteration(
         );
     }
 
-    // prune before respawn so downgraded auto-mode endpoints get replaced
-    ctx.collectors.prune_finished_logs();
+    // Logs auto-mode transitions and gNMI stream task failures finish their
+    // parents without discovery stopping them. Prune those entries before respawn.
+    ctx.collectors.prune_finished_collectors();
 
     // Metadata changes keep the same endpoint key and collector type. Complete
     // old collector cleanup before respawn so a late CollectorRemoved cannot

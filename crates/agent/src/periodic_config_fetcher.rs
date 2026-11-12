@@ -19,7 +19,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ::rpc::forge_tls_client::ForgeClientConfig;
+use ::rpc::carbide_tls_client::CarbideClientConfig;
 use ::rpc::{Instance, forge as rpc};
 use arc_swap::ArcSwapOption;
 use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
@@ -131,10 +131,10 @@ impl Drop for PeriodicConfigFetcher {
 
 impl PeriodicConfigFetcher {
     pub(super) async fn new(config: PeriodicConfigFetcherConfig) -> Self {
-        let forge_client_config = Arc::clone(&config.forge_client_config);
+        let carbide_client_config = Arc::clone(&config.carbide_client_config);
         // Fetch the sitename from Carbide at the start and keep it in State
         // so that it can be made available as instance metadata.
-        let sitename = match fetch_sitename(&forge_client_config, &config.forge_api).await {
+        let sitename = match fetch_sitename(&carbide_client_config, &config.forge_api).await {
             Ok(sn) => sn,
             Err(e) => {
                 warn!(error = %e, "Unable to fetch sitename");
@@ -152,7 +152,7 @@ impl PeriodicConfigFetcher {
 
         // Do an initial synchronous fetch so that caller has data to use
         // This gets a DPU on the network immediately
-        let next_fetch_delay = single_fetch(&forge_client_config, state.clone(), true).await;
+        let next_fetch_delay = single_fetch(&carbide_client_config, state.clone(), true).await;
 
         let task_state = state.clone();
         let join_handle = tokio::spawn(async move {
@@ -164,7 +164,7 @@ impl PeriodicConfigFetcher {
                     () = tokio::time::sleep(delay) => {}
                 }
                 next_fetch_delay =
-                    single_fetch(&forge_client_config, task_state.clone(), false).await;
+                    single_fetch(&carbide_client_config, task_state.clone(), false).await;
             }
         });
 
@@ -196,24 +196,24 @@ pub(super) struct PeriodicConfigFetcherConfig {
     pub(super) config_fetch_interval: Duration,
     pub(super) machine_id: DpuMachineId,
     pub(super) forge_api: String,
-    pub(super) forge_client_config: Arc<ForgeClientConfig>,
+    pub(super) carbide_client_config: Arc<CarbideClientConfig>,
 }
 
 // Use the version grpc call to carbide to get
 // the sitename. This will be made visible to tenant OS
 // at an FMDS endpoint
 async fn fetch_sitename(
-    forge_client_config: &ForgeClientConfig,
+    carbide_client_config: &CarbideClientConfig,
     forge_api: &str,
 ) -> Result<Option<String>, eyre::Report> {
-    let mut client = create_forge_client(forge_api, forge_client_config).await?;
+    let mut client = create_forge_client(forge_api, carbide_client_config).await?;
 
     get_sitename(&mut client).await
 }
 
 /// Returns the next fetch delay, or `None` when the fetcher was dropped.
 async fn single_fetch(
-    forge_client_config: &ForgeClientConfig,
+    carbide_client_config: &CarbideClientConfig,
     state: Arc<PeriodicFetcherState>,
     initial_fetch: bool,
 ) -> Option<Duration> {
@@ -231,7 +231,7 @@ async fn single_fetch(
     let result = fetch(
         &state.config.machine_id,
         &state.config.forge_api,
-        forge_client_config,
+        carbide_client_config,
         accepted.as_deref(),
     )
     .await;
@@ -280,7 +280,7 @@ async fn single_fetch(
 async fn fetch(
     dpu_machine_id: &MachineId,
     forge_api: &str,
-    client_config: &ForgeClientConfig,
+    client_config: &CarbideClientConfig,
     accepted: Option<&rpc::ManagedHostNetworkConfigResponse>,
 ) -> Result<rpc::ManagedHostNetworkConfigResponse, eyre::Report> {
     let mut client = create_forge_client(forge_api, client_config).await?;

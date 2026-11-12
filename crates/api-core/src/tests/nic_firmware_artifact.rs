@@ -752,6 +752,34 @@ async fn retention_reads_only_current_host_operations_and_db_failure_denies_acce
             .collect::<Vec<_>>(),
         ["operation-5", "operation-6"]
     );
+    // The new coherent snapshot must select the same stable/predicted hosts;
+    // including a DPU copy would make otherwise valid artifact requests fail.
+    let mut session = db::DbSessionGuard::acquire(&pool).await.unwrap();
+    session
+        .begin_retention_read(Duration::from_secs(5))
+        .await
+        .unwrap();
+    db::nic_firmware_artifact::lock_retention(session.as_pgconn())
+        .await
+        .unwrap();
+    let mut from_snapshot = db::nic_firmware_artifact::snapshot(session.as_pgconn(), host_id(5))
+        .await
+        .unwrap()
+        .unwrap()
+        .into_host_operations()
+        .unwrap();
+    session.commit_retention_read().await.unwrap();
+    from_snapshot.sort_by(|(_, left), (_, right)| left.operation_id.cmp(&right.operation_id));
+    assert_eq!(
+        from_snapshot
+            .iter()
+            .map(|(id, operation)| (*id, operation.operation_id.as_str()))
+            .collect::<Vec<_>>(),
+        operations
+            .iter()
+            .map(|(id, operation)| (*id, operation.operation_id.as_str()))
+            .collect::<Vec<_>>(),
+    );
     let cache = cache(256);
     let app = router(pool.clone(), cache.cache.clone(), cache.cancel.clone());
     let requested = uri(&operations[0].1, &digest(IMAGE), "image");
@@ -781,12 +809,22 @@ async fn retention_reads_only_current_host_operations_and_db_failure_denies_acce
     assert_eq!(after_denial, backend);
     // The authenticated host is valid, but a broken retention snapshot cannot
     // authorize eviction or a new source transfer on its behalf.
-    sqlx::query("UPDATE machines SET controller_state = $2 WHERE id = $1")
+    let nested = format!("{}null{}", "[".repeat(150), "]".repeat(150));
+    sqlx::query("UPDATE machines SET controller_state = $2::text::jsonb WHERE id = $1")
         .bind(machine_id(6, MachineType::PredictedHost))
-        .bind(serde_json::json!({"state": "nicfirmwareupdating", "operation": {}}))
+        // Bind text so the fixture itself does not parse through serde_json's
+        // depth limit. A denied request must never parse this unrelated value.
+        .bind(format!(
+            "{{\"state\":\"nicfirmwareupdating\",\"operation\":{nested}}}"
+        ))
         .execute(&pool)
         .await
         .expect("corrupt another host's retained operation");
+    // Authorization still rejects this operation ID before decoding unrelated
+    // retention, even though the same snapshot contains corrupt membership.
+    let unknown = requested.replace("operation-5", "unknown-operation");
+    let denied = request(&app, Some(principal(host_id(5))), Method::GET, &unknown).await;
+    assert_eq!(denied.status(), StatusCode::NOT_FOUND);
     let unavailable_retention =
         request(&app, Some(principal(host_id(5))), Method::GET, &requested).await;
     assert_eq!(
@@ -806,10 +844,20 @@ async fn retention_reads_only_current_host_operations_and_db_failure_denies_acce
         .expect("backend after decode denial");
     assert_eq!(after_decode, backend);
     assert!(origin.paths().is_empty());
+    // The successful callback must also return this same healthy session after
+    // both cold Pending and warm Ready responses, rather than reconnecting.
+    seed(&pool, operations[1].0, None).await;
+    let successful = ready(&app, host_id(5), &requested).await;
+    assert_eq!(to_bytes(successful.into_body(), 1024).await.unwrap(), IMAGE);
+    let after_success: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&pool)
+        .await
+        .expect("backend after successful artifact open");
+    assert_eq!(after_success, backend);
     pool.close().await;
     let response = request(&app, Some(principal(host_id(5))), Method::GET, &requested).await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert!(origin.paths().is_empty());
+    assert_eq!(origin.paths(), ["/image"]);
     cache.finish().await;
     origin.finish().await;
 }
@@ -1038,7 +1086,7 @@ async fn blocked_snapshots_release_pool_capacity_on_deadline_and_cancellation(po
         crate::tests::common::postgres::wait_for_blocked_query(
             &pool,
             blocker_pid,
-            "SELECT controller_state FROM machines",
+            "SELECT controller_state, COALESCE",
         )
         .await;
         match stop {
@@ -1071,14 +1119,21 @@ async fn blocked_snapshots_release_pool_capacity_on_deadline_and_cancellation(po
         assert!(origin.paths().is_empty());
         assert!(!cache.namespace().exists());
 
-        // The original statement is still blocked by DDL. A replacement session
-        // proves abnormal drop freed the sole local pool slot immediately.
+        // Check local capacity before doing network I/O: a slow replacement
+        // handshake must not be mistaken for a connection still held by SQLx.
+        assert_eq!(
+            reader_pool.size(),
+            0,
+            "{scenario}: abandoned session detached"
+        );
+        // The original statement is still blocked by DDL. A different backend
+        // proves the replacement works before the schema lock is released.
         let replacement_pid: i32 = tokio::time::timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(10),
             sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&reader_pool),
         )
         .await
-        .expect("local pool slot recovered")
+        .expect("replacement connection established")
         .expect("replacement backend");
         assert_ne!(replacement_pid, original_pid);
         blocker.rollback().await.expect("release schema lock");
@@ -1099,4 +1154,233 @@ async fn blocked_snapshots_release_pool_capacity_on_deadline_and_cancellation(po
         cache.finish().await;
         origin.finish().await;
     }
+}
+
+// Real route ownership must keep SQL exclusion through queued physical work,
+// even after cancellation and beyond the configured idle timer. A lost backend
+// instead fails the release visibly and must not strand cache or pool capacity.
+#[crate::sqlx_test]
+async fn physical_open_owns_sql_exclusion_and_commit_failure_is_retryable(pool: PgPool) {
+    let options = (*pool.connect_options()).clone();
+    tokio::task::spawn_blocking(move || {
+        // Isolate the blocking queue so its depth identifies this cache worker,
+        // without exposing a production test hook or blocking unrelated tests.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all().max_blocking_threads(1).build().unwrap();
+        runtime.block_on(async move {
+            let control = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(4).connect_with(options.clone()).await.unwrap();
+            // Open every control connection before the blocking gate, so a
+            // later query cannot need DNS lookup on the occupied blocking thread.
+            let mut control_connections = Vec::with_capacity(4);
+            for _ in 0..4 {
+                control_connections.push(control.acquire().await.unwrap());
+            }
+            drop(control_connections);
+            let origin = Origin::start(false).await;
+            for (scenario, cancel_request, seed_number) in [
+                ("cancelled caller retains the SQL owner", true, 51),
+                ("backend loss returns a retryable HTTP error", false, 52),
+            ] {
+                let host = host_id(seed_number);
+                let operation = admitted(&origin);
+                create(&control, host.into(), ManagedHostState::NicFirmwareUpdating {
+                    operation: operation.clone(),
+                }).await;
+                let readers = sqlx::postgres::PgPoolOptions::new()
+                    .max_connections(1).connect_with(options.clone()).await.unwrap();
+                sqlx::query("SELECT set_config('idle_in_transaction_session_timeout', '100', false)")
+                    .execute(&readers).await.unwrap();
+                let reader_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                    .fetch_one(&readers).await.unwrap();
+                let cache = cache(64);
+                std::fs::create_dir_all(cache.namespace()).unwrap();
+                std::fs::write(cache.namespace().join(digest(IMAGE)), IMAGE).unwrap();
+                let app = router(readers.clone(), cache.cache.clone(), CancellationToken::new());
+                let requested = uri(&operation, &digest(IMAGE), "image");
+
+                let (started_tx, started) = tokio::sync::oneshot::channel();
+                let (release, released) = std::sync::mpsc::channel();
+                let blocker = tokio::task::spawn_blocking(move || {
+                    started_tx.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(15))
+                        .expect("release isolated physical-work gate");
+                });
+                tokio::time::timeout(Duration::from_secs(5), started).await
+                    .expect("isolated physical-work gate starts").unwrap();
+                let get = tokio::spawn({
+                    let app = app.clone();
+                    let requested = requested.clone();
+                    async move { request(&app, Some(principal(host)), Method::GET, &requested).await }
+                });
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while tokio::runtime::Handle::current().metrics().blocking_queue_depth() == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                }).await.expect("real cache open queued behind the physical gate");
+
+                let mut writer = control.begin().await.unwrap();
+                let writer = tokio::spawn(async move {
+                    db::nic_firmware_artifact::lock_retention_for_update(&mut writer).await.unwrap();
+                    writer.commit().await.unwrap();
+                });
+                crate::tests::common::postgres::wait_for_blocked_query(
+                    &control, reader_pid, "pg_advisory_xact_lock(",
+                ).await;
+                let get = if cancel_request {
+                    get.abort();
+                    assert!(get.await.unwrap_err().is_cancelled());
+                    None
+                } else { Some(get) };
+                // This is the actual PostgreSQL idle-expiry boundary, not a
+                // scheduling delay: hold physical work past its 100 ms limit.
+                sqlx::query("SELECT pg_sleep(0.3)").execute(&control).await.unwrap();
+                let shared: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid = $1 AND locktype = 'advisory' AND mode = 'ShareLock' AND granted)",
+                ).bind(reader_pid).fetch_one(&control).await.unwrap();
+                assert!(shared, "{scenario}: SQL exclusion still held");
+                assert!(!writer.is_finished(), "{scenario}: writer still excluded");
+                if !cancel_request {
+                    // Terminate only this captured backend in the isolated test
+                    // database, after its physical work was definitely queued.
+                    let killed: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+                        .bind(reader_pid).fetch_one(&control).await.unwrap();
+                    assert!(killed);
+                }
+                release.send(()).unwrap();
+                blocker.await.unwrap();
+                tokio::time::timeout(Duration::from_secs(5), writer).await
+                    .expect("writer progresses after exclusion ends").unwrap();
+                if let Some(get) = get {
+                    let response = tokio::time::timeout(Duration::from_secs(5), get).await
+                        .expect("commit failure reaches HTTP caller").unwrap();
+                    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                    assert_eq!(response.headers()[header::RETRY_AFTER], "5");
+                    assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap(), "firmware state unavailable");
+                }
+                assert!(origin.paths().is_empty(), "{scenario}: no source access");
+                // A fresh successful request proves capacity is reusable. Keep
+                // its body unread while a writer acquires exclusion, proving
+                // that streaming holds a cache reader but no SQL transaction.
+                let response = tokio::time::timeout(Duration::from_secs(5),
+                    request(&app, Some(principal(host)), Method::GET, &requested),
+                ).await.expect("fresh request after physical completion");
+                assert_eq!(response.status(), StatusCode::OK, "{scenario}");
+                let mut streaming_writer = control.begin().await.unwrap();
+                tokio::time::timeout(Duration::from_secs(5),
+                    db::nic_firmware_artifact::lock_retention_for_update(&mut streaming_writer),
+                ).await.expect("streaming response has released SQL exclusion").unwrap();
+                streaming_writer.commit().await.unwrap();
+                assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap(), IMAGE);
+                assert!(origin.paths().is_empty());
+                readers.close().await;
+                cache.finish().await;
+            }
+            origin.finish().await;
+            control.close().await;
+        });
+    }).await.expect("isolated physical-work runtime");
+}
+
+// The writer commits after the GET starts waiting for its lock. Authorization
+// and retention must both see that commit before the cache can evict anything.
+#[crate::sqlx_test]
+async fn retention_snapshot_sees_membership_committed_while_waiting_for_the_lock(pool: PgPool) {
+    let origin = Origin::start(false).await;
+    let requesting_host = host_id(41);
+    let retaining_host = host_id(42);
+    let operation = admitted(&origin);
+    create(&pool, requesting_host.into(), ManagedHostState::Ready).await;
+    create(&pool, retaining_host.into(), ManagedHostState::Ready).await;
+    let cache = cache(64);
+    let retained_bytes = [b'r'; 64];
+    let retained_digest = digest(&retained_bytes);
+    std::fs::create_dir_all(cache.namespace()).unwrap();
+    let retained_path = cache.namespace().join(&retained_digest);
+    std::fs::write(&retained_path, retained_bytes).unwrap();
+    let app = router(pool.clone(), cache.cache.clone(), CancellationToken::new());
+
+    // Simulate the future producer's final transaction, without enabling it.
+    let mut writer = pool.begin().await.expect("begin new operation");
+    db::nic_firmware_artifact::lock_retention_for_update(&mut writer)
+        .await
+        .expect("lock new retention membership");
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .unwrap();
+    let requested = uri(&operation, &digest(IMAGE), "image");
+    let response = tokio::spawn(async move {
+        request(
+            &app,
+            Some(principal(requesting_host)),
+            Method::GET,
+            &requested,
+        )
+        .await
+    });
+    crate::tests::common::postgres::wait_for_blocked_query(
+        &pool,
+        writer_pid,
+        "pg_advisory_xact_lock_shared",
+    )
+    .await;
+
+    // Authorization must also see the writer's commit. Reading this host
+    // before acquiring the lock would incorrectly return 404 for the GET.
+    sqlx::query("UPDATE machines SET controller_state = $2 WHERE id = $1")
+        .bind(requesting_host)
+        .bind(sqlx::types::Json(ManagedHostState::NicFirmwareUpdating {
+            operation: operation.clone(),
+        }))
+        .execute(&mut *writer)
+        .await
+        .expect("authorize requester in the same writer transaction");
+    let mut retained_operation = operation;
+    retained_operation.operation_id = "new-retained-operation".into();
+    retained_operation.targets[0].resolution.entry.image.sha256 = retained_digest;
+    retained_operation
+        .validate()
+        .expect("valid newly retained operation");
+    sqlx::query("UPDATE machines SET controller_state = $2 WHERE id = $1")
+        .bind(retaining_host)
+        .bind(sqlx::types::Json(ManagedHostState::NicFirmwareUpdating {
+            operation: retained_operation,
+        }))
+        .execute(&mut *writer)
+        .await
+        .expect("save new membership");
+    writer.commit().await.expect("commit new operation");
+
+    let response = tokio::time::timeout(Duration::from_secs(5), response)
+        .await
+        .expect("GET finishes after writer")
+        .expect("join GET");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[header::RETRY_AFTER], "5");
+    assert_eq!(
+        to_bytes(response.into_body(), 1024).await.unwrap(),
+        "firmware cache is full"
+    );
+    assert_eq!(std::fs::read(&retained_path).unwrap(), retained_bytes);
+    assert!(
+        origin.paths().is_empty(),
+        "retained capacity denies transfer before source access"
+    );
+
+    // Retention lasts only as long as the active operation, rather than pinning
+    // the cache permanently after a successful lock/commit cycle.
+    seed(&pool, retaining_host, None).await;
+    let recovered = router(pool.clone(), cache.cache.clone(), CancellationToken::new());
+    let operation = admitted(&origin);
+    let response = ready(
+        &recovered,
+        requesting_host,
+        &uri(&operation, &digest(IMAGE), "image"),
+    )
+    .await;
+    assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap(), IMAGE);
+    assert!(!retained_path.exists());
+    cache.finish().await;
+    origin.finish().await;
 }

@@ -1098,7 +1098,7 @@ func TestFetchAllocationConstraints_UsesIDWhenDisplayPartsAreEmpty(t *testing.T)
 	defer server.Close()
 	session := &Session{Client: appcli.NewClient(server.URL, "acme", "token", nil, false)}
 
-	items, err := session.fetchAllocationConstraints("allocation-1")
+	items, err := session.fetchAllocationConstraints(context.Background(), "allocation-1")
 
 	require.NoError(t, err)
 	require.Len(t, items, 1)

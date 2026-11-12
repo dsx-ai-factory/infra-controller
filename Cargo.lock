@@ -790,6 +790,49 @@ dependencies = [
 ]
 
 [[package]]
+name = "bmc-backend"
+version = "0.1.0"
+dependencies = [
+ "bmc-drivers",
+ "bmc-platform",
+ "bmc-runtime",
+ "carbide-api-model",
+ "carbide-redfish",
+ "carbide-test-support",
+ "carbide-utils",
+ "http",
+ "libredfish",
+ "nv-redfish",
+]
+
+[[package]]
+name = "bmc-driver-validator"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "bmc-drivers",
+ "bmc-explorer",
+ "bmc-platform",
+ "bmc-runtime",
+ "carbide-ipmi",
+ "carbide-redfish",
+ "carbide-secrets",
+ "clap",
+ "colored",
+ "futures",
+ "libc",
+ "mac_address",
+ "nv-redfish",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "strum",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "bmc-drivers"
 version = "0.1.0"
 dependencies = [
@@ -924,18 +967,19 @@ dependencies = [
 name = "bmc-runtime"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "axum",
  "bmc-drivers",
  "bmc-mock",
  "bmc-platform",
+ "carbide-api-model",
  "carbide-instrument",
  "carbide-ipmi",
  "carbide-redfish",
  "carbide-secrets",
  "carbide-test-support",
  "carbide-utils",
- "carbide-uuid",
  "eyre",
  "mac_address",
  "nv-redfish",
@@ -1226,8 +1270,10 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "bmc-backend",
  "bmc-drivers",
  "bmc-explorer",
+ "bmc-runtime",
  "bmc-vendor",
  "byteorder",
  "carbide-api-db",
@@ -1371,14 +1417,22 @@ dependencies = [
 name = "carbide-api-core-integration-tests"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
+ "bmc-backend",
  "carbide-api-core",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-authn",
+ "carbide-credential-rotation",
+ "carbide-health-metrics",
  "carbide-health-report",
  "carbide-ib-fabric",
  "carbide-instrument",
+ "carbide-ipmi",
+ "carbide-machine-controller",
+ "carbide-nvlink-manager",
  "carbide-rack",
+ "carbide-redfish",
  "carbide-rpc",
  "carbide-secrets",
  "carbide-site-explorer",
@@ -1392,6 +1446,7 @@ dependencies = [
  "const_format",
  "data-encoding",
  "eyre",
+ "futures-util",
  "http",
  "ipnetwork",
  "itertools 0.14.0",
@@ -1399,6 +1454,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "sqlx",
+ "state-controller",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -1475,6 +1531,7 @@ dependencies = [
  "carbide-api-test-helper",
  "carbide-dhcp",
  "carbide-health",
+ "carbide-health-report",
  "carbide-kms-provider",
  "carbide-machine-a-tron",
  "carbide-nvlink-manager",
@@ -2173,6 +2230,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-dpf",
  "carbide-machine-controller",
+ "carbide-test-support",
  "carbide-uuid",
  "config-version",
  "futures",
@@ -2289,6 +2347,7 @@ dependencies = [
  "criterion",
  "dashmap",
  "figment",
+ "flate2",
  "futures",
  "http",
  "http-body-util",
@@ -2521,7 +2580,6 @@ dependencies = [
  "carbide-secrets",
  "carbide-test-support",
  "carbide-utils",
- "carbide-uuid",
  "eyre",
  "reqwest 0.13.4",
  "serde",
@@ -2733,6 +2791,8 @@ name = "carbide-machine-controller"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
+ "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
  "carbide-api-model",
@@ -3026,6 +3086,7 @@ name = "carbide-power-shelf-controller"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-credential-rotation",
@@ -3059,6 +3120,8 @@ name = "carbide-preingestion-manager"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "bmc-backend",
+ "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
  "carbide-api-model",
@@ -3137,6 +3200,7 @@ dependencies = [
  "carbide-version",
  "clap",
  "http-body",
+ "httpdate",
  "hyper",
  "hyper-util",
  "logfmt",
@@ -3377,6 +3441,7 @@ dependencies = [
  "dns-record",
  "eyre",
  "hickory-resolver",
+ "http-body-util",
  "hyper",
  "hyper-rustls",
  "hyper-util",
@@ -3387,6 +3452,8 @@ dependencies = [
  "mac_address",
  "nonempty",
  "once_cell",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "p256 0.14.0",
  "prettytable-rs",
  "prost",
@@ -3410,8 +3477,10 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "tower",
+ "tower-http 0.7.0",
  "trace-propagation",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "tryhard",
  "uuid",
@@ -3582,8 +3651,10 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "axum",
+ "bmc-backend",
  "bmc-explorer",
  "bmc-mock",
+ "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
  "carbide-api-model",
@@ -3688,6 +3759,7 @@ name = "carbide-spdm-controller"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-instrument",
@@ -3832,6 +3904,7 @@ name = "carbide-switch-controller"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-credential-rotation",
@@ -4382,6 +4455,8 @@ name = "component-manager"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
+ "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
  "carbide-api-model",
@@ -4393,6 +4468,7 @@ dependencies = [
  "carbide-secrets",
  "carbide-sqlx-testing",
  "carbide-test-support",
+ "carbide-utils",
  "carbide-uuid",
  "chrono",
  "futures-util",
@@ -7321,7 +7397,7 @@ dependencies = [
 [[package]]
 name = "libredfish"
 version = "0.0.0"
-source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.25#04e40498f99ce878d794961bf467eabd48f736dd"
+source = "git+https://github.com/NVIDIA/libredfish.git?tag=v0.47.28#6145110b8cfa93c39ccc2ad40a165e2edd4c4938"
 dependencies = [
  "chrono",
  "clap",

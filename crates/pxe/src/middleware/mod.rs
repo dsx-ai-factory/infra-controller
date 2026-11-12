@@ -20,6 +20,7 @@ use axum::http::uri::PathAndQuery;
 use axum::http::{Method, Request, Uri, header};
 use axum::response::Response;
 
+pub(super) mod if_range;
 pub(super) mod logging;
 pub(super) mod metrics;
 

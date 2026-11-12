@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bmc_runtime::DriverConnector;
 use carbide_rack::firmware_object::rack_maintenance_access_token_key;
 use carbide_redfish::libredfish::RedfishClientPool;
 use carbide_secrets::credentials::{CredentialManager, Credentials};
@@ -747,6 +748,7 @@ pub async fn build_component_manager(
     rms_switch_system_image_client: Option<Arc<dyn RmsSwitchSystemImageStatusApi>>,
     db: Option<PgPool>,
     redfish_pool: Option<Arc<dyn RedfishClientPool>>,
+    driver_connector: Option<Arc<DriverConnector>>,
 ) -> Result<ComponentManager, ComponentManagerError> {
     validate_rms_backend_rack_profiles(config, &rack_profiles)?;
 
@@ -848,9 +850,16 @@ pub async fn build_component_manager(
                         .into(),
                 )
             })?;
-            Arc::new(crate::core_compute_manager::CoreComputeTrayManager::new(
-                pool,
-            ))
+            let mut manager = crate::core_compute_manager::CoreComputeTrayManager::new(pool);
+            if driver_connector.is_some() {
+                let db = db.clone().ok_or_else(|| {
+                    ComponentManagerError::InvalidArgument(
+                        "bmc_backend is 'drivers' but database pool is not configured".into(),
+                    )
+                })?;
+                manager = manager.with_driver_connector(driver_connector, db);
+            }
+            Arc::new(manager)
         }
         ComputeBackend::Mock => Arc::new(crate::mock::MockComputeTrayManager),
     };
@@ -1499,7 +1508,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cm = build_component_manager(&config, Default::default(), None, None, None, None)
+        let cm = build_component_manager(&config, Default::default(), None, None, None, None, None)
             .await
             .unwrap();
 
@@ -1528,6 +1537,7 @@ mod tests {
             Some(Arc::new(MockRmsApi::new())),
             None,
             Some(db),
+            None,
             None,
         )
         .await
@@ -1559,9 +1569,10 @@ mod tests {
             ..Default::default()
         };
 
-        let err = build_component_manager(&config, Default::default(), None, None, None, None)
-            .await
-            .unwrap_err();
+        let err =
+            build_component_manager(&config, Default::default(), None, None, None, None, None)
+                .await
+                .unwrap_err();
 
         assert!(matches!(err, ComponentManagerError::InvalidArgument(_)));
     }
@@ -1575,9 +1586,10 @@ mod tests {
             ..Default::default()
         };
 
-        let err = build_component_manager(&config, Default::default(), None, None, None, None)
-            .await
-            .unwrap_err();
+        let err =
+            build_component_manager(&config, Default::default(), None, None, None, None, None)
+                .await
+                .unwrap_err();
 
         assert!(matches!(err, ComponentManagerError::InvalidArgument(_)));
     }
@@ -1598,9 +1610,10 @@ mod tests {
 
         assert_eq!(config.compute_tray_backend, ComputeBackend::Rms);
 
-        let err = build_component_manager(&config, Default::default(), None, None, None, None)
-            .await
-            .unwrap_err();
+        let err =
+            build_component_manager(&config, Default::default(), None, None, None, None, None)
+                .await
+                .unwrap_err();
 
         assert!(matches!(
             err,
@@ -1619,7 +1632,8 @@ mod tests {
         };
 
         let result =
-            build_component_manager(&config, Default::default(), None, None, None, None).await;
+            build_component_manager(&config, Default::default(), None, None, None, None, None)
+                .await;
         let Err(error) = result else {
             panic!("missing RMS rack profiles should be rejected");
         };
@@ -1643,7 +1657,8 @@ mod tests {
             ..Default::default()
         };
 
-        let result = build_component_manager(&config, rack_profiles, None, None, None, None).await;
+        let result =
+            build_component_manager(&config, rack_profiles, None, None, None, None, None).await;
         let Err(error) = result else {
             panic!("missing RMS vendor should be rejected");
         };

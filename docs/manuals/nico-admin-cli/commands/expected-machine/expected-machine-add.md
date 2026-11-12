@@ -18,7 +18,8 @@ nico-admin-cli expected-machine add
 [--default_pause_ingestion_and_poweron] [--dpf-enabled]
 [--extended] [--bmc-ip-address]
 [--bmc-retain-credentials] [--dpu-policy]
-[--bmc-ip-allocation] [--disable-lockdown] [--sort-by]
+[--bmc-ip-allocation] [--disable-lockdown]
+[--retain-hbn-config-on-boot] [--sort-by]
 [-h|--help]
 ```
 
@@ -81,12 +82,14 @@ Optional unique ID to assign to the ExpectedMachine on create
 Interfaces as a JSON array of ExpectedInterface objects (fields:
 mac_address, role, ip_allocation, network_segment_type, fixed_ip,
 fixed_mask, fixed_gateway, primary; legacy: nic_type). Accepted values:
-role=host|dpu_os|dpu_bmc|host_bmc and
+role=host|dpu_os|dpu_bmc|host_bmc|dpu_loopback and
 ip_allocation=dynamic|fixed|retained. network_segment_type uses
 protobuf enum numbers: tenant=0, admin=1, underlay=2, host_inband=3. An
 omitted role defaults to host. When ip_allocation is omitted, fixed_ip
 implies fixed; without fixed_ip, host_bmc defaults to retained and every
-other role defaults to dynamic. Explicit fixed policies, DPU fixed
+other role defaults to dynamic. DpuLoopback uses the DPU OS/admin MAC
+and only fixed_ip from a non-auto-assign lo-ip or lo-ip-v6 pool; omit
+interface-only fields. Explicit fixed policies, DPU OS/BMC fixed
 addresses, and inferred host_bmc fixed addresses with a segment guard
 must fall within a configured managed prefix. Legacy host entries with
 an omitted policy and unguarded inferred host_bmc fixed addresses keep
@@ -195,6 +198,21 @@ behavior of locking down the server after configuring the BIOS.
 >
 > - false
 
+`--retain-hbn-config-on-boot <RETAIN_HBN_CONFIG_ON_BOOT>`
+
+If true, designate the machine to retain its HBN config on boot. This allows
+the machine to boot while NICO's DHCP and gRPC services are unavailable. The
+machine must declare a DPU BMC and a DPU OS interface, and the host BMC
+and both DPU interfaces must then use a fixed or retained IP allocation.
+A machine whose DPU policy attaches no DPU declares neither. If unset or
+false, the machine will need NICo to be up in order to boot.
+
+*Possible values:*
+
+> - true
+>
+> - false
+
 `--sort-by <SORT_BY> [default: primary-id]`
 
 Sort output by specified field
@@ -217,8 +235,9 @@ nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-us
 nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 --bmc-ip-address 192.0.2.20
 nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 --dpu-policy nic
 nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 --interfaces '[{"mac_address":"00:11:22:33:44:55","role":"host_bmc","ip_allocation":"retained"}]'
-nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 --interfaces '[{"mac_address":"02:00:00:00:20:01","role":"dpu_os","ip_allocation":"fixed","fixed_ip":"192.0.2.10"}]'
+nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 --interfaces '[{"mac_address":"02:00:00:00:20:01","role":"dpu_os","ip_allocation":"fixed","fixed_ip":"192.0.2.10"},{"mac_address":"02:00:00:00:20:01","role":"dpu_loopback","fixed_ip":"198.51.100.20"}]'
 nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 --bmc-ip-allocation retained
+nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 --retain-hbn-config-on-boot true --interfaces '[{"mac_address":"00:11:22:33:44:55","role":"host_bmc","ip_allocation":"retained"}]'
 ```
 
 ---
