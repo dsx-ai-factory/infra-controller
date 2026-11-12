@@ -42,6 +42,7 @@ use model::machine::{
     AnyMachine, CURRENT_STATE_MODEL_VERSION, ConfigureAstraState, LoadSnapshotOptions,
     MachineInterfaceSnapshot, ManagedHostState, dpf_based_dpu_provisioning_possible,
 };
+use model::machine_boot_interface::InterfaceSelectionSource;
 use model::machine_interface_address::MachineInterfaceAssociation;
 use model::network_segment::NetworkSegmentType;
 use model::predicted_machine_interface::NewPredictedMachineInterface;
@@ -58,7 +59,6 @@ use crate::IdentifiedManagedHost;
 use crate::boot_interfaces::{initial_selection_source, zero_dpu_primary_mac};
 use crate::dpu_asn::PreparedDpuAsn;
 use crate::dpu_loopback::{PreparedDpuLoopback, acquire_admin_admission};
-use crate::endpoint_exploration_report_ext::EndpointExplorationReportExt;
 use crate::errors::{SiteExplorerError, SiteExplorerResult};
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 use crate::machine_interfaces::MachineInterfacesExt;
@@ -467,6 +467,10 @@ impl MachineCreator {
                 ))
                 .into());
             }
+            // Only the controller checkpoint may publish an initial automatic BF4 target.
+            if db::machine::bf4_host_pf_initialization_pending(txn, machine_id).await? {
+                return Ok(());
+            }
             let selection_source =
                 initial_selection_source(&target, primary_interface_selection, declared_primary);
             db::machine_desired_boot_interface::initialize_if_unset(
@@ -601,7 +605,7 @@ impl MachineCreator {
                 .get(dpu_machine_id)
                 .and_then(|&index| resources.reservations[index].loopback_ipv6);
             self
-                .create_dpu(&mut txn, dpu_report, requested_loopback_v6)
+                .create_dpu(&mut txn, dpu_report, report, requested_loopback_v6)
                 .await?
                 .ok_or_else(|| {
                     SiteExplorerError::internal(format!(
@@ -663,13 +667,36 @@ impl MachineCreator {
         }
 
         // Own a declared integrated boot NIC so a managed-DPU host can boot from it
-        // while its DPUs stay managed: the NIC becomes the host's HostInband
-        // primary and the DPU admin links go dormant in the reconcile below.
+        // while its DPUs stay managed: BF4 keeps DPU networking primary, while
+        // legacy hosts promote the HostInband NIC and retire dormant DPU admin links below.
         // Only for hosts with explored DPUs -- a zero-DPU host's NICs (including
         // a declared primary) are already owned by `create_zero_dpu_host`.
         if !managed_host.explored_host.dpus.is_empty() {
             self.own_declared_host_boot_nic(&mut txn, &host_machine_id, report, machine_data)
                 .await?;
+        }
+
+        // Attribute only the selected owned NIC; a pending boot prediction does not select the current networking primary.
+        if let Some(primary) =
+            db::machine_interface::find_by_machine_ids(&mut txn, &[host_machine_id])
+                .await?
+                .remove(&host_machine_id)
+                .unwrap_or_default()
+                .into_iter()
+                .find(|row| row.primary_interface)
+        {
+            let source = primary_interface_selection
+                .filter(|selection| selection.mac_address == primary.mac_address)
+                .map_or(InterfaceSelectionSource::LegacyUnknown, |selection| {
+                    selection.source
+                });
+            db::machine_interface::set_primary_interface_selection(
+                &mut txn,
+                &host_machine_id,
+                source,
+                false,
+            )
+            .await?;
         }
 
         Self::initialize_desired_boot_interface(
@@ -811,6 +838,11 @@ impl MachineCreator {
             &mac_addresses,
             &report_boot_interface_ids,
             primary_mac,
+            if primary_mac.is_some() && primary_mac == declared_primary {
+                InterfaceSelectionSource::ExpectedMachine
+            } else {
+                InterfaceSelectionSource::LegacyUnknown
+            },
         )
         .await?;
 
@@ -819,10 +851,10 @@ impl MachineCreator {
 
     /// Owns a declared integrated (non-DPU) host NIC as a managed-DPU host's
     /// HostInband boot interface, so a host with managed DPUs can still boot from
-    /// an integrated NIC. The NIC carries `primary` into `machine_interfaces` on
-    /// its first DHCP; the DPUs stay explored and linked, and their admin links
-    /// go dormant in `reconcile_admin_addresses_for_host` once this NIC is the
-    /// primary.
+    /// an integrated NIC. BF4 keeps this NIC secondary so DPU admin networking
+    /// remains usable. Other generations carry `primary` into `machine_interfaces`
+    /// on first DHCP; their DPUs stay explored and linked, and their admin links
+    /// go dormant in `reconcile_admin_addresses_for_host` once this NIC is primary.
     ///
     /// Mirrors the host-NIC ownership in `create_zero_dpu_host`, but for the
     /// one declared NIC reached from the managed-DPU path. No-op when nothing is
@@ -839,6 +871,8 @@ impl MachineCreator {
             return Ok(());
         };
 
+        // A BF4 declaration selects boot independently of the HBN-backed networking primary.
+        let primary_interface = !db::machine::host_has_bf4_dpu(txn, host_machine_id).await?;
         if let Some(existing) = db::machine_interface::find_by_mac_address(&mut *txn, declared_mac)
             .await?
             .into_iter()
@@ -858,13 +892,14 @@ impl MachineCreator {
                 }
                 return Ok(());
             }
-            // The integrated NIC leased before ingestion: adopt its anonymous row
-            // as the host's sole primary, demoting the interim DPU primary so the
-            // two never collide on `one_primary_interface_per_machine`.
-            db::machine_interface::demote_primary_interfaces_for_machine(host_machine_id, txn)
-                .await?;
-            if !existing.primary_interface {
-                db::machine_interface::set_primary_interface(&existing.id, true, txn).await?;
+            // Adopt an anonymous leased boot NIC; only legacy primary promotion demotes the interim DPU link.
+            if primary_interface {
+                db::machine_interface::demote_primary_interfaces_for_machine(host_machine_id, txn)
+                    .await?;
+            }
+            if existing.primary_interface != primary_interface {
+                db::machine_interface::set_primary_interface(&existing.id, primary_interface, txn)
+                    .await?;
             }
             db::machine_interface::associate_interface_with_machine(
                 &existing.id,
@@ -872,9 +907,20 @@ impl MachineCreator {
                 txn,
             )
             .await?;
+            if primary_interface {
+                // Record networking intent only when this adoption actually selects the NIC as primary.
+                db::machine_interface::set_primary_interface_selection(
+                    txn,
+                    host_machine_id,
+                    InterfaceSelectionSource::ExpectedMachine,
+                    true,
+                )
+                .await?;
+            }
             tracing::info!(
                 declared_mac_address = %declared_mac, %host_machine_id,
-                "Adopted declared integrated boot NIC as the managed-DPU host's primary",
+                primary_interface,
+                "Adopted declared integrated boot NIC for managed-DPU host",
             );
             return Ok(());
         }
@@ -892,12 +938,19 @@ impl MachineCreator {
                     id: declared_mac.to_string(),
                 });
             }
+            // Demote older BF4 boot predictions without changing legacy prediction flags.
+            if !primary_interface && existing_prediction.primary_interface {
+                db::predicted_machine_interface::set_primary_interface(
+                    existing_prediction.id,
+                    false,
+                    txn,
+                )
+                .await?;
+            }
             return Ok(());
         }
 
-        // Not yet leased: mint a HostInband prediction carrying primary, so the
-        // NIC is adopted and made primary on its first DHCP (the promotion demotes
-        // the interim DPU primary).
+        // BF4 boot predictions stay secondary on first DHCP; legacy primary predictions still demote the interim DPU link.
         let boot_interface_id = report.find_interface_id_for_mac(declared_mac);
         db::predicted_machine_interface::create(
             NewPredictedMachineInterface {
@@ -905,14 +958,15 @@ impl MachineCreator {
                 mac_address: declared_mac,
                 expected_network_segment_type: NetworkSegmentType::HostInband,
                 boot_interface_id,
-                primary_interface: true,
+                primary_interface,
             },
             txn,
         )
         .await?;
         tracing::info!(
             declared_mac_address = %declared_mac, %host_machine_id,
-            "Minted HostInband boot-NIC prediction for managed-DPU host's declared integrated primary",
+            primary_interface,
+            "Minted HostInband boot-NIC prediction for managed-DPU host",
         );
         Ok(())
     }
@@ -932,6 +986,7 @@ impl MachineCreator {
         &self,
         txn: &mut PgConnection,
         explored_dpu: &ExploredDpu,
+        host_report: &EndpointExplorationReport,
         requested_loopback_v6: Option<std::net::Ipv6Addr>,
     ) -> SiteExplorerResult<Option<AnyMachine>> {
         if let Some(dpu_machine) = self
@@ -941,7 +996,8 @@ impl MachineCreator {
             Self::ensure_dpu_oob_interface_ownership(txn, explored_dpu).await?;
             let dpu_machine_id: &MachineId = explored_dpu.report.machine_id.as_ref().unwrap();
             let dpu_bmc_info = explored_dpu.bmc_info();
-            let dpu_hw_info = explored_dpu.hardware_info()?;
+            // Persist accepted host BF4 evidence before boot-NIC adoption checks the DPU topology.
+            let dpu_hw_info = explored_dpu.hardware_info_with_host_inventory(host_report)?;
             self.update_machine_topology(txn, dpu_machine_id, dpu_bmc_info, dpu_hw_info)
                 .await?;
             return Ok(Some(dpu_machine));

@@ -29,6 +29,8 @@ SELECT m.* FROM (
     INNER JOIN LATERAL (
         SELECT
         m2.*,
+        primary_interface.primary_selection_source AS primary_interface_selection_source,
+        primary_interface.primary_selection_updated_at AS primary_interface_selection_updated_at,
         COALESCE(nic_firmware.json, '[]') AS nic_firmware_card_selections,
         boot_interface.desired_mac_address AS desired_boot_interface_mac,
         boot_interface.desired_interface_id AS desired_boot_interface_id,
@@ -54,6 +56,10 @@ SELECT m.* FROM (
             FROM machine_nic_firmware_overrides card
             WHERE card.machine_id = m2.id
         ) AS nic_firmware ON true
+        LEFT JOIN machine_interfaces primary_interface
+            ON primary_interface.machine_id = m2.id
+            AND primary_interface.primary_interface
+            AND primary_interface.interface_type != 'Bmc'
         LEFT JOIN machine_boot_interfaces boot_interface
         ON boot_interface.machine_id = m2.id
         LEFT JOIN machine_skus sku on m2.hw_sku = sku.id
@@ -96,7 +102,8 @@ SELECT m.* FROM (
                 __TOPOLOGY__
                 'created', mt2.created,
                 'updated', mt2.updated,
-                'topology_update_needed', mt2.topology_update_needed
+                'topology_update_needed', mt2.topology_update_needed,
+                'dpu_host_pf_inventory', mt2.dpu_host_pf_inventory
             )) AS json,
             mt2.topology->'bmc_info' AS bmc_info
             FROM machine_topologies mt2
@@ -156,6 +163,8 @@ SELECT m.* FROM (
         SELECT
         mi_parent.machine_id AS managed_host_id,
         m2.*,
+        primary_interface.primary_selection_source AS primary_interface_selection_source,
+        primary_interface.primary_selection_updated_at AS primary_interface_selection_updated_at,
         boot_interface.desired_mac_address AS desired_boot_interface_mac,
         boot_interface.desired_interface_id AS desired_boot_interface_id,
         boot_interface.desired_version AS desired_boot_interface_version,
@@ -171,6 +180,10 @@ SELECT m.* FROM (
         FROM machine_interfaces mi_parent
         INNER JOIN machines m2
         ON (m2.id = mi_parent.attached_dpu_machine_id)
+        LEFT JOIN machine_interfaces primary_interface
+            ON primary_interface.machine_id = m2.id
+            AND primary_interface.primary_interface
+            AND primary_interface.interface_type != 'Bmc'
         LEFT JOIN machine_boot_interfaces boot_interface
         ON boot_interface.machine_id = m2.id
 
@@ -212,7 +225,8 @@ SELECT m.* FROM (
                 __TOPOLOGY__
                 'created', mt2.created,
                 'updated', mt2.updated,
-                'topology_update_needed', mt2.topology_update_needed
+                'topology_update_needed', mt2.topology_update_needed,
+                'dpu_host_pf_inventory', mt2.dpu_host_pf_inventory
             )) AS json,
             mt2.topology->'bmc_info' AS bmc_info
             FROM machine_topologies mt2

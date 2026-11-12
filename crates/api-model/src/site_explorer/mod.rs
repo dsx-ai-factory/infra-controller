@@ -49,6 +49,11 @@ use crate::pci::{UefiPciOrderingKey, UefiPciOrderingKeyParseError, normalize_uef
 use crate::power_shelf::power_shelf_id;
 use crate::switch::switch_id;
 
+/// Pure DPU ordering shared by discovery and initial host interface finalization.
+pub mod dpu_ordering;
+/// Host inventory traversal shared by DPU matching and discovery-order reconstruction.
+pub mod host_inventory;
+
 /// Stands in for a field the BMC left empty, so every explored endpoint gets a
 /// class an operator can key a profile to rather than no class at all.
 const ABSENT_MANUFACTURER: &str = "unknown";
@@ -946,6 +951,29 @@ impl ExploredDpu {
             firmware_version: self.bmc_firmware_version(),
             ..Default::default()
         }
+    }
+
+    /// Preserves serial-matched host BF4 part evidence in provisional hardware data so identification and boot-NIC adoption agree before authenticated agent reports arrive.
+    ///
+    /// Host BF4 part numbers take the same precedence as pairing. Other host part numbers leave
+    /// the DPU part unchanged; temporary DMI identity stays unchanged and PF facts remain absent.
+    pub fn hardware_info_with_host_inventory(
+        &self,
+        host_report: &EndpointExplorationReport,
+    ) -> ModelResult<HardwareInfo> {
+        let mut hardware_info = self.hardware_info()?;
+        // Retain only BF4 evidence from this DPU's pairing serial, leaving legacy provisional hardware unchanged.
+        if let Some(dpu) = hardware_info.dpu_info.as_mut()
+            && let Some(part_number) = host_report
+                .devices_with_unique_serials()
+                .iter()
+                .find(|device| device.serial_number() == self.report.dpu_pairing_serial_number())
+                .and_then(|device| device.part_number)
+                .filter(|part_number| is_bf4_dpu_part_number(part_number))
+        {
+            dpu.part_number = part_number.to_string();
+        }
+        Ok(hardware_info)
     }
 
     pub fn hardware_info(&self) -> ModelResult<HardwareInfo> {
@@ -2275,10 +2303,9 @@ pub fn is_bf2_dpu_part_number(part_number: &str) -> bool {
     normalized_part_number.starts_with("mbf2")
 }
 
+/// Recognizes BF4 VPD part numbers using the same classification as agent PF acquisition.
 pub fn is_bf4_dpu_part_number(part_number: &str) -> bool {
-    let normalized_part_number = part_number.to_lowercase();
-    normalized_part_number.starts_with("900-9d4b4")
-        || normalized_part_number.starts_with("900-9d4a4")
+    carbide_utils::is_bf4_dpu_part_number(part_number)
 }
 
 /// Whether a DPU BMC chassis member can carry the card product identity

@@ -87,9 +87,10 @@ pub use service_vpc_slot::{SERVICE_VPC_MTU, ServiceVpcSlots};
 pub use services::{DEFAULT_DOCA_HELM_REGISTRY, ServiceRegistryConfig};
 pub use types::{
     AstraRoutePrefixes, BlueFieldSoftwareParams, BmcPasswordProvider, ConfigPortsServiceType,
-    DEFAULT_DPU_NUM_OF_VFS, DEFAULT_MAX_SF_PER_PF, DEFAULT_PF_TOTAL_SF_RESERVED,
-    DOCA_WEAVE_DHCP_AGENT_PF_TOTAL_SF, DPU_ENABLED_NODE_LABEL, DetachedDpfResourceObservation,
-    DetachedDpuServiceChainDefinition, DetachedDpuServiceDefinition, DetachedDpuServiceInterface,
+    DEFAULT_DPU_HOST_PF_PCI_CONTROLLER_ID, DEFAULT_DPU_NUM_OF_VFS, DEFAULT_MAX_SF_PER_PF,
+    DEFAULT_PF_TOTAL_SF_RESERVED, DOCA_WEAVE_DHCP_AGENT_PF_TOTAL_SF, DPU_ENABLED_NODE_LABEL,
+    DetachedDpfResourceObservation, DetachedDpuServiceChainDefinition,
+    DetachedDpuServiceDefinition, DetachedDpuServiceInterface,
     DetachedDpuServiceInterfaceDefinition, DetachedDpuServiceSecurity, DetachedHelmChart,
     DetachedServiceDaemonSet, DetachedServiceDaemonSetRollingUpdate,
     DetachedServiceDaemonSetUpdateStrategy, DpfDeletePreconditions, DpfInterceptBridge,

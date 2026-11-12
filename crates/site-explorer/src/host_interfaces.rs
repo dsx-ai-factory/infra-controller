@@ -22,6 +22,7 @@ use db::ObjectColumnFilter;
 use itertools::Itertools;
 use mac_address::MacAddress;
 use model::machine::MachineInterfaceSnapshot;
+use model::machine_boot_interface::InterfaceSelectionSource;
 use model::machine_interface::InterfaceType;
 use model::network_segment::NetworkSegmentType;
 use model::predicted_machine_interface::{NewPredictedMachineInterface, PredictedMachineInterface};
@@ -235,10 +236,26 @@ pub(super) async fn reconcile(
     macs: &[MacAddress],
     boot_ids: &[(MacAddress, &str)],
     primary_mac: Option<MacAddress>,
+    source: InterfaceSelectionSource,
 ) -> SiteExplorerResult<()> {
     let interfaces = HostInterfaces::load(txn, macs).await?;
     let tasks = interfaces.plan(machine_id, macs, boot_ids, primary_mac)?;
-    apply(txn, machine_id, tasks).await
+    apply(txn, machine_id, tasks).await?;
+    // Publish networking provenance only when a leased NIC actually becomes primary.
+    if primary_mac
+        .filter(|mac| macs.contains(mac))
+        .and_then(|mac| interfaces.interfaces.get(&mac))
+        .filter(|row| {
+            row.interface_type != InterfaceType::Bmc
+                && row.machine_id.is_none_or(|owner| owner == *machine_id)
+                && (row.machine_id.is_none() || !row.primary_interface)
+        })
+        .is_some()
+    {
+        db::machine_interface::set_primary_interface_selection(txn, machine_id, source, true)
+            .await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

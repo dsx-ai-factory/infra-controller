@@ -21,7 +21,9 @@ use std::net::IpAddr;
 use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
 use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::domain::DomainId;
-use carbide_uuid::machine::{AsMachineId, MachineId, MachineIdSubtypeTrait, MachineInterfaceId};
+use carbide_uuid::machine::{
+    AsMachineId, HostMachineId, MachineId, MachineIdSubtypeTrait, MachineInterfaceId,
+};
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::switch::SwitchId;
@@ -35,6 +37,7 @@ use model::allocation_type::AllocationType;
 use model::expected_machine::{ExpectedInterface, ExpectedInterfaceIpAllocation};
 use model::hardware_info::HardwareInfo;
 use model::machine::MachineInterfaceSnapshot;
+use model::machine_boot_interface::InterfaceSelectionSource;
 use model::machine_interface::InterfaceType;
 use model::machine_interface_address::{InterfaceAssociationType, MachineInterfaceAssociation};
 use model::network_prefix::NetworkPrefix;
@@ -48,6 +51,11 @@ use crate::host_naming::{self, NamingContext};
 use crate::ip_allocator::{IpAllocator, UsedIpResolver};
 use crate::machine_interface_address::{AddressAlreadyInUseError, MachineInterfaceAddressWithType};
 use crate::{DatabaseError, DatabaseResult, Transaction, network_segment as db_network_segment};
+
+mod host_pfs;
+pub use host_pfs::{
+    HostPfInterfacePlan, RegisteredHostPf, lock_host_pf_initialization, repair_host_pf_interfaces,
+};
 
 const SQL_VIOLATION_DUPLICATE_MAC: &str = "machine_interfaces_segment_id_mac_address_key";
 const SQL_VIOLATION_ONE_PRIMARY_INTERFACE: &str = "one_primary_interface_per_machine";
@@ -263,6 +271,32 @@ pub(crate) async fn record_allocation_removal(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
+/// Records networking-primary provenance without changing boot intent, preserving decision time for an unchanged primary and source.
+///
+/// Callers must serialize primary-interface changes and write their final primary flags in the same transaction.
+/// Set `primary_changed` when the selected NIC or DPU changes. Callers replacing the PF row for the same selected DPU must transfer its original source and time themselves.
+pub async fn set_primary_interface_selection(
+    txn: &mut PgConnection,
+    machine_id: &impl MachineIdSubtypeTrait,
+    source: InterfaceSelectionSource,
+    primary_changed: bool,
+) -> DatabaseResult<bool> {
+    // Attribute only the final owned primary after its flag and association have been settled.
+    let query = "UPDATE machine_interfaces SET primary_selection_source = $2,
+                     primary_selection_updated_at = clock_timestamp()
+                 WHERE machine_id = $1 AND primary_interface AND interface_type != 'Bmc'
+                   AND ($3 OR primary_selection_source IS DISTINCT FROM $2)";
+    Ok(sqlx::query(query)
+        .bind(machine_id.as_machine_id())
+        .bind(source)
+        .bind(primary_changed)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .rows_affected()
+        != 0)
+}
+
 /// Sets current machine interface primary attribute to provided value.
 pub async fn set_primary_interface(
     interface_id: &MachineInterfaceId,
@@ -271,8 +305,12 @@ pub async fn set_primary_interface(
 ) -> Result<MachineInterfaceId, DatabaseError> {
     // Only primary and BMC interfaces publish DNS names, so a real change here
     // changes what the zone serves. The sub-select sees the pre-update row, so
-    // `changed` compares the old flag with the new one.
-    let query = "UPDATE machine_interfaces SET primary_interface=$1 WHERE id=$2::uuid
+    // `changed` compares the old flag with the new one. Clear attribution on flag transitions
+    // so later promotions cannot revive the previous selection authority.
+    let query = "UPDATE machine_interfaces
+                 SET primary_selection_source = CASE WHEN $1 AND primary_interface THEN primary_selection_source END,
+                     primary_selection_updated_at = CASE WHEN $1 AND primary_interface THEN primary_selection_updated_at END,
+                     primary_interface=$1 WHERE id=$2::uuid
                  RETURNING id,
                      (SELECT primary_interface FROM machine_interfaces WHERE id=$2::uuid)
                          IS DISTINCT FROM primary_interface AS changed";
@@ -288,7 +326,7 @@ pub async fn set_primary_interface(
     Ok(id)
 }
 
-/// Updates a group of primary flags and invalidates DNS for the changed rows.
+/// Updates a group of primary flags, clears their prior selection decisions and invalidates DNS for the changed rows.
 pub async fn set_primary_interfaces(
     interface_ids: &[MachineInterfaceId],
     primary: bool,
@@ -297,7 +335,8 @@ pub async fn set_primary_interfaces(
     if interface_ids.is_empty() {
         return Ok(());
     }
-    let query = "UPDATE machine_interfaces SET primary_interface=$1 \
+    let query = "UPDATE machine_interfaces SET primary_interface=$1, \
+                 primary_selection_source=NULL, primary_selection_updated_at=NULL \
                  WHERE id=ANY($2) AND primary_interface IS DISTINCT FROM $1 RETURNING id";
     let changed: Vec<MachineInterfaceId> = sqlx::query_scalar(query)
         .bind(primary)
@@ -308,7 +347,7 @@ pub async fn set_primary_interfaces(
     crate::dns::domain::bump_serial_for_interfaces(txn, &changed).await
 }
 
-/// Associates a group of interfaces after their primary flags have been settled.
+/// Associates a group of interfaces after their primary flags have been settled, clearing selection decisions when ownership changes.
 pub async fn associate_interfaces_with_machine(
     interface_ids: &[MachineInterfaceId],
     machine_id: &MachineId,
@@ -317,7 +356,10 @@ pub async fn associate_interfaces_with_machine(
     if interface_ids.is_empty() {
         return Ok(());
     }
-    let query = "UPDATE machine_interfaces SET machine_id=$1, association_type='Machine'::association_type WHERE id=ANY($2)";
+    let query = "UPDATE machine_interfaces
+                 SET primary_selection_source = CASE WHEN machine_id = $1 THEN primary_selection_source END,
+                     primary_selection_updated_at = CASE WHEN machine_id = $1 THEN primary_selection_updated_at END,
+                     machine_id=$1, association_type='Machine'::association_type WHERE id=ANY($2)";
     sqlx::query(query)
         .bind(machine_id)
         .bind(interface_ids)
@@ -342,7 +384,7 @@ pub async fn associate_interfaces_with_machine(
     Ok(())
 }
 
-/// Clears `primary_interface` on every interface a machine currently owns.
+/// Clears `primary_interface` and its selection metadata on every primary interface a machine currently owns.
 ///
 /// Used when a new interface takes over as the machine's sole primary -- e.g. a
 /// declared integrated host NIC promoted ahead of the DPU admin link it replaces
@@ -352,7 +394,9 @@ pub async fn demote_primary_interfaces_for_machine(
     machine_id: &MachineId,
     txn: &mut PgConnection,
 ) -> Result<(), DatabaseError> {
-    let query = "UPDATE machine_interfaces SET primary_interface=false WHERE machine_id=$1 AND primary_interface=true";
+    let query = "UPDATE machine_interfaces SET primary_interface=false,
+                     primary_selection_source=NULL, primary_selection_updated_at=NULL
+                 WHERE machine_id=$1 AND primary_interface=true";
     let demoted = sqlx::query(query)
         .bind(machine_id)
         .execute(&mut *txn)
@@ -440,7 +484,7 @@ pub async fn associate_interface_with_dpu_machine(
 /// interface, never the primary data interface).
 ///
 /// Mirrors [`associate_interface_with_machine`] but additionally forces
-/// `interface_type='Bmc'` and `primary_interface=false`.
+/// `interface_type='Bmc'` and `primary_interface=false`, and clears networking-selection metadata.
 pub async fn associate_bmc_interface(
     interface_id: &MachineInterfaceId,
     association: MachineInterfaceAssociation,
@@ -449,21 +493,24 @@ pub async fn associate_bmc_interface(
     let (query, association_type, id_value) = match association {
         MachineInterfaceAssociation::Machine(id) => (
             "UPDATE machine_interfaces SET machine_id=$1, association_type=$2::association_type, \
-             interface_type='Bmc'::interface_type, primary_interface=false \
+             interface_type='Bmc'::interface_type, primary_interface=false, \
+             primary_selection_source=NULL, primary_selection_updated_at=NULL \
              WHERE id=$3::uuid RETURNING id",
             "Machine",
             id.to_string(),
         ),
         MachineInterfaceAssociation::Switch(id) => (
             "UPDATE machine_interfaces SET switch_id=$1, association_type=$2::association_type, \
-             interface_type='Bmc'::interface_type, primary_interface=false \
+             interface_type='Bmc'::interface_type, primary_interface=false, \
+             primary_selection_source=NULL, primary_selection_updated_at=NULL \
              WHERE id=$3::uuid RETURNING id",
             "Switch",
             id.to_string(),
         ),
         MachineInterfaceAssociation::PowerShelf(id) => (
             "UPDATE machine_interfaces SET power_shelf_id=$1, association_type=$2::association_type, \
-             interface_type='Bmc'::interface_type, primary_interface=false \
+             interface_type='Bmc'::interface_type, primary_interface=false, \
+             primary_selection_source=NULL, primary_selection_updated_at=NULL \
              WHERE id=$3::uuid RETURNING id",
             "PowerShelf",
             id.to_string(),
@@ -487,6 +534,7 @@ pub async fn associate_bmc_interface(
         })
 }
 
+/// Sets the interface type and clears networking-selection metadata for BMC interfaces to prevent reuse of data-interface authority.
 pub async fn set_interface_type(
     interface_id: &MachineInterfaceId,
     interface_type: InterfaceType,
@@ -495,7 +543,10 @@ pub async fn set_interface_type(
     // Only primary and BMC interfaces publish DNS names, so a real change here
     // changes what the zone serves. The sub-select sees the pre-update row, so
     // `changed` compares the old type with the new one.
-    let query = "UPDATE machine_interfaces SET interface_type=$1 WHERE id=$2::uuid
+    let query = "UPDATE machine_interfaces
+                 SET primary_selection_source = CASE WHEN $1 != 'Bmc' THEN primary_selection_source END,
+                     primary_selection_updated_at = CASE WHEN $1 != 'Bmc' THEN primary_selection_updated_at END,
+                     interface_type=$1 WHERE id=$2::uuid
                  RETURNING id,
                      (SELECT interface_type FROM machine_interfaces WHERE id=$2::uuid)
                          IS DISTINCT FROM interface_type AS changed";
@@ -511,6 +562,7 @@ pub async fn set_interface_type(
     Ok(id)
 }
 
+/// Associates an interface and preserves its primary decision only for unchanged ownership, preventing authority from following a reassigned row.
 pub async fn associate_interface_with_machine(
     interface_id: &MachineInterfaceId,
     association: MachineInterfaceAssociation,
@@ -518,17 +570,26 @@ pub async fn associate_interface_with_machine(
 ) -> DatabaseResult<MachineInterfaceId> {
     let (query, association_type, id_value) = match association {
         MachineInterfaceAssociation::Machine(id) => (
-            "UPDATE machine_interfaces SET machine_id=$1, association_type=$2::association_type where id=$3::uuid RETURNING id",
+            "UPDATE machine_interfaces
+             SET primary_selection_source = CASE WHEN machine_id = $1 THEN primary_selection_source END,
+                 primary_selection_updated_at = CASE WHEN machine_id = $1 THEN primary_selection_updated_at END,
+                 machine_id=$1, association_type=$2::association_type WHERE id=$3::uuid RETURNING id",
             "Machine",
             id.to_string(),
         ),
         MachineInterfaceAssociation::Switch(id) => (
-            "UPDATE machine_interfaces SET switch_id=$1, association_type=$2::association_type where id=$3::uuid RETURNING id",
+            "UPDATE machine_interfaces
+             SET primary_selection_source = CASE WHEN switch_id = $1 THEN primary_selection_source END,
+                 primary_selection_updated_at = CASE WHEN switch_id = $1 THEN primary_selection_updated_at END,
+                 switch_id=$1, association_type=$2::association_type WHERE id=$3::uuid RETURNING id",
             "Switch",
             id.to_string(),
         ),
         MachineInterfaceAssociation::PowerShelf(id) => (
-            "UPDATE machine_interfaces SET power_shelf_id=$1, association_type=$2::association_type where id=$3::uuid RETURNING id",
+            "UPDATE machine_interfaces
+             SET primary_selection_source = CASE WHEN power_shelf_id = $1 THEN primary_selection_source END,
+                 primary_selection_updated_at = CASE WHEN power_shelf_id = $1 THEN primary_selection_updated_at END,
+                 power_shelf_id=$1, association_type=$2::association_type WHERE id=$3::uuid RETURNING id",
             "PowerShelf",
             id.to_string(),
         ),
@@ -1192,7 +1253,9 @@ pub async fn update_unassociated_expected_interface_settings(
     let query = r#"
 UPDATE machine_interfaces
 SET interface_type = COALESCE($1::interface_type, interface_type),
-    primary_interface = COALESCE($2::boolean, primary_interface)
+    primary_interface = COALESCE($2::boolean, primary_interface),
+    primary_selection_source = NULL,
+    primary_selection_updated_at = NULL
 WHERE id = $3::uuid
   AND association_type = 'None'::association_type
   AND machine_id IS NULL
@@ -1835,6 +1898,15 @@ async fn reconcile_existing_preallocation(
             && iface.primary_interface != primary_interface
         {
             set_primary_interface(&iface.id, primary_interface, txn).await?;
+            if let Some(machine_id) = iface.machine_id.filter(|id| id.machine_type().is_host()) {
+                set_primary_interface_selection(
+                    txn,
+                    &machine_id,
+                    model::machine_boot_interface::InterfaceSelectionSource::LegacyUnknown,
+                    true,
+                )
+                .await?;
+            }
         }
     }
     Ok(true)
@@ -3050,6 +3122,20 @@ pub async fn move_predicted_machine_interface_to_machine(
         );
     }
 
+    let already_owned_primary = existing_row.as_ref().is_some_and(|row| {
+        row.machine_id == Some(predicted_machine_interface.machine_id) && row.primary_interface
+    });
+    // BF4 HostInband predictions carry boot intent; preserve an owned primary but never let prediction flags select a new one.
+    let primary_interface = if predicted_machine_interface.expected_network_segment_type
+        == NetworkSegmentType::HostInband
+        && let Ok(host_id) = HostMachineId::try_from(predicted_machine_interface.machine_id)
+        && crate::machine::host_has_bf4_dpu(txn, &host_id).await?
+    {
+        already_owned_primary
+    } else {
+        predicted_machine_interface.primary_interface
+    };
+    let primary_unchanged = !primary_interface || already_owned_primary;
     let (machine_interface_id, current_boot_interface_id, current_primary, row_created_here) =
         match existing_row {
             // This host has already DHCP'd once and created a machine_interface;
@@ -3068,7 +3154,7 @@ pub async fn move_predicted_machine_interface_to_machine(
                     txn,
                     &network_segment,
                     &predicted_machine_interface.mac_address,
-                    predicted_machine_interface.primary_interface,
+                    primary_interface,
                     InterfaceType::Data,
                     retained_window,
                 )
@@ -3082,26 +3168,21 @@ pub async fn move_predicted_machine_interface_to_machine(
             }
         };
 
-    // Land the declared boot interface as we promote: the prediction holds the
-    // host's declared `ExpectedInterface.primary`, so a promoted interface is primary
-    // exactly when it was declared. (An anonymous row found here keeps whatever
-    // flag DHCP set, so reconcile it to the declaration.) Done before association
-    // so a row reaches its machine already carrying the right flag.
-    if current_primary != predicted_machine_interface.primary_interface {
-        set_primary_interface(
-            &machine_interface_id,
-            predicted_machine_interface.primary_interface,
-            &mut *txn,
-        )
-        .await?;
-    }
-
     // A primary prediction takes over as the host's sole primary: demote any
-    // current primary (e.g. the DPU admin link on a managed-DPU host that boots from
+    // current primary (e.g. the DPU admin link on a legacy managed-DPU host that boots from
     // a declared integrated NIC) before this row joins the machine, so the two
     // never collide on `one_primary_interface_per_machine`.
-    if predicted_machine_interface.primary_interface {
+    if primary_interface && !primary_unchanged {
         demote_primary_interfaces_for_machine(&predicted_machine_interface.machine_id, txn).await?;
+    }
+
+    // Land the networking flag before association: predictions ordinarily carry
+    // `ExpectedInterface.primary`, while BF4 HostInband boot NICs keep DPU networking selected.
+    // (An anonymous row found here keeps whatever
+    // flag DHCP set, so reconcile it to the declaration.) Done before association
+    // so a row reaches its machine already carrying the right flag.
+    if current_primary != primary_interface {
+        set_primary_interface(&machine_interface_id, primary_interface, &mut *txn).await?;
     }
 
     // Take either the newly-created interface or the anonymous one we found, and associate it with
@@ -3112,6 +3193,22 @@ pub async fn move_predicted_machine_interface_to_machine(
         txn,
     )
     .await?;
+
+    // Predictions do not retain their selection mechanism, so a different promoted NIC cannot inherit the previous primary's authority.
+    if !primary_unchanged
+        && predicted_machine_interface
+            .machine_id
+            .machine_type()
+            .is_host()
+    {
+        set_primary_interface_selection(
+            txn,
+            &predicted_machine_interface.machine_id,
+            model::machine_boot_interface::InterfaceSelectionSource::LegacyUnknown,
+            true,
+        )
+        .await?;
+    }
 
     if predicted_machine_interface
         .machine_id
@@ -3205,6 +3302,37 @@ pub async fn create_host_machine_dpu_interface_proactively(
     });
     if admin_networks.is_empty() {
         return Err(DatabaseError::AdminNetworkNotConfigured);
+    }
+
+    // Reuse a BF4's existing host link so later registrations cannot reattach its retired factory MAC.
+    let topologies = crate::machine_topology::find_latest_by_machine_ids(txn, &[*dpu_id]).await?;
+    let is_bf4 = hardware_info.is_some_and(HardwareInfo::is_bf4_dpu)
+        || topologies.get(dpu_id).is_some_and(|topology| {
+            topology.topology.discovery_data.info.is_bf4_dpu()
+                || topology
+                    .dpu_host_pf_inventory
+                    .as_ref()
+                    .is_some_and(|inventory| inventory.is_bf4)
+        });
+    if is_bf4 {
+        let query = "SELECT id FROM machine_interfaces WHERE attached_dpu_machine_id = $1
+                     AND machine_id IS NOT NULL AND machine_id != $1
+                     AND interface_type != 'Bmc' ORDER BY id";
+        let links: Vec<MachineInterfaceId> = sqlx::query_scalar(query)
+            .bind(dpu_id)
+            .fetch_all(&mut *txn)
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?;
+        if links.len() > 1 {
+            return Err(DatabaseError::FailedPrecondition(format!(
+                "DPU {dpu_id} has multiple host links; reconcile ownership"
+            )));
+        }
+        if let Some(id) = links.first() {
+            let mut interface = find_one(&mut *txn, *id).await?;
+            reconcile_interface_segment_candidates(txn, &mut interface, &admin_networks).await?;
+            return Ok(interface);
+        }
     }
 
     // Host mac is stored at DPU topology data.

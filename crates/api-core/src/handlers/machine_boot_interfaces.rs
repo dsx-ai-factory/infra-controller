@@ -47,9 +47,9 @@ use crate::handlers::utils::convert_and_log_machine_id;
 /// Gather the boot-interface view for one machine across all four stores.
 ///
 /// All four stores are read within a single read transaction. The effective
-/// boot interface is the same
-/// `pick_boot_interface` selection every other flow acts on, applied to the
-/// owned `machine_interfaces` rows. Reconciliation is derived from the
+/// owned candidate uses `pick_boot_interface` over `machine_interfaces`;
+/// default lifecycle resolution uses it when no desired target exists.
+/// Reconciliation is derived from the
 /// persisted desired target, its latest observation, and `ManagedHostState`.
 pub(crate) async fn get_machine_boot_interfaces(
     api: &Api,
@@ -124,8 +124,8 @@ pub(crate) async fn get_machine_boot_interfaces(
     txn.commit().await?;
 
     // The effective boot interface: `pick_boot_interface` over the owned rows
-    // (primary wins, else the lowest-MAC non-underlay NIC). This is what the
-    // controller and admin actions resolve.
+    // (primary wins, else the lowest-MAC non-underlay NIC). Default lifecycle
+    // resolution uses this candidate only when no desired target is stored.
     let effective = interfaces.boot_interface();
     let effective_mac = effective.map(|i| i.mac_address);
     let effective_boot_interface = effective.and_then(|i| i.boot_interface());

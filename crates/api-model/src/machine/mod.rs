@@ -3444,8 +3444,8 @@ pub struct MachineInterfaceSnapshot {
     pub mac_address: MacAddress,
     /// Vendor-native Redfish `EthernetInterface.Id` for this interface, captured
     /// by site-explorer alongside the MAC. Combined with `mac_address` it forms a
-    /// [`MachineBootInterface`]; for the `primary_interface` row that pair is the
-    /// host's boot device.
+    /// [`MachineBootInterface`]; desired boot selection can use this pair
+    /// independently of `primary_interface`.
     pub boot_interface_id: Option<String>,
     pub attached_dpu_machine_id: Option<DpuMachineId>,
     pub domain_id: Option<DomainId>,

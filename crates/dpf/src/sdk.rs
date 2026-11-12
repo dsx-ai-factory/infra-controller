@@ -1915,6 +1915,17 @@ fn resolve_initialization_inventory<'a>(
     config: &'a InitDpfResourcesConfig,
     namespace: Option<&str>,
 ) -> Result<ResolvedInitialization<'a>, DpfError> {
+    let is_bf4 = matches!(
+        config.deployment_type,
+        DpuDeploymentType::Bf4Generic | DpuDeploymentType::Bf4Astra
+    );
+    if config.dpu_host_pf_pci_controller_id != crate::DEFAULT_DPU_HOST_PF_PCI_CONTROLLER_ID
+        && (!is_bf4 || !config.deployment_scoped_service_interfaces)
+    {
+        return Err(DpfError::ConfigError(
+            "host PF controller overrides require a scoped BF4 deployment".to_string(),
+        ));
+    }
     if config.num_of_vfs > MAX_BLUEFIELD_VFS_PER_PF {
         return Err(DpfError::ConfigError(format!(
             "DPF num_of_vfs must be <= {MAX_BLUEFIELD_VFS_PER_PF}"
@@ -2188,6 +2199,7 @@ fn build_service_interface_with_scope(
     namespace: &str,
     suffix: &str,
     dpu_cluster_node_labels: Option<&BTreeMap<String, String>>,
+    pci_controller_id: u8,
 ) -> DPUServiceInterface {
     let (interface_type, physical, pf, vf, patch) = match &iface.iface_type {
         DpuServiceInterfaceTemplateType::Physical => (
@@ -2209,7 +2221,7 @@ fn build_service_interface_with_scope(
                 // deployment-scoping migration and would otherwise reconcile existing resources.
                 nic_selector: dpu_cluster_node_labels.is_some().then_some(
                     DpuServiceInterfaceTemplateSpecTemplateSpecPfNicSelector {
-                        controller_number: Some(1),
+                        controller_number: Some(pci_controller_id.into()),
                         pci: None,
                         r#type: DpuServiceInterfaceTemplateSpecTemplateSpecPfNicSelectorType::Dpu,
                     },
@@ -2234,7 +2246,7 @@ fn build_service_interface_with_scope(
                 // Keep the VF selector symmetric with its parent PF and absent in legacy mode.
                 nic_selector: dpu_cluster_node_labels.is_some().then_some(
                     DpuServiceInterfaceTemplateSpecTemplateSpecVfNicSelector {
-                        controller_number: Some(1),
+                        controller_number: Some(pci_controller_id.into()),
                         pci: None,
                         r#type: DpuServiceInterfaceTemplateSpecTemplateSpecVfNicSelectorType::Dpu,
                     },
@@ -2308,7 +2320,13 @@ pub fn build_service_interface(
     iface: &DpuServiceInterfaceTemplateDefinition,
     namespace: &str,
 ) -> DPUServiceInterface {
-    build_service_interface_with_scope(iface, namespace, "", None)
+    build_service_interface_with_scope(
+        iface,
+        namespace,
+        "",
+        None,
+        crate::DEFAULT_DPU_HOST_PF_PCI_CONTROLLER_ID,
+    )
 }
 
 /// Builds and applies DPUServiceInterfaces. Deployment-scoped names are
@@ -2321,10 +2339,16 @@ async fn apply_service_interface_templates_with_scope<
     interfaces: &[DpuServiceInterfaceTemplateDefinition],
     suffix: &str,
     dpu_cluster_node_labels: Option<&BTreeMap<String, String>>,
+    pci_controller_id: u8,
 ) -> Result<(), crate::error::DpfError> {
     for iface in interfaces {
-        let cr =
-            build_service_interface_with_scope(iface, namespace, suffix, dpu_cluster_node_labels);
+        let cr = build_service_interface_with_scope(
+            iface,
+            namespace,
+            suffix,
+            dpu_cluster_node_labels,
+            pci_controller_id,
+        );
         crate::repository::DpuServiceInterfaceRepository::apply(repo, &cr).await?;
     }
     Ok(())
@@ -2587,6 +2611,7 @@ async fn create_flavor_services_and_deployment<
         interfaces,
         interface_suffix,
         dpu_cluster_node_labels.as_ref(),
+        config.dpu_host_pf_pci_controller_id,
     )
     .await
     .map_err(|error| {
@@ -5260,6 +5285,7 @@ mod tests {
                     TEST_NAMESPACE,
                     "bf3",
                     Some(&dpu_cluster_node_labels),
+                    crate::DEFAULT_DPU_HOST_PF_PCI_CONTROLLER_ID,
                 )),
                 Some(1),
             );
@@ -10346,5 +10372,36 @@ mod configmap_seed_tests {
                 "the existing ConfigMap is left byte-for-byte alone"
             );
         }
+    }
+
+    /// Verifies controller overrides cannot mutate legacy unscoped or BF3 forwarding.
+    #[test]
+    fn controller_overrides_require_scoped_bf4_resources() {
+        use carbide_test_support::value_scenarios;
+
+        value_scenarios!(
+            run = |(deployment_type, scoped, controller)| {
+                // Keep ordinary resource defaults valid so only controller admission varies.
+                let mut config = InitDpfResourcesConfigBuilder::default()
+                    .build()
+                    .expect("valid default initialization configuration");
+                config.deployment_type = deployment_type;
+                config.deployment_scoped_service_interfaces = scoped;
+                config.dpu_host_pf_pci_controller_id = controller;
+                validate_initialization_config(&config).is_ok()
+            };
+            "supported forwarding" {
+                // Legacy controller 1 keeps existing BF4 initialization valid.
+                (DpuDeploymentType::Bf4Generic, false, 1) => true,
+                // Scoped BF4 resources can represent an explicit controller.
+                (DpuDeploymentType::Bf4Generic, true, 7) => true,
+            }
+            "unsupported overrides" {
+                // A match-all legacy resource cannot select a site-specific controller.
+                (DpuDeploymentType::Bf4Generic, false, 7) => false,
+                // The new root setting must not change BF3 forwarding behavior.
+                (DpuDeploymentType::Bf3, true, 7) => false,
+            }
+        );
     }
 }

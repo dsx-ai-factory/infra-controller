@@ -217,6 +217,7 @@ pub fn get() -> CarbideConfig {
         max_concurrent_machine_updates: None,
         machine_update_run_interval: Some(1),
         retained_boot_interface_window: None,
+        dpu_host_pf_pci_controller_id: carbide_dpf::DEFAULT_DPU_HOST_PF_PCI_CONTROLLER_ID,
         site_explorer: SiteExplorerConfig {
             enabled: Arc::new(false.into()),
             run_interval: std::time::Duration::from_secs(0),

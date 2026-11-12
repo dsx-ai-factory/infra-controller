@@ -193,6 +193,49 @@ message DpuData {
   string firmware_version = 5;
   string firmware_date = 6;
   repeated LldpSwitchData switches = 7;
+  // Host-visible PF MACs read from matching c<controller>pf<pf> netdevs.
+  // Collection does not select a boot controller. Each (pci_controller_id,
+  // pf_id) must be unique, including entries with identical MACs. IDs must be
+  // in the range 0 through 255, and MACs must be valid nonzero unicast addresses.
+  // Invalid entries or duplicate identities reject DiscoverMachine with
+  // InvalidArgument before discovery writes.
+  //
+  // Only DiscoverMachine reports with discovery_reporter set to
+  // MACHINE_DISCOVERY_REPORTER_DPU_AGENT and authorized for the reporting DPU
+  // update retained PF inventory. Other reporters do not establish or replace it.
+  // Empty and omitted lists both report no currently observed PFs. BF2/BF3 and
+  // fake agents do not collect live PF facts. BF4 registration requires PF 0 on
+  // dpu_host_pf_pci_controller_id in the current report or previously protected
+  // inventory. An earlier unprotected observation is insufficient.
+  //
+  // For BF4, configured PF 0 mappings are protected. Previously observed PFs
+  // matching an attached host's Operator desired boot MAC are also protected.
+  // At HostInit, Ready, Assigned, or BootConfiguring, or while any instance
+  // record exists (including deleted instances), previously observed PFs matching
+  // the reporting DPU's host-facing primary interface MAC or its host's desired
+  // boot MAC are protected too. BF4 classification and protected mappings survive
+  // omission. A conflicting MAC rejects registration with FailedPrecondition
+  // without replacing retained inventory.
+  // Unprotected observations are replaced by each report and removed on omission.
+  //
+  // These PF precondition checks run after discovery and bootstrap writes commit.
+  // Missing required BF4 PF facts return FailedPrecondition after also committing
+  // BF4 classification and valid PF observations. Conflicting protected MACs leave
+  // retained PF inventory unchanged. Both failures return before issuing a new
+  // machine certificate.
+  // Configuration, acquisition, and rollout requirements are described in
+  // [BF4 Host PF Initialization](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md#bf4-host-pf-initialization).
+  repeated DpuHostPf host_pfs = 8;
+}
+
+// Identifies one host-visible PF using the DPU's phys_port_name and address.
+message DpuHostPf {
+  // Hardware controller ID, in the range 0 through 255.
+  uint32 pci_controller_id = 1;
+  // Hardware PF ID, in the range 0 through 255.
+  uint32 pf_id = 2;
+  // Nonzero unicast MAC from the same netdev's address attribute.
+  string mac_address = 3;
 }
 
 message GpuPlatformInfo {

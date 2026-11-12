@@ -194,6 +194,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .field_attribute("machine_discovery.BlockDevice.device_type", "#[serde(default)]")
         .field_attribute("machine_discovery.NvmeDevice.serial", "#[serde(default)]")
         .field_attribute(
+            "machine_discovery.DpuData.host_pfs",
+            "#[serde(default, skip_serializing_if = \"Vec::is_empty\")]",
+        )
+        .field_attribute(
             "machine_discovery.LldpSwitchData.id",
             "#[serde(default, skip_serializing_if = \"String::is_empty\")]",
         )

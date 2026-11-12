@@ -248,11 +248,24 @@ async fn compact_snapshot_matches_full_snapshot(pool: sqlx::PgPool) {
     );
 }
 
+/// Retains primary-selection decisions in compact snapshots even when DPU interfaces and topology are omitted, preserving full-read selection semantics.
 #[crate::sqlx_test]
 async fn compact_decode_sorts_topology_free_dpus(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
+    // Two DPUs distinguish ordering from primary-selection metadata omitted with their interface lists.
     let host_id = HostMachineId::from(&create_managed_host_multi_dpu(&env, 2).await.id);
+    sqlx::query(
+        "UPDATE machine_interfaces SET primary_selection_source = 'operator',
+        primary_selection_updated_at = TIMESTAMPTZ '2024-07-24 00:00:00+00'
+        WHERE primary_interface AND interface_type != 'Bmc' AND (machine_id = $1 OR machine_id IN
+            (SELECT attached_dpu_machine_id FROM machine_interfaces WHERE machine_id = $1))",
+    )
+    .bind(host_id)
+    .execute(&env.pool)
+    .await
+    .expect("seed host and DPU decisions");
 
+    // Reload both snapshot forms so SQL aliases must supply decisions independently of interface projection.
     let (full, compact) = full_and_compact(&env, &[host_id]).await;
     let (full, compact) = (&full[&host_id], &compact[&host_id]);
     let primary_dpu = full
@@ -271,6 +284,35 @@ async fn compact_decode_sorts_topology_free_dpus(pool: sqlx::PgPool) {
     );
     assert_eq!(Some(compact.dpu_snapshots[0].id), primary_dpu);
     assert_eq!(compact.dpu_snapshots[0].id, full.dpu_snapshots[0].id);
+    // Require nonempty decisions as well as agreement to catch aliases missing from both query forms.
+    assert_eq!(
+        compact.host_snapshot.config.primary_interface_selection,
+        full.host_snapshot.config.primary_interface_selection
+    );
+    assert_eq!(
+        compact
+            .host_snapshot
+            .config
+            .primary_interface_selection
+            .expect("host decision")
+            .source,
+        BootInterfaceSelectionSource::Operator
+    );
+    for (compact_dpu, full_dpu) in compact.dpu_snapshots.iter().zip(&full.dpu_snapshots) {
+        assert!(compact_dpu.status.interfaces.is_empty());
+        assert_eq!(
+            compact_dpu.config.primary_interface_selection,
+            full_dpu.config.primary_interface_selection
+        );
+        assert_eq!(
+            compact_dpu
+                .config
+                .primary_interface_selection
+                .expect("DPU decision")
+                .source,
+            BootInterfaceSelectionSource::Operator
+        );
+    }
 }
 async fn find_host_states(
     env: &TestEnv,

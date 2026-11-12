@@ -153,6 +153,20 @@ pub struct DpuData {
     pub firmware_date: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub switches: Vec<LldpSwitchData>,
+    /// Observed host PF MACs, independent of the factory MAC and boot-controller policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_pfs: Vec<DpuHostPf>,
+}
+
+/// Identifies a host-visible PF from one DPU netdev's physical port and MAC attributes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DpuHostPf {
+    /// Hardware controller number parsed from `c<controller>pf<pf>`.
+    pub pci_controller_id: u8,
+    /// Hardware PF number parsed from the same physical port name.
+    pub pf_id: u8,
+    /// MAC read from the same netdev's `address` attribute.
+    pub mac_address: MacAddress,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -418,6 +432,19 @@ pub enum HardwareInfoError {
 }
 
 impl HardwareInfo {
+    /// Recognizes BF4 from reported VPD or DMI so missing part numbers cannot bypass PF acquisition.
+    /// Callers must establish that this machine is a DPU before using this classification.
+    pub fn is_bf4_dpu(&self) -> bool {
+        carbide_utils::is_bf4_dpu(
+            self.dpu_info
+                .as_ref()
+                .map_or("", |dpu| dpu.part_number.as_str()),
+            self.dmi_data
+                .as_ref()
+                .map_or("", |dmi| dmi.product_name.as_str()),
+        )
+    }
+
     /// Returns whether the machine is deemed to be a DPU based on some properties
     pub fn is_dpu(&self) -> bool {
         if self.machine_type != CpuArchitecture::Aarch64 {
