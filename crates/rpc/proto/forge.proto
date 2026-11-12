@@ -1402,6 +1402,21 @@ service Forge {
   rpc UpdateComponentFirmware(UpdateComponentFirmwareRequest) returns (UpdateComponentFirmwareResponse);
   rpc GetComponentFirmwareStatus(GetComponentFirmwareStatusRequest) returns (GetComponentFirmwareStatusResponse);
   rpc ListComponentFirmwareVersions(ListComponentFirmwareVersionsRequest) returns (ListComponentFirmwareVersionsResponse);
+  // Returns the username and password Core uses to reach an ingested power
+  // shelf or switch that an external component manager (PSM or NSM) operates:
+  // the per-device entry in the credential store, else the expected-inventory
+  // credentials. Credential overrides sent with a dispatch request are not
+  // consulted. Backend registration may persist a pair, including one that
+  // was an override (NSM/PSM store them in Vault). Where Core's credential
+  // store reads the entries a manager wrote, such a pair is a per-device
+  // entry and is returned like any other.
+  // Only the nico-powershelf-manager and nico-nvswitch-manager service
+  // identities may call this, each for its own credential kinds.
+  // Core bounds the device checks and the credential lookup together at five
+  // seconds and returns DeadlineExceeded when that time expires. A failed read
+  // of the credential store returns Internal instead of falling back to
+  // expected inventory, as does a database failure.
+  rpc GetComponentCredentials(GetComponentCredentialsRequest) returns (GetComponentCredentialsResponse);
 
   // Operating System library
   rpc CreateOperatingSystem(CreateOperatingSystemRequest) returns (OperatingSystem);
@@ -14009,6 +14024,40 @@ message ComponentCredentialOverrides {
   optional UsernamePassword bmc = 1;
   // Switch NVOS credentials. Ignored for compute and power-shelf targets.
   optional UsernamePassword nvos = 2;
+}
+
+// Selects which credential of a rack component GetComponentCredentials returns.
+enum ComponentCredentialKind {
+  // Default enum value; the server rejects it with InvalidArgument.
+  COMPONENT_CREDENTIAL_KIND_UNSPECIFIED = 0;
+  // Power-shelf PMC root credentials. Only the power-shelf manager may request them.
+  COMPONENT_CREDENTIAL_KIND_POWER_SHELF_PMC = 1;
+  // Switch BMC root credentials. Only the switch manager may request them.
+  COMPONENT_CREDENTIAL_KIND_SWITCH_BMC = 2;
+  // Switch NVOS admin credentials. Only the switch manager may request them.
+  COMPONENT_CREDENTIAL_KIND_SWITCH_NVOS = 3;
+}
+
+// Identifies one credential of an ingested power shelf or switch.
+message GetComponentCredentialsRequest {
+  // Required. PMC MAC address of the power shelf, or BMC MAC address of the
+  // switch, in either letter case. The server returns InvalidArgument when it
+  // is not a MAC address, and NotFound when Core has no power shelf, for the
+  // power-shelf kind, or no switch, for a switch kind, with that BMC MAC
+  // address that is not deleted, when a machine owns an interface with that
+  // MAC address, or when neither the credential store nor expected inventory
+  // holds the credential. A device known only from expected inventory is
+  // NotFound.
+  string bmc_mac_address = 1;
+  // Required. The server returns InvalidArgument for an unspecified or unknown
+  // value, and PermissionDenied when the calling identity may not request it.
+  ComponentCredentialKind kind = 2;
+}
+
+// Carries the credential resolved for the requested power shelf or switch.
+message GetComponentCredentialsResponse {
+  // The resolved credential. Always set on success.
+  UsernamePassword credentials = 1;
 }
 
 // --- RMS job diagnostics ---
