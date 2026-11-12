@@ -675,8 +675,8 @@ async fn oob_interface_mac_addresses(
     Ok(interfaces
         .into_values()
         .flatten()
-        // Underlay can include BMC interface rows; keep those for the later
-        // SuppressingBmcDhcp step so BMC DHCP is not blocked before factory reset.
+        // Underlay can include BMC interface rows; keep those for the per-BMC
+        // factory-reset attempt so DHCP stays available through the power cycle.
         .filter(|interface| {
             interface.network_segment_type == Some(NetworkSegmentType::Underlay)
                 && interface.interface_type != InterfaceType::Bmc
@@ -836,42 +836,11 @@ pub(super) async fn handle_waiting_for_oob_dhcp_acknowledgement(
 
     Ok(StateHandlerOutcome::transition(
         ManagedHostState::Decommissioning {
-            decommissioning_state: DecommissioningState::SuppressingBmcDhcp,
-        },
-    ))
-}
-
-pub(super) async fn handle_suppressing_bmc_dhcp(
-    state: &ManagedHostStateSnapshot,
-    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let mut txn = ctx.services.db_pool.begin().await?;
-    for bmc_mac_address in bmc_mac_addresses(state)? {
-        db::bmc_suppression::upsert(
-            &mut txn,
-            &NewBmcSuppression {
-                bmc_mac_address,
-                subsystem: BmcSuppressionSubsystem::Dhcp,
-                source: BmcSuppressionSource::Decommissioning,
-                reason: format!(
-                    "managed host {} is being decommissioned; suppressing BMC DHCP",
-                    state.host_snapshot.id
-                ),
-            },
-        )
-        .await?;
-    }
-    // Not deleting interface rows: bumps machine_interfaces_deletion so the
-    // DHCP server restarts, clears its cache, and honors the suppressions above.
-    db::machine_interface::record_deletion(&mut txn).await?;
-    Ok(
-        StateHandlerOutcome::transition(ManagedHostState::Decommissioning {
             decommissioning_state: DecommissioningState::FactoryResettingBmcs {
                 completed: HashSet::new(),
             },
-        })
-        .with_txn(txn),
-    )
+        },
+    ))
 }
 
 pub(super) async fn handle_factory_resetting_bmcs(
@@ -879,47 +848,91 @@ pub(super) async fn handle_factory_resetting_bmcs(
     state: &ManagedHostStateSnapshot,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    let machine_id = if !completed.contains(&state.host_snapshot.id) {
-        factory_reset_bmc(&state.host_snapshot, ctx).await?
+    if !completed.contains(&state.host_snapshot.id) {
+        factory_reset_bmc(&state.host_snapshot, completed, state, ctx).await
     } else if let Some(dpu) = state
         .dpu_snapshots
         .iter()
         .find(|dpu| !completed.contains(&dpu.id))
     {
-        factory_reset_bmc(dpu, ctx).await?
+        factory_reset_bmc(dpu, completed, state, ctx).await
     } else {
-        return Ok(StateHandlerOutcome::transition(
+        Ok(StateHandlerOutcome::transition(
             ManagedHostState::Decommissioning {
                 decommissioning_state: DecommissioningState::WaitingForBmcDhcpAcknowledgement,
             },
-        ));
-    };
+        ))
+    }
+}
+
+async fn factory_reset_bmc(
+    machine: &Machine<impl MachineIdSubtypeTrait>,
+    completed: &HashSet<MachineId>,
+    state: &ManagedHostStateSnapshot,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
+    let mac = bmc_mac_address(machine)?;
+    let host_id = state.host_snapshot.id;
+    if db::bmc_suppression::find(
+        &ctx.services.db_pool,
+        mac,
+        BmcSuppressionSubsystem::Dhcp,
+        BmcSuppressionSource::Decommissioning,
+    )
+    .await?
+    .is_some()
+    {
+        let mut txn = ctx.services.db_pool.begin().await?;
+        // If there is a suppression present for a BMC not marked complete, that means
+        // we couldn't verify the factory reset request went through. Delete the
+        // suppression so we can retry.
+        db::bmc_suppression::delete(
+            &mut txn,
+            mac,
+            BmcSuppressionSubsystem::Dhcp,
+            BmcSuppressionSource::Decommissioning,
+        )
+        .await?;
+        // Trigger a DHCP server restart to clear its cache and restore DHCP for this BMC.
+        db::machine_interface::record_deletion(&mut txn).await?;
+        return Ok(StateHandlerOutcome::wait_and_requeue(format!(
+            "restoring DHCP after an unresolved factory reset for BMC {}",
+            machine.id
+        ))
+        .with_txn(txn));
+    }
+    // Create client first to ensure BMC is reachable before suppressing DHCP.
+    let client = ctx
+        .services
+        .create_redfish_client_from_machine(machine)
+        .await?;
+    let mut txn = ctx.services.db_pool.begin().await?;
+    db::bmc_suppression::upsert(
+        &mut txn,
+        &NewBmcSuppression {
+            bmc_mac_address: mac,
+            subsystem: BmcSuppressionSubsystem::Dhcp,
+            source: BmcSuppressionSource::Decommissioning,
+            reason: format!("managed host {host_id} is being decommissioned; suppressing BMC DHCP"),
+        },
+    )
+    .await?;
+    // Trigger a DHCP server restart to clear its cache so it honors the new suppression.
+    db::machine_interface::record_deletion(&mut txn).await?;
+    txn.commit().await?;
+
+    client
+        .bmc_reset_to_defaults()
+        .await
+        .map_err(|error| super::redfish_error("bmc_reset_to_defaults", error))?;
 
     let mut completed = completed.clone();
-    completed.insert(machine_id);
+    completed.insert(machine.id.into());
     Ok(StateHandlerOutcome::transition(
         ManagedHostState::Decommissioning {
             decommissioning_state: DecommissioningState::FactoryResettingBmcs { completed },
         },
     ))
-}
-
-async fn factory_reset_bmc(
-    machine: &Machine<impl MachineIdSubtypeTrait>,
-    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-) -> Result<MachineId, StateHandlerError> {
-    ctx.services
-        .create_redfish_client_from_machine(machine)
-        .await?
-        .bmc_reset_to_defaults()
-        .await
-        .map_err(|error| {
-            StateHandlerError::GenericError(eyre::eyre!(
-                "failed to factory reset BMC for {}: {error}",
-                machine.id
-            ))
-        })?;
-    Ok(machine.id.into())
 }
 
 pub(super) async fn handle_waiting_for_bmc_dhcp_acknowledgement(

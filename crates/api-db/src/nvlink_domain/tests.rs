@@ -3,20 +3,41 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+use model::nvlink_domain::NvLinkDomainMember;
+use model::rack_type::RackCapabilityType;
+
 use super::*;
 
-async fn inventory(pool: &sqlx::PgPool) -> ExpectedNvLinkDomain {
-    sqlx::raw_sql("INSERT INTO expected_rack_groups (rack_group_id, topology, racks) VALUES ('group', 'topology', '[{\"rack_id\":\"rack\",\"members\":[]}]');
-        INSERT INTO expected_machines (serial_number, bmc_mac_address, bmc_username, bmc_password, rack_id) VALUES ('compute', '00:11:22:33:44:55', 'test', 'test', 'rack');
-        INSERT INTO expected_switches (serial_number, bmc_mac_address, bmc_username, bmc_password, rack_id) VALUES ('switch', '00:11:22:33:44:66', 'test', 'test', 'rack');")
-        .execute(pool).await.unwrap();
-    ExpectedNvLinkDomain {
+async fn inventory(pool: &sqlx::PgPool) -> NvLinkDomain {
+    sqlx::raw_sql(
+        r#"INSERT INTO expected_rack_groups (rack_group_id, topology, racks)
+        VALUES ('group', 'topology', '[{"rack_id":"rack","members":[
+        {"type":"Compute","manufacturer":"NVIDIA","id":"compute","cartridge_index":0},
+        {"type":"Switch","manufacturer":"NVIDIA","id":"switch","cartridge_index":0},
+        {"type":"Compute","manufacturer":"NVIDIA","id":"compute-2","cartridge_index":1},
+        {"type":"Switch","manufacturer":"NVIDIA","id":"switch-2","cartridge_index":1}]},
+        {"rack_id":"rack-2","members":[
+        {"type":"Compute","manufacturer":"NVIDIA","id":"compute-3","cartridge_index":0},
+        {"type":"Switch","manufacturer":"NVIDIA","id":"switch-3","cartridge_index":0}]}]');"#,
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    NvLinkDomain {
         id: Uuid::new_v4(),
         rack_group_id: RackGroupId::new("group"),
         name: None,
-        member_bmc_mac_addresses: vec![
-            "00:11:22:33:44:55".parse().unwrap(),
-            "00:11:22:33:44:66".parse().unwrap(),
+        members: vec![
+            NvLinkDomainMember {
+                rack_index: 0,
+                slot_index: 0,
+                component_type: RackCapabilityType::Compute,
+            },
+            NvLinkDomainMember {
+                rack_index: 0,
+                slot_index: 0,
+                component_type: RackCapabilityType::Switch,
+            },
         ],
     }
 }
@@ -45,7 +66,7 @@ async fn lifecycle_and_group_dependencies(pool: sqlx::PgPool) {
     );
 
     // Dependency errors must be classified independently of the constraint name.
-    sqlx::query("ALTER TABLE expected_nvlink_domains RENAME CONSTRAINT expected_nvlink_domains_rack_group_id_fkey TO test_domain_parent_reference")
+    sqlx::query("ALTER TABLE nvlink_domains RENAME CONSTRAINT expected_nvlink_domains_rack_group_id_fkey TO test_domain_parent_reference")
         .execute(&pool)
         .await
         .unwrap();
@@ -96,21 +117,26 @@ async fn lifecycle_and_group_dependencies(pool: sqlx::PgPool) {
         delete(&mut txn, domain.id).await,
         Err(DatabaseError::NotFoundError { .. })
     ));
-    let replacement = ExpectedNvLinkDomain {
+    let replacement = NvLinkDomain {
         id: Uuid::new_v4(),
         ..domain
     };
     create(&mut txn, &replacement).await.unwrap();
     txn.commit().await.unwrap();
     assert_eq!(find_ids(&pool, None).await.unwrap(), vec![replacement.id]);
-    sqlx::raw_sql("INSERT INTO expected_machines (serial_number, bmc_mac_address, bmc_username, bmc_password, rack_id) VALUES ('compute-2', '00:11:22:33:44:77', 'test', 'test', 'rack');
-        INSERT INTO expected_switches (serial_number, bmc_mac_address, bmc_username, bmc_password, rack_id) VALUES ('switch-2', '00:11:22:33:44:88', 'test', 'test', 'rack');")
-        .execute(&pool).await.unwrap();
-    let peer = ExpectedNvLinkDomain {
+    let peer = NvLinkDomain {
         id: Uuid::new_v4(),
-        member_bmc_mac_addresses: vec![
-            "00:11:22:33:44:77".parse().unwrap(),
-            "00:11:22:33:44:88".parse().unwrap(),
+        members: vec![
+            NvLinkDomainMember {
+                rack_index: 1,
+                slot_index: 0,
+                component_type: RackCapabilityType::Compute,
+            },
+            NvLinkDomainMember {
+                rack_index: 1,
+                slot_index: 0,
+                component_type: RackCapabilityType::Switch,
+            },
         ],
         ..replacement
     };
@@ -127,18 +153,15 @@ async fn lifecycle_and_group_dependencies(pool: sqlx::PgPool) {
 }
 
 #[crate::sqlx_test]
-async fn membership_admission(pool: sqlx::PgPool) {
+async fn membership_storage_constraints(pool: sqlx::PgPool) {
     let domain = inventory(&pool).await;
-    type Mutation = fn(&mut ExpectedNvLinkDomain);
+    type Mutation = fn(&mut NvLinkDomain);
     let cases: &[(&str, Mutation)] = &[
         ("unknown group", |d| {
             d.rack_group_id = RackGroupId::new("unknown")
         }),
-        ("unknown member", |d| {
-            d.member_bmc_mac_addresses[0] = "00:11:22:33:44:77".parse().unwrap()
-        }),
-        ("missing switch", |d| {
-            d.member_bmc_mac_addresses.pop();
+        ("power shelf", |d| {
+            d.members[0].component_type = RackCapabilityType::PowerShelf
         }),
     ];
     for (name, mutate) in cases {
@@ -149,27 +172,23 @@ async fn membership_admission(pool: sqlx::PgPool) {
         txn.rollback().await.unwrap();
         assert!(find_ids(&pool, None).await.unwrap().is_empty());
     }
-    for rack in [Some("other-rack"), None] {
-        sqlx::query("UPDATE expected_switches SET rack_id=$1")
-            .bind(rack)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let mut txn = pool.begin().await.unwrap();
-        assert!(matches!(
-            create(&mut txn, &domain).await,
-            Err(DatabaseError::InvalidArgument(_))
-        ));
-        txn.rollback().await.unwrap();
-    }
-    sqlx::raw_sql("UPDATE expected_switches SET rack_id='rack'; INSERT INTO expected_switches (serial_number, bmc_mac_address, bmc_username, bmc_password, rack_id) VALUES ('ambiguous', '00:11:22:33:44:55', 'test', 'test', 'rack');")
-        .execute(&pool).await.unwrap();
+
+    // Storage accepts declared positions without resolving RackGroup inventory.
+    let declaration = NvLinkDomain {
+        members: vec![NvLinkDomainMember {
+            rack_index: 99,
+            slot_index: u32::MAX,
+            component_type: RackCapabilityType::Compute,
+        }],
+        ..domain
+    };
     let mut txn = pool.begin().await.unwrap();
-    assert!(matches!(
-        create(&mut txn, &domain).await,
-        Err(DatabaseError::InvalidArgument(_))
-    ));
-    txn.rollback().await.unwrap();
+    create(&mut txn, &declaration).await.unwrap();
+    txn.commit().await.unwrap();
+    assert_eq!(
+        find_by_ids(&pool, &[declaration.id]).await.unwrap(),
+        vec![declaration]
+    );
 }
 
 #[crate::sqlx_test]
@@ -182,7 +201,7 @@ async fn concurrent_claims_are_atomic(pool: sqlx::PgPool) {
         .fetch_one(&mut *second)
         .await
         .unwrap();
-    let competing = ExpectedNvLinkDomain {
+    let competing = NvLinkDomain {
         id: Uuid::new_v4(),
         ..domain.clone()
     };
@@ -227,14 +246,47 @@ async fn concurrent_claims_are_atomic(pool: sqlx::PgPool) {
 
 #[crate::sqlx_test]
 async fn migration_preserves_existing_inventory(pool: sqlx::PgPool) {
+    use sqlx::Acquire;
+
     let domain = inventory(&pool).await;
-    sqlx::raw_sql("DROP TABLE expected_nvlink_domain_members; DROP TABLE expected_nvlink_domains;")
+    sqlx::raw_sql("DROP TABLE nvlink_domain_members; DROP TABLE nvlink_domains;")
         .execute(&pool)
         .await
         .unwrap();
     let mut txn = pool.begin().await.unwrap();
     sqlx::raw_sql(include_str!(
         "../../migrations/20261014011133_expected_nvlink_domains.sql"
+    ))
+    .execute(&mut *txn)
+    .await
+    .unwrap();
+    sqlx::raw_sql("INSERT INTO expected_nvlink_domains (id, rack_group_id) VALUES ('12345678-1234-5678-90ab-cdef01234567', 'group');
+        INSERT INTO expected_nvlink_domain_members (domain_id, bmc_mac_address) VALUES ('12345678-1234-5678-90ab-cdef01234567', '00:11:22:33:44:55');")
+        .execute(&mut *txn).await.unwrap();
+    let mut attempt = txn.begin().await.unwrap();
+    let error = sqlx::raw_sql(include_str!(
+        "../../migrations/20261111000712_nvlink_domain_positions.sql"
+    ))
+    .execute(&mut *attempt)
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("23502")
+    );
+    attempt.rollback().await.unwrap();
+    let retained: String =
+        sqlx::query_scalar("SELECT bmc_mac_address::text FROM expected_nvlink_domain_members")
+            .fetch_one(&mut *txn)
+            .await
+            .unwrap();
+    assert_eq!(retained, "00:11:22:33:44:55");
+    sqlx::query("DELETE FROM expected_nvlink_domains")
+        .execute(&mut *txn)
+        .await
+        .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261111000712_nvlink_domain_positions.sql"
     ))
     .execute(&mut *txn)
     .await
