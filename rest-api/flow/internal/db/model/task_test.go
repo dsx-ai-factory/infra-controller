@@ -253,6 +253,7 @@ func TestTaskComponentIDFilter_GeneratedSQL(t *testing.T) {
 	assert.Contains(t, got, "attributes @?")
 	assert.Contains(t, got, "::jsonpath")
 	assert.Contains(t, got, "$.components_by_type.*[*]")
+	assert.Contains(t, got, "$.firmware_restart_compute_ids[*]")
 	assert.Contains(t, got, compID.String(),
 		"the UUID must appear literally inside the jsonpath string so the planner can use the GIN index")
 }
@@ -281,7 +282,7 @@ func TestTaskListOptionsToFilterable_FullQuerySQL(t *testing.T) {
 	gotSQL := string(sql)
 
 	// Each predicate must be present; combined under AND by bun's Where
-	// chaining (no OR or aliasing surprises).
+	// chaining; the two membership paths are OR-combined inside that filter.
 	for _, frag := range []string{
 		"rack_id = ",
 		rackID.String(),
@@ -291,8 +292,10 @@ func TestTaskListOptionsToFilterable_FullQuerySQL(t *testing.T) {
 	} {
 		assert.Contains(t, gotSQL, frag, "missing fragment %q", frag)
 	}
-	assert.Equal(t, 0, strings.Count(gotSQL, " OR "),
-		"filters must be AND-combined, got: %s", gotSQL)
+	assert.Equal(t, 1, strings.Count(gotSQL, " OR "))
+	assert.Contains(t, gotSQL, "AND ((attributes @?")
+	assert.True(t, strings.HasSuffix(gotSQL, "::jsonpath))"),
+		"membership alternatives must stay grouped beneath AND: %s", gotSQL)
 }
 
 func TestListTasksForRacksByStatus_GeneratedSQL(t *testing.T) {

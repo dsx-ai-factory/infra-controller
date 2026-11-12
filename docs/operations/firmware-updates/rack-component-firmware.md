@@ -19,7 +19,7 @@ The REST response confirms that the task was created; it does not mean that
 the firmware update has completed.
 
 ```mermaid
-flowchart LR
+flowchart TD
     A["Provider Admin submits rack or tray request"] --> B["Flow resolves targets and an operation rule"]
     B --> C["Wait for affected hosts to be ready"]
     C --> D["Start update through NICo Core"]
@@ -27,7 +27,13 @@ flowchart LR
     E --> F["Flow polls component status"]
     F --> G{"Terminal result?"}
     G -- No --> F
-    G -- Success --> H["Task succeeds"]
+    G -- Success --> J{"NVOS update with reserved compute?"}
+    J -- No --> H["Task succeeds"]
+    J -- Yes --> K["Graceful compute shutdown; confirm off"]
+    K --> L["Power compute on; confirm on"]
+    L --> H
+    K -- Failure or timeout --> I
+    L -- Failure or timeout --> I
     G -- Failure or timeout --> I["Task fails with a report"]
 ```
 
@@ -40,6 +46,32 @@ checks every 5 seconds by default.
 If readiness information is missing, the current implementation logs a warning
 and allows the operation to proceed. Do not treat the readiness check as a
 substitute for confirming the maintenance scope and tenant impact.
+
+## Compute restart after NVOS updates
+
+When a Flow firmware task includes NVOS on a selected NVSwitch tray, Flow
+restarts all compute trays in that rack after every firmware stage succeeds.
+This includes tray requests with `targets: ["nvos"]` and whole-bundle updates
+with omitted or empty `targets`. A layered `version` that excludes NVSwitch,
+a non-NVOS subset such as `targets: ["bmc"]`, or a custom rule without an
+NVSwitch firmware action does not trigger this restart.
+
+Flow saves the compute membership when it admits the task and includes those
+compute trays in conflict checks. A queued task keeps that membership: later
+arrivals are not restarted, and a missing reserved component fails execution.
+Only the original firmware selection receives firmware; adding compute to the
+restart scope does not add a compute firmware update.
+If a queued task's rule changes to require a restart that was not reserved at
+admission, the task fails before firmware dispatch; submit a new task to reserve
+the required compute scope.
+
+The restart uses Flow's graceful shutdown, confirmation of the off state,
+power on, and confirmation of the on state. It does not fall back to forced
+shutdown. Restart failures or timeouts fail the task, and the task report
+includes the two additional compute stages. Cancellation or failure after
+shutdown can leave compute off; inspect task status and device state before
+requesting recovery. The request's `overrideReadinessCheck` also applies to
+these power operations.
 
 ## Choose the endpoint
 

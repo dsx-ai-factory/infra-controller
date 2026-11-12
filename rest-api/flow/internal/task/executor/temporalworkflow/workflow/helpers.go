@@ -423,6 +423,14 @@ func parseDurationParam(val any) time.Duration {
 	}
 }
 
+// ruleContinuation runs additional stages against a separate target snapshot.
+// Keeping its targets separate prevents a post-update restart from widening
+// the set of devices receiving firmware.
+type ruleContinuation struct {
+	rule    operationrules.RuleDefinition
+	targets map[devicetypes.ComponentType]common.Target
+}
+
 // executeRuleBasedOperation drives the rule's stages in order. At each
 // stage boundary it advances the report.Tracker (begin -> complete or
 // fail) and emits a best-effort report snapshot to the store. The first
@@ -437,6 +445,7 @@ func executeRuleBasedOperation(
 	allTargets map[devicetypes.ComponentType]common.Target,
 	operationInfo any,
 	ruleDef *operationrules.RuleDefinition,
+	continuations ...ruleContinuation,
 ) (*report.Report, error) {
 	if ruleDef == nil {
 		return nil, fmt.Errorf(
@@ -455,6 +464,29 @@ func executeRuleBasedOperation(
 		Report: report.NewInitial(ruleDef, componentTotalsByType(typeToTargets)),
 	}
 
+	// Continuation stages follow every caller-supplied stage, including sparse
+	// stage numbers, while retaining their own report counts and target sets.
+	combinedRule := *ruleDef
+	combinedRule.Steps = append([]operationrules.SequenceStep(nil), ruleDef.Steps...)
+	stageTargets := make(map[int]map[devicetypes.ComponentType]common.Target)
+	lastStage := tracker.Report.Stages[len(tracker.Report.Stages)-1].Number
+	for _, continuation := range continuations {
+		continuationReport := report.NewInitial(&continuation.rule, componentTotalsByType(continuation.targets))
+		for i, step := range continuation.rule.Steps {
+			if lastStage == int(^uint(0)>>1) {
+				return nil, fmt.Errorf("no stage number available for operation continuation")
+			}
+			lastStage++
+			step.Stage = lastStage
+			combinedRule.Steps = append(combinedRule.Steps, step)
+			stageTargets[lastStage] = continuation.targets
+			stageReport := continuationReport.Stages[i]
+			stageReport.Number = lastStage
+			tracker.Report.Stages = append(tracker.Report.Stages, stageReport)
+		}
+	}
+	ruleDef = &combinedRule
+
 	updateTaskReportBestEffort(ctx, taskID, tracker.Report)
 
 	log.Info().
@@ -471,12 +503,16 @@ func executeRuleBasedOperation(
 			Int("step_count", len(stage.Steps)).
 			Msg("Executing stage")
 
+		executionTargets := typeToTargets
+		if targets, ok := stageTargets[stage.Number]; ok {
+			executionTargets = targets
+		}
 		err := executeGenericStageParallel(
 			ctx,
 			taskID,
 			tracker,
 			stage.Steps,
-			typeToTargets,
+			executionTargets,
 			allTargets,
 			operationInfo,
 		)

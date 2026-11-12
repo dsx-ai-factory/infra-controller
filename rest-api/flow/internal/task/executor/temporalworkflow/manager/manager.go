@@ -24,6 +24,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/activity"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/workflow"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -264,6 +265,26 @@ func validateRequiredCapabilities(
 	)
 	if err != nil {
 		return err
+	}
+
+	restartRequired := false
+	if len(info.FirmwareRestartComponents) > 0 && info.OperationType == taskcommon.TaskTypeFirmwareControl {
+		op, decodeErr := operations.New(info.OperationType, info.OperationInfo)
+		if decodeErr != nil {
+			return decodeErr
+		}
+		firmware, ok := op.(*operations.FirmwareControlTaskInfo)
+		restartRequired = ok && info.RuleDefinition.RequiresNVOSComputeRestart(firmware)
+	}
+	if restartRequired {
+		restartRequirements, restartErr := capabilityrequirements.Required(
+			&operationrules.RuleDefinition{Steps: operationrules.ComputeRestartSteps()},
+			executionComponentTypes(info.FirmwareRestartComponents),
+		)
+		if restartErr != nil {
+			return restartErr
+		}
+		requirements = append(requirements, restartRequirements...)
 	}
 
 	for _, r := range requirements {
