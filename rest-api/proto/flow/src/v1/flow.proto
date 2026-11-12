@@ -126,6 +126,9 @@ service Flow {
     // This is not an atomic snapshot and does not change power or task state.
     // Caller cancellation fails the RPC; child read failures remain section errors.
     rpc GetTrayPowerDetails(GetTrayPowerDetailsRequest) returns (GetTrayPowerDetailsResponse);
+    // Reads live Core firmware evidence and outstanding Flow firmware tasks.
+    // Passive and non-atomic; child failures remain independent section errors.
+    rpc GetTrayFirmwareDetails(GetTrayFirmwareDetailsRequest) returns (GetTrayFirmwareDetailsResponse);
     // Reads full current rack membership once, with batched Core details and one
     // power-task list. This is informational, not an atomic snapshot.
     // It does not change power or task state.
@@ -2385,4 +2388,211 @@ message TrayStatusCounts {
     uint32 error = 4; // Trays in Error.
     uint32 deleting = 5; // Trays in Deleting.
     uint32 unknown = 6; // Trays with unknown, missing or unrecognized status.
+}
+
+// Uses the same inventory ID or BMC/PMC MAC selector as tray inventory.
+// Empty IDs return InvalidArgument, missing IDs NotFound, ambiguous IDs
+// FailedPrecondition. Only compute, NVLink switch and power shelf are supported.
+// Other component types return InvalidArgument. Inventory dependency failures
+// return sanitized Unavailable or Internal errors.
+message GetTrayFirmwareDetailsRequest {
+    string id = 1;
+}
+
+// Contains independent installed firmware, configured expectations and work.
+message GetTrayFirmwareDetailsResponse {
+    TrayFirmwareDetails details = 1;
+}
+
+// Live Core evidence and stored Flow intent describe separately collected facts.
+// Every section contains a value or an explicit read error; an empty collection
+// never substitutes for unavailable evidence. No field proves whole-update
+// completion, active/staged image choice or a universal compliance verdict.
+// Inventory and child reads share at most 30 seconds from entry, ending one
+// second before an earlier caller deadline. Caller cancellation fails the RPC
+// after children are joined; other child failures preserve completed sections.
+// A failed or timed-out Core RPC makes all three Core sections unavailable;
+// Flow cannot recover partial Core evidence from a failed transport response.
+// The encoded proxy response is bounded to 1,991,680 bytes. On overflow, remove
+// populated waiting references first, then successful external identities, then
+// the whole task section, each with LimitExceeded and a size recheck. If the
+// remaining response is too large, return ResourceExhausted. Never clip targets.
+message TrayFirmwareDetails {
+    // Managed inventory ID, absent until linked to Core; never a Flow UUID.
+    optional string component_id = 1;
+    ComponentType component_type = 2;
+    // Internal rack assignment, absent for a rackless tray.
+    UUID rack_id = 3;
+    // Retained inventory rack identifier, including deleted racks; no UUID fallback.
+    // Absent for a rackless tray or when its rack identity cannot be read.
+    optional string rack_external_id = 4;
+    FirmwareActualDetails actual = 5;
+    FirmwareDesiredDetails desired = 6;
+    FirmwareOperations operations = 7;
+}
+
+// Flow failures are separate from safe typed failures inside Core evidence.
+// Dependency diagnostics, authentication, reports and raw manifests are excluded.
+enum FirmwareDetailsReadError {
+    // Never emitted as a failure.
+    FIRMWARE_DETAILS_READ_ERROR_UNSPECIFIED = 0;
+    // Required managed/rack/inventory identity is absent.
+    FIRMWARE_DETAILS_READ_ERROR_NOT_LINKED = 1;
+    // No NICo provider client is configured.
+    FIRMWARE_DETAILS_READ_ERROR_NOT_CONFIGURED = 2;
+    // Missing RPC/capability or required Core section/result.
+    FIRMWARE_DETAILS_READ_ERROR_UNSUPPORTED = 3;
+    // Caller, provider or shared read deadline expired.
+    FIRMWARE_DETAILS_READ_ERROR_DEADLINE_EXCEEDED = 4;
+    // Other dependency failures, including actual authorization denial.
+    // PermissionDenied alone cannot identify an older Core server.
+    // Unreadable or invalid stored task data also reports ReadFailed.
+    FIRMWARE_DETAILS_READ_ERROR_READ_FAILED = 5;
+    // Wrong Core response identity/cardinality or inconsistent inventory identities.
+    FIRMWARE_DETAILS_READ_ERROR_INVALID_RESPONSE = 6;
+    // Rack task/context count or encoded response exceeded its bound.
+    FIRMWARE_DETAILS_READ_ERROR_LIMIT_EXCEEDED = 7;
+}
+
+// A Core installed collection, including member failures, or Flow read failure.
+// Core payloads are forwarded unchanged. Consumers must treat absent nested
+// results as unsupported evidence, never as a successful empty observation.
+message FirmwareActualDetails {
+    oneof result {
+        forge.ComponentFirmwareInstalled value = 1;
+        FirmwareDetailsReadError error = 2;
+    }
+}
+
+// Existing effective defaults/comparison, independent of a task's requested input.
+message FirmwareDesiredDetails {
+    oneof result {
+        forge.ComponentFirmwareExpected value = 1;
+        FirmwareDetailsReadError error = 2;
+    }
+}
+
+// Core requests/jobs and Flow tasks are distinct, without a correlation ID.
+// Running Flow work does not establish an active Core or hardware operation.
+message FirmwareOperations {
+    FirmwareActionDetails actions = 1;
+    FirmwareTaskDetailsList tasks = 2;
+}
+
+// Core stored and backend work, preserving their separate availability.
+// Nested Core targets/results are forwarded unchanged; consumers must treat
+// their absence as unsupported evidence, not completed or empty work.
+message FirmwareActionDetails {
+    oneof result {
+        forge.ComponentFirmwareActions value = 1;
+        FirmwareDetailsReadError error = 2;
+    }
+}
+
+// Waiting/Pending/Running firmware tasks in creation-time then UUID order.
+// Tray results select recorded UUID/type membership in the current rack only;
+// a power-shelf firmware task is listed only for the shelf it selects.
+// Missing rack is NotLinked. A failed rack query or invalid stored row makes
+// the whole task section unavailable, before filtering for this tray.
+// More than 256 outstanding rack firmware tasks makes the whole section
+// unavailable even when fewer select this tray. Error is absent on success,
+// including empty; entries is empty on failure. No execution reports are exposed.
+message FirmwareTaskDetailsList {
+    repeated FirmwareTaskDetails entries = 1;
+    optional FirmwareDetailsReadError error = 2;
+}
+
+// Sanitized stored firmware intent; not installed or effective expected firmware.
+message FirmwareTaskDetails {
+    UUID id = 1;
+    UUID rack_id = 2;
+    FirmwareControlOperation operation = 3;
+    // Full recorded Flow UUID/type selection, sorted by type then UUID.
+    ComponentsByType targets = 4;
+    // Recorded Flow status; Running does not prove hardware dispatch.
+    TaskStatus status = 5;
+    google.protobuf.Timestamp created_at = 6;
+    google.protobuf.Timestamp updated_at = 7;
+    // Absent if no start was recorded; not proof of hardware dispatch.
+    google.protobuf.Timestamp started_at = 8;
+    // Always set on returned tasks, with shared or by_type selected.
+    FirmwareRequestedTargets requested_targets = 9;
+    // Recorded component selectors; empty retains backend defaults.
+    repeated string sub_targets = 10;
+    // Recorded request flag to bypass the updater's readiness check.
+    bool override_readiness_check = 11;
+    // Recorded request flag to bypass the updater's version check.
+    bool override_version_check = 12;
+    // Recorded Unix seconds; absent for stored zero/omitted bounds.
+    optional int64 start_time = 13;
+    optional int64 end_time = 14;
+    // Set for Waiting tasks with references or an error; absent for other statuses.
+    FirmwareTaskWaitingContext waiting_context = 15;
+    // Always set on returned tasks, with complete identities or a read error.
+    FirmwareTaskExternalTargets external_targets = 16;
+}
+
+// Shared input or explicit type-specific sections, without interpreting membership.
+// Every returned task selects shared or by_type; an unset selection is not emitted.
+// Unavailable display metadata uses FIRMWARE_TARGET_KIND_UNAVAILABLE instead.
+message FirmwareRequestedTargets {
+    oneof selection {
+        FirmwareTargetMetadata shared = 1;
+        FirmwareTargetsByType by_type = 2;
+    }
+}
+
+// Only the explicitly supplied type sections, in component-type order.
+message FirmwareTargetsByType {
+    repeated FirmwareTargetForType entries = 1;
+}
+
+// A recorded type section, distinct from task target selection.
+message FirmwareTargetForType {
+    ComponentType component_type = 1;
+    FirmwareTargetMetadata target = 2;
+}
+
+// Display-only metadata; versions/manifest IDs retain exact stored spelling.
+message FirmwareTargetMetadata {
+    FirmwareTargetKind kind = 1;
+    // Empty for unavailable/default metadata; no artifact URLs or manifest body.
+    string value = 2;
+}
+
+// What safe target metadata was retained; no kind establishes update success.
+enum FirmwareTargetKind {
+    // Never emitted by this service.
+    FIRMWARE_TARGET_KIND_UNSPECIFIED = 0;
+    // Stored input has no safe display metadata; value is empty.
+    FIRMWARE_TARGET_KIND_UNAVAILABLE = 1;
+    // No explicit target was requested; the updater resolves its configured default.
+    FIRMWARE_TARGET_KIND_CONFIGURED_DEFAULT = 2;
+    // Exact recorded scalar version; not a statement about installed firmware.
+    FIRMWARE_TARGET_KIND_VERSION = 3;
+    // Recorded manifest identity only; no manifest body or artifact location.
+    FIRMWARE_TARGET_KIND_MANIFEST = 4;
+}
+
+// Informational conflict evidence, not a saved waiting reason or readiness check.
+// Membership/order follow current conflict rules and creation-time/UUID order;
+// equal-time waiters are excluded. More than 256 nonterminal rack tasks makes
+// context unavailable without hiding firmware tasks. Error is absent on success;
+// both lists are empty on failure. Populated lists may be omitted as LimitExceeded.
+message FirmwareTaskWaitingContext {
+    repeated TaskBrief active_conflicts = 1;
+    repeated TaskBrief earlier_waiting = 2;
+    optional FirmwareDetailsReadError error = 3;
+}
+
+// Retained inventory identifiers for every recorded target, in recorded order.
+// Includes soft-deleted members without requiring current rack membership.
+// These identities are read-time facts, not historical identity copies.
+// Success includes a nonempty rack ID and every target (possibly empty). Failure
+// leaves rack_id/targets empty with a categorized error; never a UUID fallback.
+// Every returned task has this message, with a successful selection or an error.
+message FirmwareTaskExternalTargets {
+    string rack_id = 1;
+    repeated ExternalRef targets = 2;
+    optional FirmwareDetailsReadError error = 3;
 }

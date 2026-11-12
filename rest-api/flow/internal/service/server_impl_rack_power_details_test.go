@@ -836,7 +836,7 @@ func TestFlowServerImpl_GetRackPowerDetails(t *testing.T) {
 				require.NoError(t, err)
 				encoded, err := json.Marshal(grpcproxy.Response{ResponseJSON: message})
 				require.NoError(t, err)
-				require.LessOrEqual(t, len(encoded), powerDetailsResponseBytes)
+				require.LessOrEqual(t, len(encoded), detailsResponseBytes)
 			},
 		},
 		{
@@ -879,10 +879,10 @@ func TestFlowServerImpl_GetRackPowerDetails(t *testing.T) {
 				}
 				message, err := protojson.Marshal(control)
 				require.NoError(t, err)
-				require.LessOrEqual(t, len(message), powerDetailsResponseBytes)
+				require.LessOrEqual(t, len(message), detailsResponseBytes)
 				encoded, err := json.Marshal(grpcproxy.Response{ResponseJSON: message})
 				require.NoError(t, err)
-				require.Greater(t, len(encoded), powerDetailsResponseBytes)
+				require.Greater(t, len(encoded), detailsResponseBytes)
 			},
 		},
 		{
@@ -1052,9 +1052,9 @@ func requireRackCoreError(t *testing.T, tray *pb.RackTrayPowerDetails, code pb.P
 	require.Equal(t, code, tray.Operations.Actions.GetError())
 }
 
-// TestNormalizeCorePowerTarget covers typed request constraints beyond the
+// TestNormalizeCoreComponentTarget covers typed request constraints beyond the
 // ordinary host, switch, shelf and case aliases exercised by the public RPC.
-func TestNormalizeCorePowerTarget(t *testing.T) {
+func TestNormalizeCoreComponentTarget(t *testing.T) {
 	host := rackPowerCoreID("fm100ht", 1)
 	predicted := rackPowerCoreID("fm100ps", 1)
 	hostShelf := rackPowerCoreID("ps100hs", 1)
@@ -1077,7 +1077,7 @@ func TestNormalizeCorePowerTarget(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, valid := normalizeCorePowerTarget(test.kind, test.id)
+			got, valid := normalizeCoreComponentTarget(test.kind, test.id)
 			require.Equal(t, test.want != "", valid)
 			require.Equal(t, test.want, got)
 		})

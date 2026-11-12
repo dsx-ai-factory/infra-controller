@@ -820,3 +820,9 @@ func (c *mockClient) SetDecommissionPowerShelfError(err error) {
 func (c *mockClient) GetComponentPowerDetails(context.Context, *corev1.GetComponentPowerDetailsRequest) (*corev1.GetComponentPowerDetailsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "mock power details are not configured")
 }
+
+// GetComponentFirmwareDetails reports absent passive capability rather than a
+// fabricated empty firmware inventory when tests use the default mock provider.
+func (c *mockClient) GetComponentFirmwareDetails(context.Context, *corev1.GetComponentFirmwareDetailsRequest) (*corev1.GetComponentFirmwareDetailsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "firmware details are not implemented by the mock client")
+}

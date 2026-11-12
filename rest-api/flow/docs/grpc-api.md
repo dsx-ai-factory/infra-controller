@@ -71,8 +71,20 @@
   - [ExternalRef](#v1-ExternalRef)
   - [FieldDiff](#v1-FieldDiff)
   - [Filter](#v1-Filter)
+  - [FirmwareActionDetails](#v1-FirmwareActionDetails)
+  - [FirmwareActualDetails](#v1-FirmwareActualDetails)
   - [FirmwareAuthenticationData](#v1-FirmwareAuthenticationData)
   - [FirmwareControlTaskOperation](#v1-FirmwareControlTaskOperation)
+  - [FirmwareDesiredDetails](#v1-FirmwareDesiredDetails)
+  - [FirmwareOperations](#v1-FirmwareOperations)
+  - [FirmwareRequestedTargets](#v1-FirmwareRequestedTargets)
+  - [FirmwareTargetForType](#v1-FirmwareTargetForType)
+  - [FirmwareTargetMetadata](#v1-FirmwareTargetMetadata)
+  - [FirmwareTargetsByType](#v1-FirmwareTargetsByType)
+  - [FirmwareTaskDetails](#v1-FirmwareTaskDetails)
+  - [FirmwareTaskDetailsList](#v1-FirmwareTaskDetailsList)
+  - [FirmwareTaskExternalTargets](#v1-FirmwareTaskExternalTargets)
+  - [FirmwareTaskWaitingContext](#v1-FirmwareTaskWaitingContext)
   - [GetComponentInfoByIDRequest](#v1-GetComponentInfoByIDRequest)
   - [GetComponentInfoBySerialRequest](#v1-GetComponentInfoBySerialRequest)
   - [GetComponentInfoResponse](#v1-GetComponentInfoResponse)
@@ -104,6 +116,8 @@
   - [GetTaskScheduleRequest](#v1-GetTaskScheduleRequest)
   - [GetTasksByIDsRequest](#v1-GetTasksByIDsRequest)
   - [GetTasksByIDsResponse](#v1-GetTasksByIDsResponse)
+  - [GetTrayFirmwareDetailsRequest](#v1-GetTrayFirmwareDetailsRequest)
+  - [GetTrayFirmwareDetailsResponse](#v1-GetTrayFirmwareDetailsResponse)
   - [GetTrayPowerDetailsRequest](#v1-GetTrayPowerDetailsRequest)
   - [GetTrayPowerDetailsResponse](#v1-GetTrayPowerDetailsResponse)
   - [HealthProbeAlert](#v1-HealthProbeAlert)
@@ -194,6 +208,7 @@
   - [QueueOptions](#v1-QueueOptions)
   - [Rack](#v1-Rack)
   - [RackMemberPowerActions](#v1-RackMemberPowerActions)
+  - [RackOperationStatusDetails](#v1-RackOperationStatusDetails)
   - [RackPosition](#v1-RackPosition)
   - [RackPowerCoverage](#v1-RackPowerCoverage)
   - [RackPowerDetails](#v1-RackPowerDetails)
@@ -219,7 +234,10 @@
   - [TaskSchedule](#v1-TaskSchedule)
   - [TaskScheduleScope](#v1-TaskScheduleScope)
   - [TaskStats](#v1-TaskStats)
+  - [TrayFirmwareDetails](#v1-TrayFirmwareDetails)
   - [TrayPowerDetails](#v1-TrayPowerDetails)
+  - [TrayStatusCounts](#v1-TrayStatusCounts)
+  - [TrayStatusCountsByType](#v1-TrayStatusCountsByType)
   - [TriggerTaskScheduleRequest](#v1-TriggerTaskScheduleRequest)
   - [UUID](#v1-UUID)
   - [UpdateEventRuleRequest](#v1-UpdateEventRuleRequest)
@@ -242,6 +260,8 @@
   - [EventRuleSeverity](#v1-EventRuleSeverity)
   - [EventRuleTargetStrategy](#v1-EventRuleTargetStrategy)
   - [FirmwareControlOperation](#v1-FirmwareControlOperation)
+  - [FirmwareDetailsReadError](#v1-FirmwareDetailsReadError)
+  - [FirmwareTargetKind](#v1-FirmwareTargetKind)
   - [LeakHandlingStatus](#v1-LeakHandlingStatus)
   - [LeakStatus](#v1-LeakStatus)
   - [OperationRunPhysicalLocationOrdering.Strategy](#v1-OperationRunPhysicalLocationOrdering-Strategy)
@@ -959,6 +979,32 @@ Filter represents a single filter condition
 | component_field | [ComponentFilterField](#v1-ComponentFilterField) |  | For component queries |
 | query_info | [StringQueryInfo](#v1-StringQueryInfo) |  |  |
 
+<a name="v1-FirmwareActionDetails"></a>
+
+### FirmwareActionDetails
+
+Core stored and backend work, preserving their separate availability.
+Nested Core targets/results are forwarded unchanged; consumers must treat
+their absence as unsupported evidence, not completed or empty work.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| value | [forge.ComponentFirmwareActions](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto) |  |  |
+| error | [FirmwareDetailsReadError](#v1-FirmwareDetailsReadError) |  |  |
+
+<a name="v1-FirmwareActualDetails"></a>
+
+### FirmwareActualDetails
+
+A Core installed collection, including member failures, or Flow read failure.
+Core payloads are forwarded unchanged. Consumers must treat absent nested
+results as unsupported evidence, never as a successful empty observation.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| value | [forge.ComponentFirmwareInstalled](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto) |  |  |
+| error | [FirmwareDetailsReadError](#v1-FirmwareDetailsReadError) |  |  |
+
 <a name="v1-FirmwareAuthenticationData"></a>
 
 ### FirmwareAuthenticationData
@@ -984,6 +1030,150 @@ or values scoped to supported firmware tray types.
 | sub_targets | [string](#string) | repeated | Optional firmware sub-parts within each selected component. Empty means every firmware sub-part supported by that component. |
 | override_readiness_check | [bool](#bool) |  | Bypasses the component readiness gate when the task executes. |
 | override_version_check | [bool](#bool) |  | Overrides firmware version-based checks when the selected component backend applies the update. |
+
+<a name="v1-FirmwareDesiredDetails"></a>
+
+### FirmwareDesiredDetails
+
+Existing effective defaults/comparison, independent of a task&#39;s requested input.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| value | [forge.ComponentFirmwareExpected](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/rpc/proto/forge.proto) |  |  |
+| error | [FirmwareDetailsReadError](#v1-FirmwareDetailsReadError) |  |  |
+
+<a name="v1-FirmwareOperations"></a>
+
+### FirmwareOperations
+
+Core requests/jobs and Flow tasks are distinct, without a correlation ID.
+Running Flow work does not establish an active Core or hardware operation.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| actions | [FirmwareActionDetails](#v1-FirmwareActionDetails) |  |  |
+| tasks | [FirmwareTaskDetailsList](#v1-FirmwareTaskDetailsList) |  |  |
+
+<a name="v1-FirmwareRequestedTargets"></a>
+
+### FirmwareRequestedTargets
+
+Shared input or explicit type-specific sections, without interpreting membership.
+Every returned task selects shared or by_type; an unset selection is not emitted.
+Unavailable display metadata uses FIRMWARE_TARGET_KIND_UNAVAILABLE instead.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| shared | [FirmwareTargetMetadata](#v1-FirmwareTargetMetadata) |  |  |
+| by_type | [FirmwareTargetsByType](#v1-FirmwareTargetsByType) |  |  |
+
+<a name="v1-FirmwareTargetForType"></a>
+
+### FirmwareTargetForType
+
+A recorded type section, distinct from task target selection.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| component_type | [ComponentType](#v1-ComponentType) |  |  |
+| target | [FirmwareTargetMetadata](#v1-FirmwareTargetMetadata) |  |  |
+
+<a name="v1-FirmwareTargetMetadata"></a>
+
+### FirmwareTargetMetadata
+
+Display-only metadata; versions/manifest IDs retain exact stored spelling.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| kind | [FirmwareTargetKind](#v1-FirmwareTargetKind) |  |  |
+| value | [string](#string) |  | Empty for unavailable/default metadata; no artifact URLs or manifest body. |
+
+<a name="v1-FirmwareTargetsByType"></a>
+
+### FirmwareTargetsByType
+
+Only the explicitly supplied type sections, in component-type order.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| entries | [FirmwareTargetForType](#v1-FirmwareTargetForType) | repeated |  |
+
+<a name="v1-FirmwareTaskDetails"></a>
+
+### FirmwareTaskDetails
+
+Sanitized stored firmware intent; not installed or effective expected firmware.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [UUID](#v1-UUID) |  |  |
+| rack_id | [UUID](#v1-UUID) |  |  |
+| operation | [FirmwareControlOperation](#v1-FirmwareControlOperation) |  |  |
+| targets | [ComponentsByType](#v1-ComponentsByType) |  | Full recorded Flow UUID/type selection, sorted by type then UUID. |
+| status | [TaskStatus](#v1-TaskStatus) |  | Recorded Flow status; Running does not prove hardware dispatch. |
+| created_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
+| updated_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  |  |
+| started_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) |  | Absent if no start was recorded; not proof of hardware dispatch. |
+| requested_targets | [FirmwareRequestedTargets](#v1-FirmwareRequestedTargets) |  | Always set on returned tasks, with shared or by_type selected. |
+| sub_targets | [string](#string) | repeated | Recorded component selectors; empty retains backend defaults. |
+| override_readiness_check | [bool](#bool) |  | Recorded request flag to bypass the updater&#39;s readiness check. |
+| override_version_check | [bool](#bool) |  | Recorded request flag to bypass the updater&#39;s version check. |
+| start_time | [int64](#int64) | optional | Recorded Unix seconds; absent for stored zero/omitted bounds. |
+| end_time | [int64](#int64) | optional |  |
+| waiting_context | [FirmwareTaskWaitingContext](#v1-FirmwareTaskWaitingContext) |  | Set for Waiting tasks with references or an error; absent for other statuses. |
+| external_targets | [FirmwareTaskExternalTargets](#v1-FirmwareTaskExternalTargets) |  | Always set on returned tasks, with complete identities or a read error. |
+
+<a name="v1-FirmwareTaskDetailsList"></a>
+
+### FirmwareTaskDetailsList
+
+Waiting/Pending/Running firmware tasks in creation-time then UUID order.
+Tray results select recorded UUID/type membership in the current rack only;
+a power-shelf firmware task is listed only for the shelf it selects.
+Missing rack is NotLinked. A failed rack query or invalid stored row makes
+the whole task section unavailable, before filtering for this tray.
+More than 256 outstanding rack firmware tasks makes the whole section
+unavailable even when fewer select this tray. Error is absent on success,
+including empty; entries is empty on failure. No execution reports are exposed.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| entries | [FirmwareTaskDetails](#v1-FirmwareTaskDetails) | repeated |  |
+| error | [FirmwareDetailsReadError](#v1-FirmwareDetailsReadError) | optional |  |
+
+<a name="v1-FirmwareTaskExternalTargets"></a>
+
+### FirmwareTaskExternalTargets
+
+Retained inventory identifiers for every recorded target, in recorded order.
+Includes soft-deleted members without requiring current rack membership.
+These identities are read-time facts, not historical identity copies.
+Success includes a nonempty rack ID and every target (possibly empty). Failure
+leaves rack_id/targets empty with a categorized error; never a UUID fallback.
+Every returned task has this message, with a successful selection or an error.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| rack_id | [string](#string) |  |  |
+| targets | [ExternalRef](#v1-ExternalRef) | repeated |  |
+| error | [FirmwareDetailsReadError](#v1-FirmwareDetailsReadError) | optional |  |
+
+<a name="v1-FirmwareTaskWaitingContext"></a>
+
+### FirmwareTaskWaitingContext
+
+Informational conflict evidence, not a saved waiting reason or readiness check.
+Membership/order follow current conflict rules and creation-time/UUID order;
+equal-time waiters are excluded. More than 256 nonterminal rack tasks makes
+context unavailable without hiding firmware tasks. Error is absent on success;
+both lists are empty on failure. Populated lists may be omitted as LimitExceeded.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| active_conflicts | [TaskBrief](#v1-TaskBrief) | repeated |  |
+| earlier_waiting | [TaskBrief](#v1-TaskBrief) | repeated |  |
+| error | [FirmwareDetailsReadError](#v1-FirmwareDetailsReadError) | optional |  |
 
 <a name="v1-GetComponentInfoByIDRequest"></a>
 
@@ -1274,6 +1464,30 @@ members, tasks, recorded target selections or actions.
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | tasks | [Task](#v1-Task) | repeated |  |
+
+<a name="v1-GetTrayFirmwareDetailsRequest"></a>
+
+### GetTrayFirmwareDetailsRequest
+
+Uses the same inventory ID or BMC/PMC MAC selector as tray inventory.
+Empty IDs return InvalidArgument, missing IDs NotFound, ambiguous IDs
+FailedPrecondition. Only compute, NVLink switch and power shelf are supported.
+Other component types return InvalidArgument. Inventory dependency failures
+return sanitized Unavailable or Internal errors.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [string](#string) |  |  |
+
+<a name="v1-GetTrayFirmwareDetailsResponse"></a>
+
+### GetTrayFirmwareDetailsResponse
+
+Contains independent installed firmware, configured expectations and work.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| details | [TrayFirmwareDetails](#v1-TrayFirmwareDetails) |  |  |
 
 <a name="v1-GetTrayPowerDetailsRequest"></a>
 
@@ -2260,6 +2474,7 @@ QueueOptions controls how a task behaves when a conflict is detected.
 | health | [HealthReport](#v1-HealthReport) |  | Latest Core aggregate health snapshot mirrored by inventory sync. |
 | rack_profile_id | [string](#string) | optional | Core rack profile mirrored by expected inventory sync. |
 | nvl_domain_external_ids | [string](#string) | repeated | Public rack-group domain identities. |
+| operation_status_details | [RackOperationStatusDetails](#v1-RackOperationStatusDetails) |  | Output only. Absent on older servers; ignored on inventory writes. |
 
 <a name="v1-RackMemberPowerActions"></a>
 
@@ -2274,6 +2489,16 @@ list. Individual Core actions retain their order: Active before Pending.
 | component_id | [string](#string) | optional | External inventory ID, matching Component.component_id. Absent until the inventory member has a managed Core identity. |
 | component_type | [ComponentType](#v1-ComponentType) |  |  |
 | details | [PowerActionDetails](#v1-PowerActionDetails) |  |  |
+
+<a name="v1-RackOperationStatusDetails"></a>
+
+### RackOperationStatusDetails
+
+RackOperationStatusDetails explains operation_status, not operation admission.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| tray_counts_by_type | [TrayStatusCountsByType](#v1-TrayStatusCountsByType) |  | Counts of active Compute, NVSwitch and PowerShelf inventory records from the same snapshot used for operation_status, independent of expansion. Undiscovered records and other component types are excluded. No freshness or expected-inventory completeness guarantee is implied. |
 
 <a name="v1-RackPosition"></a>
 
@@ -2621,6 +2846,34 @@ TaskStats counts non-terminal Tasks currently associated with an inventory resou
 | pending_task_count | [uint32](#uint32) |  |  |
 | running_task_count | [uint32](#uint32) |  |  |
 
+<a name="v1-TrayFirmwareDetails"></a>
+
+### TrayFirmwareDetails
+
+Live Core evidence and stored Flow intent describe separately collected facts.
+Every section contains a value or an explicit read error; an empty collection
+never substitutes for unavailable evidence. No field proves whole-update
+completion, active/staged image choice or a universal compliance verdict.
+Inventory and child reads share at most 30 seconds from entry, ending one
+second before an earlier caller deadline. Caller cancellation fails the RPC
+after children are joined; other child failures preserve completed sections.
+A failed or timed-out Core RPC makes all three Core sections unavailable;
+Flow cannot recover partial Core evidence from a failed transport response.
+The encoded proxy response is bounded to 1,991,680 bytes. On overflow, remove
+populated waiting references first, then successful external identities, then
+the whole task section, each with LimitExceeded and a size recheck. If the
+remaining response is too large, return ResourceExhausted. Never clip targets.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| component_id | [string](#string) | optional | Managed inventory ID, absent until linked to Core; never a Flow UUID. |
+| component_type | [ComponentType](#v1-ComponentType) |  |  |
+| rack_id | [UUID](#v1-UUID) |  | Internal rack assignment, absent for a rackless tray. |
+| rack_external_id | [string](#string) | optional | Retained inventory rack identifier, including deleted racks; no UUID fallback. Absent for a rackless tray or when its rack identity cannot be read. |
+| actual | [FirmwareActualDetails](#v1-FirmwareActualDetails) |  |  |
+| desired | [FirmwareDesiredDetails](#v1-FirmwareDesiredDetails) |  |  |
+| operations | [FirmwareOperations](#v1-FirmwareOperations) |  |  |
+
 <a name="v1-TrayPowerDetails"></a>
 
 ### TrayPowerDetails
@@ -2647,6 +2900,36 @@ limit, the RPC returns ResourceExhausted. No task targets are truncated.
 | desired | [PowerDesiredDetails](#v1-PowerDesiredDetails) |  |  |
 | operations | [PowerOperations](#v1-PowerOperations) |  |  |
 | rack_external_id | [string](#string) | optional | The inventory rack identifier used by REST rack and tray resources. Includes retained soft-deleted racks. Absent when no rack identity can be read; older services or proxies also omit it. Never uses the Flow UUID. |
+
+<a name="v1-TrayStatusCounts"></a>
+
+### TrayStatusCounts
+
+TrayStatusCounts partitions participating trays by their operation phase.
+An empty rack has all zero counts and operation_status Unknown. A missing or
+unrecognized status on an existing participating tray increments unknown.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| ready | [uint32](#uint32) |  | Trays in Ready. |
+| in_use | [uint32](#uint32) |  | Trays in InUse. |
+| initializing | [uint32](#uint32) |  | Trays in Initializing. |
+| error | [uint32](#uint32) |  | Trays in Error. |
+| deleting | [uint32](#uint32) |  | Trays in Deleting. |
+| unknown | [uint32](#uint32) |  | Trays with unknown, missing or unrecognized status. |
+
+<a name="v1-TrayStatusCountsByType"></a>
+
+### TrayStatusCountsByType
+
+TrayStatusCountsByType always includes all three types, with zero counts for
+types without participating records. Empty types do not affect rack phase.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| compute | [TrayStatusCounts](#v1-TrayStatusCounts) |  |  |
+| nv_switch | [TrayStatusCounts](#v1-TrayStatusCounts) |  |  |
+| power_shelf | [TrayStatusCounts](#v1-TrayStatusCounts) |  |  |
 
 <a name="v1-TriggerTaskScheduleRequest"></a>
 
@@ -2914,6 +3197,38 @@ ConflictStrategy controls how a task behaves when a conflict is detected.
 | FIRMWARE_CONTROL_OPERATION_UPGRADE | 1 |  |
 | FIRMWARE_CONTROL_OPERATION_DOWNGRADE | 2 |  |
 | FIRMWARE_CONTROL_OPERATION_ROLLBACK | 3 |  |
+
+<a name="v1-FirmwareDetailsReadError"></a>
+
+### FirmwareDetailsReadError
+
+Flow failures are separate from safe typed failures inside Core evidence.
+Dependency diagnostics, authentication, reports and raw manifests are excluded.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| FIRMWARE_DETAILS_READ_ERROR_UNSPECIFIED | 0 | Never emitted as a failure. |
+| FIRMWARE_DETAILS_READ_ERROR_NOT_LINKED | 1 | Required managed/rack/inventory identity is absent. |
+| FIRMWARE_DETAILS_READ_ERROR_NOT_CONFIGURED | 2 | No NICo provider client is configured. |
+| FIRMWARE_DETAILS_READ_ERROR_UNSUPPORTED | 3 | Missing RPC/capability or required Core section/result. |
+| FIRMWARE_DETAILS_READ_ERROR_DEADLINE_EXCEEDED | 4 | Caller, provider or shared read deadline expired. |
+| FIRMWARE_DETAILS_READ_ERROR_READ_FAILED | 5 | Other dependency failures, including actual authorization denial. PermissionDenied alone cannot identify an older Core server. Unreadable or invalid stored task data also reports ReadFailed. |
+| FIRMWARE_DETAILS_READ_ERROR_INVALID_RESPONSE | 6 | Wrong Core response identity/cardinality or inconsistent inventory identities. |
+| FIRMWARE_DETAILS_READ_ERROR_LIMIT_EXCEEDED | 7 | Rack task/context count or encoded response exceeded its bound. |
+
+<a name="v1-FirmwareTargetKind"></a>
+
+### FirmwareTargetKind
+
+What safe target metadata was retained; no kind establishes update success.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| FIRMWARE_TARGET_KIND_UNSPECIFIED | 0 | Never emitted by this service. |
+| FIRMWARE_TARGET_KIND_UNAVAILABLE | 1 | Stored input has no safe display metadata; value is empty. |
+| FIRMWARE_TARGET_KIND_CONFIGURED_DEFAULT | 2 | No explicit target was requested; the updater resolves its configured default. |
+| FIRMWARE_TARGET_KIND_VERSION | 3 | Exact recorded scalar version; not a statement about installed firmware. |
+| FIRMWARE_TARGET_KIND_MANIFEST | 4 | Recorded manifest identity only; no manifest body or artifact location. |
 
 <a name="v1-LeakHandlingStatus"></a>
 
@@ -3300,6 +3615,7 @@ Task kinds include rack lifecycle work not represented by OperationType.
 | AdvanceOperationRunPhase | [AdvanceOperationRunPhaseRequest](#v1-AdvanceOperationRunPhaseRequest) | [OperationRun](#v1-OperationRun) |  |
 | CancelOperationRun | [CancelOperationRunRequest](#v1-CancelOperationRunRequest) | [OperationRun](#v1-OperationRun) |  |
 | GetTrayPowerDetails | [GetTrayPowerDetailsRequest](#v1-GetTrayPowerDetailsRequest) | [GetTrayPowerDetailsResponse](#v1-GetTrayPowerDetailsResponse) | Reads live Core power details and outstanding Flow power tasks independently. This is not an atomic snapshot and does not change power or task state. Caller cancellation fails the RPC; child read failures remain section errors. |
+| GetTrayFirmwareDetails | [GetTrayFirmwareDetailsRequest](#v1-GetTrayFirmwareDetailsRequest) | [GetTrayFirmwareDetailsResponse](#v1-GetTrayFirmwareDetailsResponse) | Reads live Core firmware evidence and outstanding Flow firmware tasks. Passive and non-atomic; child failures remain independent section errors. |
 | GetRackPowerDetails | [GetRackPowerDetailsRequest](#v1-GetRackPowerDetailsRequest) | [GetRackPowerDetailsResponse](#v1-GetRackPowerDetailsResponse) | Reads full current rack membership once, with batched Core details and one power-task list. This is informational, not an atomic snapshot. It does not change power or task state. |
 
 ## Scalar Value Types
