@@ -139,7 +139,7 @@ async fn assert_dpu_reprovision_host_boot_repair<ID>(
     env: &TestEnv,
     machine: &TestMachine<ID>,
     expected_states: Vec<ManagedHostState>,
-) -> Machine<ID>
+) -> Box<Machine<ID>>
 where
     ID: MachineIdSubtypeTrait,
     db::DatabaseError: From<<ID as TryFrom<MachineId>>::Error>,

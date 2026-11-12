@@ -76,7 +76,7 @@ pub(in crate::tests) mod tests {
     async fn a_second_spdm_environment_reuses_the_seeded_profile(pool: sqlx::PgPool) {
         for _ in 0..2 {
             let mut overrides = TestEnvOverrides::no_network_segments();
-            overrides.config = Some(spdm_enabled_config());
+            overrides.config = Some(Box::new(spdm_enabled_config()));
             let _env = create_test_env_with_overrides(pool.clone(), overrides).await;
         }
     }
@@ -416,7 +416,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -555,7 +555,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -624,7 +624,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -689,7 +689,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -725,7 +725,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -786,7 +786,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -931,7 +931,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(config),
+                config: Some(Box::new(config)),
                 ..Default::default()
             },
         )
@@ -1185,7 +1185,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -1630,7 +1630,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
@@ -1971,7 +1971,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(config),
+                config: Some(Box::new(config)),
                 ..TestEnvOverrides::no_network_segments()
             },
         )
@@ -2138,7 +2138,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(config),
+                config: Some(Box::new(config)),
                 ..Default::default()
             },
         )
@@ -2392,7 +2392,7 @@ pub(in crate::tests) mod tests {
         let env = create_test_env_with_overrides(
             pool,
             TestEnvOverrides {
-                config: Some(spdm_enabled_config()),
+                config: Some(Box::new(spdm_enabled_config())),
                 ..Default::default()
             },
         )
