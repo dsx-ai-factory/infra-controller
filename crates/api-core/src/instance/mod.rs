@@ -61,7 +61,7 @@ use model::instance::config::network::{
     InstanceInterfaceIpFamilyMode, InstanceNetworkConfig, InterfaceFunctionId, Ipv6InterfaceConfig,
     NetworkDetails,
 };
-use model::instance::config::spx::{InstanceSpxConfig, SpxAttachmentType};
+use model::instance::config::spx::InstanceSpxConfig;
 use model::instance::nic_firmware::NicFirmwareAllocationTarget;
 use model::machine::astra::astra_nic_mappings_for_dpu_pci_address_prefix;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -3173,12 +3173,6 @@ pub(crate) fn allocate_spx_port_mac(
     let mut spx_hw_map = sort_spx_by_slot(mh_snapshot.dpa_interface_snapshots.as_ref());
 
     for spx_attachment in &mut updated_spx_config.spx_attachments {
-        if spx_attachment.attachment_type == SpxAttachmentType::Virtual {
-            tracing::error!("allocate_spx_port_mac SPX attachment type Virtual is not supported");
-            return Err(CarbideError::InvalidArgument(
-                "SPX attachment type virtual is not supported".to_string(),
-            ));
-        }
         if let Some(sorted_spxs) = spx_hw_map.get_mut(&spx_attachment.device) {
             if let Some(spx_interface) = sorted_spxs.get(spx_attachment.device_instance as usize) {
                 // spx_interface is the DPA interface that will be used to bind the SPX attachment
@@ -3243,7 +3237,7 @@ mod tests {
     };
     use model::instance::config::extension_services::InstanceExtensionServiceConfig;
     use model::instance::config::infiniband::InstanceIbInterfaceConfig;
-    use model::instance::config::spx::InstanceSpxAttachment;
+    use model::instance::config::spx::{InstanceSpxAttachment, SpxAttachmentType};
     use model::machine::astra::ASTRA_NIC_MAPPINGS;
     use model::machine::spx_multiplane::{
         MachineSpxMultiplaneInterface, MachineSpxMultiplaneObservation, MachineSpxMultiplaneStatus,

@@ -2796,8 +2796,20 @@ async fn update_instance_spx_config(
     // those writers take the host lock before touching desired state or
     // observations, so holding it here serializes them and lets the refreshed
     // reads below describe one point in time instead of the request's baseline.
-    // Lock the host before any DPU, matching the order the readback path uses.
     if partial_multiplane_enabled {
+        // Lock the Instance this request writes below before any Machine, the
+        // order power changes and IB updates already establish, then the host
+        // before any DPU as the readback path does. The write below still
+        // resolves concurrent config changes by its expected version.
+        if db::instance::find_by_id_for_update(txn.as_mut(), instance.id)
+            .await?
+            .is_none()
+        {
+            return Err(CarbideError::NotFoundError {
+                kind: "instance",
+                id: instance.id.to_string(),
+            });
+        }
         mh_snapshot.host_snapshot.spx_multiplane =
             db::machine::lock_spx_multiplane(txn.as_mut(), &host_machine_id).await?;
         for dpu_snapshot in &mut mh_snapshot.dpu_snapshots {
