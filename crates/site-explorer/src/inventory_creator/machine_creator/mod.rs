@@ -1019,6 +1019,10 @@ impl MachineCreator {
         Ok(false)
     }
 
+    // TODO(txn_held_across_await):
+    // There's a false positive with the way the function is rewritten by the tracing::instrument
+    // macro, the lint needs fixing to detect this.
+    #[allow(txn_held_across_await)]
     #[tracing::instrument(skip_all, name = "ingest_dpu")]
     // Create the DPU row and its optional native IPv6 reservation here. Prepared
     // IPv4 and ASN resources attach after all host interfaces exist; an existing
