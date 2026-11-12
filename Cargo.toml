@@ -276,6 +276,16 @@ debug = "line-tables-only"
 debug-assertions = true    # Add some extra assurance during development
 overflow-checks = true     # Add some extra assurance during development
 
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"
+
+[profile.debug]
+inherits = "dev"
+debug = true
+
 [workspace.lints.clippy]
 cloned_instead_of_copied = "warn"
 redundant_clone = "warn"
