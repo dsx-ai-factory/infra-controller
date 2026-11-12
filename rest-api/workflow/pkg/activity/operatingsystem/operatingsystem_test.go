@@ -68,6 +68,16 @@ func TestManageOsImage_UpdateOsImageInDB(t *testing.T) {
 
 	st5 := util.TestBuildSite(t, dbSession, ip, "test-site-5", cdbm.SiteStatusRegistered, nil, ipu)
 	assert.NotNil(t, st5)
+	st6 := util.TestBuildSite(t, dbSession, ip, "test-site-6", cdbm.SiteStatusRegistered, nil, ipu)
+	assert.NotNil(t, st6)
+	st7 := util.TestBuildSite(t, dbSession, ip, "test-site-7", cdbm.SiteStatusRegistered, nil, ipu)
+	assert.NotNil(t, st7)
+	for _, site := range []*cdbm.Site{st5, st6, st7} {
+		tenantSite := util.TestBuildTenantSiteAssociation(t, dbSession, tn.Org, tn.ID, site.ID, tnu.ID)
+		assert.NotNil(t, tenantSite)
+		allocation := util.TestBuildAllocation(t, dbSession, ip, tn, site, "image-os-recovery-"+site.Name)
+		assert.NotNil(t, allocation)
+	}
 
 	// Build OsImage1
 	os1 := util.TestBuildImageOperatingSystem(t, dbSession, &ip.ID, &tn.ID, "test-OsImage-1", tnOrg, nil, cdbm.OperatingSystemStatusSyncing)
@@ -146,12 +156,82 @@ func TestManageOsImage_UpdateOsImageInDB(t *testing.T) {
 		site             *cdbm.Site
 	}
 
+	recoveredID := uuid.New()
+	recoveredName := "recovered-site-image"
+	recoveredDescription := "reported only by Site inventory"
+	authType := cdbm.OperatingSystemAuthTypeBearer
+	authToken := "inventory-token"
+	rootFsID := "rootfs-id"
+	rootFsLabel := "rootfs"
+	bootDisk := "/dev/nvme0n1"
+	recoveryInventory := &corev1.OsImageInventory{
+		OsImages: []*corev1.OsImage{{
+			Attributes: &corev1.OsImageAttributes{
+				Id:                   &corev1.UUID{Value: recoveredID.String()},
+				SourceUrl:            "https://example.invalid/recovered.img",
+				Digest:               "sha256:recovered",
+				TenantOrganizationId: tn.Org,
+				CreateVolume:         true,
+				Name:                 &recoveredName,
+				Description:          &recoveredDescription,
+				AuthType:             &authType,
+				AuthToken:            &authToken,
+				RootfsId:             &rootFsID,
+				RootfsLabel:          &rootFsLabel,
+				BootDisk:             &bootDisk,
+			},
+			Status: corev1.OsImageStatus_ImageReady,
+		}},
+		InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+		InventoryPage: &corev1.InventoryPage{
+			CurrentPage: 1,
+			TotalPages:  1,
+			PageSize:    1,
+			TotalItems:  1,
+			ItemIds:     []string{recoveredID.String()},
+		},
+	}
+	failedRecoveredID := uuid.New()
+	failedRecoveredName := "failed-recovered-image"
+	failedRecoveryInventory := &corev1.OsImageInventory{
+		OsImages: []*corev1.OsImage{{
+			Attributes: &corev1.OsImageAttributes{
+				Id:                   &corev1.UUID{Value: failedRecoveredID.String()},
+				SourceUrl:            "https://example.invalid/failed.img",
+				Digest:               "sha256:failed",
+				TenantOrganizationId: tn.Org,
+				Name:                 &failedRecoveredName,
+			},
+			Status: corev1.OsImageStatus_ImageFailed,
+		}},
+		InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+	}
+	deletedParentOS := util.TestBuildImageOperatingSystem(t, dbSession, &ip.ID, &tn.ID, "deleted-parent-image", tn.Org, nil, cdbm.OperatingSystemStatusDeleting)
+	survivingAssociation := util.TestBuildImageOperatingSystemSiteAssociation(t, dbSession, deletedParentOS.ID, st7.ID, cdbm.OperatingSystemSiteAssociationStatusSynced, "surviving-version", false)
+	require.NoError(t, cdbm.NewOperatingSystemDAO(dbSession).Delete(context.Background(), nil, deletedParentOS.ID))
+	util.TestInventoryAgeDeletedTimestamp(context.Background(), t, dbSession, &cdbm.OperatingSystem{}, deletedParentOS.ID)
+	deletedParentName := "restored-deleted-parent"
+	deletedParentInventory := &corev1.OsImageInventory{
+		OsImages: []*corev1.OsImage{{
+			Attributes: &corev1.OsImageAttributes{
+				Id:                   &corev1.UUID{Value: deletedParentOS.ID.String()},
+				SourceUrl:            "https://example.invalid/restored-parent.img",
+				Digest:               "sha256:restored-parent",
+				TenantOrganizationId: tn.Org,
+				Name:                 &deletedParentName,
+			},
+			Status: corev1.OsImageStatus_ImageReady,
+		}},
+		InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+	}
+
 	tests := []struct {
 		name             string
 		lockContention   bool
 		failFinalization bool
 		fields           fields
 		args             args
+		check            func(*testing.T, *ManageOsImage, []uuid.UUID)
 	}{
 		{
 			name: "test OS Image inventory return success status",
@@ -276,6 +356,98 @@ func TestManageOsImage_UpdateOsImageInDB(t *testing.T) {
 			fields:           fields{dbSession: dbSession, siteClientPool: tSiteClientPool, env: env},
 			args:             args{ctx: context.Background(), site: st4, osImageInventory: &corev1.OsImageInventory{}},
 		},
+		{
+			name:   "recovers missing image Operating System and Site association",
+			fields: fields{dbSession: dbSession, siteClientPool: tSiteClientPool, env: env},
+			args:   args{ctx: context.Background(), site: st5, osImageInventory: recoveryInventory},
+			check: func(t *testing.T, manager *ManageOsImage, updatedIDs []uuid.UUID) {
+				assert.Contains(t, updatedIDs, recoveredID)
+
+				osDAO := cdbm.NewOperatingSystemDAO(dbSession)
+				recoveredOS, err := osDAO.GetByID(context.Background(), nil, recoveredID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, recoveredName, recoveredOS.Name)
+				assert.Equal(t, tn.ID, *recoveredOS.TenantID)
+				assert.Equal(t, cdbm.OperatingSystemTypeImage, recoveredOS.Type)
+				assert.Equal(t, recoveryInventory.OsImages[0].Attributes.SourceUrl, *recoveredOS.ImageURL)
+				assert.Equal(t, recoveryInventory.OsImages[0].Attributes.Digest, *recoveredOS.ImageSHA)
+				assert.Equal(t, authType, *recoveredOS.ImageAuthType)
+				assert.Equal(t, authToken, *recoveredOS.ImageAuthToken)
+				assert.Equal(t, rootFsID, *recoveredOS.RootFsID)
+				assert.Equal(t, rootFsLabel, *recoveredOS.RootFsLabel)
+				assert.Equal(t, bootDisk, *recoveredOS.ImageDisk)
+				assert.True(t, recoveredOS.EnableBlockStorage)
+
+				ossaDAO := cdbm.NewOperatingSystemSiteAssociationDAO(dbSession)
+				recoveredAssociation, err := ossaDAO.GetByOperatingSystemIDAndSiteID(context.Background(), nil, recoveredID, st5.ID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, cdbm.OperatingSystemSiteAssociationStatusSynced, recoveredAssociation.Status)
+				assert.False(t, recoveredAssociation.IsMissingOnSite)
+				assert.NotNil(t, recoveredAssociation.Version)
+
+				require.NoError(t, manager.UpdateOperatingSystemStatusInDB(context.Background(), recoveredID))
+				recoveredOS, err = osDAO.GetByID(context.Background(), nil, recoveredID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, cdbm.OperatingSystemStatusReady, recoveredOS.Status)
+				statusDetails, _, err := cdbm.NewStatusDetailDAO(dbSession).GetAll(context.Background(), nil, cdbm.StatusDetailFilterInput{
+					EntityIDs: []string{recoveredID.String(), recoveredAssociation.ID.String()},
+				}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)})
+				require.NoError(t, err)
+				statusEntities := map[string]bool{}
+				for _, detail := range statusDetails {
+					statusEntities[detail.EntityID] = true
+				}
+				assert.True(t, statusEntities[recoveredID.String()])
+				assert.True(t, statusEntities[recoveredAssociation.ID.String()])
+
+				_, err = manager.UpdateOsImagesInDB(context.Background(), st5.ID, recoveryInventory)
+				require.NoError(t, err)
+				associations, count, err := ossaDAO.GetAll(context.Background(), nil, cdbm.OperatingSystemSiteAssociationFilterInput{
+					OperatingSystemIDs: []uuid.UUID{recoveredID},
+					SiteIDs:            []uuid.UUID{st5.ID},
+				}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+				require.NoError(t, err)
+				assert.Equal(t, 1, count)
+				assert.Len(t, associations, 1)
+			},
+		},
+		{
+			name:   "maps a recovered failed image to Error",
+			fields: fields{dbSession: dbSession, siteClientPool: tSiteClientPool, env: env},
+			args:   args{ctx: context.Background(), site: st6, osImageInventory: failedRecoveryInventory},
+			check: func(t *testing.T, manager *ManageOsImage, updatedIDs []uuid.UUID) {
+				assert.Contains(t, updatedIDs, failedRecoveredID)
+
+				association, err := cdbm.NewOperatingSystemSiteAssociationDAO(dbSession).GetByOperatingSystemIDAndSiteID(context.Background(), nil, failedRecoveredID, st6.ID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, cdbm.OperatingSystemSiteAssociationStatusError, association.Status)
+
+				require.NoError(t, manager.UpdateOperatingSystemStatusInDB(context.Background(), failedRecoveredID))
+				recoveredOS, err := cdbm.NewOperatingSystemDAO(dbSession).GetByID(context.Background(), nil, failedRecoveredID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, cdbm.OperatingSystemStatusError, recoveredOS.Status)
+			},
+		},
+		{
+			name:   "restores a deleted Operating System when its active Site association survives",
+			fields: fields{dbSession: dbSession, siteClientPool: tSiteClientPool, env: env},
+			args:   args{ctx: context.Background(), site: st7, osImageInventory: deletedParentInventory},
+			check: func(t *testing.T, _ *ManageOsImage, updatedIDs []uuid.UUID) {
+				assert.Contains(t, updatedIDs, deletedParentOS.ID)
+
+				restoredOS, err := cdbm.NewOperatingSystemDAO(dbSession).GetByID(context.Background(), nil, deletedParentOS.ID, nil)
+				require.NoError(t, err)
+				assert.Nil(t, restoredOS.Deleted)
+				assert.Equal(t, deletedParentName, restoredOS.Name)
+				assert.Equal(t, cdbm.OperatingSystemStatusSyncing, restoredOS.Status)
+
+				association, err := cdbm.NewOperatingSystemSiteAssociationDAO(dbSession).GetByID(context.Background(), nil, survivingAssociation.ID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, survivingAssociation.ID, association.ID)
+				assert.Equal(t, cdbm.OperatingSystemSiteAssociationStatusSynced, association.Status)
+				assert.False(t, association.IsMissingOnSite)
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -290,6 +462,8 @@ func TestManageOsImage_UpdateOsImageInDB(t *testing.T) {
 			ossaDAO := cdbm.NewOperatingSystemSiteAssociationDAO(dbSession)
 			osDAO := cdbm.NewOperatingSystemDAO(dbSession)
 			var deletingOS *cdbm.OperatingSystem
+			var updatedIDs []uuid.UUID
+			var err error
 			if tt.lockContention || tt.failFinalization {
 				deletingOS = util.TestBuildImageOperatingSystem(t, dbSession, &ip.ID, &tn.ID, uuid.NewString(), tnOrg, nil, cdbm.OperatingSystemStatusDeleting)
 				association := util.TestBuildImageOperatingSystemSiteAssociation(t, dbSession, deletingOS.ID, tt.args.site.ID, cdbm.OperatingSystemSiteAssociationStatusDeleting, "delete-version", false)
@@ -321,7 +495,7 @@ FOR EACH ROW EXECUTE FUNCTION test_fail_os_deletion()`)
 					require.NoError(t, err)
 				}
 
-				_, err := mv.UpdateOsImagesInDB(tt.args.ctx, tt.args.site.ID, tt.args.osImageInventory)
+				_, err = mv.UpdateOsImagesInDB(tt.args.ctx, tt.args.site.ID, tt.args.osImageInventory)
 				require.NoError(t, err)
 				storedAssociation, err := ossaDAO.GetByID(tt.args.ctx, nil, association.ID, nil)
 				require.NoError(t, err)
@@ -332,7 +506,7 @@ FOR EACH ROW EXECUTE FUNCTION test_fail_os_deletion()`)
 				releaseFailure()
 			}
 
-			_, err := mv.UpdateOsImagesInDB(tt.args.ctx, tt.args.site.ID, tt.args.osImageInventory)
+			updatedIDs, err = mv.UpdateOsImagesInDB(tt.args.ctx, tt.args.site.ID, tt.args.osImageInventory)
 			assert.NoError(t, err)
 			if deletingOS != nil {
 				_, err = osDAO.GetByID(tt.args.ctx, nil, deletingOS.ID, nil)
@@ -386,6 +560,171 @@ FOR EACH ROW EXECUTE FUNCTION test_fail_os_deletion()`)
 					assert.Equal(t, ossa.Status, cdbm.OperatingSystemSiteAssociationStatusError)
 				}
 			}
+			if tt.check != nil {
+				tt.check(t, &mv, updatedIDs)
+			}
+		})
+	}
+}
+
+func TestManageOsImage_createOrUpdateOperatingSystemFromSite(t *testing.T) {
+	ctx := context.Background()
+	dbSession := util.TestInitDB(t)
+	defer dbSession.Close()
+	util.TestSetupSchema(t, dbSession)
+
+	providerUser := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{"recovery-provider"}, []string{"FORGE_PROVIDER_ADMIN"})
+	provider := util.TestBuildInfrastructureProvider(t, dbSession, "recovery-provider", "recovery-provider", providerUser)
+	tenantUser := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{"recovery-tenant"}, []string{"FORGE_TENANT_ADMIN"})
+	tenant := util.TestBuildTenant(t, dbSession, "recovery-tenant", "recovery-tenant", nil, tenantUser)
+	siteA := util.TestBuildSite(t, dbSession, provider, "recovery-site-a", cdbm.SiteStatusRegistered, nil, providerUser)
+	siteB := util.TestBuildSite(t, dbSession, provider, "recovery-site-b", cdbm.SiteStatusRegistered, nil, providerUser)
+	siteC := util.TestBuildSite(t, dbSession, provider, "recovery-site-c", cdbm.SiteStatusRegistered, nil, providerUser)
+	noAccessSite := util.TestBuildSite(t, dbSession, provider, "recovery-no-access", cdbm.SiteStatusRegistered, nil, providerUser)
+	for _, site := range []*cdbm.Site{siteA, siteB, siteC} {
+		require.NotNil(t, util.TestBuildTenantSiteAssociation(t, dbSession, tenant.Org, tenant.ID, site.ID, tenantUser.ID))
+		require.NotNil(t, util.TestBuildAllocation(t, dbSession, provider, tenant, site, "image-os-recovery-"+site.Name))
+	}
+
+	manager := ManageOsImage{dbSession: dbSession, siteClientPool: util.TestTemporalSiteClientPool(t)}
+	osDAO := cdbm.NewOperatingSystemDAO(dbSession)
+	ossaDAO := cdbm.NewOperatingSystemSiteAssociationDAO(dbSession)
+
+	reportedImage := func(id uuid.UUID, name, org string) *corev1.OsImage {
+		return &corev1.OsImage{
+			Attributes: &corev1.OsImageAttributes{
+				Id:                   &corev1.UUID{Value: id.String()},
+				SourceUrl:            "https://example.invalid/" + id.String(),
+				Digest:               "sha256:" + id.String(),
+				TenantOrganizationId: org,
+				Name:                 &name,
+			},
+			Status: corev1.OsImageStatus_ImageReady,
+		}
+	}
+
+	var staleAssociationID uuid.UUID
+	tests := []struct {
+		name  string
+		setup func(*testing.T) (*cdbm.Site, *corev1.OsImage)
+		check func(*testing.T, *cdbm.Site, *corev1.OsImage, *cdbm.OperatingSystemSiteAssociation, error)
+	}{
+		{
+			name: "creates missing Site association for existing Image OS",
+			setup: func(t *testing.T) (*cdbm.Site, *corev1.OsImage) {
+				os := util.TestBuildImageOperatingSystem(t, dbSession, &provider.ID, &tenant.ID, "existing-image-os", tenant.Org, nil, cdbm.OperatingSystemStatusReady)
+				return siteA, reportedImage(os.ID, os.Name, tenant.Org)
+			},
+			check: func(t *testing.T, site *cdbm.Site, image *corev1.OsImage, association *cdbm.OperatingSystemSiteAssociation, err error) {
+				require.NoError(t, err)
+				require.NotNil(t, association)
+				assert.Equal(t, uuid.MustParse(image.GetAttributes().GetId().GetValue()), association.OperatingSystemID)
+				assert.Equal(t, site.ID, association.SiteID)
+				assert.Equal(t, cdbm.OperatingSystemSiteAssociationStatusSyncing, association.Status)
+				assert.NotNil(t, association.Version)
+			},
+		},
+		{
+			name: "restores stale soft-deleted OS and Site association",
+			setup: func(t *testing.T) (*cdbm.Site, *corev1.OsImage) {
+				os := util.TestBuildImageOperatingSystem(t, dbSession, &provider.ID, &tenant.ID, "deleted-image-os", tenant.Org, nil, cdbm.OperatingSystemStatusDeleting)
+				association := util.TestBuildImageOperatingSystemSiteAssociation(t, dbSession, os.ID, siteB.ID, cdbm.OperatingSystemSiteAssociationStatusDeleting, "deleted-version", true)
+				staleAssociationID = association.ID
+				require.NoError(t, ossaDAO.Delete(ctx, nil, association.ID))
+				require.NoError(t, osDAO.Delete(ctx, nil, os.ID))
+				util.TestInventoryAgeDeletedTimestamp(ctx, t, dbSession, &cdbm.OperatingSystem{}, os.ID)
+				util.TestInventoryAgeDeletedTimestamp(ctx, t, dbSession, &cdbm.OperatingSystemSiteAssociation{}, association.ID)
+				return siteB, reportedImage(os.ID, "restored-image-os", tenant.Org)
+			},
+			check: func(t *testing.T, _ *cdbm.Site, image *corev1.OsImage, association *cdbm.OperatingSystemSiteAssociation, err error) {
+				require.NoError(t, err)
+				require.NotNil(t, association)
+				assert.Equal(t, staleAssociationID, association.ID)
+				assert.Nil(t, association.Deleted)
+				assert.False(t, association.IsMissingOnSite)
+				assert.Equal(t, cdbm.OperatingSystemSiteAssociationStatusSyncing, association.Status)
+
+				osID := uuid.MustParse(image.GetAttributes().GetId().GetValue())
+				restoredOS, getErr := osDAO.GetByID(ctx, nil, osID, nil)
+				require.NoError(t, getErr)
+				assert.Nil(t, restoredOS.Deleted)
+				assert.Equal(t, image.GetAttributes().GetName(), restoredOS.Name)
+				assert.Equal(t, cdbm.OperatingSystemStatusSyncing, restoredOS.Status)
+				assert.Equal(t, image.GetAttributes().GetSourceUrl(), *restoredOS.ImageURL)
+			},
+		},
+		{
+			name: "defers a recent soft-delete",
+			setup: func(t *testing.T) (*cdbm.Site, *corev1.OsImage) {
+				os := util.TestBuildImageOperatingSystem(t, dbSession, &provider.ID, &tenant.ID, "recently-deleted-image-os", tenant.Org, nil, cdbm.OperatingSystemStatusDeleting)
+				association := util.TestBuildImageOperatingSystemSiteAssociation(t, dbSession, os.ID, siteC.ID, cdbm.OperatingSystemSiteAssociationStatusDeleting, "recent-version", false)
+				require.NoError(t, ossaDAO.Delete(ctx, nil, association.ID))
+				require.NoError(t, osDAO.Delete(ctx, nil, os.ID))
+				return siteC, reportedImage(os.ID, os.Name, tenant.Org)
+			},
+			check: func(t *testing.T, _ *cdbm.Site, image *corev1.OsImage, association *cdbm.OperatingSystemSiteAssociation, err error) {
+				require.NoError(t, err)
+				assert.Nil(t, association)
+				deletedOS, _, getErr := osDAO.GetAll(ctx, nil, cdbm.OperatingSystemFilterInput{
+					OperatingSystemIds: []uuid.UUID{uuid.MustParse(image.GetAttributes().GetId().GetValue())},
+					IncludeDeleted:     true,
+				}, paginator.PageInput{Limit: cutil.GetPtr(1)}, nil)
+				require.NoError(t, getErr)
+				require.Len(t, deletedOS, 1)
+				assert.NotNil(t, deletedOS[0].Deleted)
+			},
+		},
+		{
+			name: "skips unknown Tenant",
+			setup: func(t *testing.T) (*cdbm.Site, *corev1.OsImage) {
+				return siteA, reportedImage(uuid.New(), "unknown-tenant-image", "unknown-tenant")
+			},
+			check: func(t *testing.T, _ *cdbm.Site, image *corev1.OsImage, association *cdbm.OperatingSystemSiteAssociation, err error) {
+				require.NoError(t, err)
+				assert.Nil(t, association)
+				_, getErr := osDAO.GetByID(ctx, nil, uuid.MustParse(image.GetAttributes().GetId().GetValue()), nil)
+				assert.ErrorIs(t, getErr, cdb.ErrDoesNotExist)
+			},
+		},
+		{
+			name: "recovers without Tenant Site access",
+			setup: func(t *testing.T) (*cdbm.Site, *corev1.OsImage) {
+				return noAccessSite, reportedImage(uuid.New(), "no-access-image", tenant.Org)
+			},
+			check: func(t *testing.T, site *cdbm.Site, image *corev1.OsImage, association *cdbm.OperatingSystemSiteAssociation, err error) {
+				require.NoError(t, err)
+				require.NotNil(t, association)
+				osID := uuid.MustParse(image.GetAttributes().GetId().GetValue())
+				assert.Equal(t, osID, association.OperatingSystemID)
+				assert.Equal(t, site.ID, association.SiteID)
+				_, getErr := osDAO.GetByID(ctx, nil, osID, nil)
+				require.NoError(t, getErr)
+			},
+		},
+		{
+			name: "uses a unique recovered name when the reported name conflicts",
+			setup: func(t *testing.T) (*cdbm.Site, *corev1.OsImage) {
+				const sharedName = "duplicate-image-name"
+				util.TestBuildImageOperatingSystem(t, dbSession, &provider.ID, &tenant.ID, sharedName, tenant.Org, nil, cdbm.OperatingSystemStatusReady)
+				return siteA, reportedImage(uuid.New(), sharedName, tenant.Org)
+			},
+			check: func(t *testing.T, _ *cdbm.Site, image *corev1.OsImage, association *cdbm.OperatingSystemSiteAssociation, err error) {
+				require.NoError(t, err)
+				require.NotNil(t, association)
+				osID := uuid.MustParse(image.GetAttributes().GetId().GetValue())
+				recoveredOS, getErr := osDAO.GetByID(ctx, nil, osID, nil)
+				require.NoError(t, getErr)
+				assert.NotEqual(t, image.GetAttributes().GetName(), recoveredOS.Name)
+				assert.Contains(t, recoveredOS.Name, "recovered-"+osID.String()[:8])
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			site, image := tc.setup(t)
+			association, err := manager.createOrUpdateOperatingSystemFromSite(ctx, site, image)
+			tc.check(t, site, image, association, err)
 		})
 	}
 }

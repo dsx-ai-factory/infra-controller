@@ -25,6 +25,10 @@ The IPv6 LoadBalancer Service uses `externalTrafficPolicy: Local` to preserve re
 
 ## Prepare the Managed Network
 
+Network definitions apply only when Core first creates a segment. Changing `prefix_v6`, `dhcpv6_link_address`, or `infer_slaac_eui64_addresses` in the site configuration does not update an existing segment. A change from an existing seed snapshot reports configuration drift. For an older segment without a snapshot, Core records the declaration without changing the segment.
+
+The network-segment command-line interface (CLI) and remote procedure calls (RPCs) provide no in-place prefix or inference-flag update. An existing segment needs a reviewed migration to add IPv6 or enable inference. Keep the DHCPv6 workload disabled until the stored segments it will serve are ready.
+
 For a new segment, add the following definition to the existing TOML in `nico-api.siteConfig.nicoApiSiteConfig`. Retain the rest of the site's TOML. A Helm string override replaces the entire value. Replace the segment name and addresses with unused site allocations before the segment is first created:
 
 ```toml
@@ -40,7 +44,15 @@ reserve_first = 5
 
 `prefix_v6` is an optional IPv6 prefix in Classless Inter-Domain Routing (CIDR) notation that adds a second prefix to the same segment as the IPv4 `prefix`. Omitting it leaves this definition IPv4-only. `dhcpv6_link_address` is an optional IPv6 address used for exact matching of the relay's link-address. It can be outside the IPv6 prefix and requires an IPv6 prefix to be configured. The server prefers an exact link-address match and otherwise falls back to prefix containment. `gateway` applies only to IPv4, and `reserve_first` reserves the same number of leading addresses in each prefix. [IP and Network Configuration](ip-and-network-configuration.md) describes the physical interface and segment-type rules.
 
-Apply the site configuration through the normal API deployment workflow, then confirm the stored segment contains both prefixes before enabling the DHCPv6 workload. Network definitions are applied only when the segment is first created. Adding `prefix_v6` or changing `dhcpv6_link_address` on an existing seeded segment only reports configuration drift. It does not update the stored prefixes. The network-segment command-line interface (CLI) and remote procedure calls (RPCs) provide no in-place prefix update. Existing IPv4 segments therefore need a reviewed segment migration before DHCPv6 can be enabled for their clients. Keep the DHCPv6 workload disabled until the segments it will serve are ready.
+`infer_slaac_eui64_addresses` is an optional per-network Boolean that defaults to `false` and applies to the whole segment. Set it to `true` only for clients that derive Stateless Address Autoconfiguration (SLAAC) addresses from their MAC addresses using modified EUI-64.
+
+For site-relayed INFORMATION-REQUEST messages and SOLICIT messages without IA_NA, Core can infer and persist the client's SLAAC address and refresh its DNS naming. Creating an inferred address requires all of the following:
+
+- The segment uses `allocation_strategy = "dynamic"`, which is the default. Inference is disabled for `allocation_strategy = "reserved"`.
+- The segment has exactly one IPv6 prefix, and that prefix is a `/64`.
+- The interface has no existing IPv6 assignment.
+
+For a new segment, apply the site configuration through the normal API deployment workflow. Then, from your admin CLI environment, use [network-segment show](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/network-segment/network-segment-show.md#examples) with the segment ID. Inspect `PREFIXES` and `INFER SLAAC EUI-64`; the list-all view does not display the inference flag. SLAAC inference requires exactly one IPv6 `/64` and an inference value of `true`. Verify these stored values before enabling the DHCPv6 workload.
 
 ## Enable the DHCPv6 Workload
 
@@ -67,7 +79,7 @@ The example enables address allocation, not HTTP boot. Refer to [Helm Values](#h
 
 ## Deployment Verification and Metrics
 
-Validate address allocation with a representative DHCPv6 client through the actual relay and confirm that it receives an address from the managed IPv6 prefix. Before serving DUID-EN or DUID-UUID clients, verify that the relay supplies a usable option 79 with a representative client of that type.
+For stateful DHCPv6, validate address allocation with a representative client through the actual relay and confirm that it receives an address from the managed IPv6 prefix. For SLAAC boot, confirm that an INFORMATION-REQUEST receives configuration without a lease and that Core records the client's inferred address. Before serving DUID-EN or DUID-UUID clients, verify that the relay supplies a usable option 79 with a representative client of that type.
 
 Both independent DHCP metrics targets use the configured port (1089 by default). With ServiceMonitor enabled, the common `app.kubernetes.io/metrics` label discovers both through the named `http` port. Check both pod targets after the exchange:
 
@@ -84,16 +96,28 @@ Optional: complete this procedure to boot a host when DHCPv4 is unavailable. The
 
 ### Check the Boot Prerequisites
 
-Use a source revision containing both the DHCPv6 HTTP boot server support and the embedded IPv6 iPXE support listed in [Implementation References](#implementation-references). Build the Core image, chart, and EFI artifacts from that revision. For packaged deployments, check the [repository releases](https://github.com/dsx-ai-factory/infra-controller/releases) for both features and compatible EFI artifacts before enabling HTTP boot. Do not infer artifact support from the Core version alone.
+Use a source revision containing the required DHCPv6 and embedded iPXE changes listed in [Implementation References](#implementation-references). Build the Core image, chart, and EFI artifacts from that revision.
+
+For SLAAC boot, inspect `pxe/ipxe/local/embed.ipxe` at the served artifact's recorded source revision. The script must prefer `netX.dhcpv6/ip6` and fall back to `netX.ndp/ip6` when no lease exists. `netX` represents the selected interface. If you cannot verify the artifact's source revision, follow [Build and Deploy the EFI Artifacts](#build-and-deploy-the-efi-artifacts) with a revision containing the linked SLAAC implementation. A Core version or iPXE version banner alone does not prove that the served EFI artifact supports SLAAC boot.
 
 Prepare the boot network and firmware with the following:
 
-- A stateful DHCPv6 lease from NICo and router advertisements with the managed-address (`M`) flag set. Additional Stateless Address Autoconfiguration (SLAAC) addresses are allowed.
+- A stateful DHCPv6 lease from NICo with router advertisements that set the managed-address flag (`M=1`), or the site-relayed SLAAC configuration described below. Additional SLAAC addresses are allowed with a stateful lease.
 - A relay that supplies the client's Ethernet MAC address in RFC 6939 option 79. Embedded iPXE uses DUID-UUID, so it needs this relay metadata even if firmware previously used DUID-LL or DUID-LLT.
 - UEFI firmware configured to HTTP boot over IPv6 and pass the boot URL to iPXE in its EFI device path. Loading an EFI file from local storage without that URL does not provide the PXE API endpoint.
 - IPv6 routing to the boot server and every HTTP or HTTPS payload endpoint used by the returned boot script, including redirect targets. Provide AAAA records for hostname endpoints and advertise reachable IPv6 recursive resolvers through `dhcp.v6DnsServers`. Refer to [Helm Values](#helm-values) and [Unbound IPv6 Transport](../configuration/dns.md#unbound-ipv6-transport).
 
-The stateful-lease requirement belongs to NICo's embedded script, not IPv6 itself. With only the other-configuration (`O`) flag, iPXE can obtain DHCPv6 configuration without a leased address, but NICo's script rejects that result. [Interface Selection](#interface-selection) explains the related multi-interface limitation.
+For SLAAC boot through a site DHCPv6 relay, configure all of the following:
+
+- Set `M=0` and the other-configuration flag (`O=1`) in router advertisements.
+- Advertise exactly one autonomous `/64` (`A=1`) that matches the managed segment's IPv6 prefix.
+- Enable modified EUI-64 inference as described in [Prepare the Managed Network](#prepare-the-managed-network). Core uses the options-only INFORMATION-REQUEST to record iPXE's address.
+
+This SLAAC boot path does not cover privacy addresses, multiple autonomous prefixes, or DPU-local boot. [Interface Selection](#interface-selection) explains the multi-interface limitation.
+
+Before relying on inference, inspect the interface's stored addresses from your admin CLI environment. Use [machine-interfaces show](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/machine-interfaces/machine-interfaces-show.md#examples) to find the interface UUID by MAC address. Then use [machine-interfaces show-addresses](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/machine-interfaces/machine-interfaces-show-addresses.md#examples) with that UUID. Its `Address`, `Family`, and `Type` columns identify each stored assignment.
+
+A DHCPv6 lease recorded during firmware bootstrap, a static address, or a fixed reservation prevents Core from adding an inferred SLAAC address. Core can reuse an already registered matching SLAAC address. A later stateful DHCPv6 allocation replaces the inferred SLAAC address, so iPXE must prefer that lease when both local addresses exist. Qualify the firmware exchange separately. Receiving an options-only reply does not prove that Core registered the address iPXE uses.
 
 HTTPS endpoints require a certificate chain trusted by the deployed iPXE artifact. The build tasks retain upstream iPXE trust defaults and do not add a site-specific CA. A successful firmware download does not establish that iPXE trusts the same endpoint.
 
@@ -139,7 +163,7 @@ Firmware and iPXE configure networking separately. The handoff proceeds as follo
 
 1. UEFI firmware downloads and starts `ipxe.efi` using the HTTP boot URL from DHCPv6 option 59 or a firmware-configured boot option. Firmware exposes that URL in its EFI device path, which iPXE uses as its current working URI (`cwuri`).
 2. NICo's embedded script tries DHCPv4 first. If DHCPv4 succeeds, it contacts the PXE API at `http://${next-server}` on port 80. A later HTTP failure does not switch to IPv6.
-3. If DHCPv4 fails, the script configures IPv6 and checks for a stateful DHCPv6 lease. It binds HTTP and HTTPS requests to that address and interface so NICo can identify the client, even when SLAAC adds another address.
+3. If DHCPv4 fails, the script configures IPv6 and selects the lease in `netX.dhcpv6/ip6` when present. Otherwise, it selects the SLAAC address from Neighbor Discovery Protocol (NDP) settings in `netX.ndp/ip6`. It binds HTTP and HTTPS requests to the selected address and interface through `http-source6`. Core must have registered that exact source address.
 4. On the IPv6 path, iPXE requests `/api/v0/pxe/boot` using the firmware-provided URL's scheme, server, and port. The root-relative API path replaces the EFI-file path. It is not appended to the artifact's directory.
 5. iPXE executes the returned boot script. That script supplies its own payload URLs. Reusing the firmware's server for the PXE API does not rewrite them.
 
@@ -152,20 +176,29 @@ Without site configuration or API overrides, the standard PXE template uses `htt
 Use a representative host through the actual relay path. Confirm each stage before proceeding to the next:
 
 1. Firmware retrieves the intended architecture's EFI artifact and starts NICo's embedded script, which prints the NICo version banner.
-2. iPXE obtains its own stateful DHCPv6 lease. A successful firmware lease alone does not prove this exchange works.
-3. The PXE API identifies the interface. The menu's **Print information about this machine** entry displays its stored hostname under the FQDN (fully qualified domain name) label, along with its MAC address. It does not display IP addresses, gateways, or DNS settings.
-4. The returned boot script retrieves its payloads and completes the intended operating-system boot.
+2. For stateful boot, confirm that iPXE obtains its own DHCPv6 lease. For SLAAC boot, confirm its options-only INFORMATION-REQUEST completes through the site relay. An options-only reply is not a lease. A successful firmware exchange alone does not prove either iPXE path.
+3. On the host, select **iPXE Debug Shell** from the NICo menu and run `show http-source6`. The value has the form `<IPv6-address>%<interface>`. Compare the address before `%` with Core's stored `Address`, using the commands in [Check the Boot Prerequisites](#check-the-boot-prerequisites). For SLAAC inference, expect `Family` to be `IPv6` and `Type` to be `slaac`. A missing setting means no IPv6 HTTP source binding is set, not that the artifact lacks SLAAC support. Run `exit` to return to the menu.
+4. The PXE API identifies the interface. The menu's **Print information about this machine** entry displays its stored hostname under the FQDN (fully qualified domain name) label, along with its MAC address. It does not display IP addresses, gateways, or DNS settings.
+5. The returned boot script retrieves its payloads and completes the intended operating-system boot.
 
 Firmware configuration and platform qualification are separate from the iPXE handoff, as tracked in [Configure Hosts to HTTP Boot Over IPv6](https://github.com/dsx-ai-factory/infra-controller/issues/7173). Reaching iPXE or the PXE API does not establish a complete Core-managed operating-system boot.
 
 ### Diagnose the Embedded Handoff
 
-If IPv6 configuration fails, iPXE exits before checking for a lease or boot URL. Check router advertisements and the DHCPv6 exchange through the relay. After configuration succeeds, a missing prerequisite produces one of these diagnostics:
+If IPv6 configuration fails, iPXE exits before checking for an address or boot URL. Check router advertisements and the DHCPv6 exchange through the relay. After configuration succeeds, a missing prerequisite produces one of these diagnostics:
 
 | Message | Check |
 | --- | --- |
-| "NICo IPv6 boot requires a stateful DHCPv6 lease." | Confirm that router advertisements set `M` and the selected interface receives a lease. SLAAC with only `O` does not satisfy the embedded script. |
+| "NICo IPv6 boot requires a DHCPv6 lease or SLAAC address." | Neither `netX.dhcpv6/ip6` nor `netX.ndp/ip6` is present on the selected interface. Check the lease or SLAAC configuration. |
 | "NICo IPv6 boot requires an inherited HTTP boot URI." | Confirm that firmware passes the HTTP or HTTPS URL used to load `ipxe.efi` in its EFI device path. |
+
+The address diagnostic checks local iPXE settings, not Core registration. An NDP setting alone does not prove usable SLAAC. Non-autonomous or non-`/64` prefixes do not satisfy the router-advertisement requirements in [Check the Boot Prerequisites](#check-the-boot-prerequisites).
+
+An unregistered SLAAC address passes the local check but fails later when the PXE API looks up the source address. That failure returns to the NICo menu and its normal retry flow. It does not automatically return to firmware or select another interface. Repeat the stored-segment and stored-address checks in [Check the Boot Prerequisites](#check-the-boot-prerequisites), and confirm that relay option 79 supplies the client's MAC. Core also rejects inference if another interface already owns the derived address.
+
+Kea caches successful options-only responses for 60 seconds from insertion. Repeated requests can receive the cached reply without a new Core registration attempt; they do not extend that expiry. After correcting address state, repeat [Verify the Boot Handoff](#verify-the-boot-handoff) after the cached response expires. Confirm the stored address after a fresh eligible request reaches Core. Cache expiry alone does not send a request or repair the record.
+
+The diagnostic "NICo IPv6 boot requires a stateful DHCPv6 lease." identifies an artifact without the SLAAC fallback. Follow [Build and Deploy the EFI Artifacts](#build-and-deploy-the-efi-artifacts) using a revision containing the linked SLAAC implementation. The absence of that diagnostic alone does not establish support.
 
 For a fetch failure, check IPv6 reachability, DNS, the boot URL's port, and the root-relative API paths. While HTTP source binding is active, an IPv4-only destination does not trigger IPv4 fallback. This also applies to redirects and payload URLs.
 
@@ -261,13 +294,13 @@ The reply preserves the enterprise number from the matching request vendor class
 
 The supplied `ipxe.efi` uses the firmware's boot network device (`snponly`). Native-driver variants such as `golan.efi` can expose multiple supported interfaces. The following selection rule applies to interfaces visible to the chosen build.
 
-iPXE's IPv6 configuration command stops at the first successfully configured interface. NICo's embedded script checks for a DHCPv6 lease only after that selection. If the selected interface has only a SLAAC address, the script exits with the missing-lease diagnostic. It does not try the next interface.
+iPXE's IPv6 configuration command stops at the first successfully configured interface. NICo's embedded script selects its DHCPv6 lease or NDP SLAAC address only after that selection. It does not try another interface if the selected interface has neither address, or if Core has not registered its source address.
 
-Provide stateful DHCPv6 on the interface iPXE selects. Supporting SLAAC-only results or continuing to another suitable interface requires an embedded-script change, not a DHCP server setting.
+Provide a NICo lease or a registered modified EUI-64 SLAAC address on the interface iPXE selects. Continuing to another suitable interface requires an embedded-script change, not a DHCP server setting.
 
 ### Custom Scripts and Network Reconfiguration
 
-The `http-source6` setting binds HTTP and HTTPS requests to an IPv6 address and interface. NICo sets it to the DHCPv6 lease on the IPv6 boot path. Network commands in a custom script do not clear this setting automatically.
+The `http-source6` setting binds HTTP and HTTPS requests to an IPv6 address and interface. On the IPv6 boot path, NICo sets it to the DHCPv6 lease or, if no lease is present, the NDP SLAAC address. Network commands in a custom script do not clear this setting automatically.
 
 To rerun NICo's network configuration, press p at the boot or retry prompt and choose **Boot according to NICo workflow**. This action clears `http-source6`, tries DHCPv4, and establishes a new binding if it selects IPv6. **Print information about this machine** also reruns network configuration. **Retry boot** returns to the startup prompt, which runs the workflow after a four-second timeout. An idle menu selects the workflow after five seconds. Entering the menu or **iPXE Debug Shell** does not itself clear the binding.
 
@@ -284,3 +317,4 @@ The following references identify the source changes and their tracked scope:
 - [DHCP/06: Deploy Kea DHCPv6, Metrics, and Helm](https://github.com/dsx-ai-factory/infra-controller/issues/2388) tracks the opt-in service deployment.
 - [feat(dhcp): return HTTP boot URLs from the site DHCPv6 server](https://github.com/dsx-ai-factory/infra-controller/pull/7574) implements [Return HTTP Boot URLs From the Site DHCPv6 Server](https://github.com/dsx-ai-factory/infra-controller/issues/7171).
 - [feat(ipxe): boot from IPv6-only provisioning networks](https://github.com/dsx-ai-factory/infra-controller/pull/7650) implements [Boot Through the Embedded iPXE Script on IPv6-Only Networks](https://github.com/dsx-ai-factory/infra-controller/issues/7172).
+- [feat(ipxe): support SLAAC boot through site DHCPv6 relays](https://github.com/dsx-ai-factory/infra-controller/pull/8290) implements [Support iPXE SLAAC Boot Through Site DHCPv6 Relays](https://github.com/dsx-ai-factory/infra-controller/issues/8279).

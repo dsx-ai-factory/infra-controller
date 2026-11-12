@@ -280,16 +280,24 @@ impl<P: Provider> Provider for NormalizeLegacyDpuPolicy<P> {
     }
 }
 
-pub(crate) fn merged_carbide_config_figment(
-    config_path: &Path,
-    site_config_path: Option<&Path>,
-) -> Figment {
-    let mut figment = Figment::new().merge(NormalizeLegacyDpuPolicy(Toml::file(config_path)));
-    if let Some(site_config_path) = site_config_path {
-        figment = figment.merge(NormalizeLegacyDpuPolicy(Toml::file(site_config_path)));
-    }
+fn merged_carbide_config_figment(config_path: &Path, site_config_path: Option<&Path>) -> Figment {
+    merge_carbide_config_providers(
+        Toml::file(config_path),
+        site_config_path.map(Toml::file),
+        Env::prefixed("CARBIDE_API_"),
+    )
+}
 
-    figment.merge(NormalizeLegacyDpuPolicy(Env::prefixed("CARBIDE_API_")))
+fn merge_carbide_config_providers(
+    global: impl Provider,
+    site: Option<impl Provider>,
+    environment: impl Provider,
+) -> Figment {
+    let mut figment = Figment::new().merge(NormalizeLegacyDpuPolicy(global));
+    if let Some(site) = site {
+        figment = figment.merge(NormalizeLegacyDpuPolicy(site));
+    }
+    figment.merge(NormalizeLegacyDpuPolicy(environment))
 }
 
 /// Load, normalize, and validate the Carbide API configuration, emitting
@@ -333,6 +341,11 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
         (
             "rack_management_enabled",
             config.deprecated_rack_management_enabled.is_some(),
+            None,
+        ),
+        (
+            "site_explorer.explore_mode",
+            config.site_explorer.deprecated_explore_mode.is_some(),
             None,
         ),
     ]
@@ -405,11 +418,20 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
     // Reject endpoints with embedded secrets before tracing the configuration.
     config.validate_resource_pool_backends()?;
     config.api_admission_control.validate()?;
+    config.validate_admin_lock_admission_permits()?;
+    config
+        .driver_rules()
+        .wrap_err("invalid bmc_driver_rules configuration")?;
     config
         .firmware_global
         .downloads
         .validate()
         .wrap_err("invalid firmware_global.downloads configuration")?;
+    carbide_firmware::FirmwareArtifactCache::validate_capacity(
+        config.firmware_global.nic_firmware_cache_capacity_bytes,
+        config.firmware_global.downloads.max_download_bytes,
+    )
+    .wrap_err("invalid firmware_global.nic_firmware_cache_capacity_bytes configuration")?;
 
     if let Some(config) = &config.dsx_exchange_event_bus {
         config.periodic_state_republish.validate()?;
@@ -417,7 +439,11 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
 
     config
         .nvlink_config
-        .get_or_insert_with(NvLinkConfig::default);
+        .get_or_insert_with(NvLinkConfig::default)
+        // Defaulting later fills the certificate, key, and authority together and only when no
+        // nmx_c_tls_* key is set, so a pair complete here stays complete.
+        .nmx_c_tls_config()
+        .wrap_err("invalid nvlink_config")?;
 
     // Publish the configured tool list so the admin-UI sidebar and per-machine
     // "Logs" deep link can read it back via `crate::configured_tools`. The list
@@ -435,6 +461,10 @@ pub fn parse_carbide_config_with_deferred_diagnostics(
     // Publish the deployment-wide host naming policy so the DB layer can read it
     // wherever an interface is [re]named (same way we do it w/ `init_tools` above).
     db::host_naming::configure(config.host_naming_strategy);
+
+    // Publish the admin-lock admission permit count the same way; the DB
+    // layer gates the admin-segment lock waiters on it.
+    db::machine_interface::configure_admin_lock_admission(config.admin_lock_admission_permits);
 
     if let Some(manager_config) = &config.component_manager {
         component_manager::rms::validate_rms_backend_rack_profiles(
@@ -544,12 +574,148 @@ pub fn log_vpc_peering_policy_deprecations(config: &CarbideConfig) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use carbide_test_support::Outcome::{Fails, FailsWith, Yields};
     use carbide_test_support::scenarios;
+    use model::expected_machine::HostDpuPolicy;
     use tracing_subscriber::prelude::*;
 
     use super::*;
+    use crate::cfg::file::BmcBackend;
     use crate::logging::stream::{LogStream, LogStreamLayer};
+
+    #[derive(Clone, Copy)]
+    struct PolicyLayers {
+        global_setting: &'static str,
+        site_setting: &'static str,
+        environment_value: Option<&'static str>,
+    }
+
+    #[allow(clippy::result_large_err)] // Figment controls the error representation.
+    fn load_layered_dpu_policy(
+        layers: PolicyLayers,
+    ) -> Result<Option<HostDpuPolicy>, figment::Error> {
+        let global_config = format!(
+            "{}\n[site_explorer]\n{}\n",
+            include_str!("test_data/min_config.toml"),
+            layers.global_setting,
+        );
+        let site_config = format!("[site_explorer]\n{}\n", layers.site_setting);
+        // Parse the same structured value as Env without mutating process state.
+        let environment = layers
+            .environment_value
+            .unwrap_or("{}")
+            .parse::<Value>()
+            .expect("environment values parse infallibly");
+        Ok(merge_carbide_config_providers(
+            Toml::string(&global_config),
+            Some(Toml::string(&site_config)),
+            ("site_explorer", environment),
+        )
+        .extract::<CarbideConfig>()?
+        .site_explorer
+        .dpu_policy)
+    }
+
+    #[test]
+    fn site_explorer_dpu_policy_respects_provider_precedence_across_legacy_key() {
+        scenarios!(
+            run = load_layered_dpu_policy;
+            "site config overrides global config regardless of key spelling" {
+                PolicyLayers {
+                    global_setting: "dpu_policy = \"nic\"",
+                    site_setting: "dpu_mode = \"no_dpu\"",
+                    environment_value: None,
+                } => Yields(Some(HostDpuPolicy::Ignore)),
+                PolicyLayers {
+                    global_setting: "dpu_mode = \"no_dpu\"",
+                    site_setting: "dpu_policy = \"manage\"",
+                    environment_value: None,
+                } => Yields(Some(HostDpuPolicy::Manage)),
+            }
+
+            "environment overrides site config regardless of key spelling" {
+                PolicyLayers {
+                    global_setting: "",
+                    site_setting: "dpu_policy = \"nic\"",
+                    environment_value: Some("{dpu_mode=no_dpu}"),
+                } => Yields(Some(HostDpuPolicy::Ignore)),
+                PolicyLayers {
+                    global_setting: "",
+                    site_setting: "dpu_mode = \"no_dpu\"",
+                    environment_value: Some("{dpu_policy=manage}"),
+                } => Yields(Some(HostDpuPolicy::Manage)),
+            }
+
+            "canonical key wins within one provider" {
+                PolicyLayers {
+                    global_setting: concat!(
+                        "dpu_policy = \"nic\"\n",
+                        "dpu_mode = \"no_dpu\"",
+                    ),
+                    site_setting: "",
+                    environment_value: None,
+                } => Yields(Some(HostDpuPolicy::Nic)),
+            }
+        );
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)] // Figment controls the error representation.
+    fn rack_profile_attributes_merge_per_key_with_provider_precedence() -> Result<(), figment::Error>
+    {
+        // Environment input overrides duplicate keys while retaining unrelated keys.
+        let global_config = format!(
+            r#"{}
+
+[rack_profiles.NVL72]
+product_family = "gb200"
+attributes = {{ attribute1 = "global", additional_attribute2 = "global" }}
+
+[rack_profiles.NVL72.rack_capabilities.compute]
+count = 18
+
+[rack_profiles.NVL72.rack_capabilities.switch]
+count = 9
+
+[rack_profiles.NVL72.rack_capabilities.power_shelf]
+count = 8
+"#,
+            include_str!("test_data/min_config.toml"),
+        );
+
+        let site_config = r#"
+[rack_profiles.NVL72]
+attributes = { attribute1 = "site", additional_attribute3 = "site" }
+"#;
+        let environment =
+            "{NVL72={attributes={attribute1=environment,additional_attribute4=environment}}}"
+                .parse::<Value>()
+                .expect("environment values parse infallibly");
+        let config = merge_carbide_config_providers(
+            Toml::string(&global_config),
+            Some(Toml::string(site_config)),
+            ("rack_profiles", environment),
+        )
+        .extract::<CarbideConfig>()?;
+
+        let attributes = &config.rack_profiles.get("NVL72").unwrap().attributes;
+
+        assert_eq!(
+            attributes,
+            &HashMap::from([
+                ("attribute1".to_string(), "environment".to_string()),
+                ("additional_attribute2".to_string(), "global".to_string()),
+                ("additional_attribute3".to_string(), "site".to_string()),
+                (
+                    "additional_attribute4".to_string(),
+                    "environment".to_string(),
+                ),
+            ])
+        );
+        Ok(())
+    }
 
     /// Loads downloader limits through the startup configuration path, including
     /// omission defaults, and rejects invalid limits before activating Core.
@@ -606,12 +772,166 @@ request_timeout_seconds = 5"#
         })
     }
 
+    /// Loads BMC driver rule overrides and rejects any the drivers cannot
+    /// serve before activating Core.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn bmc_driver_rules_are_loaded_and_validated() {
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |settings| {
+                    jail.create_file(
+                        "config.toml",
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    ).unwrap();
+                    parse_carbide_config(Path::new("config.toml"), None)
+                        .map(|config| {
+                            config
+                                .bmc_driver_rules
+                                .iter()
+                                .map(|rule| rule.id.clone())
+                                .collect::<Vec<_>>()
+                        })
+                        .map_err(|error| format!("{error:#}"))
+                };
+                "BMC driver rule overrides" {
+                    "" => Yields(Vec::new()),
+                    r#"[[bmc_driver_rules]]
+id = "site-xcc3"
+matchers = [{ field = "manager_model", pattern = { kind = "exact", value = "XCC3" } }]
+selections = { boot_order = "lenovo-xcc3-boot-order" }"#
+                        => Yields(vec!["site-xcc3".to_string()]),
+                    r#"[[bmc_driver_rules]]
+id = "site-one-bmc"
+matchers = [{ field = "manager_mac_address", pattern = { kind = "mac_address", value = "c4-5a-b1-c8-38-0d" } }]
+selections = { power = "standard" }"#
+                        => Yields(vec!["site-one-bmc".to_string()]),
+                    r#"[[bmc_driver_rules]]
+id = "site-one-bmc"
+matchers = [{ field = "manager_mac_address", pattern = { kind = "mac_address", value = "not-a-mac" } }]
+selections = { power = "standard" }"#
+                        => FailsWith(
+                            "failed to load configuration files: invalid MAC address not-a-mac: invalid length".to_string(),
+                        ),
+                    // A misspelled key inside a rule follows the same unknown-field policy.
+                    "[[bmc_driver_rules]]\nid = \"site\"\nselections = { power = \"standard\" }\nquirk = []"
+                        => Yields(vec!["site".to_string()]),
+                    "deny_unknown_fields = true\n[[bmc_driver_rules]]\nid = \"site\"\nselections = { power = \"standard\" }\nquirk = []"
+                        => FailsWith("failed to load configuration files: unknown configuration fields: bmc_driver_rules.0.quirk (configuration)".to_string()),
+                    "[[bmc_driver_rules]]\nid = \"site\"\nselections = { power = \"no-such-driver\" }"
+                        => FailsWith("invalid bmc_driver_rules configuration: unknown power driver no-such-driver".to_string()),
+                    "[[bmc_driver_rules]]\nid = \"lenovo-xcc3\"\nselections = { power = \"standard\" }"
+                        => FailsWith("invalid bmc_driver_rules configuration: rule id lenovo-xcc3 is used more than once".to_string()),
+                }
+            );
+            Ok(())
+        })
+    }
+
+    /// Existing configurations keep libredfish, and only the two clients parse.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn bmc_backend_defaults_to_libredfish() {
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |settings| {
+                    jail.create_file(
+                        "config.toml",
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    ).unwrap();
+                    parse_carbide_config(Path::new("config.toml"), None)
+                        .map(|config| config.bmc_backend)
+                        .map_err(|error| format!("{error:#}"))
+                };
+                "BMC backend" {
+                    "" => Yields(BmcBackend::Libredfish),
+                    "bmc_backend = \"drivers\"" => Yields(BmcBackend::Drivers),
+                    "bmc_backend = \"redfish\"" => FailsWith(
+                        "failed to load configuration files: unknown variant: found `redfish`, expected ``libredfish` or `drivers`` for key \"default.bmc_backend\" in config.toml TOML file".to_string(),
+                    ),
+                }
+            );
+            Ok(())
+        })
+    }
+
+    /// Validates the NIC cache budget through the production loader, including
+    /// existing configurations that omit the new setting.
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn nic_firmware_cache_capacity_is_loaded_and_validated() {
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |settings| {
+                    jail.create_file(
+                        "config.toml",
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    ).unwrap();
+                    parse_carbide_config(Path::new("config.toml"), None)
+                        .map(|config| config.firmware_global.nic_firmware_cache_capacity_bytes)
+                        .map_err(|error| format!("{error:#}"))
+                };
+                "NIC cache startup budget" {
+                    // Omission supports even the largest previously valid download limit.
+                    "[firmware_global.downloads]\nmax_download_bytes = 17179869184"
+                        => Yields(17179869184_u64),
+                    // An explicit budget is preserved when it covers a maximum transfer.
+                    "[firmware_global]\nnic_firmware_cache_capacity_bytes = 8\n[firmware_global.downloads]\nmax_download_bytes = 8"
+                        => Yields(8_u64),
+                    // The loader enforces the relation before Core performs startup writes.
+                    "[firmware_global]\nnic_firmware_cache_capacity_bytes = 7\n[firmware_global.downloads]\nmax_download_bytes = 8"
+                        => FailsWith("invalid firmware_global.nic_firmware_cache_capacity_bytes configuration: firmware cache capacity must cover max_download_bytes and be at most 1 TiB".to_string()),
+                    // A budget above the supported storage bound is also rejected at loading.
+                    "[firmware_global]\nnic_firmware_cache_capacity_bytes = 1099511627777"
+                        => FailsWith("invalid firmware_global.nic_firmware_cache_capacity_bytes configuration: firmware cache capacity must cover max_download_bytes and be at most 1 TiB".to_string()),
+                }
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn nic_firmware_delivery_mode_is_loaded_and_validated() {
+        use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
+
+        figment::Jail::expect_with(|jail| {
+            scenarios!(
+                run = |settings| {
+                    jail.create_file(
+                        "config.toml",
+                        &format!("{}\n{settings}\n", include_str!("test_data/min_config.toml")),
+                    ).unwrap();
+                    parse_carbide_config(Path::new("config.toml"), None)
+                        .map(|config| config.firmware_global.nic_firmware_delivery_mode)
+                        .map_err(drop)
+                };
+                "NIC firmware delivery policy" {
+                    "" => Yields(FirmwareDeliveryMode::SiteCache),
+                    "[firmware_global]\nnic_firmware_delivery_mode = \"direct\""
+                        => Yields(FirmwareDeliveryMode::Direct),
+                    "[firmware_global]\nnic_firmware_delivery_mode = \"automatic\""
+                        => Fails,
+                }
+            );
+            Ok(())
+        })
+    }
+
     /// Verifies production configuration loading traverses both admin and named
     /// profiles so invalid route targets cannot survive startup.
     #[test]
     #[allow(clippy::result_large_err)]
     fn route_targets_are_validated_during_startup_loading() {
         figment::Jail::expect_with(|jail| {
+            // Put 257 valid targets in one prefix rule to exercise configured-pair admission.
+            let oversized_targets = (0..=256)
+                .map(|vni| format!("{{ asn = 64512, vni = {vni} }}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let oversized_conditional_exports = format!(
+                "[fnn.routing_profiles.OVERSIZED]\nroute_targets_on_exports_by_prefix = [{{ prefix = \"0.0.0.0/0\", route_targets = [{oversized_targets}] }}]"
+            );
             scenarios!(
                 run = |(name, settings)| {
                     // Parse each invalid profile through the same deferred loader used at startup.
@@ -644,6 +964,39 @@ route_target_imports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
             route_targets_on_exports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
                     ) => FailsWith(
                         "fnn.routing_profiles.INVALID.route_targets_on_exports[0] is invalid: route target cannot specify both vni and vni_self".to_string(),
+                    ),
+                    // Admin conditional rules must reject ineffective target lists at startup.
+                    (
+                        "admin-conditional-exports",
+                        r#"[fnn.admin_vpc]
+enabled = true
+[fnn.admin_vpc.routing_profile]
+route_targets_on_exports_by_prefix = [{ prefix = "::/0", route_targets = [] }]"#,
+                    ) => FailsWith(
+                        "fnn.admin_vpc.routing_profile.route_targets_on_exports_by_prefix is invalid: route_targets must contain at least one route target".to_string(),
+                    ),
+                    // Named profiles must validate the match mode as well as nested targets.
+                    (
+                        "named-conditional-exports",
+                        r#"[fnn.routing_profiles.INVALID]
+            route_targets_on_exports_by_prefix = [{ prefix = "0.0.0.0/0", match_type = "exact", max_prefix_length = 0, route_targets = [{ asn = 64512, vni = 100 }] }]"#,
+                    ) => FailsWith(
+                        "fnn.routing_profiles.INVALID.route_targets_on_exports_by_prefix is invalid: max_prefix_length is only accepted with match_type = le".to_string(),
+                    ),
+                    // A valid prefix rule must not bypass semantic validation of its nested target.
+                    (
+                        "named-conditional-target",
+                        r#"[fnn.routing_profiles.INVALID]
+            route_targets_on_exports_by_prefix = [{ prefix = "0.0.0.0/0", match_type = "exact", route_targets = [{ asn = 429000000, vni = 0, vni_self = true }] }]"#,
+                    ) => FailsWith(
+                        "fnn.routing_profiles.INVALID.route_targets_on_exports_by_prefix[0].route_targets[0] is invalid: route target cannot specify both vni and vni_self".to_string(),
+                    ),
+                    // Startup must count targets within a rule rather than only prefix entries.
+                    (
+                        "named-conditional-pair-limit",
+                        oversized_conditional_exports.as_str(),
+                    ) => FailsWith(
+                        "fnn.routing_profiles.OVERSIZED.route_targets_on_exports_by_prefix is invalid: route_targets_on_exports_by_prefix exceeds 256 prefix/route-target pairs".to_string(),
                     ),
                 }
             );
@@ -782,12 +1135,39 @@ route_target_imports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
         })
     }
 
+    /// A client certificate without its key stops configuration loading, even with NVLink
+    /// partitioning disabled, and the error names the missing setting.
     #[test]
     #[allow(clippy::result_large_err)]
-    fn legacy_rack_management_key_is_accepted_warned_and_omitted() {
+    fn nmx_c_client_certificate_without_key_fails_configuration_loading() {
         figment::Jail::expect_with(|jail| {
             let config_text = format!(
-                "{}\ndeny_unknown_fields = true\nrack_management_enabled = true\n",
+                "{}\n[nvlink_config]\nnmx_c_tls_client_cert_path = \"/etc/nico/nmxc/client.crt\"\n",
+                include_str!("test_data/min_config.toml")
+            );
+            jail.create_file("config.toml", &config_text)?;
+
+            let error = parse_carbide_config(Path::new("config.toml"), None)
+                .expect_err("a client certificate without its key must be rejected");
+            let message = format!("{error:#}");
+            assert!(message.contains("invalid nvlink_config"), "{message}");
+            assert!(
+                message.contains(
+                    "nmx_c_tls_client_cert_path is set without nmx_c_tls_client_key_path"
+                ),
+                "{message}"
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    #[allow(clippy::result_large_err)]
+    fn legacy_keys_without_a_replacement_are_accepted_warned_and_omitted() {
+        figment::Jail::expect_with(|jail| {
+            let config_text = format!(
+                "{}\ndeny_unknown_fields = true\nrack_management_enabled = true\n\
+                 [site_explorer]\nexplore_mode = \"libredfish\"\n",
                 include_str!("test_data/min_config.toml")
             );
             jail.create_file("config.toml", &config_text)?;
@@ -801,22 +1181,32 @@ route_target_imports = [{ asn = 429000000, vni = 0, vni_self = true }]"#,
             .expect("strict configuration with the deprecated key must load");
 
             assert_eq!(config.deprecated_rack_management_enabled, Some(true));
+            assert_eq!(
+                config.site_explorer.deprecated_explore_mode.as_deref(),
+                Some("libredfish")
+            );
             let serialized =
                 toml::to_string(config.as_ref()).expect("loaded configuration must serialize");
             assert!(!serialized.contains("rack_management_enabled"));
+            assert!(!serialized.contains("explore_mode"));
 
-            let warning = std::iter::from_fn(|| logs.try_recv().ok())
-                .find(|line| line.message == "Ignoring deprecated configuration key")
-                .expect("deprecated key warning");
-            assert_eq!(warning.level, "WARN");
+            let warnings = std::iter::from_fn(|| logs.try_recv().ok())
+                .filter(|line| line.message == "Ignoring deprecated configuration key")
+                .collect::<Vec<_>>();
             assert_eq!(
-                warning.fields.get("config_key").map(String::as_str),
-                Some("rack_management_enabled")
+                warnings
+                    .iter()
+                    .map(|line| line.fields.get("config_key").map(String::as_str))
+                    .collect::<Vec<_>>(),
+                vec![
+                    Some("rack_management_enabled"),
+                    Some("site_explorer.explore_mode"),
+                ]
             );
-            assert_eq!(
-                warning.fields.get("config_source").map(String::as_str),
-                Some("config.toml")
-            );
+            assert!(warnings.iter().all(|line| {
+                line.level == "WARN"
+                    && line.fields.get("config_source").map(String::as_str) == Some("config.toml")
+            }));
             Ok(())
         })
     }

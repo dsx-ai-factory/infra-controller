@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use model::hardware_info::HardwareInfo;
+
 use super::args::{NvlinkInfoArgs, NvlinkInfoPopulateArgs};
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
@@ -25,23 +27,14 @@ pub(super) async fn handle_nvlink_info_show(
 ) -> CarbideCliResult<()> {
     let machine = api_client.get_machine(args.machine_id).await?;
 
-    let status = machine.status.as_ref();
-
-    // Check if this is an MNNVL machine (GB200)
-    let is_mnnvl = status
-        .and_then(|status| status.discovery_info.as_ref())
-        .and_then(|info| info.dmi_data.as_ref())
-        .map(|dmi| dmi.product_name.contains("GB200"))
-        .unwrap_or(false);
-
-    if !is_mnnvl {
+    if !is_mnnvl_machine(&machine)? {
         return Err(CarbideCliError::GenericError(format!(
             "Machine {} is not an MNNVL machine",
             args.machine_id
         )));
     }
 
-    match status.and_then(|status| status.nvlink_info.clone()) {
+    match machine.status.and_then(|status| status.nvlink_info) {
         Some(nvlink_info) => {
             println!("{}", serde_json::to_string_pretty(&nvlink_info)?);
         }
@@ -54,6 +47,18 @@ pub(super) async fn handle_nvlink_info_show(
     }
 
     Ok(())
+}
+
+/// Applies the same MNNVL capability check NICo uses before it stores NVLink info.
+fn is_mnnvl_machine(machine: &::rpc::Machine) -> CarbideCliResult<bool> {
+    let Some(discovery_info) = machine
+        .status
+        .as_ref()
+        .and_then(|status| status.discovery_info.clone())
+    else {
+        return Ok(false);
+    };
+    Ok(HardwareInfo::try_from(discovery_info)?.is_mnnvl_capable())
 }
 
 /// Rendered when the retained `populate` compatibility command is invoked.
@@ -70,9 +75,56 @@ pub(super) fn handle_nvlink_info_populate(_args: NvlinkInfoPopulateArgs) -> Carb
 
 #[cfg(test)]
 mod tests {
+    use ::rpc::forge::MachineStatus;
+    use ::rpc::machine_discovery::{DiscoveryInfo, DmiData, Gpu, GpuPlatformInfo};
+    use carbide_test_support::value_scenarios;
     use clap::Parser;
 
     use super::*;
+
+    fn machine_with_gpu(gpu_name: &str, dmi_product_name: &str) -> ::rpc::Machine {
+        ::rpc::Machine {
+            status: Some(MachineStatus {
+                discovery_info: Some(DiscoveryInfo {
+                    dmi_data: Some(DmiData {
+                        product_name: dmi_product_name.to_string(),
+                        ..Default::default()
+                    }),
+                    gpus: vec![Gpu {
+                        name: gpu_name.to_string(),
+                        platform_info: Some(GpuPlatformInfo::default()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn show_accepts_every_mnnvl_platform() {
+        value_scenarios!(
+            run = |(gpu_name, dmi_product_name): (&str, &str)| {
+                is_mnnvl_machine(&machine_with_gpu(gpu_name, dmi_product_name)).unwrap()
+            };
+            "MNNVL GPU name outside GB200" {
+                ("NVIDIA GB300", "P4242") => true,
+            }
+            "MNNVL marker only in DMI product name" {
+                ("NVIDIA Graphics Device", "VR NVL144") => true,
+            }
+            "non-MNNVL GPU" {
+                ("NVIDIA H100 80GB HBM3", "DGXH100") => false,
+            }
+        );
+    }
+
+    #[test]
+    fn show_rejects_machine_without_discovery_info() {
+        assert!(!is_mnnvl_machine(&::rpc::Machine::default()).unwrap());
+    }
 
     #[test]
     fn populate_returns_unsupported_without_side_effects() {

@@ -8,7 +8,7 @@ How NICo component tracing works, what it covers, how to turn it on and off and 
 
 - **nico-api** (the `carbide-api` binary) is NICo's primary tracing source and the subject of this
   document. **nico-dns** also emits traces, but with a separate simpler opt-in setup.
-  **nico-bmc-proxy** emits traces for each proxied BMC request when configured (see
+  **nico-bmc-proxy** adds spans to sampled caller traces when configured (see
   [nico-bmc-proxy tracing](#nico-bmc-proxy-tracing)) and **nico-pxe** for each boot request it
   serves (see [nico-pxe tracing](#nico-pxe-tracing)).
 - **nico-api traces are off by default**; two things must both be true before any spans are emitted:
@@ -53,7 +53,7 @@ The following binaries build an OTLP span exporter:
 - **nico-api** (`crates/api-core/src/logging/setup.rs`) - the rich, control-plane tracing this
   document is mostly about, off by default behind endpoint plus enabled-flag configuration
 - **nico-dns** (`crates/dns/src/main.rs`) - a separate, much simpler **opt-in** setup.
-- **nico-bmc-proxy** (`crates/bmc-proxy/src/setup.rs`) - one span per proxied BMC request, off by
+- **nico-bmc-proxy** (`crates/bmc-proxy/src/setup.rs`) - spans for sampled caller traces, off by
   default behind endpoint plus `[tracing] enabled` (see
   [nico-bmc-proxy tracing](#nico-bmc-proxy-tracing)).
 - **nico-pxe** (`crates/pxe/src/main.rs`) - request spans, off by default unless an OTLP
@@ -64,13 +64,15 @@ The following binaries build an OTLP span exporter:
 - **nico-dhcp-server** (`crates/dhcp-server/src/main.rs`) - the Rust DHCP server the BlueField
   DaemonSet runs. One span per packet, configured the same way (see
   [nico-dhcp tracing](#nico-dhcp-tracing)).
+- **nico-ssh-console-rs** (`crates/ssh-console/src/main.rs`) - one span per console operation, off by
+  default unless an OTLP endpoint is configured (refer to
+  [nico-ssh-console-rs tracing](#nico-ssh-console-rs-tracing)).
 - **NICo REST API services** (`rest-api/common/pkg/otel`), off by default until an OTLP endpoint
   variable is set, plus `tracing.enabled` on nico-rest-api and the workflow workers (see
   [REST service tracing](#7-nico-rest-api-service-tracing)).
 
-The other binaries (nico-hardware-health, nico-ssh-console-rs, and nico-dsx-exchange-consumer)
-carry the OpenTelemetry crates in the workspace but do not build a span exporter, so they do not
-emit traces.
+The other binaries (nico-hardware-health and nico-dsx-exchange-consumer) carry the
+OpenTelemetry crates in the workspace but do not build a span exporter, so they do not emit traces.
 
 Unless noted otherwise, the rest of this document describes **nico-api** tracing.
 nico-dns differs as described in [nico-dns tracing](#nico-dns-tracing-separate-opt-in).
@@ -207,7 +209,7 @@ nico-api's:
 
 ### nico-bmc-proxy tracing
 
-nico-bmc-proxy traces each proxied Redfish request through the BMC credential proxy
+nico-bmc-proxy continues caller traces through the BMC credential proxy
 (`crates/bmc-proxy/src/proxy/`). It follows the same W3C propagation model as nico-api
 (issue [#2438](https://github.com/dsx-ai-factory/infra-controller/issues/2438)) so a call from nico-api or
 DPS stays one trace across the proxy hop (issue
@@ -228,13 +230,17 @@ DPS stays one trace across the proxy hop (issue
   itself and apply as well. A malformed endpoint is rejected when the
   exporter is built; the proxy logs a warning and serves BMC traffic without tracing rather than
   refusing to start.
-- **Ingress.** Each proxied request opens a `bmc_proxy_request` span and adopts any inbound
-  `traceparent`/`tracestate` via `trace_propagation::set_span_parent_from_headers`.
+- **Ingress and sampling.** The proxy inherits valid inbound `traceparent`/`tracestate`
+  context and the caller's sampling decision. Sampled requests export a `bmc_proxy_request`
+  span and outbound request spans. Unsampled requests propagate the inherited trace ID without
+  exporting spans. Requests with missing or malformed context receive a new, unsampled trace ID
+  that is propagated to nico-api metadata lookups and BMC requests without exporting spans.
+  The proxy uses parent-based sampling with root sampling disabled; sampling is decided by callers.
 - **Egress to BMC.** Upstream Redfish calls use a `reqwest-tracing` client so the active proxy
   span's W3C context is injected on the BMC leg. The inbound headers are dropped before the upstream
   request is assembled — `trace_propagation::is_propagated_header` asks the configured propagator
   which headers are its own — so the BMC parents under the proxy's span rather than the caller's.
-- **Egress to nico-api (gRPC).** Credential lookup uses the shared `ForgeApiClient`, which already
+- **Egress to nico-api (gRPC).** Credential lookup uses the shared `CarbideApiClient`, which already
   wraps the transport with `TraceInjectService`.
 - **Resource / tracer:** `service.name = nico-bmc-proxy`, tracer name `nico-bmc-proxy`.
 - **Span fields:** HTTP method and request path, the status the proxy answered its caller with (not
@@ -281,7 +287,7 @@ routes. It uses the shared setup in `carbide_instrument::otlp_tracing`, enabled 
   and uses any inbound `traceparent` or `tracestate` header as its parent.
   - A booting node cannot send those headers, so most requests span starts a new trace.
   - A request from another traced service continues that service's trace.
-- **Outbound gRPC to nico-api.** Calls use the shared `ForgeTlsClient`, which wraps its transport
+- **Outbound gRPC to nico-api.** Calls use the shared `CarbideTlsClient`, which wraps its transport
   with `TraceInjectService` and sends the trace context on every request. No per-call code is
   needed.
 - **Resource / tracer:** `service.name = nico-pxe`, tracer name `nico-pxe`.
@@ -318,13 +324,49 @@ Two separate programs serve DHCP, and both use the shared setup in
 - **Each packet starts a new trace.** A DHCP client sends no `traceparent`, so there is
   no inbound context to continue. Spans opened inside that root span, including the outbound gRPC
   call, join the same trace.
-- **Outbound gRPC to nico-api.** Calls use the shared `ForgeTlsClient`, which sends the trace
+- **Outbound gRPC to nico-api.** Calls use the shared `CarbideTlsClient`, which sends the trace
   context on every request, so a DHCP trace continues into nico-api.
 - **Hook logging is unchanged.** The hook logs through Kea's logger, and installing span export
   does not add log lines or route them through `RUST_LOG`.
 - **Shutdown.** The hook sends its last batch when Kea unloads it. nico-dhcp-server sends its last
   batch only after its serving loop returns to `main`. It does not handle SIGTERM, so spans still buffered when
   the pod is terminated are lost.
+
+### nico-ssh-console-rs tracing
+
+`nico-ssh-console-rs` traces each console operation it serves. It uses the shared setup in
+`carbide_instrument::otlp_tracing`, enabled by that crate's `otlp-tracing` feature.
+
+- **Off by default.** It exports spans only when an OTLP endpoint is configured. There is no
+  separate enabled flag and no runtime toggle.
+- **Endpoint.** `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`, which also
+  applies to metrics and logs. The traces-specific variable takes precedence when both are set. In
+  the Helm chart, `otlpEndpoint` defaults to unset and `env` defaults to an empty map. The
+  `otlpEndpoint` value sets `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`; the `env` map can set any
+  environment variable, including the span level and sampler variables below. A non-empty
+  `otlpEndpoint` overrides `env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` when both are set. If the
+  exporter rejects the endpoint, the service logs a warning and continues without span export.
+- **Span level, separate from the log level.** `NICO_TRACES_SPAN_LEVEL` sets the most verbose span
+  level exported, defaulting to `info`, and accepts `off`, `error`, `warn`, `info`, `debug`,
+  `trace`, or `0`-`5`. It is independent of `RUST_LOG` and of the `--debug` flag.
+- **One span per operation, not per session.** The spans are
+  `ssh_console_auth_certificate`, `ssh_console_auth_publickey`, `ssh_console_channel_open`,
+  `ssh_console_shell_request`, and `ssh_console_exec_request`, all in
+  `crates/ssh-console/src/frontend.rs`. Console sessions stay open for hours, so a span covering a
+  whole session would not export until the session ended and its duration would mostly measure idle
+  time. Terminal traffic on `data` and `extended_data` is not traced, because each keystroke would
+  produce a span.
+- **Trace roots.** An SSH client cannot send a `traceparent` header, so each operation span starts a
+  new trace.
+- **Outbound gRPC to nico-api.** Calls use the shared `CarbideTlsClient`, which wraps its transport
+  with `TraceInjectService` and sends the trace context on every request, so tenant public key
+  validation and instance ID lookups appear in the same trace as the operation that triggered them.
+- **Resource / tracer:** `service.name = nico-ssh-console-rs`, tracer name
+  `nico-ssh-console-rs`.
+- **Span fields:** `peer_address` on every operation, plus `machine` on the auth, channel-open,
+  and shell-request spans.
+- **Sampling.** The standard `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` variables apply.
+- **Shutdown.** The service sends the last batch of spans after its listener task stops.
 
 ### W3C trace-context propagation
 
@@ -368,7 +410,7 @@ Propagation is automatic on ingress but opt-in on egress. Keep the following in 
   for you.
 - **New outbound gRPC client (tonic/hyper):** wrap its channel/service with
   `trace_propagation::TraceInjectService` at construction. Better yet, build through an existing shared
-  client that already wraps the transport (see `crates/rpc/src/forge_tls_client.rs`).
+  client that already wraps the transport (see `crates/rpc/src/carbide_tls_client.rs`).
 - **New outbound HTTP client (`reqwest`):** build it through the `reqwest-tracing` middleware instead of using a
   bare `reqwest::Client`. The wrapped client injects the current `traceparent` and `tracestate` into every request
   automatically, so there is no per-call code:

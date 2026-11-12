@@ -1,0 +1,84 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+use ::rpc::forge::{
+    SpdmAttestationStatus, SpdmListAttestationRequest, SpdmListAttestationRequestSelector,
+};
+use carbide_uuid::machine::MachineId;
+use eyre::Context;
+use uuid::Uuid;
+
+use crate::attestation::spdm::job::list::args::{Args, Selector};
+use crate::errors::{CarbideCliError, CarbideCliResult};
+use crate::rpc::ApiClient;
+
+pub(super) async fn list(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
+    let selector = match args.selector {
+        Selector::InProgress => SpdmListAttestationRequestSelector::SpdmListInProgress,
+        Selector::Waived => SpdmListAttestationRequestSelector::SpdmListWaived,
+        Selector::Failed => SpdmListAttestationRequestSelector::SpdmListFailed,
+        Selector::Passed => SpdmListAttestationRequestSelector::SpdmListPassed,
+    };
+
+    // Follow every continuation so the CLI still prints the complete retained list.
+    let mut statuses = Vec::new();
+    let mut page_token = String::new();
+    loop {
+        let response = api_client
+            .0
+            .list_attestation(SpdmListAttestationRequest {
+                selector: selector.into(),
+                page_token,
+                ..Default::default()
+            })
+            .await
+            .context("list SPDM attestation jobs")?;
+        statuses.extend(response.statuses);
+        page_token = response.next_page_token;
+        if page_token.is_empty() {
+            break;
+        }
+    }
+
+    // Keep the job ID and status positions stable, appending the job's machine membership.
+    let attestations: Vec<(Uuid, String, Vec<MachineId>)> = statuses
+        .into_iter()
+        .map(|elem| {
+            let job_id = elem.job_id.ok_or_else(|| {
+                CarbideCliError::GenericError(
+                    "SPDM attestation status missing job_id".to_string(),
+                )
+            })?;
+            let job_id = Uuid::try_from(job_id).map_err(|_| {
+                CarbideCliError::GenericError(
+                    "SPDM attestation status contains an invalid job_id".to_string(),
+                )
+            })?;
+            let att_status = SpdmAttestationStatus::try_from(elem.attestation_status)
+                .map_err(|_| CarbideCliError::GenericError(
+                    "SPDM attestation cannot construct SpdmAttestationStatus - unknown integer value".to_string(),
+                ))?
+                .as_str_name()
+                .to_string();
+            Ok((job_id, att_status, elem.machine_ids))
+        })
+        .collect::<CarbideCliResult<Vec<_>>>()?;
+
+    println!("{}", serde_json::to_string_pretty(&attestations)?);
+
+    Ok(())
+}

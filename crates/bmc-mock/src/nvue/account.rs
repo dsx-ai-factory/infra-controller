@@ -75,6 +75,10 @@ impl Accounts {
         (admin.username.clone(), admin.password.clone())
     }
 
+    pub(super) fn reset_to_defaults(&self, admin: &Account) {
+        *super::lock(&self.accounts) = vec![admin.clone()];
+    }
+
     pub(super) fn set_password(
         &self,
         username: &str,

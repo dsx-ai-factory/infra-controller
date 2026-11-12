@@ -10,7 +10,7 @@ workflow.
 
 ## Requirements
 
-- Docker
+- Docker connected to a Linux AMD64 or ARM64 daemon, with BuildKit available
 - Tilt
 - Helm 3 or Helm 4, plus Python 3 for Tilt's `helm_resource` extension
 - `kubectl` connected to a kind cluster
@@ -128,6 +128,58 @@ Narrow the results with the `namespace`, `workload`, `pod`, `container`, or
 Loki stores logs on a 2 GiB persistent volume and retains them for 24 hours.
 The volume survives pod restarts but is removed with the local Kind cluster.
 
+## API traces
+
+With `--observability=true`, Tilt installs Tempo and enables `nico-api` trace
+sampling with the chart's `tracing.enabled` value. The API exports OTLP/gRPC
+traces to `http://tempo.observability.svc.cluster.local:4317` by default.
+Set `nico-api.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` in
+[`values.yaml`](values.yaml) to use a different OTLP/gRPC URL. An empty or
+omitted endpoint selects the local Tempo service when the profile is enabled.
+The environment variable overrides `[tracing].otlp_endpoint` in the API's TOML
+configuration; site TOML overrides the chart's generated `[tracing].enabled`.
+
+Open **Explore** in Grafana, select **Tempo**, and search for service name
+`carbide-api`. Tempo retains traces for 24 hours on a 2 GiB persistent volume.
+The volume survives pod restarts and is removed with the local Kind cluster.
+When enabling observability in an existing session, trigger the manual
+`nico-api` resource in Tilt to apply its tracing configuration.
+
+To export REST traces into the same Tempo instance, enable both profiles:
+
+```bash
+tilt up -f dev/deployment/tilt/Tiltfile -- --observability=true --rest=true
+```
+
+Tilt enables trace export for the REST API, cloud and site workers, site-agent,
+cert-manager, and site-manager. Existing HTTP, Temporal, and Core gRPC
+instrumentation carries W3C trace context from REST requests into `carbide-api`.
+In Grafana Explore, search Tempo for `nico-rest-api`, `nico-rest-cloud-worker`,
+`nico-rest-site-worker`, `nico-rest-site-agent`, `nico-rest-cert-manager`, or
+`nico-rest-site-manager`. Requests that reach Core through Temporal should show
+REST and `carbide-api` spans in the same trace.
+
+Under `tilt.rest` in [`values.yaml`](values.yaml), configure `OTEL_*` overrides in
+`api.extraEnv`, `certManager.extraEnv`, `siteManager.extraEnv`,
+`workflow.extraEnv`, or `siteAgent.envConfig`. The workers also accept
+`workflow.cloudWorker.extraEnv` and `workflow.siteWorker.extraEnv`, which take
+precedence over shared worker environment settings. Tilt defaults the exporter
+endpoint to `http://tempo.<observabilityNamespace>.svc.cluster.local:4317` and
+the protocol to `grpc` only when neither the general nor traces-specific
+variable has a non-empty value. The Go exporter gives traces-specific variables
+precedence over general variables. Explicit `OTEL_SERVICE_NAME` values override
+configured service names; an explicit `workflow.config.tracing.serviceName`
+replaces the distinct worker defaults. Other services retain their existing
+service-name defaults. Disabling observability adds no REST tracing settings;
+explicit exporter configuration remains effective.
+
+For an existing Tilt session, use `tilt args -- --observability=true --rest=true`,
+then trigger `nico-api`, `nico-rest-api`, `nico-rest-workflow`,
+`nico-rest-site-agent`, `nico-rest-cert-manager`, and `nico-rest-site-manager`
+to apply the configuration to these manual resources. Once the services are
+ready, trigger `rest-integration` to restore the registered site ID after the
+site-agent chart reapplies its development placeholder.
+
 ## Pod metrics
 
 Prometheus discovers ServiceMonitor and PodMonitor resources across the local
@@ -210,21 +262,37 @@ mock on port 443.
 
 ## Image builds
 
-Tilt owns its service Dockerfiles and build-context ignore files in this directory.
-The shared compiler-container Dockerfile remains under `dev/docker`, where CI and
-other development workflows also use it. Their existing service Dockerfiles
-remain independent of Tilt.
+Tilt and `make images-dev` share the Core service recipes and build-context
+ignore files in `dev/docker/Dockerfile.dev-services` and
+`dev/docker/Dockerfile.dev-runtime`. The compiler-container Dockerfiles in
+`dev/docker` are also shared with other build workflows. Tilt retains the
+MAT controller recipe in this directory and uses the REST service Dockerfiles
+under `rest-api`.
+
+Both workflows select the native Linux AMD64 or ARM64 architecture from the
+active Docker daemon. Other daemon platforms fail before builds start. The Docker
+daemon and the kind cluster must use the same architecture.
+
+For a standalone image build, use `make images-dev` from the repository root.
+See [building one local development service](../../../docs/manuals/building_nico_containers.md#build-one-local-development-service)
+for target selection, image names, prerequisites and the isolated DHCP image
+runtime check. It builds into the selected Docker daemon without publishing
+images or deploying Kubernetes resources.
 
 All Tilt runtime images derive from one digest-pinned Debian Bookworm slim base
 with CA certificates. Service images install their additional runtime packages;
-the compiler toolchains remain in build stages. DHCP uses the Kea version in
-`dev/docker/kea.version`, matching the compiler container.
+the compiler toolchains remain in build stages. DHCP includes both Kea DHCPv4
+and DHCPv6 servers, using the version in `dev/docker/kea.version` to match the
+compiler container. Its hook library is installed at
+`/usr/lib/kea/hooks/libdhcp.so` on both architectures. Tilt values select that
+path for DHCPv4; the DHCPv6 chart already uses it directly.
 
-`Dockerfile.core` has separate targets for API, BMC proxy, DHCP,
-machine-a-tron, SSH console, and the MAT protocol gateway. Each target builds
-and packages its own binary (or DHCP hook library), sharing locked Cargo
-dependency and target caches. Tilt's Rust build stages use `line-tables-only`
-debug information for development and release profiles, retaining source-line
+`Dockerfile.dev-services` has separate targets for API, BMC proxy, DHCP,
+machine-a-tron, SSH console, the MAT protocol gateway and PostgreSQL exporter.
+Each target builds and packages its own binary (or DHCP hook library), sharing
+locked Cargo dependency and target caches separated by architecture. The Rust
+build stages use `line-tables-only` debug information for development and release
+profiles, retaining source-line
 backtraces without full debugger type and variable information. The API image
 contains a copy of nico-admin-cli for convenience.
 
@@ -246,9 +314,9 @@ retention policies.
 ## Optional profiles
 
 The `tilt.profiles` switches in [`values.yaml`](values.yaml) control REST, MCP,
-DSX Exchange, and observability. REST brings Temporal and Keycloak, MCP
+DSX Exchange, observability, and DPF. REST brings Temporal and Keycloak, MCP
 automatically brings REST, and DSX Exchange brings NATS. Observability manages
-Loki, Alloy, Prometheus, Grafana, and the NICo metrics monitors as one unit. All
+Loki, Tempo, Alloy, Prometheus, Grafana, and the NICo metrics monitors as one unit. All
 optional profiles are disabled by default.
 
 Changes to `values.yaml` reload the running Tilt session. For temporary
@@ -276,6 +344,36 @@ Enable the complete observability stack with:
 tilt args -- --observability=true
 ```
 
+Enable DPF-managed DPU initialization by starting the session with:
+
+```bash
+tilt up -f dev/deployment/tilt/Tiltfile -- --dpf=true
+```
+
+The DPF profile installs the DPF CRDs from
+[`crates/dpf/crds`](../../../crates/dpf/crds), creates the
+`dpf-operator-system` namespace, and builds and deploys the
+[DPF simulator](../../k8s/dpf-sim-controller/README.md) in place of the real
+DPF operator. NICo API starts with `[dpf] enabled = true` in its site
+configuration, a mounted ServiceAccount token, and the chart's DPF RBAC, so
+simulated machines run DPU initialization through the DPF provisioning flow
+instead of the legacy iPXE path. Never enable this profile on a cluster that
+also runs the real DPF operator: both would drive the same `DPU` resources.
+Because NICo API's Vault client switches to Kubernetes ServiceAccount login
+whenever a token is mounted, this profile extends the dev Vault's `postStart`
+hook to configure the `kubernetes` auth method and bind the `nico-api`
+ServiceAccount. Vault's StatefulSet only applies updates on pod deletion, so
+when enabling the profile against a cluster whose Vault is already running,
+delete the `nico-vault-0` pod once so the extended hook runs (dev-mode Vault
+keeps no durable state), then retrigger `nico-api`.
+
+Prefer a fresh `tilt up` over toggling `tilt args -- --dpf=true` in a running
+session: dependency ordering applies only to first-time deploys, so a
+mid-session toggle can redeploy NICo API before the namespace and CRDs exist,
+leaving it failed until manually retriggered. The simulator covers initial DPU
+provisioning only; DPF-driven reprovisioning on BFB or flavor changes stays
+inert because no `DPFOperatorConfig` reports `Ready` in this profile.
+
 Return to the values-file defaults with:
 
 ```bash
@@ -299,7 +397,8 @@ cluster to Tilt, run:
 LOCAL_DEV_INSTALL_REST_PREREQS=0 devspace purge -n nico-system
 ```
 
-To switch back to DevSpace, remove the Tilt stack and use the existing DevSpace
+To switch back to DevSpace, remove the Tilt stack (with the session's profile
+flags, as described under **Stop and remove**) and use the existing DevSpace
 bootstrap and deploy commands:
 
 ```bash
@@ -315,3 +414,15 @@ Stopping `tilt up` leaves the stack running. Remove Tilt-managed resources with:
 ```bash
 tilt down -f dev/deployment/tilt/Tiltfile
 ```
+
+Pass the same profile flags the session ran with, or `tilt down` evaluates the
+Tiltfile without those profiles and leaves their resources behind. After a DPF
+session, for example, add `-- --dpf=true` so the DPF CRDs and the simulator are
+removed too:
+
+```bash
+tilt down -f dev/deployment/tilt/Tiltfile -- --dpf=true
+```
+
+`tilt down` keeps namespaces, including `dpf-operator-system`, unless it also
+gets `--delete-namespaces`.

@@ -12,8 +12,7 @@ Each NICo component runs an HTTP server exposing a `/metrics` endpoint in Promet
 format. The OpenTelemetry SDK creates metrics using the Meter API, then the
 `opentelemetry-prometheus` exporter bridges them to a Prometheus registry served over HTTP.
 
-Components also expose `/health` (liveness) and `/ready` (readiness) endpoints on the same
-metrics port for each component:
+The following components expose metrics at `/metrics`. Ports shown are defaults:
 
 | Component | Port | Primary metrics |
 |-----------|------|-----------------|
@@ -24,8 +23,18 @@ metrics port for each component:
 | nico-dhcp | 1089 | IPv4 lease counts, request handling |
 | nico-dhcp6 (opt-in) | 1089 | IPv6 request, drop, and reply counts |
 | nico-dns | 8053 | Query rates, resolution latency |
+| nico-dsx-exchange-consumer | 9009 | Exchange message processing, queue drops |
+| nico-machine-a-tron (UFM mock) | 9090 | UFM mock inventory reconciliation |
 | nico-pxe | 8080 | Boot request counts |
 | nico-ssh-console-rs | 9009 | Console sessions, BMC connections |
+| nico-unbound (exporter) | 9167 | DNS resolver statistics |
+
+The machine-a-tron metrics listener requires `ufmMock.enabled`, and the Unbound exporter
+requires `exporter.enabled` in their respective subcharts. Both are enabled by default.
+
+Health-probe routes vary by component. The nico-api main metrics listener exposes `/health`
+for liveness and `/ready` for readiness. The nico-hardware-health metrics listener (default
+port 9009) exposes `/livez` for liveness and has no readiness endpoint.
 
 Metrics in the [generated Core catalogue](core_metrics.md) use the `carbide_` prefix. A small
 number of legacy Core metrics (such as `site_explorer_create_switches_latency_seconds` and
@@ -104,9 +113,12 @@ means something is blocking normal lifecycle progression and warrants investigat
 Common causes include BMC connectivity issues, PXE boot failures or external service
 timeouts.
 
-Related metrics include `carbide_<object>_per_state` (current count per state),
-`carbide_<object>_state_time_in_state_seconds` (histogram of time spent) and
-`carbide_<object>_state_handler_errors_total` (processing failures).
+Related metrics include:
+
+- `carbide_<object>_per_state` - current count per state
+- `carbide_<object>_time_in_state_seconds` - histogram of elapsed seconds in state
+- `carbide_<object>_with_state_handling_errors_per_state` - gauge of objects with error,
+grouped by state, substate and error name
 
 ### Capacity: "How much headroom do we have?"
 
@@ -115,9 +127,15 @@ exposes `carbide_hosts_usable_count` and `carbide_gpus_usable_count` showing hos
 GPUs available for allocation. The `carbide_available_ips_count` metric tracks IP
 address pool exhaustion.
 
-For multi-tenant deployments, `carbide_resource_pool_*` metrics break down capacity by
-resource pool. Watch for pools approaching zero availability before tenants start seeing
-allocation failures.
+The `carbide_resourcepool_free_count` and `carbide_resourcepool_used_count` gauges
+report available and allocated values, respectively, for each resource pool, identified
+by the `pool` label. Watch for pools approaching zero availability before tenants start
+seeing allocation failures.
+
+These counts are absent before the first successful statistics check, after a failed
+check, or when the data is too old. Also monitor `carbide_resourcepool_stats_available`
+and `carbide_resourcepool_stats_fresh` to check whether pool data is available and up
+to date. See the [metrics reference](core_metrics.md) for their meanings.
 
 ### Health: "What's broken right now?"
 
@@ -143,10 +161,14 @@ with BMCs or switches.
 
 ### Firmware management
 
-Firmware update metrics track the upgrade queue and active operations.
-`carbide_firmware_queue_length` shows pending updates while
-`carbide_firmware_active_updates` shows concurrent operations. The pre-ingestion manager
-metrics (`carbide_preingestion_*`) track firmware image preparation.
+Host firmware metrics count machines rather than operations.
+`carbide_pending_host_firmware_update_count` is the number of hosts the drift
+query currently selects as needing firmware work, and
+`carbide_active_host_firmware_update_count` is the number of hosts whose
+top-level state is `HostReprovision`; assigned-host firmware substates are not
+included. See the [host firmware guide](../operations/firmware-updates/host-firmware.md)
+for the full metric table. The pre-ingestion manager metrics
+(`carbide_preingestion_*`) track firmware image preparation.
 
 ### API performance
 
@@ -161,7 +183,7 @@ here cascade to certificate issuance and machine provisioning.
 
 ### Hardware health service
 
-The nico-hardware-health component has two separate endpoints. The `/metrics` endpoint
+The nico-hardware-health component has two separate metrics endpoints. The `/metrics` endpoint
 exposes service-level metrics (probe success rates, scrape latency). The `/telemetry`
 endpoint exposes raw sensor readings (temperatures, power, fan speeds) collected via
 Redfish from BMCs.
@@ -262,8 +284,16 @@ request handling. nico-dns exposes query rates and resolution latency.
 
 ### Console services
 
-nico-ssh-console-rs exposes `carbide_ssh_console_*` metrics for BMC connection counts,
-session durations and error rates. This is useful for debugging console access issues.
+nico-ssh-console-rs exposes legacy `ssh_console_*` metrics for console sessions,
+BMC connections, and errors, plus `carbide_ssh_console_*` counters.
+`carbide_ssh_console_bmc_recovery_attempts_total` counts iterations of the BMC
+connection recovery loop, excluding each client's initial iteration. This
+service-wide counter has no labels, survives BMC client recreation, and resets
+when the service restarts. The legacy `ssh_console_bmc_recovery_attempts` gauge
+provides per-machine values through its `machine_id` label and resets when that
+client is recreated. `carbide_ssh_console_stream_lines_dropped_total` counts lines
+omitted from individual console-log gRPC streams. Its `reason` label is
+`client_queue_full` or `completed_line_broadcast_lag`.
 
 ## 3. Collection architecture
 
@@ -308,9 +338,16 @@ telemetryServiceMonitor:
 ### OTel Collector configuration
 
 Configure the prometheus receiver for Kubernetes service discovery. This example scrapes
-only the `/metrics` endpoint. For nico-hardware-health `/telemetry` (high-cardinality
-sensor data), add a separate scrape job targeting the `metrics` port name with its
-metrics path set to `/telemetry`.
+the primary `/metrics` endpoints for nico-api, nico-dhcp, nico-pxe and
+nico-hardware-health. It selects the chart-defined `app.kubernetes.io/metrics` Service
+label and the corresponding endpoint port name (`http` or `metrics`); no
+`prometheus.io/scrape` annotation is required. Set `names` to the installation namespace
+and adjust the label values in `regex` if using chart `nameOverride` values.
+
+The selection excludes the optional nico-api per-object metrics Service. For
+nico-hardware-health `/telemetry` (high-cardinality sensor data), add a separate scrape
+job selecting the nico-hardware-health metrics label and the `metrics` port name, with
+its metrics path set to `/telemetry`.
 
 <Note>
 If running as a DaemonSet, each replica will independently discover and scrape
@@ -329,12 +366,11 @@ receivers:
               namespaces:
                 names: [nico-system]
           relabel_configs:
-            - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+            - source_labels:
+                - __meta_kubernetes_service_label_app_kubernetes_io_metrics
+                - __meta_kubernetes_endpoint_port_name
               action: keep
-              regex: true
-            - source_labels: [__meta_kubernetes_endpoint_port_name]
-              action: keep
-              regex: metrics
+              regex: '(nico-api|nico-dhcp|nico-pxe);http|nico-hardware-health;metrics'
 
 processors:
   batch: {}
@@ -560,7 +596,7 @@ token lifetime, Postgres secrets operations, inbound TLS handshakes, certificate
 reloads, and outbound TCP connect outcomes.
 
 **DPUs and firmware** - DPUs online compared with healthy, failing health checks,
-firmware and dpu-agent versions, host inventory component versions, and the DPU NIC and
+firmware and dpu-agent versions, DPU inventory component versions, and the DPU NIC and
 host firmware update backlogs.
 
 **Site explorer** - Whether exploration is enabled, last run status, endpoints explored
@@ -601,7 +637,7 @@ distinct API versions deployed.
 and tenant footprint across sites.
 
 **Deployed versions** - API build per site, sites per build, and the dpu-agent, DPU
-firmware and host inventory component version spread.
+firmware and DPU inventory component version spread.
 
 **Inventory and lifecycle** - Hosts, network segments and InfiniBand partitions managed
 per site, with the stuck objects of each type.
@@ -655,8 +691,12 @@ control plane health and performance metrics:
 **Request summary** - API status, request rate, p95 latency, gRPC error rate. Top-level
 indicators for SLO monitoring.
 
-**Requests by method and status** - Heatmap of request latency by gRPC method. Identifies
-which endpoints are slow or failing.
+**Requests by method and status** - Stacked time series of requests per second, grouped
+by gRPC method and status code. Shows traffic volume and error responses by method.
+
+**Request latency** - The summary p95 and the p50/p95/p99 latency time series aggregate
+requests across all methods matching the selected job filter; they do not show
+per-method latency.
 
 **Database** - Queries per second, time per request, connection pool utilization. Database
 contention is a common cause of API slowdowns.
@@ -696,8 +736,11 @@ Download the JSON files from `helm/observability/dashboards/` and import via Gra
 (Dashboards -> Import -> Upload JSON file). Set the Prometheus datasource when prompted.
 
 Each dashboard provides variables for datasource selection and metric prefix customization.
-The prefix defaults to `carbide_` (NICo's current emission prefix). If your site uses
-`alt_metric_prefix`, update the dashboard variable accordingly.
+The `metric_prefix` dashboard variable defaults to `carbide`, without a trailing underscore.
+Dashboard expressions add the separator: `${metric_prefix}_api_ready` becomes
+`carbide_api_ready`. Entering `carbide_` instead produces `carbide__api_ready`, which does not
+match the emitted metric. If your site uses `alt_metric_prefix`, set the dashboard variable
+to the alternative prefix without its trailing underscore.
 
 ## 6. Troubleshooting
 

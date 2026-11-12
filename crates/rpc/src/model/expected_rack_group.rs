@@ -41,33 +41,39 @@ impl From<ExpectedRackGroup> for rpc::forge::ExpectedRackGroup {
     }
 }
 
-/// Whether a declaration must carry a protocol. Add and Update require one;
-/// groups stored before the protocol column are read back without it.
+/// Distinguishes write validation from legacy stored data.
 #[derive(Clone, Copy)]
-enum Protocol {
-    Required,
-    Optional,
+enum ConversionMode {
+    Declaration,
+    Update,
+    Stored,
 }
 
 impl TryFrom<rpc::forge::ExpectedRackGroup> for ExpectedRackGroup {
     type Error = RpcDataConversionError;
 
     fn try_from(value: rpc::forge::ExpectedRackGroup) -> Result<Self, Self::Error> {
-        convert(value, Protocol::Required)
+        convert(value, ConversionMode::Declaration)
     }
 }
 
-/// Convert a group read back from nico-api. An empty protocol means the
-/// group was stored before protocols were recorded, not an invalid value.
+/// Convert a group read back from nico-api, preserving an unspecified protocol.
 pub fn stored_expected_rack_group(
     value: rpc::forge::ExpectedRackGroup,
 ) -> Result<ExpectedRackGroup, RpcDataConversionError> {
-    convert(value, Protocol::Optional)
+    convert(value, ConversionMode::Stored)
+}
+
+/// Convert an update; the database validates indexes when membership changes.
+pub fn updated_expected_rack_group(
+    value: rpc::forge::ExpectedRackGroup,
+) -> Result<ExpectedRackGroup, RpcDataConversionError> {
+    convert(value, ConversionMode::Update)
 }
 
 fn convert(
     value: rpc::forge::ExpectedRackGroup,
-    protocol: Protocol,
+    mode: ConversionMode,
 ) -> Result<ExpectedRackGroup, RpcDataConversionError> {
     let invalid = |message: &str| RpcDataConversionError::InvalidArgument(message.to_string());
     let rack_group_id = value
@@ -79,8 +85,10 @@ fn convert(
             "topology must contain 1 to 128 characters and not be blank",
         ));
     }
-    let protocol = match protocol {
-        Protocol::Optional if value.protocol.trim().is_empty() => None,
+    let declaration = matches!(mode, ConversionMode::Declaration);
+    let protocol = match mode {
+        ConversionMode::Stored if value.protocol.trim().is_empty() => None,
+        ConversionMode::Declaration | ConversionMode::Update if value.protocol.is_empty() => None,
         _ if value.protocol.trim().is_empty() || value.protocol.chars().count() > 128 => {
             return Err(invalid(
                 "protocol must contain 1 to 128 characters and not be blank",
@@ -102,6 +110,9 @@ fn convert(
         }
         let mut devices = Vec::with_capacity(rack.members.len());
         for member in rack.members {
+            if declaration && member.cartridge_index.is_none() {
+                return Err(invalid("member cartridge_index is required"));
+            }
             if member.manufacturer.trim().is_empty() || member.id.trim().is_empty() {
                 return Err(invalid("member manufacturer and id must not be blank"));
             }
@@ -117,6 +128,7 @@ fn convert(
                 return Err(invalid("duplicate device member across racks"));
             }
             devices.push(ExpectedRackGroupMember {
+                cartridge_index: member.cartridge_index,
                 device_type,
                 manufacturer: member.manufacturer,
                 id: member.id,
@@ -148,6 +160,7 @@ impl From<ExpectedRackGroupRack> for rpc::forge::ExpectedRackGroupRack {
                 .members
                 .into_iter()
                 .map(|m| rpc::forge::ExpectedRackGroupMember {
+                    cartridge_index: m.cartridge_index,
                     r#type: m.device_type.to_string(),
                     manufacturer: m.manufacturer,
                     id: m.id,
@@ -172,6 +185,7 @@ mod tests {
                 rpc::forge::ExpectedRackGroupRack {
                     rack_id: Some(RackId::new("rack-02")),
                     members: vec![rpc::forge::ExpectedRackGroupMember {
+                        cartridge_index: Some(0),
                         r#type: "Compute".to_string(),
                         manufacturer: "NVIDIA".to_string(),
                         id: "device-01".to_string(),
@@ -227,13 +241,17 @@ mod tests {
         assert!(ExpectedRackGroup::try_from(empty).is_ok());
     }
 
-    /// Groups stored before the protocol column come back with an empty
-    /// protocol; the read path keeps them, the declaration path rejects them.
+    /// Missing protocols survive declaration and read conversion.
     #[test]
     fn stored_group_may_lack_a_protocol() {
         let mut legacy = wire();
         legacy.protocol.clear();
-        assert!(ExpectedRackGroup::try_from(legacy.clone()).is_err());
+        assert_eq!(
+            ExpectedRackGroup::try_from(legacy.clone())
+                .unwrap()
+                .protocol,
+            None
+        );
         let stored = stored_expected_rack_group(legacy).unwrap();
         assert_eq!(stored.protocol, None);
         let current = stored_expected_rack_group(wire()).unwrap();
@@ -278,6 +296,27 @@ mod tests {
                 "name={name_len}, description={description_len}"
             );
         }
+    }
+
+    #[test]
+    fn cartridge_index_round_trip() {
+        for index in [None, Some(0), Some(7), Some(u32::MAX)] {
+            let mut input = wire();
+            input.racks[0].members[0].cartridge_index = index;
+            assert_eq!(
+                ExpectedRackGroup::try_from(input.clone()).is_ok(),
+                index.is_some()
+            );
+            let mut group = stored_expected_rack_group(input.clone()).unwrap();
+            let stored = serde_json::to_value(&group.racks).unwrap();
+            group.racks = serde_json::from_value(stored).unwrap();
+            let output: rpc::forge::ExpectedRackGroup = group.into();
+            assert_eq!(output.racks, input.racks);
+        }
+        let member: ExpectedRackGroupMember =
+            serde_json::from_str(r#"{"type":"Switch","manufacturer":"NVIDIA","id":"switch-01"}"#)
+                .unwrap();
+        assert_eq!(member.cartridge_index, None);
     }
 
     #[test]

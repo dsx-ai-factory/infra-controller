@@ -30,6 +30,7 @@ use ::rpc::protos::dns::{
     UpdateDomainRequest,
 };
 use ::rpc::protos::{measured_boot as measured_boot_pb, mlx_device as mlx_device_pb};
+use bmc_runtime::DriverConnector;
 use carbide_ib_fabric::ib::IBFabricManager;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_machine_controller::io::MachineStateControllerIO;
@@ -70,6 +71,28 @@ use crate::resource_pool::ResourcePoolMonitor;
 use crate::scout_stream::ConnectionRegistry;
 use crate::{CarbideError, CarbideResult};
 
+/// `RequestReceivedAt` records ingress before authorization/admission waits.
+/// Handlers opt into it; it does not change other RPC timeout semantics.
+#[derive(Clone, Copy)]
+pub(crate) struct RequestReceivedAt(pub(crate) tokio::time::Instant);
+
+/// Records request arrival before authorization and business admission. The
+/// listener installs this outermost; firmware reads consume the extension.
+fn record_grpc_receipt<B>(mut request: axum::extract::Request<B>) -> axum::extract::Request<B> {
+    request
+        .extensions_mut()
+        .insert(RequestReceivedAt(tokio::time::Instant::now()));
+    request
+}
+
+/// Builds the listener's receipt layer independently of admission configuration.
+/// Firmware reads consume its stamp even when admission is disabled.
+pub(crate) fn grpc_receipt_layer<B>() -> tower::util::MapRequestLayer<
+    impl Fn(axum::extract::Request<B>) -> axum::extract::Request<B> + Clone,
+> {
+    tower::util::MapRequestLayer::new(record_grpc_receipt::<B>)
+}
+
 pub struct Api {
     // `pub` (not `pub(crate)`): read by the `carbide-api-web` admin UI (e.g. IPAM/DNS pages).
     pub database_connection: sqlx::PgPool,
@@ -83,6 +106,9 @@ pub struct Api {
     /// handing these to a wrapper pool is a compile error (a wrong-pool
     /// guard, not a wire-path guarantee -- see [`BmcCredentialOps`]).
     pub(crate) bmc_credential_ops: Arc<dyn BmcCredentialOps>,
+    /// Connects moved BMC operations through their drivers when the site
+    /// sets `bmc_backend = "drivers"`; `None` runs them through libredfish.
+    pub(crate) driver_connector: Option<Arc<DriverConnector>>,
     /// HTTP client for the raw Redfish passthrough when `[bmc_proxy]` is
     /// enabled; `None` keeps the passthrough dialing BMCs directly.
     pub(crate) bmc_proxy_passthrough: Option<Arc<crate::bmc_proxy::PassthroughClient>>,
@@ -104,7 +130,6 @@ pub struct Api {
     pub(crate) bmc_client: Arc<dyn AuthenticatedBmc>,
     pub(crate) endpoint_exploration_service: Arc<EndpointExplorationService>,
     pub(crate) scout_stream_registry: ConnectionRegistry,
-    #[allow(unused)]
     pub(crate) rms_client: Option<Arc<dyn RmsApi>>,
     pub(crate) nmxc_client_pool: Arc<dyn NmxcPool>,
     pub(crate) work_lock_manager_handle: WorkLockManagerHandle,
@@ -154,6 +179,13 @@ impl Forge for Api {
         request: Request<rpc::GetRmsVersionRequest>,
     ) -> Result<Response<rpc::GetRmsVersionResponse>, Status> {
         crate::handlers::rms::get_rms_version(self, request).await
+    }
+
+    async fn get_rms_job_status(
+        &self,
+        request: Request<rpc::GetRmsJobStatusRequest>,
+    ) -> Result<Response<rpc::GetRmsJobStatusResponse>, Status> {
+        crate::handlers::rms::get_rms_job_status(self, request).await
     }
 
     async fn create_domain(
@@ -268,6 +300,20 @@ impl Forge for Api {
         request: Request<rpc::VpcsByIdsRequest>,
     ) -> Result<Response<rpc::VpcList>, Status> {
         crate::handlers::vpc::find_by_ids(self, request).await
+    }
+
+    async fn find_routing_profile_names(
+        &self,
+        request: Request<rpc::RoutingProfileSearchFilter>,
+    ) -> Result<Response<rpc::RoutingProfileNameList>, Status> {
+        crate::handlers::routing_profile::find_names(self, request)
+    }
+
+    async fn find_routing_profiles_by_names(
+        &self,
+        request: Request<rpc::RoutingProfilesByNamesRequest>,
+    ) -> Result<Response<rpc::NamedRoutingProfileList>, Status> {
+        crate::handlers::routing_profile::find_by_names(self, request)
     }
 
     async fn get_vpc_routing_state(
@@ -591,6 +637,13 @@ impl Forge for Api {
         crate::handlers::network_segment::create(self, request).await
     }
 
+    async fn add_network_segment_prefix(
+        &self,
+        request: Request<rpc::AddNetworkSegmentPrefixRequest>,
+    ) -> Result<Response<rpc::NetworkSegment>, Status> {
+        crate::handlers::network_segment::add_prefix(self, request).await
+    }
+
     async fn attach_network_segment_to_vpc(
         &self,
         request: Request<rpc::AttachNetworkSegmentToVpcRequest>,
@@ -617,6 +670,60 @@ impl Forge for Api {
         request: Request<rpc::NetworkSegmentStateHistoriesRequest>,
     ) -> Result<Response<rpc::StateHistories>, Status> {
         crate::handlers::network_segment::find_state_histories(self, request).await
+    }
+
+    async fn find_external_validation_hold_ids(
+        &self,
+        _request: Request<rpc::ExternalValidationHoldSearchFilter>,
+    ) -> Result<Response<rpc::ExternalValidationHoldIdList>, Status> {
+        Err(Status::unimplemented(
+            "external validation holds are not implemented",
+        ))
+    }
+
+    async fn find_external_validation_holds_by_ids(
+        &self,
+        _request: Request<rpc::ExternalValidationHoldsByIdsRequest>,
+    ) -> Result<Response<rpc::ExternalValidationHoldList>, Status> {
+        Err(Status::unimplemented(
+            "external validation holds are not implemented",
+        ))
+    }
+
+    async fn start_external_validation(
+        &self,
+        _request: Request<rpc::StartExternalValidationRequest>,
+    ) -> Result<Response<rpc::StartExternalValidationResponse>, Status> {
+        Err(Status::unimplemented(
+            "external validation attempts are not implemented",
+        ))
+    }
+
+    async fn cancel_external_validation(
+        &self,
+        _request: Request<rpc::CancelExternalValidationRequest>,
+    ) -> Result<Response<rpc::ExternalValidationAttempt>, Status> {
+        Err(Status::unimplemented(
+            "external validation attempts are not implemented",
+        ))
+    }
+
+    async fn complete_external_validation(
+        &self,
+        _request: Request<rpc::CompleteExternalValidationRequest>,
+    ) -> Result<Response<rpc::ExternalValidationAttempt>, Status> {
+        Err(Status::unimplemented(
+            "external validation attempts are not implemented",
+        ))
+    }
+
+    async fn remove_external_validation_hold(
+        &self,
+        _request: Request<rpc::RemoveExternalValidationHoldRequest>,
+    ) -> Result<Response<()>, Status> {
+        Err(Status::unimplemented(
+            "external validation hold removal is not implemented",
+        ))
     }
 
     async fn allocate_instance(
@@ -1043,6 +1150,20 @@ impl Forge for Api {
         crate::handlers::machine::find_machines_by_ids(self, request).await
     }
 
+    async fn find_machine_states_by_ids(
+        &self,
+        request: Request<rpc::MachineStatesByIdsRequest>,
+    ) -> Result<Response<rpc::MachineStateList>, Status> {
+        crate::handlers::machine::find_machine_states_by_ids(self, request).await
+    }
+
+    async fn find_host_states_by_ids(
+        &self,
+        request: Request<rpc::HostStatesByIdsRequest>,
+    ) -> Result<Response<rpc::HostStateList>, Status> {
+        crate::handlers::host_state::find_host_states_by_ids(self, request).await
+    }
+
     async fn find_machine_state_histories(
         &self,
         request: Request<rpc::MachineStateHistoriesRequest>,
@@ -1231,6 +1352,13 @@ impl Forge for Api {
         request: Request<rpc::BmcEndpointRequest>,
     ) -> Result<Response<rpc::BmcCredentialStatusResponse>, Status> {
         crate::handlers::bmc_endpoint_explorer::bmc_credential_status(self, request).await
+    }
+
+    async fn find_bmc_driver_selection(
+        &self,
+        request: Request<rpc::BmcEndpointRequest>,
+    ) -> Result<Response<rpc::BmcDriverSelection>, Status> {
+        crate::handlers::site_explorer::find_bmc_driver_selection(self, request).await
     }
 
     async fn re_explore_endpoint(
@@ -3643,25 +3771,39 @@ impl Forge for Api {
         crate::handlers::attestation::trigger_machine_attestation(self, request).await
     }
 
-    async fn cancel_machine_attestation(
+    async fn waive_attestation(
         &self,
-        request: tonic::Request<MachineId>,
+        request: tonic::Request<::rpc::Uuid>,
     ) -> Result<tonic::Response<()>, Status> {
-        crate::handlers::attestation::cancel_machine_attestation(self, request).await
+        crate::handlers::attestation::waive_attestation(self, request).await
     }
 
-    async fn list_attestation_machines(
+    async fn fail_attestation(
         &self,
-        request: tonic::Request<rpc::SpdmListAttestationMachinesRequest>,
-    ) -> Result<Response<rpc::SpdmListAttestationMachinesResponse>, Status> {
-        crate::handlers::attestation::list_attestation_machines(self, request).await
+        request: tonic::Request<::rpc::Uuid>,
+    ) -> Result<tonic::Response<()>, Status> {
+        crate::handlers::attestation::fail_attestation(self, request).await
     }
 
-    async fn get_attestation_machine(
+    async fn list_attestation(
         &self,
-        request: tonic::Request<MachineId>,
-    ) -> Result<Response<rpc::SpdmGetAttestationMachineResponse>, Status> {
-        crate::handlers::attestation::get_attestation_machine(self, request).await
+        request: tonic::Request<rpc::SpdmListAttestationRequest>,
+    ) -> Result<Response<rpc::SpdmListAttestationResponse>, Status> {
+        crate::handlers::attestation::list_attestation(self, request).await
+    }
+
+    async fn list_machine_attestation_statuses(
+        &self,
+        request: tonic::Request<rpc::ListMachineAttestationStatusesRequest>,
+    ) -> Result<Response<rpc::ListMachineAttestationStatusesResponse>, Status> {
+        crate::handlers::attestation::list_machine_attestation_statuses(self, request).await
+    }
+
+    async fn get_attestation(
+        &self,
+        request: tonic::Request<::rpc::Uuid>,
+    ) -> Result<Response<rpc::SpdmGetAttestationResponse>, Status> {
+        crate::handlers::attestation::get_attestation(self, request).await
     }
 
     async fn create_attestation_profile(
@@ -4026,11 +4168,35 @@ impl Forge for Api {
         .await
     }
 
+    async fn get_component_firmware_details(
+        &self,
+        request: Request<rpc::GetComponentFirmwareDetailsRequest>,
+    ) -> Result<Response<rpc::GetComponentFirmwareDetailsResponse>, Status> {
+        crate::handlers::component_manager::firmware_details::get_component_firmware_details(
+            self, request,
+        )
+        .await
+    }
+
     async fn component_power_control(
         &self,
         request: Request<rpc::ComponentPowerControlRequest>,
     ) -> Result<Response<rpc::ComponentPowerControlResponse>, Status> {
         crate::handlers::component_manager::component_power_control(self, request).await
+    }
+
+    async fn component_reset(
+        &self,
+        request: Request<rpc::ComponentResetRequest>,
+    ) -> Result<Response<rpc::ComponentResetResponse>, Status> {
+        crate::handlers::component_manager::component_reset(self, request).await
+    }
+
+    async fn get_component_reset_status(
+        &self,
+        request: Request<rpc::GetComponentResetStatusRequest>,
+    ) -> Result<Response<rpc::GetComponentResetStatusResponse>, Status> {
+        crate::handlers::component_manager::get_component_reset_status(self, request).await
     }
 
     async fn component_configure_switch_certificate(

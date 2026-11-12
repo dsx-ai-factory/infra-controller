@@ -29,15 +29,17 @@ mod conditional_write;
 mod config_drift;
 pub mod credential_rotation;
 pub mod db_read;
+mod db_session;
 pub mod desired_firmware;
 pub mod dhcp_entry;
 pub mod dhcp_record;
-pub mod direct_dispatch_firmware_job;
+pub mod direct_dispatch_rms_job;
 pub mod dns;
 pub mod dpa_interface;
 pub mod dpu_agent_upgrade_policy;
 pub mod dpu_machine_update;
 pub mod dpu_remediation;
+pub mod expected_dpu_loopback_reservation;
 pub mod expected_machine;
 pub mod expected_nvlink_domain;
 pub mod expected_power_shelf;
@@ -80,6 +82,7 @@ pub mod network_prefix;
 pub mod network_security_group;
 pub mod network_segment;
 pub mod nic_firmware;
+pub mod nic_firmware_artifact;
 pub mod nvl_logical_partition;
 pub mod nvl_partition;
 pub mod nvlink_domain_health_report;
@@ -119,6 +122,7 @@ mod writable_pool;
 pub use conditional_write::{
     ConditionalWrite, ControllerStateNotCurrent, MaintenanceRequestNotCurrent,
 };
+pub use db_session::DbSessionGuard;
 pub use writable_pool::writable_pool_options;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -487,6 +491,14 @@ impl From<InvalidMachineType> for DatabaseError {
 }
 
 impl DatabaseError {
+    /// Identifies PostgreSQL lock-unavailable errors (55P03), including NOWAIT rejection.
+    /// Roll back the failed transaction before retrying.
+    pub fn is_lock_not_available(&self) -> bool {
+        matches!(self, DatabaseError::Sqlx(error)
+            if error.source.as_database_error().and_then(|error| error.code()).as_deref()
+                == Some("55P03"))
+    }
+
     /// Returns true if the database error wrapps a sqlx::Error::RowNotFound, or if it's our own DatabaseError::NotFoundError
     pub fn is_not_found(&self) -> bool {
         match self {
@@ -978,6 +990,18 @@ impl WithTransaction for PgPool {
     }
 }
 
+/// Makes the current transaction one repeatable-read, read-only snapshot, so
+/// every later statement reads the same committed data. It must be the first
+/// statement of the transaction.
+pub async fn set_read_only_snapshot(txn: &mut sqlx::PgConnection) -> Result<(), DatabaseError> {
+    let query = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY";
+    sqlx::query(query)
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(())
+}
+
 pub trait TransactionVending {
     fn txn_begin(&self) -> impl Future<Output = Result<Transaction<'_>, DatabaseError>>;
 }
@@ -1037,6 +1061,21 @@ mod tests {
                 .is_retryable_transaction_error()
         );
         Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn read_only_snapshot_rejects_writes(pool: PgPool) {
+        let mut txn = pool.begin().await.unwrap();
+        set_read_only_snapshot(&mut txn).await.unwrap();
+        let error = sqlx::query("CREATE TABLE read_only_snapshot_probe (id int)")
+            .execute(&mut *txn)
+            .await
+            .expect_err("a read-only transaction rejects writes");
+        // read_only_sql_transaction
+        assert_eq!(
+            error.as_database_error().and_then(|e| e.code()).as_deref(),
+            Some("25006")
+        );
     }
 
     const TRANSACTION_ROLLBACK_FAILURES_METRIC: &str =

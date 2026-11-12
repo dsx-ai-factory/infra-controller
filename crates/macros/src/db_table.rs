@@ -40,7 +40,7 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     }
 
     reject_sqlx_attributes(&input.attrs)?;
-    let table_name = parse_table_name(&input)?;
+    let (table_name, alias) = parse_table_metadata(&input)?;
     let columns = fields
         .named
         .iter()
@@ -61,6 +61,28 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         })
         .collect::<syn::Result<Vec<_>>>()?;
 
+    let aliased_methods = alias.map(|alias| {
+        let table_reference = LitStr::new(
+            &format!("{} AS {}", table_name.value(), alias.value()),
+            alias.span(),
+        );
+        let qualified_columns = columns.iter().map(|column| {
+            LitStr::new(
+                &format!("{}.{}", alias.value(), column.value()),
+                column.span(),
+            )
+        });
+        quote! {
+            fn db_aliased_table() -> &'static str {
+                #table_reference
+            }
+
+            fn db_aliased_columns() -> ::carbide_uuid::DbColumns {
+                ::carbide_uuid::DbColumns::new(&[#(#qualified_columns),*])
+            }
+        }
+    });
+
     let name = &input.ident;
     let (impl_generics, type_generics, where_clause) = input.generics.split_for_impl();
     Ok(quote! {
@@ -72,11 +94,13 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
             fn db_table_columns() -> ::carbide_uuid::DbColumns {
                 ::carbide_uuid::DbColumns::new(&[#(#columns),*])
             }
+
+            #aliased_methods
         }
     })
 }
 
-fn parse_table_name(input: &DeriveInput) -> syn::Result<LitStr> {
+fn parse_table_metadata(input: &DeriveInput) -> syn::Result<(LitStr, Option<LitStr>)> {
     let mut attributes = input.attrs.iter().filter(|a| a.path().is_ident("db_table"));
     let attribute = attributes.next().ok_or_else(|| {
         Error::new_spanned(&input.ident, "missing #[db_table(name = \"table_name\")]")
@@ -89,19 +113,31 @@ fn parse_table_name(input: &DeriveInput) -> syn::Result<LitStr> {
     }
 
     let mut name = None;
+    let mut alias = None;
     attribute.parse_nested_meta(|meta| {
-        if !meta.path.is_ident("name") {
-            return Err(meta.error("unsupported DbTable option; expected name = \"table_name\""));
-        }
-        if name.is_some() {
-            return Err(meta.error("duplicate DbTable name"));
-        }
+        let slot = if meta.path.is_ident("name") {
+            if name.is_some() {
+                return Err(meta.error("duplicate DbTable name"));
+            }
+            &mut name
+        } else if meta.path.is_ident("alias") {
+            if alias.is_some() {
+                return Err(meta.error("duplicate DbTable alias"));
+            }
+            &mut alias
+        } else {
+            return Err(meta.error(
+                "unsupported DbTable option; expected name = \"table_name\" or alias = \"alias_name\"",
+            ));
+        };
         let value: LitStr = meta.value()?.parse()?;
         validate_identifier(&value.value(), value.span())?;
-        name = Some(value);
+        *slot = Some(value);
         Ok(())
     })?;
-    name.ok_or_else(|| Error::new_spanned(attribute, "missing DbTable name = \"table_name\""))
+    let name =
+        name.ok_or_else(|| Error::new_spanned(attribute, "missing DbTable name = \"table_name\""))?;
+    Ok((name, alias))
 }
 
 fn validate_identifier(name: &str, span: Span) -> syn::Result<()> {
@@ -178,6 +214,11 @@ mod tests {
             "duplicate configuration" {
                 "#[db_table(name = \"records\", name = \"other\")] struct Record { id: u64 }" => Fails,
                 "#[db_table(name = \"records\")] #[db_table()] struct Record { id: u64 }" => Fails,
+                "#[db_table(name = \"records\", alias = \"r\", alias = \"s\")] struct Record { id: u64 }" => Fails,
+            }
+            "alias requires a table name and a plain identifier" {
+                "#[db_table(alias = \"r\")] struct Record { id: u64 }" => Fails,
+                "#[db_table(name = \"records\", alias = \"r; SELECT 1\")] struct Record { id: u64 }" => Fails,
             }
             "unknown and malformed configuration" {
                 "#[db_table(table = \"records\")] struct Record { id: u64 }" => Fails,

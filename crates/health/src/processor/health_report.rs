@@ -274,6 +274,8 @@ impl EventProcessor for HealthReportProcessor {
             }
             CollectorEvent::Log(_)
             | CollectorEvent::Firmware(_)
+            | CollectorEvent::ResourceStatusObservation(_)
+            | CollectorEvent::ResourceStatus(_)
             | CollectorEvent::HealthReport(_) => {}
         }
 

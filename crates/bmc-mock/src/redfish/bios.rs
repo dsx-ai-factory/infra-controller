@@ -39,6 +39,21 @@ pub(super) fn change_password_target(resource: &redfish::Resource<'_>) -> String
     format!("{}/Actions/Bios.ChangePassword", resource.odata_id)
 }
 
+pub(super) fn reset_target(resource: &redfish::Resource<'_>) -> String {
+    format!("{}/Actions/Bios.ResetBios", resource.odata_id)
+}
+
+/// The `Actions` object of the `Bios` resource. libredfish's HPE driver
+/// resolves both action URLs from here instead of building them.
+pub(super) fn actions(resource: &redfish::Resource<'_>) -> serde_json::Value {
+    json!({
+        "Actions": {
+            "#Bios.ChangePassword": {"target": change_password_target(resource)},
+            "#Bios.ResetBios": {"target": reset_target(resource)},
+        }
+    })
+}
+
 pub(crate) fn builder(resource: &redfish::Resource) -> super::schema::bios::Bios {
     super::schema::bios::Bios::new(
         resource.odata_id.as_ref(),

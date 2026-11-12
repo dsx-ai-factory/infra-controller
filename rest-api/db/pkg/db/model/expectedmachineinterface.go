@@ -13,6 +13,7 @@ const (
 	ExpectedInterfaceRoleUnspecified ExpectedInterfaceRole = "Unspecified"
 	ExpectedInterfaceRoleHost        ExpectedInterfaceRole = "Host"
 	ExpectedInterfaceRoleDpuOs       ExpectedInterfaceRole = "DpuOs"
+	ExpectedInterfaceRoleDpuLoopback ExpectedInterfaceRole = "DpuLoopback"
 	ExpectedInterfaceRoleDpuBmc      ExpectedInterfaceRole = "DpuBmc"
 	ExpectedInterfaceRoleHostBmc     ExpectedInterfaceRole = "HostBmc"
 )
@@ -26,6 +27,8 @@ func (v ExpectedInterfaceRole) ToProto() corev1.ExpectedInterfaceRole {
 		return corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_HOST
 	case ExpectedInterfaceRoleDpuOs:
 		return corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_DPU_OS
+	case ExpectedInterfaceRoleDpuLoopback:
+		return corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_DPU_LOOPBACK
 	case ExpectedInterfaceRoleDpuBmc:
 		return corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_DPU_BMC
 	case ExpectedInterfaceRoleHostBmc:
@@ -44,6 +47,8 @@ func (v *ExpectedInterfaceRole) FromProto(p corev1.ExpectedInterfaceRole) {
 		*v = ExpectedInterfaceRoleHost
 	case corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_DPU_OS:
 		*v = ExpectedInterfaceRoleDpuOs
+	case corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_DPU_LOOPBACK:
+		*v = ExpectedInterfaceRoleDpuLoopback
 	case corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_DPU_BMC:
 		*v = ExpectedInterfaceRoleDpuBmc
 	case corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_HOST_BMC:

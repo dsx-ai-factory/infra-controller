@@ -26,7 +26,7 @@ Confirm the deployment is in Keycloak mode and read the values you will need:
 
 ```bash
 kubectl -n nico-rest get configmap nico-rest-api-config \
-  -o jsonpath='{.data.config\.yaml}' | grep -A 8 '^keycloak:'
+  -o jsonpath='{.data.config\.yaml}' | grep -A 9 '^keycloak:'
 ```
 
 A `setup.sh` install reports:
@@ -40,6 +40,8 @@ keycloak:
   externalBaseURL: http://keycloak.nico-rest:8082
   realm: nico
   serviceAccount: true
+  serviceAccountOrgs:
+  - ncx
 ```
 
 <Warning title="Plain HTTP is for the bundled deployment only">
@@ -51,7 +53,7 @@ traffic stays inside the cluster. A production deployment has to terminate TLS a
 is built from `externalBaseURL`.
 </Warning>
 
-Three of these govern the rest of this page.
+Four of these govern the rest of this page.
 
 `realm` is the only realm NICo reads. A single `nico-rest-api` release accepts tokens
 from exactly one realm, so the Provider org and every Tenant org are realm roles inside
@@ -69,8 +71,12 @@ which does not match, and the API rejects it with `401`. Requesting it at the in
 name is the simplest way to get a matching `iss`, which is why the examples below run from
 inside the cluster.
 
-`serviceAccount: true` permits `client_credentials` tokens. Leave it enabled if the
-Tenant will authenticate as a service account rather than as a user.
+Any client in the realm can use `client_credentials` tokens, including a Tenant's own
+client. `serviceAccount: true` treats only the client that holds both
+`PROVIDER_ADMIN` and `TENANT_ADMIN` in an org listed in `serviceAccountOrgs`, which is
+`ncx-service` in `ncx` above, as a service account. A disconnected deployment has exactly one
+service account org, a Tenant org cannot assume service account privilege. The chart defaults `serviceAccount` to
+`false`.
 
 If `keycloak.enabled` is `false`, your deployment uses the `issuers` block instead and
 this page does not apply. Onboarding a Tenant is then a configuration change rather than
@@ -115,8 +121,8 @@ operations.
 Human users additionally need an `oidc_id` user attribute, which is the key NICo uses to
 locate or create the user record. The bundled `nico-rest` client already publishes it
 through an `oidc-usermodel-attribute-mapper`, so no mapper work is required, but the
-attribute has to be set on each user. Service accounts do not need it, because NICo uses
-the token's `sub` claim when a `client_id` claim is present.
+attribute has to be set on each user. Clients do not need it, because NICo uses the
+token's `sub` claim when a `client_id` claim is present.
 
 ## Opening an Admin Session
 
@@ -176,8 +182,8 @@ human user.
 
 Choose one of the two options below.
 
-**Option A, a service-account client.** Suited to automation, and the pattern the
-bundled `ncx-service` client uses. Requires `serviceAccount: true` in the NICo config.
+**Option A, a client credentials client.** Suited to automation, and the pattern the
+bundled `ncx-service` client uses. Keycloak calls it a service-account client.
 
 Pass the client definition on stdin rather than putting the secret in `-s secret=...`,
 which would place it in shell history, process listings, and any terminal capture. Build
@@ -225,7 +231,8 @@ before creating any user:
 end-user profile forms, which is the policy Keycloak recommends over `ENABLED`.
 
 Keycloak 24's default user profile requires `email`, `firstName`, and `lastName`, and the
-password grant fails with `Account is not fully set up` when any one of them is unset.
+password grant fails with `invalid_grant` and the description `Account is not fully set up`
+when any one of them is unset.
 Read the realm's own list rather than trusting this one, since a customized profile can
 require more:
 
@@ -431,19 +438,13 @@ print(json.dumps(json.loads(base64.urlsafe_b64decode(padded)), indent=2))
 ## Completing the Setup in NICo
 
 With the realm role in place, the remaining steps are the standard flow in
-[Tenant Management](tenant_management.md). Two points are specific to this path.
+[Tenant Management](tenant_management.md). One point is specific to this path.
 
 **The Tenant must call `nicocli tenant current` before accepting an invitation.** That
 call creates the org's Tenant if it does not exist yet, and accepting fails with
 `404 Org does not have tenant` until it does. A Provider can invite an org before that org
 has a Tenant, which leaves the account's `tenantId` empty. Accepting fills it in with the
 org's Tenant, so an invitation that predates the Tenant needs no extra step.
-
-**A Tenant should not call `nicocli service-account current`.** In a deployment with
-`serviceAccount: true`, that endpoint creates an Infrastructure Provider, a Tenant, and
-an already-accepted Tenant Account for the calling org, which makes the org its own
-Provider instead of a Tenant of yours. It is the bootstrap path for the Provider org, not
-for an invited Tenant.
 
 The order is:
 
@@ -471,8 +472,8 @@ uses, so in a shared file it would replace the Provider's credentials. A Provide
 `auth.token` also outranks `auth.oidc.token`, so in a shared file it would still be the
 one sent.
 
-A human user signs in as shown above. A service-account client stores its secret in its
-file the same way. With `username` unset, `login` uses the client credentials grant:
+A human user signs in as shown above. A client credentials client stores its secret in
+its file the same way. With `username` unset, `login` uses the client credentials grant:
 
 ```bash
 mkdir -p ~/.nico
@@ -526,8 +527,8 @@ caller is and which org they act in**, while the Tenant Account decides **what t
 allowed to do**. A realm role of `acme-corp:TENANT_ADMIN` makes someone a Tenant Admin for
 `acme-corp`; it does not make them privileged. Adding a role such as
 `acme-corp:PROVIDER_ADMIN` does not grant the capability either. It authorizes Provider
-operations for `acme-corp`, and it does not create an Infrastructure Provider. That
-bootstrap is `nicocli service-account current`, described above.
+operations for `acme-corp`, and it does not create an Infrastructure Provider.
+`nicocli infrastructure-provider current` creates the Infrastructure Provider.
 
 ## Making Realm Changes Permanent
 
@@ -571,8 +572,7 @@ authentication inactive, so confirm Keycloak is ready first.
 | Symptom | Cause | Resolution |
 |---------|-------|-----------|
 | `401 Invalid authorization token in request` | Token `iss` is not `<externalBaseURL>/realms/<realm>`. Usually a token fetched over a port-forward, where Keycloak stamped the forwarded hostname instead | Decode the payload and compare `iss` with the configured issuer, then fetch the token from a host that produces a matching value |
-| `401 Service accounts are not enabled` | Token carries a `client_id` claim but `keycloak.serviceAccount` is `false` | Enable `serviceAccount` in the values and upgrade, or use a user token |
-| `nicocli login` fails with `authentication failed: Account is not fully set up` | Usually `email`, `firstName`, or `lastName` is unset, all three of which Keycloak 24's default user profile requires. Any one of them is enough to cause it. The validation runs at authentication time, so `requiredActions` is empty and the Admin UI shows nothing wrong. A temporary password produces the same message, through an `UPDATE_PASSWORD` action that *is* recorded | Read the account with `kcadm.sh get users --fields email,firstName,lastName` and treat any absent field as the cause, since `kcadm` omits unset fields. `emailVerified: true` does not mean `email` is set. Fill them in with `kcadm.sh update users/<id>`, checking `get users/profile` for a customized required set. Clear `requiredActions` only if it is non-empty |
+| `nicocli login` fails with `authentication failed (HTTP 400, invalid_grant)` | `nicocli` intentionally omits the token endpoint's `error_description`, which can echo credentials. A Keycloak `LOGIN_ERROR` event with `error=resolve_required_actions` usually means `email`, `firstName`, or `lastName` is unset, all three of which Keycloak 24's default user profile requires. Any one of them is enough to cause it. The validation runs at authentication time, so `requiredActions` is empty and the Admin UI shows nothing wrong. A temporary password can also require account setup through an `UPDATE_PASSWORD` action that *is* recorded | Check recent login events with `kubectl -n nico-rest logs -l app=keycloak -c keycloak --since=10m` and find the `LOGIN_ERROR` for the failed login. `error=invalid_user_credentials` points to the username or password; `error=resolve_required_actions` points to account setup. For account setup, read the affected account with `kcadm.sh get users -r nico -q 'username=<affected-username>' -q exact=true --fields id,username,email,firstName,lastName,requiredActions`, replacing `<affected-username>` with the username used for the failed login. Confirm the returned username, then check whether `email`, `firstName`, or `lastName` is absent; `kcadm` omits unset fields. `emailVerified: true` does not mean `email` is set. Fill them in with `kcadm.sh update users/<id> -r nico`, using the returned ID and checking `kcadm.sh get users/profile -r nico` for customized required fields. Clear `requiredActions` only if it is non-empty |
 | `401 Failed to retrieve or create user record, DB error` on a human user's first request, with a valid token | The `oidc_id` claim is empty because the attribute was discarded, and NICo rejects an empty user key rather than creating a row. Keycloak 24 defaults `unmanagedAttributePolicy` to `DISABLED` | Set the policy to `ADMIN_EDIT`, re-set `oidc_id` on the user, then decode the token and confirm the claim is present |
 | `401 invalid_client` from a token request | The client does not exist in the realm, or its secret differs | List what exists with `kcadm.sh get clients -r nico --fields clientId`, then create the Tenant's identity if it is missing |
 | `403 Requested organization not found in token claims` | The token holds no role for the `{org}` in the request path. Either a case mismatch, or the token belongs to an identity with no role in that org | Use the lowercase org name in the path and in `api.org`, and log in as an identity holding a role in that org. See [Pointing `nicocli` at the Tenant Org](#pointing-nicocli-at-the-tenant-org) |

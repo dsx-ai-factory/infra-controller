@@ -101,6 +101,35 @@ type APIMachineOnlineRepair struct {
 	Acknowledgments *APIMachineOnlineRepairAcknowledgments `json:"acknowledgments,omitempty"`
 }
 
+// APIMachineDeleteRequest contains the query options for Machine deletion.
+type APIMachineDeleteRequest struct {
+	Force                       bool `query:"force"`
+	AllowDeleteWithInstanceType bool `query:"allowDeleteWithInstanceType"`
+	AllowDeleteWithInstance     bool `query:"allowDeleteWithInstance"`
+	AllowDeleteWithAllocation   bool `query:"allowDeleteWithAllocation"`
+}
+
+// Validate requires force mode for destructive overrides.
+func (r APIMachineDeleteRequest) Validate() error {
+	return validation.ValidateStruct(&r,
+		validation.Field(&r.AllowDeleteWithInstanceType, validation.When(!r.Force, validation.Empty.Error("requires force=true"))),
+		validation.Field(&r.AllowDeleteWithInstance, validation.When(!r.Force, validation.Empty.Error("requires force=true"))),
+		validation.Field(&r.AllowDeleteWithAllocation, validation.When(!r.Force, validation.Empty.Error("requires force=true"))),
+	)
+}
+
+// ToProto builds the Core force-delete request. The Instance override also
+// permits removing its Instance Type, matching the administrative CLI.
+func (r APIMachineDeleteRequest) ToProto(machineID string) *corev1.AdminForceDeleteMachineRequest {
+	return &corev1.AdminForceDeleteMachineRequest{
+		HostQuery:                   machineID,
+		DeleteInterfaces:            true,
+		DeleteBmcInterfaces:         true,
+		AllowDeleteWithInstanceType: r.AllowDeleteWithInstanceType || r.AllowDeleteWithInstance,
+		AllowDeleteWithInstance:     r.AllowDeleteWithInstance,
+	}
+}
+
 // APIMachineUpdateRequest is the data structure to capture request to update a Machine
 type APIMachineUpdateRequest struct {
 	// InstanceTypeID is the ID of the InstanceType to set for the Machine
@@ -428,15 +457,40 @@ type APIBMCInfo struct {
 	FirmwareRevision *string `json:"firmwareRevision"`
 }
 
-// FromProto populates an APIBMCInfo from its protobuf form.
-func (abmc *APIBMCInfo) FromProto(protoBmcInfo *corev1.BmcInfo) {
-	if protoBmcInfo == nil {
-		return
+// FromProto replaces BMC information across Core versions, clearing fields whose
+// messages are absent. Nil input clears all fields.
+func (abmc *APIBMCInfo) FromProto(protoMachine *corev1.Machine) {
+	*abmc = APIBMCInfo{}
+	bmc := protoMachine.GetBmc()
+	bmcStatus := protoMachine.GetStatus().GetBmcStatus()
+	legacyBmc := protoMachine.GetBmcInfo() //nolint:staticcheck // Support Core versions before the BMC split.
+
+	// A present split message is authoritative, even when its fields are unknown.
+	if bmc != nil {
+		abmc.IP = bmc.Ip
+		abmc.Mac = bmc.Mac
+	} else if legacyBmc != nil {
+		abmc.IP = legacyBmc.Ip
+		abmc.Mac = legacyBmc.Mac
 	}
-	abmc.IP = protoBmcInfo.Ip
-	abmc.Mac = protoBmcInfo.Mac
-	abmc.Version = protoBmcInfo.Version
-	abmc.FirmwareRevision = protoBmcInfo.FirmwareVersion
+	if bmcStatus != nil {
+		abmc.Version = bmcStatus.Version
+		abmc.FirmwareRevision = bmcStatus.FirmwareVersion
+	} else if legacyBmc != nil {
+		abmc.Version = legacyBmc.Version
+		abmc.FirmwareRevision = legacyBmc.FirmwareVersion
+	}
+}
+
+// newAPIBMCInfoFromMachine returns nil when Core omits all BMC messages.
+func newAPIBMCInfoFromMachine(protoMachine *corev1.Machine) *APIBMCInfo {
+	legacyBmc := protoMachine.GetBmcInfo() //nolint:staticcheck // Support Core versions before the BMC split.
+	if protoMachine.GetBmc() == nil && protoMachine.GetStatus().GetBmcStatus() == nil && legacyBmc == nil {
+		return nil
+	}
+	info := &APIBMCInfo{}
+	info.FromProto(protoMachine)
+	return info
 }
 
 // APIMachineGPUInfo is the data structure to capture API representation of a Machine's GPU Info
@@ -457,6 +511,44 @@ type APIMachineGPUInfo struct {
 	Frequency *string `json:"frequency"`
 	// PciBusId is the PCI BusId of the Machine's GPU
 	PciBusId *string `json:"pciBusId"`
+}
+
+// APIMachineDisk is the data structure to capture API representation of a disk of a Machine.
+// Clients use it to pick the disk an image-based Operating System is written to (imageDisk).
+type APIMachineDisk struct {
+	// Type is the kind of disk reported by the Machine, for example "nvme" or "disk"
+	Type string `json:"type"`
+	// Model is the model of the disk
+	Model string `json:"model"`
+	// Serial is the serial number of the disk
+	Serial string `json:"serial"`
+	// SizeMb is the size of the disk in megabytes, when the Machine reports it
+	SizeMb *uint32 `json:"sizeMb"`
+	// PciPath is the PCI sysfs path of the disk, when the Machine reports it
+	PciPath *string `json:"pciPath"`
+}
+
+// newAPIMachineDisks lists the NVMe and other block-device disks Core discovered.
+// A block device already reported as NVMe (same serial) is listed once.
+func newAPIMachineDisks(info *corev1.DiscoveryInfo) []APIMachineDisk {
+	disks := []APIMachineDisk{}
+	seen := map[string]bool{}
+
+	for _, nvme := range info.GetNvmeDevices() {
+		disk := APIMachineDisk{Type: "nvme", Model: nvme.Model, Serial: nvme.Serial, SizeMb: nvme.SizeMb}
+		disk.PciPath = nvme.PciPath
+		seen[nvme.Serial] = true
+		disks = append(disks, disk)
+	}
+
+	for _, dev := range info.GetBlockDevices() {
+		if dev.DeviceType != "disk" || (dev.Serial != "" && seen[dev.Serial]) {
+			continue
+		}
+		disks = append(disks, APIMachineDisk{Type: dev.DeviceType, Model: dev.Model, Serial: dev.Serial})
+	}
+
+	return disks
 }
 
 // FromProto populates an APIMachineGPUInfo from its protobuf form.
@@ -635,6 +727,8 @@ type APIMachineMetadata struct {
 	BMCInfo *APIBMCInfo `json:"bmcInfo"`
 	// GPUInfo is the list of GPUs for the machine
 	GPUs []APIMachineGPUInfo `json:"gpus"`
+	// Disks is the list of disks of the machine
+	Disks []APIMachineDisk `json:"disks"`
 	// NetworkInterfaces is the list of Ethernet interfaces of the machine
 	NetworkInterfaces []APIMachineNetworkInterface `json:"networkInterfaces"`
 	// InfiniBandInterfaces is the list of InfiniBand interfaces of the machine
@@ -652,6 +746,7 @@ func (m *APIMachineMetadata) FromProto(machine *corev1.Machine) {
 	m.DMIData = nil
 	m.BMCInfo = nil
 	m.GPUs = []APIMachineGPUInfo{}
+	m.Disks = []APIMachineDisk{}
 	m.NetworkInterfaces = []APIMachineNetworkInterface{}
 	m.InfiniBandInterfaces = []APIMachineInfiniBandInterface{}
 	m.LifecycleState = nil
@@ -660,10 +755,7 @@ func (m *APIMachineMetadata) FromProto(machine *corev1.Machine) {
 		return
 	}
 
-	if machine.BmcInfo != nil {
-		m.BMCInfo = &APIBMCInfo{}
-		m.BMCInfo.FromProto(machine.BmcInfo)
-	}
+	m.BMCInfo = newAPIBMCInfoFromMachine(machine)
 
 	discoveryInfo := machine.GetStatus().GetDiscoveryInfo()
 	if discoveryInfo != nil {
@@ -677,6 +769,8 @@ func (m *APIMachineMetadata) FromProto(machine *corev1.Machine) {
 			apiGPUInfo.FromProto(gpuInfo)
 			m.GPUs = append(m.GPUs, apiGPUInfo)
 		}
+
+		m.Disks = newAPIMachineDisks(discoveryInfo)
 
 		for _, networkInterface := range discoveryInfo.NetworkInterfaces {
 			apiNetworkInterface := APIMachineNetworkInterface{}

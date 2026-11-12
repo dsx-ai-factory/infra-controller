@@ -31,9 +31,7 @@ use crate::{Callbacks, redfish};
 
 /// BMC state and its concrete backend callbacks.
 pub struct BmcState<C: Callbacks> {
-    pub(crate) bmc_vendor: redfish::oem::BmcVendor,
-    pub(crate) bmc_product: Option<&'static str>,
-    pub(crate) bmc_redfish_version: &'static str,
+    pub(crate) service_root_state: Arc<redfish::service_root::ServiceRootState>,
     pub(crate) oem_state: redfish::oem::State,
     pub manager: Arc<ManagerState>,
     pub system_state: Arc<SystemState<C>>,
@@ -49,11 +47,6 @@ pub struct BmcState<C: Callbacks> {
     /// Sequence of lifecycle Events this BMC has published.
     pub(crate) event_sequence: Arc<AtomicU64>,
     pub(crate) callbacks: Option<Arc<C>>,
-    /// Whether this BMC advertises and serves the `/redfish/v1/Systems`
-    /// collection. Delta power shelves expose no `ComputerSystem` collection,
-    /// so the service root omits the `Systems` link and the collection endpoint
-    /// returns 404.
-    pub(crate) exposes_computer_systems: bool,
     /// What this BMC says it can attest, or `None` for one that advertises no
     /// `ComponentIntegrity` collection: the service root omits the link and
     /// both the collection and its members return 404.
@@ -63,9 +56,7 @@ pub struct BmcState<C: Callbacks> {
 impl<C: Callbacks> Clone for BmcState<C> {
     fn clone(&self) -> Self {
         Self {
-            bmc_vendor: self.bmc_vendor,
-            bmc_product: self.bmc_product,
-            bmc_redfish_version: self.bmc_redfish_version,
+            service_root_state: self.service_root_state.clone(),
             oem_state: self.oem_state.clone(),
             manager: self.manager.clone(),
             system_state: self.system_state.clone(),
@@ -78,7 +69,6 @@ impl<C: Callbacks> Clone for BmcState<C> {
             availability: self.availability.clone(),
             event_sequence: self.event_sequence.clone(),
             callbacks: self.callbacks.clone(),
-            exposes_computer_systems: self.exposes_computer_systems,
             component_integrities: self.component_integrities.clone(),
         }
     }
@@ -91,20 +81,55 @@ pub enum BmcEvent {
 }
 
 impl<C: Callbacks> BmcState<C> {
+    /// Number of factory resets applied to this BMC, including restored snapshots.
+    pub fn factory_reset_generation(&self) -> u64 {
+        self.account_service_state.reset_generation()
+    }
+
+    pub(crate) async fn factory_reset_update(&self) -> crate::BmcResetUpdate {
+        let operation = self.account_service_state.lock_updates().await;
+        let state = self.clone();
+        crate::BmcResetUpdate {
+            apply: Box::pin(async move {
+                let _operation = operation;
+                state
+                    .account_service_state
+                    .reset_to_factory()
+                    .await
+                    .map_err(|error| crate::ActionError::Internal(eyre::eyre!(error)))?;
+                state.manager.reset_to_defaults();
+                match &state.oem_state {
+                    redfish::oem::State::DellIdrac(idrac) => idrac.reset_attributes(),
+                    redfish::oem::State::Supermicro(supermicro) => supermicro.reset_to_defaults(),
+                    _ => {}
+                }
+                state.session_service_state.clear();
+                // A factory reset does not activate unrelated staged firmware.
+                Ok(state.begin_outage())
+            }),
+        }
+    }
+
+    fn begin_outage(&self) -> std::time::Duration {
+        let window = self
+            .availability
+            .as_ref()
+            .map_or(std::time::Duration::ZERO, |availability| {
+                availability.begin_reset()
+            });
+        if let Some(events) = &self.event_service {
+            events.reset();
+        }
+        window
+    }
+
     /// Simulate a BMC reset without changing host power: begin the outage
     /// window, if one is configured, then close event streams and clear replay
     /// history. Activates completed host BMC firmware without activating UEFI.
     /// Returns the outage duration, zero when downtime is disabled.
     pub(crate) fn reset(&self) -> std::time::Duration {
         self.update_service_state.apply_staged_bmc_firmware();
-        let window = self
-            .availability
-            .as_ref()
-            .map_or(std::time::Duration::ZERO, |a| a.begin_reset());
-        if let Some(events) = &self.event_service {
-            events.reset();
-        }
-        window
+        self.begin_outage()
     }
 
     /// Record a lifecycle event the way a BMC does: append a LogEntry to the
@@ -142,6 +167,34 @@ impl<C: Callbacks> BmcState<C> {
         (created, entry)
     }
 
+    /// Record a completed host power command in the BMC's own event log, the
+    /// way HPE iLO's Integrated Event Log does. Backends call this once the
+    /// command has taken effect, not when the Redfish request is accepted;
+    /// a failed command is never logged. BMCs without such a log ignore it.
+    pub fn record_power_command_completed(&self, reset_type: crate::ResourceResetType) {
+        let Some(system) = self.system_state.primary_system_odata_id() else {
+            return;
+        };
+        let Some(draft) = LogEntryDraft::power_command_completed(&system, reset_type) else {
+            return;
+        };
+        let created = chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        self.manager.record_integrated_event(draft, &created);
+    }
+
+    /// The virtual-media drive `device_id` of ComputerSystem `system_id`, or
+    /// `None` when the system has no such drive.
+    pub fn virtual_media_drive(
+        &self,
+        system_id: &str,
+        device_id: &str,
+    ) -> Option<crate::VirtualMediaDrive> {
+        self.system_state
+            .find(system_id)?
+            .virtual_media()?
+            .drive(device_id)
+    }
+
     /// Returns whether this BMC advertises an enabled SSH serial console.
     pub fn has_enabled_ssh_serial_console(&self) -> bool {
         self.system_state.has_enabled_ssh_serial_console()
@@ -167,16 +220,26 @@ impl<C: Callbacks> BmcState<C> {
                 // Move any staged firmware versions into the active inventory so
                 // that site-explorer observes the upgraded version after reset.
                 self.update_service_state.apply_staged_firmware();
+                self.update_service_state.on_dpu_power_on();
                 if let Some(system) = system {
                     self.record_event(LogEntryDraft::powered_on(&system));
                 }
             }
             BmcEvent::BootCompleted => {
-                self.system_state.on_boot_completed();
-                if let Some(system) = system {
-                    self.record_event(LogEntryDraft::boot_completed(&system));
-                }
+                self.on_boot_completed(true);
             }
+        }
+    }
+
+    /// A libvirt warm reset keeps the live boot configuration, so it must not
+    /// consume a one-shot override staged for the next cold start.
+    pub(crate) fn on_boot_completed(&self, used_saved_boot_configuration: bool) {
+        if used_saved_boot_configuration {
+            self.system_state.on_boot_completed();
+        }
+        self.update_service_state.on_dpu_boot_completed();
+        if let Some(system) = self.system_state.primary_system_odata_id() {
+            self.record_event(LogEntryDraft::boot_completed(&system));
         }
     }
 

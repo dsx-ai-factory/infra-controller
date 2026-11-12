@@ -39,10 +39,11 @@ use model::resource_pool::{self};
 use regex::Regex;
 
 use crate::cfg::file::{
-    AuthConfig, CarbideConfig, DpaInterfaceStateControllerConfig, DpuConfig as InitialDpuConfig,
-    DsxExchangeEventBusConfig, EwEthersConfig, ExtensionServiceStateControllerConfig, FnnConfig,
-    IbPartitionStateControllerConfig, KmsConfig, ListenMode, MachineUpdater,
-    MeasuredBootMetricsCollectorConfig, MqttAuthConfig, NetworkSecurityGroupConfig,
+    AuthConfig, BmcBackend, CarbideConfig, DpaInterfaceStateControllerConfig, DpfInterfaceIdentity,
+    DpuConfig as InitialDpuConfig, DsxExchangeEventBusConfig, EwEthersConfig,
+    ExtensionServiceStateControllerConfig, FnnConfig, HostInterceptBridging,
+    HostRepresentorBridgingConfig, IbPartitionStateControllerConfig, KmsConfig, ListenMode,
+    MachineUpdater, MeasuredBootMetricsCollectorConfig, MqttAuthConfig, NetworkSecurityGroupConfig,
     NetworkSegmentStateControllerConfig, NodeAuthConfig, PowerShelfStateControllerConfig,
     RackStateControllerConfig, SecretsConfig, SpdmConfig, SpdmStateControllerConfig, SvpcConfig,
     SwitchStateControllerConfig, TracingConfig, VmaasConfig, VpcPeeringPolicy,
@@ -52,14 +53,9 @@ use crate::cfg::file::{
     default_max_find_by_ids, default_max_site_prefix_isolation_rules,
     default_max_site_prefixes_per_tenant, default_pxe_public_base_url, default_shutdown_timeout,
 };
-#[cfg(test)]
-use crate::cfg::file::{
-    DpfInterfaceIdentity, HostInterceptBridging, HostRepresentorBridgingConfig,
-};
 
 /// Returns the default configuration with one selected PF and the requested sparse DPF VFs.
-#[cfg(test)]
-pub(crate) fn with_dpf_intercept_topology(selected_vfs: &[u8]) -> CarbideConfig {
+pub fn with_dpf_intercept_topology(selected_vfs: &[u8]) -> CarbideConfig {
     let mut config = get();
     config.dpf.enabled = true;
 
@@ -146,6 +142,7 @@ pub fn fully_populated() -> CarbideConfig {
             fmds_use_node_tokens: Some(false),
             ..Default::default()
         },
+        admin_lock_admission_permits: Some(16),
         ..get()
     }
 }
@@ -175,6 +172,7 @@ pub fn get() -> CarbideConfig {
         database_pool_idle_timeout: default_database_pool_idle_timeout(),
         database_pool_max_lifetime: default_database_pool_max_lifetime(),
         database_startup_retry_timeout: default_database_startup_retry_timeout(),
+        admin_lock_admission_permits: None,
         api_admission_control: Default::default(),
         compute_allocation_enforcement: Default::default(),
         asn: 0,
@@ -293,10 +291,13 @@ pub fn get() -> CarbideConfig {
             num_of_vfs: crate::cfg::file::DEFAULT_DPU_NUM_OF_VFS,
             service_vpc_slot_count: 0,
             max_active_service_vpc_interfaces_per_dpu: 0,
+            allow_service_vpc_tenant_overlap: false,
             additional_managed_sf: 0,
             restart_ovs_on_use_admin_network_change: false,
         },
         host_models: host_firmware_example(),
+        bmc_driver_rules: Vec::new(),
+        bmc_backend: BmcBackend::default(),
         firmware_global: FirmwareGlobal::test_default(),
         machine_updater: MachineUpdater {
             instance_autoreboot_period: None,
@@ -357,9 +358,7 @@ pub fn get() -> CarbideConfig {
         deprecated_rack_management_enabled: None,
         rms: RmsConfig::default(),
         rack_profiles: Default::default(),
-        spdm_state_controller: SpdmStateControllerConfig {
-            controller: StateControllerConfig::default(),
-        },
+        spdm_state_controller: SpdmStateControllerConfig::default(),
         spdm: SpdmConfig {
             enabled: false,
             nras_config: Some(nras::Config::default()),
@@ -488,4 +487,19 @@ fn host_firmware_example() -> HashMap<String, Firmware> {
             },
         ),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_default_config_vf_enabled() {
+        let config = super::get();
+        assert!(
+            config
+                .vmaas_config
+                .as_ref()
+                .map(|vc| vc.allow_instance_vf)
+                .unwrap_or(true)
+        );
+    }
 }

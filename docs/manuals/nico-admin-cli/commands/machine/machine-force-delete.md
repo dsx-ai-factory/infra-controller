@@ -16,6 +16,7 @@ nico-admin-cli machine force-delete <--machine>
 [--delete-bmc-suppressions]
 [--delete-retained-boot-interfaces]
 [--release-preserved-addresses]
+[--allow-delete-with-instance-type]
 [--allow-delete-with-instance] [--wait-for-instance-dpu]
 [--allow-delete-with-orphaned-dpf-crds] [--extended]
 [--sort-by] [-h|--help]
@@ -61,14 +62,17 @@ Release preserved address reservations for deleted interfaces instead of
 parking them. Without this, an address marked for preservation is parked
 so the same MAC can reclaim it on re-ingestion.
 
+`--allow-delete-with-instance-type`
+
+Delete Machine with an assigned Instance Type. This flag acknowledges
+removing the Instance Type association.
+
 `--allow-delete-with-instance`
 
-Acknowledge deleting a machine with an allocated instance. The CLI
-checks for an instance only for machine-ID queries, not hostname, MAC,
-or IP queries. The API does not enforce this consent flag.
-
-Before deleting a host by any identifier, remove its instance type
-association; this flag does not bypass that check.
+Delete Machine with an attached Instance. This flag also allows removing
+an assigned Instance Type and removes the attached Instance
+control-plane record without first requesting a graceful workload
+shutdown; force-delete cleanup may forcibly restart the host.
 
 `--wait-for-instance-dpu`
 
@@ -122,6 +126,8 @@ Print help (see a summary with -h)
 nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567
 nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 --delete-interfaces
 nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 --delete-interfaces --delete-bmc-interfaces --delete-bmc-suppressions --delete-retained-boot-interfaces
+nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 --allow-delete-with-instance-type
+nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 --allow-delete-with-instance
 nico-admin-cli machine force-delete --machine 12345678-1234-5678-90ab-cdef01234567 --delete-interfaces --release-preserved-addresses
 ```
 

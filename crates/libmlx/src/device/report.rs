@@ -28,7 +28,9 @@ use crate::device::filters::{DeviceFilter, DeviceFilterSet};
 pub struct MlxDeviceReport {
     // hostname is the system hostname where the report was generated.
     pub hostname: String,
-    // timestamp is when the report was generated.
+    /// Collection-start time supplied by the producer. Create the report before
+    /// collecting devices and preserve this value when publishing, so a delayed
+    /// query or resend cannot appear to be a newer collection.
     pub timestamp: DateTime<Utc>,
     // devices contains the discovered devices matching any applied filters.
     pub devices: Vec<MlxDeviceInfo>,

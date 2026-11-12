@@ -15,7 +15,7 @@ View the latest OpenAPI schema in the [REST API Reference](https://docs.nvidia.c
 
 ## Prerequisites
 
-- Go 1.26.4 or later
+- Go 1.27.3 or later
 - Docker 20.10+ with BuildKit enabled
 - Make
 - [Kind](https://kind.sigs.k8s.io/docs/user/quick-start/#installation) (for local deployment)
@@ -259,7 +259,7 @@ done
 | nico-rest-workflow | `workflow` | Temporal workflow service |
 | nico-rest-db | `migrations` | Database migrations |
 | nico-rest-site-agent | `site-agent` | On-site agent |
-| nico-rest-site-manager | `sitemgr` | Site management service |
+| nico-rest-site-manager | `site-manager` | Site management service |
 | nico-rest-cert-manager | `credsmgr` | Native PKI certificate manager |
 | nico-cli | `nicocli` | [CLI client](cli/README.md) for the REST API |
 
@@ -273,47 +273,10 @@ Supporting modules:
 
 OpenAPI schema must be updated whenever the API endpoints are added/updated. Please view instructions at [OpenAPI README](openapi/README.md)
 
-## Pre-commit Hooks
+## Secret Scanning
 
-This project uses [pre-commit](https://pre-commit.com/) with [TruffleHog](https://github.com/trufflesecurity/trufflehog) for secret detection to prevent accidentally committing sensitive information like API keys, passwords, or tokens.
-
-### Setup
-
-```bash
-# Install pre-commit hooks (first time setup)
-make pre-commit-install
-```
-
-This will:
-
-1. Install `pre-commit` if not already installed
-2. Install `trufflehog` if not already installed
-3. Configure git hooks for pre-commit and pre-push
-
-### Usage
-
-Once installed, TruffleHog automatically scans your changes on every `git commit` and `git push`.
-
-To manually run the scan on all files:
-
-```bash
-make pre-commit-run
-```
-
-Example output:
-
-```text
-❯ make pre-commit-run
-pre-commit run --all-files
-[INFO] Initializing environment for https://github.com/trufflesecurity/trufflehog.
-TruffleHog Secret Scan...................................................Passed
-```
-
-### Other Commands
-
-```bash
-make pre-commit-update  # Update hooks to latest versions
-```
+The repository root's pre-commit hook scans REST changes for secrets too. See
+[Secret Scanning](../CONTRIBUTING.md#secret-scanning) for setup.
 
 ## Release Notice
 
@@ -323,5 +286,7 @@ deployments, please test thoroughly in non-critical environments first.
 
 ## License
 
-See [LICENSE](LICENSE) for details.
+NICo REST is licensed under the [Apache License 2.0](../LICENSE). Licenses for
+the vendored go-ipam (`ipam/`) and Temporal Helm chart (`temporal-helm/`) are in
+[THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES).
 This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use.

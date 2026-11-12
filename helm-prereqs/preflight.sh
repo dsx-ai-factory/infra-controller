@@ -21,13 +21,29 @@
 #   source ./preflight.sh
 #
 # Also sourced automatically at the start of every setup.sh run.
+# -y accepts routine prompts. To bypass ordinary preflight errors explicitly,
+# run bash ./preflight.sh --ignore-preflight-errors. Database safety errors
+# always stop preflight.
 #
 # Checks (in order — fails fast so the most actionable issues appear first):
 #   1. Environment variables:    presence and format
 #   2. Required tools:           helm, helmfile, kubectl, jq, ssh-keygen
-#                                Core VIP validation also needs python3 + PyYAML
+#                                Core VIP validation also needs python3 + PyYAML;
+#                                --skip-vault also a TOML parser (3.11 tomllib or tomli)
 #   3. values/metallb-config.yaml: YAML, pools, advertisement mode, ASNs
+#   3b. Site values completeness: no placeholder or empty required value
+#   3c. Core values (--skip-vault): nothing in them makes nico-api need a Vault
+#                                client: [secrets] in the site TOML, no Transit
+#                                KMS provider, cert-manager flags, no issuer
+#                                reference to vault-nico-issuer (check-vault-free.py);
+#                                blocking: --ignore-preflight-errors cannot skip these findings
+#   3d. DPF VIP and Kea hook IPs: IPv4-only checks of the Core values
 #   4. Cluster reachability:     kubectl can reach the API server
+#   4e. --skip-vault legacy markers: PSM/NSM hook resources whose cleanup needs
+#                                Vault (blocking: --ignore-preflight-errors cannot skip this finding)
+#   4f. --skip-vault consumers:    Deployments and Certificates that still reference
+#                                Vault and that this run does not redeploy keep the
+#                                Vault resources in nico-prereqs (warning)
 #   5. Node resources:           at least 3 schedulable (Ready + untainted) nodes
 #   6. MetalLB BGPPeer nodes:    hostnames in config exist in the cluster
 #   7. Per-node checks:          kernel params (sysctl) and DNS on every node
@@ -50,7 +66,7 @@
 #                           auth/not-found/transport findings are warnings.
 #
 # Exit codes:
-#   0 — all checks passed (or user chose to continue despite issues)
+#   0 — checks passed, warnings accepted, or ordinary errors explicitly ignored
 #   1 — hard failure or user declined to continue
 # =============================================================================
 
@@ -86,11 +102,14 @@ _SOURCED=false
 # setup.sh has consumed its own args, so this block is a no-op there.
 # ---------------------------------------------------------------------------
 if ! ${_SOURCED}; then
+    IGNORE_PREFLIGHT_ERRORS=false
     # DPF is on by default; derive INSTALL_DPF from env, then let flags override.
     INSTALL_DPF="${INSTALL_DPF:-${NICO_INSTALL_DPF:-true}}"
     [[ "${NICO_SKIP_DPF:-false}" == "true" ]] && INSTALL_DPF=false
     INSTALL_RMS="${INSTALL_RMS:-${NICO_INSTALL_RMS:-true}}"
     [[ "${NICO_SKIP_RMS:-false}" == "true" ]] && INSTALL_RMS=false
+    INSTALL_VAULT="${INSTALL_VAULT:-${NICO_INSTALL_VAULT:-true}}"
+    [[ "${NICO_SKIP_VAULT:-false}" == "true" ]] && INSTALL_VAULT=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --skip-core)      SKIP_CORE=true ;;
@@ -99,18 +118,32 @@ if ! ${_SOURCED}; then
             --install-dpf)    INSTALL_DPF=true ;;
             --skip-rms)       INSTALL_RMS=false ;;
             --install-rms)    INSTALL_RMS=true ;;
+            --skip-vault)     INSTALL_VAULT=false ;;
+            --install-vault)  INSTALL_VAULT=true ;;
             -y|--yes)         AUTO_YES=true ;;
+            --ignore-preflight-errors) IGNORE_PREFLIGHT_ERRORS=true ;;
             --core-values)    CORE_VALUES="$2"; shift ;;
             --metallb-config) METALLB_CONFIG="$2"; shift ;;
             *) ;;  # ignore unknown args when run standalone
         esac
         shift
     done
+    # The Vault-free Core values checks run only when INSTALL_VAULT is exactly
+    # false, so a misspelt value must not silently pass as "install Vault".
+    # setup.sh validates the same way before sourcing this file.
+    case "${INSTALL_VAULT}" in
+        true|false) ;;
+        *) echo "ERROR: INSTALL_VAULT (or NICO_INSTALL_VAULT) must be true or false (got '${INSTALL_VAULT}')." >&2; exit 1 ;;
+    esac
+    case "${NICO_SKIP_VAULT:-false}" in
+        true|false) ;;
+        *) echo "ERROR: NICO_SKIP_VAULT must be true or false (got '${NICO_SKIP_VAULT}')." >&2; exit 1 ;;
+    esac
 fi
 
 ERRORS=()
 WARNINGS=()
-# Errors that neither -y nor answering y at the prompt can skip.
+# Errors that --ignore-preflight-errors cannot skip.
 BLOCKING_ERRORS=()
 
 _CORE_VALUES_CFG="${CORE_VALUES:-${SCRIPT_DIR}/values/nico-core.yaml}"
@@ -568,6 +601,24 @@ if [[ "${INSTALL_DPF:-true}" == "true" ]]; then
     fi
 fi
 
+# KMIP KEK provider client material. setup.sh loads these three files into
+# Secret nico-system/nico-kmip-client before Phase 6; see README.md →
+# "Opting in to the KMIP KEK provider". The mounts and the Secret itself are
+# checked against the site config in 4c below.
+if [[ -n "${NICO_KMIP_CLIENT_DIR:-}" ]]; then
+    if [[ "${SKIP_CORE:-false}" == "true" ]]; then
+        ERRORS+=("NICO_KMIP_CLIENT_DIR cannot be used with --skip-core — unset it or install NICo Core")
+    elif [[ ! -d "${NICO_KMIP_CLIENT_DIR}" ]]; then
+        ERRORS+=("NICO_KMIP_CLIENT_DIR='${NICO_KMIP_CLIENT_DIR}' is not a directory")
+    else
+        for _kmip_file in ca.pem client.pem client.key; do
+            if [[ ! -s "${NICO_KMIP_CLIENT_DIR}/${_kmip_file}" || ! -r "${NICO_KMIP_CLIENT_DIR}/${_kmip_file}" ]]; then
+                ERRORS+=("NICO_KMIP_CLIENT_DIR='${NICO_KMIP_CLIENT_DIR}' has no readable, non-empty ${_kmip_file}    (setup.sh loads ca.pem, client.pem, and client.key into Secret nico-system/nico-kmip-client)")
+            fi
+        done
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # 2. Required tools
 # ---------------------------------------------------------------------------
@@ -1011,6 +1062,156 @@ if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# 3c. --skip-vault: nothing in the Core values may make nico-api build a Vault
+#     client. setup.sh sets global.certificate.issuerRef (site-issuer, kind
+#     ClusterIssuer, group cert-manager.io), both cert-manager flags, and
+#     nico-api.vault.enabled=false; the checker
+#     covers what those --set values do not reach: the site TOML's [secrets]
+#     section (absent means the Vault credential store), Transit KMS
+#     providers, [certificates] flags set to false in the site TOML, issuer
+#     references to vault-nico-issuer below the top level, and
+#     nico-api.vaultClusterInfo. It needs python3 with PyYAML and a TOML
+#     parser (3.11 tomllib or the tomli package): the [secrets] section must
+#     be read, so a missing parser is an error here, not a warning.
+#     Findings block setup even with --ignore-preflight-errors: continuing would drop the Vault
+#     ConfigMap and Secrets from nico-prereqs in phase 5 and crash-loop
+#     nico-api until the phase 6 --wait times out, taking an existing
+#     Vault site down.
+# ---------------------------------------------------------------------------
+_check_vault_free_core_values() {
+    local _vault_free_checks _check
+    if ! command -v python3 &>/dev/null; then
+        BLOCKING_ERRORS+=("--skip-vault preflight requires python3 with PyYAML and a TOML parser (python3 3.11 or the tomli package) to check ${_CORE_VALUES_LABEL} — install them before running setup.sh")
+        return 0
+    fi
+    if _vault_free_checks="$(python3 "${SCRIPT_DIR}/check-vault-free.py" "${_CORE_VALUES_CFG}" 2>&1)"; then
+        while IFS= read -r _check; do
+            case "${_check}" in
+                "ERROR: "*) BLOCKING_ERRORS+=("${_CORE_VALUES_LABEL}: ${_check#ERROR: }") ;;
+                "WARNING: "*) WARNINGS+=("${_CORE_VALUES_LABEL}: ${_check#WARNING: }") ;;
+            esac
+        done <<< "${_vault_free_checks}"
+    else
+        BLOCKING_ERRORS+=("${_CORE_VALUES_LABEL}: ${_vault_free_checks}")
+    fi
+    return 0
+}
+if [[ "${INSTALL_VAULT:-true}" == "false" && "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
+    _check_vault_free_core_values
+fi
+
+# Prints the legacy PSM/NSM hook resources that cleanup-legacy-flow-managers.sh
+# removes, one per line, probing the same resource names and namespaces as that
+# script. Returns 1 when a probe failed, so the caller can tell "none" from
+# "unknown"; the names found by the other probes are still printed.
+_legacy_flow_manager_markers() {
+    local _rc=0 _found
+    _found="$(kubectl get job/flow-vault-tokens serviceaccount/flow-vault-tokens-sa \
+        -n "${NICO_SYSTEM_NS:-nico-system}" --ignore-not-found -o name 2>/dev/null)" || _rc=1
+    printf '%s\n' "${_found}"
+    _found="$(kubectl get secret/psm-vault-token secret/nsm-vault-token \
+        -n "${NICO_FLOW_NAMESPACE:-flow}" --ignore-not-found -o name 2>/dev/null)" || _rc=1
+    printf '%s\n' "${_found}"
+    _found="$(kubectl get clusterrole/flow-vault-tokens-writer \
+        clusterrolebinding/flow-vault-tokens-writer --ignore-not-found -o name 2>/dev/null)" || _rc=1
+    printf '%s\n' "${_found}"
+    return "${_rc}"
+}
+
+# --skip-vault with legacy PSM/NSM hook resources: their cleanup
+# (cleanup-legacy-flow-managers.sh, after the Core phase) revokes Vault tokens
+# through vaultroottoken and vault-0, so it needs Vault. Report the markers
+# here, before any mutation, instead of stopping setup after phase 6; the
+# cleanup script keeps its own guard as the backstop. Needs the cluster.
+# Blocking: --ignore-preflight-errors cannot skip it, because the run would mutate the cluster
+# and then stop on the same markers after the Core phase.
+_check_skip_vault_legacy_flow_managers() {
+    local _markers _rc=0
+    [[ "${INSTALL_VAULT:-true}" == "false" ]] || return 0
+    _markers="$(_legacy_flow_manager_markers)" || _rc=$?
+    _markers="$(printf '%s\n' "${_markers}" | sed '/^$/d' | paste -sd ' ' -)"
+    if [[ -n "${_markers}" ]]; then
+        BLOCKING_ERRORS+=("--skip-vault: legacy PSM/NSM hook resources exist (${_markers}) and their cleanup revokes Vault tokens, so it needs Vault — run setup.sh once with Vault installed before using --skip-vault (see helm-prereqs/README.md, section \"Installing without Vault\")")
+    elif (( _rc != 0 )); then
+        WARNINGS+=("--skip-vault: could not inspect the legacy PSM/NSM hook resources (job/flow-vault-tokens, secret/psm-vault-token, clusterrole/flow-vault-tokens-writer and their companions); if they exist, cleanup-legacy-flow-managers.sh stops setup after the Core phase because their cleanup needs Vault")
+    fi
+    return 0
+}
+
+# Prints every Vault consumer in the cluster, one per line:
+#   deployment/<namespace>/<name> (VAULT_ADDR)          a Deployment in the NICo
+#       namespace whose container env names VAULT_ADDR (the nico-api chart
+#       renders it only while nico-api.vault.enabled; no Deployment name is assumed)
+#   certificate/<namespace>/<name> (vault-nico-issuer)  a cert-manager Certificate
+#       issued by the Vault PKI ClusterIssuer, which renews through the
+#       cert-manager Vault-auth ServiceAccount and token
+# Returns 1 when a probe failed (kubectl's error goes to stderr), so callers never
+# read a failure as "no consumers". A cluster without the cert-manager CRDs has no
+# Certificates. Used by setup.sh (phase 5 and the end of the run) and preflight 4f;
+# health-check.sh mirrors the Deployment probe.
+_vault_consumers() {
+    local _rc=0 _out _name _envs _ref _issuer _errfile
+    local _ns="${NICO_SYSTEM_NS:-nico-system}"
+    if _out="$(kubectl get deployments -n "${_ns}" \
+            -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .spec.template.spec.containers[*].env[*]}{.name}{","}{end}{"\n"}{end}')"; then
+        while read -r _name _envs; do
+            if [[ -n "${_name}" && ",${_envs}" == *,VAULT_ADDR,* ]]; then
+                printf 'deployment/%s/%s (VAULT_ADDR)\n' "${_ns}" "${_name}"
+            fi
+        done <<< "${_out}"
+    else
+        _rc=1
+    fi
+    _errfile="$(mktemp)"
+    if _out="$(kubectl get certificates.cert-manager.io -A \
+            -o jsonpath='{range .items[*]}{.metadata.namespace}{"/"}{.metadata.name}{" "}{.spec.issuerRef.name}{"\n"}{end}' 2>"${_errfile}")"; then
+        while read -r _ref _issuer; do
+            if [[ -n "${_ref}" && "${_issuer}" == "vault-nico-issuer" ]]; then
+                printf 'certificate/%s (vault-nico-issuer)\n' "${_ref}"
+            fi
+        done <<< "${_out}"
+    elif grep -qE "doesn't have a resource type|no matches for kind|could not find the requested resource" "${_errfile}"; then
+        : # cert-manager is not installed, so there are no Certificates
+    else
+        cat "${_errfile}" >&2
+        _rc=1
+    fi
+    rm -f "${_errfile}"
+    return "${_rc}"
+}
+
+# --skip-vault consumers that this run does not redeploy: Core (--skip-core),
+# Flow and the site-agent (--skip-rest), RMS (--skip-rms), or any Certificate
+# outside those releases. setup.sh keeps the Vault resources in nico-prereqs
+# until none of them references Vault, so the run changes less than the flags
+# suggest. A warning, not an error: the run is safe. Needs the cluster.
+_check_skip_vault_consumers_not_redeployed() {
+    local _consumers _consumer _kept=""
+    local _core_ns="${NICO_SYSTEM_NS:-nico-system}" _flow_ns="${NICO_FLOW_NAMESPACE:-flow}" _rms_ns="${_RMS_NS:-rack-manager}"
+    [[ "${INSTALL_VAULT:-true}" == "false" ]] || return 0
+    if ! _consumers="$(_vault_consumers)"; then
+        WARNINGS+=("--skip-vault: could not inspect the Vault consumers (Deployments in ${_core_ns} and cert-manager Certificates); setup.sh stops before phase 5 while that query fails, because it keeps the Vault resources in nico-prereqs for any consumer that still references Vault")
+        return 0
+    fi
+    while IFS= read -r _consumer; do
+        [[ -n "${_consumer}" ]] || continue
+        case "${_consumer}" in
+            "deployment/${_core_ns}/"*|"certificate/${_core_ns}/"*)
+                if [[ "${SKIP_CORE:-false}" != "true" ]]; then continue; fi ;;
+            "certificate/${_flow_ns}/"*|"certificate/nico-rest/"*)
+                if [[ "${SKIP_REST:-false}" != "true" ]]; then continue; fi ;;
+            "certificate/${_rms_ns}/"*)
+                if [[ "${INSTALL_RMS:-true}" == "true" ]]; then continue; fi ;;
+        esac
+        _kept="${_kept}${_kept:+, }${_consumer}"
+    done <<< "${_consumers}"
+    if [[ -n "${_kept}" ]]; then
+        WARNINGS+=("--skip-vault: these still reference Vault and this run does not redeploy them: ${_kept}; the Vault resources stay in nico-prereqs until they are migrated (redeployed without Vault, or their Certificates reissued from site-issuer)")
+    fi
+    return 0
+}
+
 # Keep the prerequisite-only empty-pool check independent of Python when Core is skipped.
 # Core installs validate both address families from parsed pools above.
 if [[ "${SKIP_CORE:-false}" == "true" && -f "${_METALLB_CFG}" && ! -d "${_METALLB_CFG}" ]]; then
@@ -1028,7 +1229,7 @@ if [[ -f "${_SITE_VALUES_CFG}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3c. IPv4-only DPF VIP and Kea DHCP hook IP validation.
+# 3d. IPv4-only DPF VIP and Kea DHCP hook IP validation.
 #     External Service VIPs and MetalLB pool syntax are checked above for both families.
 # ---------------------------------------------------------------------------
 _ip2int() { local a b c d; IFS=. read -r a b c d <<<"$1"; echo $(( (a<<24)+(b<<16)+(c<<8)+d )); }
@@ -1162,6 +1363,61 @@ if [[ "${_CLUSTER_REACHABLE}" == "true" ]]; then
     fi
 
     # -----------------------------------------------------------------------
+    # 4c. KMIP KEK provider — when the site TOML declares a type = "kmip"
+    #     provider, its ca_bundle, client_cert and client_key paths must lie
+    #     under a nico-api.extraVolumeMounts mount, and the Secret behind that
+    #     mount must exist in nico-system with the keys those paths read,
+    #     unless setup.sh creates nico-kmip-client from NICO_KMIP_CLIENT_DIR
+    #     this run, in which case an existing Secret must carry setup's label.
+    #     Otherwise the mistake surfaces only inside the install, as a Pod
+    #     stuck on a missing Secret or nico-api refusing to start on a
+    #     missing file. The checker decides from the decoded values, so YAML
+    #     quoting cannot hide a provider; it needs the TOML parser (python3
+    #     3.11 or the tomli package) only when the site config mentions KMIP.
+    # -----------------------------------------------------------------------
+    if [[ "${SKIP_CORE:-false}" != "true" && -f "${_CORE_VALUES_CFG}" ]]; then
+        _kmip_check_args=("${_CORE_VALUES_CFG}")
+        if [[ -n "${NICO_KMIP_CLIENT_DIR:-}" ]]; then
+            _kmip_check_args+=(--managed-secret)
+        fi
+        if ! command -v python3 &>/dev/null; then
+            ERRORS+=("KMIP provider preflight requires python3 with PyYAML — install them before running setup.sh")
+        elif _kmip_checks="$(python3 "${SCRIPT_DIR}/check-kmip-provider.py" "${_kmip_check_args[@]}" 2>&1)"; then
+            while IFS= read -r _check; do
+                case "${_check}" in
+                    "ERROR: "*) ERRORS+=("${_CORE_VALUES_LABEL}: ${_check#ERROR: }") ;;
+                    "WARNING: "*) WARNINGS+=("${_CORE_VALUES_LABEL}: ${_check#WARNING: }") ;;
+                esac
+            done <<< "${_kmip_checks}"
+        else
+            ERRORS+=("${_CORE_VALUES_LABEL}: ${_kmip_checks}")
+        fi
+    fi
+
+    # -----------------------------------------------------------------------
+    # 4d. --skip-vault on a cluster that runs Vault. setup.sh never uninstalls
+    #     Vault: the vault release keeps running, and the Vault resources stay
+    #     in the nico-prereqs release until no Deployment in nico-system or
+    #     cert-manager Certificate references Vault (_vault_consumers), so
+    #     credentials, KEK wrapping, and certificate issuance must have been
+    #     moved off Vault beforehand.
+    # -----------------------------------------------------------------------
+    if [[ "${INSTALL_VAULT:-true}" == "false" ]] && \
+       kubectl get statefulset vault -n "${VAULT_NS:-vault}" >/dev/null 2>&1; then
+        WARNINGS+=("--skip-vault: a vault StatefulSet is running in namespace ${VAULT_NS:-vault}; setup leaves it running and keeps the Vault resources in the nico-prereqs release until no Deployment in nico-system or cert-manager Certificate references Vault, then removes them — credentials, KEK wrapping, and certificate issuance must already have been moved off Vault (see helm-prereqs/README.md, section \"Installing without Vault\")")
+    fi
+
+    # -----------------------------------------------------------------------
+    # 4e. --skip-vault with legacy PSM/NSM hook resources (see the function).
+    # -----------------------------------------------------------------------
+    _check_skip_vault_legacy_flow_managers
+
+    # -----------------------------------------------------------------------
+    # 4f. --skip-vault consumers this run does not redeploy (see the function).
+    # -----------------------------------------------------------------------
+    _check_skip_vault_consumers_not_redeployed
+
+    # -----------------------------------------------------------------------
     # 5. Node resources — at least 3 schedulable nodes required
     # -----------------------------------------------------------------------
     _schedulable=$(kubectl get nodes -o json 2>/dev/null | jq -r '
@@ -1176,7 +1432,9 @@ if [[ "${_CLUSTER_REACHABLE}" == "true" ]]; then
     _total=$(kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d '[:space:]')
 
     if [[ "${_schedulable}" -lt 3 ]]; then
-        ERRORS+=("Only ${_schedulable}/${_total} nodes are schedulable (Ready + untainted) — at least 3 required for HA Vault and Postgres")
+        _ha_stores="HA Vault and Postgres"
+        [[ "${INSTALL_VAULT:-true}" == "false" ]] && _ha_stores="HA Postgres"
+        ERRORS+=("Only ${_schedulable}/${_total} nodes are schedulable (Ready + untainted) — at least 3 required for ${_ha_stores}")
     fi
 
     # -----------------------------------------------------------------------
@@ -1502,25 +1760,15 @@ if [[ ${#ERRORS[@]} -eq 0 ]]; then
     if ${_SOURCED}; then return 0; else exit 0; fi
 fi
 
-# Hard errors — default abort
+# Hard errors require an explicit override; database safety errors always abort.
 if [[ ${#BLOCKING_ERRORS[@]} -gt 0 ]]; then
-    echo "  The database errors above stop setup, even with -y. Fix them and re-run setup.sh."
+    echo "  Some errors above block setup even with --ignore-preflight-errors (database cutover and --skip-vault checks). Fix them and re-run setup.sh."
     if ${_SOURCED}; then return 1; else exit 1; fi
 fi
-if [[ "${AUTO_YES:-false}" == "true" ]]; then
-    echo "  Errors above noted — continuing (-y flag set). Things may fail."
+if [[ "${IGNORE_PREFLIGHT_ERRORS:-false}" == "true" ]]; then
+    echo "  Errors above ignored — continuing (--ignore-preflight-errors set). Setup may fail."
     if ${_SOURCED}; then return 0; else exit 0; fi
 fi
 
-echo ""
-echo "  The issues above will likely cause setup to fail."
-echo ""
-read -r -p "  ➤  Continue anyway at your own risk? [y/N]: " _reply
-echo ""
-if [[ "${_reply:-N}" =~ ^[Yy]$ ]]; then
-    echo "  Continuing — good luck."
-    if ${_SOURCED}; then return 0; else exit 0; fi
-fi
-
-echo "  Fix the issues above and re-run setup.sh."
+echo "  Fix the errors above and re-run setup.sh, or pass --ignore-preflight-errors to continue explicitly."
 if ${_SOURCED}; then return 1; else exit 1; fi

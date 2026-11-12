@@ -149,8 +149,7 @@ async fn response(
 
 /// Store readback independently of attachment discovery. Ignore reports for an
 /// older desired revision so a delayed status cannot acknowledge a newer request.
-/// Maintenance mode observations are not recorded when partial-multiplane is
-/// disabled at the site level or if this is not BF4 astra.
+/// The caller records maintenance observations only for eligible BF4 Astra DPUs.
 pub(super) async fn record_observations(
     txn: &mut PgConnection,
     id: HostMachineId,
@@ -244,11 +243,6 @@ pub(crate) async fn get(
     api: &Api,
     request: Request<forge::MachineSpxMultiplaneRequest>,
 ) -> Result<Response<forge::MachineSpxMultiplane>, Status> {
-    if !api.runtime_config.is_partial_multiplane_enabled() {
-        return Err(Status::failed_precondition(
-            "partial-multiplane maintenance is disabled for this site",
-        ));
-    }
     log_request_data(&request);
     let id = host_id(request.into_inner().machine_id)?;
     tracing::info!(machine_id = %id, "spx-maintenance: [controller] Reading SPX maintenance state");
@@ -264,11 +258,6 @@ pub(crate) async fn update(
     api: &Api,
     request: Request<forge::MachineSpxMultiplaneMaintenanceUpdateRequest>,
 ) -> Result<Response<forge::MachineSpxMultiplane>, Status> {
-    if !api.runtime_config.is_partial_multiplane_enabled() {
-        return Err(Status::failed_precondition(
-            "partial-multiplane maintenance is disabled for this site",
-        ));
-    }
     log_request_data(&request);
     let request = request.into_inner();
     let id = host_id(request.machine_id)?;

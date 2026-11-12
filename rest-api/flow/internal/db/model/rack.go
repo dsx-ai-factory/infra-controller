@@ -6,6 +6,7 @@ package model
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -64,6 +65,58 @@ type Rack struct {
 	DeletedAt     *time.Time          `bun:"deleted_at,soft_delete"`
 	Components    []Component         `bun:"rel:has-many,join:id=rack_id"`
 	NVLDomain     *NVLDomain          `bun:"rel:belongs-to,join:nvldomain_id=id"`
+}
+
+// RackPatch contains rack metadata fields selected by a patch operation.
+// Nil fields are omitted from the UPDATE.
+type RackPatch struct {
+	ID          uuid.UUID
+	Name        *string
+	Description *map[string]any
+	Location    *map[string]any
+}
+
+func (patch *RackPatch) apply(rack *Rack) []string {
+	columns := make([]string, 0, 3)
+	if patch.Name != nil {
+		rack.Name = *patch.Name
+		columns = append(columns, "name")
+	}
+	if patch.Description != nil {
+		rack.Description = *patch.Description
+		columns = append(columns, "description")
+	}
+	if patch.Location != nil {
+		rack.Location = *patch.Location
+		columns = append(columns, "location")
+	}
+	return columns
+}
+
+// Patch updates only rack metadata explicitly selected by RackPatch.
+func (patch *RackPatch) Patch(ctx context.Context, idb bun.IDB) error {
+	rack := &Rack{ID: patch.ID}
+	columns := patch.apply(rack)
+	if len(columns) == 0 {
+		return nil
+	}
+
+	result, err := idb.NewUpdate().
+		Model(rack).
+		Column(columns...).
+		Where("id = ?", patch.ID).
+		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected != 1 {
+		return fmt.Errorf("patch rack %s affected %d rows", patch.ID, rowsAffected)
+	}
+	return nil
 }
 
 type RackStatus string
@@ -175,6 +228,19 @@ func (rd *Rack) SetHealthByExternalID(ctx context.Context, idb bun.IDB) error {
 // input rack. It goes through the patchable fields and builds the patched
 // rack. If there is no change on patchable fields, it returns nil.
 func (rd *Rack) BuildPatch(cur *Rack) *Rack {
+	patch := rd.BuildColumnPatch(cur)
+	if patch == nil {
+		return nil
+	}
+
+	patchedRack := *cur
+	patch.apply(&patchedRack)
+	return &patchedRack
+}
+
+// BuildColumnPatch returns only patchable rack metadata whose supplied values
+// differ from the current row.
+func (rd *Rack) BuildColumnPatch(cur *Rack) *RackPatch {
 	if rd == nil || cur == nil {
 		return nil
 	}
@@ -184,31 +250,27 @@ func (rd *Rack) BuildPatch(cur *Rack) *Rack {
 	// Description
 	// Location
 
-	// Make a copy fo the current rack which serves as the base for the
-	// patched rack.
-	patchedRack := *cur
-	patched := false
+	patch := &RackPatch{ID: cur.ID}
 
-	if len(rd.Name) > 0 && patchedRack.Name != rd.Name {
-		patchedRack.Name = rd.Name
-		patched = true
+	if len(rd.Name) > 0 && cur.Name != rd.Name {
+		patch.Name = &rd.Name
 	}
 
-	if desc := utils.CompareAndCopyMaps(rd.Description, cur.Description); desc != nil {
-		patchedRack.Description = desc
-		patched = true
+	desc := utils.CompareAndCopyMaps(rd.Description, cur.Description)
+	if desc != nil {
+		patch.Description = &desc
 	}
 
-	if loc := utils.CompareAndCopyMaps(rd.Location, cur.Location); loc != nil {
-		patchedRack.Location = loc
-		patched = true
+	loc := utils.CompareAndCopyMaps(rd.Location, cur.Location)
+	if loc != nil {
+		patch.Location = &loc
 	}
 
-	if !patched {
+	if patch.Name == nil && patch.Description == nil && patch.Location == nil {
 		return nil
 	}
 
-	return &patchedRack
+	return patch
 }
 
 // SerialInfo returns the serial number information of the rack.
@@ -388,19 +450,17 @@ func GetRacksByIDsIncludingDeleted(
 	return racks, nil
 }
 
-// GetRackOperationStatuses derives each requested rack's operability phase
-// from its active Compute, NVSwitch, and PowerShelf components. Racks with no
-// supported active components, or with any missing/unrecognized participating
-// component status, fail closed as Unknown.
-func GetRackOperationStatuses(
+// GetRackOperationStatusCounts counts each requested rack's operability phases
+// from its active Compute, NVSwitch, and PowerShelf components. Empty membership
+// produces zero counts; missing or unrecognized status increments Unknown.
+func GetRackOperationStatusCounts(
 	ctx context.Context,
 	idb bun.IDB,
 	rackIDs []uuid.UUID,
-) (map[uuid.UUID]types.Phase, error) {
-	result := make(map[uuid.UUID]types.Phase, len(rackIDs))
-	statusesByRack := make(map[uuid.UUID][]*types.ComponentOperationStatus, len(rackIDs))
+) (map[uuid.UUID]types.TrayStatusCountsByType, error) {
+	result := make(map[uuid.UUID]types.TrayStatusCountsByType, len(rackIDs))
 	for _, rackID := range rackIDs {
-		result[rackID] = types.PhaseUnknown
+		result[rackID] = types.TrayStatusCountsByType{}
 	}
 	if len(rackIDs) == 0 {
 		return result, nil
@@ -414,7 +474,7 @@ func GetRackOperationStatuses(
 	}
 	err := idb.NewSelect().
 		Model(&components).
-		Column("rack_id", "status").
+		Column("rack_id", "type", "status").
 		Where("rack_id IN (?)", bun.In(rackIDs)).
 		Where("type IN (?)", bun.In(supportedTypes)).
 		Scan(ctx)
@@ -424,10 +484,16 @@ func GetRackOperationStatuses(
 
 	for i := range components {
 		component := &components[i]
-		statusesByRack[component.RackID] = append(statusesByRack[component.RackID], component.Status)
-	}
-	for rackID, statuses := range statusesByRack {
-		result[rackID] = types.AggregateComponentOperationStatus(statuses)
+		counts := result[component.RackID]
+		switch component.Type {
+		case devicetypes.ComponentTypeToString(devicetypes.ComponentTypeCompute):
+			counts.Compute.Add(component.Status)
+		case devicetypes.ComponentTypeToString(devicetypes.ComponentTypeNVSwitch):
+			counts.NVSwitch.Add(component.Status)
+		case devicetypes.ComponentTypeToString(devicetypes.ComponentTypePowerShelf):
+			counts.PowerShelf.Add(component.Status)
+		}
+		result[component.RackID] = counts
 	}
 
 	return result, nil

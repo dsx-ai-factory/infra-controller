@@ -36,6 +36,7 @@ carbide-macros = { path = "../macros" }
 carbide-network = { path = "../network", features = ["sqlx"] }
 carbide-version = { path = "../version" }
 carbide-health-report = { path = "../health-report" }
+carbide-instrument = { path = "../instrument" }
 carbide-ipxe-renderer = { path = "../ipxe-renderer" }
 carbide-utils = { path = "../utils", features = ["sqlx"] }
 carbide-uuid = { path = "../uuid", features = ["sqlx"] }
@@ -90,6 +91,7 @@ test-support = []
 carbide-version = { path = "../version" }
 
 [dev-dependencies]
+carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-sqlx-testing = { path = "../sqlx-testing", default-features = false }
 carbide-secrets = { path = "../secrets" }
 carbide-test-support = { path = "../test-support" }

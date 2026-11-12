@@ -17,6 +17,16 @@
 name: NICo Core CI
 
 on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: 'Exact PR head SHA authorized for image publishing'
+        required: true
+        type: string
+      comment_id:
+        description: 'PR comment containing the privileged publishing request'
+        required: true
+        type: string
   push:
     branches:
       - main
@@ -51,7 +61,13 @@ env:
 jobs:
   changes:
     name: Detect Core CI Gate
-    runs-on: linux-amd64-cpu4
+    # Hosted ubuntu-slim, because every other job waits on this one and the
+    # cpu4 pool can queue for minutes.
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       run_core_ci: ${{ steps.gate.outputs.run_core_ci }}
       non_rest_changed: ${{ steps.non-rest-changes.outputs.non_rest }}
@@ -61,6 +77,42 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+
+      # Keep publishing checks in changes because skipped prerequisites can suppress ordinary builds.
+      # https://github.com/actions/runner/issues/2205
+      # A dispatch follows a mutable branch, so check its captured SHA before PR code.
+      - name: Validate PR publishing request
+        if: github.event_name == 'workflow_dispatch'
+        timeout-minutes: 5
+        uses: actions/github-script@v7
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          COMMENT_ID: ${{ inputs.comment_id }}
+        with:
+          script: |
+            const match = /^refs\/heads\/pull-request\/([1-9][0-9]*)$/.exec(context.ref);
+            if (context.repo.owner + '/' + context.repo.repo !== 'dsx-ai-factory/infra-controller'
+                || !match || !/^[0-9a-f]{40}$/.test(process.env.EXPECTED_SHA)
+                || context.sha !== process.env.EXPECTED_SHA) {
+              throw new Error('Dispatch must target the exact authorized PR mirror commit');
+            }
+            const { authorizePush } = require('./.github/ci/pr_push.cjs');
+            await authorizePush({
+              github, ...context.repo, prNumber: Number(match[1]),
+              commentId: Number(process.env.COMMENT_ID), expectedSha: context.sha,
+            });
+
+      - name: Set up Node for PR publishing tests
+        if: github.event_name == 'workflow_dispatch'
+        timeout-minutes: 5
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test PR publishing authorization
+        if: github.event_name == 'workflow_dispatch'
+        timeout-minutes: 5
+        run: node --test .github/ci/test_pr_push.cjs
 
       - name: Check Core CI concurrency policy
         run: bash scripts/check-ci-concurrency.sh core
@@ -114,6 +166,7 @@ jobs:
           REF: ${{ github.ref }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message || '' }}
           NON_REST_CHANGED: ${{ steps.non-rest-changes.outputs.non_rest }}
+          PR_PUBLISH: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           run_core_ci=true
 
@@ -121,7 +174,8 @@ jobs:
             run_core_ci="${NON_REST_CHANGED}"
           fi
 
-          if [[ "${COMMIT_MESSAGE}" =~ ci-run-complete-pipeline ]]; then
+          # A publishing request needs the build jobs even when path filters skip normal PR CI.
+          if [[ "${PR_PUBLISH}" == "true" || "${COMMIT_MESSAGE}" =~ ci-run-complete-pipeline ]]; then
             run_core_ci=true
           fi
 
@@ -143,6 +197,7 @@ jobs:
       source_registry_host: ${{ steps.registry.outputs.source_registry_host }}
       bases_rebuilt: ${{ steps.base-container-gate.outputs.build_container_x86_64_run == 'true' || steps.base-container-gate.outputs.runtime_container_x86_64_run == 'true' || steps.base-container-gate.outputs.build_container_aarch64_run == 'true' || steps.base-container-gate.outputs.runtime_container_aarch64_run == 'true' || steps.base-container-gate.outputs.build_artifacts_container_x86_64_run == 'true' || steps.base-container-gate.outputs.build_artifacts_container_aarch64_run == 'true' }}
       publish_images: ${{ steps.release-gate.outputs.publish_built_container }}
+      publish_release: ${{ steps.release-gate.outputs.publish_release }}
       lint_container_ref: ${{ steps.release-gate.outputs.lint_container_ref }}
       target_ngc_path: ${{ steps.registry.outputs.target_ngc_path }}
       registry_host: ${{ steps.registry.outputs.registry_host }}
@@ -206,6 +261,14 @@ jobs:
       - name: Test Scout firmware supervisor packaging
         run: python3 -B pxe/tests/test_firmware_supervisor_packaging.py
 
+      - name: Test Scout APT repository packaging
+        run: |
+          if ! command -v dpkg-scanpackages >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends dpkg-dev
+          fi
+          python3 -B pxe/tests/test_apt_repository_packaging.py
+
       - name: Detect build-container-x86_64 changes
         id: build-container-changes
         uses: dorny/paths-filter@v3
@@ -240,6 +303,13 @@ jobs:
               - 'rust-toolchain.toml'
               - '.github/workflows/ci.yaml'
               - 'dev/k8s/machine-a-tron-controller/**'
+              - 'dev/k8s/scale-test/**'
+              # The scale-test runner imports the generated Forge stubs from the
+              # rest-api module via a local replace, so a change to its module
+              # files or those stubs must run the runner gate (test-scale-test).
+              - 'rest-api/go.mod'
+              - 'rest-api/go.sum'
+              - 'rest-api/proto/core/**'
             machine_lifecycle:
               - 'tests/machine-lifecycle/**'
               - '.github/workflows/ci.yaml'
@@ -250,6 +320,8 @@ jobs:
               - '.github/ci/test_check_ci_gate.py'
       - name: Calculate version
         id: version
+        env:
+          PR_PUBLISH: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
 
           set -euo pipefail
@@ -279,6 +351,13 @@ jobs:
           HELM_VERSION="${VERSION#v}"
           if [[ "$IS_LONG_TAG" == "true" ]]; then
             HELM_VERSION=$(echo "$HELM_VERSION" | sed 's/\(.*\)-/\1./')
+          fi
+
+          # Separate PR packages and images from the versions published by main.
+          if [[ "${PR_PUBLISH}" == "true" ]]; then
+            PR_NUMBER="${GITHUB_REF_NAME#pull-request/}"
+            VERSION="${VERSION}-pr.${PR_NUMBER}.g${SHORT_SHA}"
+            HELM_VERSION="${HELM_VERSION}-pr.${PR_NUMBER}.g${SHORT_SHA}"
           fi
 
           # Strict SemVer validation. Regex adapted to POSIX ERE (non-capturing
@@ -442,6 +521,11 @@ jobs:
           MACHINE_LIFECYCLE_CHANGED: ${{ steps.build-container-changes.outputs.machine_lifecycle }}
           CONTROL_PLANE_DPU_CHANGED: ${{ steps.build-container-changes.outputs.control_plane_dpu }}
         run: |
+          # Read the authorized commit message because dispatch events have no head_commit.
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            COMMIT_MESSAGE=$(git log -1 --format=%B "${GITHUB_SHA}") || exit 1
+          fi
+
           build_container_x86_64_run=false
           runtime_container_x86_64_run=false
           build_container_aarch64_run=false
@@ -593,12 +677,16 @@ jobs:
           SOURCE_REGISTRY: ${{ steps.registry.outputs.source_registry }}
           HAS_TARGET_USERNAME: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME != '' }}
           EVENT_NAME: ${{ github.event_name }}
+          PR_PUBLISH: ${{ github.event_name == 'workflow_dispatch' }}
           REF: ${{ github.ref }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message || '' }}
         run: |
           PUBLISH=false
 
-          if [[ "${EVENT_NAME}" == "pull_request" ]] || [[ "${REF}" =~ pull-request/[0-9]+ ]] ; then
+          # Only an authenticated dispatch may publish deployable images from a PR.
+          if [[ "${PR_PUBLISH}" == "true" ]]; then
+            PUBLISH=true
+          elif [[ "${EVENT_NAME}" == "pull_request" ]] || [[ "${REF}" =~ pull-request/[0-9]+ ]] ; then
             PUBLISH=false
           elif [[ "${REF}" == "refs/heads/main" ]] || [[ "${REF}" =~ ^refs/heads/release/ ]] || [[ "${REF}" =~ ^refs/tags/ ]] || [[ "${COMMIT_MESSAGE}" =~ ci-run-complete-pipeline ]]; then
             PUBLISH=true
@@ -610,6 +698,12 @@ jobs:
             exit 1
           fi
           echo "publish_built_container=${PUBLISH}" >> "$GITHUB_OUTPUT"
+          # Helm uploads and production promotion remain reserved for release refs.
+          PUBLISH_RELEASE=false
+          if [[ "${PUBLISH}" == "true" && "${PR_PUBLISH}" != "true" ]]; then
+            PUBLISH_RELEASE=true
+          fi
+          echo "publish_release=${PUBLISH_RELEASE}" >> "$GITHUB_OUTPUT"
           # job containers log in before any step runs, so the lint job must
           # never point at a target ref that was not published (mirror PRs)
           if [[ "${BUILD_X86_RUN}" == "true" && "${GITHUB_REPOSITORY}" != "dsx-ai-factory/infra-controller" && "${PUBLISH}" != "true" ]]; then
@@ -868,6 +962,7 @@ jobs:
       # of what filled up the Actions quota and evicted the sccache
       # entries.
       cache: false
+      sccache_scope: release-container-x86_64
       build_args: ${{ needs.prepare.outputs.release_build_args }}
       image_name: ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide
       image_tag: ${{ needs.prepare.outputs.version }}
@@ -904,6 +999,7 @@ jobs:
       # is the worst of the four: 8m21s of cache export on a main run for two
       # cached layers.
       cache: false
+      sccache_scope: release-container-aarch64
       build_args: ${{ needs.prepare.outputs.release_build_args_aarch64 }}
       image_name: ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide-aarch64
       image_tag: ${{ needs.prepare.outputs.version }}
@@ -949,6 +1045,7 @@ jobs:
           IMAGE_REGISTRY: ${{ needs.prepare.outputs.image_registry }}
           VERSION: ${{ needs.prepare.outputs.version }}
           MAJOR_MINOR_VERSION: ${{ needs.prepare.outputs.major_minor_version }}
+          PUBLISH_RELEASE: ${{ needs.prepare.outputs.publish_release }}
           X86_DIGEST: ${{ needs.build-release-container-x86_64.outputs.image_digest }}
           ARM_DIGEST: ${{ needs.build-release-container-aarch64.outputs.image_digest }}
         with:
@@ -956,15 +1053,22 @@ jobs:
           timeout_minutes: 10
           retry_wait_seconds: 20
           command: |
+            # Require strict PR publishing failures while preserving main/tag shell behavior.
+            if [[ "${PUBLISH_RELEASE}" != "true" ]]; then
+              set -euo pipefail
+            fi
             docker buildx imagetools create -t \
               "${IMAGE_REGISTRY}/nvmetal-carbide:${VERSION}" \
               "${IMAGE_REGISTRY}/nvmetal-carbide@${X86_DIGEST}" \
               "${IMAGE_REGISTRY}/nvmetal-carbide-aarch64@${ARM_DIGEST}"
 
-            docker buildx imagetools create -t \
-              "${IMAGE_REGISTRY}/nvmetal-carbide:${MAJOR_MINOR_VERSION}-latest" \
-              "${IMAGE_REGISTRY}/nvmetal-carbide@${X86_DIGEST}" \
-              "${IMAGE_REGISTRY}/nvmetal-carbide-aarch64@${ARM_DIGEST}"
+            # Keep shared aliases on release builds so PR images cannot replace them.
+            if [[ "${PUBLISH_RELEASE}" == "true" ]]; then
+              docker buildx imagetools create -t \
+                "${IMAGE_REGISTRY}/nvmetal-carbide:${MAJOR_MINOR_VERSION}-latest" \
+                "${IMAGE_REGISTRY}/nvmetal-carbide@${X86_DIGEST}" \
+                "${IMAGE_REGISTRY}/nvmetal-carbide-aarch64@${ARM_DIGEST}"
+            fi
 
   build-machine-a-tron:
     if: >-
@@ -1063,6 +1167,37 @@ jobs:
       timeout_minutes: 60
     secrets: inherit
 
+  # The scale-test acceptance image holds the current suite binaries that the
+  # runner chart runs as `helm test` Jobs. source_files_changed gates it: that
+  # flag is broad (it also covers the Rust crates), so the image may rebuild on
+  # changes it does not read, but it never misses a dev/k8s/scale-test or
+  # workflow change, and `core-ci-pass` still fails the merge when it fails.
+  build-scale-test-acceptance:
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.source_files_changed == 'true'
+      }}
+    needs:
+      - prepare
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      dockerfile_path: dev/k8s/scale-test/Dockerfile
+      context_path: .
+      image_name: ${{ needs.prepare.outputs.image_registry }}/scale-test-acceptance
+      image_tag: ${{ needs.prepare.outputs.version }}
+      additional_tags: ${{ needs.prepare.outputs.image_registry }}/scale-test-acceptance:${{ needs.prepare.outputs.major_minor_version }}-latest
+      platforms: linux/amd64
+      runner: linux-amd64-cpu4
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: false
+      scan: true
+      tag_latest: false
+      timeout_minutes: 30
+    secrets: inherit
+
   # Like the release-container builds above, deliberately not gated on
   # `check-rest-core-proto-sync`: the tests do not read anything it produces,
   # and `core-ci-pass` still fails the merge when the protos are out of sync.
@@ -1086,14 +1221,71 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: dev/k8s/machine-a-tron-controller/go.mod
-          cache: true
-          cache-dependency-path: dev/k8s/machine-a-tron-controller/go.sum
+          cache: false
+
+      # setup-go's own cache saves on every ref, so this job restores and saves
+      # through go-cache-restore and go-cache-save instead.
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: mat-k8s-controller
+          dependency-path: dev/k8s/machine-a-tron-controller/go.sum
 
       - name: Run the mat-k8s-controller unit tests
         run: make -C dev/k8s/machine-a-tron-controller test
+
+      - name: Save Go caches
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}
+
+  # The scale-test runner is a standalone Go module. Its unit gates run here,
+  # and `core-ci-pass` fails the merge when they fail. The cross-language
+  # probe vectors it shares with crates/site-health-probe-api are checked by
+  # that crate's Rust tests in the Rust lane.
+  test-scale-test:
+    name: test-scale-test
+    if: >-
+      ${{
+        !cancelled()
+        && github.event_name != 'schedule'
+        && needs.prepare.result == 'success'
+        && needs.prepare.outputs.source_files_changed == 'true'
+      }}
+    needs:
+      - prepare
+    runs-on: linux-amd64-cpu4
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: dev/k8s/scale-test/go.mod
+          cache: true
+          cache-dependency-path: dev/k8s/scale-test/go.sum
+
+      - name: Check formatting, vet and build
+        run: make -C dev/k8s/scale-test fmt-check vet build
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
+          working-directory: dev/k8s/scale-test
+
+      - name: Run the unit tests with the race detector
+        run: make -C dev/k8s/scale-test test
 
   test-release-container-services:
     if: >-
@@ -1141,7 +1333,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .sccache
-          key: sccache-test-release-x86_64-${{ hashFiles('Cargo.lock') }}
+          key: sccache-test-release-x86_64-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
             sccache-test-release-x86_64-
 
@@ -1154,7 +1346,11 @@ jobs:
           set -euo pipefail
           mkdir -p "${{ github.workspace }}/.sccache"
           docker pull "${BUILD_CONTAINER}"
+          # SCCACHE_IDLE_TIMEOUT=0 keeps the server that compiled alive through
+          # the test run. Otherwise it exits after 600s idle and the stats
+          # printed afterwards come from a fresh server and read all zeros.
           docker run --rm \
+            --ulimit nofile=65536:65536 \
             -v "${{ github.workspace }}:/carbide" \
             -v "${{ github.workspace }}/.sccache:/sccache" \
             -w /carbide \
@@ -1162,8 +1358,10 @@ jobs:
             -e CARGO_INCREMENTAL=0 \
             -e CARGO_MAKE_SKIP_CODECOV=true \
             -e DATABASE_URL='postgresql://root@%2Fvar%2Frun%2Fpostgresql/root' \
+            -e NICO_TEST_MAX_PG_CONNECTIONS=900 \
             -e SCCACHE_DIR=/sccache \
             -e SCCACHE_CACHE_SIZE=5G \
+            -e SCCACHE_IDLE_TIMEOUT=0 \
             -e RUSTC_WRAPPER=sccache \
             -e CI_COMMIT_SHORT_SHA="${CI_COMMIT_SHORT_SHA}" \
             -e VERSION="${VERSION}" \
@@ -1172,15 +1370,16 @@ jobs:
             "${BUILD_CONTAINER}" \
             bash -c '
               set -euo pipefail
+              echo "Open file descriptor limits: soft=$(ulimit -Sn), hard=$(ulimit -Hn)"
               # Everything in here runs as root, so sccache leaves /sccache
               # owned by root and the post-job archive step cannot read it back.
               # Hand the directory to the runner user on the way out, including
               # when the tests fail.
               trap "chown -R ${HOST_OWNER} /sccache 2>/dev/null || true" EXIT
               git config --global --add safe.directory /carbide
-              # max_connections is startup-only; the default of 100 is too low
-              # when Cargo runs several SQLx-backed test binaries concurrently.
-              printf "max_connections = 1000\n" | tee -a /etc/postgresql/*/main/postgresql.conf
+              # Apply durability, WAL and connection settings for this disposable
+              # CI cluster before PostgreSQL starts.
+              tee -a /etc/postgresql/*/main/postgresql.conf < .github/ci/postgresql.conf
               /etc/init.d/postgresql start
               sudo -u postgres psql -c "ALTER USER root WITH SUPERUSER;"
               createdb root
@@ -1194,9 +1393,10 @@ jobs:
 
       # Worth saving even when the tests failed: the entry holds the dependency
       # compilation, which is no less valid after a red run and is most of the
-      # eight minutes spent before the first test starts. Cargo.lock keys it, so
-      # a run that changes no dependencies hits the primary key and skips the
-      # upload rather than rewriting an equivalent entry.
+      # eight minutes spent before the first test starts. Cargo.lock and
+      # rust-toolchain.toml key it, so a run that changes neither hits the
+      # primary key and skips the upload rather than rewriting an equivalent
+      # entry.
       #
       # Only main saves. A pull request whose Cargo.lock differs from main's
       # matches the restore-keys prefix rather than the exact key, so cache-hit
@@ -1212,6 +1412,126 @@ jobs:
 
       - name: Final repository clean check
         run: bash scripts/check-repo-clean.sh "release-container service tests"
+
+  test-dev-dhcp-image:
+    name: test-dev-dhcp-image (${{ matrix.arch }})
+    if: >-
+      ${{
+        !cancelled()
+        && startsWith(github.ref, 'refs/heads/pull-request/')
+        && needs.prepare.result == 'success'
+        && contains('success,skipped', needs.build-container-x86_64.result)
+        && contains('success,skipped', needs.build-container-aarch64.result)
+      }}
+    needs:
+      - prepare
+      - build-container-x86_64
+      - build-container-aarch64
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: linux-amd64-cpu8
+            build_container: ${{ needs.prepare.outputs.build_container_x86_64_ref }}
+            build_container_rebuilt: ${{ needs.prepare.outputs.build_container_x86_64_run }}
+          - arch: arm64
+            runner: linux-arm64-cpu8
+            build_container: ${{ needs.prepare.outputs.build_container_aarch64_ref }}
+            build_container_rebuilt: ${{ needs.prepare.outputs.build_container_aarch64_run }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Login to source registry
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ needs.prepare.outputs.source_registry_host }}
+          username: ${{ secrets.NICO_SOURCE_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_SOURCE_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      - name: Login to target registry
+        if: ${{ needs.prepare.outputs.publish_images == 'true' && needs.prepare.outputs.registry_host != needs.prepare.outputs.source_registry_host }}
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: ${{ needs.prepare.outputs.registry_host }}
+          username: ${{ secrets.NICO_TARGET_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_TARGET_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      # Reuse the prepared compiler, but build the actual development recipes
+      # so runtime dependencies and COPY paths are checked on both architectures.
+      - name: Build and smoke-test native development DHCP image
+        id: dev-build
+        env:
+          ARCH: ${{ matrix.arch }}
+          BUILD_CONTAINER: ${{ matrix.build_container }}
+          BUILD_CONTAINER_REBUILT: ${{ matrix.build_container_rebuilt }}
+          PUBLISH_COMPILER: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+          KEA_VERSION: ${{ needs.prepare.outputs.kea_version }}
+          DOCKER_BUILDKIT: '1'
+        run: |
+          set -euo pipefail
+          docker_context="$(docker context show)"
+          export DOCKER_CONTEXT="$docker_context" BUILDX_BUILDER="$docker_context"
+          daemon_platform="$(docker info --format '{{.OSType}}/{{.Architecture}}')"
+          case "$daemon_platform" in
+            linux/amd64|linux/x86_64) daemon_arch=amd64; compiler=x86_64 ;;
+            linux/arm64|linux/aarch64) daemon_arch=arm64; compiler=aarch64 ;;
+            *) echo "Unsupported Docker daemon platform: $daemon_platform" >&2; exit 1 ;;
+          esac
+          if [[ "$daemon_arch" != "$ARCH" ]]; then
+            echo "Docker daemon platform $daemon_platform does not match requested linux/$ARCH" >&2
+            exit 1
+          fi
+          tag="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
+          runtime_image="nico-dev-runtime:$tag"
+          service_image="nico-dev-dhcp:$tag"
+          compiler_image="$BUILD_CONTAINER"
+          if [[ "$BUILD_CONTAINER_REBUILT" == true && "$PUBLISH_COMPILER" != true ]]; then
+            # Mirror PRs build the compiler without publishing it to another job.
+            compiler_image="nico-dev-build:$tag"
+          fi
+          echo "compiler_image=$compiler_image" >> "$GITHUB_OUTPUT"
+          echo "docker_context=$docker_context" >> "$GITHUB_OUTPUT"
+          if [[ "$BUILD_CONTAINER_REBUILT" == true && "$PUBLISH_COMPILER" != true ]]; then
+            docker build --platform "linux/$ARCH" \
+              --file "dev/docker/Dockerfile.build-container-$compiler" \
+              --build-arg KEA_VERSION="$KEA_VERSION" --tag "$compiler_image" .
+          else
+            docker pull --platform "linux/$ARCH" "$BUILD_CONTAINER"
+          fi
+          test "$(docker image inspect --format '{{.Architecture}}' "$compiler_image")" = "$ARCH"
+          docker build --platform "linux/$ARCH" \
+            --file dev/docker/Dockerfile.dev-runtime \
+            --tag "$runtime_image" .
+          docker build --platform "linux/$ARCH" \
+            --file dev/docker/Dockerfile.dev-services --target dhcp \
+            --build-arg CONTAINER_BUILD="$compiler_image" \
+            --build-arg CONTAINER_RUNTIME="$runtime_image" \
+            --build-arg KEA_VERSION="$KEA_VERSION" \
+            --tag "$service_image" .
+          test "$(docker image inspect --format '{{.Architecture}}' "$service_image")" = "$ARCH"
+          bash dev/docker/tests/smoke_dhcp_image.sh "$service_image"
+
+      - name: Remove development DHCP job images
+        if: always() && steps.dev-build.outputs.compiler_image != ''
+        env:
+          ARCH: ${{ matrix.arch }}
+          BUILD_CONTAINER_REBUILT: ${{ matrix.build_container_rebuilt }}
+          PUBLISH_COMPILER: ${{ github.repository == 'dsx-ai-factory/infra-controller' || needs.prepare.outputs.publish_images == 'true' }}
+          DOCKER_CONTEXT: ${{ steps.dev-build.outputs.docker_context }}
+          BUILDX_BUILDER: ${{ steps.dev-build.outputs.docker_context }}
+        run: |
+          tag="ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
+          owned_images=("nico-dev-dhcp:$tag" "nico-dev-runtime:$tag")
+          if [[ "$BUILD_CONTAINER_REBUILT" == true && "$PUBLISH_COMPILER" != true ]]; then
+            owned_images+=("nico-dev-build:$tag")
+          fi
+          docker image rm "${owned_images[@]}" >/dev/null 2>&1 || true
 
   # ============================================================================
   # BUILD STAGE - Forge CLI (Multi-arch)
@@ -1229,6 +1549,7 @@ jobs:
       # Off for the same reason as the release containers above: 2m00s of cache
       # export on a main run for a single cached layer.
       cache: false
+      sccache_scope: forge-cli-x86_64
       image_name: ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-x86_64
       image_tag: ${{ needs.prepare.outputs.version }}
       additional_tags: ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-x86_64:${{ needs.prepare.outputs.major_minor_version }}-latest
@@ -1253,6 +1574,7 @@ jobs:
       # Off for the same reason as the release containers above: 3m27s of cache
       # export on a main run for two cached layers.
       cache: false
+      sccache_scope: forge-cli-aarch64
       image_name: ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-aarch64
       image_tag: ${{ needs.prepare.outputs.version }}
       additional_tags: ${{ needs.prepare.outputs.image_registry }}/forge-admin-cli-aarch64:${{ needs.prepare.outputs.major_minor_version }}-latest
@@ -1292,25 +1614,33 @@ jobs:
           IMAGE_REGISTRY: ${{ needs.prepare.outputs.image_registry }}
           VERSION: ${{ needs.prepare.outputs.version }}
           MAJOR_MINOR_VERSION: ${{ needs.prepare.outputs.major_minor_version }}
+          PUBLISH_RELEASE: ${{ needs.prepare.outputs.publish_release }}
         with:
           max_attempts: 3
           timeout_minutes: 10
           retry_wait_seconds: 20
           command: |
+            # Require strict PR publishing failures while preserving main/tag shell behavior.
+            if [[ "${PUBLISH_RELEASE}" != "true" ]]; then
+              set -euo pipefail
+            fi
             docker buildx imagetools create -t \
               "${IMAGE_REGISTRY}/forge-admin-cli:${VERSION}" \
               "${IMAGE_REGISTRY}/forge-admin-cli-x86_64:${VERSION}" \
               "${IMAGE_REGISTRY}/forge-admin-cli-aarch64:${VERSION}"
 
-            docker buildx imagetools create -t \
-              "${IMAGE_REGISTRY}/forge-admin-cli:latest" \
-              "${IMAGE_REGISTRY}/forge-admin-cli-x86_64:${VERSION}" \
-              "${IMAGE_REGISTRY}/forge-admin-cli-aarch64:${VERSION}"
+            # Keep shared aliases on release builds so PR images cannot replace them.
+            if [[ "${PUBLISH_RELEASE}" == "true" ]]; then
+              docker buildx imagetools create -t \
+                "${IMAGE_REGISTRY}/forge-admin-cli:latest" \
+                "${IMAGE_REGISTRY}/forge-admin-cli-x86_64:${VERSION}" \
+                "${IMAGE_REGISTRY}/forge-admin-cli-aarch64:${VERSION}"
 
-            docker buildx imagetools create -t \
-              "${IMAGE_REGISTRY}/forge-admin-cli:${MAJOR_MINOR_VERSION}-latest" \
-              "${IMAGE_REGISTRY}/forge-admin-cli-x86_64:${VERSION}" \
-              "${IMAGE_REGISTRY}/forge-admin-cli-aarch64:${VERSION}"
+              docker buildx imagetools create -t \
+                "${IMAGE_REGISTRY}/forge-admin-cli:${MAJOR_MINOR_VERSION}-latest" \
+                "${IMAGE_REGISTRY}/forge-admin-cli-x86_64:${VERSION}" \
+                "${IMAGE_REGISTRY}/forge-admin-cli-aarch64:${VERSION}"
+            fi
 
   # ============================================================================
   # BUILD STAGE - Boot Artifacts
@@ -1558,7 +1888,7 @@ jobs:
           fi
 
       - name: Run TruffleHog Scan
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/trufflehog-scan@9a9ce3a7770a8b53d2726afa920be3276bc3ddd7
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/trufflehog-scan@db3780bff4b2cbf90ba9117a63e41ddea066791b
         with:
           base: ${{ steps.scan-range.outputs.base }}
           head: ${{ steps.scan-range.outputs.head }}
@@ -1702,6 +2032,7 @@ jobs:
           IMAGE_REGISTRY: ${{ needs.prepare.outputs.image_registry }}
           VERSION: ${{ needs.prepare.outputs.version }}
           MAJOR_MINOR_VERSION: ${{ needs.prepare.outputs.major_minor_version }}
+          PUBLISH_RELEASE: ${{ needs.prepare.outputs.publish_release }}
           X86_DIGEST: ${{ needs.build-release-machine-validation-basic-plugin-x86.outputs.image_digest }}
           ARM_DIGEST: ${{ needs.build-release-machine-validation-basic-plugin-arm.outputs.image_digest }}
         with:
@@ -1716,10 +2047,13 @@ jobs:
               "${IMAGE_REGISTRY}/machine-validation-basic-plugin@${X86_DIGEST}" \
               "${IMAGE_REGISTRY}/machine-validation-basic-plugin-aarch64@${ARM_DIGEST}"
 
-            docker buildx imagetools create -t \
-              "${IMAGE_REGISTRY}/machine-validation-basic-plugin:${MAJOR_MINOR_VERSION}-latest" \
-              "${IMAGE_REGISTRY}/machine-validation-basic-plugin@${X86_DIGEST}" \
-              "${IMAGE_REGISTRY}/machine-validation-basic-plugin-aarch64@${ARM_DIGEST}"
+            # Keep shared aliases on release builds so PR images cannot replace them.
+            if [[ "${PUBLISH_RELEASE}" == "true" ]]; then
+              docker buildx imagetools create -t \
+                "${IMAGE_REGISTRY}/machine-validation-basic-plugin:${MAJOR_MINOR_VERSION}-latest" \
+                "${IMAGE_REGISTRY}/machine-validation-basic-plugin@${X86_DIGEST}" \
+                "${IMAGE_REGISTRY}/machine-validation-basic-plugin-aarch64@${ARM_DIGEST}"
+            fi
 
   build-release-machine-validation-artifacts-x86-host:
     needs:
@@ -1750,7 +2084,7 @@ jobs:
   # machine_validation tag below. It bundles the same amd64 runner archive as the
   # amd64 carrier, so the served payload does not depend on the control-plane
   # node's architecture. (The bundled validation runner payload staying
-  # arm64-capable is tracked separately — this only makes the carrier runnable on
+  # arm64-capable is tracked separately. This only makes the carrier runnable on
   # arm64 nodes.)
   build-release-machine-validation-artifacts-arm-host:
     needs:
@@ -1808,6 +2142,7 @@ jobs:
           IMAGE_REGISTRY: ${{ needs.prepare.outputs.image_registry }}
           VERSION: ${{ needs.prepare.outputs.version }}
           MAJOR_MINOR_VERSION: ${{ needs.prepare.outputs.major_minor_version }}
+          PUBLISH_RELEASE: ${{ needs.prepare.outputs.publish_release }}
           X86_DIGEST: ${{ needs.build-release-machine-validation-artifacts-x86-host.outputs.image_digest }}
           ARM_DIGEST: ${{ needs.build-release-machine-validation-artifacts-arm-host.outputs.image_digest }}
         with:
@@ -1815,15 +2150,22 @@ jobs:
           timeout_minutes: 10
           retry_wait_seconds: 20
           command: |
+            # Require strict PR publishing failures while preserving main/tag shell behavior.
+            if [[ "${PUBLISH_RELEASE}" != "true" ]]; then
+              set -euo pipefail
+            fi
             docker buildx imagetools create -t \
               "${IMAGE_REGISTRY}/machine_validation:${VERSION}" \
               "${IMAGE_REGISTRY}/machine_validation@${X86_DIGEST}" \
               "${IMAGE_REGISTRY}/machine_validation-aarch64@${ARM_DIGEST}"
 
-            docker buildx imagetools create -t \
-              "${IMAGE_REGISTRY}/machine_validation:${MAJOR_MINOR_VERSION}-latest" \
-              "${IMAGE_REGISTRY}/machine_validation@${X86_DIGEST}" \
-              "${IMAGE_REGISTRY}/machine_validation-aarch64@${ARM_DIGEST}"
+            # Keep shared aliases on release builds so PR images cannot replace them.
+            if [[ "${PUBLISH_RELEASE}" == "true" ]]; then
+              docker buildx imagetools create -t \
+                "${IMAGE_REGISTRY}/machine_validation:${MAJOR_MINOR_VERSION}-latest" \
+                "${IMAGE_REGISTRY}/machine_validation@${X86_DIGEST}" \
+                "${IMAGE_REGISTRY}/machine_validation-aarch64@${ARM_DIGEST}"
+            fi
 
   proto-police:
     needs:
@@ -1906,11 +2248,20 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: "1.26.4"
-          cache: true
-          cache-dependency-path: rest-api/go.sum
+          go-version: "1.27.3"
+          cache: false
+
+      - name: Restore Go caches
+        id: go-cache
+        uses: ./.github/actions/go-cache-restore
+        with:
+          scope: rest-core-proto-sync
+          dependency-path: rest-api/go.sum
+
+      - name: Download REST dependencies
+        uses: ./.github/actions/go-mod-download
 
       - name: Regenerate REST protos from Core protos
         run: make -C rest-api core-proto
@@ -1919,6 +2270,13 @@ jobs:
         run: >-
           bash scripts/check-repo-clean.sh "REST Core protobuf sync"
           "make sync-protobuf (from the repository root)"
+
+      - name: Save Go caches
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/go-cache-save
+        with:
+          key: ${{ steps.go-cache.outputs.key }}
+          cache-hit: ${{ steps.go-cache.outputs.cache-hit }}
 
   lint-police:
     needs:
@@ -2023,9 +2381,9 @@ jobs:
       # Same uv release the runtime image pins, so the lockfile resolves the
       # same way in both places.
       - name: Set up uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.11.32"
+          version: "0.13.6"
           enable-cache: false
 
       - name: Install locked dependencies
@@ -2118,6 +2476,7 @@ jobs:
           IMAGE_REGISTRY: ${{ needs.prepare.outputs.image_registry }}
           VERSION: ${{ needs.prepare.outputs.version }}
           MAJOR_MINOR_VERSION: ${{ needs.prepare.outputs.major_minor_version }}
+          PUBLISH_RELEASE: ${{ needs.prepare.outputs.publish_release }}
         with:
           max_attempts: 3
           timeout_minutes: 10
@@ -2129,10 +2488,13 @@ jobs:
               "${IMAGE_REGISTRY}/machine-lifecycle-test-x86_64:${VERSION}" \
               "${IMAGE_REGISTRY}/machine-lifecycle-test-aarch64:${VERSION}"
 
-            docker buildx imagetools create -t \
-              "${IMAGE_REGISTRY}/machine-lifecycle-test:${MAJOR_MINOR_VERSION}-latest" \
-              "${IMAGE_REGISTRY}/machine-lifecycle-test-x86_64:${VERSION}" \
-              "${IMAGE_REGISTRY}/machine-lifecycle-test-aarch64:${VERSION}"
+            # Keep shared aliases on release builds so PR images cannot replace them.
+            if [[ "${PUBLISH_RELEASE}" == "true" ]]; then
+              docker buildx imagetools create -t \
+                "${IMAGE_REGISTRY}/machine-lifecycle-test:${MAJOR_MINOR_VERSION}-latest" \
+                "${IMAGE_REGISTRY}/machine-lifecycle-test-x86_64:${VERSION}" \
+                "${IMAGE_REGISTRY}/machine-lifecycle-test-aarch64:${VERSION}"
+            fi
 
   # ============================================================================
   # BUILD STAGE - Helm Chart
@@ -2155,6 +2517,26 @@ jobs:
           chart-path: helm
           lint: 'true'
           template: 'true'
+
+      # helm/scale-test is standalone (outside the umbrella dependency tree), so
+      # the validation above does not reach it. Lint and template it on its own
+      # with a valid dummy image; its helper rejects a missing repository or
+      # digest/tag, so these inputs are required here.
+      - name: Set up Helm for the scale-test chart
+        uses: azure/setup-helm@v4.3.0
+      - name: Validate the scale-test chart
+        env:
+          IMAGE_REPO: registry.invalid/scale-test-acceptance
+          IMAGE_DIGEST: sha256:0000000000000000000000000000000000000000000000000000000000000000
+        run: |
+          set -euo pipefail
+          helm lint helm/scale-test --set "image.repository=${IMAGE_REPO}" --set "image.digest=${IMAGE_DIGEST}"
+          # --set passes integer budgets as int64, which Helm-unittest's YAML
+          # set path does not exercise; prove the chart accepts them.
+          helm template scale-test helm/scale-test --namespace scale-test \
+            --set "image.repository=${IMAGE_REPO}" --set "image.digest=${IMAGE_DIGEST}" \
+            --set testBudget.activeDeadlineSeconds=1200 \
+            --set testBudget.testTimeoutSeconds=900 >/dev/null
 
       - name: Validate IPv6 Prometheus scrape configuration
         run: |
@@ -2182,13 +2564,22 @@ jobs:
       - name: Check Core VIP preflight
         run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_external_service_vips.py'
 
+      - name: Check KMIP provider preflight
+        run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_kmip_provider.py'
+
+      - name: Check Vault-free Core values preflight
+        run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_vault_free.py'
+
       # Uses python3-yaml installed by the configuration check above.
       - name: Test DevSpace bootstrap manifests
         run: /usr/bin/python3 -B dev/deployment/devspace/test_bootstrap_prereqs.py
 
+      - name: Test local native development image builds
+        run: /usr/bin/python3 -B -m unittest discover -s dev/docker/tests
+
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@db3780bff4b2cbf90ba9117a63e41ddea066791b
         with:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_TOKEN }}
@@ -2197,6 +2588,7 @@ jobs:
             bluefield/charts/nico-dhcp-server
             bluefield/charts/nico-fmds
             bluefield/charts/nico-otelcol
+            bluefield/charts/nico-unbound-local
             helm
             helm/charts/nico-api
             helm/charts/nico-bmc-proxy
@@ -2204,6 +2596,7 @@ jobs:
             helm/charts/nico-dns
             helm/charts/nico-dsx-exchange-consumer
             helm/nico-flow
+            helm/scale-test
             helm/charts/nico-hardware-health
             helm/charts/nico-machine-a-tron
             helm/charts/nico-machine-a-tron/charts/mat-k8s-controller
@@ -2226,7 +2619,7 @@ jobs:
     needs:
       - prepare
       - build-validate-helm-chart
-    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-validate-helm-chart.result == 'success' && needs.prepare.outputs.publish_images == 'true' }}
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-validate-helm-chart.result == 'success' && needs.prepare.outputs.publish_release == 'true' }}
     runs-on: linux-amd64-cpu4
     steps:
       - name: Checkout code
@@ -2236,7 +2629,7 @@ jobs:
 
       - name: Package and push Helm chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
         with:
           chart-path: helm
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2244,7 +2637,8 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
   build-validate-helm-prereqs-chart:
     needs:
@@ -2265,7 +2659,7 @@ jobs:
           template: 'true'
 
       - name: Run Helm unit tests
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@fdc2fa4b5f14ae570f290218f102f9b4aad3b26e
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@db3780bff4b2cbf90ba9117a63e41ddea066791b
         with:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_TOKEN }}
@@ -2292,8 +2686,14 @@ jobs:
       - name: Test REST postgres StatefulSet recreation
         run: bash helm-prereqs/tests/setup-rest-postgres-statefulset-recreate_test.sh
 
+      - name: Test site-agent Core connection verification
+        run: bash helm-prereqs/tests/setup-site-agent-connection_test.sh
+
       - name: Test Temporal/Keycloak HA Postgres resolution
         run: bash helm-prereqs/tests/preflight-ha-postgres-resolution_test.sh
+
+      - name: Test preflight error handling
+        run: bash helm-prereqs/tests/preflight-errors_test.sh
 
       - name: Test Temporal/Keycloak migration receipt
         run: bash helm-prereqs/tests/migrate-temporal-keycloak-db-receipt_test.sh
@@ -2325,11 +2725,31 @@ jobs:
       - name: Test doca-platform pin
         run: bash helm-prereqs/tests/doca-platform-pin_test.sh
 
+      - name: Test KMIP client Secret
+        run: bash helm-prereqs/tests/setup-kmip-client-secret_test.sh
+
+      - name: Test Keycloak token error redaction
+        run: /usr/bin/python3 -m unittest discover -s helm-prereqs/tests -p 'test_keycloak_token.py'
+
+      - name: Test setup --skip-vault
+        run: bash helm-prereqs/tests/setup-skip-vault_test.sh
+
+      - name: Test preflight --skip-vault
+        run: bash helm-prereqs/tests/preflight-skip-vault_test.sh
+
+      - name: Test health check without Vault
+        run: bash helm-prereqs/tests/health-check-vault-optional_test.sh
+
+  # Waits for the nico chart push. NGC answers an upload with HTTP 409 while
+  # another upload to the same namespace is updating its chart index, and the
+  # CLI reports that as "already exists". `!cancelled()` still runs this job
+  # when the nico chart push fails.
   build-push-helm-prereqs-chart:
     needs:
       - prepare
       - build-validate-helm-prereqs-chart
-    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-validate-helm-prereqs-chart.result == 'success' && needs.prepare.outputs.publish_images == 'true' }}
+      - build-push-helm-chart
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-validate-helm-prereqs-chart.result == 'success' && needs.prepare.outputs.publish_release == 'true' }}
     runs-on: linux-amd64-cpu4
     steps:
       - name: Checkout code
@@ -2339,7 +2759,7 @@ jobs:
 
       - name: Package and push Helm prereqs chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
         with:
           chart-path: helm-prereqs
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2347,7 +2767,8 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
   # ============================================================================
   # BUILD STAGE - Bluefield Images
@@ -2534,6 +2955,24 @@ jobs:
       artifact_pattern: 'bluefield-binaries-${{ github.run_id }}'
     secrets: inherit
 
+  build-bluefield-nico-unbound:
+    needs:
+      - prepare
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' }}
+    uses: ./.github/workflows/docker-build.yml
+    with:
+      # public bases only: skip source login so anonymous nvcr pulls keep working
+      source_registry_host: ''
+      dockerfile_path: bluefield/containers/unbound/Dockerfile
+      image_name: ${{ needs.prepare.outputs.image_registry }}/nico-unbound
+      image_tag: ${{ needs.prepare.outputs.version }}
+      additional_tags: ${{ needs.prepare.outputs.image_registry }}/nico-unbound:${{ needs.prepare.outputs.major_minor_version }}-latest
+      platforms: linux/arm64
+      runner: linux-arm64-cpu4
+      push: ${{ needs.prepare.outputs.publish_images == 'true' }}
+      load: false
+    secrets: inherit
+
   # ============================================================================
   # BUILD STAGE - Bluefield Helm Charts
   # ============================================================================
@@ -2589,6 +3028,22 @@ jobs:
           sudo apt-get install -y --no-install-recommends python3-yaml busybox
           /usr/bin/python3 -B bluefield/charts/nico-fmds/tests/test_listener_command.py
 
+      # nico-api renders the required values and helm-validate has no values-file
+      # input, so lint against the test fixture with the helm the preceding
+      # helm-validate steps installed; the chart's helm-unittest suites run in
+      # the "Run Helm unit tests" step.
+      - name: Validate nico-unbound-local chart
+        run: helm lint --strict bluefield/charts/nico-unbound-local -f bluefield/charts/nico-unbound-local/tests/values.yaml
+
+      # Execute the rendered nic-init command under busybox against a stub ip,
+      # as the nico-fmds listener test does, so the script's failure policy is
+      # proven rather than read.
+      - name: Test nico-unbound-local nic-init command
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-yaml busybox
+          /usr/bin/python3 -B bluefield/charts/nico-unbound-local/tests/test_nic_init_command.py
+
       - name: Test site-controller OTEL configuration
         run: |
           sudo apt-get update
@@ -2598,11 +3053,14 @@ jobs:
           /usr/bin/python3 -B bluefield/otel/site-controller/scripts/test_map_endpoints.py
           /usr/bin/python3 -B bluefield/otel/site-controller/scripts/test_otel_post_install.py
 
+  # Waits for the prereqs chart push, for the same reason as
+  # `build-push-helm-prereqs-chart`.
   build-push-bluefield-helm-charts:
     needs:
       - prepare
       - build-validate-bluefield-helm-charts
-    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-validate-bluefield-helm-charts.result == 'success' && needs.prepare.outputs.publish_images == 'true' }}
+      - build-push-helm-prereqs-chart
+    if: ${{ !cancelled() && github.event_name != 'schedule' && needs.prepare.result == 'success' && needs.build-validate-bluefield-helm-charts.result == 'success' && needs.prepare.outputs.publish_release == 'true' }}
     runs-on: linux-amd64-cpu4
     steps:
       - name: Checkout code
@@ -2612,7 +3070,7 @@ jobs:
 
       - name: Package and push nico-otelcol chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
         with:
           chart-path: bluefield/charts/nico-otelcol
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2620,11 +3078,12 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
       - name: Package and push nico-dpu-agent chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
         with:
           chart-path: bluefield/charts/nico-dpu-agent
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2632,11 +3091,12 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
       - name: Package and push nico-dhcp-server chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
         with:
           chart-path: bluefield/charts/nico-dhcp-server
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2644,11 +3104,12 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
 
       - name: Package and push nico-fmds chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
         with:
           chart-path: bluefield/charts/nico-fmds
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2656,7 +3117,21 @@ jobs:
           lint: 'false'
           ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
           ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
-          ngc-duplicate: fail
+          ngc-duplicate: verify
+          retries: 3
+
+      - name: Package and push nico-unbound-local chart
+        if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
+        with:
+          chart-path: bluefield/charts/nico-unbound-local
+          chart-version: ${{ needs.prepare.outputs.helm_version }}
+          app-version: ${{ needs.prepare.outputs.version }}
+          lint: 'false'
+          ngc-key: ${{ secrets.NICO_NGC_TOKEN || secrets.NVCR_TOKEN }}
+          ngc-path: ${{ needs.prepare.outputs.target_ngc_path }}
+          ngc-duplicate: verify
+          retries: 3
 
   build-summary:
     runs-on: linux-amd64-cpu4
@@ -2674,8 +3149,11 @@ jobs:
       - build-machine-a-tron
       - build-mat-k8s-controller
       - build-site-health-probe
+      - build-scale-test-acceptance
       - test-mat-k8s-controller
+      - test-scale-test
       - test-release-container-services
+      - test-dev-dhcp-image
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
       - build-package-scout-aarch64
@@ -2701,6 +3179,7 @@ jobs:
       - build-bluefield-forge-dpu-agent
       - build-bluefield-forge-dhcp-server
       - build-bluefield-carbide-fmds
+      - build-bluefield-nico-unbound
       - build-validate-bluefield-helm-charts
       - build-push-bluefield-helm-charts
       - lint-police
@@ -2726,6 +3205,7 @@ jobs:
           BUILD_RELEASE_ARTIFACTS_ARM_HOST_IMAGE_REF: ${{ needs.build-release-artifacts-arm-host.outputs.image_ref }}
           BUILD_MAT_K8S_CONTROLLER_IMAGE_REF: ${{ needs.build-mat-k8s-controller.outputs.image_ref }}
           BUILD_SITE_HEALTH_PROBE_IMAGE_REF: ${{ needs.build-site-health-probe.outputs.image_ref }}
+          BUILD_SCALE_TEST_ACCEPTANCE_IMAGE_REF: ${{ needs.build-scale-test-acceptance.outputs.image_ref }}
         run: |
           echo "## Build Jobs Summary" >> "$GITHUB_STEP_SUMMARY"
           echo >> "$GITHUB_STEP_SUMMARY"
@@ -2763,6 +3243,7 @@ jobs:
           IMAGES["build-release-artifacts-arm-host"]="${BUILD_RELEASE_ARTIFACTS_ARM_HOST_IMAGE_REF}"
           IMAGES["build-mat-k8s-controller"]="${BUILD_MAT_K8S_CONTROLLER_IMAGE_REF}"
           IMAGES["build-site-health-probe"]="${BUILD_SITE_HEALTH_PROBE_IMAGE_REF}"
+          IMAGES["build-scale-test-acceptance"]="${BUILD_SCALE_TEST_ACCEPTANCE_IMAGE_REF}"
 
           for job in "${!IMAGES[@]}"; do
             image="${IMAGES[$job]}"
@@ -2771,13 +3252,64 @@ jobs:
             fi
           done
 
+  # Every Cargo.lock change on main saves a new sccache archive per scope, and
+  # restore-keys only falls back to the newest one. The older archives would
+  # otherwise hold their space until they go 7 days unread, so this keeps the
+  # newest per scope and deletes the rest.
+  prune-sccache:
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    needs:
+      - test-release-container-services
+      - build-release-container-x86_64
+      - build-release-container-aarch64
+      - build-forge-cli-x86_64
+      - build-forge-cli-aarch64
+      - build-boot-artifacts-x86
+      - build-boot-artifacts-bfb
+      - build-package-scout-aarch64
+    runs-on: linux-amd64-cpu4
+    permissions:
+      actions: write
+    steps:
+      - name: Delete superseded sccache archives
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const entries = await github.paginate(github.rest.actions.getActionsCacheList, {
+              owner,
+              repo,
+              key: 'sccache-',
+              ref: 'refs/heads/main',
+              per_page: 100,
+            });
+            const scopeOf = (key) => key.replace(/-[0-9a-f]{64}$/, '');
+            const newest = new Map();
+            for (const entry of entries) {
+              const kept = newest.get(scopeOf(entry.key));
+              if (!kept || Date.parse(entry.created_at) > Date.parse(kept.created_at)) {
+                newest.set(scopeOf(entry.key), entry);
+              }
+            }
+            for (const entry of entries) {
+              const kept = newest.get(scopeOf(entry.key));
+              if (kept.id === entry.id) continue;
+              core.info(`Deleting ${entry.key} (${entry.size_in_bytes} bytes), superseded by ${kept.key}`);
+              try {
+                await github.rest.actions.deleteActionsCacheById({ owner, repo, cache_id: entry.id });
+              } catch (error) {
+                // An overlapping main run may have deleted it already.
+                if (error.status !== 404) throw error;
+              }
+            }
+
   promote-to-be-scanned-image:
     # Skip for pull-request/* branches (main, release/*, and tags are allowed by workflow trigger)
-    if: ${{ !cancelled() && github.repository == 'dsx-ai-factory/infra-controller' && needs.build-release-container-x86_64.result == 'success' && github.event_name != 'schedule' && needs.prepare.outputs.publish_images == 'true' }}
+    if: ${{ !cancelled() && github.repository == 'dsx-ai-factory/infra-controller' && needs.build-release-container-x86_64.result == 'success' && github.event_name != 'schedule' && needs.prepare.outputs.publish_release == 'true' }}
     needs:
       - prepare
       - build-release-container-x86_64
-    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@f2a3b631804750e94e7725070ec3fa8374f6218f # v1.20.2
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
     with:
       source: ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide
       source_tag: ${{ needs.prepare.outputs.version }}
@@ -2808,6 +3340,7 @@ jobs:
       - build-machine-a-tron
       - build-mat-k8s-controller
       - build-site-health-probe
+      - build-scale-test-acceptance
       - test-release-container-services
       - build-boot-artifacts-x86
       - build-boot-artifacts-bfb
@@ -2834,6 +3367,7 @@ jobs:
       - build-bluefield-forge-dpu-agent
       - build-bluefield-forge-dhcp-server
       - build-bluefield-carbide-fmds
+      - build-bluefield-nico-unbound
       - build-validate-bluefield-helm-charts
       - build-push-bluefield-helm-charts
       - security-secret-scan
@@ -2867,7 +3401,10 @@ jobs:
   # Update `.github/ci/check_ci_gate.py` when a job gains an allowed skip.
   core-ci-pass:
     name: core-ci-pass
-    runs-on: linux-amd64-cpu4
+    # Hosted ubuntu-slim, because a superseded run keeps its concurrency slot
+    # until this always() job finishes and the cpu4 pool can queue for minutes.
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
     if: always()
     needs:
       # Detection and preparation
@@ -2889,8 +3426,11 @@ jobs:
       - build-machine-a-tron
       - build-mat-k8s-controller
       - build-site-health-probe
+      - build-scale-test-acceptance
       - test-mat-k8s-controller
+      - test-scale-test
       - test-release-container-services
+      - test-dev-dhcp-image
 
       # CLI images
       - build-forge-cli-x86_64
@@ -2949,6 +3489,7 @@ jobs:
       - build-bluefield-forge-dpu-agent
       - build-bluefield-forge-dhcp-server
       - build-bluefield-carbide-fmds
+      - build-bluefield-nico-unbound
       - build-validate-bluefield-helm-charts
       - build-push-bluefield-helm-charts
 

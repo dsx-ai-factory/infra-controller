@@ -152,8 +152,10 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 							Revision: "2CV1L028",
 						},
 						{
-							Model:    "DELLBOSS_VD",
-							Revision: "MV.R00-0",
+							Model:      "DELLBOSS_VD",
+							Revision:   "MV.R00-0",
+							Serial:     "BLOCK-SERIAL-1",
+							DeviceType: "disk",
 						},
 					},
 					DmiData: &corev1.DmiData{
@@ -171,6 +173,9 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 						{
 							Model:       "Dell Ent NVMe CM6 RI 1.92TB",
 							FirmwareRev: "2.1.3",
+							Serial:      "NVME-SERIAL-1",
+							SizeMb:      cutil.GetPtr(uint32(1831420)),
+							PciPath:     cutil.GetPtr("/devices/pci0000:40/0000:40:01.1/0000:41:00.0"),
 						},
 						{
 							Model:       "Dell Ent NVMe CM6 RI 1.92TB",
@@ -461,8 +466,8 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 
 	if apimi.Metadata != nil {
 		if apimi.Metadata.BMCInfo != nil {
-			assert.Equal(t, *apimi.Metadata.BMCInfo.IP, *machineInfo1.Machine.BmcInfo.Ip)
-			assert.Equal(t, *apimi.Metadata.BMCInfo.Mac, *machineInfo1.Machine.BmcInfo.Mac)
+			assert.Equal(t, *apimi.Metadata.BMCInfo.IP, *machineInfo1.Machine.BmcInfo.Ip)   //nolint:staticcheck // Verify the legacy Core response fixture.
+			assert.Equal(t, *apimi.Metadata.BMCInfo.Mac, *machineInfo1.Machine.BmcInfo.Mac) //nolint:staticcheck // Verify the legacy Core response fixture.
 		}
 
 		if apimi.Metadata.DMIData != nil {
@@ -486,6 +491,17 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 			assert.Equal(t, *apimi.Metadata.GPUs[0].Frequency, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().Gpus[0].Frequency)
 			assert.Equal(t, *apimi.Metadata.GPUs[0].PciBusId, machineInfo1.Machine.GetStatus().GetDiscoveryInfo().Gpus[0].PciBusId)
 		}
+
+		// Three NVMe devices, then the DELLBOSS block device; the first NVMe disk carries every field.
+		require.Len(t, apimi.Metadata.Disks, 4)
+		assert.Equal(t, APIMachineDisk{
+			Type:    "nvme",
+			Model:   "Dell Ent NVMe CM6 RI 1.92TB",
+			Serial:  "NVME-SERIAL-1",
+			SizeMb:  cutil.GetPtr(uint32(1831420)),
+			PciPath: cutil.GetPtr("/devices/pci0000:40/0000:40:01.1/0000:41:00.0"),
+		}, apimi.Metadata.Disks[0])
+		assert.Equal(t, APIMachineDisk{Type: "disk", Model: "DELLBOSS_VD", Serial: "BLOCK-SERIAL-1"}, apimi.Metadata.Disks[3])
 
 		if apimi.Metadata.NetworkInterfaces != nil {
 			assert.Equal(t, len(apimi.Metadata.NetworkInterfaces), len(machineInfo1.Machine.GetStatus().GetDiscoveryInfo().NetworkInterfaces))
@@ -574,7 +590,7 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 
 		var fields map[string]json.RawMessage
 		require.NoError(t, json.Unmarshal(payload, &fields))
-		for _, field := range []string{"gpus", "networkInterfaces", "infinibandInterfaces"} {
+		for _, field := range []string{"gpus", "disks", "networkInterfaces", "infinibandInterfaces"} {
 			value, found := fields[field]
 			require.True(t, found, "%s must be present", field)
 			assert.JSONEq(t, `[]`, string(value))
@@ -582,42 +598,175 @@ func TestMachine_NewAPIMachine(t *testing.T) {
 	})
 }
 
-func TestAPIMachineMetadata_FromProto(t *testing.T) {
-	metadata := APIMachineMetadata{
-		DMIData:              &APIDMIData{},
-		BMCInfo:              &APIBMCInfo{},
-		GPUs:                 []APIMachineGPUInfo{{}},
-		NetworkInterfaces:    []APIMachineNetworkInterface{{}},
-		InfiniBandInterfaces: []APIMachineInfiniBandInterface{{}},
-		LifecycleState:       &APIMachineLifecycleState{},
-		LldpNeighbors:        []APIMachineLldpNeighbor{{}},
+func TestAPIBMCInfo_FromProto(t *testing.T) {
+	cases := []struct {
+		name    string
+		machine *corev1.Machine
+		want    APIBMCInfo
+	}{
+		{
+			name: "nil machine clears reused receiver",
+		},
+		{
+			name:    "missing BMC messages clear reused receiver",
+			machine: &corev1.Machine{},
+		},
+		{
+			name: "endpoint without status clears old versions",
+			machine: &corev1.Machine{
+				Bmc: &corev1.BmcEndpoint{
+					Ip:  cutil.GetPtr("192.0.2.10"),
+					Mac: cutil.GetPtr("02:00:00:00:00:10"),
+				},
+			},
+			want: APIBMCInfo{
+				IP:  cutil.GetPtr("192.0.2.10"),
+				Mac: cutil.GetPtr("02:00:00:00:00:10"),
+			},
+		},
+		{
+			name: "status without endpoint clears old addresses",
+			machine: &corev1.Machine{
+				Status: &corev1.MachineStatus{
+					BmcStatus: &corev1.BmcStatus{
+						Version:         cutil.GetPtr("new-version"),
+						FirmwareVersion: cutil.GetPtr("new-firmware"),
+					},
+				},
+			},
+			want: APIBMCInfo{
+				Version:          cutil.GetPtr("new-version"),
+				FirmwareRevision: cutil.GetPtr("new-firmware"),
+			},
+		},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			info := APIBMCInfo{
+				IP:               cutil.GetPtr("192.0.2.99"),
+				Mac:              cutil.GetPtr("02:00:00:00:00:99"),
+				Version:          cutil.GetPtr("old-version"),
+				FirmwareRevision: cutil.GetPtr("old-firmware"),
+			}
+			info.FromProto(tc.machine)
+			assert.Equal(t, tc.want, info)
+		})
+	}
+}
 
-	metadata.FromProto(nil)
+func TestAPIMachineMetadata_FromProto(t *testing.T) {
+	cases := []struct {
+		name               string
+		machine            *corev1.Machine
+		wantLifecycleState *APIMachineLifecycleState
+		wantJSON           string
+	}{
+		{
+			name: "missing machine clears metadata",
+			wantJSON: `{
+				"dmiData": null,
+				"bmcInfo": null,
+				"gpus": [],
+				"disks": [],
+				"networkInterfaces": [],
+				"infinibandInterfaces": [],
+				"lifecycleState": null,
+				"lldpNeighbors": []
+			}`,
+		},
+		{
+			name:               "missing BMC data remains null",
+			machine:            &corev1.Machine{},
+			wantLifecycleState: &APIMachineLifecycleState{},
+			wantJSON: `{
+				"dmiData": null,
+				"bmcInfo": null,
+				"gpus": [],
+				"disks": [],
+				"networkInterfaces": [],
+				"infinibandInterfaces": [],
+				"lifecycleState": {
+					"value": "",
+					"isAboveSLA": false,
+					"updated": null,
+					"slaSeconds": 0
+				},
+				"lldpNeighbors": []
+			}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			metadata := APIMachineMetadata{
+				DMIData:              &APIDMIData{},
+				BMCInfo:              &APIBMCInfo{},
+				GPUs:                 []APIMachineGPUInfo{{}},
+				NetworkInterfaces:    []APIMachineNetworkInterface{{}},
+				InfiniBandInterfaces: []APIMachineInfiniBandInterface{{}},
+				LifecycleState:       &APIMachineLifecycleState{},
+				LldpNeighbors:        []APIMachineLldpNeighbor{{}},
+			}
 
-	assert.Nil(t, metadata.DMIData)
-	assert.Nil(t, metadata.BMCInfo)
-	assert.NotNil(t, metadata.GPUs)
-	assert.Empty(t, metadata.GPUs)
-	assert.NotNil(t, metadata.NetworkInterfaces)
-	assert.Empty(t, metadata.NetworkInterfaces)
-	assert.NotNil(t, metadata.InfiniBandInterfaces)
-	assert.Empty(t, metadata.InfiniBandInterfaces)
-	assert.Nil(t, metadata.LifecycleState)
-	assert.NotNil(t, metadata.LldpNeighbors)
-	assert.Empty(t, metadata.LldpNeighbors)
+			metadata.FromProto(tc.machine)
 
-	payload, err := json.Marshal(metadata)
-	require.NoError(t, err)
-	assert.JSONEq(t, `{
-		"dmiData": null,
-		"bmcInfo": null,
-		"gpus": [],
-		"networkInterfaces": [],
-		"infinibandInterfaces": [],
-		"lifecycleState": null,
-		"lldpNeighbors": []
-	}`, string(payload))
+			assert.Nil(t, metadata.DMIData)
+			assert.Nil(t, metadata.BMCInfo)
+			assert.NotNil(t, metadata.GPUs)
+			assert.Empty(t, metadata.GPUs)
+			assert.NotNil(t, metadata.NetworkInterfaces)
+			assert.Empty(t, metadata.NetworkInterfaces)
+			assert.NotNil(t, metadata.InfiniBandInterfaces)
+			assert.Empty(t, metadata.InfiniBandInterfaces)
+			assert.Equal(t, tc.wantLifecycleState, metadata.LifecycleState)
+			assert.NotNil(t, metadata.LldpNeighbors)
+			assert.Empty(t, metadata.LldpNeighbors)
+
+			payload, err := json.Marshal(metadata)
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.wantJSON, string(payload))
+		})
+	}
+	t.Run("BMC split fields", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			legacy *corev1.BmcInfo
+		}{
+			{
+				name: "split fields without legacy data",
+			},
+			{
+				name: "split fields override legacy data",
+				legacy: &corev1.BmcInfo{
+					Ip:              cutil.GetPtr("192.0.2.20"),
+					Mac:             cutil.GetPtr("02:00:00:00:00:20"),
+					Version:         cutil.GetPtr("legacy-version"),
+					FirmwareVersion: cutil.GetPtr("legacy-firmware"),
+				},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				machine := &corev1.Machine{
+					Bmc: &corev1.BmcEndpoint{
+						Ip:  cutil.GetPtr("192.0.2.10"),
+						Mac: cutil.GetPtr("02:00:00:00:00:10"),
+					},
+					Status: &corev1.MachineStatus{
+						BmcStatus: &corev1.BmcStatus{
+							Version:         cutil.GetPtr("new-version"),
+							FirmwareVersion: cutil.GetPtr("new-firmware"),
+						},
+					},
+					BmcInfo: tc.legacy, //nolint:staticcheck // Verify split fields win over the older representation.
+				}
+				metadata := APIMachineMetadata{}
+				metadata.FromProto(machine)
+				payload, err := json.Marshal(metadata.BMCInfo)
+				require.NoError(t, err)
+				assert.JSONEq(t, `{"ip":"192.0.2.10","mac":"02:00:00:00:00:10","version":"new-version","firmwareRevision":"new-firmware"}`, string(payload))
+			})
+		}
+	})
 }
 
 // TestMachine_NewAPIMachineLldpNeighborsJSON proves the wire contract of
@@ -1156,6 +1305,54 @@ func TestAPIMachineUpdateRequest_ToRemoveHealthReportProto(t *testing.T) {
 			require.NotNil(t, got.MachineId)
 			assert.Equal(t, tt.machineID, got.MachineId.Id)
 			assert.Equal(t, tt.wantSource, got.GetSource())
+		})
+	}
+}
+
+func TestAPIMachineDeleteRequest_Validate(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		request   APIMachineDeleteRequest
+		wantError bool
+	}{
+		{name: "regular deletion"},
+		{name: "Instance Type override requires force", request: APIMachineDeleteRequest{AllowDeleteWithInstanceType: true}, wantError: true},
+		{name: "Instance override requires force", request: APIMachineDeleteRequest{AllowDeleteWithInstance: true}, wantError: true},
+		{name: "Allocation override requires force", request: APIMachineDeleteRequest{AllowDeleteWithAllocation: true}, wantError: true},
+		{name: "force permits independent overrides", request: APIMachineDeleteRequest{Force: true, AllowDeleteWithInstanceType: true, AllowDeleteWithInstance: true, AllowDeleteWithAllocation: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.request.Validate()
+			if tc.wantError {
+				require.ErrorContains(t, err, "requires force=true")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestAPIMachineDeleteRequest_ToProto(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		request      APIMachineDeleteRequest
+		wantType     bool
+		wantInstance bool
+	}{
+		{name: "force alone grants no override", request: APIMachineDeleteRequest{Force: true}},
+		{name: "Instance Type override", request: APIMachineDeleteRequest{Force: true, AllowDeleteWithInstanceType: true}, wantType: true},
+		{name: "Instance implies Instance Type despite explicit false", request: APIMachineDeleteRequest{Force: true, AllowDeleteWithInstance: true}, wantType: true, wantInstance: true},
+		{name: "Allocation acknowledgment grants no Core override", request: APIMachineDeleteRequest{Force: true, AllowDeleteWithAllocation: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.request.ToProto("host-machine")
+			require.Equal(t, &corev1.AdminForceDeleteMachineRequest{
+				HostQuery:                   "host-machine",
+				DeleteInterfaces:            true,
+				DeleteBmcInterfaces:         true,
+				AllowDeleteWithInstanceType: tc.wantType,
+				AllowDeleteWithInstance:     tc.wantInstance,
+			}, got)
 		})
 	}
 }

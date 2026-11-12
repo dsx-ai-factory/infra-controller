@@ -170,10 +170,12 @@ accepted the string at startup.
 | `rack_capabilities.<role>.vendor` | Non-empty string; RMS validates support at request time | For each role whose backend is `rms` |
 | `rack_capabilities.<role>.count` | Non-negative integer | Always, for all three roles |
 
-`count` is independent of RMS. It tells the rack state machine how many devices of that role a
-rack must have before it can progress. A rack stays in `Created` until all three roles have at
-least `count` devices registered, and stays in `Discovering` until all three roles have at
-least `count` devices in `Ready` state.
+`count` is independent of RMS and describes expected inventory for missing-component health
+alerts. Only the switch count gates ingestion: `Created` waits for at least that many
+registered switches, and `Discovering` waits for at least that many switches in `Ready`.
+Compute and power shelf counts and readiness do not gate these transitions. See the
+[rack state machine](../architecture/state_machines/rackstatemachine.md#discovering-r_discovering)
+for shipped defaults and transition details.
 
 Each rack that uses an RMS-backed operation must have a `rack_profile_id` matching a key under
 `[rack_profiles]`.

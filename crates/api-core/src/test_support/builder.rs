@@ -28,7 +28,6 @@ use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::credentials::CredentialManager;
 use carbide_secrets::test_support::certificates::TestCertificateProvider;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
-use carbide_site_explorer::config::SiteExplorerExploreMode;
 use carbide_site_explorer::test_support::MockEndpointExplorer;
 use carbide_site_explorer::{
     AuthenticatedBmc, AuthenticatedBmcClient, EndpointExplorationService, EndpointExplorer,
@@ -228,8 +227,8 @@ impl TestApiBuilder {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_firmware_object_fetcher(
+    /// Sets the firmware-object fetcher shared with controller test fixtures.
+    pub fn with_firmware_object_fetcher(
         self,
         firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher>,
     ) -> Self {
@@ -243,9 +242,10 @@ impl TestApiBuilder {
         let runtime_config = self
             .runtime_config
             .unwrap_or_else(|| Arc::new(default_config::get()));
-        let resource_pool_monitor =
+        let mut resource_pool_monitor =
             ResourcePoolMonitor::new(self.db_pool.clone(), &runtime_config.resource_pool_backends)
                 .expect("valid resource pool backend configuration");
+        resource_pool_monitor.use_registry_clients(&self.resource_pool_registry);
 
         let scout_stream_registry = ConnectionRegistry::new();
         let credential_manager = self
@@ -294,7 +294,7 @@ impl TestApiBuilder {
         let real_endpoint_explorer = carbide_site_explorer::new_bmc_explorer(
             real_bmc_client.clone(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            SiteExplorerExploreMode::NvRedfish,
+            false,
             self.db_pool.clone(),
         );
         // A mock supplies both narrow interfaces so tests asserting on BMC calls
@@ -347,6 +347,7 @@ impl TestApiBuilder {
             // dyn upcast: the ops handle is also the general pool in tests.
             redfish_pool: redfish_pool.clone(),
             bmc_credential_ops: redfish_pool,
+            driver_connector: None,
             bmc_proxy_passthrough: None,
             eth_data,
             common_pools: self.common_pools,

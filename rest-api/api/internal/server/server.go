@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -114,7 +115,7 @@ func InitAPIServer(cfg *config.Config, dbSession *cdb.Session, tc tsdkClient.Cli
 	e.Use(middleware.Secure())
 
 	// Limit request body size to prevent OOM from oversized payloads
-	e.Use(echoMiddleware.BodyLimit("10M"))
+	e.Use(echoMiddleware.BodyLimit(strconv.Itoa(cerr.MaxRequestBodyBytes)))
 
 	// Rate limiter middleware (if enabled)
 	rateLimiterConfig := cfg.GetRateLimiterConfig()

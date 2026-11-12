@@ -34,9 +34,9 @@ use eyre::Context;
 use mac_address::MacAddress;
 use nmxc_mock::NmxcMockConfig;
 use rms_mock::RmsMockConfig;
+use rpc::carbide_tls_client::CarbideClientConfig;
 use rpc::forge::DesiredFirmwareVersionEntry;
-use rpc::forge_tls_client::ForgeClientConfig;
-use rpc::protos::forge_api_client::ForgeApiClient;
+use rpc::protos::carbide_api_client::CarbideApiClient;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use ufm_mock::UfmMockConfig;
@@ -44,7 +44,6 @@ use uuid::Uuid;
 
 use crate::BmcMockRegistry;
 use crate::api_client::ApiClient;
-use crate::api_throttler::ApiThrottler;
 use crate::lifecycle_timings::LifecycleTimingOverrides;
 use crate::machine_state_machine::OsImage;
 use crate::rack::{RackMemberRegistration, RackRegistration};
@@ -513,6 +512,17 @@ pub struct MachineATronConfig {
     #[serde(default)]
     pub dhcp: DhcpType,
 
+    /// Periodic host/DPU BMC lease renewal, default 900 seconds.
+    /// First renewals spread over [0, interval), then each interval has +/-10% jitter.
+    /// Like scout polling, this interval is not scaled by `acceleration_factor`.
+    /// Zero disables periodic renewal. Changes take effect after restarting MAT.
+    #[serde(
+        default = "default_bmc_dhcp_renewal_interval",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "as_std_duration"
+    )]
+    pub bmc_dhcp_renewal_interval: Duration,
+
     #[serde(default = "default_bmc_mock_port")]
     pub bmc_mock_port: u16,
 
@@ -561,9 +571,9 @@ pub struct MachineATronConfig {
     #[serde(default)]
     pub dpu_bmc_password: Option<String>,
 
-    /// How often to refresh the API state from the server. Longer durations are appropriate for
-    /// mocking lots of hosts, shorter durations are appropriate for integration tests where the
-    /// interval should be shorter than the state controller update interval
+    /// Interval for the binary's desired-firmware fetches and for host actors to
+    /// adopt the shared firmware targets. Library callers arrange their own fetches.
+    /// Defaults to two seconds. Machine lifecycle states are not polled.
     #[serde(
         default = "default_api_refresh_interval",
         deserialize_with = "deserialize_duration",
@@ -603,14 +613,35 @@ pub struct MachineATronConfig {
 
     /// The hosted RMS mock. Unlike the UFM mock this has no `enabled`
     /// flag: the services are always mounted, and NICo reaches them only when
-    /// it is configured with an `rms.api_url` pointing here.
-    #[serde(default)]
+    /// it is configured with an `rms.api_url` pointing here. MAT defaults
+    /// `max_terminal_jobs` to 100,000, including when only other RMS fields are set.
+    #[serde(
+        default = "default_rms_mock_config",
+        deserialize_with = "deserialize_rms_mock_config"
+    )]
     pub rms_mock: RmsMockConfig,
 
     /// The hosted NMX-C mock, always mounted like the RMS mock. NICo reaches
     /// it at a simulated switch's NVOS address, so nothing here names it.
     #[serde(default)]
     pub nmxc_mock: NmxcMockConfig,
+}
+
+fn default_rms_mock_config() -> RmsMockConfig {
+    RmsMockConfig {
+        max_terminal_jobs: 100_000,
+        ..RmsMockConfig::default()
+    }
+}
+
+fn deserialize_rms_mock_config<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<RmsMockConfig, D::Error> {
+    let mut fields = serde_json::Map::deserialize(deserializer)?;
+    fields
+        .entry("max_terminal_jobs".to_string())
+        .or_insert(serde_json::Value::from(100_000));
+    serde_json::from_value(serde_json::Value::Object(fields)).map_err(serde::de::Error::custom)
 }
 
 impl MachineATronConfig {
@@ -623,6 +654,15 @@ impl MachineATronConfig {
     /// Checks the invariants serde cannot express, such as the UFM mock settings
     /// and the UDP relay addresses.
     pub fn validate(&self) -> eyre::Result<()> {
+        eyre::ensure!(
+            tokio::time::Instant::now()
+                .checked_add(
+                    self.bmc_dhcp_renewal_interval
+                        .saturating_add(self.bmc_dhcp_renewal_interval / 10)
+                )
+                .is_some(),
+            "BMC DHCP renewal interval must fit within the monotonic clock"
+        );
         if let Some(ufm_mock) = self.ufm_mock.as_ref() {
             ufm_mock.validate()?;
         }
@@ -896,7 +936,7 @@ pub struct PersistedDevice {
     /// the versions last observed, not the operator-configured starting point.
     #[serde(default)]
     pub active_host_firmware: Option<HostFirmwareVersions>,
-    /// Portable BMC state. Power shelves do not populate this field.
+    /// Portable BMC state, including accounts and the factory-reset generation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bmc_state: Option<bmc_mock::persistence::PersistedBmcState>,
     /// A switch's NVOS administrator as the last completed password rotation
@@ -1010,6 +1050,10 @@ fn default_scout_run_interval() -> Duration {
     Duration::from_secs(60)
 }
 
+fn default_bmc_dhcp_renewal_interval() -> Duration {
+    Duration::from_secs(900)
+}
+
 fn default_scout_stream_reconnect_interval() -> Duration {
     Duration::from_secs(10)
 }
@@ -1039,22 +1083,24 @@ pub struct MacAddressRangesConfig {
 
 pub struct MachineATronContext {
     pub app_config: MachineATronConfig,
-    pub forge_client_config: ForgeClientConfig,
+    pub carbide_client_config: CarbideClientConfig,
     pub bmc_mock_certs_dir: Option<PathBuf>,
     pub bmc_registry: BmcMockRegistry,
-    pub api_throttler: ApiThrottler,
     /// These are the firmware versions the server wants us to be on. If not configured for other
     /// firmware, DPU's can mock that they already have this installed. Refreshed in the
     /// background by `spawn_desired_firmware_refresher`.
     pub desired_firmware_versions: std::sync::RwLock<Vec<DesiredFirmwareVersionEntry>>,
-    pub forge_api_client: ForgeApiClient,
+    pub carbide_api_client: CarbideApiClient,
     pub dhcp_client: crate::dhcp_wrapper::DhcpClient,
     pub mac_address_pool: Arc<Mutex<MacAddressPool>>,
+    /// Test-only fixed delay for every scheduled BMC DHCP retry, replacing backoff and jitter.
+    #[cfg(test)]
+    pub(crate) bmc_dhcp_retry_delay: Option<Duration>,
 }
 
 impl MachineATronContext {
     pub fn api_client(&self) -> ApiClient {
-        self.forge_api_client.clone().into()
+        self.carbide_api_client.clone().into()
     }
 }
 
@@ -1078,29 +1124,26 @@ scout_run_interval = "5s"
 "#,
         )
         .expect("test config must parse");
-        let forge_client_config = ForgeClientConfig::new(String::new(), None);
-        let api_config = rpc::forge_tls_client::ApiConfig::new(
+        let carbide_client_config = CarbideClientConfig::new(String::new(), None);
+        let api_config = rpc::carbide_tls_client::ApiConfig::new(
             &app_config.carbide_api_url,
-            &forge_client_config,
+            &carbide_client_config,
         );
-        let forge_api_client = ForgeApiClient::new(&api_config);
-        let api_client: ApiClient = forge_api_client.clone().into();
+        let carbide_api_client = CarbideApiClient::new(&api_config);
+        let api_client: ApiClient = carbide_api_client.clone().into();
         let pool_config =
             bmc_mock::mac_address_pool::PoolConfig::new(MacAddress::new([2, 0, 0, 0, 0, 0]), 24)
                 .expect("test MAC pool must be valid");
         Arc::new(Self {
             app_config,
-            forge_client_config,
+            carbide_client_config,
             bmc_mock_certs_dir: None,
             bmc_registry: BmcMockRegistry::default(),
-            api_throttler: crate::api_throttler::run(
-                tokio::time::interval(Duration::from_secs(2)),
-                api_client.clone(),
-            ),
             desired_firmware_versions: std::sync::RwLock::new(Vec::new()),
-            forge_api_client,
+            carbide_api_client,
             dhcp_client: crate::dhcp_wrapper::DhcpClient::Api(api_client),
             mac_address_pool: Arc::new(Mutex::new(MacAddressPool::new_pool(pool_config))),
+            bmc_dhcp_retry_delay: None,
         })
     }
 }
@@ -1183,6 +1226,86 @@ scout_run_interval = "5s"
     "#,
         )
         .expect("Could not parse config")
+    }
+
+    #[test]
+    fn bmc_renewal_interval_defaults_and_overrides() {
+        check_values(
+            [
+                Check {
+                    scenario: "omitted",
+                    input: None,
+                    expect: Duration::from_secs(900),
+                },
+                Check {
+                    scenario: "explicit default",
+                    input: Some("900s"),
+                    expect: Duration::from_secs(900),
+                },
+                Check {
+                    scenario: "test interval",
+                    input: Some("250ms"),
+                    expect: Duration::from_millis(250),
+                },
+                Check {
+                    scenario: "disabled",
+                    input: Some("0s"),
+                    expect: Duration::ZERO,
+                },
+            ],
+            |value| {
+                let mut config = serde_json::to_value(rack_config()).unwrap();
+                config
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("bmc_dhcp_renewal_interval");
+                if let Some(value) = value {
+                    config["bmc_dhcp_renewal_interval"] = value.into();
+                }
+                let config = serde_json::from_value::<MachineATronConfig>(config).unwrap();
+                config.validate().unwrap();
+                config.bmc_dhcp_renewal_interval
+            },
+        );
+        let mut config = rack_config();
+        config.bmc_dhcp_renewal_interval = Duration::MAX;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rms_retention_defaults_allow_partial_configuration_and_explicit_overrides() {
+        check_values(
+            [
+                Check {
+                    scenario: "no RMS table",
+                    input: None,
+                    expect: 100_000,
+                },
+                Check {
+                    scenario: "partial RMS table",
+                    input: Some("version_string = 'custom'"),
+                    expect: 100_000,
+                },
+                Check {
+                    scenario: "explicit count target",
+                    input: Some("max_terminal_jobs = 17"),
+                    expect: 17,
+                },
+            ],
+            |rms_table| {
+                let mut table = toml::Table::try_from(rack_config()).unwrap();
+                table.remove("rms_mock");
+                if let Some(rms_table) = rms_table {
+                    table.insert(
+                        "rms_mock".to_string(),
+                        toml::Value::Table(toml::from_str(rms_table).unwrap()),
+                    );
+                }
+                let config: MachineATronConfig = table.try_into().unwrap();
+                assert_eq!(config.rms_mock.min_terminal_retention_secs, 3_600);
+                config.rms_mock.max_terminal_jobs
+            },
+        );
     }
 
     #[test]

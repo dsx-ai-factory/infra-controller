@@ -16,13 +16,15 @@
  */
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
+use std::process::Output;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
 use nv_redfish::schema::resource::PowerState;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -31,8 +33,8 @@ use crate::actor::{Actor, ActorCallbacks, ActorMailbox, ActorResult, AlarmId};
 use crate::persistence::PersistenceError;
 use crate::redfish::computer_system::{SingleSystemState, SystemState};
 use crate::{
-    ActionError, BmcState, BootOptionKind, Callbacks, ResourceResetType, VirtualMediaUpdate,
-    validate_power_reset,
+    ActionError, BmcEvent, BmcResetUpdate, BmcState, BootOptionKind, Callbacks, DeviceEffect,
+    ResourceResetType, VirtualMediaUpdate, validate_power_reset,
 };
 
 mod commands;
@@ -53,13 +55,13 @@ const VIRSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Additional grace period for reaping after a kill request, independent of the command deadline.
 const VIRSH_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Per power request, allow one five-second poll delay, a 30-second virsh
+/// attempt and five seconds of cleanup to obtain the first recognized state.
+/// Expiry fails before enqueueing a power command. Backend polling continues.
+const INITIALIZATION_WAIT: Duration = Duration::from_secs(40);
+
 /// Delay after each periodic observation; the actor retains at most one polling alarm.
-// Unit tests exercise polling and recovery without waiting for the production cadence.
-const POWER_POLL_INTERVAL: Duration = if cfg!(test) {
-    Duration::from_millis(20)
-} else {
-    Duration::from_secs(5)
-};
+const POWER_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const PERSISTENCE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
@@ -74,6 +76,7 @@ pub struct LibvirtActor {
     config: Config,
     refresh_pending: Arc<AtomicBool>,
     power_state: Arc<RwLock<PowerObservation>>,
+    initialized: watch::Sender<bool>,
 }
 
 impl LibvirtActor {
@@ -86,6 +89,7 @@ impl LibvirtActor {
             cycling: false,
         }));
         let (actor, mailbox) = Actor::new();
+        let (initialized, initialization) = watch::channel(false);
         (
             LibvirtActor {
                 actor,
@@ -93,19 +97,24 @@ impl LibvirtActor {
                 config,
                 refresh_pending: refresh_pending.clone(),
                 power_state: power_state.clone(),
+                initialized,
             },
             LibvirtCallbacks {
                 mailbox,
                 refresh_pending,
                 power_state,
+                initialized: initialization,
                 _stop: guard,
             },
         )
     }
 
+    /// Loads saved state and runs the supervised backend. The owner retains the
+    /// state Arc for the serving lifetime. Lifecycle publication uses only Weak
+    /// access, so it cannot keep the callbacks and backend alive.
     pub async fn run(
         self,
-        bmc_state: &BmcState<LibvirtCallbacks>,
+        bmc_state: &Arc<BmcState<LibvirtCallbacks>>,
         tasks: &mut JoinSet<()>,
         stop: CancellationToken,
     ) -> eyre::Result<()> {
@@ -121,6 +130,10 @@ impl LibvirtActor {
             config: self.config,
             restore_boot_after_power_on: false,
             system_state: None,
+            bmc_state: Arc::downgrade(bmc_state),
+            last_observed_power: None,
+            boot_pending: None,
+            initialized: self.initialized,
             applied_state: AppliedState::default(),
             refresh_pending: self.refresh_pending,
             power_state: self.power_state,
@@ -149,6 +162,13 @@ pub struct Config {
     pub uri: String,
     pub domain: String,
     pub virtual_media_targets: BTreeMap<String, String>,
+    /// Whether the connection recreates the guest from its persistent definition
+    /// on reboot and reset, as on start. When set, the backend applies the
+    /// effective boot order before a restart and treats a completed restart as a
+    /// boot from the saved configuration, which consumes a one-time boot override.
+    /// Native libvirt keeps the running configuration across a restart; leave this
+    /// unset for it.
+    pub restart_loads_persistent_definition: bool,
 }
 
 /// Backend handle that sends operations to one sequential libvirt actor.
@@ -158,7 +178,11 @@ pub struct Config {
 /// after power commands and refresh notifications, and by polling with a five-second
 /// delay after each attempt. Actor work can delay polling; each virsh attempt has a 30-second
 /// deadline and up to five seconds of cleanup. Failed or unrecognized observations retain the last state.
-/// Power commands return once enqueued; execution failures are logged by the actor.
+/// Power commands wait up to 40 seconds for the first recognized domain observation
+/// before validation, then return once enqueued. Expiry returns an internal error
+/// without enqueueing. Backend exit closes the readiness channel, and the caller
+/// can cancel its wait. A later request can succeed after an observation recovers.
+/// Execution failures are logged by the actor.
 /// Virtual-media operations await execution and publish Redfish contents only on success.
 /// Resets are rejected while a power-cycle command is executing.
 /// Dropping the handle cancels the actor. Cancelling `LibvirtActor::run` during
@@ -168,6 +192,7 @@ pub struct LibvirtCallbacks {
     mailbox: ActorMailbox<LibvirtMessage>,
     refresh_pending: Arc<AtomicBool>,
     power_state: Arc<RwLock<PowerObservation>>,
+    initialized: watch::Receiver<bool>,
     _stop: DropGuard,
 }
 
@@ -181,9 +206,120 @@ enum LibvirtMessage {
         update: VirtualMediaUpdate,
         reply: oneshot::Sender<Result<(), ActionError>>,
     },
+    ResetBmcToDefaults {
+        update: BmcResetUpdate,
+        reply: oneshot::Sender<Result<(), ActionError>>,
+    },
+    Session {
+        reply: oneshot::Sender<LibvirtSession>,
+    },
     Refresh,
     PersistState,
     Stop(oneshot::Sender<Result<(), PersistenceError>>),
+}
+
+/// Exclusive use of the libvirt backend by an embedding application.
+///
+/// While a session is open, the backend's actor runs only the session's requests:
+/// Redfish power commands, media changes, state refreshes and power polling queue
+/// behind it in order. Dropping the session ends it. Keep sessions short and do not
+/// await another backend operation, such as a Redfish request to this BMC, while
+/// holding one: that operation waits for the session to end.
+///
+/// Requests take `&mut self`, so a session has at most one request outstanding.
+/// A request future dropped after its request was sent does not cancel it: the
+/// backend finishes the request and discards the reply. The session's channel
+/// holds one request, so at most one more waits behind a request that is still
+/// running.
+#[derive(Debug)]
+pub struct LibvirtSession {
+    requests: mpsc::Sender<SessionRequest>,
+}
+
+#[derive(Debug)]
+enum SessionRequest {
+    Virsh {
+        arguments: Vec<OsString>,
+        reply: oneshot::Sender<eyre::Result<Output>>,
+    },
+    PowerState {
+        reply: oneshot::Sender<Option<PowerState>>,
+    },
+    Power {
+        reset_type: ResourceResetType,
+        boot_order: SessionBootOrder,
+        reply: oneshot::Sender<Result<(), ActionError>>,
+    },
+}
+
+/// Whether a session's power command applies the BMC's boot order first.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionBootOrder {
+    /// Apply the effective Redfish boot order when the command loads the saved
+    /// definition, as a Redfish `ComputerSystem.Reset` does.
+    Apply,
+    /// Leave the domain's boot configuration as the session prepared it. The
+    /// resulting boot does not use the BMC's boot configuration, so it leaves a
+    /// pending one-time boot override for the next boot that applies it.
+    ///
+    /// Use it only when the session itself prepared the boot configuration. The
+    /// backend cannot tell whether the session changed the saved definition, so a
+    /// session that has not changed it should use [`SessionBootOrder::Apply`]: the
+    /// boot then uses the effective boot order and consumes a one-time override.
+    Keep,
+}
+
+impl LibvirtSession {
+    async fn request<T>(
+        &mut self,
+        request: impl FnOnce(oneshot::Sender<T>) -> SessionRequest,
+    ) -> Result<T, ActionError> {
+        let (reply, response) = oneshot::channel();
+        self.requests.send(request(reply)).await.map_err(|error| {
+            ActionError::Internal(eyre::eyre!("libvirt session closed: {error}"))
+        })?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))
+    }
+
+    /// Runs the configured virsh as `virsh --connect URI ARGUMENTS...` and returns
+    /// its output when it exits successfully. The arguments are passed unchanged;
+    /// they name the domain themselves.
+    pub async fn virsh(
+        &mut self,
+        arguments: impl IntoIterator<Item = impl Into<OsString>>,
+    ) -> Result<Output, ActionError> {
+        let arguments = arguments.into_iter().map(Into::into).collect();
+        self.request(|reply| SessionRequest::Virsh { arguments, reply })
+            .await?
+            .map_err(ActionError::Internal)
+    }
+
+    /// Observes the domain's power state, as the backend's polling does. `None`
+    /// means the state could not be read or was not recognized.
+    pub async fn power_state(&mut self) -> Result<Option<PowerState>, ActionError> {
+        self.request(|reply| SessionRequest::PowerState { reply })
+            .await
+    }
+
+    /// Runs a power command as a Redfish `ComputerSystem.Reset` would, with
+    /// lifecycle publication and, for [`SessionBootOrder::Apply`], boot-order
+    /// handling, and returns its outcome instead of only enqueueing it. Unlike a
+    /// Redfish request, the command is not validated against the published power
+    /// state first.
+    pub async fn power(
+        &mut self,
+        reset_type: ResourceResetType,
+        boot_order: SessionBootOrder,
+    ) -> Result<(), ActionError> {
+        self.request(|reply| SessionRequest::Power {
+            reset_type,
+            boot_order,
+            reply,
+        })
+        .await?
+    }
 }
 
 struct LibvirtBackend {
@@ -192,9 +328,19 @@ struct LibvirtBackend {
     config: Config,
     restore_boot_after_power_on: bool,
     system_state: Option<Weak<SystemState<LibvirtCallbacks>>>,
+    bmc_state: Weak<BmcState<LibvirtCallbacks>>,
+    last_observed_power: Option<PowerState>,
+    boot_pending: Option<BootKind>,
+    initialized: watch::Sender<bool>,
     applied_state: AppliedState,
     refresh_pending: Arc<AtomicBool>,
     power_state: Arc<RwLock<PowerObservation>>,
+}
+
+#[derive(Clone, Copy)]
+enum BootKind {
+    Warm,
+    Cold,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -257,12 +403,9 @@ impl LibvirtBackend {
     }
 
     async fn restore_boot_after_start(&mut self) -> eyre::Result<()> {
-        let restore_boot = std::mem::take(&mut self.restore_boot_after_power_on);
-        if restore_boot {
-            if let Some(system_state) = self.system_state.as_ref().and_then(Weak::upgrade) {
-                system_state.on_boot_completed();
-            }
+        if self.restore_boot_after_power_on {
             self.restore_persistent_boot_order().await?;
+            self.restore_boot_after_power_on = false;
         }
         Ok(())
     }
@@ -426,35 +569,135 @@ impl LibvirtBackend {
         }
     }
 
-    async fn refresh_power_state(&self) {
+    async fn refresh_power_state(&mut self) {
         if let Some(observed) = self.observe_power_state().await {
+            // Synthetic Off during a cycle is not an observed edge. Initial On
+            // seeds state without inventing a boot for a restored BFB task.
+            let boot = if observed == PowerState::On {
+                self.boot_pending.take().or_else(|| {
+                    (self.last_observed_power == Some(PowerState::Off)).then_some(BootKind::Cold)
+                })
+            } else {
+                None
+            };
+            self.last_observed_power = Some(observed);
             self.publish_power_state(observed);
+            self.initialized.send_replace(true);
+            if let Some(boot) = boot {
+                let used_saved_boot_configuration = matches!(boot, BootKind::Cold);
+                if let Some(state) = self.bmc_state.upgrade() {
+                    state.on_event(&BmcEvent::PowerOn);
+                    // Domain On is the standalone backend's boot-completion
+                    // inference, as for one-time boot-policy restoration.
+                    state.on_boot_completed(used_saved_boot_configuration);
+                }
+                // Publish this boot before yielding to XML cleanup. A later
+                // upload admitted during cleanup must wait for its own boot.
+                if used_saved_boot_configuration
+                    && let Err(error) = self.restore_boot_after_start().await
+                {
+                    tracing::error!(domain = %self.config.domain, %error, "could not restore persistent boot order");
+                }
+            }
         }
     }
 
     async fn send_power_command(
         &mut self,
         reset_type: ResourceResetType,
+        boot_order: SessionBootOrder,
     ) -> Result<(), ActionError> {
         use ResourceResetType::*;
-        // Only a cold start loads the saved domain XML. Reboot and reset keep
-        // the running domain's boot configuration and their existing semantics.
-        if matches!(reset_type, On | ForceOn | PowerCycle | FullPowerCycle) {
+        // Natively, only a cold start loads the saved domain XML. Reboot and reset
+        // keep the running domain's boot configuration, unless the connection
+        // recreates the guest from its persistent definition on restart too.
+        let restart_is_cold = self.config.restart_loads_persistent_definition;
+        if boot_order == SessionBootOrder::Apply
+            && (matches!(reset_type, On | ForceOn | PowerCycle | FullPowerCycle)
+                || (restart_is_cold && matches!(reset_type, GracefulRestart | ForceRestart)))
+        {
             self.reapply_effective_boot_order().await?;
         }
         for command in VirshCommand::power(reset_type)? {
-            let starts_domain = matches!(command, VirshCommand::Start);
+            let boot = match command {
+                // A Keep command boots the configuration its session prepared,
+                // not the BMC's, so it does not consume a one-time override.
+                VirshCommand::Start | VirshCommand::Reset | VirshCommand::Reboot
+                    if boot_order == SessionBootOrder::Keep =>
+                {
+                    Some(BootKind::Warm)
+                }
+                VirshCommand::Start => Some(BootKind::Cold),
+                VirshCommand::Reset | VirshCommand::Reboot if restart_is_cold => {
+                    Some(BootKind::Cold)
+                }
+                VirshCommand::Reset | VirshCommand::Reboot => Some(BootKind::Warm),
+                _ => None,
+            };
             self.virsh()
                 .execute(command)
                 .await
                 .map_err(ActionError::Internal)?;
-            if starts_domain {
-                self.restore_boot_after_start()
-                    .await
-                    .map_err(ActionError::Internal)?;
+            // The boot happened even if later boot-policy cleanup fails.
+            // Only confirmed On consumes this marker and publishes lifecycle.
+            if boot.is_some() {
+                self.boot_pending = boot;
             }
         }
         Ok(())
+    }
+
+    async fn execute_power_command(
+        &mut self,
+        reset_type: ResourceResetType,
+        boot_order: SessionBootOrder,
+    ) -> Result<(), ActionError> {
+        if matches!(reset_type, ResourceResetType::PowerCycle) {
+            self.power_state
+                .write()
+                .expect("power state lock poisoned")
+                .cycling = true;
+            self.publish_power_state(PowerState::Off);
+        }
+        let result = self.send_power_command(reset_type, boot_order).await;
+        match &result {
+            Ok(()) => {
+                if let Some(state) = self.bmc_state.upgrade() {
+                    state.record_power_command_completed(reset_type);
+                }
+            }
+            Err(error) => {
+                tracing::error!(domain = %self.config.domain, ?reset_type, %error, "libvirt power command failed");
+            }
+        }
+        self.refresh_power_state().await;
+        self.power_state
+            .write()
+            .expect("power state lock poisoned")
+            .cycling = false;
+        result
+    }
+
+    async fn session_request(&mut self, request: SessionRequest) {
+        match request {
+            SessionRequest::Virsh { arguments, reply } => {
+                reply
+                    .send(self.virsh().execute_arguments(&arguments).await)
+                    .ok();
+            }
+            SessionRequest::PowerState { reply } => {
+                reply.send(self.observe_power_state().await).ok();
+            }
+            SessionRequest::Power {
+                reset_type,
+                boot_order,
+                reply,
+            } => {
+                reply
+                    .send(self.execute_power_command(reset_type, boot_order).await)
+                    .ok();
+            }
+        }
     }
 
     async fn refresh(&mut self) {
@@ -502,6 +745,16 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
                 reply.send(result).ok();
                 ActorResult::Noop
             }
+            LibvirtMessage::ResetBmcToDefaults { update, reply } => {
+                // The reset changes only BMC state, which is saved with the domain's. A
+                // libvirt-backed BMC serves no DHCP, so there is no recovery to admit.
+                let result = update.commit().await.map(drop);
+                if result.is_ok() {
+                    self.persist(mailbox);
+                }
+                reply.send(result).ok();
+                ActorResult::Noop
+            }
             LibvirtMessage::Stop(reply) => {
                 reply.send(self.save_state()).ok();
                 ActorResult::Stop
@@ -523,21 +776,22 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
                 ActorResult::Noop
             }
             LibvirtMessage::SendPowerCommand { reset_type } => {
-                if matches!(reset_type, ResourceResetType::PowerCycle) {
-                    self.power_state
-                        .write()
-                        .expect("power state lock poisoned")
-                        .cycling = true;
-                    self.publish_power_state(PowerState::Off);
-                }
-                if let Err(error) = self.send_power_command(reset_type).await {
-                    tracing::error!(domain = %self.config.domain, ?reset_type, %error, "libvirt power command failed");
+                // Failures are logged; a Redfish caller observes the published state.
+                self.execute_power_command(reset_type, SessionBootOrder::Apply)
+                    .await
+                    .ok();
+                ActorResult::Noop
+            }
+            LibvirtMessage::Session { reply } => {
+                // One queued request: the session's `&mut self` requests allow at
+                // most one outstanding, plus one sent after a cancelled request.
+                let (requests, mut received) = mpsc::channel(1);
+                if reply.send(LibvirtSession { requests }).is_ok() {
+                    while let Some(request) = received.recv().await {
+                        self.session_request(request).await;
+                    }
                 }
                 self.refresh_power_state().await;
-                self.power_state
-                    .write()
-                    .expect("power state lock poisoned")
-                    .cycling = false;
                 ActorResult::Noop
             }
             LibvirtMessage::Refresh => {
@@ -553,6 +807,17 @@ impl ActorCallbacks<LibvirtMessage> for LibvirtBackend {
 }
 
 impl LibvirtCallbacks {
+    /// Opens a [`LibvirtSession`] once the backend's earlier operations have finished.
+    pub async fn session(&self) -> Result<LibvirtSession, ActionError> {
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(LibvirtMessage::Session { reply })
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))
+    }
+
     /// Flushes the latest BMC state and stops the actor after the application stops HTTP requests.
     /// The owner must still join its supervised task. A failed final save is returned to the owner.
     pub async fn finish(&self) -> eyre::Result<()> {
@@ -579,6 +844,21 @@ impl Callbacks for LibvirtCallbacks {
         reset_type: ResourceResetType,
     ) -> Result<(), ActionError> {
         {
+            let mut initialized = self.initialized.clone();
+            drop(
+                tokio::time::timeout(INITIALIZATION_WAIT, initialized.wait_for(|ready| *ready))
+                    .await
+                    .map_err(|error| {
+                        ActionError::Internal(
+                            eyre::Report::new(error).wrap_err(
+                                "timed out waiting for the first libvirt power observation",
+                            ),
+                        )
+                    })?
+                    .map_err(|error| ActionError::Internal(error.into()))?,
+            );
+        }
+        {
             let observation = self.power_state.read().expect("power state lock poisoned");
             if observation.cycling {
                 return Err(ActionError::BadRequest(eyre::eyre!(
@@ -592,6 +872,22 @@ impl Callbacks for LibvirtCallbacks {
             .map_err(|err| ActionError::Internal(err.into()))
     }
 
+    /// A factory reset changes only BMC state; other effects are not modeled.
+    async fn device_effect(&self, effect: DeviceEffect) -> Result<(), ActionError> {
+        let DeviceEffect::ResetBmcToDefaults(update) = effect else {
+            return Err(ActionError::BadRequest(eyre::eyre!(
+                "bmc-mock: backend does not support device effect {effect:?}"
+            )));
+        };
+        let (reply, response) = oneshot::channel();
+        self.mailbox
+            .send(LibvirtMessage::ResetBmcToDefaults { update, reply })
+            .map_err(|error| ActionError::Internal(error.into()))?;
+        response
+            .await
+            .map_err(|error| ActionError::Internal(error.into()))?
+    }
+
     fn state_refresh_indication(&self) {
         if !self.refresh_pending.swap(true, Ordering::SeqCst)
             && let Err(error) = self.mailbox.send(LibvirtMessage::Refresh)
@@ -601,3 +897,9 @@ impl Callbacks for LibvirtCallbacks {
         }
     }
 }
+
+// Do not generate executable stub scripts in tests. A parallel test can fork while
+// another thread holds a script open for writing; inherited descriptors can race
+// with exec and cause ETXTBSY (Text file busy) or other unexpected failures.
+#[cfg(test)]
+mod tests;

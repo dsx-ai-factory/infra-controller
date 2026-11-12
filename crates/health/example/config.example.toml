@@ -28,6 +28,10 @@ bmc_proxy_url = "http://proxy.example.com:8080"
 
 endpoint_discovery_interval = "5m"
 
+# Budget for draining collectors on SIGTERM/SIGINT; keep below the pod's
+# terminationGracePeriodSeconds. Must be greater than zero. Default: 20s.
+shutdown_timeout = "20s"
+
 # ==============================================================================
 # Endpoint Sources: Where to discover BMC endpoints from
 # ==============================================================================
@@ -108,6 +112,10 @@ include_diagnostics = false
 
 [sinks.prometheus]
 enabled = true
+# Offer negotiated gzip for /telemetry. Both settings require a restart.
+gzip = false
+# Accepted range: 1 through 9. Validated for enabled sinks even when gzip is false.
+gzip_level = 1
 
 [sinks.log_file]
 enabled = false
@@ -287,8 +295,9 @@ fetch_interval = "2m"
 [collectors.firmware]
 firmware_refresh_interval = "30m"
 
-# Power shelf manager (PMC) status: `manager_status` and `manager_last_reset`.
-# Runs for power shelf endpoints only and is enabled by default with a 5m poll.
+# Redfish Manager status: `manager_status` and `manager_last_reset`.
+# Runs for power-shelf endpoints by default and for generic Redfish endpoints
+# when [processors.resource_status] is enabled. The default poll is 5m.
 [collectors.manager]
 poll_interval = "2m"
 
@@ -353,6 +362,18 @@ exclude_services = ["Journal"]
 [collectors.logs.sse]
 initial_backoff = "1s"
 max_backoff = "30s"
+# Deadline for deleting the BMC subscription a closed stream opened, and for each
+# cap diagnosis: listing the BMC's subscriptions plus any reap_on_cap sweep.
+# close_timeout plus 5s must be less than shutdown_timeout. Must be greater than
+# zero. Default: 5s.
+close_timeout = "5s"
+# Delete every SSE destination on a BMC at its cap. Enable only where hw-health
+# is the BMC's sole SSE consumer. Has no effect on BMCs that drop a capped SSE
+# open without an HTTP response (LiteOn). Each BMC is swept at most once per
+# 30 minutes, and recovery does not reset that interval. The DELETEs run one at a
+# time within close_timeout, so a sweep can stop before reaching every
+# destination; the rest wait for the next sweep. Default: false.
+reap_on_cap = false
 
 # Required when mode = "periodic"; ignored when mode = "sse".
 [collectors.logs.periodic]
@@ -639,6 +660,11 @@ minimum_alerts_per_report = 1
 
 [processors.rack_leak]
 leaking_tray_threshold = 2
+
+# Project Status from resources fetched by entity discovery and the enabled
+# Manager and Firmware collectors into structured OTLP log records.
+[processors.resource_status]
+enabled = true
 
 # ==============================================================================
 # Metrics

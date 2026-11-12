@@ -21,6 +21,7 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
+use bmc_drivers::{Drivers, Rule, Rules};
 use bmc_vendor::BMCVendor;
 use carbide_authn::config::{AllowedCertCriteria, TrustConfig};
 use carbide_dpf::types::{DpfProxyDetails, DpuDeploymentType};
@@ -38,6 +39,7 @@ use carbide_machine_controller::config::{
     TimePeriod,
 };
 use carbide_network::ip::prefix::{IpNet, aggregate};
+use carbide_network::virtualization::RouteTargetContributions;
 use carbide_nvlink_manager::config::NvLinkConfig;
 use carbide_preingestion_manager::PreingestionManagerConfig;
 use carbide_rack_controller::config::{RackValidationConfig, RmsConfig};
@@ -71,7 +73,7 @@ use model::network_security_group::{
 use model::network_segment::NetworkDefinition;
 use model::resource_pool::define::ResourcePoolConfig;
 use model::tenant::identity_config::SigningAlgorithm;
-pub use model::vpc::{PrefixFilterPolicyEntry, RouteTargetConfig};
+pub use model::vpc::{PrefixFilterPolicyEntry, PrefixRouteTargetConfig, RouteTargetConfig};
 use model::vpc::{RouteTargetConfigError, VpcConfig};
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -204,6 +206,15 @@ pub struct CarbideConfig {
         serialize_with = "as_std_duration"
     )]
     pub database_startup_retry_timeout: std::time::Duration,
+
+    /// Permits of the admission gate in front of the admin-segment advisory
+    /// locks: how many flows (DHCP discovery, machine discovery, Site
+    /// Explorer machine creation) may hold an open transaction while waiting
+    /// on those locks. Must be 1 to 256, and startup rejects other values. When
+    /// unset, the `ADMIN_LOCK_ADMISSION` environment variable applies, then
+    /// 16. Read at startup. A change needs a restart.
+    #[serde(default)]
+    pub admin_lock_admission_permits: Option<usize>,
 
     /// Bounds the number of API requests that may execute or wait for
     /// execution. The limits are shared by gRPC and admin HTTP traffic.
@@ -479,6 +490,7 @@ pub struct CarbideConfig {
     pub max_concurrent_machine_updates: Option<i32>,
 
     /// The interval at which the machine update manager checks for machine updates in seconds.
+    /// Unset means [`DEFAULT_MACHINE_UPDATE_RUN_INTERVAL_SECS`].
     pub machine_update_run_interval: Option<u64>,
 
     /// How long a retained boot interface pair (see the
@@ -497,6 +509,16 @@ pub struct CarbideConfig {
     /// SiteExplorer related configuration
     #[serde(default)]
     pub site_explorer: SiteExplorerConfig,
+
+    /// BMC driver selection rules layered over the compiled ones. Each
+    /// outranks every compiled rule, so a site can fix hardware that
+    /// misbehaves before a release adds a rule for it.
+    #[serde(default)]
+    pub bmc_driver_rules: Vec<Rule>,
+
+    /// Which client BMC operations moved to the driver system run through.
+    #[serde(default)]
+    pub bmc_backend: BmcBackend,
 
     /// Deprecated compatibility key. This setting no longer affects runtime
     /// behavior; keep accepting it temporarily so existing site files can be
@@ -633,7 +655,8 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub machine_updater: MachineUpdater,
 
-    /// Maximum number of IDs accepted by `find_*_by_ids` APIs and
+    /// Maximum number of IDs accepted by `find_*_by_ids` APIs,
+    /// routing profile names accepted by `FindRoutingProfilesByNames`, and
     /// card selections accepted by `SetMachineNicFirmwareConfig`.
     /// Default is 100.
     #[serde(default = "default_max_find_by_ids")]
@@ -1226,6 +1249,18 @@ pub struct CredentialFileSourceConfig {
     pub poll_interval: std::time::Duration,
 }
 
+/// The client BMC operations run through.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BmcBackend {
+    /// libredfish clients.
+    #[default]
+    Libredfish,
+    /// The drivers selected for each BMC by `bmc_driver_rules` and the
+    /// compiled rules.
+    Drivers,
+}
+
 /// Read precedence and mutation policy for site UFM credentials.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1411,6 +1446,14 @@ impl Default for TracingConfig {
 }
 
 impl CarbideConfig {
+    /// The compiled BMC driver rules with `bmc_driver_rules` layered over
+    /// them, checked against the compiled drivers.
+    pub fn driver_rules(&self) -> eyre::Result<Rules> {
+        let rules = bmc_drivers::rules_with_overrides(self.bmc_driver_rules.clone())?;
+        Drivers::validate_rules(&rules)?;
+        Ok(rules)
+    }
+
     /// Returns the configured FNN site-fabric null routes, including the legacy fallback.
     pub fn effective_site_fabric_null_routes(&self) -> &[IpNetwork] {
         self.site_fabric_null_routes
@@ -2023,16 +2066,15 @@ pub struct DpfConfig {
     /// Whether carbide automatically releases DPF maintenance holds for changed
     /// DPUDeployment-owned DPUService revisions whose upgrade policy enables NodeEffect.
     ///
-    /// This selects *who* opens an existing gate; it does not add one. NICo sets
-    /// `upgradePolicy.applyNodeEffect=false` for the DPU agent, DHCP server, FMDS, and OTel
-    /// Collector, so this setting does not gate those revisions. HBN, DTS, and extra services use
-    /// the gated default. Direct, detached DPUService objects do not use this setting.
+    /// This selects *who* opens an existing gate; it does not add one. NICo services,
+    /// HBN, DTS, and extra services use the gated default. Direct, detached DPUService
+    /// objects do not use this setting.
     ///
-    /// On by default. Setting it to false does not resume unchecked rollout: it
-    /// means the held DPUs wait for an operator to release them deliberately,
-    /// rather than for carbide to do it on the host's next idle sweep. Hosts
-    /// still awaiting reprovisioning, and hosts carrying a live tenant instance,
-    /// keep their hold either way.
+    /// Enabled by default. When disabled, service-update holds wait for deliberate
+    /// operator release. Provisioning still releases its own NodeEffect holds and
+    /// clears pending service-sync markers regardless of this setting. Automatic
+    /// service synchronization does not release holds for hosts awaiting
+    /// reprovisioning or carrying a live tenant instance.
     #[serde(default = "default_to_true")]
     pub dpu_service_sync_enabled: bool,
     /// Optional override for the Kubernetes `imagePullSecrets` entry used to pull service
@@ -2200,7 +2242,7 @@ impl DpfConfig {
 }
 
 fn default_dpf_bfb_url() -> String {
-    "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.4.1-12_26.04_ubuntu-24.04_64k_prod.bfb".to_string()
+    "https://content.mellanox.com/BlueField/BFBs/Ubuntu24.04/bf-bundle-3.5.0-89_26.07_ubuntu-24.04_64k_prod.bfb".to_string()
 }
 
 fn default_dpf_deployment_name() -> String {
@@ -3244,6 +3286,11 @@ pub struct FnnRoutingProfileConfig {
     #[serde(default)]
     pub route_targets_on_exports: Option<Vec<RouteTargetConfig>>,
 
+    /// Adds targets to already eligible type-5 exports from every matching prefix rule.
+    /// Omission means no conditional exports; a VPC's present list replaces this list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_targets_on_exports_by_prefix: Option<Vec<PrefixRouteTargetConfig>>,
+
     /// Is this an internal or external tenant/VPC profile
     #[serde(default)]
     pub internal: Option<bool>,
@@ -3325,6 +3372,7 @@ impl FnnRoutingProfileConfig {
             tenant_prefix_overlap_eligible: _,
             route_target_imports,
             route_targets_on_exports,
+            route_targets_on_exports_by_prefix,
             // External profiles cannot participate in exact prefix reuse.
             internal,
             leak_default_route_from_underlay,
@@ -3336,9 +3384,18 @@ impl FnnRoutingProfileConfig {
             access_tier: _,
         } = self;
 
+        let contributions = RouteTargetContributions {
+            profile_imports: route_target_imports.as_deref().unwrap_or_default(),
+            profile_exports: route_targets_on_exports.as_deref().unwrap_or_default(),
+            common_export: None,
+            site_imports: &[],
+        };
+
         *internal == Some(true)
-            && route_target_imports.as_ref().is_none_or(Vec::is_empty)
-            && route_targets_on_exports.as_ref().is_none_or(Vec::is_empty)
+            && !contributions.has_additional_targets()
+            && route_targets_on_exports_by_prefix
+                .as_ref()
+                .is_none_or(Vec::is_empty)
             && !leak_default_route_from_underlay.unwrap_or_default()
             && !leak_tenant_host_routes_to_underlay.unwrap_or_default()
             && !tenant_leak_communities_accepted.unwrap_or_default()
@@ -3352,26 +3409,41 @@ impl FnnRoutingProfileConfig {
 impl FnnConfig {
     /// Validates global and configured routing-profile targets before the API starts serving.
     pub(crate) fn validate_route_targets(&self) -> eyre::Result<()> {
-        let validate_profile =
-            |path: &str, profile: &FnnRoutingProfileConfig| -> eyre::Result<()> {
-                for (field, targets) in [
-                    (
-                        "route_target_imports",
-                        profile.route_target_imports.as_deref(),
-                    ),
-                    (
-                        "route_targets_on_exports",
-                        profile.route_targets_on_exports.as_deref(),
-                    ),
-                ] {
-                    for (index, target) in targets.unwrap_or_default().iter().enumerate() {
-                        target
-                            .validate()
-                            .wrap_err_with(|| format!("{path}.{field}[{index}] is invalid"))?;
-                    }
+        let validate_profile = |path: &str,
+                                profile: &FnnRoutingProfileConfig|
+         -> eyre::Result<()> {
+            for (field, targets) in [
+                (
+                    "route_target_imports",
+                    profile.route_target_imports.as_deref(),
+                ),
+                (
+                    "route_targets_on_exports",
+                    profile.route_targets_on_exports.as_deref(),
+                ),
+            ] {
+                for (index, target) in targets.unwrap_or_default().iter().enumerate() {
+                    target
+                        .validate()
+                        .wrap_err_with(|| format!("{path}.{field}[{index}] is invalid"))?;
                 }
-                Ok(())
-            };
+            }
+            let entries = profile
+                .route_targets_on_exports_by_prefix
+                .as_deref()
+                .unwrap_or_default();
+            PrefixRouteTargetConfig::validate_entries(entries).wrap_err_with(|| {
+                format!("{path}.route_targets_on_exports_by_prefix is invalid")
+            })?;
+            for (index, entry) in entries.iter().enumerate() {
+                for (target_index, target) in entry.route_targets.iter().enumerate() {
+                    target.validate().wrap_err_with(|| format!(
+                            "{path}.route_targets_on_exports_by_prefix[{index}].route_targets[{target_index}] is invalid"
+                        ))?;
+                }
+            }
+            Ok(())
+        };
 
         // Global targets have no VPC context and therefore accept literals only.
         if let Some(target) = &self.common_internal_route_target {
@@ -3420,6 +3492,10 @@ impl FnnConfig {
         };
 
         Ok(Cow::Owned(FnnRoutingProfileConfig {
+            route_targets_on_exports_by_prefix: overrides
+                .route_targets_on_exports_by_prefix
+                .clone()
+                .or_else(|| base_profile.route_targets_on_exports_by_prefix.clone()),
             route_target_imports: overrides
                 .route_target_imports
                 .clone()
@@ -3455,10 +3531,12 @@ impl FnnConfig {
 
 impl FnnRoutingProfileConfig {
     /// Resolves route targets against one VPC while constructing the concrete DPU routing profile.
-    pub(crate) fn to_rpc(
-        &self,
-        vpc_vni: Option<u32>,
-    ) -> Result<rpc::forge::RoutingProfile, RouteTargetConfigError> {
+    pub(crate) fn to_rpc(&self, vpc_vni: Option<u32>) -> eyre::Result<rpc::forge::RoutingProfile> {
+        let conditional_exports = self
+            .route_targets_on_exports_by_prefix
+            .as_deref()
+            .unwrap_or_default();
+        PrefixRouteTargetConfig::validate_entries(conditional_exports)?;
         let resolve_route_targets = |targets: Option<&[RouteTargetConfig]>| {
             targets
                 .unwrap_or_default()
@@ -3468,6 +3546,19 @@ impl FnnRoutingProfileConfig {
         };
 
         Ok(rpc::forge::RoutingProfile {
+            route_targets_on_exports_by_prefix: conditional_exports
+                .iter()
+                .map(|entry| {
+                    // Resolve nested targets with the same VPC context as unconditional targets.
+                    Ok(rpc::forge::PrefixRouteTarget {
+                        prefix: entry.prefix.trunc().to_string(),
+                        match_type: rpc::forge::ExportPrefixMatchType::from(entry.match_type)
+                            as i32,
+                        max_prefix_length: entry.max_prefix_length,
+                        route_targets: resolve_route_targets(Some(&entry.route_targets))?,
+                    })
+                })
+                .collect::<Result<_, RouteTargetConfigError>>()?,
             tenant_leak_communities_accepted: self
                 .tenant_leak_communities_accepted
                 .unwrap_or_default(),
@@ -3506,9 +3597,10 @@ impl FnnRoutingProfileConfig {
     pub(crate) fn to_effective_rpc(
         &self,
         vpc_vni: Option<u32>,
-    ) -> Result<rpc::forge::VpcEffectiveRoutingProfile, RouteTargetConfigError> {
+    ) -> eyre::Result<rpc::forge::VpcEffectiveRoutingProfile> {
         let routing_profile = self.to_rpc(vpc_vni)?;
         Ok(rpc::forge::VpcEffectiveRoutingProfile {
+            route_targets_on_exports_by_prefix: routing_profile.route_targets_on_exports_by_prefix,
             route_target_imports: routing_profile.route_target_imports,
             route_targets_on_exports: routing_profile.route_targets_on_exports,
             leak_default_route_from_underlay: routing_profile.leak_default_route_from_underlay,
@@ -3529,6 +3621,11 @@ impl FnnRoutingProfileConfig {
 pub struct AdminFnnConfig {
     /// Whether FNN should be applied to the admin network as well.
     pub enabled: bool,
+
+    /// Routes the admin host link without an L2VNI or VLAN SVI when admin FNN is enabled.
+    /// Defaults to false and preserves existing host addresses and subnet masks.
+    #[serde(default)]
+    pub l3_only: bool,
 
     /// VNI for the admin network VPC. When enabled, will create a VPC with this VNI
     /// and attach it to the admin network segment. Panics if a conflicting VPC/segment exists.
@@ -3657,6 +3754,20 @@ impl CarbideConfig {
         Ok(())
     }
 
+    /// Rejects an `admin_lock_admission_permits` value outside the gate's
+    /// accepted range before it becomes the active permit count.
+    pub(crate) fn validate_admin_lock_admission_permits(&self) -> eyre::Result<()> {
+        let range = db::machine_interface::ADMIN_LOCK_ADMISSION_PERMIT_RANGE;
+        match self.admin_lock_admission_permits {
+            Some(permits) if !range.contains(&permits) => Err(eyre::eyre!(
+                "admin_lock_admission_permits must be {} to {}, got {permits}",
+                range.start(),
+                range.end()
+            )),
+            _ => Ok(()),
+        }
+    }
+
     pub(crate) fn validate_service_vpc_slots(&self) -> eyre::Result<()> {
         // Reject unrealizable capacity before startup creates DPF resources or launches
         // controllers.
@@ -3780,6 +3891,12 @@ impl CarbideConfig {
             absolute: self.machine_updater.max_concurrent_machine_updates_absolute,
             percent: self.machine_updater.max_concurrent_machine_updates_percent,
         }
+    }
+
+    /// Seconds between machine update manager passes, as the manager applies it.
+    pub fn machine_update_run_interval_secs(&self) -> u64 {
+        self.machine_update_run_interval
+            .unwrap_or(DEFAULT_MACHINE_UPDATE_RUN_INTERVAL_SECS)
     }
 
     pub fn is_ewethers_enabled(&self) -> bool {
@@ -4106,12 +4223,52 @@ impl SwitchStateControllerConfig {
 }
 
 /// SpdmStateController related config
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
 pub struct SpdmStateControllerConfig {
     /// Common state controller configs
     #[serde(default = "StateControllerConfig::default")]
     pub controller: StateControllerConfig,
+    /// Maximum wait from the persisted start of cancellation cleanup before releasing an
+    /// evidence collection lock without BMC confirmation. Accepts positive
+    /// durations up to five minutes (e.g. "30s", "5m"); defaults to "2m".
+    /// Covers operator failure, waivers, and automatic recovery.
+    /// The first cleanup start is persisted independently of the latest operator request.
+    /// Repeating or switching targets cannot extend cleanup already in progress.
+    /// Requires an API restart; controller retries do not reset the deadline.
+    #[serde(
+        deserialize_with = "SpdmStateControllerConfig::deserialize_cancellation_timeout",
+        serialize_with = "as_duration"
+    )]
+    pub cancellation_timeout: chrono::Duration,
+}
+
+impl SpdmStateControllerConfig {
+    // Bound how long an unresponsive BMC can hold a job's collection lock during cleanup.
+    const MAX_CANCELLATION_TIMEOUT: Duration = Duration::minutes(5);
+
+    fn deserialize_cancellation_timeout<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let timeout = deserialize_duration_chrono(deserializer)?;
+        if timeout <= Duration::zero() || timeout > Self::MAX_CANCELLATION_TIMEOUT {
+            return Err(serde::de::Error::custom(
+                "spdm_state_controller.cancellation_timeout must be greater than 0s and at most 5m",
+            ));
+        }
+        Ok(timeout)
+    }
+}
+
+impl Default for SpdmStateControllerConfig {
+    fn default() -> Self {
+        // Preserve the cancellation grace period when the section or field is omitted.
+        Self {
+            controller: StateControllerConfig::default(),
+            cancellation_timeout: Duration::minutes(2),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -4374,6 +4531,11 @@ pub struct DpuConfig {
     #[serde(default)]
     pub max_active_service_vpc_interfaces_per_dpu: u32,
 
+    /// Allows a tenant host interface and a service interface to use the same VPC (default false).
+    /// Existing overlapping bindings remain valid when this is false, but new overlap is rejected.
+    #[serde(default)]
+    pub allow_service_vpc_tenant_overlap: bool,
+
     /// Additional SF capacity that is not assigned to an HBN interface.
     #[serde(default)]
     pub additional_managed_sf: u32,
@@ -4430,6 +4592,8 @@ impl<'de> Deserialize<'de> for DpuConfig {
             #[serde(default)]
             max_active_service_vpc_interfaces_per_dpu: Option<u32>,
             #[serde(default)]
+            allow_service_vpc_tenant_overlap: Option<bool>,
+            #[serde(default)]
             additional_managed_sf: Option<u32>,
             #[serde(default)]
             restart_ovs_on_use_admin_network_change: Option<bool>,
@@ -4468,6 +4632,9 @@ impl<'de> Deserialize<'de> for DpuConfig {
             max_active_service_vpc_interfaces_per_dpu: partial
                 .max_active_service_vpc_interfaces_per_dpu
                 .unwrap_or(default.max_active_service_vpc_interfaces_per_dpu),
+            allow_service_vpc_tenant_overlap: partial
+                .allow_service_vpc_tenant_overlap
+                .unwrap_or(default.allow_service_vpc_tenant_overlap),
             additional_managed_sf: partial
                 .additional_managed_sf
                 .unwrap_or(default.additional_managed_sf),
@@ -4603,6 +4770,7 @@ impl Default for DpuConfig {
             num_of_vfs: DEFAULT_DPU_NUM_OF_VFS,
             service_vpc_slot_count: 0,
             max_active_service_vpc_interfaces_per_dpu: 0,
+            allow_service_vpc_tenant_overlap: false,
             additional_managed_sf: 0,
             restart_ovs_on_use_admin_network_change: false,
         }
@@ -4704,6 +4872,9 @@ pub struct MachineUpdater {
     /// too many machines from being put into maintenance at any given time.  If both values are given, the lesser will be used.
     pub max_concurrent_machine_updates_percent: Option<i32>,
 }
+
+/// Seconds between machine update manager passes when `machine_update_run_interval` is unset.
+pub const DEFAULT_MACHINE_UPDATE_RUN_INTERVAL_SECS: u64 = 300;
 
 pub fn default_max_find_by_ids() -> u32 {
     100
@@ -4846,6 +5017,16 @@ impl From<VpcIsolationBehaviorType> for rpc::forge::VpcIsolationBehaviorType {
 #[allow(deprecated)] // nvue_enabled proto field is deprecated but still set for backwards compat
 impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
     fn from(value: CarbideConfig) -> Self {
+        let machine_update_policy = Some(rpc::forge::MachineUpdatePolicy {
+            effective_run_interval_seconds: value.machine_update_run_interval_secs(),
+            requires_manual_upgrade: value.firmware_global.requires_manual_upgrade,
+            max_concurrent_updates_absolute: value
+                .machine_updater
+                .max_concurrent_machine_updates_absolute,
+            max_concurrent_updates_percent: value
+                .machine_updater
+                .max_concurrent_machine_updates_percent,
+        });
         let site_fabric_null_routes = Some(rpc::common::StringList {
             items: value
                 .effective_site_fabric_null_routes()
@@ -5001,6 +5182,7 @@ impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
                     .as_ref()
                     .map_or(NvLinkConfig::default().enabled, |config| config.enabled),
             ),
+            machine_update_policy,
         }
     }
 }
@@ -5696,41 +5878,89 @@ path = "credentials.yaml"
         );
     }
 
+    /// Verifies omitted L3-only configuration parses as false and explicit true is retained,
+    /// so existing site configuration cannot opt into routed admin during deserialization.
+    #[test]
+    fn admin_fnn_l3_only_requires_explicit_opt_in() {
+        // Parse the attachment choice while retaining the required admin FNN enablement.
+        scenarios!(run = |source| {
+            toml::from_str::<AdminFnnConfig>(source).map(|config| config.l3_only).map_err(drop)
+        };
+            "existing site configuration" {
+                // Omission preserves the shared admin segment after an upgrade.
+                "enabled = true" => Yields(false),
+            }
+            "routed admin opt-in" {
+                // Explicit opt-in must survive parsing so Core can select the routed attachment.
+                "enabled = true\nl3_only = true" => Yields(true),
+            }
+        );
+    }
+
+    /// Verifies admission checks the resolved profile: configured targets prevent
+    /// prefix reuse, while an explicit empty override clears inherited targets.
     #[test]
     fn resolved_profile_overlap_eligibility_includes_vpc_overrides() {
-        let fnn = FnnConfig {
-            admin_vpc: None,
-            common_internal_route_target: None,
-            additional_route_target_imports: vec![],
-            routing_profiles: HashMap::from([(
-                "BASE".to_string(),
-                FnnRoutingProfileConfig {
-                    tenant_prefix_overlap_eligible: true,
-                    internal: Some(true),
-                    ..Default::default()
-                },
-            )]),
-            use_vpc_vrf_loopback: false,
+        let base = FnnRoutingProfileConfig {
+            tenant_prefix_overlap_eligible: true,
+            internal: Some(true),
+            ..Default::default()
         };
-        assert!(
-            fnn.routing_profiles["BASE"].is_eligible_for_tenant_prefix_overlap(),
-            "base profile should be eligible before VPC overrides"
-        );
-
-        let vpc = vpc_config(
-            Some("BASE"),
-            Some(VpcRoutingProfileOverrides {
-                leak_default_route_from_underlay: Some(true),
-                ..Default::default()
-            }),
-        );
-        let resolved = fnn
-            .resolve_vpc_routing_profile(&vpc)
-            .expect("base profile must resolve");
-
-        assert!(
-            !resolved.is_eligible_for_tenant_prefix_overlap(),
-            "resolved VPC leak must make the profile ineligible"
+        let target = RouteTargetConfig {
+            asn: 65000,
+            vni: Some(100),
+            vni_self: false,
+        };
+        value_scenarios!(
+            run = |(profile, overrides)| {
+                let fnn = FnnConfig {
+                    admin_vpc: None,
+                    common_internal_route_target: None,
+                    additional_route_target_imports: vec![],
+                    routing_profiles: HashMap::from([("BASE".to_string(), profile)]),
+                    use_vpc_vrf_loopback: false,
+                };
+                fnn.resolve_vpc_routing_profile(&vpc_config(Some("BASE"), overrides))
+                    .expect("base profile must resolve")
+                    .is_eligible_for_tenant_prefix_overlap()
+            };
+            "no additions" {
+                // A profile with no route leaks is the eligible positive control.
+                (base.clone(), None) => true,
+            }
+            "inherited imports" {
+                // Omitted overrides retain the import that makes reuse unsafe.
+                (FnnRoutingProfileConfig {
+                    route_target_imports: Some(vec![target.clone()]),
+                    ..base.clone()
+                }, None) => false,
+            }
+            "inherited exports" {
+                // Export tagging alone also prevents isolated prefix reuse.
+                (FnnRoutingProfileConfig {
+                    route_targets_on_exports: Some(vec![target.clone()]),
+                    ..base.clone()
+                }, None) => false,
+            }
+            "cleared additions" {
+                // Explicit empty lists remove both inherited contributions.
+                (FnnRoutingProfileConfig {
+                    route_target_imports: Some(vec![target.clone()]),
+                    route_targets_on_exports: Some(vec![target]),
+                    ..base.clone()
+                }, Some(VpcRoutingProfileOverrides {
+                    route_target_imports: Some(vec![]),
+                    route_targets_on_exports: Some(vec![]),
+                    ..Default::default()
+                })) => true,
+            }
+            "VPC leak override" {
+                // Resolving a leak override must still reject an otherwise safe base.
+                (base, Some(VpcRoutingProfileOverrides {
+                    leak_default_route_from_underlay: Some(true),
+                    ..Default::default()
+                })) => false,
+            }
         );
     }
 
@@ -5745,6 +5975,106 @@ path = "credentials.yaml"
                 .to_string()
                 .contains("unknown field `tenant_prefix_overlap_eligible`")
         );
+    }
+
+    /// Verifies conditional targets inherit, replace, or clear as a collection and
+    /// resolve independently per VPC.
+    #[test]
+    fn conditional_export_overrides_and_vpc_resolution_preserve_configured_symbols() {
+        // Configure one reusable symbolic rule through the named-profile TOML representation.
+        let profile: FnnRoutingProfileConfig = toml::from_str(r#"
+            internal = true
+            tenant_prefix_overlap_eligible = true
+            route_targets_on_exports_by_prefix = [
+                { prefix = "0.0.0.0/0", match_type = "exact", route_targets = [{ asn = 429000000, vni_self = true }] },
+            ]
+        "#).expect("conditional export profile");
+        let fnn = FnnConfig {
+            admin_vpc: None,
+            common_internal_route_target: None,
+            additional_route_target_imports: vec![],
+            routing_profiles: HashMap::from([("BASE".to_string(), profile)]),
+            use_vpc_vrf_loopback: false,
+        };
+
+        // Each VPC resolves the same symbol without altering the configured rule.
+        for vni in [100, 200] {
+            let resolved = fnn
+                .resolve_vpc_routing_profile(&vpc_config(Some("BASE"), None))
+                .expect("inherited rules")
+                .to_rpc(Some(vni))
+                .expect("encodable VPC VNI");
+            assert_eq!(
+                resolved.route_targets_on_exports_by_prefix[0].route_targets[0].vni,
+                Some(vni)
+            );
+            assert!(!resolved.route_targets_on_exports_by_prefix[0].route_targets[0].vni_self);
+        }
+        let configured_profile = fnn
+            .routing_profiles
+            .get("BASE")
+            .expect("retained configured profile");
+        assert!(
+            configured_profile
+                .route_targets_on_exports_by_prefix
+                .as_ref()
+                .expect("configured rules")[0]
+                .route_targets[0]
+                .vni_self
+        );
+        assert!(!configured_profile.is_eligible_for_tenant_prefix_overlap());
+
+        // Encoding validation must run after nested symbolic targets have resolved.
+        assert!(configured_profile.to_rpc(Some(65_536)).is_err());
+
+        // Clone the configured rules to retain the symbolic target in the replacement fixture.
+        let mut replacement_rules = configured_profile
+            .route_targets_on_exports_by_prefix
+            .clone()
+            .expect("configured rules");
+        // Change the prefix to distinguish replacement from retaining or appending the base rule.
+        replacement_rules[0].prefix = "::/0".parse().expect("IPv6 default route");
+
+        value_scenarios!(run = |overrides| {
+            // Compare complete collections so inherited rules cannot leak into a replacement.
+            fnn.resolve_vpc_routing_profile(&vpc_config(Some("BASE"), Some(overrides)))
+                .expect("conditional export overrides")
+                .into_owned()
+                .route_targets_on_exports_by_prefix
+        };
+            "conditional export collection overrides" {
+                // Present unrelated properties retain the populated conditional export list.
+                VpcRoutingProfileOverrides {
+                    route_target_imports: Some(vec![]), // Leave conditional exports unset.
+                    ..Default::default()
+                } => configured_profile.route_targets_on_exports_by_prefix.clone(),
+                // A populated list replaces the base collection instead of accumulating its rules.
+                VpcRoutingProfileOverrides {
+                    route_targets_on_exports_by_prefix: Some(replacement_rules.clone()), // Supply the complete replacement.
+                    ..Default::default()
+                } => Some(replacement_rules),
+            }
+        );
+
+        // A present empty collection clears inherited conditional exports and restores isolation.
+        let cleared = fnn
+            .resolve_vpc_routing_profile(&vpc_config(
+                Some("BASE"),
+                Some(VpcRoutingProfileOverrides {
+                    route_targets_on_exports_by_prefix: Some(vec![]),
+                    ..Default::default()
+                }),
+            ))
+            .expect("explicit clearing")
+            .into_owned();
+        assert!(
+            cleared
+                .to_rpc(Some(100))
+                .expect("cleared profile")
+                .route_targets_on_exports_by_prefix
+                .is_empty()
+        );
+        assert!(cleared.is_eligible_for_tenant_prefix_overlap());
     }
 
     /// Verifies numeric TOML remains compatible while symbolic targets retain
@@ -5776,6 +6106,7 @@ path = "credentials.yaml"
         assert_eq!(
             profile,
             FnnRoutingProfileConfig {
+                route_targets_on_exports_by_prefix: None,
                 tenant_prefix_overlap_eligible: false,
                 route_target_imports: Some(vec![
                     RouteTargetConfig {
@@ -5842,6 +6173,7 @@ path = "credentials.yaml"
                 FnnConfig {
                     admin_vpc: Some(AdminFnnConfig {
                         enabled: true,
+                        l3_only: false,
                         vpc_vni: None,
                         routing_profile: FnnRoutingProfileConfig {
                             route_targets_on_exports: Some(vec![symbolic_target.clone()]),
@@ -5926,6 +6258,7 @@ path = "credentials.yaml"
             prefix: "192.0.2.0/24".parse().expect("valid test prefix"),
         };
         let base = FnnRoutingProfileConfig {
+            route_targets_on_exports_by_prefix: None,
             tenant_prefix_overlap_eligible: true,
             route_target_imports: Some(vec![RouteTargetConfig {
                 asn: 3,
@@ -5963,6 +6296,7 @@ path = "credentials.yaml"
         assert_eq!(
             fnn.resolve_vpc_routing_profile(&vpc).unwrap().as_ref(),
             &FnnRoutingProfileConfig {
+                route_targets_on_exports_by_prefix: None,
                 tenant_prefix_overlap_eligible: true,
                 route_target_imports: Some(vec![]),
                 route_targets_on_exports: Some(vec![inherited_export]),
@@ -6285,6 +6619,7 @@ path = "credentials.yaml"
                 metric_emission_interval: std::time::Duration::from_secs(60),
                 metric_hold_time: std::time::Duration::from_secs(5 * 60),
             },
+            spdm_attester_selection_timeout: std::time::Duration::from_secs(45),
             dpu_wait_time: Duration::minutes(20),
             power_down_wait: Duration::seconds(10),
             failure_retry_time: Duration::minutes(90),
@@ -6317,6 +6652,7 @@ path = "credentials.yaml"
         let config = r#"{"dpu_wait_time": "20m","power_down_wait":"10s",
         "failure_retry_time":"1h30m", "dpu_up_threshold": "1w",
         "boot_interface_observation_interval": "2h",
+        "spdm_attester_selection_timeout": "3m",
         "controller": {"iteration_time": "33s", "max_object_handling_time": "63s", "max_concurrency": 13}}"#;
         let config: MachineStateControllerConfig = serde_json::from_str(config).unwrap();
 
@@ -6334,6 +6670,7 @@ path = "credentials.yaml"
                         metric_hold_time: std::time::Duration::from_secs(5 * 60),
                     }
                 },
+                spdm_attester_selection_timeout: std::time::Duration::from_secs(180),
                 dpu_wait_time: Duration::minutes(20),
                 power_down_wait: Duration::seconds(10),
                 failure_retry_time: Duration::minutes(90),
@@ -6359,6 +6696,7 @@ path = "credentials.yaml"
             config,
             MachineStateControllerConfig {
                 controller: StateControllerConfig::default(),
+                spdm_attester_selection_timeout: std::time::Duration::from_secs(30),
                 dpu_wait_time: Duration::minutes(5),
                 power_down_wait: Duration::seconds(10),
                 failure_retry_time: Duration::minutes(90),
@@ -6394,6 +6732,30 @@ path = "credentials.yaml"
                 "boot_interface_observation_interval={invalid_interval} must be rejected",
             );
         }
+    }
+
+    #[test]
+    fn reject_invalid_spdm_attester_selection_timeouts() {
+        use carbide_test_support::Outcome::Fails;
+        use carbide_test_support::scenarios;
+
+        // These values must fail configuration loading before any selection can run.
+        scenarios!(
+            run = |timeout: &str| {
+                let config_json = format!(r#"{{"spdm_attester_selection_timeout":"{timeout}"}}"#);
+                serde_json::from_str::<MachineStateControllerConfig>(&config_json).map_err(drop)
+            };
+            "a timeout must be positive" {
+                "0s" => Fails,
+                "-1s" => Fails,
+            }
+            "a timeout must stay within the hard maximum" {
+                "180001ms" => Fails,
+            }
+            "a timeout must be a duration" {
+                "invalid" => Fails,
+            }
+        );
     }
 
     #[test]
@@ -6487,6 +6849,32 @@ path = "credentials.yaml"
             url: BAD_URL.to_string(),
         }];
         assert!(config.validate_web_ui_sidebar_tools().is_err());
+    }
+
+    /// The admission permit count is bounded at startup: an out-of-range
+    /// value is rejected rather than clamped.
+    #[test]
+    fn admin_lock_admission_permits_are_bounded_at_startup() {
+        scenarios!(
+            run = |permits: Option<usize>| {
+                let mut config: CarbideConfig = Figment::new()
+                    .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                    .extract()
+                    .unwrap();
+                config.admin_lock_admission_permits = permits;
+                config.validate_admin_lock_admission_permits().map_err(drop)
+            };
+            "accepted" {
+                None => Yields(()),
+                Some(1) => Yields(()),
+                Some(256) => Yields(()),
+            }
+
+            "rejected" {
+                Some(0) => Fails,
+                Some(257) => Fails,
+            }
+        );
     }
 
     /// Rejects unrealizable slot counts, endpoint reservations without a bridge, and static slots
@@ -6861,7 +7249,7 @@ path = "credentials.yaml"
         );
     }
 
-    /// Verifies omitted configuration retains shipping defaults, including disabled service-VPC counts.
+    /// Verifies omitted configuration retains shipping defaults so service-VPC admission stays restrictive.
     #[test]
     fn deserialize_min_config() {
         // The fixture omits the entire DPU configuration block.
@@ -6869,12 +7257,13 @@ path = "credentials.yaml"
             .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
             .extract()
             .unwrap();
-        // An absent dpu_config block must not implicitly enable either service-VPC count.
+        // An absent dpu_config block must not enable service capacity or tenant overlap.
         assert_eq!(config.dpu_config.service_vpc_slot_count, 0);
         assert_eq!(
             config.dpu_config.max_active_service_vpc_interfaces_per_dpu,
             0
         );
+        assert!(!config.dpu_config.allow_service_vpc_tenant_overlap);
         assert_eq!(config.dpf.deployments.bf3.max_sf_per_pf, 126);
         assert_eq!(config.listen, "[::]:1081".parse().unwrap());
         assert_eq!(config.metrics_endpoint, None);
@@ -7220,6 +7609,7 @@ path = "credentials.yaml"
                 r#"{{ .Values.sshConsole.serviceName }}.{{ include "nico-api.namespace" . }}.svc.cluster.local:{{ .Values.sshConsole.port }}"#,
                 "ssh-console.nico-system.svc.cluster.local:1079",
             ),
+            ("{{ .Values.tracing.enabled }}", "false"),
             ("{{ . | quote }}", r#""/tmp/test.pem""#),
         ] {
             config = config.replace(template, rendered);
@@ -7231,7 +7621,11 @@ path = "credentials.yaml"
             .join("\n");
         assert!(
             !config.contains("{{"),
-            "all Helm template expressions must be rendered for this test"
+            "all Helm template expressions must be rendered for this test:\n\t{}",
+            config
+                .lines()
+                .filter(|line| line.contains("{{"))
+                .join("\n\t"),
         );
         config
     }
@@ -7328,7 +7722,7 @@ path = "credentials.yaml"
                     Some(compute_vendor),
                     "{key}"
                 );
-                assert_eq!(caps.compute.count, 18, "{key}");
+                assert_eq!(caps.compute.count, 16, "{key}");
                 assert_eq!(caps.switch.vendor.as_deref(), Some("NVIDIA"), "{key}");
                 assert_eq!(caps.switch.count, 9, "{key}");
                 assert_eq!(
@@ -7349,14 +7743,14 @@ path = "credentials.yaml"
                 profile.rack_capabilities.compute.vendor.as_deref(),
                 Some(vendor)
             );
-            assert_eq!(profile.rack_capabilities.compute.count, 18);
+            assert_eq!(profile.rack_capabilities.compute.count, 16);
             assert_eq!(profile.rack_capabilities.switch.count, 9);
             assert_eq!(profile.rack_capabilities.power_shelf.count, power_count);
         }
         let overridden: CarbideConfig = Figment::new()
             .merge(Toml::string(&source))
             .merge(Toml::string(
-                "[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN.rack_capabilities.compute]\nvendor = \"WiWynn\"",
+                "[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN.rack_capabilities.compute]\nvendor = \"WiWynn\"\ncount = 18\n[rack_profiles.GB200_NVL72R1_C2G4_WIWYNN.rack_capabilities.power_shelf]\ncount = 8",
             ))
             .extract()
             .unwrap();
@@ -7747,6 +8141,44 @@ path = "credentials.yaml"
         );
     }
 
+    /// Version reports the update policy the manager applies, and keeps caps
+    /// absent when they are not configured.
+    #[test]
+    fn machine_update_policy_reports_effective_values() {
+        value_scenarios!(
+            run = |(interval, manual, absolute, percent)| {
+                let mut config = crate::test_support::default_config::get();
+                config.machine_update_run_interval = interval;
+                config.firmware_global.requires_manual_upgrade = manual;
+                config.machine_updater.max_concurrent_machine_updates_absolute = absolute;
+                config.machine_updater.max_concurrent_machine_updates_percent = percent;
+                let runtime_config: rpc::forge::RuntimeConfig = config.into();
+                runtime_config.machine_update_policy.map(|policy| {
+                    (
+                        policy.effective_run_interval_seconds,
+                        policy.requires_manual_upgrade,
+                        policy.max_concurrent_updates_absolute,
+                        policy.max_concurrent_updates_percent,
+                    )
+                })
+            };
+            "run interval" {
+                (None, false, None, None) => Some((300, false, None, None)),
+                (Some(60), false, None, None) => Some((60, false, None, None)),
+                (Some(0), false, None, None) => Some((0, false, None, None)),
+            }
+            "manual upgrade" {
+                (None, true, None, None) => Some((300, true, None, None)),
+            }
+            "caps" {
+                (None, false, Some(5), None) => Some((300, false, Some(5), None)),
+                (None, false, None, Some(20)) => Some((300, false, None, Some(20))),
+                (None, false, Some(5), Some(20)) => Some((300, false, Some(5), Some(20))),
+                (None, false, Some(0), None) => Some((300, false, Some(0), None)),
+            }
+        );
+    }
+
     /// Real-world site TOMLs may still carry the now-removed
     /// `force_dpu_nic_mode` setting (top-level and/or under
     /// `[site_explorer]`). Keep that one compatibility exception explicit.
@@ -8107,10 +8539,10 @@ underlay_ip_software_plane_id_bit_len = 7
         assert_eq!(config.astra.underlay_ip_software_plane_id_bit_len, 7);
     }
 
-    /// Verifies explicit service limits survive partial assembly so provisioning reserves the requested SFs.
+    /// Verifies explicit service-VPC settings survive partial assembly so admission uses operator intent.
     #[test]
     fn deserialize_dpu_config() {
-        // Override only the service limits and selected existing fields; firmware defaults remain available.
+        // Override only service settings and selected existing fields; firmware defaults remain available.
         let toml = r#"
 [dpu_config]
 bootstrap_ca_source = "embedded"
@@ -8118,6 +8550,7 @@ dpu_enable_secure_boot = true
 num_of_vfs = 64
 service_vpc_slot_count = 5
 max_active_service_vpc_interfaces_per_dpu = 5
+allow_service_vpc_tenant_overlap = true
 additional_managed_sf = 2
 "#;
 
@@ -8139,28 +8572,59 @@ additional_managed_sf = 2
             config.dpu_config.max_active_service_vpc_interfaces_per_dpu,
             5
         );
+        assert!(config.dpu_config.allow_service_vpc_tenant_overlap);
         assert_eq!(config.dpu_config.additional_managed_sf, 2);
         assert!(!config.dpu_config.dpu_models.is_empty());
     }
 
-    /// Verifies partial blocks keep independent zero defaults so generic headroom cannot enable admission.
+    /// Verifies partial DPU blocks keep service-VPC defaults independent so setting slots,
+    /// `additional_managed_sf`, or overlap cannot enable any omitted service-VPC setting.
     #[test]
     fn service_vpc_counts_default_independently() {
         value_scenarios!(
             run = |input| {
                 // Deserialize the partial block through the production default assembly.
                 let config: DpuConfig = toml::from_str(input).expect("valid partial DPU configuration");
-                (config.service_vpc_slot_count, config.max_active_service_vpc_interfaces_per_dpu)
+                (
+                    config.service_vpc_slot_count,
+                    config.max_active_service_vpc_interfaces_per_dpu,
+                    config.allow_service_vpc_tenant_overlap,
+                )
             };
             "partial service configuration" {
                 // An explicitly empty block retains both disabled counts.
-                "" => (0, 0),
+                "" => (0, 0, false),
                 // Generic capacity remains independent of service-VPC provisioning and admission.
-                "additional_managed_sf = 5" => (0, 0),
+                "additional_managed_sf = 5" => (0, 0, false),
                 // Slots may be provisioned before any endpoint admission is enabled.
-                "service_vpc_slot_count = 5" => (5, 0),
+                "service_vpc_slot_count = 5" => (5, 0, false),
+                // Explicit false retains the same restrictive overlap policy as omission.
+                "allow_service_vpc_tenant_overlap = false" => (0, 0, false),
+                // The overlap escape hatch is independent of physical service capacity.
+                "allow_service_vpc_tenant_overlap = true" => (0, 0, true),
             }
         );
+    }
+
+    /// Verifies the overlap setting accepts only TOML booleans because silently coercing another
+    /// type could enable tenant connectivity to a service VPC unexpectedly.
+    #[test]
+    fn service_vpc_overlap_rejects_non_boolean_values() {
+        let cases = [
+            // An integer must not be interpreted as a conventional zero/one boolean.
+            ("integer", "allow_service_vpc_tenant_overlap = 1"),
+            // A quoted value must not be interpreted by its textual boolean spelling.
+            ("string", "allow_service_vpc_tenant_overlap = \"false\""),
+            // A collection must fail instead of collapsing to an empty or truthy value.
+            ("array", "allow_service_vpc_tenant_overlap = []"),
+        ];
+
+        for (scenario, input) in cases {
+            assert!(
+                toml::from_str::<DpuConfig>(input).is_err(),
+                "{scenario} must fail DPU configuration parsing"
+            );
+        }
     }
 
     #[test]

@@ -32,7 +32,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, header};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use prost::Message as _;
-use rpc::forge_tls_client::{ForgeClientConfig, ForgeTlsClient};
+use rpc::carbide_tls_client::{CarbideClientConfig, CarbideTlsClient};
 use rpc::protos::dns::{
     DnsLookupOutcome, DnsResourceRecord, DnsResourceRecordLookupRequest,
     DnsResourceRecordLookupResponse,
@@ -266,7 +266,7 @@ impl TestDnsServer {
 
     async fn start_with_reply(reply: DnsResourceRecordLookupResponse) -> Self {
         let api = MockLookupApi::start(reply).await;
-        let client = ForgeTlsClient::new(&ForgeClientConfig::default())
+        let client = CarbideTlsClient::new(&CarbideClientConfig::default())
             .build(format!("http://{}", api.address))
             .await
             .expect("production Forge client builds for the mock API");

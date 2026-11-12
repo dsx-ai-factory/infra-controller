@@ -18,6 +18,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::sync::LazyLock;
 
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::machine::{
@@ -62,6 +63,10 @@ use crate::network_segment::NetworkSegmentType;
 use crate::predicted_machine_interface::PredictedMachineInterface;
 use crate::state_history::StateHistoryRecord;
 
+// Rack-scoped probes excluded from host health aggregation.
+static RACK_ONLY_PROBES: LazyLock<[health_report::HealthProbeId; 1]> =
+    LazyLock::new(|| [health_report::HealthProbeId::missing_rack_component()]);
+
 pub mod slas;
 
 pub mod astra;
@@ -73,6 +78,7 @@ pub mod json;
 pub mod machine_id;
 pub mod machine_search_config;
 pub mod network;
+pub mod nic_firmware;
 pub mod nvlink;
 pub mod spx;
 pub mod spx_multiplane;
@@ -153,6 +159,11 @@ pub struct ManagedHostStateSnapshot {
     /// Health overrides inherited from the rack this host belongs to (if any).
     /// Populated at read time; not stored on the machines table.
     pub rack_health_overrides: Option<HealthReportSources>,
+    /// Which parts of `hardware_info` the host and DPU snapshots hold.
+    /// Populated at read time by the loader. Compact snapshots from
+    /// `load_compact_by_host_ids` load no topology at all, so their
+    /// `hardware_info` is always `None` and this field doesn't describe them.
+    pub hardware_info_scope: HardwareInfoScope,
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ManagedHostStateSnapshot {
@@ -227,6 +238,9 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ManagedHostStateSnapshot {
             // This will need to be modified by callers, as its value depends on a
             // HardwareHealthReportsConfig being specified.
             aggregate_health: health_report::HealthReport::empty("".to_string()),
+            // Every snapshot query loads full hardware unless a `WithoutComponents`
+            // load overwrites this.
+            hardware_info_scope: HardwareInfoScope::Full,
         };
 
         result.sort_dpu_snapshots()?;
@@ -257,6 +271,22 @@ pub enum NotAllocatableReason {
     MaintenanceMode,
     #[error("A health alert prevents the machine from being allocated: {0:?}")]
     HealthAlert(Box<health_report::HealthProbeAlert>),
+}
+
+impl NotAllocatableReason {
+    /// The stable snake_case code reported by the API.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::InvalidState(_) => "invalid_state",
+            Self::PendingInstanceCreation => "pending_instance_creation",
+            Self::PendingDecommission => "pending_decommission",
+            Self::PendingBootConfiguration => "pending_boot_configuration",
+            Self::DpuReprovisioningStarted => "dpu_reprovisioning_started",
+            Self::NoDpuSnapshots => "no_dpu_snapshots",
+            Self::MaintenanceMode => "maintenance_mode",
+            Self::HealthAlert(_) => "health_alert",
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -505,6 +535,11 @@ impl ManagedHostStateSnapshot {
     /// - no pending or operator maintenance, even when `allow_unhealthy` is true
     /// - the desired boot-interface generation to have a matching observation
     /// - no started DPU reprovision request, even when `allow_unhealthy` is true
+    ///
+    /// `FindHostStatesByIds` also runs this on a compact snapshot that blanks
+    /// host topology, interface addresses and vendors, DPU interfaces,
+    /// topology and BMC info, NIC firmware, power options and SKU device type.
+    /// A new input from those parts must be loaded by the compact query too.
     pub fn is_usable_as_instance(&self, allow_unhealthy: bool) -> Result<(), NotAllocatableReason> {
         // TODO: allow other states than Ready when allow_unhealthy=true. Will require changes to state machine (see Matthias).
         if !matches!(self.managed_state, ManagedHostState::Ready) {
@@ -572,6 +607,11 @@ impl ManagedHostStateSnapshot {
 
     /// Derives the aggregate health of the Managed Host based on individual
     /// health reports
+    ///
+    /// Rack component inventory shortages remain rack-scoped; other rack alerts
+    /// are included unless a host replacement report takes precedence.
+    ///
+    /// Also runs on the compact snapshot, see [`Self::is_usable_as_instance`].
     pub fn derive_aggregate_health(&mut self, host_health_config: HostHealthConfig) {
         let source = "aggregate-host-health".to_string();
         let observed_at = Some(chrono::Utc::now());
@@ -676,11 +716,18 @@ impl ManagedHostStateSnapshot {
         }
 
         if let Some(rack_overrides) = &self.rack_health_overrides {
-            if let Some(rack_replace) = &rack_overrides.replace {
-                output.merge(rack_replace);
-            }
-            for rack_merge in rack_overrides.merges.values() {
-                output.merge(rack_merge);
+            for report in rack_overrides
+                .replace
+                .iter()
+                .chain(rack_overrides.merges.values())
+            {
+                // Inventory shortages are actionable at the rack, not on each host.
+                // Filter before merging so host-owned alerts remain untouched.
+                let mut report = report.clone();
+                report
+                    .alerts
+                    .retain(|alert| !RACK_ONLY_PROBES.contains(&alert.id));
+                output.merge(&report);
             }
         }
 
@@ -772,37 +819,8 @@ impl ManagedHostStateSnapshot {
             })
             .collect();
 
-        self.dpu_snapshots.sort_by(|lhs, rhs| {
-            let Some(lhs_dpu_mac) = lhs
-                .status
-                .hardware_info
-                .as_ref()
-                .and_then(|hi| hi.dpu_info.as_ref())
-                .and_then(|di| di.factory_mac_address.parse().ok())
-            else {
-                return Ordering::Greater;
-            };
-
-            let Some(rhs_dpu_mac) = rhs
-                .status
-                .hardware_info
-                .as_ref()
-                .and_then(|hi| hi.dpu_info.as_ref())
-                .and_then(|di| di.factory_mac_address.parse().ok())
-            else {
-                return Ordering::Less;
-            };
-
-            let lhs_pci_slot = mac_pci_map.get(&lhs_dpu_mac).unwrap_or(&None);
-            let rhs_pci_slot = mac_pci_map.get(&rhs_dpu_mac).unwrap_or(&None);
-
-            match (lhs_pci_slot, rhs_pci_slot) {
-                (Some(lhs_pci_slot), Some(rhs_pci_slot)) => lhs_pci_slot.cmp(rhs_pci_slot),
-                (Some(_), None) => Ordering::Less,
-                (None, Some(_)) => Ordering::Greater,
-                (None, None) => Ordering::Equal,
-            }
-        });
+        self.dpu_snapshots
+            .sort_by(|lhs, rhs| compare_dpus(lhs, rhs, &mac_pci_map));
 
         let primary_interface = self
             .host_snapshot
@@ -841,6 +859,27 @@ impl ManagedHostStateSnapshot {
 
         Ok(())
     }
+}
+
+/// Orders DPUs by the host PCI slot of their factory MAC. DPUs without a slot
+/// come next, then DPUs without a factory MAC. The order is total, so sorting
+/// stays valid when hardware info is not loaded.
+fn compare_dpus(
+    lhs: &DpuMachine,
+    rhs: &DpuMachine,
+    mac_pci: &HashMap<MacAddress, Option<&str>>,
+) -> Ordering {
+    let sort_key = |dpu: &DpuMachine| {
+        let mac: Option<MacAddress> = dpu
+            .status
+            .hardware_info
+            .as_ref()
+            .and_then(|hi| hi.dpu_info.as_ref())
+            .and_then(|di| di.factory_mac_address.parse().ok());
+        let slot = mac.and_then(|mac| mac_pci.get(&mac).copied().flatten());
+        (mac.is_none(), slot.is_none(), slot)
+    };
+    sort_key(lhs).cmp(&sort_key(rhs))
 }
 
 /// Represents the last_reboot_requested data
@@ -1124,6 +1163,13 @@ pub struct HostProfile {
     /// When `true` the ingestion state machine skips re-enabling lockdown
     /// after BIOS/UEFI configuration.
     pub disable_lockdown: bool,
+    /// When `true` this machine is designated to retain-hbn-config-on-boot.
+    /// This allows the machine to boot while NICO's DHCP and gRPC services
+    /// are unavailable. No
+    /// state machine reads this field yet. Defaulted on deserialization
+    /// because snapshots written before this field exists omit it.
+    #[serde(default)]
+    pub retain_hbn_config_on_boot: bool,
 }
 
 impl HostProfile {
@@ -1139,6 +1185,10 @@ impl HostProfile {
                 disable_lockdown: d
                     .host_lifecycle_profile
                     .disable_lockdown
+                    .unwrap_or_default(),
+                retain_hbn_config_on_boot: d
+                    .host_lifecycle_profile
+                    .retain_hbn_config_on_boot
                     .unwrap_or_default(),
             },
             None => Self::default(),
@@ -1176,11 +1226,13 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
 
     /// Whether this machine's BMC must have its lockdown disabled before its
     /// UEFI (BIOS setup) password can be changed, and re-enabled afterward.
-    /// Only Dell BMCs enforce a lockdown that blocks the BIOS password change;
-    /// other vendors accept it without unlocking. Centralizes the vendor check
-    /// so the UEFI setup and rotation flows don't special-case Dell inline.
+    /// Dell and Lenovo XCC BMCs can lock BIOS settings. On older Lenovo
+    /// firmware, the Redfish client skips the unsupported OEM controls.
     pub fn needs_bmc_unlock_for_uefi_setup(&self) -> bool {
-        self.bmc_vendor().is_dell()
+        matches!(
+            self.bmc_vendor(),
+            bmc_vendor::BMCVendor::Dell | bmc_vendor::BMCVendor::Lenovo
+        )
     }
 
     /// Does the forge-dpu-agent on this DPU need upgrading?
@@ -1319,9 +1371,9 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
     }
 
     pub fn to_capabilities(&self) -> Option<MachineCapabilitiesSet> {
-        self.status.hardware_info.clone().map(|info| {
+        self.status.hardware_info.as_ref().map(|info| {
             MachineCapabilitiesSet::from_hardware_info(
-                &info,
+                info,
                 self.status.infiniband_status_observation.as_ref(),
                 self.associated_dpu_machine_ids(),
                 &self.status.interfaces,
@@ -1474,6 +1526,12 @@ pub enum ManagedHostState {
         /// omit this, so their completion must leave pending requests alone.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request: Option<MachineMaintenanceRequest>,
+    },
+
+    /// Host-owned generic NIC firmware work, separate from legacy DPA commands.
+    NicFirmwareUpdating {
+        /// Frozen requests and durable progress for the admitted cards.
+        operation: nic_firmware::NicFirmwareOperation,
     },
 
     /// Host is assigned to an Instance.
@@ -1936,6 +1994,23 @@ impl ManagedHostState {
         }
     }
 
+    /// Whether this state can hand control to a pending maintenance request.
+    /// Ready and Failed hosts can do so, as can boot configuration before writes
+    /// begin or after recovery has restored lockdown and parked in Failed.
+    /// Instance ownership and competing requests must be checked separately.
+    pub fn accepts_maintenance_request(&self) -> bool {
+        matches!(
+            self,
+            Self::Ready
+                | Self::Failed { .. }
+                | Self::BootConfiguring {
+                    boot_config_state: ReadyBootConfigState::Prepare
+                        | ReadyBootConfigState::Failed { .. },
+                    ..
+                }
+        )
+    }
+
     /// Starts `Maintenance` with the requested operation and saves the full
     /// request so completion can check whether it is still pending.
     pub fn maintenance_for_request(request: MachineMaintenanceRequest) -> Self {
@@ -2128,7 +2203,7 @@ pub enum MeasuringState {
 #[serde(rename_all = "lowercase")]
 pub enum SpdmMeasuringState {
     TriggerMeasurements,
-    PollResult,
+    PollResult(uuid::Uuid), // the job id to poll
 }
 
 /// Tenant has requested network config update for the existing instance.
@@ -2402,6 +2477,9 @@ pub enum DpuInitState {
     /// idempotent power-on phase begins.
     WaitingForPlatformPowerOff,
     WaitingForPlatformConfiguration,
+    /// Waits for network and agent health observations newer than the UEFI
+    /// password-change restart request before accepting network readiness.
+    WaitingForUefiRestart,
     PollingBiosSetup,
     WaitingForNetworkConfig,
     WaitingForNetworkInstall, // Deprecated now, not used
@@ -2455,6 +2533,12 @@ pub enum PerformPowerOperation {
 pub enum MachineState {
     Init,
     EnableIpmiOverLan,
+    /// Toggle onboard NICs off during initialization of Vera Rubin hosts with managed DPUs.
+    /// Other SKUs do not support disabling onboard NICs through the BMC and skip this state.
+    DisableOnboardNics {
+        /// Persist the write or application wait across controller iterations.
+        disable_onboard_nics_state: DisableOnboardNicsState,
+    },
     WaitingForPlatformConfiguration {
         /// Retries after BIOS job failure remediation; re-run machine_setup from this state.
         #[serde(default)]
@@ -2492,6 +2576,24 @@ pub enum MachineState {
     // MachineValidating has been moved to ValidationState
 }
 
+/// Vera Rubin-only sequence that enables, then disables onboard NICs, with a
+/// ten-second application wait after each successful write. Other SKUs do not
+/// support this BMC operation; hosts without managed DPUs also skip the sequence.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(tag = "state", rename_all = "lowercase")]
+pub enum DisableOnboardNicsState {
+    /// Write the requested onboard NIC setting; failures retry this substate.
+    ConfigureOnboardNics {
+        /// Enable first (`true`), then disable (`false`).
+        enable: bool,
+    },
+    /// Wait at least ten seconds from entry before continuing the sequence.
+    WaitForConfigToBeApplied {
+        /// Whether the preceding write disabled the NICs, completing the sequence.
+        onboard_nics_disabled: bool,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub struct LockdownInfo {
@@ -2521,8 +2623,8 @@ pub enum UefiSetupState {
     WaitForPasswordJobScheduled,
     PowercycleHost,
     WaitForPasswordJobCompletion,
-    // Deprecated: no-op state, transitions directly to WaitingForLockdown::SetLockdown
-    // Kept for backwards compatibility with hosts that may be in this state
+    /// Legacy ingestion no-op; transitions to WaitingForLockdown::SetLockdown.
+    /// Lenovo rotation retries BMC re-locking here after a failed password change.
     LockdownHost,
 }
 
@@ -2865,8 +2967,13 @@ pub enum MachineMaintenanceOperation {
         #[serde(default)]
         graceful: bool,
     },
-    /// Reset the host (restart / AC power cycle).
-    Reset,
+    /// Restart the host, gracefully when requested and forcibly otherwise.
+    Reset {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        graceful: bool,
+    },
+    /// Gracefully reboot the host without falling back to a forced restart.
+    Reboot,
     /// Reset the identified Redfish chassis through the host BMC.
     ChassisReset { chassis_id: String },
 }
@@ -3140,6 +3247,9 @@ impl Display for ManagedHostState {
             ManagedHostState::Maintenance { operation, .. } => {
                 write!(f, "Maintenance({operation:?})")
             }
+            ManagedHostState::NicFirmwareUpdating { operation } => {
+                write!(f, "NicFirmwareUpdating/{}", operation.phase)
+            }
             ManagedHostState::Assigned { instance_state, .. } => match instance_state {
                 InstanceState::DPUReprovision { dpu_states } => {
                     let dpu_lowest_state = dpu_states
@@ -3255,6 +3365,7 @@ impl ManagedHostState {
             ManagedHostState::Maintenance { operation, .. } => {
                 format!("Maintenance({operation:?})")
             }
+            ManagedHostState::NicFirmwareUpdating { .. } => self.to_string(),
             ManagedHostState::Assigned { instance_state } => match instance_state {
                 InstanceState::DPUReprovision { dpu_states } => {
                     format!(
@@ -3514,6 +3625,15 @@ pub fn state_sla(
         ManagedHostState::Maintenance { .. } => {
             StateSla::with_sla(slas::MAINTENANCE, time_in_state)
         }
+        ManagedHostState::NicFirmwareUpdating { operation }
+            if matches!(
+                operation.phase,
+                nic_firmware::NicFirmwarePhase::Failed { .. }
+            ) =>
+        {
+            StateSla::with_sla(std::time::Duration::ZERO, time_in_state)
+        }
+        ManagedHostState::NicFirmwareUpdating { .. } => StateSla::no_sla(),
         ManagedHostState::Assigned { instance_state } => match instance_state {
             InstanceState::Ready => StateSla::no_sla(),
             InstanceState::BootingWithDiscoveryImage { retry } => {
@@ -3591,7 +3711,7 @@ pub fn state_sla(
             AttestationMode::SpdmAttestation {
                 spdm_measuring_state,
             } => match spdm_measuring_state {
-                SpdmMeasuringState::PollResult => {
+                SpdmMeasuringState::PollResult(..) => {
                     StateSla::with_sla(slas::SPDM_ATTESTATION_RESULT_POLL, time_in_state)
                 }
                 SpdmMeasuringState::TriggerMeasurements => {
@@ -3602,7 +3722,7 @@ pub fn state_sla(
         ManagedHostState::PreAssignedMeasuring {
             spdm_measuring_state,
         } => match spdm_measuring_state {
-            SpdmMeasuringState::PollResult => {
+            SpdmMeasuringState::PollResult(..) => {
                 StateSla::with_sla(slas::SPDM_ATTESTATION_RESULT_POLL, time_in_state)
             }
             SpdmMeasuringState::TriggerMeasurements => {
@@ -3701,6 +3821,18 @@ impl Display for MachineValidationFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(self, f)
     }
+}
+
+/// Which parts of each machine's `status.hardware_info` a snapshot load decodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HardwareInfoScope {
+    /// All discovered hardware, including the component lists.
+    Full,
+    /// Everything except the component lists a SKU is built from: CPUs, memory,
+    /// block devices, NVMe devices, GPUs, InfiniBand interfaces and the TPM
+    /// description. Those aren't loaded: the lists are empty when decoded, and
+    /// `tpm_description` is `None`.
+    WithoutComponents,
 }
 
 pub struct LoadSnapshotOptions {
@@ -3978,7 +4110,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::machine_snapshot::{
-        dpu_machine, host_machine, managed_host_state_snapshot,
+        dpu_machine, dpu_machine_id, host_machine, managed_host_state_snapshot,
     };
 
     #[derive(Clone, Copy)]
@@ -4412,6 +4544,56 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_restart_preserves_mode_and_reads_legacy_operations() {
+        check_values(
+            [
+                Check {
+                    scenario: "legacy reset preserves its serialized shape",
+                    input: serde_json::json!({"operation": "reset"}),
+                    expect: (
+                        MachineMaintenanceOperation::Reset { graceful: false },
+                        serde_json::json!({"operation": "reset"}),
+                    ),
+                },
+                Check {
+                    scenario: "explicit forced restart",
+                    input: serde_json::json!({"operation": "reset", "graceful": false}),
+                    expect: (
+                        MachineMaintenanceOperation::Reset { graceful: false },
+                        serde_json::json!({"operation": "reset"}),
+                    ),
+                },
+                Check {
+                    scenario: "graceful restart",
+                    input: serde_json::json!({"operation": "reset", "graceful": true}),
+                    expect: (
+                        MachineMaintenanceOperation::Reset { graceful: true },
+                        serde_json::json!({"operation": "reset", "graceful": true}),
+                    ),
+                },
+                Check {
+                    scenario: "existing reboot remains readable",
+                    input: serde_json::json!({"operation": "reboot"}),
+                    expect: (
+                        MachineMaintenanceOperation::Reboot,
+                        serde_json::json!({"operation": "reboot"}),
+                    ),
+                },
+            ],
+            |encoded| {
+                let wire = serde_json::json!({"state": "maintenance", "operation": encoded});
+                let state: ManagedHostState = serde_json::from_value(wire).unwrap();
+                let serialized = serde_json::to_value(&state).unwrap();
+                let ManagedHostState::Maintenance { operation, request } = state else {
+                    panic!("expected maintenance state");
+                };
+                assert!(request.is_none());
+                (operation, serialized["operation"].clone())
+            },
+        );
+    }
+
+    #[test]
     fn pending_decommission_blocks_allocation_even_with_the_health_override() {
         let mut snapshot = managed_host_state_snapshot();
         snapshot.host_snapshot.decommission_requested = true;
@@ -4491,6 +4673,109 @@ mod tests {
     }
 
     #[test]
+    fn not_allocatable_reason_codes_are_stable_and_unique() {
+        let alert = alert_with_classifications(vec![]);
+        let codes = [
+            NotAllocatableReason::InvalidState(Box::new(ManagedHostState::Ready)),
+            NotAllocatableReason::PendingInstanceCreation,
+            NotAllocatableReason::PendingDecommission,
+            NotAllocatableReason::PendingBootConfiguration,
+            NotAllocatableReason::DpuReprovisioningStarted,
+            NotAllocatableReason::NoDpuSnapshots,
+            NotAllocatableReason::MaintenanceMode,
+            NotAllocatableReason::HealthAlert(Box::new(alert)),
+        ]
+        .map(|reason| reason.code());
+
+        assert_eq!(
+            codes,
+            [
+                "invalid_state",
+                "pending_instance_creation",
+                "pending_decommission",
+                "pending_boot_configuration",
+                "dpu_reprovisioning_started",
+                "no_dpu_snapshots",
+                "maintenance_mode",
+                "health_alert",
+            ]
+        );
+        assert_eq!(HashSet::from(codes).len(), codes.len());
+    }
+
+    /// A fixture DPU reporting `factory_mac`, or without hardware info.
+    fn dpu_with_factory_mac(index: u8, factory_mac: Option<MacAddress>) -> DpuMachine {
+        let mut dpu = dpu_machine(index);
+        match factory_mac {
+            Some(mac) => {
+                dpu.status
+                    .hardware_info
+                    .as_mut()
+                    .and_then(|hi| hi.dpu_info.as_mut())
+                    .expect("fixture DPU has DPU info")
+                    .factory_mac_address = mac.to_string()
+            }
+            None => dpu.status.hardware_info = None,
+        }
+        dpu
+    }
+
+    #[test]
+    fn dpu_comparator_is_antisymmetric() {
+        let [slot_1, slot_2, no_slot, unknown] =
+            [1, 2, 3, 4].map(|i| MacAddress::new([0x0a, 0, 0, 0, 0x02, i]));
+        let mac_pci = HashMap::from([(slot_1, Some("1")), (slot_2, Some("2")), (no_slot, None)]);
+
+        value_scenarios!(
+            run = |(lhs, rhs)| {
+                let (lhs, rhs) = (dpu_with_factory_mac(0, lhs), dpu_with_factory_mac(1, rhs));
+                let ordering = compare_dpus(&lhs, &rhs, &mac_pci);
+                assert_eq!(ordering, compare_dpus(&rhs, &lhs, &mac_pci).reverse());
+                ordering
+            };
+            "DPUs without a factory MAC are equal" {
+                (None, None) => Ordering::Equal,
+            }
+            "a DPU without a factory MAC sorts last" {
+                (None, Some(slot_1)) => Ordering::Greater,
+                (None, Some(no_slot)) => Ordering::Greater,
+            }
+            "slotted DPUs sort by slot, then DPUs without a slot" {
+                (Some(slot_1), Some(slot_2)) => Ordering::Less,
+                (Some(slot_2), Some(no_slot)) => Ordering::Less,
+                (Some(no_slot), Some(unknown)) => Ordering::Equal,
+            }
+        );
+    }
+
+    #[test]
+    fn dpu_sort_keeps_pci_order_and_promotes_primary() {
+        let mut snapshot = managed_host_state_snapshot();
+        // Host NIC `i` sits in PCI slot `i`. The primary interface is attached to DPU 0.
+        let nic_macs: Vec<_> = snapshot
+            .host_snapshot
+            .status
+            .hardware_info
+            .as_ref()
+            .unwrap()
+            .network_interfaces
+            .iter()
+            .map(|nic| nic.mac_address)
+            .collect();
+        snapshot.dpu_snapshots = vec![
+            dpu_with_factory_mac(3, None),
+            dpu_with_factory_mac(0, Some(nic_macs[2])),
+            dpu_with_factory_mac(1, Some(nic_macs[1])),
+            dpu_with_factory_mac(2, Some(nic_macs[0])),
+        ];
+
+        snapshot.sort_dpu_snapshots().unwrap();
+
+        let order: Vec<_> = snapshot.dpu_snapshots.iter().map(|dpu| dpu.id).collect();
+        assert_eq!(order, [0, 2, 1, 3].map(dpu_machine_id));
+    }
+
+    #[test]
     fn operator_maintenance_blocks_allocation_until_cleared() {
         let mut snapshot = managed_host_state_snapshot();
         let mut alert = alert_with_classifications(vec![
@@ -4564,6 +4849,50 @@ mod tests {
                 },
             ],
             |machine| machine.bmc_vendor(),
+        );
+    }
+
+    #[test]
+    fn uefi_password_changes_unlock_dell_and_lenovo_xcc() {
+        check_values(
+            [
+                Check {
+                    scenario: "Dell",
+                    input: "Dell Inc.",
+                    expect: true,
+                },
+                Check {
+                    scenario: "Lenovo XCC",
+                    input: "Lenovo",
+                    expect: true,
+                },
+                Check {
+                    scenario: "Supermicro unchanged",
+                    input: "Supermicro",
+                    expect: false,
+                },
+                Check {
+                    scenario: "HPE unchanged",
+                    input: "HPE",
+                    expect: false,
+                },
+                Check {
+                    scenario: "unknown unchanged",
+                    input: "unknown",
+                    expect: false,
+                },
+            ],
+            |vendor| {
+                let mut machine = host_machine();
+                machine
+                    .status
+                    .hardware_info
+                    .as_mut()
+                    .and_then(|hardware| hardware.dmi_data.as_mut())
+                    .expect("fixture host has DMI data")
+                    .sys_vendor = vendor.to_string();
+                machine.needs_bmc_unlock_for_uefi_setup()
+            },
         );
     }
 
@@ -5215,6 +5544,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rack_component_shortages_are_not_host_health() {
+        use health_report::{
+            HealthAlertClassification, HealthProbeId, HealthProbeSuccess, HealthReportApplyMode,
+        };
+
+        for mode in [HealthReportApplyMode::Merge, HealthReportApplyMode::Replace] {
+            let mut host = managed_host_state_snapshot();
+            host.host_snapshot.health_reports = HealthReportSources::default();
+            let missing = health_report::HealthProbeAlert {
+                id: HealthProbeId::missing_rack_component(),
+                target: Some("switch".to_string()),
+                ..alert_with_classifications(vec![HealthAlertClassification::hardware()])
+            };
+            let other = health_report::HealthProbeAlert {
+                id: "RackLeak".parse().unwrap(),
+                ..alert_with_classifications(vec![HealthAlertClassification::prevent_allocations()])
+            };
+            let mut report = health_report_with_alerts(vec![missing.clone(), other.clone()]);
+            report.successes.push(HealthProbeSuccess {
+                id: "RackProbe".parse().unwrap(),
+                target: None,
+            });
+            let mut sources = HealthReportSources::default();
+            match mode {
+                HealthReportApplyMode::Merge => {
+                    sources.merges.insert(report.source.clone(), report.clone());
+                }
+                HealthReportApplyMode::Replace => sources.replace = Some(report.clone()),
+            }
+            host.rack_health_overrides = Some(sources.clone());
+            // A snapshot produced by the previous implementation already has this alert.
+            host.aggregate_health = report.clone();
+            host.derive_aggregate_health(HostHealthConfig::default());
+            assert!(!host.aggregate_health.alerts.contains(&missing), "{mode:?}");
+            assert!(host.aggregate_health.alerts.contains(&other), "{mode:?}");
+            assert!(
+                host.aggregate_health
+                    .successes
+                    .contains(&report.successes[0])
+            );
+            assert_eq!(host.rack_health_overrides, Some(sources));
+
+            // Filtering rack data must not remove an identically named host-owned alert.
+            let host_report = health_report_with_alerts(vec![missing.clone()]);
+            host.host_snapshot
+                .health_reports
+                .merges
+                .insert(host_report.source.clone(), host_report);
+            host.derive_aggregate_health(HostHealthConfig::default());
+            assert!(host.aggregate_health.alerts.contains(&missing), "{mode:?}");
+        }
+    }
+
     fn alert_with_classifications(
         classifications: Vec<health_report::HealthAlertClassification>,
     ) -> health_report::HealthProbeAlert {
@@ -5541,7 +5924,9 @@ mod tests {
                     scenario: "post-assignment SPDM polling uses the poll SLA",
                     input: stale(ManagedHostState::PostAssignedMeasuring {
                         attestation_mode: AttestationMode::SpdmAttestation {
-                            spdm_measuring_state: SpdmMeasuringState::PollResult,
+                            spdm_measuring_state: SpdmMeasuringState::PollResult(uuid::uuid!(
+                                "123e4567-e89b-12d3-a456-426614174000"
+                            )),
                         },
                     }),
                     expect: (seconds(600), true),
@@ -5558,7 +5943,9 @@ mod tests {
                 Check {
                     scenario: "pre-assignment SPDM polling uses the poll SLA",
                     input: stale(ManagedHostState::PreAssignedMeasuring {
-                        spdm_measuring_state: SpdmMeasuringState::PollResult,
+                        spdm_measuring_state: SpdmMeasuringState::PollResult(uuid::uuid!(
+                            "123e4567-e89b-12d3-a456-426614174000"
+                        )),
                     }),
                     expect: (seconds(600), true),
                 },
@@ -5754,6 +6141,137 @@ mod tests {
         assert!(
             !sla.time_in_state_above_sla,
             "a freshly entered RotatingNicLockdown state is within its SLA"
+        );
+    }
+
+    /// Pin populated persisted progress and the labels consumed outside Rust.
+    /// Active workflow age has no SLA; restored terminal failure breaches
+    /// immediately. Individual calls have their own deadlines.
+    #[test]
+    fn nic_firmware_state_serde_display_and_sla() {
+        use carbide_libmlx_model::firmware::operation::{
+            FirmwareOperation, FirmwareOperationPhase, FirmwareOperationState,
+        };
+        use carbide_libmlx_model::firmware::result::FirmwareFlashReport;
+
+        use crate::machine::nic_firmware::{NicFirmwareDeliveryErrorCode, NicFirmwarePhase};
+
+        let wire = serde_json::json!({
+            "state": "nicfirmwareupdating",
+            "operation": {
+                "operation_id": "nic-workflow",
+                "purpose": {"Baseline": {"continuation": "Ready"}},
+                "targets": [{
+                    "selector": {"BaseMac": "02:00:00:00:00:01"},
+                    "pci_name": "0000:01:00.0",
+                    "resolution": {
+                        "scope": "Site", "profile_id": "baseline", "profile_version": "V1-T0",
+                        "entry": {
+                            "firmware": {"part_number": "test-card", "psid": "test-psid", "version": "1.2.3"},
+                            "image": {"url": "https://firmware.example.test/image.bin", "sha256": "ab".repeat(32)},
+                            "device_config": null, "approach": "Scout"
+                        }
+                    },
+                    "original_lockdown": "Unlocked", "supervisor_instance_id": "helper-a",
+                    "receipt": {
+                        "operation_id": "nic-workflow", "state": "Running", "phase": "Burn",
+                        "report": {"flashed": false, "reset": null, "verified_image": null,
+                            "verified_version": null, "observed_version": null, "expected_version": "1.2.3"},
+                        "diagnostic": null
+                    },
+                    "diagnostic": "supervisor unavailable", "delivery_error_code": "Unavailable"
+                }],
+                "options": {"verify_image": false, "verify_version": false, "activation": "HostReboot"},
+                "phase": {"UpdatingFirmware": {"target_index": 0}},
+                "lockdown": {"step": "Observe", "result": null}
+            }
+        });
+        let mut operation = crate::test_support::nic_firmware::operation();
+        operation.targets[0].resolution.profile_version = "V1-T0".parse().expect("fixture version");
+        operation.phase = NicFirmwarePhase::UpdatingFirmware { target_index: 0 };
+        operation.targets[0].supervisor_instance_id = Some("helper-a".into());
+        operation.targets[0].receipt = Some(FirmwareOperation {
+            operation_id: "nic-workflow".into(),
+            state: FirmwareOperationState::Running,
+            phase: Some(FirmwareOperationPhase::Burn),
+            report: FirmwareFlashReport {
+                expected_version: Some("1.2.3".into()),
+                ..Default::default()
+            },
+            diagnostic: None,
+        });
+        operation.targets[0].diagnostic = Some("supervisor unavailable".into());
+        operation.targets[0].delivery_error_code = Some(NicFirmwareDeliveryErrorCode::Unavailable);
+        operation.validate().expect("reachable progress fixture");
+        let mut failed_operation = operation.clone();
+        let expected = ManagedHostState::NicFirmwareUpdating { operation };
+        let parsed: ManagedHostState =
+            serde_json::from_value(wire.clone()).expect("decode frozen state");
+        assert_eq!(parsed, expected);
+        assert_eq!(
+            serde_json::to_value(&parsed).expect("encode frozen state"),
+            wire
+        );
+        assert_eq!(parsed.to_string(), "NicFirmwareUpdating/UpdatingFirmware");
+        let dpu_id =
+            MachineId::from_str("fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng")
+                .expect("fixture DPU ID")
+                .try_into()
+                .expect("DPU machine type");
+        assert_eq!(
+            parsed.dpu_state_string(&dpu_id),
+            "NicFirmwareUpdating/UpdatingFirmware"
+        );
+
+        // Go consumes this exact terminal substate after safe restoration.
+        let failed_receipt = failed_operation.targets[0]
+            .receipt
+            .as_mut()
+            .expect("receipt");
+        failed_receipt.state = FirmwareOperationState::Failed;
+        failed_receipt.phase = Some(FirmwareOperationPhase::Inspect);
+        failed_operation.targets[0].delivery_error_code = None;
+        failed_operation.phase = NicFirmwarePhase::Failed {
+            reason: "inspection failed".into(),
+        };
+        failed_operation
+            .validate()
+            .expect("reachable safe failure fixture");
+        let failed = ManagedHostState::NicFirmwareUpdating {
+            operation: failed_operation,
+        };
+        assert_eq!(failed.to_string(), "NicFirmwareUpdating/Failed");
+        assert_eq!(
+            failed.dpu_state_string(&dpu_id),
+            "NicFirmwareUpdating/Failed"
+        );
+
+        let machine_id = "fm100ds7blqjsadm2uuh3qqbf1h7k8pmf47um6v9uckrg7l03po8mhqgvng"
+            .parse()
+            .expect("fixture host ID");
+        check_values(
+            [
+                Check {
+                    scenario: "active firmware work has no state SLA",
+                    input: &parsed,
+                    expect: (None, false),
+                },
+                Check {
+                    scenario: "restored terminal firmware failure breaches the SLA",
+                    input: &failed,
+                    expect: (Some(std::time::Duration::ZERO), true),
+                },
+            ],
+            |state| {
+                let sla = state_sla(
+                    &machine_id,
+                    state,
+                    &ConfigVersion::new(0),
+                    &health_report_with_alerts(vec![]),
+                    &slas::MachineSlaConfig::default(),
+                );
+                (sla.sla, sla.time_in_state_above_sla)
+            },
         );
     }
 
@@ -5989,10 +6507,12 @@ mod tests {
             "lockdown disabled (true)" {
                 HostProfile {
                     disable_lockdown: true,
+                    retain_hbn_config_on_boot: false,
                 } => Yields((
-                    r#"{"disable_lockdown":true}"#.to_string(),
+                    r#"{"disable_lockdown":true,"retain_hbn_config_on_boot":false}"#.to_string(),
                     HostProfile {
                         disable_lockdown: true,
+                        retain_hbn_config_on_boot: false,
                     },
                 )),
             }
@@ -6000,10 +6520,25 @@ mod tests {
             "lockdown enabled (false)" {
                 HostProfile {
                     disable_lockdown: false,
+                    retain_hbn_config_on_boot: false,
                 } => Yields((
-                    r#"{"disable_lockdown":false}"#.to_string(),
+                    r#"{"disable_lockdown":false,"retain_hbn_config_on_boot":false}"#.to_string(),
                     HostProfile {
                         disable_lockdown: false,
+                        retain_hbn_config_on_boot: false,
+                    },
+                )),
+            }
+
+            "retain-hbn-config-on-boot designated (true)" {
+                HostProfile {
+                    disable_lockdown: false,
+                    retain_hbn_config_on_boot: true,
+                } => Yields((
+                    r#"{"disable_lockdown":false,"retain_hbn_config_on_boot":true}"#.to_string(),
+                    HostProfile {
+                        disable_lockdown: false,
+                        retain_hbn_config_on_boot: true,
                     },
                 )),
             }
@@ -6015,6 +6550,7 @@ mod tests {
         let db_default = r#"{"disable_lockdown": false}"#;
         let profile: HostProfile = serde_json::from_str(db_default).unwrap();
         assert!(!profile.disable_lockdown);
+        assert!(!profile.retain_hbn_config_on_boot);
     }
 
     #[test]
@@ -6022,7 +6558,8 @@ mod tests {
         assert_eq!(
             HostProfile::default(),
             HostProfile {
-                disable_lockdown: false
+                disable_lockdown: false,
+                retain_hbn_config_on_boot: false,
             }
         );
     }
@@ -6049,6 +6586,17 @@ mod tests {
 
         data.host_lifecycle_profile.disable_lockdown = Some(false);
         assert!(!HostProfile::from_expected_machine(Some(&data)).disable_lockdown);
+    }
+
+    #[test]
+    fn host_profile_from_expected_resolves_retain_hbn_config_on_boot() {
+        let mut data = ExpectedMachineData::default();
+
+        data.host_lifecycle_profile.retain_hbn_config_on_boot = Some(true);
+        assert!(HostProfile::from_expected_machine(Some(&data)).retain_hbn_config_on_boot);
+
+        data.host_lifecycle_profile.retain_hbn_config_on_boot = Some(false);
+        assert!(!HostProfile::from_expected_machine(Some(&data)).retain_hbn_config_on_boot);
     }
 
     #[test]

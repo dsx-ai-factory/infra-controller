@@ -11,7 +11,7 @@ profile for a hardware class
 
 ```text
 nico-admin-cli attestation spdm profile create <--mode>
-[--exact] [--prefix] [--extended] [--sort-by]
+[--exact] [--prefix] [--sort-by]
 [-h|--help] <HARDWARE_CLASS>
 ```
 
@@ -44,14 +44,6 @@ Match one ComponentIntegrity ID in full. Repeatable
 `--prefix <PREFIX>`
 
 Match every ComponentIntegrity ID starting with this. Repeatable
-
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
 
 `--sort-by <SORT_BY> [default: primary-id]`
 

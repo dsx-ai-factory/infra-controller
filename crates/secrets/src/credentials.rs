@@ -517,11 +517,28 @@ pub enum BgpCredentialType {
     SiteWideLeafPassword,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum MqttCredentialType {
     Dpa,
     DsxExchangeEventBus,
     DsxExchangeConsumer,
+}
+
+/// Accepts a variant name in any letter case. The environment source lowercases
+/// nested keys, so `CARBIDE_STATIC_CREDENTIAL__MQTT_AUTH_BY_CREDENTIAL_TYPE__DSXEXCHANGECONSUMER__…`
+/// arrives as `dsxexchangeconsumer`; the PascalCase names that the file source
+/// and stored records use still deserialize.
+impl<'de> Deserialize<'de> for MqttCredentialType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        const VARIANTS: &[&str] = &["Dpa", "DsxExchangeEventBus", "DsxExchangeConsumer"];
+        let name = String::deserialize(deserializer)?;
+        match name.to_ascii_lowercase().as_str() {
+            "dpa" => Ok(Self::Dpa),
+            "dsxexchangeeventbus" => Ok(Self::DsxExchangeEventBus),
+            "dsxexchangeconsumer" => Ok(Self::DsxExchangeConsumer),
+            _ => Err(serde::de::Error::unknown_variant(&name, VARIANTS)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1699,5 +1716,34 @@ mod tests {
         let all = CredentialPrefix::all();
 
         assert_eq!(all.len(), 18);
+    }
+
+    #[test]
+    fn mqtt_credential_type_accepts_any_letter_case_and_rejects_unknown_names() {
+        let parse = |name: &str| serde_json::from_str::<MqttCredentialType>(&format!("\"{name}\""));
+        for (name, want) in [
+            (
+                "DsxExchangeConsumer",
+                MqttCredentialType::DsxExchangeConsumer,
+            ),
+            (
+                "dsxexchangeconsumer",
+                MqttCredentialType::DsxExchangeConsumer,
+            ),
+            ("DPA", MqttCredentialType::Dpa),
+            (
+                "dsxexchangeeventbus",
+                MqttCredentialType::DsxExchangeEventBus,
+            ),
+        ] {
+            assert_eq!(parse(name).expect(name), want, "{name}");
+        }
+        assert!(parse("dsx_exchange_consumer").is_err());
+        assert!(parse("other").is_err());
+        // Serialization keeps the PascalCase name stored records use.
+        assert_eq!(
+            serde_json::to_string(&MqttCredentialType::DsxExchangeConsumer).unwrap(),
+            "\"DsxExchangeConsumer\""
+        );
     }
 }

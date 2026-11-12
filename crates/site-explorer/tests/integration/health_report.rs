@@ -68,6 +68,7 @@ fn test_site_explorer(
         test_harness.test_meter.meter(),
         endpoint_exploration_service,
         endpoint_explorer.clone(),
+        Default::default(),
         api.common_pools().clone(),
         api.work_lock_manager_handle(),
         api.runtime_config.rack_profiles.clone(),
@@ -192,6 +193,58 @@ async fn test_site_explorer_health_report(pool: PgPool) -> Result<(), Box<dyn st
             .cloned()
             .unwrap();
     assert_eq!(next_site_explorer_report, stored_site_explorer_report);
+
+    Ok(())
+}
+
+/// A BMC that times out only prevents allocations once
+/// `exploration_timeouts_before_prevent_allocations` explorations in a row timed out.
+#[sqlx_test]
+async fn test_site_explorer_timeouts_prevent_allocations_after_threshold(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let test_harness = TestHarness::builder(pool.clone())
+        .with_resource_pools(ResourcePoolBuilder::default().build())
+        .build()
+        .await;
+    let domain = test_harness.test_domain().await;
+    let network_controller = test_harness.network_controller();
+    let underlay_segment = network_controller.create_underlay_segment(&domain).await;
+    network_controller.create_admin_segment(&domain).await;
+    let explorer = test_site_explorer(
+        &test_harness,
+        SiteExplorerConfig {
+            exploration_timeouts_before_prevent_allocations: 2,
+            ..health_site_explorer_config()
+        },
+    );
+    let (created_host, build_data) = test_harness
+        .managed_host_builder(&explorer, underlay_segment)
+        .with_dpu_network_status_reported()
+        .build()
+        .await;
+
+    explorer.insert_endpoint_result(
+        build_data.host_bmc_ip(),
+        Err(EndpointExplorationError::ConnectionTimeout {
+            details: "chassis collection".to_string(),
+            consecutive_count: 1,
+        }),
+    );
+    for expected_classifications in [vec![], vec!["PreventAllocations".to_string()]] {
+        explorer.run_single_iteration().await?;
+        let alerts = find_machine(test_harness.api(), created_host.host.id.into())
+            .await?
+            .status
+            .and_then(|status| status.health)
+            .unwrap()
+            .alerts;
+        let alert = alerts
+            .iter()
+            .find(|alert| alert.id == "BmcExplorationFailure")
+            .expect("expected a BmcExplorationFailure alert");
+        assert_eq!(alert.classifications, expected_classifications);
+    }
 
     Ok(())
 }

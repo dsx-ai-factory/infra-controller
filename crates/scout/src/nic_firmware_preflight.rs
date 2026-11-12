@@ -134,7 +134,7 @@ impl PreflightArgs {
         };
         validate_preflight_request(&self.device, &desired)?;
         let report = self
-            .inspect_with(async |files| {
+            .inspect_with(FirmwareStaging::new, async |files| {
                 Ok(inspect_prepared_firmware(&self.device, &desired, files).await?)
             })
             .await?;
@@ -166,7 +166,11 @@ impl PreflightArgs {
 
     /// `inspect_with` keeps each present checked input alive through the
     /// inspector's await. A failed config download must not inspect a partial set.
-    async fn inspect_with<F, T>(&self, inspect: F) -> eyre::Result<T>
+    async fn inspect_with<F, T>(
+        &self,
+        new_staging: impl FnOnce() -> Result<FirmwareStaging, Box<dyn std::error::Error + Send + Sync>>,
+        inspect: F,
+    ) -> eyre::Result<T>
     where
         F: for<'files> AsyncFnOnce(LocalFirmwareFiles<'files>) -> eyre::Result<T>,
     {
@@ -180,7 +184,7 @@ impl PreflightArgs {
             }))
             .build()
             .wrap_err("failed to create artifact HTTP client")?;
-        let mut staging = FirmwareStaging::new().map_err(|error| eyre::eyre!(error))?;
+        let mut staging = new_staging().map_err(|error| eyre::eyre!(error))?;
         let image = staging
             .stage(
                 &client,
@@ -267,6 +271,7 @@ mod tests {
 
     use axum::Router;
     use axum::routing::get;
+    use carbide_instrument::testing::MetricsCapture;
     use carbide_test_support::{Check, check_values};
     use clap::Parser;
     use sha2::{Digest, Sha256};
@@ -523,6 +528,38 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn preflight_rejects_invalid_urls_before_creating_staging() {
+        let args = PreflightArgs {
+            device: "03:00.0".to_string(),
+            part_number: "test-part".to_string(),
+            psid: "test-psid".to_string(),
+            version: "1.2.3".to_string(),
+            image_url: "https://user:secret-marker@example.test/image.bin".to_string(),
+            image_sha256: DIGEST.to_string(),
+            device_config_url: None,
+            device_config_sha256: None,
+        };
+        let staging_calls = Cell::new(0);
+        let error = args
+            .inspect_with(
+                || {
+                    staging_calls.set(staging_calls.get() + 1);
+                    Err(std::io::Error::other("staging unavailable").into())
+                },
+                async |_| Ok(()),
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(staging_calls.get(), 0);
+        assert_eq!(
+            error.to_string(),
+            "invalid --image-url: artifact URL must not include authentication, query, or fragment"
+        );
+        assert!(!format!("{error:#}").contains("secret-marker"));
+    }
+
     /// Exercise the real staging consumer: either bad digest prevents all live
     /// inspection, while success passes local bytes without a second fetch.
     #[tokio::test]
@@ -625,7 +662,7 @@ mod tests {
             };
             let inspections = Cell::new(0);
             let result: eyre::Result<Vec<PathBuf>> = args
-                .inspect_with(async |files| {
+                .inspect_with(FirmwareStaging::new, async |files| {
                     inspections.set(inspections.get() + 1);
                     assert_eq!(
                         tokio::fs::read(files.image).await.unwrap(),
@@ -705,6 +742,9 @@ mod tests {
                 expected_error: "unexpected HTTP status 302",
             },
         ];
+        // Exhausted artifact retries emit `give_up`, which another test counts
+        // exactly. Hold the shared capture lock until both cases finish.
+        let _metrics = MetricsCapture::start();
         for case in cases {
             let image_requests = Arc::new(AtomicUsize::new(0));
             let redirected_requests = Arc::new(AtomicUsize::new(0));
@@ -760,14 +800,25 @@ mod tests {
                 device_config_sha256: None,
             };
             let inspections = Cell::new(0);
-            let result = args
-                .inspect_with(async |_| {
-                    inspections.set(inspections.get() + 1);
-                    Ok(())
-                })
-                .await;
+            let result = tokio::time::timeout(
+                Duration::from_secs(30),
+                args.inspect_with(
+                    || {
+                        FirmwareStaging::new()
+                            .map(|staging| staging.with_retry_backoff(Duration::from_millis(10)))
+                    },
+                    async |_| {
+                        inspections.set(inspections.get() + 1);
+                        Ok(())
+                    },
+                ),
+            )
+            .await;
             stop.cancel();
-            server.await.unwrap();
+            tokio::time::timeout(Duration::from_secs(30), server)
+                .await
+                .expect("redirect server did not stop")
+                .unwrap();
 
             // The retained staging retry policy retries only the original URL.
             assert_eq!(
@@ -783,7 +834,9 @@ mod tests {
                 case.scenario
             );
             assert_eq!(inspections.get(), 0, "{}", case.scenario);
-            let error = result.unwrap_err();
+            let error = result
+                .expect("redirect inspection did not finish")
+                .unwrap_err();
             assert!(
                 format!("{error:#}").contains(case.expected_error),
                 "{}: {error:#}",

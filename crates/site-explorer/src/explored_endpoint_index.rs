@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
+use carbide_uuid::rack::RackId;
 use mac_address::MacAddress;
 use model::expected_entity::ExpectedEntity;
 use model::expected_machine::ExpectedMachine;
@@ -125,6 +126,20 @@ impl ExploredEndpointIndex {
                 }
             })
             .collect()
+    }
+
+    /// Count the expected machines of every rack, over all expected machines
+    /// that declare a rack.
+    pub(crate) fn expected_hosts_per_rack(&self) -> HashMap<&RackId, usize> {
+        let mut counts = HashMap::new();
+        for expected in self.expected.values() {
+            if let ExpectedEntity::Machine(machine) = expected
+                && let Some(rack_id) = machine.data.rack_id.as_ref()
+            {
+                *counts.entry(rack_id).or_default() += 1;
+            }
+        }
+        counts
     }
 
     /// Return the expected machines that were found in `explored_underlay_interfaces`
@@ -280,5 +295,44 @@ impl ExploredEndpointIndexBuilder {
             explored_power_shelves_addr_index: self.explored_power_shelves_addr_index,
             explored_switches_addr_index: self.explored_switches_addr_index,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use model::expected_machine::ExpectedMachineData;
+
+    use super::*;
+
+    /// An expected machine counts toward its rack whether or not an interface
+    /// was found for it, a machine without a rack is not counted, and the
+    /// other expected entities are not counted.
+    #[test]
+    fn expected_hosts_per_rack_counts_expected_machines_with_a_rack() {
+        let rack_a = RackId::new("rack-a");
+        let machine = |mac: &str, rack_id: Option<&RackId>| ExpectedMachine {
+            id: None,
+            bmc_mac_address: mac.parse().unwrap(),
+            data: ExpectedMachineData {
+                rack_id: rack_id.cloned(),
+                ..Default::default()
+            },
+        };
+        let index = ExploredEndpointIndex::builder(Vec::new(), Vec::new())
+            .with_expected_machines(vec![
+                machine("02:00:00:00:00:01", Some(&rack_a)),
+                machine("02:00:00:00:00:02", Some(&rack_a)),
+                machine("02:00:00:00:00:03", None),
+            ])
+            .with_expected_switches(vec![ExpectedSwitch {
+                bmc_mac_address: "02:00:00:00:00:04".parse().unwrap(),
+                ..Default::default()
+            }])
+            .build();
+
+        assert_eq!(
+            index.expected_hosts_per_rack(),
+            HashMap::from([(&rack_a, 2)])
+        );
     }
 }

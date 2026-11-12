@@ -32,7 +32,7 @@
 # its libraries are present (see journaldreceiver/examples/container/README.md
 # in opentelemetry-collector-contrib).
 
-ARG GO_VERSION=1.26.4
+ARG GO_VERSION=1.27.3
 ARG OTELCOL_VERSION=0.155.0
 ARG CRICTL_VERSION=1.34.0
 
@@ -59,7 +59,7 @@ COPY bluefield/otel/get_module_version.sh /build/
 
 # Committed go.mod/go.sum produced by running update-ocb-modules.sh locally.
 # Using these instead of a fresh `go mod tidy` inside the build makes the
-# dependency graph deterministic — two builds from the same commit produce
+# dependency graph deterministic, so two builds from the same commit produce
 # identical module sets. Run update-ocb-modules.sh and commit the outputs
 # whenever otelcol_builder_config_yaml.txt or component versions change.
 COPY bluefield/otel/ocb-generated/go.mod /build/ocb-generated/go.mod
@@ -75,7 +75,7 @@ RUN FILERESOURCE_VERSION=$(bash /build/get_module_version.sh /build/fileresource
         -e "s/\${PUNTSTATS_VERSION}/${PUNTSTATS_VERSION}/g" \
         otelcol_builder_config_yaml.txt > ocb_config.yaml
 
-# Generate Go source only — skip the go mod tidy step that makes module
+# Generate Go source only. Skip the go mod tidy step that makes module
 # resolution non-deterministic across builds.
 RUN ocb --config ocb_config.yaml --skip-compilation --skip-get-modules
 

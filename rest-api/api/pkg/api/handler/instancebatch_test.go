@@ -64,22 +64,23 @@ func testBatchBuildMachineWithNVLinkDomain(t *testing.T, dbSession *cdb.Session,
 	return mc
 }
 
-// testBatchAssignOnLockHook marks the first candidate Machine assigned from another connection right after
-// the batch locks it, so the locked re-read rejects that Machine. bun can't remove a hook, so it fires once.
-type testBatchAssignOnLockHook struct {
+// testBatchInvalidateOnLockHook changes the first candidate from another connection before
+// the row lock, so the locked re-read must reject it. The hook fires only once.
+type testBatchInvalidateOnLockHook struct {
 	once      sync.Once
 	dbSession *cdb.Session
 	// lockQueries maps each candidate's pg_try_advisory_xact_lock call to its Machine ID
-	lockQueries map[string]string
-	assigned    string
-	err         error
+	lockQueries   map[string]string
+	assigned      string
+	forceDeletion bool
+	err           error
 }
 
-func (h *testBatchAssignOnLockHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+func (h *testBatchInvalidateOnLockHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
 	return ctx
 }
 
-func (h *testBatchAssignOnLockHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+func (h *testBatchInvalidateOnLockHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
 	if event.Err != nil {
 		return
 	}
@@ -89,10 +90,13 @@ func (h *testBatchAssignOnLockHook) AfterQuery(_ context.Context, event *bun.Que
 		}
 		h.once.Do(func() {
 			h.assigned = machineID
-			_, h.err = cdbm.NewMachineDAO(h.dbSession).Update(context.Background(), nil, cdbm.MachineUpdateInput{
-				MachineID:  machineID,
-				IsAssigned: cutil.GetPtr(true),
-			})
+			update := cdbm.MachineUpdateInput{MachineID: machineID, IsAssigned: cutil.GetPtr(true)}
+			if h.forceDeletion {
+				update.IsAssigned = nil
+				update.IsForceDeletionRequested = cutil.GetPtr(true)
+				update.IsUsableByTenant = cutil.GetPtr(false)
+			}
+			_, h.err = cdbm.NewMachineDAO(h.dbSession).Update(context.Background(), nil, update)
 		})
 		return
 	}
@@ -237,29 +241,37 @@ func TestAllocateMachinesForBatch(t *testing.T) {
 		})
 	}
 
-	t.Run("unlocks a Machine rejected after its lock, keeps the verified Machine locked", func(t *testing.T) {
-		lockedInstanceType := testInstanceBuildInstanceType(t, dbSession, provider, "test-rejected-lock-type", site, cdbm.InstanceStatusReady)
-		hook := &testBatchAssignOnLockHook{dbSession: dbSession, lockQueries: map[string]string{}}
-		for range 2 {
-			machine := testInstanceBuildMachine(t, dbSession, provider.ID, site.ID, cutil.GetPtr(false), nil)
-			testInstanceBuildMachineInstanceType(t, dbSession, machine, lockedInstanceType)
-			hook.lockQueries[fmt.Sprintf("pg_try_advisory_xact_lock(%d)", cdb.GetAdvisoryLockIDFromString(machine.ID))] = machine.ID
-		}
-		dbSession.DB.AddQueryHook(hook)
+	for _, tc := range []struct {
+		name          string
+		forceDeletion bool
+	}{
+		{"assignment", false},
+		{"force deletion", true},
+	} {
+		t.Run("rejects concurrent "+tc.name+" and releases the candidate lock", func(t *testing.T) {
+			lockedInstanceType := testInstanceBuildInstanceType(t, dbSession, provider, "test-rejected-lock-type-"+tc.name, site, cdbm.InstanceStatusReady)
+			hook := &testBatchInvalidateOnLockHook{dbSession: dbSession, lockQueries: map[string]string{}, forceDeletion: tc.forceDeletion}
+			for range 2 {
+				machine := testInstanceBuildMachine(t, dbSession, provider.ID, site.ID, cutil.GetPtr(false), nil)
+				testInstanceBuildMachineInstanceType(t, dbSession, machine, lockedInstanceType)
+				hook.lockQueries[fmt.Sprintf("pg_try_advisory_xact_lock(%d)", cdb.GetAdvisoryLockIDFromString(machine.ID))] = machine.ID
+			}
+			dbSession.DB.AddQueryHook(hook)
 
-		tx, err := cdb.BeginTx(ctx, dbSession, nil)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = tx.Rollback() })
+			tx, err := cdb.BeginTx(ctx, dbSession, nil)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = tx.Rollback() })
 
-		machines, apiErr := allocateMachinesForBatch(ctx, tx, dbSession, lockedInstanceType, 1, false, nil, nil, zerolog.Nop())
-		require.Nil(t, apiErr)
-		require.NoError(t, hook.err)
-		require.NotEmpty(t, hook.assigned, "batch never locked a candidate Machine")
-		require.Len(t, machines, 1)
-		assert.NotEqual(t, hook.assigned, machines[0].ID)
-		assert.False(t, machineLockedElsewhere(t, hook.assigned), "rejected Machine must be unlocked before the transaction ends")
-		assert.True(t, machineLockedElsewhere(t, machines[0].ID), "verified Machine must stay locked until the transaction ends")
-	})
+			machines, apiErr := allocateMachinesForBatch(ctx, tx, dbSession, lockedInstanceType, 1, false, nil, nil, zerolog.Nop())
+			require.Nil(t, apiErr)
+			require.NoError(t, hook.err)
+			require.NotEmpty(t, hook.assigned, "batch never locked a candidate Machine")
+			require.Len(t, machines, 1)
+			assert.NotEqual(t, hook.assigned, machines[0].ID)
+			assert.False(t, machineLockedElsewhere(t, hook.assigned), "rejected Machine must be unlocked before the transaction ends")
+			assert.True(t, machineLockedElsewhere(t, machines[0].ID), "verified Machine must stay locked until the transaction ends")
+		})
+	}
 }
 
 func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
@@ -290,13 +302,36 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 	// Tenant 1
 	tnu1 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-2", tnOrg, tnOrgRoles)
 	tn1 := testInstanceBuildTenant(t, dbSession, "test-tenant-1", tnOrg, tnu1)
-	_ = common.TestBuildTenantAccountWithTargetedInstanceCreation(t, dbSession, ip, &tn1.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu1)
+	tenantAccount := common.TestBuildTenantAccountWithCapabilities(t, dbSession, ip, &tn1.ID, tnOrg, cdbm.TenantAccountStatusReady, tnu1, cdbm.TenantAccountConfig{
+		TargetedInstanceCreation:     true,
+		CrossTenantInterfaceCreation: true,
+	})
 
 	// Tenant-Site association
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn1.ID, st1.ID, tnu1.ID)
 	assert.NotNil(t, ts1)
 	ts2 := testBuildTenantSiteAssociation(t, dbSession, tnOrg, tn1.ID, st2.ID, tnu1.ID)
 	assert.NotNil(t, ts2)
+
+	disableCrossTenantInterfaceCreation := func(t *testing.T) {
+		accountDAO := cdbm.NewTenantAccountDAO(dbSession)
+		disabledConfig := tenantAccount.Config
+		disabledConfig.CrossTenantInterfaceCreation = false
+		_, err := accountDAO.Update(ctx, nil, cdbm.TenantAccountUpdateInput{
+			TenantAccountID: tenantAccount.ID,
+			Config:          &disabledConfig,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			enabledConfig := tenantAccount.Config
+			enabledConfig.CrossTenantInterfaceCreation = true
+			_, cleanupErr := accountDAO.Update(ctx, nil, cdbm.TenantAccountUpdateInput{
+				TenantAccountID: tenantAccount.ID,
+				Config:          &enabledConfig,
+			})
+			assert.NoError(t, cleanupErr)
+		})
+	}
 
 	// Allocation for tenant 1
 	al1 := testInstanceSiteBuildAllocation(t, dbSession, st1, tn1, "test-allocation-1", ipu)
@@ -327,6 +362,15 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		mc := testBatchBuildMachineWithNVLinkDomain(t, dbSession, ip.ID, st1.ID, "nvlink-domain-vpc-selection")
 		testInstanceBuildMachineInstanceType(t, dbSession, mc, istVpcSelection)
+	}
+
+	istCrossTenantVpc := testInstanceBuildInstanceType(t, dbSession, ip, "test-instance-type-cross-tenant-vpc", st1, cdbm.InstanceStatusReady)
+	assert.NotNil(t, istCrossTenantVpc)
+	alcCrossTenantVpc := testInstanceSiteBuildAllocationContraints(t, dbSession, al1, cdbm.AllocationResourceTypeInstanceType, istCrossTenantVpc.ID, cdbm.AllocationConstraintTypeReserved, 2, ipu)
+	assert.NotNil(t, alcCrossTenantVpc)
+	for range 2 {
+		mc := testBatchBuildMachineWithNVLinkDomain(t, dbSession, ip.ID, st1.ID, "nvlink-domain-cross-tenant-vpc")
+		testInstanceBuildMachineInstanceType(t, dbSession, mc, istCrossTenantVpc)
 	}
 
 	// Create 15 machines for ist1 (all on same NVLink domain for topology optimization test)
@@ -442,6 +486,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 	tnu2 := testInstanceBuildUser(t, dbSession, "test-starfleet-id-3", tnOrg2, tnOrgRoles2)
 	tn2 := testInstanceBuildTenant(t, dbSession, "test-tenant-2", tnOrg2, tnu2)
 	vpcOtherTenant := testInstanceBuildVPC(t, dbSession, "test-vpc-other-tenant", ip, tn2, st1, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, cdbm.VpcStatusReady, tnu2)
+	crossTenantVpcFNN := testInstanceBuildVPC(t, dbSession, "test-cross-tenant-vpc-fnn", ip, tn2, st1, cutil.GetPtr(uuid.New()), nil, cutil.GetPtr(cdbm.VpcFNN), nil, cdbm.VpcStatusReady, tnu2)
 	subnetOtherTenant := testInstanceBuildSubnet(t, dbSession, "test-subnet-other-tenant", tn2, vpcOtherTenant, cutil.GetPtr(uuid.New()), cdbm.SubnetStatusReady, tnu2)
 
 	// OS owned by different tenant (for OS ownership test)
@@ -504,7 +549,19 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 		args                     args
 		expectedControllerVpcIDs map[string]uuid.UUID
 		wantErr                  bool
+		checkResponse            func(t *testing.T, response []model.APIInstance)
 	}
+	// Baseline intent belongs to the registration and must block instance-scoped deployments.
+	baselineService, baselineErr := cdbm.NewDpuExtensionServiceDAO(dbSession).Create(context.Background(), nil, cdbm.DpuExtensionServiceCreateInput{
+		Name:           "baseline-attachment-test",
+		ServiceType:    cdbm.DpuExtensionServiceServiceTypeDpfHelmChart,
+		DeploymentType: cdbm.DpuExtensionServiceDeploymentTypeBaseline,
+		TenantID:       tn1.ID, SiteID: st1.ID, CreatedBy: tnu1.ID,
+		Status:         cdbm.DpuExtensionServiceStatusReady,
+		ActiveVersions: []string{"V1-T1761856992374052", "2.0.0"},
+	})
+	require.NoError(t, baselineErr)
+
 	tests := []batchCase{
 		{
 			name: "test batch instance create API endpoint succeeds with valid request",
@@ -555,6 +612,136 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 				respMsg:  "Tenant does not have capability to create Instances using Machine label selector",
 			},
 			wantErr: false,
+		},
+		{
+			name: "batch create rejects a cross-Tenant VPC attachment without crossTenantInterfaceCreation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIBatchInstanceCreateRequest{
+					NamePrefix:      "test-batch-cross-tenant-denied",
+					Count:           2,
+					TenantID:        tn1.ID.String(),
+					InstanceTypeID:  istCrossTenantVpc.ID.String(),
+					VpcID:           vpcFNN.ID.String(),
+					SecondaryVpcIDs: []string{crossTenantVpcFNN.ID.String()},
+					IpxeScript:      cutil.GetPtr("test script"),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpcFNN.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcID:      cutil.GetPtr(crossTenantVpcFNN.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				prepareReq: func(t *testing.T, _ *model.APIBatchInstanceCreateRequest) {
+					disableCrossTenantInterfaceCreation(t)
+				},
+				reqOrg:   tnOrg,
+				reqUser:  tnu1,
+				respCode: http.StatusForbidden,
+				respMsg:  "Tenant does not have crossTenantInterfaceCreation capability enabled",
+			},
+		},
+		{
+			name: "batch create does not reveal cross-Tenant VPC state without crossTenantInterfaceCreation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIBatchInstanceCreateRequest{
+					NamePrefix:      "test-batch-cross-tenant-state-hidden",
+					Count:           2,
+					TenantID:        tn1.ID.String(),
+					InstanceTypeID:  istCrossTenantVpc.ID.String(),
+					VpcID:           vpcFNN.ID.String(),
+					SecondaryVpcIDs: []string{vpcOtherTenant.ID.String()},
+					IpxeScript:      cutil.GetPtr("test script"),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpcFNN.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							// Not FNN, so validation would reject it with a 400 if it ran first.
+							VpcID:      cutil.GetPtr(vpcOtherTenant.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				prepareReq: func(t *testing.T, _ *model.APIBatchInstanceCreateRequest) {
+					disableCrossTenantInterfaceCreation(t)
+				},
+				reqOrg:   tnOrg,
+				reqUser:  tnu1,
+				respCode: http.StatusForbidden,
+				respMsg:  "Tenant does not have crossTenantInterfaceCreation capability enabled",
+			},
+		},
+		{
+			name: "batch create permits a cross-Tenant VPC attachment with crossTenantInterfaceCreation",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIBatchInstanceCreateRequest{
+					NamePrefix:      "test-batch-cross-tenant-allowed",
+					Count:           2,
+					TenantID:        tn1.ID.String(),
+					InstanceTypeID:  istCrossTenantVpc.ID.String(),
+					VpcID:           vpcFNN.ID.String(),
+					SecondaryVpcIDs: []string{crossTenantVpcFNN.ID.String()},
+					IpxeScript:      cutil.GetPtr("test script"),
+					Interfaces: []model.APIInterfaceCreateOrUpdateRequest{
+						{
+							VpcID:      cutil.GetPtr(vpcFNN.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+							IsPhysical: true,
+						},
+						{
+							VpcID:      cutil.GetPtr(crossTenantVpcFNN.ID.String()),
+							IPFamilies: []model.IPFamily{model.IPFamilyIPv4},
+						},
+					},
+				},
+				reqOrg:   tnOrg,
+				reqUser:  tnu1,
+				respCode: http.StatusCreated,
+			},
+			checkResponse: func(t *testing.T, response []model.APIInstance) {
+				require.Len(t, response, 2)
+				for _, instance := range response {
+					require.Len(t, instance.Interfaces, 2)
+					for _, apiInterface := range instance.Interfaces {
+						if apiInterface.VpcID != nil && *apiInterface.VpcID == crossTenantVpcFNN.ID.String() {
+							assert.Equal(t, cutil.GetPtr(tn1.ID.String()), apiInterface.InstanceTenantID)
+							assert.Equal(t, cutil.GetPtr(tn2.ID.String()), apiInterface.VpcTenantID)
+						} else {
+							assert.Nil(t, apiInterface.InstanceTenantID)
+							assert.Nil(t, apiInterface.VpcTenantID)
+						}
+					}
+				}
+			},
+			expectedControllerVpcIDs: map[string]uuid.UUID{
+				vpcFNN.ID.String():            *vpcFNN.ControllerVpcID,
+				crossTenantVpcFNN.ID.String(): *crossTenantVpcFNN.ControllerVpcID,
+			},
 		},
 		{
 			name: "test batch instance create API endpoint preserves IPv6-only and dual-stack VPC selection intent",
@@ -1425,6 +1612,38 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		// Baseline placement cannot be activated through instance attachment.
+		{
+			name: "rejects baseline service attachment on batch create",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				scp:       scp,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIBatchInstanceCreateRequest{
+					NamePrefix:     "test-batch-dpu-wrong-site",
+					Count:          2,
+					TenantID:       tn1.ID.String(),
+					InstanceTypeID: ist1.ID.String(),
+					VpcID:          vpc1.ID.String(),
+					Interfaces:     createInterfacesForCount(2, subnet1.ID.String()),
+					IpxeScript:     cutil.GetPtr("test script"),
+					DpuExtensionServiceDeployments: []model.APIDpuExtensionServiceDeploymentRequest{
+						{
+							DpuExtensionServiceID: baselineService.ID.String(),
+							Version:               "V1-T1761856992374052",
+						},
+					},
+				},
+				reqOrg:   tnOrg,
+				reqUser:  tnu1,
+				respCode: http.StatusBadRequest,
+				respMsg:  "Baseline DPU Extension Services cannot be attached",
+			},
+			wantErr: false,
+		},
 		{
 			name: "test batch instance create API endpoint fails with DPU Extension Service from different Site",
 			fields: fields{
@@ -1754,6 +1973,9 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 					jsonErr := json.Unmarshal(rec.Body.Bytes(), &response)
 					assert.Nil(t, jsonErr)
 					assert.Equal(t, tt.args.reqData.Count, len(response), "Expected %d instances, got %d", tt.args.reqData.Count, len(response))
+					if tt.checkResponse != nil {
+						tt.checkResponse(t, response)
+					}
 
 					hasInlineRoutingProfile := false
 					for _, reqIfc := range tt.args.reqData.Interfaces {

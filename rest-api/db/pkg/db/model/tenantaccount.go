@@ -113,7 +113,8 @@ var (
 // TenantAccountConfig holds provider-scoped configuration for a TenantAccount.
 // Fields must stay flat so jsonb partial merge works.
 type TenantAccountConfig struct {
-	TargetedInstanceCreation bool `json:"targetedInstanceCreation"`
+	TargetedInstanceCreation     bool `json:"targetedInstanceCreation"`
+	CrossTenantInterfaceCreation bool `json:"crossTenantInterfaceCreation"`
 }
 
 // TenantAccount represents a tenant account - the relationship between a Tenant and an Infrastructure Provider

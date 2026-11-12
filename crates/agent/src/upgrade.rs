@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use std::{env, fs};
 
+use ::rpc::carbide_tls_client::{self, ApiConfig, CarbideClientConfig};
 use ::rpc::forge as rpc;
-use ::rpc::forge_tls_client::{self, ApiConfig, ForgeClientConfig};
 use carbide_uuid::machine::MachineId;
 use data_encoding::BASE64;
 use eyre::WrapErr;
@@ -59,7 +59,7 @@ fn shell_escape(s: &str) -> String {
 /// Returns true if we just updated and hence need to exit, so the new version can start instead.
 pub async fn upgrade(
     forge_api: &str,
-    client_config: &ForgeClientConfig,
+    client_config: &CarbideClientConfig,
     machine_id: &MachineId,
     // allow integration test to replace UPGRADE_CMD
     override_upgrade_cmd: Option<&str>,
@@ -154,7 +154,7 @@ pub async fn upgrade(
 
 async fn upgrade_check(
     forge_api: &str,
-    client_config: &ForgeClientConfig,
+    client_config: &CarbideClientConfig,
     machine_id: &MachineId,
 ) -> eyre::Result<UpgradeCheckResult> {
     let binary_path = env::current_exe()?;
@@ -213,7 +213,7 @@ struct UpgradeCheckResult {
 
 async fn network_upgrade_check(
     forge_api: &str,
-    client_config: &ForgeClientConfig,
+    client_config: &CarbideClientConfig,
     machine_id: &MachineId,
     binary_mtime: SystemTime,
     binary_hash: String,
@@ -226,9 +226,11 @@ async fn network_upgrade_check(
         binary_sha: binary_hash,
     };
 
-    let mut client =
-        forge_tls_client::ForgeTlsClient::retry_build(&ApiConfig::new(forge_api, client_config))
-            .await?;
+    let mut client = carbide_tls_client::CarbideTlsClient::retry_build(&ApiConfig::new(
+        forge_api,
+        client_config,
+    ))
+    .await?;
     let resp = client
         .dpu_agent_upgrade_check(tonic::Request::new(req))
         .await

@@ -91,18 +91,10 @@ impl EnvBuilder {
     }
 
     pub(super) async fn build(self) -> Env {
-        let Self {
-            pool,
-            runtime_config,
-            component_manager,
-            credential_manager,
-        } = self;
         let redfish_sim = Arc::new(RedfishSim::default());
-        let controller_redfish_sim = redfish_sim.clone();
         let api_redfish_sim = redfish_sim.clone();
-        let runtime_config = Arc::new(runtime_config);
-        let api_runtime_config = runtime_config.clone();
-        let test_harness = TestHarness::builder(pool.clone())
+        let api_runtime_config = Arc::new(self.runtime_config.clone());
+        let test_harness = TestHarness::builder(self.pool.clone())
             .with_api_builder_fn(move |builder| {
                 builder
                     .with_runtime_config(api_runtime_config)
@@ -110,6 +102,23 @@ impl EnvBuilder {
             })
             .build()
             .await;
+        self.build_with_harness(test_harness, redfish_sim)
+    }
+
+    /// Rebuild the controller without recreating its database and external fixtures.
+    pub(super) fn build_with_harness(
+        self,
+        test_harness: TestHarness,
+        redfish_sim: Arc<RedfishSim>,
+    ) -> Env {
+        let Self {
+            pool,
+            runtime_config,
+            component_manager,
+            credential_manager,
+        } = self;
+        let controller_redfish_sim = redfish_sim.clone();
+        let runtime_config = Arc::new(runtime_config);
         let api = test_harness.api();
         let cancel_token = CancellationToken::new();
 
@@ -161,6 +170,7 @@ impl EnvBuilder {
             db_pool: pool.clone(),
             db_reader: pool.clone().into(),
             redfish_client_pool: controller_redfish_sim.clone(),
+            bmc_connector: bmc_backend::BmcConnector::Libredfish(controller_redfish_sim.clone()),
             bmc_credential_ops: controller_redfish_sim,
             ipmi_tool: carbide_ipmi::test_support(),
             site_config: runtime_config.machine_state_handler_site_config().into(),

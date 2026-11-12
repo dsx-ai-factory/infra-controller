@@ -185,6 +185,16 @@ func TestAPITenantAccountSiteCapabilitiesUpdateRequest_Validate(t *testing.T) {
 			},
 		},
 		{
+			desc: "accepts cross-Tenant Interface creation without replacing targeted Instance creation",
+			caps: APITenantAccountSiteCapabilitiesUpdateRequest{
+				{CrossTenantInterfaceCreation: cutil.GetPtr(true)},
+				{
+					SiteIDs:                      []string{siteID},
+					CrossTenantInterfaceCreation: cutil.GetPtr(false),
+				},
+			},
+		},
+		{
 			desc: "accepts empty siteIds for account capability",
 			caps: APITenantAccountSiteCapabilitiesUpdateRequest{
 				{
@@ -209,6 +219,17 @@ func TestAPITenantAccountSiteCapabilitiesUpdateRequest_Validate(t *testing.T) {
 				{
 					SiteIDs:                  []string{siteID},
 					TargetedInstanceCreation: cutil.GetPtr(true),
+				},
+			},
+			expectErr: true,
+		},
+		{
+			desc: "rejects Site capability omitted from account default",
+			caps: APITenantAccountSiteCapabilitiesUpdateRequest{
+				{TargetedInstanceCreation: cutil.GetPtr(true)},
+				{
+					SiteIDs:                      []string{siteID},
+					CrossTenantInterfaceCreation: cutil.GetPtr(true),
 				},
 			},
 			expectErr: true,

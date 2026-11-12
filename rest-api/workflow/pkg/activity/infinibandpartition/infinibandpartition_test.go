@@ -113,6 +113,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 	st4 := util.TestBuildSite(t, dbSession, ip, "test-site-4", cdbm.SiteStatusRegistered, nil, ipu)
 	st5 := util.TestBuildSite(t, dbSession, ip, "test-site-5", cdbm.SiteStatusRegistered, nil, ipu)
 	st6 := util.TestBuildSite(t, dbSession, ip, "test-site-6", cdbm.SiteStatusRegistered, nil, ipu)
+	st7 := util.TestBuildSite(t, dbSession, ip, "test-site-7", cdbm.SiteStatusRegistered, nil, ipu)
 
 	ts1 := util.TestBuildTenantSiteAssociation(t, dbSession, tnOrg, tn.ID, st1.ID, tn.ID)
 	assert.NotNil(t, ts1)
@@ -161,6 +162,7 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 
 	recoveredIbpID := uuid.New()
 	failedRecoveredIbpID := uuid.New()
+	noAccessRecoveredIbpID := uuid.New()
 	terminalIbpID := uuid.New()
 	recoveredDescription := "recovered from Site inventory"
 	recoveredLabelValue := "recovered"
@@ -452,6 +454,43 @@ func TestManageInfiniBandPartition_UpdateInfiniBandPartitionsInDB(t *testing.T) 
 					assert.Equal(t, string(cdbm.InfiniBandPartitionStatusReady), statusDetails[0].Status)
 					assert.Equal(t, cutil.GetPtr("InfiniBand Partition was found on Site, ready for use"), statusDetails[0].Message)
 				}
+			},
+		},
+		{
+			name: "test InfiniBand Partition inventory recovers partition without Tenant Site access",
+			fields: fields{
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
+				env:            env,
+			},
+			args: args{
+				ctx:    ctx,
+				siteID: st7.ID,
+				infiniBandPartitionInventory: &corev1.InfiniBandPartitionInventory{
+					IbPartitions: []*corev1.IBPartition{
+						{
+							Id: &corev1.IBPartitionId{Value: noAccessRecoveredIbpID.String()},
+							Config: &corev1.IBPartitionConfig{
+								TenantOrganizationId: tn.Org,
+							},
+							Metadata: &corev1.Metadata{Name: "no-access-site-only-ibp"},
+							Status: &corev1.IBPartitionStatus{
+								State: corev1.TenantState_READY,
+							},
+						},
+					},
+					InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				},
+			},
+			check: func(t *testing.T) {
+				t.Helper()
+
+				recovered, rerr := cdbm.NewInfiniBandPartitionDAO(dbSession).GetByID(ctx, nil, noAccessRecoveredIbpID, nil)
+				require.NoError(t, rerr)
+				require.NotNil(t, recovered)
+				assert.Equal(t, st7.ID, recovered.SiteID)
+				assert.Equal(t, tn.ID, recovered.TenantID)
+				assert.Equal(t, cdbm.InfiniBandPartitionStatusReady, recovered.Status)
 			},
 		},
 		{

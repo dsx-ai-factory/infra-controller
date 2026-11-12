@@ -78,8 +78,8 @@ use carbide_instrument::emit;
 use forge_tls::client_config::ClientCert;
 use http::{Method, Request, Response, StatusCode};
 use moka::future::Cache as MokaCache;
-use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+use rpc::carbide_api_client::CarbideApiClient;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use trace_propagation::set_span_parent_from_headers;
@@ -129,7 +129,7 @@ pub(crate) struct BmcProxyParams {
 #[derive(Clone)]
 struct BmcProxyState {
     config: Arc<crate::Config>,
-    api_client: ForgeApiClient,
+    api_client: CarbideApiClient,
     credential_cache: CredentialCache,
     upstream_clients: Arc<UpstreamClients>,
     ip_cache: LookupToIpCache,
@@ -195,7 +195,7 @@ pub(crate) async fn start(
         .await
         .map_err(BmcProxyError::Listen)?;
 
-    let client_config = ForgeClientConfig::new(
+    let client_config = CarbideClientConfig::new(
         config.carbide_api.root_ca.clone(),
         Some(ClientCert {
             cert_path: config.carbide_api.client_cert.clone(),
@@ -203,7 +203,7 @@ pub(crate) async fn start(
         }),
     );
     let api_config = ApiConfig::new(config.carbide_api.api_url.as_str(), &client_config);
-    let api_client = ForgeApiClient::new(&api_config);
+    let api_client = CarbideApiClient::new(&api_config);
 
     let admission = Admission::start(
         &config.classes,
@@ -304,7 +304,6 @@ async fn proxy_request(
     request: Request<Body>,
 ) -> Result<Response<Body>, Response<Body>> {
     let request_span = bmc_proxy_request_span(&request);
-
     let result = proxy_request_inner(state, request)
         .instrument(request_span.clone())
         .await;
@@ -320,6 +319,7 @@ fn bmc_proxy_request_span<B>(request: &Request<B>) -> tracing::Span {
     let request_span = tracing::info_span!(
         parent: None,
         "bmc_proxy_request",
+        otel.kind = "server",
         http.request.method = %request.method(),
         url.path = %request.uri().path(),
         http.response.status_code = tracing::field::Empty,
@@ -742,6 +742,7 @@ mod tests {
             TraceId::from(inbound_trace)
         );
         assert_eq!(request.parent_span_id, SpanId::from(inbound_span));
+        assert_eq!(request.span_kind, opentelemetry::trace::SpanKind::Server);
     }
 
     #[test]

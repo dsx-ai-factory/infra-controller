@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::{fs, io};
 
+use carbide_libmlx_model::device::identity::MlxDeviceSelectorError;
+use carbide_libmlx_model::firmware::FirmwareDeliveryMode;
 use carbide_libmlx_model::firmware::operation::{
     FirmwareOperation, FirmwareOperationState, ObserverExitBehavior,
 };
@@ -19,9 +21,11 @@ use rpc::protos::firmware_supervisor::firmware_supervisor_server::{
 use rpc::protos::firmware_supervisor::{
     self as wire, CancelFirmwareOperationRequest, CancelFirmwareOperationResponse,
     GetFirmwareOperationRequest, GetFirmwareOperationResponse, GetSupervisorStatusRequest,
-    GetSupervisorStatusResponse, SubmitFirmwareOperationRequest, SubmitFirmwareOperationResponse,
-    SupervisorIdentity,
+    GetSupervisorStatusResponse, ObserveFirmwareOperationResponse, ObserveFirmwareUpdateRequest,
+    SubmitFirmwareOperationRequest, SubmitFirmwareOperationResponse, SupervisorIdentity,
+    observe_firmware_operation_response, submit_firmware_operation_response,
 };
+use rpc::protos::mlx_device::FirmwareOperationMissingReceipt;
 use sha2::{Digest, Sha256};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, watch};
@@ -29,10 +33,11 @@ use tokio::task::{JoinSet, spawn_blocking};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{Request, Response, Status};
+use uuid::Uuid;
 
 use super::claim::MutationClaim;
 use super::client::{MESSAGE_LIMIT, PROTOCOL_VERSION};
-use super::execution::run_operation;
+use super::execution::{OperationRuntime, run_operation};
 use super::identity::{DeviceIdentity, current_boot_id};
 use super::journal::{
     Admission, JournalError, JournalRecord, OperationJournal, OperationUpdate, RequestedFirmware,
@@ -40,6 +45,7 @@ use super::journal::{
 use super::launch::ensure_state_directory;
 use super::peer::{ConnectedSocket, PeerInfo, wait_for_exit};
 use crate::firmware::config::{FirmwareFlasherProfile, FirmwareUpdateContext};
+use crate::firmware::core_download::CoreFirmwareDownloadConfig;
 use crate::firmware::preflight::validate_preflight_request;
 use crate::runner::FirmwareToolExecutor;
 
@@ -54,9 +60,100 @@ const MAX_REQUESTS_PER_CONNECTION: u32 = 8;
 struct Work {
     operation_id: String,
     profile: Option<FirmwareFlasherProfile>,
+    core_download_config: Option<CoreFirmwareDownloadConfig>,
     observer: Option<Arc<OwnedFd>>,
     claim: MutationClaim,
     canceled: watch::Receiver<Option<String>>,
+}
+
+/// Submission and checked observation must interpret and fingerprint the same
+/// immutable request. Validation performs no journal, filesystem, or device I/O.
+struct ValidatedFirmwareRequest {
+    profile: Option<FirmwareFlasherProfile>,
+    behavior: ObserverExitBehavior,
+    update_context: Option<FirmwareUpdateContext>,
+    fingerprint: [u8; 32],
+}
+
+impl ValidatedFirmwareRequest {
+    fn parse(
+        operation_id: &str,
+        profile: Option<rpc::protos::mlx_device::FirmwareFlasherProfile>,
+        observer_exit_behavior: i32,
+        update_context: Option<wire::FirmwareUpdateContext>,
+        execution_device: &str,
+    ) -> Result<Self, Status> {
+        validate_operation_id(operation_id)?;
+        if update_context.is_some() && operation_id.starts_with("dpa-firmware:") {
+            return Err(Status::invalid_argument(
+                "firmware update operation IDs must not use the reserved dpa-firmware: prefix",
+            ));
+        }
+        let behavior: ObserverExitBehavior =
+            wire::ObserverExitBehavior::try_from(observer_exit_behavior)
+                .map_err(|_| Status::invalid_argument("unknown observer exit behavior"))?
+                .into();
+        let profile: Option<FirmwareFlasherProfile> = profile
+            .map(TryInto::try_into)
+            .transpose()
+            .map_err(Status::invalid_argument)?;
+        if let Some(profile) = &profile {
+            profile
+                .flash_spec
+                .validate_submission_paths()
+                .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        }
+        let update_context = update_context
+            .map(|context| {
+                let profile = profile.as_ref().ok_or_else(|| {
+                    Status::invalid_argument("firmware update requires a profile")
+                })?;
+                let context = FirmwareUpdateContext {
+                    phase_id: context.phase_id,
+                    delivery_mode: rpc::protos::mlx_device::FirmwareDeliveryMode::try_from(
+                        context.delivery_mode,
+                    )
+                    .map_err(|_| Status::invalid_argument("unknown firmware delivery mode"))?
+                    .into(),
+                    expected_digests: context
+                        .expected_digests
+                        .ok_or_else(|| {
+                            Status::invalid_argument("firmware update requires expected digests")
+                        })?
+                        .try_into()
+                        .map_err(|_| Status::invalid_argument("invalid firmware update digests"))?,
+                    expected_device: context
+                        .expected_device
+                        .map(TryInto::try_into)
+                        .transpose()
+                        .map_err(|error: MlxDeviceSelectorError| {
+                            Status::invalid_argument(error.to_string())
+                        })?,
+                };
+                context
+                    .validate(profile)
+                    .map_err(|error| Status::invalid_argument(error.to_string()))?;
+                validate_preflight_request(execution_device, &profile.firmware_spec)
+                    .map_err(|_| Status::invalid_argument("invalid firmware update target"))?;
+                Ok::<_, Status>(context)
+            })
+            .transpose()?;
+        // Preserve the legacy `(profile, behavior)` and checked
+        // `(profile, behavior, context, execution_device)` tuples. Serde omits
+        // an absent card selector so saved receipt fingerprints stay unchanged.
+        // Credentials contribute to the fingerprint but are not stored in the journal.
+        let encoded = match &update_context {
+            Some(context) => serde_json::to_vec(&(&profile, behavior, context, execution_device)),
+            None => serde_json::to_vec(&(&profile, behavior)),
+        }
+        .map_err(|_| Status::internal("cannot encode firmware request"))?;
+        Ok(Self {
+            profile,
+            behavior,
+            update_context,
+            fingerprint: Sha256::digest(encoded).into(),
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -65,6 +162,7 @@ struct Supervisor {
     directory: PathBuf,
     root: PathBuf,
     identity: SupervisorIdentity,
+    supervisor_instance_id: String,
     work: mpsc::Sender<Work>,
     executor: FirmwareToolExecutor,
     canceled: watch::Sender<Option<String>>,
@@ -87,7 +185,8 @@ impl Supervisor {
         Ok(peer.clone())
     }
 
-    /// Tonic may reconnect a channel; each mutation pins the original handshake.
+    /// Submit, cancel, and checked observation pin the original handshake even
+    /// when Tonic reconnects the channel.
     fn check_identity(&self, expected: Option<&SupervisorIdentity>) -> Result<(), Status> {
         if expected != Some(&self.identity) {
             return Err(Status::failed_precondition(
@@ -108,6 +207,18 @@ impl Supervisor {
 
     /// Read durable state without inferring completion from process liveness.
     async fn snapshot(&self, operation_id: &str) -> Result<FirmwareOperation, Status> {
+        self.find_operation(operation_id, None)
+            .await?
+            .ok_or_else(|| Status::not_found("firmware operation is not recorded"))
+    }
+
+    /// Only a readable journal can establish absence. Uncertain persistence
+    /// fences this lookup instead of returning permission to submit new work.
+    async fn find_operation(
+        &self,
+        operation_id: &str,
+        expected_fingerprint: Option<[u8; 32]>,
+    ) -> Result<Option<FirmwareOperation>, Status> {
         validate_operation_id(operation_id)?;
         let permit = self.reserve_journal_rpc()?;
         let journal = self.journal.clone();
@@ -116,12 +227,16 @@ impl Supervisor {
             // Dropping the RPC does not stop a blocking closure. Keep its
             // reservation until the journal access actually finishes.
             let _permit = permit;
-            journal
-                .lock()
-                .expect("firmware journal mutex poisoned")
-                .snapshot(&operation_id)
-                .map_err(journal_status)?
-                .ok_or_else(|| Status::not_found("firmware operation is not recorded"))
+            let journal = journal.lock().expect("firmware journal mutex poisoned");
+            let Some(record) = journal.record(&operation_id).map_err(journal_status)? else {
+                return Ok(None);
+            };
+            if expected_fingerprint.is_some_and(|expected| expected != record.request_sha256) {
+                return Err(Status::already_exists(
+                    "firmware operation ID identifies different work",
+                ));
+            }
+            Ok(Some(record.operation.clone()))
         })
         .await
         .map_err(|error| journal_status(error.into()))?
@@ -166,6 +281,7 @@ impl Supervisor {
         let Work {
             operation_id,
             profile,
+            core_download_config,
             observer,
             claim,
             canceled,
@@ -179,8 +295,11 @@ impl Supervisor {
                         profile,
                         self.directory.clone(),
                         self.journal.clone(),
-                        self.executor.clone(),
-                        canceled,
+                        OperationRuntime {
+                            executor: self.executor.clone(),
+                            cancellation: canceled,
+                            core_download_config,
+                        },
                     )
                     .await
                 }
@@ -257,69 +376,24 @@ impl FirmwareSupervisor for Supervisor {
         let peer = self.peer(&request)?;
         let request = request.into_inner();
         self.check_identity(request.expected_identity.as_ref())?;
-        validate_operation_id(&request.operation_id)?;
-        if request.update_context.is_some() && request.operation_id.starts_with("dpa-firmware:") {
-            return Err(Status::invalid_argument(
-                "firmware update operation IDs must not use the reserved dpa-firmware: prefix",
-            ));
-        }
-        let behavior: ObserverExitBehavior =
-            wire::ObserverExitBehavior::try_from(request.observer_exit_behavior)
-                .map_err(|_| Status::invalid_argument("unknown observer exit behavior"))?
-                .into();
-        let profile: Option<FirmwareFlasherProfile> = request
-            .profile
-            .map(TryInto::try_into)
-            .transpose()
-            .map_err(Status::invalid_argument)?;
-        if let Some(profile) = &profile {
-            profile
-                .flash_spec
-                .validate_submission_paths()
-                .map_err(|error| Status::invalid_argument(error.to_string()))?;
-        }
-        let update_context = request
-            .update_context
-            .map(|context| {
-                let profile = profile.as_ref().ok_or_else(|| {
-                    Status::invalid_argument("firmware update requires a profile")
-                })?;
-                let context = FirmwareUpdateContext {
-                    phase_id: context.phase_id,
-                    expected_digests: context
-                        .expected_digests
-                        .ok_or_else(|| {
-                            Status::invalid_argument("firmware update requires expected digests")
-                        })?
-                        .try_into()
-                        .map_err(|_| Status::invalid_argument("invalid firmware update digests"))?,
-                };
-                context
-                    .validate(profile)
-                    .map_err(|error| Status::invalid_argument(error.to_string()))?;
-                validate_preflight_request(&self.identity.execution_device, &profile.firmware_spec)
-                    .map_err(|_| Status::invalid_argument("invalid firmware update target"))?;
-                Ok::<_, Status>(context)
-            })
-            .transpose()?;
-        // Hash the exact request, including source credentials, without storing
-        // those secrets in the journal or operator diagnostics.
-        // Preserve the legacy tuple: adding an absent field would change the
-        // fingerprint of a request whose receipt predates checked submission.
-        let encoded = match &update_context {
-            Some(context) => {
-                serde_json::to_vec(&(&profile, behavior, context, &self.identity.execution_device))
-            }
-            None => serde_json::to_vec(&(&profile, behavior)),
-        }
-        .map_err(|_| Status::internal("cannot encode firmware request"))?;
-        let fingerprint: [u8; 32] = Sha256::digest(encoded).into();
+        let ValidatedFirmwareRequest {
+            profile,
+            behavior,
+            update_context,
+            fingerprint,
+        } = ValidatedFirmwareRequest::parse(
+            &request.operation_id,
+            request.profile,
+            request.observer_exit_behavior,
+            request.update_context,
+            &self.identity.execution_device,
+        )?;
         let permit = self.reserve_journal_rpc()?;
         // Shutdown waits for this guard even if the RPC stops awaiting its
         // blocking admission, so accepted work reaches the draining queue.
         let admission = self.admissions.clone().read_owned().await;
         let supervisor = self.clone();
-        let operation = spawn_blocking(move || {
+        let result = spawn_blocking(move || {
             let _permit = permit;
             let _admission = admission;
             let mut journal = supervisor
@@ -332,8 +406,42 @@ impl FirmwareSupervisor for Supervisor {
                         "firmware operation ID identifies different work",
                     ));
                 }
-                return Ok(existing.operation.clone());
+                return Ok(submit_firmware_operation_response::Result::Operation(
+                    existing.operation.clone().into(),
+                ));
             }
+            // A replacement may return a retained receipt, but it cannot infer
+            // whether an absent ID ran before its journal disappeared. Keep the
+            // caller's original token outside the fingerprint and check it only
+            // after duplicate lookup, under the same lock as new admission.
+            if request
+                .expected_supervisor_instance_id
+                .as_ref()
+                .is_some_and(|expected| expected != &supervisor.supervisor_instance_id)
+            {
+                return Err(Status::failed_precondition(
+                    "firmware supervisor instance changed; missing operation requires reconciliation",
+                ));
+            }
+            // Runtime transport is required only for newly admitted SiteCache
+            // work. A duplicate above returns its immutable receipt without
+            // needing current credentials or changing the accepted worker.
+            let core_download_config = match (
+                update_context.as_ref().map(|context| context.delivery_mode),
+                request.core_download_config,
+            ) {
+                (Some(FirmwareDeliveryMode::SiteCache), Some(config)) => Some(
+                    CoreFirmwareDownloadConfig::try_from(config)
+                        .map_err(|error| Status::invalid_argument(error.to_string()))?,
+                ),
+                (Some(FirmwareDeliveryMode::SiteCache), None) => return Err(
+                    Status::invalid_argument("site_cache firmware delivery requires core transport settings"),
+                ),
+                (_, Some(_)) => return Err(Status::invalid_argument(
+                    "core transport settings require site_cache firmware delivery",
+                )),
+                (_, None) => None,
+            };
             let observer = match behavior {
                 ObserverExitBehavior::Continue => None,
                 ObserverExitBehavior::Terminate => Some(peer.pidfd.ok_or_else(|| {
@@ -373,22 +481,39 @@ impl FirmwareSupervisor for Supervisor {
             journal.check_admission(&record).map_err(journal_status)?;
             // PCI locators do not establish independent physical reset domains;
             // the admission policy deliberately serializes work host-wide.
-            let claim = MutationClaim::acquire(
+            let claim = match MutationClaim::acquire(
                 &supervisor.root,
                 &request.operation_id,
                 &supervisor.identity.device_identity,
                 &supervisor.identity.boot_id,
             )
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    Status::resource_exhausted(
-                        "another firmware operation owns the host or requires reconciliation",
-                    )
-                } else {
-                    tracing::error!(%error, "cannot persist firmware mutation claim");
-                    Status::internal("cannot persist firmware mutation claim")
+            {
+                Ok(claim) => claim,
+                Err(error)
+                    if error.kind() == io::ErrorKind::AlreadyExists
+                        && request.report_rejection_details =>
+                {
+                    // Earlier checks passed, but this submission could not claim
+                    // the host. This says nothing about an earlier uncertain
+                    // attempt, even if it used the same operation ID.
+                    return Ok(submit_firmware_operation_response::Result::NotAdmitted(
+                        wire::FirmwareOperationNotAdmitted {
+                            operation_id: request.operation_id,
+                            supervisor_instance_id: supervisor.supervisor_instance_id.clone(),
+                            identity: Some(supervisor.identity.clone()),
+                        },
+                    ));
                 }
-            })?;
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    return Err(Status::resource_exhausted(
+                        "another firmware operation owns the host or requires reconciliation",
+                    ));
+                }
+                Err(error) => {
+                    tracing::error!(%error, "cannot persist firmware mutation claim");
+                    return Err(Status::internal("cannot persist firmware mutation claim"));
+                }
+            };
             let operation = match journal.admit(record).map_err(journal_status)? {
                 Admission::Accepted(operation) | Admission::Existing(operation) => operation,
             };
@@ -399,6 +524,7 @@ impl FirmwareSupervisor for Supervisor {
                 .try_send(Work {
                     operation_id: request.operation_id,
                     profile,
+                    core_download_config,
                     observer,
                     claim,
                     canceled: supervisor.canceled.subscribe(),
@@ -408,12 +534,14 @@ impl FirmwareSupervisor for Supervisor {
                         "firmware executor is unavailable; retrieve the recorded operation",
                     )
                 })?;
-            Ok(operation)
+            Ok(submit_firmware_operation_response::Result::Operation(
+                operation.into(),
+            ))
         })
         .await
         .map_err(|error| journal_status(error.into()))??;
         Ok(Response::new(SubmitFirmwareOperationResponse {
-            operation: Some(operation.into()),
+            result: Some(result),
         }))
     }
 
@@ -425,6 +553,43 @@ impl FirmwareSupervisor for Supervisor {
         let operation = self.snapshot(&request.into_inner().operation_id).await?;
         Ok(Response::new(GetFirmwareOperationResponse {
             operation: Some(operation.into()),
+        }))
+    }
+
+    async fn observe_firmware_update(
+        &self,
+        request: Request<ObserveFirmwareUpdateRequest>,
+    ) -> Result<Response<ObserveFirmwareOperationResponse>, Status> {
+        self.peer(&request)?;
+        let request = request.into_inner();
+        self.check_identity(request.expected_identity.as_ref())?;
+        if request.update_context.is_none() {
+            return Err(Status::invalid_argument(
+                "firmware update requires update context",
+            ));
+        }
+        let validated = ValidatedFirmwareRequest::parse(
+            &request.operation_id,
+            request.profile,
+            request.observer_exit_behavior,
+            request.update_context,
+            &self.identity.execution_device,
+        )?;
+        let result = match self
+            .find_operation(&request.operation_id, Some(validated.fingerprint))
+            .await?
+        {
+            Some(operation) => {
+                observe_firmware_operation_response::Result::Receipt(operation.into())
+            }
+            None => observe_firmware_operation_response::Result::MissingReceipt(
+                FirmwareOperationMissingReceipt {
+                    supervisor_instance_id: self.supervisor_instance_id.clone(),
+                },
+            ),
+        };
+        Ok(Response::new(ObserveFirmwareOperationResponse {
+            result: Some(result),
         }))
     }
 
@@ -587,6 +752,7 @@ pub async fn serve(device: &str, state_directory: &Path) -> io::Result<()> {
             boot_id,
             execution_device: device.device,
         },
+        supervisor_instance_id: Uuid::new_v4().to_string(),
         work,
         executor,
         canceled,
@@ -663,6 +829,16 @@ mod tests {
 
     use super::*;
 
+    /// Extract the durable receipt expected by admission and recovery tests.
+    fn admitted_operation(
+        response: SubmitFirmwareOperationResponse,
+    ) -> rpc::protos::mlx_device::FirmwareOperation {
+        match response.result {
+            Some(submit_firmware_operation_response::Result::Operation(operation)) => operation,
+            other => panic!("expected a durable admission receipt, got {other:?}"),
+        }
+    }
+
     /// Use a private ledger and an absent helper, so service tests can exercise
     /// admission and known launch failures without running a hardware tool.
     fn supervisor_fixture() -> (tempfile::TempDir, Supervisor, mpsc::Receiver<Work>) {
@@ -682,6 +858,7 @@ mod tests {
                 boot_id: "boot".into(),
                 execution_device: "0000:01:00.0".into(),
             },
+            supervisor_instance_id: Uuid::new_v4().to_string(),
             work,
             executor: FirmwareToolExecutor::with_supervisor_path(root.path().join("absent-helper")),
             canceled,
@@ -705,11 +882,14 @@ mod tests {
     /// Submit no hardware work unless a test explicitly supplies a profile.
     fn submission(supervisor: &Supervisor, operation_id: &str) -> SubmitFirmwareOperationRequest {
         SubmitFirmwareOperationRequest {
+            report_rejection_details: false,
+            core_download_config: None,
             operation_id: operation_id.into(),
             profile: None,
             observer_exit_behavior: wire::ObserverExitBehavior::Continue.into(),
             expected_identity: Some(supervisor.identity.clone()),
             update_context: None,
+            expected_supervisor_instance_id: None,
         }
     }
 
@@ -760,13 +940,68 @@ mod tests {
             .unwrap()
             .firmware_url = "https://host/image.bin".into();
         request.update_context = Some(wire::FirmwareUpdateContext {
+            delivery_mode: Default::default(),
             phase_id: "dispatch-1".into(),
             expected_digests: Some(rpc::protos::mlx_device::FirmwareArtifactDigests {
                 image_sha256: "00".repeat(32),
                 configuration_sha256: None,
             }),
+            expected_device: None,
         });
         request
+    }
+
+    /// Supply valid runtime settings so mode rejection cannot be masked by
+    /// an unrelated transport validation error. These tests do not open files.
+    fn core_transport_settings() -> wire::CoreFirmwareDownloadConfig {
+        wire::CoreFirmwareDownloadConfig {
+            core_url: "https://core.example.test".into(),
+            root_ca_path: "/runtime-ca.pem".into(),
+            client_cert_path: "/runtime-cert.pem".into(),
+            client_key_path: "/runtime-key.pem".into(),
+            enforce_tls: true,
+            require_client_cert: true,
+            socks_proxy: Some("socks5://runtime-proxy-secret@proxy.test".into()),
+            ..Default::default()
+        }
+    }
+
+    /// Observation repeats immutable work but cannot request new admission.
+    fn checked_observation(
+        request: SubmitFirmwareOperationRequest,
+    ) -> ObserveFirmwareUpdateRequest {
+        ObserveFirmwareUpdateRequest {
+            operation_id: request.operation_id,
+            profile: request.profile,
+            observer_exit_behavior: request.observer_exit_behavior,
+            expected_identity: request.expected_identity,
+            update_context: request.update_context,
+        }
+    }
+
+    /// An omitted card selector must not change saved request fingerprints.
+    /// Freeze the serialized tuple independently of the current Rust types.
+    #[test]
+    fn omitted_selector_preserves_saved_checked_fingerprint() {
+        let (_root, supervisor, _receiver) = supervisor_fixture();
+        let request = checked_submission(&supervisor, "checked");
+        let validated = ValidatedFirmwareRequest::parse(
+            &request.operation_id,
+            request.profile,
+            request.observer_exit_behavior,
+            request.update_context,
+            &supervisor.identity.execution_device,
+        )
+        .unwrap();
+        let predecessor = concat!(
+            r#"[{"part_number":"part","psid":"psid","version":"version","#,
+            r#""firmware_url":"https://host/image.bin","firmware_credentials":null,"#,
+            r#""device_conf_url":null,"device_conf_credentials":null,"verify_from_cache":false,"cache_dir":null,"#,
+            r#""verify_image":false,"verify_version":false,"reset":false,"reset_level":3},"Continue","#,
+            r#"{"phase_id":"dispatch-1","expected_digests":{"image_sha256":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"configuration_sha256":null}},"0000:01:00.0"]"#,
+        );
+        let expected: [u8; 32] = Sha256::digest(predecessor.as_bytes()).into();
+        assert_eq!(validated.fingerprint, expected);
     }
 
     /// Omitted retry settings must preserve the exact predecessor request hash,
@@ -815,10 +1050,10 @@ mod tests {
             .expect("identical omitted policy returns the retained receipt");
     }
 
-    /// Checked context must not change legacy receipt identities. The complete
-    /// checked request, including its whole-workflow phase ID, is immutable.
+    /// Checked observation and admission share immutable request identity,
+    /// including the phase ID, without changing legacy receipt fingerprints.
     #[tokio::test]
-    async fn checked_context_is_immutable_and_legacy_fingerprint_is_unchanged() {
+    async fn checked_observation_and_admission_preserve_request_identity() {
         let (_root, supervisor, mut receiver) = supervisor_fixture();
         supervisor
             .submit_firmware_operation(peer_request(submission(&supervisor, "legacy")))
@@ -842,6 +1077,7 @@ mod tests {
             .unwrap();
 
         let mut request = checked_submission(&supervisor, "checked");
+        request.expected_supervisor_instance_id = Some(supervisor.supervisor_instance_id.clone());
         request
             .profile
             .as_mut()
@@ -889,6 +1125,32 @@ mod tests {
         ));
         supervisor.execute(legacy_work).await.unwrap();
 
+        // An exact checked lookup can establish absence without creating work,
+        // even when its source is not reachable from this test process.
+        let before_observation = fs::read(supervisor.directory.join("operations.json")).unwrap();
+        let observed = supervisor
+            .observe_firmware_update(peer_request(checked_observation(request.clone())))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            observed.result,
+            Some(observe_firmware_operation_response::Result::MissingReceipt(
+                FirmwareOperationMissingReceipt {
+                    supervisor_instance_id: supervisor.supervisor_instance_id.clone()
+                }
+            ))
+        );
+        assert_eq!(
+            fs::read(supervisor.directory.join("operations.json")).unwrap(),
+            before_observation
+        );
+        assert!(!supervisor.root.join("mutation.json").exists());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
         let accepted = supervisor
             .submit_firmware_operation(peer_request(request.clone()))
             .await
@@ -898,7 +1160,30 @@ mod tests {
         let saved = fs::read(supervisor.directory.join("operations.json")).unwrap();
         assert_eq!(
             supervisor
+                .observe_firmware_update(peer_request(checked_observation(request.clone())))
+                .await
+                .unwrap()
+                .into_inner()
+                .result,
+            Some(observe_firmware_operation_response::Result::Receipt(
+                admitted_operation(accepted.clone())
+            ))
+        );
+        assert_eq!(
+            supervisor
                 .submit_firmware_operation(peer_request(request.clone()))
+                .await
+                .unwrap()
+                .into_inner(),
+            accepted
+        );
+        // Once admitted, only the immutable work decides whether this is the
+        // same operation. A stale instance token cannot turn it into new work.
+        let mut stale_instance = request.clone();
+        stale_instance.expected_supervisor_instance_id = Some("previous-instance".into());
+        assert_eq!(
+            supervisor
+                .submit_firmware_operation(peer_request(stale_instance))
                 .await
                 .unwrap()
                 .into_inner(),
@@ -955,12 +1240,45 @@ mod tests {
                 },
             },
             Case {
+                label: "stable device identity",
+                change: |request| {
+                    request.update_context.as_mut().unwrap().expected_device = Some(
+                        carbide_libmlx_model::device::identity::MlxDeviceSelector::Guid(
+                            "another-card".into(),
+                        )
+                        .into(),
+                    );
+                },
+            },
+            Case {
+                label: "delivery mode changed",
+                change: |request| {
+                    request.update_context.as_mut().unwrap().delivery_mode =
+                        rpc::protos::mlx_device::FirmwareDeliveryMode::SiteCache.into()
+                },
+            },
+            Case {
                 label: "checked receipt reused as legacy",
                 change: |request| request.update_context = None,
             },
         ] {
             let mut conflicting = request.clone();
             (case.change)(&mut conflicting);
+            let observation_code = if conflicting.update_context.is_some() {
+                tonic::Code::AlreadyExists
+            } else {
+                tonic::Code::InvalidArgument
+            };
+            assert_eq!(
+                supervisor
+                    .observe_firmware_update(peer_request(checked_observation(conflicting.clone())))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                observation_code,
+                "{} observed",
+                case.label
+            );
             assert_eq!(
                 supervisor
                     .submit_firmware_operation(peer_request(conflicting))
@@ -992,6 +1310,40 @@ mod tests {
         }
         for case in [
             Case {
+                label: "unknown delivery mode",
+                invalidate: |request| request.update_context.as_mut().unwrap().delivery_mode = 99,
+            },
+            Case {
+                label: "SiteCache requires runtime Core configuration",
+                invalidate: |request| {
+                    request.update_context.as_mut().unwrap().delivery_mode =
+                        rpc::protos::mlx_device::FirmwareDeliveryMode::SiteCache.into()
+                },
+            },
+            Case {
+                label: "Direct rejects Core configuration",
+                invalidate: |request| {
+                    request.core_download_config = Some(core_transport_settings())
+                },
+            },
+            Case {
+                label: "SiteCache validates runtime configuration before admission",
+                invalidate: |request| {
+                    request.update_context.as_mut().unwrap().delivery_mode =
+                        rpc::protos::mlx_device::FirmwareDeliveryMode::SiteCache.into();
+                    let mut config = core_transport_settings();
+                    config.enforce_tls = false;
+                    request.core_download_config = Some(config);
+                },
+            },
+            Case {
+                label: "legacy requests reject Core configuration",
+                invalidate: |request| {
+                    request.update_context = None;
+                    request.core_download_config = Some(core_transport_settings());
+                },
+            },
+            Case {
                 label: "missing profile",
                 invalidate: |request| request.profile = None,
             },
@@ -1005,6 +1357,13 @@ mod tests {
                 label: "invalid phase",
                 invalidate: |request| {
                     request.update_context.as_mut().unwrap().phase_id = "has space".into();
+                },
+            },
+            Case {
+                label: "missing device selector variant",
+                invalidate: |request| {
+                    request.update_context.as_mut().unwrap().expected_device =
+                        Some(rpc::protos::mlx_device::MlxDeviceSelector { identity: None });
                 },
             },
             Case {
@@ -1062,6 +1421,287 @@ mod tests {
         }
     }
 
+    /// An absent receipt never permits a caller to cross service instances.
+    /// Reject before creating either the host claim or an admission record.
+    #[tokio::test]
+    async fn guarded_admission_rejects_another_instance_without_effects() {
+        for expected in ["", "previous-instance"] {
+            let (root, supervisor, mut receiver) = supervisor_fixture();
+            let path = supervisor.directory.join("operations.json");
+            let saved = fs::read(&path).unwrap();
+            let mut request = checked_submission(&supervisor, "missing");
+            request.expected_supervisor_instance_id = Some(expected.into());
+            request.report_rejection_details = expected == "previous-instance";
+            let error = supervisor
+                .submit_firmware_operation(peer_request(request))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.code(),
+                tonic::Code::FailedPrecondition,
+                "expected instance {expected:?}"
+            );
+            assert_eq!(
+                error.message(),
+                "firmware supervisor instance changed; missing operation requires reconciliation",
+                "expected instance {expected:?}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), saved);
+            assert!(!root.path().join("mutation.json").exists());
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    /// Rejecting a new request must preserve both durable stores and the owner.
+    /// Once admitted, receipt lookup must win over the operation's own claim.
+    #[tokio::test]
+    async fn occupied_claim_rejection_preserves_owner_and_retained_receipts() {
+        let (_root, supervisor, mut receiver) = supervisor_fixture();
+        supervisor
+            .submit_firmware_operation(peer_request(submission(&supervisor, "prior")))
+            .await
+            .unwrap();
+        supervisor
+            .execute(receiver.try_recv().unwrap())
+            .await
+            .unwrap();
+        let prior = supervisor.snapshot("prior").await.unwrap();
+        assert_eq!(prior.state, FirmwareOperationState::Complete);
+
+        let claim = MutationClaim::acquire(
+            &supervisor.root,
+            "foreign-owner",
+            &supervisor.identity.device_identity,
+            &supervisor.identity.boot_id,
+        )
+        .unwrap();
+        let claim_path = supervisor.root.join("mutation.json");
+        let journal_path = supervisor.directory.join("operations.json");
+        let held_claim = fs::read(&claim_path).unwrap();
+        let saved_journal = fs::read(&journal_path).unwrap();
+        let mut request = submission(&supervisor, "pending");
+        assert_eq!(
+            supervisor
+                .submit_firmware_operation(peer_request(request.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::ResourceExhausted
+        );
+        request.report_rejection_details = true;
+        let response = supervisor
+            .submit_firmware_operation(peer_request(request.clone()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            response.result,
+            Some(submit_firmware_operation_response::Result::NotAdmitted(
+                wire::FirmwareOperationNotAdmitted {
+                    operation_id: "pending".into(),
+                    supervisor_instance_id: supervisor.supervisor_instance_id.clone(),
+                    identity: Some(supervisor.identity.clone()),
+                }
+            ))
+        );
+        assert_eq!(
+            supervisor.snapshot("pending").await.unwrap_err().code(),
+            tonic::Code::NotFound
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(fs::read(&claim_path).unwrap(), held_claim);
+        assert_eq!(fs::read(&journal_path).unwrap(), saved_journal);
+        assert_eq!(supervisor.snapshot("prior").await.unwrap(), prior);
+
+        // Once the owner releases its claim, the same request can be admitted.
+        claim.release().unwrap();
+        let accepted = admitted_operation(
+            supervisor
+                .submit_firmware_operation(peer_request(request.clone()))
+                .await
+                .unwrap()
+                .into_inner(),
+        );
+        assert_eq!(accepted.operation_id, "pending");
+        let work = receiver.try_recv().unwrap();
+        assert_eq!(work.operation_id, "pending");
+        let accepted_claim = fs::read(&claim_path).unwrap();
+        let accepted_journal = fs::read(&journal_path).unwrap();
+
+        // The retained receipt takes precedence over the operation's own claim.
+        for report_rejection_details in [false, true] {
+            request.report_rejection_details = report_rejection_details;
+            let repeated = admitted_operation(
+                supervisor
+                    .submit_firmware_operation(peer_request(request.clone()))
+                    .await
+                    .unwrap()
+                    .into_inner(),
+            );
+            assert_eq!(repeated, accepted);
+            assert_eq!(fs::read(&claim_path).unwrap(), accepted_claim);
+            assert_eq!(fs::read(&journal_path).unwrap(), accepted_journal);
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    /// Removing a file cannot make a live service forget a prior admission.
+    /// Its process token remains safe because receipt lookup uses the cache.
+    #[tokio::test]
+    async fn live_instance_keeps_receipts_when_the_journal_file_is_removed() {
+        let (_root, supervisor, mut receiver) = supervisor_fixture();
+        let mut request = checked_submission(&supervisor, "saved");
+        request.expected_supervisor_instance_id = Some(supervisor.supervisor_instance_id.clone());
+        let accepted = admitted_operation(
+            supervisor
+                .submit_firmware_operation(peer_request(request.clone()))
+                .await
+                .unwrap()
+                .into_inner(),
+        );
+        // Admission alone must remain visible; leave queued work unexecuted.
+        let _work = receiver.recv().await.unwrap();
+        fs::remove_file(supervisor.directory.join("operations.json")).unwrap();
+
+        let observed = supervisor
+            .observe_firmware_update(peer_request(checked_observation(request.clone())))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            observed.result,
+            Some(observe_firmware_operation_response::Result::Receipt(
+                accepted.clone()
+            ))
+        );
+        assert_eq!(
+            supervisor
+                .submit_firmware_operation(peer_request(request))
+                .await
+                .unwrap()
+                .into_inner()
+                .result,
+            Some(submit_firmware_operation_response::Result::Operation(
+                accepted
+            ))
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    /// A SiteCache receipt survives reopening with its mode, but no runtime
+    /// origin, credential paths or proxy secrets. Duplicate transport data is
+    /// ignored before validation and cannot replace the accepted Work snapshot.
+    #[tokio::test]
+    async fn site_cache_receipt_keeps_intent_separate_from_runtime_transport() {
+        let (root, mut supervisor, mut receiver) = supervisor_fixture();
+        let config = core_transport_settings();
+        let mut request = checked_submission(&supervisor, "site-cache");
+        request.update_context.as_mut().unwrap().delivery_mode =
+            rpc::protos::mlx_device::FirmwareDeliveryMode::SiteCache.into();
+        request.core_download_config = Some(config.clone());
+        let accepted = supervisor
+            .submit_firmware_operation(peer_request(request.clone()))
+            .await
+            .expect("admit SiteCache work")
+            .into_inner();
+        let work = receiver
+            .recv()
+            .await
+            .expect("accepted worker owns transport");
+        let runtime = work.core_download_config.as_ref().unwrap();
+        assert_eq!(runtime.core_url, config.core_url);
+        assert_eq!(runtime.socks_proxy, config.socks_proxy);
+        let ledger_path = supervisor.directory.join("operations.json");
+        let saved = fs::read(&ledger_path).unwrap();
+        let json = std::str::from_utf8(&saved).unwrap();
+        assert!(json.contains("site_cache"));
+        for runtime_value in [
+            "core.example.test",
+            "runtime-ca.pem",
+            "runtime-cert.pem",
+            "runtime-key.pem",
+            "runtime-proxy-secret",
+        ] {
+            assert!(
+                !json.contains(runtime_value),
+                "runtime configuration must not become durable intent"
+            );
+        }
+        let saved_claim = fs::read(root.path().join("mutation.json")).unwrap();
+        // Reopen actual committed bytes; no recovery path requeues the operation.
+        drop(supervisor.journal);
+        let reopened =
+            OperationJournal::open(&supervisor.directory, "0000:01:00.0", "boot").unwrap();
+        assert_eq!(
+            reopened
+                .record("site-cache")
+                .unwrap()
+                .unwrap()
+                .requested
+                .as_ref()
+                .unwrap()
+                .update_context
+                .as_ref()
+                .unwrap()
+                .delivery_mode,
+            FirmwareDeliveryMode::SiteCache
+        );
+        supervisor.journal = Arc::new(Mutex::new(reopened));
+        for runtime in [None, Some(wire::CoreFirmwareDownloadConfig::default())] {
+            let mut duplicate = request.clone();
+            duplicate.core_download_config = runtime;
+            let answer = supervisor
+                .submit_firmware_operation(peer_request(duplicate))
+                .await
+                .expect("duplicate returns receipt before current configuration validation")
+                .into_inner();
+            // Reopening marks unfinished work for reconciliation. Read the
+            // reopened receipt rather than expecting the earlier Accepted state.
+            assert_eq!(
+                answer.result,
+                Some(submit_firmware_operation_response::Result::Operation(
+                    supervisor.snapshot("site-cache").await.unwrap().into()
+                ))
+            );
+            assert_eq!(
+                admitted_operation(answer.clone()).operation_id,
+                admitted_operation(accepted.clone()).operation_id
+            );
+        }
+        assert_eq!(
+            fs::read(root.path().join("mutation.json")).unwrap(),
+            saved_claim
+        );
+        let after_duplicates = fs::read(&ledger_path).unwrap();
+        let conflict = supervisor
+            .submit_firmware_operation(peer_request({
+                request.update_context.as_mut().unwrap().delivery_mode =
+                    rpc::protos::mlx_device::FirmwareDeliveryMode::Direct.into();
+                request
+            }))
+            .await
+            .expect_err("a delivery mode change cannot reuse the ID");
+        assert_eq!(conflict.code(), tonic::Code::AlreadyExists);
+        assert_eq!(fs::read(&ledger_path).unwrap(), after_duplicates);
+        assert_eq!(runtime.core_url, config.core_url);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
     /// The reserved prefix still belongs to legacy DPA callers; checked
     /// admission must not make their existing operation IDs invalid.
     #[tokio::test]
@@ -1090,90 +1730,115 @@ mod tests {
         ));
     }
 
-    /// A predecessor handshake allows receipt recovery, not submission that
-    /// an older helper could accept without enforcing the checked contract.
+    /// Checked submission without an instance guard must preserve its profile
+    /// and context through the public client, work queue, and durable journal.
+    /// Observation with a different observer policy must not change that work.
     #[tokio::test]
-    async fn predecessor_protocols_allow_get_and_cancel_but_refuse_submission() {
+    async fn checked_submission_without_instance_guard_is_durable() {
         use super::super::client::{FirmwareSupervisorClient, FirmwareSupervisorClientError};
         use crate::firmware::config::FirmwareArtifactDigests;
 
-        for version in [1, 2] {
-            let (_root, mut supervisor, mut receiver) = supervisor_fixture();
-            supervisor.identity.protocol_version = version;
-            supervisor
-                .submit_firmware_operation(peer_request(submission(&supervisor, "existing")))
-                .await
+        let (_root, supervisor, mut receiver) = supervisor_fixture();
+        let socket = supervisor.directory.join("control.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+        let incoming = UnixListenerStream::new(listener)
+            .filter_map(move |stream| accept_connection(stream, &connections));
+        let (stop, mut stopped) = watch::channel(false);
+        let server = tonic::transport::Server::builder()
+            .add_service(FirmwareSupervisorServer::new(supervisor.clone()))
+            .serve_with_incoming_shutdown(incoming, async move {
+                stopped
+                    .wait_for(|stop| *stop)
+                    .await
+                    .expect("fixture shutdown requested");
+            });
+        let mut tasks = JoinSet::new();
+        tasks.spawn(server);
+        timeout(Duration::from_secs(10), async {
+            let mut client = FirmwareSupervisorClient::connect(&socket).await.unwrap();
+            let profile: FirmwareFlasherProfile = checked_submission(&supervisor, "new")
+                .profile
+                .unwrap()
+                .try_into()
                 .unwrap();
-            let _work = receiver.recv().await.unwrap();
-            let socket = supervisor.directory.join("control.sock");
-            let listener = UnixListener::bind(&socket).unwrap();
-            let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
-            let incoming = UnixListenerStream::new(listener)
-                .filter_map(move |stream| accept_connection(stream, &connections));
-            let (stop, mut stopped) = watch::channel(false);
-            let server = tonic::transport::Server::builder()
-                .add_service(FirmwareSupervisorServer::new(supervisor.clone()))
-                .serve_with_incoming_shutdown(incoming, async move {
-                    stopped
-                        .wait_for(|stop| *stop)
-                        .await
-                        .expect("fixture shutdown requested");
-                });
-            let mut tasks = JoinSet::new();
-            tasks.spawn(server);
-            timeout(Duration::from_secs(10), async {
-                let mut client = FirmwareSupervisorClient::connect(&socket).await.unwrap();
-                assert_eq!(
-                    client.get("existing").await.unwrap().state,
-                    FirmwareOperationState::Accepted
-                );
-                assert_eq!(
-                    client.cancel("existing").await.unwrap().state,
-                    FirmwareOperationState::CancelRequested
-                );
-                let error = client
-                    .submit("new", None, ObserverExitBehavior::Continue)
-                    .await
-                    .unwrap_err();
-                let FirmwareSupervisorClientError::UnsupportedProtocol(observed) = error else {
-                    panic!("expected unsupported protocol, got {error:?}");
-                };
-                assert_eq!(observed, version);
-                let profile = firmware_submission(&supervisor, "new")
-                    .profile
-                    .unwrap()
-                    .try_into()
-                    .unwrap();
-                let context = FirmwareUpdateContext {
-                    phase_id: "dispatch-1".into(),
-                    expected_digests: FirmwareArtifactDigests {
-                        image_sha256: [0; 32],
-                        configuration_sha256: None,
-                    },
-                };
-                let error = client
-                    .submit_update("new", profile, context, ObserverExitBehavior::Continue)
-                    .await
-                    .unwrap_err();
-                let FirmwareSupervisorClientError::UnsupportedProtocol(observed) = error else {
-                    panic!("expected unsupported protocol, got {error:?}");
-                };
-                assert_eq!(observed, version);
-                assert_eq!(
-                    supervisor.snapshot("new").await.unwrap_err().code(),
-                    tonic::Code::NotFound
-                );
-                assert!(matches!(
-                    receiver.try_recv(),
-                    Err(mpsc::error::TryRecvError::Empty)
-                ));
-                drop(client);
-                stop.send(true).expect("request fixture shutdown");
-                tasks.join_next().await.unwrap().unwrap().unwrap();
-            })
-            .await
-            .expect("predecessor recovery test finishes within watchdog");
-        }
+            let context = FirmwareUpdateContext {
+                delivery_mode: Default::default(),
+                phase_id: "dispatch-1".into(),
+                expected_digests: FirmwareArtifactDigests {
+                    image_sha256: [0; 32],
+                    configuration_sha256: None,
+                },
+                expected_device: None,
+            };
+            let accepted = client
+                .submit_update(
+                    "new",
+                    profile.clone(),
+                    context.clone(),
+                    ObserverExitBehavior::Continue,
+                )
+                .await
+                .expect("admit checked work");
+            assert_eq!(accepted.state, FirmwareOperationState::Accepted);
+            let queued = receiver.recv().await.expect("checked work reaches queue");
+            assert_eq!(queued.operation_id, "new");
+            let queued_profile = queued
+                .profile
+                .clone()
+                .map(rpc::protos::mlx_device::FirmwareFlasherProfile::from);
+            assert_eq!(queued_profile, Some(profile.clone().into()));
+            let queued_context = supervisor
+                .journal
+                .lock()
+                .unwrap()
+                .record(&queued.operation_id)
+                .unwrap()
+                .unwrap()
+                .requested
+                .as_ref()
+                .unwrap()
+                .update_context
+                .clone();
+            assert_eq!(queued_context, Some(context.clone()));
+
+            // Check committed bytes independently of the service cache.
+            // Leave the admitted firmware work unexecuted.
+            let journal_path = supervisor.directory.join("operations.json");
+            let saved = fs::read(&journal_path).unwrap();
+            let ledger: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+            let records: Vec<JournalRecord> =
+                serde_json::from_value(ledger["records"].clone()).unwrap();
+            let persisted = records
+                .iter()
+                .find(|record| record.operation.operation_id == queued.operation_id)
+                .expect("admitted checked work is durable");
+            assert_eq!(persisted.operation, accepted);
+            assert_eq!(
+                persisted.requested.as_ref().unwrap().update_context,
+                Some(context.clone())
+            );
+
+            // The public client must transmit the requested observer policy;
+            // otherwise this conflicting lookup would return the saved receipt.
+            assert!(matches!(
+                client
+                    .observe_update("new", profile, context, ObserverExitBehavior::Terminate)
+                    .await,
+                Err(FirmwareSupervisorClientError::Rpc(status))
+                    if status.code() == tonic::Code::AlreadyExists
+            ));
+            assert_eq!(fs::read(&journal_path).unwrap(), saved);
+            assert!(matches!(
+                receiver.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            drop(client);
+            stop.send(true).expect("request fixture shutdown");
+            tasks.join_next().await.unwrap().unwrap().unwrap();
+        })
+        .await
+        .expect("checked submission test finishes within watchdog");
     }
 
     /// The file may already contain an admission or cancellation when its
@@ -1242,6 +1907,19 @@ mod tests {
                     .code(),
                 tonic::Code::Unavailable
             );
+            // After an uncertain save, even an absent ID cannot establish
+            // permission for new admission from the fenced cache.
+            assert_eq!(
+                supervisor
+                    .observe_firmware_update(peer_request(checked_observation(checked_submission(
+                        &supervisor,
+                        "missing"
+                    ))))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::Unavailable
+            );
             // Duplicate submission and terminal cancellation otherwise return
             // directly from the cached receipt, without attempting a save.
             assert_eq!(
@@ -1296,13 +1974,13 @@ mod tests {
             tonic::Code::Unavailable
         );
         let saved = fs::read(supervisor.directory.join("operations.json")).unwrap();
-        let repeated = supervisor
-            .submit_firmware_operation(peer_request(request))
-            .await
-            .unwrap()
-            .into_inner()
-            .operation
-            .unwrap();
+        let repeated = admitted_operation(
+            supervisor
+                .submit_firmware_operation(peer_request(request))
+                .await
+                .unwrap()
+                .into_inner(),
+        );
         let expected: rpc::protos::mlx_device::FirmwareOperation =
             supervisor.snapshot("unstarted").await.unwrap().into();
         assert_eq!(repeated, expected);
@@ -1463,7 +2141,7 @@ mod tests {
                 ));
             } else {
                 assert_eq!(
-                    result.unwrap().into_inner().operation.unwrap().operation_id,
+                    admitted_operation(result.unwrap().into_inner()).operation_id,
                     operation_id
                 );
                 let work = receiver.recv().await.unwrap();
@@ -1550,9 +2228,11 @@ mod tests {
         fs::write(&supervisor.root, b"preserve").unwrap();
         let path = supervisor.directory.join("operations.json");
         let saved = fs::read(&path).unwrap();
+        let mut request = submission(&supervisor, "operation");
+        request.report_rejection_details = true;
         assert_eq!(
             supervisor
-                .submit_firmware_operation(peer_request(submission(&supervisor, "operation")))
+                .submit_firmware_operation(peer_request(request))
                 .await
                 .unwrap_err()
                 .code(),
@@ -1616,8 +2296,8 @@ mod tests {
     async fn dropped_journal_rpcs_retain_capacity_until_blocking_work_finishes() {
         const WATCHDOG: Duration = Duration::from_secs(10);
         let (_root, mut supervisor, mut receiver) = supervisor_fixture();
-        // One permit per RPC kind makes every journal entry point participate
-        // in the same saturation proof without depending on the production cap.
+        // Saturate lookup, cancel, and submit without depending on the
+        // production cap. Checked observation shares lookup's `find_operation`.
         supervisor.journal_rpc_tasks = Arc::new(Semaphore::new(3));
         supervisor
             .submit_firmware_operation(peer_request(submission(&supervisor, "saved")))
@@ -1655,7 +2335,7 @@ mod tests {
         .await;
         assert_eq!(supervisor.journal_rpc_tasks.available_permits(), 0);
 
-        // All three handlers reject immediately instead of creating another
+        // All journal RPCs reject immediately instead of creating another
         // mutex waiter, even though their original RPC futures are gone.
         assert_eq!(
             supervisor.snapshot("saved").await.unwrap_err().code(),
@@ -1675,6 +2355,17 @@ mod tests {
         assert_eq!(
             supervisor
                 .submit_firmware_operation(peer_request(submission(&supervisor, "saved")))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::ResourceExhausted,
+        );
+        assert_eq!(
+            supervisor
+                .observe_firmware_update(peer_request(checked_observation(checked_submission(
+                    &supervisor,
+                    "checked",
+                ))))
                 .await
                 .unwrap_err()
                 .code(),
@@ -1729,10 +2420,10 @@ mod tests {
         ));
     }
 
-    /// Authentication and the pinned handshake must reject both mutation RPCs
-    /// before they touch a saved receipt or add executable work.
+    /// Submit, cancel, and checked observation require authentication and the
+    /// pinned handshake before changing or disclosing journal state.
     #[tokio::test]
-    async fn mutation_requests_reject_missing_or_stale_identity_without_writes() {
+    async fn submit_cancel_and_observe_reject_missing_or_stale_identity() {
         let (_root, supervisor, mut receiver) = supervisor_fixture();
         supervisor
             .submit_firmware_operation(peer_request(submission(&supervisor, "saved")))
@@ -1753,7 +2444,7 @@ mod tests {
             expected: tonic::Code,
         }
         for case in [
-            // A client cannot skip the handshake on either mutation method.
+            // None of these methods permits a client to skip the handshake.
             Case {
                 label: "missing handshake",
                 identity: None,
@@ -1774,7 +2465,7 @@ mod tests {
                 peer_uid: None,
                 expected: tonic::Code::Unauthenticated,
             },
-            // Another UID cannot mutate a ledger even with the right handshake.
+            // Another UID cannot use the ledger even with the right handshake.
             Case {
                 label: "different Unix user",
                 identity: Some(supervisor.identity.clone()),
@@ -1791,12 +2482,17 @@ mod tests {
                 expected_identity: case.identity.clone(),
                 ..submission(&supervisor, "rejected")
             });
+            let mut observe = Request::new(checked_observation(SubmitFirmwareOperationRequest {
+                expected_identity: case.identity.clone(),
+                ..checked_submission(&supervisor, "rejected")
+            }));
             let mut cancel = Request::new(CancelFirmwareOperationRequest {
                 operation_id: "saved".into(),
                 expected_identity: case.identity,
             });
             if let Some(peer) = peer {
                 submit.extensions_mut().insert(peer.clone());
+                observe.extensions_mut().insert(peer.clone());
                 cancel.extensions_mut().insert(peer);
             }
             assert_eq!(
@@ -1817,6 +2513,16 @@ mod tests {
                     .code(),
                 case.expected,
                 "{} cancel",
+                case.label,
+            );
+            assert_eq!(
+                supervisor
+                    .observe_firmware_update(observe)
+                    .await
+                    .unwrap_err()
+                    .code(),
+                case.expected,
+                "{} observe",
                 case.label,
             );
             assert_eq!(
@@ -1871,13 +2577,13 @@ mod tests {
         assert!(!root.path().join("mutation.json").exists());
 
         let before = fs::read(supervisor.directory.join("operations.json")).unwrap();
-        let repeated = supervisor
-            .submit_firmware_operation(peer_request(request))
-            .await
-            .expect("retrieve failed receipt")
-            .into_inner()
-            .operation
-            .expect("saved operation");
+        let repeated = admitted_operation(
+            supervisor
+                .submit_firmware_operation(peer_request(request))
+                .await
+                .expect("retrieve failed receipt")
+                .into_inner(),
+        );
         let expected: rpc::protos::mlx_device::FirmwareOperation = failed.into();
         assert_eq!(repeated, expected);
         assert_eq!(
@@ -1924,26 +2630,9 @@ printf '\000\000\000\001x'
 "#,
             hello = std::str::from_utf8(crate::runner::HELLO).unwrap(),
         );
-        // A separate writer keeps writable executable descriptors out of
-        // concurrent test forks. The helper records, but never runs, the tool.
-        let status = timeout(
-            Duration::from_secs(10),
-            tokio::process::Command::new("/bin/sh")
-                .args([
-                    "-c",
-                    "set -eu; umask 077; printf '%s' \"$2\" > \"$1\"",
-                    "fixture-writer",
-                ])
-                .arg(&helper)
-                .arg(contents)
-                .kill_on_drop(true)
-                .status(),
-        )
-        .await
-        .expect("fixture writer completes within its watchdog")
-        .expect("write malformed helper");
-        assert!(status.success());
-        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
+        // The helper records the requested tool without running it.
+        crate::runner::write_fixture_executables(root.path(), &[("malformed-helper", &contents)])
+            .await;
         supervisor.executor = FirmwareToolExecutor::with_supervisor_path(helper);
 
         let request = checked_submission(&supervisor, "uncertain-inspection");
@@ -1975,8 +2664,10 @@ printf '\000\000\000\001x'
                 .await
                 .unwrap()
                 .into_inner()
-                .operation,
-            Some(expected.clone())
+                .result,
+            Some(submit_firmware_operation_response::Result::Operation(
+                expected.clone()
+            ))
         );
         assert_eq!(
             supervisor
@@ -2004,11 +2695,13 @@ printf '\000\000\000\001x'
         assert_eq!(
             record.requested.as_ref().unwrap().update_context,
             Some(FirmwareUpdateContext {
+                delivery_mode: Default::default(),
                 phase_id: "dispatch-1".into(),
                 expected_digests: FirmwareArtifactDigests {
                     image_sha256: [0; 32],
                     configuration_sha256: None,
                 },
+                expected_device: None,
             })
         );
         supervisor.journal = Arc::new(Mutex::new(reopened));
@@ -2018,8 +2711,10 @@ printf '\000\000\000\001x'
                 .await
                 .unwrap()
                 .into_inner()
-                .operation,
-            Some(expected)
+                .result,
+            Some(submit_firmware_operation_response::Result::Operation(
+                expected
+            ))
         );
         assert_eq!(
             supervisor
