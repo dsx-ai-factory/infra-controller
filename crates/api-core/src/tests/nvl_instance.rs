@@ -1904,6 +1904,47 @@ async fn test_partition_monitor_keeps_row_of_partition_listed_again(pool: sqlx::
     );
 }
 
+/// A partition back in the listing taken after a pass's operations resets
+/// its row's miss count even though the row was not yet due: the next pass
+/// that omits the partition from both listings is its first miss, not its
+/// second, and the row survives it. The pass after that is the second miss.
+#[crate::sqlx_test]
+async fn test_partition_monitor_refreshed_listing_resets_miss_count(pool: sqlx::PgPool) {
+    let env =
+        create_partition_monitor_test_env(pool.clone(), Some(std::time::Duration::ZERO)).await;
+    create_partitioned_host(&env).await;
+    env.run_nvl_partition_monitor_iteration().await;
+    let live_rows = nvl_physical_partition_rows(&pool).await;
+    let [live_row] = live_rows.as_slice() else {
+        panic!("expected the host's one partition row, got {live_rows:?}");
+    };
+    let nmx_c_partition_id = u32::try_from(live_row.nmx_c_partition_id).unwrap();
+    let has_live_row =
+        |rows: &[model::nvl_partition::NvlPartition]| rows.iter().any(|row| row.id == live_row.id);
+
+    // First listing omits the partition, the refreshed one has it: count reset.
+    env.nmxc_sim_client
+        .hide_partition_for_listings(nmx_c_partition_id, 1);
+    env.run_nvl_partition_monitor_iteration().await;
+
+    // Both listings omit it: the first miss after the reset.
+    env.nmxc_sim_client
+        .hide_partition_for_listings(nmx_c_partition_id, 2);
+    env.run_nvl_partition_monitor_iteration().await;
+    let rows = nvl_physical_partition_rows(&pool).await;
+    assert!(
+        has_live_row(&rows),
+        "one miss after the refreshed listing must not remove the row, got {rows:?}"
+    );
+
+    // Both listings omit it again: the second miss removes the row.
+    env.nmxc_sim_client
+        .hide_partition_for_listings(nmx_c_partition_id, 2);
+    env.run_nvl_partition_monitor_iteration().await;
+    let rows = nvl_physical_partition_rows(&pool).await;
+    assert!(!has_live_row(&rows), "{rows:?}");
+}
+
 #[crate::sqlx_test]
 async fn test_create_instance_add_to_existing_partition(pool: sqlx::PgPool) {
     let mut config = common::api_fixtures::get_config();

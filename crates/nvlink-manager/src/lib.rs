@@ -534,34 +534,54 @@ pub enum GpuRemovalMode {
 /// a restart may answer with an incomplete list.
 const STALE_PARTITION_MISSES_BEFORE_DELETE: u32 = 2;
 
-/// Consecutive checked passes each physical partition row was missing from its
+/// Consecutive iterations each physical partition row was missing from its
 /// domain's NMX-C partition list, held between iterations. A pass that lists
 /// the partition again resets its count; a pass that cannot reach NMX-C makes
-/// no observation.
+/// no observation. A domain is observed at most once per iteration: chassis
+/// groups that share an endpoint reconcile the same domain against the same
+/// listing, and their passes together count as one miss, not one each.
 #[derive(Debug, Default)]
 struct StalePartitionTracker {
     misses: HashMap<NvLinkPartitionId, u32>,
+    /// Domains whose listing this iteration has already been counted.
+    observed_domains: HashSet<NvLinkDomainId>,
 }
 
 impl StalePartitionTracker {
-    /// Records one checked pass of a domain: `missing` rows were absent from
-    /// NMX-C's list and `present` rows were listed. Returns the rows missing on
-    /// `threshold` consecutive passes, which stay counted until [`Self::forget`]
-    /// confirms their removal so a failed delete is retried next pass.
+    /// Starts an iteration: drops counts of rows that no longer exist and
+    /// lets every domain be counted again.
+    fn begin_iteration(&mut self, existing: &[NvlPartition]) {
+        let existing: HashSet<NvLinkPartitionId> = existing.iter().map(|p| p.id).collect();
+        self.misses.retain(|id, _| existing.contains(id));
+        self.observed_domains.clear();
+    }
+
+    /// Records one checked pass of `domain_uuid`: `missing` rows were absent
+    /// from NMX-C's list and `present` rows were listed. Returns the rows
+    /// missing on `threshold` consecutive iterations, which stay counted until
+    /// [`Self::forget`] confirms their removal so a failed delete is retried.
+    /// A later pass of the same domain in the same iteration advances no
+    /// count; it only reports the rows already due.
     fn observe(
         &mut self,
+        domain_uuid: NvLinkDomainId,
         missing: &[NvLinkPartitionId],
         present: &[NvLinkPartitionId],
         threshold: u32,
     ) -> Vec<NvLinkPartitionId> {
-        for id in present {
-            self.misses.remove(id);
+        let first_pass_this_iteration = self.observed_domains.insert(domain_uuid);
+        if first_pass_this_iteration {
+            for id in present {
+                self.misses.remove(id);
+            }
         }
         missing
             .iter()
             .filter(|id| {
                 let misses = self.misses.entry(**id).or_default();
-                *misses = misses.saturating_add(1);
+                if first_pass_this_iteration {
+                    *misses = misses.saturating_add(1);
+                }
                 *misses >= threshold
             })
             .copied()
@@ -572,12 +592,6 @@ impl StalePartitionTracker {
         for id in ids {
             self.misses.remove(id);
         }
-    }
-
-    /// Drops counts of rows that no longer exist.
-    fn retain(&mut self, existing: &[NvlPartition]) {
-        let existing: HashSet<NvLinkPartitionId> = existing.iter().map(|p| p.id).collect();
-        self.misses.retain(|id, _| existing.contains(id));
     }
 }
 
@@ -1626,7 +1640,7 @@ impl NvlPartitionMonitor {
         self.stale_partitions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .retain(&db_nvl_partitions);
+            .begin_iteration(&db_nvl_partitions);
 
         let db_nvl_logical_partitions =
             db::nvl_logical_partition::find_by(&mut txn, ObjectColumnFilter::<LpIdColumn>::All)
@@ -2630,9 +2644,10 @@ impl NvlPartitionMonitor {
             db_nvl_partitions,
             machine_nvlink_info,
         );
-        // Rows due for removal after this pass's miss, with the NMX-C id each
-        // is rechecked by against the listing taken after the operations.
-        let stale_candidates: Vec<(NvLinkPartitionId, u32)> = {
+        // Rows missing from this pass's listing, with the NMX-C id each is
+        // rechecked by against the listing taken after the operations, and
+        // those of them due for removal after this miss.
+        let (missing_partitions, stale_candidates) = {
             let (missing, present) =
                 partition_processing_context.partition_presence_in_domain(&domain_uuid);
             let missing_ids: Vec<NvLinkPartitionId> = missing.iter().map(|(id, _)| *id).collect();
@@ -2640,11 +2655,18 @@ impl NvlPartitionMonitor {
                 .stale_partitions
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .observe(&missing_ids, &present, STALE_PARTITION_MISSES_BEFORE_DELETE);
-            missing
-                .into_iter()
+                .observe(
+                    domain_uuid,
+                    &missing_ids,
+                    &present,
+                    STALE_PARTITION_MISSES_BEFORE_DELETE,
+                );
+            let candidates: Vec<(NvLinkPartitionId, u32)> = missing
+                .iter()
                 .filter(|(id, _)| due.contains(id))
-                .collect()
+                .copied()
+                .collect();
+            (missing, candidates)
         };
 
         // Report isolation progress for marked hosts from this pass's partition membership. Like
@@ -2701,7 +2723,7 @@ impl NvlPartitionMonitor {
 
         if nvlink_info_db_updates.is_empty()
             && completed_nmx_c_operations.is_empty()
-            && stale_candidates.is_empty()
+            && missing_partitions.is_empty()
         {
             if had_operations {
                 record_stage(MonitorStage::GroupApply, apply_started);
@@ -2713,11 +2735,12 @@ impl NvlPartitionMonitor {
         }
 
         // Created partitions are matched to their NMX-C ids through a fresh
-        // partition list, and rows due for removal are rechecked against it:
-        // a partition that reappeared while the pass ran, as during fabric
-        // restoration, keeps its row.
+        // partition list, and rows missing from the first listing are
+        // rechecked against it: a partition that reappeared while the pass
+        // ran, as during fabric restoration, keeps its row and its miss count
+        // starts over.
         let nmx_c_partitions: HashMap<String, PartitionInfo> =
-            if completed_nmx_c_operations.is_empty() && stale_candidates.is_empty() {
+            if completed_nmx_c_operations.is_empty() && missing_partitions.is_empty() {
                 HashMap::new()
             } else {
                 nmxc_client
@@ -2754,14 +2777,18 @@ impl NvlPartitionMonitor {
             &nmx_c_partitions,
         )
         .await?;
-        let (mut reappeared, mut stale_partition_ids) = (Vec::new(), Vec::new());
-        for (id, nmx_c_partition_id) in &stale_candidates {
-            if nmx_c_partitions.contains_key(&nmx_c_partition_id.to_string()) {
-                reappeared.push(*id);
-            } else {
-                stale_partition_ids.push(*id);
-            }
-        }
+        let listed_again: Vec<NvLinkPartitionId> = missing_partitions
+            .iter()
+            .filter(|(_, nmx_c_partition_id)| {
+                nmx_c_partitions.contains_key(&nmx_c_partition_id.to_string())
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        let (reappeared, stale_partition_ids): (Vec<NvLinkPartitionId>, Vec<NvLinkPartitionId>) =
+            stale_candidates
+                .iter()
+                .map(|(id, _)| *id)
+                .partition(|id| listed_again.contains(id));
         let stale_deleted = if stale_partition_ids.is_empty() {
             Vec::new()
         } else {
@@ -2774,8 +2801,8 @@ impl NvlPartitionMonitor {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             tracker.forget(&stale_partition_ids);
-            // Listed again: the miss streak starts over.
-            tracker.forget(&reappeared);
+            // Listed again, whether or not already due: the miss streak starts over.
+            tracker.forget(&listed_again);
         }
         for partition_id in &reappeared {
             tracing::info!(
@@ -4157,21 +4184,47 @@ mod stale_partition_tracker_tests {
 
     use super::*;
 
-    /// A row is due only after the threshold of consecutive misses, a pass
-    /// that lists it resets the count, and a confirmed delete forgets it.
+    /// A row is due only after the threshold of consecutive iterations, a pass
+    /// that lists it resets the count, a confirmed delete forgets it, and a
+    /// second pass of the same domain in one iteration advances nothing.
     #[test]
     fn stale_partition_tracker_debounces_misses() {
-        let a = NvLinkPartitionId::new();
-        let b = NvLinkPartitionId::new();
+        let domain = NvLinkDomainId::new();
+        let row = |nmx_c_partition_id: i32| NvlPartition {
+            id: NvLinkPartitionId::new(),
+            nmx_c_partition_id,
+            domain_uuid: domain,
+            name: NvlPartitionName::try_from(format!("p{nmx_c_partition_id}")).unwrap(),
+            created: Utc::now(),
+            updated: Utc::now(),
+            deleted: None,
+            logical_partition_id: None,
+        };
+        let rows = [row(1), row(2)];
+        let (a, b) = (rows[0].id, rows[1].id);
         let mut tracker = StalePartitionTracker::default();
 
-        assert!(tracker.observe(&[a, b], &[], 2).is_empty());
+        tracker.begin_iteration(&rows);
+        assert!(tracker.observe(domain, &[a, b], &[], 2).is_empty());
+        // Another chassis sharing the endpoint and domain, same iteration.
+        assert!(tracker.observe(domain, &[a, b], &[], 2).is_empty());
+
+        tracker.begin_iteration(&rows);
         // `b` is listed again before its second miss.
-        assert_eq!(tracker.observe(&[a], &[b], 2), vec![a]);
+        assert_eq!(tracker.observe(domain, &[a], &[b], 2), vec![a]);
+        // The sharing chassis only sees that `a` is due.
+        assert_eq!(tracker.observe(domain, &[a, b], &[], 2), vec![a]);
+
+        tracker.begin_iteration(&rows);
         // `a` stays due until its delete is confirmed.
-        assert_eq!(tracker.observe(&[a, b], &[], 2), vec![a]);
+        assert_eq!(tracker.observe(domain, &[a, b], &[], 2), vec![a]);
         tracker.forget(&[a]);
-        assert_eq!(tracker.observe(&[a, b], &[], 2), vec![b]);
+        tracker.begin_iteration(&rows);
+        assert_eq!(tracker.observe(domain, &[a, b], &[], 2), vec![b]);
+        // `b`'s count is dropped with its row at the next iteration start and
+        // restarts at one; `a` reaches its second miss since it was forgotten.
+        tracker.begin_iteration(&rows[..1]);
+        assert_eq!(tracker.observe(domain, &[a, b], &[], 2), vec![a]);
     }
 
     /// Which rows the iteration treats as orphans, given what the hosts' stored
