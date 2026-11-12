@@ -652,7 +652,7 @@ func (r ApiGetAllVpcRoutingProfileDefinitionRequest) Execute() ([]VpcRoutingProf
 /*
 GetAllVpcRoutingProfileDefinition List named VPC routing profiles
 
-Retrieve all configured routing profiles for site that the caller is eligible to see.
+Retrieve all configured routing profiles at the Site specified by `siteId` that the caller is eligible to view.
 
 Org must have an Infrastructure Provider or Tenant entity. Providers require `PROVIDER_ADMIN` or `PROVIDER_VIEWER` authorization and must own the selected Site.
 Tenants must have effective TargetedInstanceCreation at that Site and a Tenant Account with the Infrastructure Provider owning the selected Site. Tenant users must have authorization role with TENANT_ADMIN suffix.
@@ -1203,7 +1203,7 @@ type ApiGetVpcRoutingProfileDefinitionRequest struct {
 	profileName string
 }
 
-// Id of Site
+// ID of Site
 func (r ApiGetVpcRoutingProfileDefinitionRequest) SiteId(siteId string) ApiGetVpcRoutingProfileDefinitionRequest {
 	r.siteId = &siteId
 	return r
@@ -1221,7 +1221,7 @@ Retrieve a full configured routing profile by its exact name.
 Org must have an Infrastructure Provider or Tenant entity. Providers require `PROVIDER_ADMIN` or `PROVIDER_VIEWER` authorization and must own the selected Site. Tenants must have effective TargetedInstanceCreation at that Site and a Tenant Account with the Infrastructure Provider
 owning the selected Site. Tenant users must have authorization role with `TENANT_ADMIN` suffix.
 
-Tenant access is bounded by the access tier of their own default routing profile on the selected Site -- no tenant can see any profile that has a lower numeric access tier than the access tier of their own default profile. An unset access tier is treated as zero for authorization.
+Tenant access is bounded by the access tier of the Tenant's default routing profile on the selected Site. A Tenant cannot retrieve a profile whose access tier is numerically lower than that of its default profile. An unset access tier is treated as zero for authorization.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the caller organization

@@ -567,7 +567,7 @@ UpdateCurrentTenantRoutingProfile Update current Tenant default routing profile
 
 Change the current Tenant's default VPC routing profile at one Site. Requires `TENANT_ADMIN` authorization and effective TargetedInstanceCreation for this Tenant at the requested Site.
 
-A Tenant may only select a profile whose access tier is numerically greater than or equal to that of its current default routing profile. Unset tiers count as zero.
+A Tenant can select only a profile whose access tier is numerically greater than or equal to that of its current default routing profile; otherwise, the request fails with 403. Unset tiers count as zero.
 
 The Tenant must have no active FNN VPCs when changing the profile.
 
