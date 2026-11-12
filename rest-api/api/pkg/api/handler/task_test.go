@@ -72,7 +72,7 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 		Operation:   "power_on",
 		RackId:      &flowv1.UUID{Id: uuid.New().String()},
 		Description: "Power on rack",
-		Status:      flowv1.TaskStatus_TASK_STATUS_SUCCEEDED,
+		Status:      flowv1.TaskStatus_TASK_STATUS_COMPLETED,
 		Message:     "Processing",
 		Report:      `{"version":1,"stages":[{"number":1,"status":"completed","steps":[{"component_type":"Compute","status":"skipped"}]}]}`,
 	}
@@ -224,8 +224,9 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 
 			require.Equal(t, tt.expectedStatus, rec.Code)
 			if tt.mockResultErr != nil {
-				assertSingleFlowProxyErrorResponse(t, ec, rec, err, tt.mockResultErr)
+				expectedError := tt.mockResultErr
 				if tt.expectedStatus == http.StatusNotFound {
+					expectedError = status.Error(codes.NotFound, "task not found")
 					var appErr *tp.ApplicationError
 					require.ErrorAs(t, tt.mockResultErr, &appErr)
 					require.True(t, appErr.NonRetryable())
@@ -233,6 +234,7 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 					require.NotContains(t, rec.Body.String(), "sql:")
 					require.NotContains(t, rec.Body.String(), "retryable: true")
 				}
+				assertSingleFlowProxyErrorResponse(t, ec, rec, err, expectedError)
 			}
 			if tt.expectedStatus != http.StatusOK {
 				return
