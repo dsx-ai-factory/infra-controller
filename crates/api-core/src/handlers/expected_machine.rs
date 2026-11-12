@@ -19,7 +19,6 @@ use std::net::IpAddr;
 use std::str::FromStr;
 
 use ::rpc::forge as rpc;
-use carbide_instrument::emit;
 use lazy_static::lazy_static;
 use mac_address::MacAddress;
 use model::expected_machine::{
@@ -595,7 +594,8 @@ pub(crate) async fn update(
     txn.commit().await?;
 
     for outcome in preallocations {
-        emit(StaticAddressPreallocationCompleted::from(outcome));
+        api.instrumentation
+            .emit(StaticAddressPreallocationCompleted::from(outcome));
     }
 
     Ok(tonic::Response::new(()))
@@ -778,7 +778,8 @@ async fn apply_machine_patches(
     }
     txn.commit().await?;
     for preallocation in preallocations {
-        emit(StaticAddressPreallocationCompleted::from(preallocation));
+        api.instrumentation
+            .emit(StaticAddressPreallocationCompleted::from(preallocation));
     }
     Ok(())
 }
@@ -1651,7 +1652,8 @@ async fn process_batch_operations(
                 Ok((result_machine, preallocations)) => match txn.commit().await {
                     Ok(_) => {
                         for outcome in preallocations {
-                            emit(StaticAddressPreallocationCompleted::from(outcome));
+                            api.instrumentation
+                                .emit(StaticAddressPreallocationCompleted::from(outcome));
                         }
                         results.push(build_success_result(result_machine));
                     }
@@ -1713,7 +1715,8 @@ async fn process_batch_operations(
     txn.commit().await?;
 
     for outcome in preallocations {
-        emit(StaticAddressPreallocationCompleted::from(outcome));
+        api.instrumentation
+            .emit(StaticAddressPreallocationCompleted::from(outcome));
     }
 
     ordered_results.sort_by_key(|(request_index, _)| *request_index);

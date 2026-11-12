@@ -14,10 +14,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
 use carbide_extension_service_controller::interface_mac::ensure_interface_mac;
-use carbide_instrument::{Event, LabelValue, emit};
+#[cfg(test)]
+use carbide_instrument::emit;
+use carbide_instrument::{Event, LabelValue};
 use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::extension_service::ExtensionServiceId;
@@ -331,10 +334,11 @@ pub(crate) async fn create(
                     delete_extension_service_credential(&api.credential_manager, credential_key)
                         .await
                 {
-                    emit(ExtensionServiceCredentialCleanupFailed::Create {
-                        extension_service_id: service_id,
-                        error: delete_err.to_string(),
-                    });
+                    api.instrumentation
+                        .emit(ExtensionServiceCredentialCleanupFailed::Create {
+                            extension_service_id: service_id,
+                            error: delete_err.to_string(),
+                        });
                 }
             }
             return Err(e.into());
@@ -737,10 +741,11 @@ async fn update_kubernetes_pod(
                     delete_extension_service_credential(&api.credential_manager, credential_key)
                         .await
                 {
-                    emit(ExtensionServiceCredentialCleanupFailed::Update {
-                        extension_service_id: service_id,
-                        error: delete_error.to_string(),
-                    });
+                    api.instrumentation
+                        .emit(ExtensionServiceCredentialCleanupFailed::Update {
+                            extension_service_id: service_id,
+                            error: delete_error.to_string(),
+                        });
                 }
             }
             Err(error.into())
@@ -875,11 +880,12 @@ pub(crate) async fn delete(
                     delete_extension_service_credential(&api.credential_manager, credential_key)
                         .await
                 {
-                    emit(ExtensionServiceCredentialCleanupFailed::Delete {
-                        extension_service_id: service_id,
-                        version: *version,
-                        error: error.to_string(),
-                    });
+                    api.instrumentation
+                        .emit(ExtensionServiceCredentialCleanupFailed::Delete {
+                            extension_service_id: service_id,
+                            version: *version,
+                            error: error.to_string(),
+                        });
                 }
             }
         }

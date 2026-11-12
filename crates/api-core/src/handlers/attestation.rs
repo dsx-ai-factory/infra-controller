@@ -704,11 +704,12 @@ pub(crate) async fn attest_quote(
         &request.signature,
     )
     .inspect_err(|e| {
-        carbide_instrument::emit(crate::attestation::MeasuredBootVerificationFailed {
-            cause: crate::attestation::MeasuredBootVerificationFailureCause::VerificationError,
-            event_log: crate::attestation::event_log_to_string(&request.event_log),
-            error: format!("PCR signature verification failed: {e}"),
-        });
+        api.instrumentation
+            .emit(crate::attestation::MeasuredBootVerificationFailed {
+                cause: crate::attestation::MeasuredBootVerificationFailureCause::VerificationError,
+                event_log: crate::attestation::event_log_to_string(&request.event_log),
+                error: format!("PCR signature verification failed: {e}"),
+            });
     })?;
 
     // Make sure we can verify the the PCR hash one way
@@ -716,7 +717,8 @@ pub(crate) async fn attest_quote(
     let pcr_hash_matches =
         crate::attestation::verify_pcr_hash(&request.attestation, &request.pcr_values)
             .inspect_err(|e| {
-                carbide_instrument::emit(crate::attestation::MeasuredBootVerificationFailed {
+                api.instrumentation
+                    .emit(crate::attestation::MeasuredBootVerificationFailed {
                     cause:
                         crate::attestation::MeasuredBootVerificationFailureCause::VerificationError,
                     event_log: crate::attestation::event_log_to_string(&request.event_log),

@@ -14,12 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::str::FromStr;
 
 use arc_swap::ArcSwap;
-use carbide_instrument::emit;
 use carbide_secrets::credentials::CredentialReader;
 use carbide_utils::HostPortPair;
 use carbide_utils::redfish::{
@@ -321,6 +321,7 @@ pub(crate) async fn redfish_apply_action(
         // Spawn off the task to send the request, open a transaction, and store the result.
         tokio::spawn({
             let pool = api.database_connection.clone();
+            let instrumentation = api.instrumentation.clone();
             let credential_reader = api.credential_manager.clone();
             let bmc_proxy = api.dynamic_settings.bmc_proxy.clone();
             let core_proxy = api.bmc_proxy_passthrough.clone();
@@ -345,7 +346,7 @@ pub(crate) async fn redfish_apply_action(
                 update_response_in_tx(&pool, request, index, response)
                     .await
                     .inspect_err(|e| {
-                        emit(RedfishActionResultPersistenceFailed {
+                        instrumentation.emit(RedfishActionResultPersistenceFailed {
                             request_id: request.request_id,
                             result_index: index,
                             error: e.to_string(),

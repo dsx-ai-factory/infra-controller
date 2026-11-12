@@ -380,7 +380,7 @@ fn build_apply_firmware_command<'a>(
             return None;
         }
 
-        carbide_instrument::emit(FirmwareUpdateProgress {
+        api.instrumentation.emit(FirmwareUpdateProgress {
             target: FirmwareUpdateTarget::SuperNic,
             phase: FirmwareUpdatePhase::Started,
             machine_id,

@@ -755,7 +755,7 @@ pub(crate) async fn discover_machine(
             )
             .await
         {
-            carbide_instrument::emit(HostAdminAddressReconcileFailed {
+            api.instrumentation.emit(HostAdminAddressReconcileFailed {
                 dpu_machine_id: dpu_host_machine_id.map(|_| stable_machine_id),
                 host_machine_id,
                 error: error.to_string(),

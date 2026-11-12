@@ -213,7 +213,7 @@ pub(crate) async fn mark_machine_validation_complete(
 
     txn.commit().await?;
 
-    carbide_instrument::emit(completion);
+    api.instrumentation.emit(completion);
     Ok(Response::new(rpc::MachineValidationCompletedResponse {}))
 }
 
