@@ -743,3 +743,52 @@ func TestCheckCatchesAnElapsedDeadlineBeforeItsNotification(t *testing.T) {
 	cancel()
 	eq(t, c.Check(cancelled), error(Cancelled{}), "an explicit cancel wins the tie")
 }
+
+func TestFrozenNonzeroBaseline(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		base   uint64
+		change func(*input, []sweep)
+		timed  bool
+	}{
+		{"later burst", 85, nil, true},
+		{"regression retains first crossing", 85, func(_ *input, s []sweep) { s[len(s)-1].count = 87 }, true},
+		{"wrong count", 85, func(_ *input, s []sweep) { s[0].count = 84 }, false},
+		{"wrong reference", 85, func(i *input, _ []sweep) { i.base.ReadAt = AtSecs(t0 - 9) }, false},
+		{"foreign epoch", 85, func(i *input, _ []sweep) { i.base.ProcessStartSeconds++ }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := in(t0, t0+40, 5)
+			source := sw(t0-10, float64(tc.base))
+			request.base = &probeapi.SummaryBase{Count: tc.base, ProcessStartSeconds: testProcess, SweepStart: AtSecs(source.start), ReadAt: AtSecs(source.end)}
+			sweeps := []sweep{source, sw(t0+10, 88), sw(t0+20, 90), sw(t0+30, 90)}
+			if tc.change != nil {
+				tc.change(request, sweeps)
+			}
+			got := computed(request, sweeps, true)
+			if (got.Crossings[0].Seconds != nil) != tc.timed || got.Crossings[0].Target != 88 {
+				t.Fatalf("crossing=%+v", got.Crossings[0])
+			}
+			if tc.name == "regression retains first crossing" && (got.Crossings[5].Seconds == nil || *got.Crossings[5].WorstCountAfter != 87) {
+				t.Fatal("first crossing or later regression lost")
+			}
+		})
+	}
+	for _, base := range []uint64{probeapi.MaxCount, math.MaxUint64} {
+		p := params(-10, -1, 5)
+		p.Base = &probeapi.SummaryBase{Count: base}
+		if _, err := Prepare(context.Background(), testCtx(t0), probeapi.Filter{Type: probeapi.UnitTypeHost}, p, day); err == nil {
+			t.Fatal("base overflow admitted")
+		}
+	}
+	source := sw(t0-20, 85)
+	request := in(t0, t0+40, 5)
+	request.base = &probeapi.SummaryBase{Count: 85, ProcessStartSeconds: testProcess, SweepStart: AtSecs(source.start), ReadAt: AtSecs(source.end)}
+	for _, count := range []float64{85, 86} {
+		sweeps := []sweep{source, sw(t0-10, count)}
+		found := plannedBaseline(sweeps, nil, request)
+		if (found != nil) != (count == 85) {
+			t.Fatal("intervening baseline movement hidden")
+		}
+	}
+}
