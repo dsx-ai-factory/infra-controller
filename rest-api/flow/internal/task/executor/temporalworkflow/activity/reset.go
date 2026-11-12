@@ -10,16 +10,8 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 )
 
-const NameResetNVOS = "ResetNVOS"
 const NameNVOSResetCompleted = "NVOSResetCompleted"
 
-func (a *Activities) ResetNVOS(ctx context.Context, target common.Target) error {
-	manager, err := requireCapableManager[componentmanager.ComponentResetter](a.registry, target, capability.CapabilityComponentReset)
-	if err != nil {
-		return err
-	}
-	return manager.ResetNVOS(ctx, target)
-}
 func (a *Activities) NVOSResetCompleted(ctx context.Context, target common.Target) (bool, error) {
 	manager, err := requireCapableManager[componentmanager.ComponentResetter](a.registry, target, capability.CapabilityComponentReset)
 	if err != nil {
@@ -28,20 +20,31 @@ func (a *Activities) NVOSResetCompleted(ctx context.Context, target common.Targe
 	return manager.NVOSResetCompleted(ctx, target)
 }
 
-const NameResetSDN = "ResetSDN"
 const NameSDNResetCompleted = "SDNResetCompleted"
 
-func (a *Activities) ResetSDN(ctx context.Context, target common.Target) error {
-	manager, err := requireCapableManager[componentmanager.ComponentResetter](a.registry, target, capability.CapabilityComponentReset)
-	if err != nil {
-		return err
-	}
-	return manager.ResetSDN(ctx, target)
-}
 func (a *Activities) SDNResetCompleted(ctx context.Context, target common.Target) (bool, error) {
 	manager, err := requireCapableManager[componentmanager.ComponentResetter](a.registry, target, capability.CapabilityComponentReset)
 	if err != nil {
 		return false, err
 	}
 	return manager.SDNResetCompleted(ctx, target)
+}
+
+const NamePrepareFactoryReset = "PrepareFactoryReset"
+const NameSubmitFactoryReset = "SubmitFactoryReset"
+
+func (a *Activities) PrepareFactoryReset(ctx context.Context, target common.Target) error {
+	manager, err := requireCapableManager[componentmanager.ComponentResetter](a.registry, target, capability.CapabilityComponentReset)
+	if err != nil {
+		return err
+	}
+	return manager.PrepareFactoryReset(ctx, target)
+}
+
+func (a *Activities) SubmitFactoryReset(ctx context.Context, target common.Target, scope string) error {
+	manager, err := requireCapableManager[componentmanager.ComponentResetter](a.registry, target, capability.CapabilityComponentReset)
+	if err != nil {
+		return err
+	}
+	return manager.SubmitFactoryReset(ctx, target, scope)
 }

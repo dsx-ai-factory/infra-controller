@@ -23,24 +23,24 @@ import (
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 )
 
-type resetScope string
+type factoryResetScope string
 
-const resetTray resetScope = "tray"
-const resetDomain resetScope = "domain"
+const factoryResetTray factoryResetScope = "tray"
+const factoryResetDomain factoryResetScope = "domain"
 
 // FactoryResetHandler shares authorization and site checks for tray/domain
 // reset. Scope is fixed by route construction, never taken from request data.
 type FactoryResetHandler struct {
 	dbSession *cdb.Session
 	scp       *sc.ClientPool
-	scope     resetScope
+	scope     factoryResetScope
 }
 
-func NewResetTrayHandler(dbSession *cdb.Session, scp *sc.ClientPool) FactoryResetHandler {
-	return FactoryResetHandler{dbSession: dbSession, scp: scp, scope: resetTray}
+func NewFactoryResetTrayHandler(dbSession *cdb.Session, scp *sc.ClientPool) FactoryResetHandler {
+	return FactoryResetHandler{dbSession: dbSession, scp: scp, scope: factoryResetTray}
 }
-func NewResetNVLinkDomainHandler(dbSession *cdb.Session, scp *sc.ClientPool) FactoryResetHandler {
-	return FactoryResetHandler{dbSession: dbSession, scp: scp, scope: resetDomain}
+func NewFactoryResetNVLinkDomainHandler(dbSession *cdb.Session, scp *sc.ClientPool) FactoryResetHandler {
+	return FactoryResetHandler{dbSession: dbSession, scp: scp, scope: factoryResetDomain}
 }
 
 // Handle authorizes a Provider Admin, then submits through the existing Flow
@@ -84,7 +84,7 @@ func (h FactoryResetHandler) Handle(c echo.Context) error {
 	if site.Status != cdbm.SiteStatusRegistered {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Site must be Registered", nil)
 	}
-	target, err := resetTarget(h.scope, c.Param("id"))
+	target, err := getFactoryResetTarget(h.scope, c.Param("id"))
 	if err != nil {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, err.Error(), nil)
 	}
@@ -113,23 +113,36 @@ func (h FactoryResetHandler) Handle(c echo.Context) error {
 	return c.JSON(http.StatusAccepted, result)
 }
 
-// resetTarget restricts Domain expansion to switches; Core IDs for trays are
+// getFactoryResetTarget restricts Domain expansion to switches; Core IDs for trays are
 // opaque, while domain IDs use the existing domain API validation.
-func resetTarget(scope resetScope, id string) (*flowv1.OperationTargetSpec, error) {
+func getFactoryResetTarget(scope factoryResetScope, id string) (*flowv1.OperationTargetSpec, error) {
 	if strings.TrimSpace(id) == "" {
 		return nil, fmt.Errorf("target ID is required")
 	}
 	switch scope {
-	case resetDomain:
+	case factoryResetDomain:
 		err := model.ValidateNVLinkDomainID(id)
 		if err != nil {
 			return nil, err
 		}
-		target := model.NVLinkDomainTargetSpec([]string{id})
-		target.GetNvlDomains().Targets[0].ComponentTypes = []flowv1.ComponentType{flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH}
-		return target, nil
-	case resetTray:
-		return &flowv1.OperationTargetSpec{Targets: &flowv1.OperationTargetSpec_Components{Components: &flowv1.ComponentTargets{Targets: []*flowv1.ComponentTarget{{Identifier: &flowv1.ComponentTarget_External{External: &flowv1.ExternalRef{Id: id}}}}}}}, nil
+		return &flowv1.OperationTargetSpec{
+			Targets: &flowv1.OperationTargetSpec_NvlDomains{
+				NvlDomains: &flowv1.NVLDomainTargets{Targets: []*flowv1.NVLDomainTarget{{
+					Identifier:     &flowv1.NVLDomainTarget_ExternalId{ExternalId: id},
+					ComponentTypes: []flowv1.ComponentType{flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH},
+				}}},
+			},
+		}, nil
+	case factoryResetTray:
+		return &flowv1.OperationTargetSpec{
+			Targets: &flowv1.OperationTargetSpec_Components{
+				Components: &flowv1.ComponentTargets{Targets: []*flowv1.ComponentTarget{{
+					Identifier: &flowv1.ComponentTarget_External{
+						External: &flowv1.ExternalRef{Id: id},
+					},
+				}}},
+			},
+		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported reset scope")
 	}
