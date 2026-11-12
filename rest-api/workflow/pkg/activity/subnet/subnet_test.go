@@ -220,7 +220,7 @@ func testSubnetBuildVPC(t *testing.T, dbSession *cdb.Session, name string, ip *c
 		NetworkVirtualizationType: cutil.GetPtr(cdbm.VpcEthernetVirtualizer),
 		ControllerVpcID:           ct,
 		Labels:                    lb,
-		Status:                    cdbm.VpcStatusPending,
+		Status:                    cdbm.VpcStatusReady,
 		CreatedBy:                 *user,
 	}
 
@@ -1312,7 +1312,18 @@ func TestManageSubnet_CreateOrUpdateSubnetFromSite(t *testing.T) {
 		wantSubnet        bool
 		wantName          string
 		wantNamePref      string
+		parentPending     bool
 	}{
+		{
+			name:          "Pending parent does not authorize a Site Subnet",
+			parentPending: true,
+			controllerSegment: &corev1.NetworkSegment{
+				Id: &corev1.NetworkSegmentId{Value: uuid.NewString()},
+				Config: &corev1.NetworkSegmentConfig{VpcId: &corev1.VpcId{Value: parentVpc.ID.String()},
+					Prefixes: []*corev1.NetworkPrefix{{Prefix: "10.250.0.0/24", Gateway: cutil.GetPtr("10.250.0.1")}}},
+				Metadata: &corev1.Metadata{Name: "unconfirmed-parent-subnet"},
+			},
+		},
 		{
 			name: "unknown parent VPC is rejected",
 			controllerSegment: &corev1.NetworkSegment{
@@ -1462,6 +1473,15 @@ func TestManageSubnet_CreateOrUpdateSubnetFromSite(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.parentPending {
+				dao := cdbm.NewVpcDAO(dbSession)
+				_, err := dao.Update(ctx, nil, cdbm.VpcUpdateInput{VpcID: parentVpc.ID, Status: cutil.GetPtr(cdbm.VpcStatusPending)})
+				require.NoError(t, err)
+				t.Cleanup(func() {
+					_, err := dao.Update(ctx, nil, cdbm.VpcUpdateInput{VpcID: parentVpc.ID, Status: cutil.GetPtr(cdbm.VpcStatusReady)})
+					assert.NoError(t, err)
+				})
+			}
 			subnet := manager.createOrUpdateSubnetFromSite(ctx, site, tt.controllerSegment)
 			if tt.wantSubnet {
 				require.NotNil(t, subnet)

@@ -971,6 +971,9 @@ func (dvph DeleteVpcPeeringHandler) Handle(c echo.Context) error {
 		logger.Warn().Msg("User does not have access to delete the VPC Peering")
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have access to delete the VPC Peering", nil)
 	}
+	if vpc1.IsCreationPendingOrRejected() || vpc2.IsCreationPendingOrRejected() {
+		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "VPC creation does not establish ownership of the Site VPC Peering; deletion is blocked", nil)
+	}
 
 	// timeoutResp lets the closure signal a post-rollback handler — the
 	// TerminateWorkflow call has to run after the closure returns so that

@@ -177,6 +177,24 @@ func TestGetVPCRoutingProfileHandler_Handle(t *testing.T) {
 }
 
 func TestUpdateVPCRoutingProfileHandler_Handle(t *testing.T) {
+	for _, rejected := range []bool{false, true} {
+		t.Run(map[bool]string{false: "Pending creation blocks profile mutation", true: "rejected creation blocks profile mutation"}[rejected], func(t *testing.T) {
+			f := newVPCRoutingProfileHandlerFixture(t)
+			dao := cdbm.NewVpcDAO(f.dbSession)
+			_, err := dao.Update(context.Background(), nil, cdbm.VpcUpdateInput{VpcID: f.vpc.ID, Status: cutil.GetPtr(cdbm.VpcStatusPending)})
+			require.NoError(t, err)
+			message := "creation is pending"
+			if rejected {
+				_, err = dao.RejectCreation(context.Background(), f.vpc.ID)
+				require.NoError(t, err)
+				message = "creation stopped before Core commit"
+			}
+			response := f.request(t, context.Background(), http.MethodPatch, `{"ifVersionMatch":"V8-T1761856992374053","routingProfile":"EXTERNAL"}`)
+			assert.Equal(t, http.StatusConflict, response.Code)
+			assert.Contains(t, response.Body.String(), message)
+			assert.Empty(t, f.proxiedReqs)
+		})
+	}
 	cases := []struct {
 		name        string
 		body        string
@@ -307,6 +325,57 @@ func TestUpdateVPCRoutingProfileHandler_Handle(t *testing.T) {
 }
 
 func TestReleaseVPCInactiveVniHandler_Handle(t *testing.T) {
+	for _, rejected := range []bool{false, true} {
+		t.Run(map[bool]string{false: "Pending creation blocks release", true: "rejected creation blocks release"}[rejected], func(t *testing.T) {
+			f := newVPCRoutingProfileHandlerFixture(t)
+			dao := cdbm.NewVpcDAO(f.dbSession)
+			_, err := dao.Update(context.Background(), nil, cdbm.VpcUpdateInput{VpcID: f.vpc.ID, Status: cutil.GetPtr(cdbm.VpcStatusPending)})
+			require.NoError(t, err)
+			message := "creation is pending"
+			if rejected {
+				_, err = dao.RejectCreation(context.Background(), f.vpc.ID)
+				require.NoError(t, err)
+				message = "creation stopped before Core commit"
+			}
+			response := f.request(t, context.Background(), http.MethodPost, `{"ifVersionMatch":"V8-T1761856992374053","expectedInactiveVni":10100}`)
+			assert.Equal(t, http.StatusConflict, response.Code)
+			assert.Contains(t, response.Body.String(), message)
+			assert.Empty(t, f.proxiedReqs)
+		})
+	}
+	t.Run("lost release reply preserves original retry and pending inspection", func(t *testing.T) {
+		f := newVPCRoutingProfileHandlerFixture(t)
+		body := `{"ifVersionMatch":"V8-T1761856992374053","expectedInactiveVni":10100}`
+		f.expectProxy(t, corev1.Forge_ReleaseVpcInactiveVni_FullMethodName, nil,
+			tp.NewTimeoutError(temporalEnums.TIMEOUT_TYPE_START_TO_CLOSE, nil), nil)
+		first := f.request(t, context.Background(), http.MethodPost, body)
+		assert.Equal(t, http.StatusGatewayTimeout, first.Code)
+		assert.Contains(t, first.Body.String(), "may have committed")
+
+		f.expectProxy(t, corev1.Forge_ReleaseVpcInactiveVni_FullMethodName, nil,
+			tp.NewNonRetryableApplicationError("original version is stale", swe.ErrTypeNICoFailedPrecondition, nil), nil)
+		retry := f.request(t, context.Background(), http.MethodPost, body)
+		assert.Equal(t, http.StatusPreconditionFailed, retry.Code)
+		assert.Contains(t, retry.Body.String(), "this rejection does not establish whether it completed")
+		assert.Contains(t, retry.Body.String(), "inspect VPC routing state")
+		require.Len(t, f.proxiedReqs, 2)
+		assert.JSONEq(t, string(f.proxiedReqs[0].RequestJSON), string(f.proxiedReqs[1].RequestJSON))
+
+		state := f.routingState()
+		state.Version = "V9-T1761856992374054"
+		state.ActiveVni = 51000
+		state.RetainedAllocation = &corev1.VpcRetainedVniAllocation{PoolName: "vpc-vni", Vni: 10100}
+		f.expectProxy(t, corev1.Forge_GetVpcRoutingState_FullMethodName, state, nil, nil)
+		pending := f.request(t, context.Background(), http.MethodGet, "")
+		assert.Equal(t, http.StatusOK, pending.Code)
+		assert.Contains(t, pending.Body.String(), `"retainedAllocation":{"poolName":"vpc-vni","vni":10100}`)
+		state.RetainedAllocation = nil
+		f.expectProxy(t, corev1.Forge_GetVpcRoutingState_FullMethodName, state, nil, nil)
+		confirmed := f.request(t, context.Background(), http.MethodGet, "")
+		assert.Equal(t, http.StatusOK, confirmed.Code)
+		assert.Contains(t, confirmed.Body.String(), `"retainedAllocation":null`)
+		require.Len(t, f.proxiedReqs, 4)
+	})
 	t.Run("forwards observed version and exact allocation without reading again", func(t *testing.T) {
 		f := newVPCRoutingProfileHandlerFixture(t)
 		authorizationDeadline := f.captureAuthorizationDeadline(t)

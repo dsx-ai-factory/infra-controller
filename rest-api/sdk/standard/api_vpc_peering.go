@@ -201,6 +201,7 @@ A Site precondition failure returns `412` and leaves the peering's REST status u
 
 Tenant Admin can delete only peerings where both VPCs belong to their tenant.
 Provider Admin can delete only multi-tenant peerings in sites they provide.
+An unresolved or positively stopped parent VPC creation returns `409`; its saved identity does not authorize deletion of the Site peering.
 
 User must have authorization role with `TENANT_ADMIN` or `PROVIDER_ADMIN` suffix.
 
@@ -304,6 +305,17 @@ func (a *VPCPeeringAPIService) DeleteVpcPeeringExecute(r ApiDeleteVpcPeeringRequ
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 409 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,8 +36,17 @@ import (
 
 	"os"
 
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
+	commonpb "go.temporal.io/api/common/v1"
+	enumspb "go.temporal.io/api/enums/v1"
+	failurepb "go.temporal.io/api/failure/v1"
+	historypb "go.temporal.io/api/history/v1"
+	"go.temporal.io/api/serviceerror"
+	workflowpb "go.temporal.io/api/workflow/v1"
+	workflowservice "go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
+	"go.temporal.io/sdk/temporal"
 
 	"go.temporal.io/sdk/testsuite"
 
@@ -896,6 +906,7 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 			}
 		})
 	}
+	t.Run("pending creation recovery", testManageVpcPendingCreation)
 }
 
 func TestManageVpc_UpdateVpcMetadata(t *testing.T) {
@@ -1557,9 +1568,10 @@ func TestNewManageVpc(t *testing.T) {
 				tc:             wtc,
 			},
 			want: ManageVpc{
-				dbSession:      dbSession,
-				siteClientPool: scp,
-				tc:             wtc,
+				dbSession:             dbSession,
+				siteClientPool:        scp,
+				tc:                    wtc,
+				pendingCreationCursor: &sync.Map{},
 			},
 		},
 	}
@@ -1679,4 +1691,339 @@ func Test_VpcMetrics_Delete_NoDeleting(t *testing.T) {
 
 	// Verify NO metric was emitted (no deleting status found)
 	util.TestAssertMetricExistsTimes(t, reg, "nico_rest_workflow_vpc_operation_latency_seconds", 0, nil, 0)
+}
+
+func testManageVpcPendingCreation(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testVPCInitDB(t)
+	defer dbSession.Close()
+	testVPCSetupSchema(t, dbSession)
+	providerUser := testVPCBuildUser(t, dbSession, uuid.NewString(), "provider-org", []string{"FORGE_PROVIDER_ADMIN"})
+	provider := testVPCSiteBuildInfrastructureProvider(t, dbSession, "provider", "provider-org", providerUser)
+	creator := testVPCBuildUser(t, dbSession, uuid.NewString(), "tenant-org", []string{"FORGE_TENANT_ADMIN"})
+	tenant := testVPCBuildTenant(t, dbSession, "tenant", "tenant-org", creator)
+	site := testVPCBuildSite(t, dbSession, provider, "site", providerUser)
+	cases := []struct {
+		name                    string
+		closedResult            bool
+		rejected                bool
+		changedInventory        bool
+		rejectedBeforeInventory bool
+		rejectedAbsent          bool
+		running                 bool
+	}{
+		{name: "closed original result completes without another Core create", closedResult: true},
+		{name: "missing history and absent inventory preserve Pending intent"},
+		{name: "verified original rejection is persisted", rejected: true},
+		{name: "changed inventory falls back to original result", closedResult: true, changedInventory: true},
+		{name: "rejected request cannot adopt an unrelated Core VPC", rejectedBeforeInventory: true},
+		{name: "aged absent rejected request keeps its proof and history", rejectedBeforeInventory: true, rejectedAbsent: true},
+		{name: "running original execution preserves Pending intent", running: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			id := uuid.New()
+			dao := cdbm.NewVpcDAO(dbSession)
+			saved, err := dao.Create(ctx, nil, cdbm.VpcCreateInput{
+				ID: &id, ControllerVpcID: &id, Name: tc.name, Org: tenant.Org,
+				TenantID: tenant.ID, SiteID: site.ID, InfrastructureProviderID: provider.ID,
+				Status: cdbm.VpcStatusPending, CreatedBy: *creator, Labels: map[string]string{"origin": "caller"},
+			})
+			require.NoError(t, err)
+			_, err = dbSession.DB.NewUpdate().Model(saved).Set("created = ?", time.Now().Add(-24*time.Hour)).WherePK().Exec(ctx)
+			require.NoError(t, err)
+			if tc.rejectedBeforeInventory {
+				saved, err = dao.RejectCreation(ctx, id)
+				require.NoError(t, err)
+				require.NotNil(t, saved.CreationRejectedAt)
+			}
+			stc := &tmocks.Client{}
+			workflowID := "vpc-create-" + id.String()
+			if tc.closedResult || tc.rejected {
+				status := enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED
+				if tc.rejected {
+					status = enumspb.WORKFLOW_EXECUTION_STATUS_FAILED
+				}
+				stc.On("DescribeWorkflowExecution", mock.Anything, workflowID, "").Return(&workflowservice.DescribeWorkflowExecutionResponse{
+					WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{
+						Type:      &commonpb.WorkflowType{Name: "CreateVPCV2"},
+						Execution: &commonpb.WorkflowExecution{WorkflowId: workflowID, RunId: "original-run"},
+						Status:    status,
+					},
+				}, nil).Once()
+				run := &tmocks.WorkflowRun{}
+				stc.On("GetWorkflow", mock.Anything, workflowID, "original-run").Return(run).Once()
+				var resultErr error
+				if tc.rejected {
+					converter := temporal.GetDefaultFailureConverter()
+					resultErr = converter.FailureToError(&failurepb.Failure{
+						Cause: converter.ErrorToFailure(temporal.NewNonRetryableApplicationError("invalid original create", swe.ErrTypeNICoInvalidArgument, nil)),
+						FailureInfo: &failurepb.Failure_ActivityFailureInfo{ActivityFailureInfo: &failurepb.ActivityFailureInfo{
+							ActivityType: &commonpb.ActivityType{Name: "CreateVpcOnSite"}, ActivityId: "create", ScheduledEventId: 2, StartedEventId: 3,
+						}},
+					})
+					events := []*historypb.HistoryEvent{
+						{EventId: 1, EventType: enumspb.EVENT_TYPE_WORKFLOW_EXECUTION_STARTED, Attributes: &historypb.HistoryEvent_WorkflowExecutionStartedEventAttributes{WorkflowExecutionStartedEventAttributes: &historypb.WorkflowExecutionStartedEventAttributes{
+							WorkflowType: &commonpb.WorkflowType{Name: "CreateVPCV2"}, Attempt: 1, OriginalExecutionRunId: "original-run", FirstExecutionRunId: "original-run",
+						}}},
+						{EventId: 2, EventType: enumspb.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED, Attributes: &historypb.HistoryEvent_ActivityTaskScheduledEventAttributes{ActivityTaskScheduledEventAttributes: &historypb.ActivityTaskScheduledEventAttributes{
+							ActivityType: &commonpb.ActivityType{Name: "CreateVpcOnSite"}, ActivityId: "create",
+						}}},
+						{EventId: 3, EventType: enumspb.EVENT_TYPE_ACTIVITY_TASK_STARTED, Attributes: &historypb.HistoryEvent_ActivityTaskStartedEventAttributes{ActivityTaskStartedEventAttributes: &historypb.ActivityTaskStartedEventAttributes{
+							ScheduledEventId: 2, Attempt: 1,
+						}}},
+					}
+					history := &tmocks.HistoryEventIterator{}
+					for _, event := range events {
+						history.On("HasNext").Return(true).Once()
+						history.On("Next").Return(event, nil).Once()
+					}
+					stc.On("GetWorkflowHistory", mock.Anything, workflowID, "original-run", false, enumspb.HISTORY_EVENT_FILTER_TYPE_ALL_EVENT).Return(history).Once()
+				}
+				run.On("GetWithOptions", mock.Anything, mock.Anything, client.WorkflowRunGetOptions{DisableFollowingRuns: true}).Run(func(args mock.Arguments) {
+					result := args.Get(1).(*corev1.Vpc)
+					result.Id = &corev1.VpcId{Value: id.String()}
+					expected := saved.ToProto()
+					result.Config = expected.Config
+					result.Metadata = expected.Metadata
+					result.Status = &corev1.VpcStatus{Vni: cutil.GetPtr(uint32(50001))}
+				}).Return(resultErr).Once()
+			} else if tc.running {
+				stc.On("DescribeWorkflowExecution", mock.Anything, workflowID, "").Return(&workflowservice.DescribeWorkflowExecutionResponse{
+					WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{
+						Type: &commonpb.WorkflowType{Name: "CreateVPCV2"}, Status: enumspb.WORKFLOW_EXECUTION_STATUS_RUNNING,
+						Execution: &commonpb.WorkflowExecution{WorkflowId: workflowID, RunId: "original-run"},
+					},
+				}, nil).Once()
+			} else if !tc.rejectedBeforeInventory {
+				stc.On("DescribeWorkflowExecution", mock.Anything, workflowID, "").Return(nil, serviceerror.NewNotFound("expired history")).Once()
+			}
+			pool := testTemporalSiteClientPool(t)
+			pool.IDClientMap[site.ID.String()] = stc
+			manager := NewManageVpc(dbSession, pool, nil)
+			inventory := &corev1.VPCInventory{}
+			if tc.changedInventory || (tc.rejectedBeforeInventory && !tc.rejectedAbsent) {
+				changed := saved.ToProto()
+				changed.Metadata.Name = "changed after Core commit"
+				if tc.rejectedBeforeInventory {
+					changed.Config.TenantOrganizationId = "unrelated-tenant"
+				}
+				inventory.Vpcs = []*corev1.Vpc{changed}
+			}
+			var unrelatedCore *corev1.Vpc
+			if tc.rejectedBeforeInventory && !tc.rejectedAbsent {
+				unrelatedCore = proto.Clone(inventory.Vpcs[0]).(*corev1.Vpc)
+			}
+			_, err = manager.UpdateVpcsInDB(ctx, site.ID, inventory)
+			require.NoError(t, err)
+			if tc.rejectedBeforeInventory && !tc.rejectedAbsent {
+				require.NoError(t, manager.UpdateVpcMetadata(ctx, site.ID, stc, id, inventory.Vpcs[0]))
+				assert.True(t, proto.Equal(unrelatedCore, inventory.Vpcs[0]))
+			}
+			actual, err := dao.GetByID(ctx, nil, id, nil)
+			require.NoError(t, err)
+			assert.Equal(t, saved.CreatedBy, actual.CreatedBy)
+			assert.Equal(t, saved.Name, actual.Name)
+			assert.Equal(t, saved.Labels, actual.Labels)
+			assert.False(t, actual.IsMissingOnSite)
+			if tc.closedResult {
+				assert.Equal(t, cdbm.VpcStatusReady, actual.Status)
+				require.NotNil(t, actual.ActiveVni)
+				assert.Equal(t, 50001, *actual.ActiveVni)
+			} else if tc.rejected || tc.rejectedBeforeInventory {
+				assert.Equal(t, cdbm.VpcStatusError, actual.Status)
+				require.NotNil(t, actual.CreationRejectedAt)
+				assert.Nil(t, actual.ActiveVni)
+				details, _, detailErr := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{id.String()}}, cdbp.PageInput{})
+				require.NoError(t, detailErr)
+				require.Len(t, details, 1)
+				assert.Equal(t, "VPC creation stopped before Core commit", *details[0].Message)
+			} else {
+				assert.Equal(t, cdbm.VpcStatusPending, actual.Status)
+				assert.False(t, actual.IsMissingOnSite)
+				assert.Nil(t, actual.ActiveVni)
+				assert.Nil(t, actual.CreationRejectedAt)
+				history, _, err := cdbm.NewStatusDetailDAO(dbSession).GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{id.String()}}, cdbp.PageInput{})
+				require.NoError(t, err)
+				assert.Empty(t, history)
+			}
+			stc.AssertExpectations(t)
+			stc.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+			stc.AssertNotCalled(t, "GetWorkflow", mock.Anything, mock.Anything, "")
+			// The next case observes only its own Pending request.
+			require.NoError(t, dao.DeleteByID(ctx, nil, id))
+			if tc.rejectedBeforeInventory && !tc.rejectedAbsent {
+				inventory.Vpcs[0].Config.TenantOrganizationId = saved.Org
+				util.TestInventoryAgeDeletedTimestamp(ctx, t, dbSession, (*cdbm.Vpc)(nil), id)
+				_, err = manager.UpdateVpcsInDB(ctx, site.ID, inventory)
+				require.NoError(t, err)
+				rows, _, err := dao.GetAll(ctx, nil, cdbm.VpcFilterInput{VpcIDs: []uuid.UUID{id}, IncludeDeleted: true}, cdbp.PageInput{}, nil)
+				require.NoError(t, err)
+				require.Len(t, rows, 1)
+				assert.NotNil(t, rows[0].Deleted)
+				assert.Equal(t, saved.CreationRejectedAt, rows[0].CreationRejectedAt)
+				assert.Equal(t, saved.Name, rows[0].Name)
+				stc.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+			}
+		})
+	}
+	t.Run("next pass advances after an interrupted observation", func(t *testing.T) {
+		dao := cdbm.NewVpcDAO(dbSession)
+		ids := []uuid.UUID{
+			uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+			uuid.MustParse("00000000-0000-0000-0000-000000000002"),
+		}
+		var later *cdbm.Vpc
+		for i, id := range ids {
+			saved, err := dao.Create(ctx, nil, cdbm.VpcCreateInput{
+				ID: &id, ControllerVpcID: &id, Name: fmt.Sprintf("fair observation %d", i), Org: tenant.Org,
+				TenantID: tenant.ID, SiteID: site.ID, InfrastructureProviderID: provider.ID,
+				Status: cdbm.VpcStatusPending, CreatedBy: *creator,
+			})
+			require.NoError(t, err)
+			later = saved
+		}
+		firstCtx, cancelFirst := context.WithCancel(ctx)
+		defer cancelFirst()
+		stc := &tmocks.Client{}
+		firstWorkflow := "vpc-create-" + ids[0].String()
+		laterWorkflow := "vpc-create-" + ids[1].String()
+		// Interrupt one pass without sleeping, then require the next pass to advance.
+		stc.On("DescribeWorkflowExecution", mock.Anything, firstWorkflow, "").Run(func(mock.Arguments) {
+			cancelFirst()
+		}).Return(nil, context.DeadlineExceeded).Once()
+		stc.On("DescribeWorkflowExecution", mock.Anything, firstWorkflow, "").Return(nil, serviceerror.NewNotFound("unknown history")).Once()
+		stc.On("DescribeWorkflowExecution", mock.Anything, laterWorkflow, "").Return(&workflowservice.DescribeWorkflowExecutionResponse{
+			WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{
+				Type:      &commonpb.WorkflowType{Name: "CreateVPCV2"},
+				Execution: &commonpb.WorkflowExecution{WorkflowId: laterWorkflow, RunId: "later-original-run"},
+				Status:    enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED,
+			},
+		}, nil).Once()
+		run := &tmocks.WorkflowRun{}
+		stc.On("GetWorkflow", mock.Anything, laterWorkflow, "later-original-run").Return(run).Once()
+		run.On("GetWithOptions", mock.Anything, mock.Anything, client.WorkflowRunGetOptions{DisableFollowingRuns: true}).Run(func(args mock.Arguments) {
+			result := args.Get(1).(*corev1.Vpc)
+			expected := later.ToProto()
+			result.Id, result.Config, result.Metadata = expected.Id, expected.Config, expected.Metadata
+			result.Status = &corev1.VpcStatus{Vni: cutil.GetPtr(uint32(50002))}
+		}).Return(nil).Once()
+		pool := testTemporalSiteClientPool(t)
+		pool.IDClientMap[site.ID.String()] = stc
+		manager := NewManageVpc(dbSession, pool, nil)
+		_, err := manager.UpdateVpcsInDB(firstCtx, site.ID, &corev1.VPCInventory{})
+		require.NoError(t, err)
+		stc.AssertNotCalled(t, "DescribeWorkflowExecution", mock.Anything, laterWorkflow, "")
+		secondPassStart := len(stc.Calls)
+		_, err = manager.UpdateVpcsInDB(ctx, site.ID, &corev1.VPCInventory{})
+		require.NoError(t, err)
+		require.Greater(t, len(stc.Calls), secondPassStart)
+		assert.Equal(t, "DescribeWorkflowExecution", stc.Calls[secondPassStart].Method)
+		assert.Equal(t, laterWorkflow, stc.Calls[secondPassStart].Arguments.Get(1))
+		unchanged, err := dao.GetByID(ctx, nil, ids[0], nil)
+		require.NoError(t, err)
+		assert.Equal(t, cdbm.VpcStatusPending, unchanged.Status)
+		completed, err := dao.GetByID(ctx, nil, ids[1], nil)
+		require.NoError(t, err)
+		assert.Equal(t, cdbm.VpcStatusReady, completed.Status)
+		require.NotNil(t, completed.ActiveVni)
+		assert.Equal(t, 50002, *completed.ActiveVni)
+		stc.AssertExpectations(t)
+		run.AssertExpectations(t)
+		stc.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	})
+	t.Run("disjoint inventory pages preserve Site-wide progress", func(t *testing.T) {
+		pageSite := testVPCBuildSite(t, dbSession, provider, "paged-recovery", creator)
+		dao := cdbm.NewVpcDAO(dbSession)
+		pending := make([]*cdbm.Vpc, 5)
+		ids := make([]string, len(pending))
+		for i := range pending {
+			id := uuid.MustParse(fmt.Sprintf("00000000-0000-0000-0000-%012d", i+11))
+			var err error
+			pending[i], err = dao.Create(ctx, nil, cdbm.VpcCreateInput{
+				ID: &id, ControllerVpcID: &id, Name: fmt.Sprintf("paged-original-%d", i), Org: tenant.Org,
+				TenantID: tenant.ID, SiteID: pageSite.ID, InfrastructureProviderID: provider.ID,
+				Status: cdbm.VpcStatusPending, CreatedBy: *creator,
+			})
+			require.NoError(t, err)
+			ids[i] = id.String()
+		}
+		stc := &tmocks.Client{}
+		var interruptPage context.CancelFunc
+		for i, saved := range pending {
+			if i == 4 {
+				continue
+			}
+			workflowID := "vpc-create-" + saved.ID.String()
+			if i%2 == 0 {
+				stc.On("DescribeWorkflowExecution", mock.Anything, workflowID, "").Run(func(args mock.Arguments) {
+					deadline, ok := args.Get(0).(context.Context).Deadline()
+					assert.True(t, ok)
+					assert.LessOrEqual(t, time.Until(deadline), time.Second)
+					interruptPage()
+				}).Return(nil, serviceerror.NewNotFound("unknown original history")).Maybe()
+				continue
+			}
+			runID := "original-" + saved.ID.String()
+			stc.On("DescribeWorkflowExecution", mock.Anything, workflowID, "").Return(&workflowservice.DescribeWorkflowExecutionResponse{
+				WorkflowExecutionInfo: &workflowpb.WorkflowExecutionInfo{Type: &commonpb.WorkflowType{Name: "CreateVPCV2"},
+					Status:    enumspb.WORKFLOW_EXECUTION_STATUS_COMPLETED,
+					Execution: &commonpb.WorkflowExecution{WorkflowId: workflowID, RunId: runID}},
+			}, nil).Once()
+			run := &tmocks.WorkflowRun{}
+			stc.On("GetWorkflow", mock.Anything, workflowID, runID).Return(run).Once()
+			run.On("GetWithOptions", mock.Anything, mock.Anything, client.WorkflowRunGetOptions{DisableFollowingRuns: true}).Run(func(args mock.Arguments) {
+				proto.Merge(args.Get(1).(*corev1.Vpc), saved.ToProto())
+				args.Get(1).(*corev1.Vpc).Status = &corev1.VpcStatus{Vni: cutil.GetPtr(uint32(50030 + i))}
+			}).Return(nil).Once()
+			t.Cleanup(func() { run.AssertExpectations(t) })
+		}
+		pool := testTemporalSiteClientPool(t)
+		pool.IDClientMap[pageSite.ID.String()] = stc
+		manager := NewManageVpc(dbSession, pool, nil)
+		for range 3 {
+			for pageIndex := range 2 {
+				pageCtx, cancel := context.WithCancel(ctx)
+				interruptPage = cancel
+				inventory := &corev1.VPCInventory{InventoryPage: &corev1.InventoryPage{
+					CurrentPage: int32(pageIndex + 1), TotalPages: 2, TotalItems: 5, ItemIds: ids,
+				}}
+				for _, saved := range pending[pageIndex*2 : pageIndex*2+2] {
+					current, err := dao.GetByID(ctx, nil, saved.ID, nil)
+					require.NoError(t, err)
+					reported := current.ToProto()
+					if current.Status == cdbm.VpcStatusPending {
+						reported.Metadata.Name = "changed after the original result"
+					}
+					inventory.Vpcs = append(inventory.Vpcs, reported)
+				}
+				if pageIndex == 0 {
+					matching := pending[4].ToProto()
+					matching.Status = &corev1.VpcStatus{Vni: cutil.GetPtr(uint32(50040))}
+					inventory.Vpcs = append(inventory.Vpcs, matching)
+				}
+				_, err := manager.UpdateVpcsInDB(pageCtx, pageSite.ID, inventory)
+				cancel()
+				require.NoError(t, err)
+				if pageIndex == 0 {
+					direct, err := dao.GetByID(ctx, nil, pending[4].ID, nil)
+					require.NoError(t, err)
+					assert.Equal(t, cdbm.VpcStatusReady, direct.Status)
+					stc.AssertNotCalled(t, "DescribeWorkflowExecution", mock.Anything, "vpc-create-"+direct.ID.String(), "")
+				}
+			}
+		}
+		for i, saved := range pending {
+			actual, err := dao.GetByID(ctx, nil, saved.ID, nil)
+			require.NoError(t, err)
+			if i%2 == 0 && i != 4 {
+				assert.Equal(t, cdbm.VpcStatusPending, actual.Status)
+			} else {
+				assert.Equal(t, cdbm.VpcStatusReady, actual.Status)
+				assert.NotNil(t, actual.ActiveVni)
+			}
+		}
+		stc.AssertExpectations(t)
+		stc.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+	})
 }

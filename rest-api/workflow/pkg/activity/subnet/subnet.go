@@ -412,6 +412,10 @@ func (ms ManageSubnet) createOrUpdateSubnetFromSite(
 			return nil, nil
 		}
 		vpc := &vpcMatches[0]
+		if vpc.IsCreationPendingOrRejected() {
+			logger.Warn().Msg("parent VPC creation does not establish ownership of the Site Subnet")
+			return nil, nil
+		}
 
 		// Lookup by primary key globally (not scoped to site.ID). A same-UUID row under
 		// another Site would otherwise be invisible here and Create would unique-constraint

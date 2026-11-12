@@ -130,6 +130,7 @@ tests: tests-dependencies
 		postgres_port=$$(docker port "$$postgres_container_name" 5432/tcp | sed 's/.*://') && \
 		test -n "$$postgres_port" && \
 		DATABASE_URL="postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@127.0.0.1:$$postgres_port" \
+		CORE_TEST_POSTGRES_CONTAINER="$$postgres_container_name" \
 		REPO_ROOT="$(CURDIR)" \
 		cargo make --no-workspace $(CARGO_MAKE_TEST_FLAGS_OVERRIDE) correctly-execute-tests; \
 	} || status=$$?; \
