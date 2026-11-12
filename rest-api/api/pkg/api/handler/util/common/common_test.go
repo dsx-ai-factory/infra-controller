@@ -3248,14 +3248,14 @@ func TestValidateKnownQueryParams(t *testing.T) {
 			query:   "siteId=abc&foo=bar",
 			structs: []any{rackRequest{}},
 			wantErr: true,
-			errMsg:  "Unknown query parameter specified in request: foo",
+			errMsg:  "unknown query parameter specified in request: foo",
 		},
 		{
 			name:    "all unknown",
 			query:   "bogus=1",
 			structs: []any{rackRequest{}},
 			wantErr: true,
-			errMsg:  "Unknown query parameter specified in request: bogus",
+			errMsg:  "unknown query parameter specified in request: bogus",
 		},
 		{
 			name:    "subset of allowed",
@@ -3274,7 +3274,7 @@ func TestValidateKnownQueryParams(t *testing.T) {
 			query:   "siteId=abc&pageNumber=1&bogus=x",
 			structs: []any{rackRequest{}, pageRequest{}},
 			wantErr: true,
-			errMsg:  "Unknown query parameter specified in request: bogus",
+			errMsg:  "unknown query parameter specified in request: bogus",
 		},
 	}
 
