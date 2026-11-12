@@ -16,10 +16,12 @@ path = "tests/integration/main.rs"
 
 [features]
 default = []
-test-support = []
+test-support = ["carbide-utils/test-support"]
 
 [dependencies]
 bmc-explorer = { path = "../bmc-explorer" }
+bmc-backend = { path = "../bmc-backend" }
+bmc-runtime = { path = "../bmc-runtime" }
 bmc-vendor = { path = "../bmc-vendor" }
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
@@ -66,7 +68,6 @@ version-compare = { workspace = true }
 axum = { workspace = true }
 bmc-explorer = { path = "../bmc-explorer", features = ["test-support"] }
 bmc-mock = { path = "../bmc-mock" }
-bmc-runtime = { path = "../bmc-runtime" }
 opentelemetry-prometheus = { workspace = true }
 prometheus = { workspace = true }
 

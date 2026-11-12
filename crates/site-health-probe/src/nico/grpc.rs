@@ -21,12 +21,12 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use carbide_tls::client_config::ClientCert;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
-use forge_tls::client_config::ClientCert;
 use rpc::carbide_tls_client::{CarbideClientConfig, CarbideClientT, CarbideTlsClient};
 use rpc::forge::host_reprovisioning_list_response::HostReprovisioningListItem;
 use rpc::{forge, site_explorer};

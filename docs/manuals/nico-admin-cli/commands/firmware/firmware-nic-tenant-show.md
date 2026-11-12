@@ -4,7 +4,7 @@
 
 ## NAME
 
-nico-admin-cli-firmware-nic-tenant-show - Show a tenants NIC firmware
+nico-admin-cli-firmware-nic-tenant-show - Show a tenant's NIC firmware
 selection and shared version
 
 ## SYNOPSIS
@@ -15,7 +15,7 @@ nico-admin-cli firmware nic tenant show [OPTIONS] --tenant-org-id <ID>
 
 ## DESCRIPTION
 
-Read one tenants saved NIC firmware profile selection and complete
+Read one tenant's saved NIC firmware profile selection and complete
 shared tenant version. An existing tenant without a selection still
 returns its configuration. Tenant selections leave site, machine, and
 card selections unchanged. A missing tenant returns NOT_FOUND. This
@@ -23,7 +23,7 @@ command does not inspect hardware, fetch artifacts, or flash firmware.
 
 Use the returned version with tenant set or clear. Ordinary tenant
 updates and identity-configuration updates also change this token; it is
-independent of the profiles edit version.
+independent of the profile's edit version.
 
 Put --format ascii-table (default), csv, json, or yaml and --output PATH
 before the firmware subcommand. JSON/YAML returns one object with
@@ -60,7 +60,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 ## Examples
 

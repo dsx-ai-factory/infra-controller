@@ -75,7 +75,7 @@ use axum::middleware::from_fn_with_state;
 use axum::response::IntoResponse;
 use axum::routing::any;
 use carbide_instrument::emit;
-use forge_tls::client_config::ClientCert;
+use carbide_tls::client_config::ClientCert;
 use http::{Method, Request, Response, StatusCode};
 use moka::future::Cache as MokaCache;
 use rpc::carbide_api_client::CarbideApiClient;

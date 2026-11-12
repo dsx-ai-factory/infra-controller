@@ -627,12 +627,16 @@ type ForgeClient interface {
 	// allocation. Success means Core committed, not that the dataplane converged.
 	ChangeVpcRoutingProfile(ctx context.Context, in *VpcChangeRoutingProfileRequest, opts ...grpc.CallOption) (*VpcRoutingState, error)
 	// Operator cleanup after independently verifying that no DPU or fabric route
-	// still uses the retained VNI. Core does not verify dataplane convergence.
+	// still uses the retained VNI. Integrated release completes in the VPC
+	// transaction. Remote success follows provider release confirmation; an error
+	// can follow committed release intent and an advanced VPC version.
+	// Core does not verify dataplane convergence.
 	ReleaseVpcInactiveVni(ctx context.Context, in *VpcReleaseInactiveVniRequest, opts ...grpc.CallOption) (*VpcReleaseInactiveVniResult, error)
 	UpdateVpcVirtualization(ctx context.Context, in *VpcUpdateVirtualizationRequest, opts ...grpc.CallOption) (*VpcUpdateVirtualizationResult, error)
 	// Deletion does not release a retained VNI implicitly. Call
 	// ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
-	// Retained or inconsistent owned allocations cause FailedPrecondition.
+	// Retained or inconsistent owned allocations cause FailedPrecondition, as do
+	// unfinished remote cancellation or release.
 	DeleteVpc(ctx context.Context, in *VpcDeletionRequest, opts ...grpc.CallOption) (*VpcDeletionResult, error)
 	FindVpcIds(ctx context.Context, in *VpcSearchFilter, opts ...grpc.CallOption) (*VpcIdList, error)
 	FindVpcsByIds(ctx context.Context, in *VpcsByIdsRequest, opts ...grpc.CallOption) (*VpcList, error)
@@ -1587,6 +1591,12 @@ type ForgeClient interface {
 	// interconnect with a scout agent listening via an open ScoutStream connection.
 	//
 	// MlxAdminProfileSync is used to sync an MlxConfigProfile to a given device.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminProfileSync(ctx context.Context, in *MlxAdminProfileSyncRequest, opts ...grpc.CallOption) (*MlxAdminProfileSyncResponse, error)
 	// MlxAdminProfileShow shows the configuration of a specific MlxConfigProfile
 	// loaded into nico-core-api.
@@ -1602,9 +1612,21 @@ type ForgeClient interface {
 	//
 	// MlxAdminLockdownLock locks a Mellanox device, using whatever key is currently
 	// managed internally within NICo.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminLockdownLock(ctx context.Context, in *MlxAdminLockdownLockRequest, opts ...grpc.CallOption) (*MlxAdminLockdownLockResponse, error)
 	// MlxAdminLockdownUnlock unlocks a Mellanox device, using whatever key is currently
 	// managed internally within NICo.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminLockdownUnlock(ctx context.Context, in *MlxAdminLockdownUnlockRequest, opts ...grpc.CallOption) (*MlxAdminLockdownUnlockResponse, error)
 	// MlxAdminLockdownStatus returns the live lock status of a Mellanox device
 	// by querying over an open ScoutStream connection.
@@ -1639,10 +1661,22 @@ type ForgeClient interface {
 	MlxAdminConfigQuery(ctx context.Context, in *MlxAdminConfigQueryRequest, opts ...grpc.CallOption) (*MlxAdminConfigQueryResponse, error)
 	// MlxAdminConfigSet is used to set one or more running mlxconfig
 	// variable values for the provided target machine device.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminConfigSet(ctx context.Context, in *MlxAdminConfigSetRequest, opts ...grpc.CallOption) (*MlxAdminConfigSetResponse, error)
 	// MlxAdminConfigSync is used to sync one or more running mlxconfig
 	// variable values for the provided target machine device, reporting back
 	// specifics of what changed.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminConfigSync(ctx context.Context, in *MlxAdminConfigSyncRequest, opts ...grpc.CallOption) (*MlxAdminConfigSyncResponse, error)
 	// MlxAdminConfigSync is used to compare one or more running mlxconfig
 	// variable values for the provided target machine device, reporting back
@@ -7496,12 +7530,16 @@ type ForgeServer interface {
 	// allocation. Success means Core committed, not that the dataplane converged.
 	ChangeVpcRoutingProfile(context.Context, *VpcChangeRoutingProfileRequest) (*VpcRoutingState, error)
 	// Operator cleanup after independently verifying that no DPU or fabric route
-	// still uses the retained VNI. Core does not verify dataplane convergence.
+	// still uses the retained VNI. Integrated release completes in the VPC
+	// transaction. Remote success follows provider release confirmation; an error
+	// can follow committed release intent and an advanced VPC version.
+	// Core does not verify dataplane convergence.
 	ReleaseVpcInactiveVni(context.Context, *VpcReleaseInactiveVniRequest) (*VpcReleaseInactiveVniResult, error)
 	UpdateVpcVirtualization(context.Context, *VpcUpdateVirtualizationRequest) (*VpcUpdateVirtualizationResult, error)
 	// Deletion does not release a retained VNI implicitly. Call
 	// ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
-	// Retained or inconsistent owned allocations cause FailedPrecondition.
+	// Retained or inconsistent owned allocations cause FailedPrecondition, as do
+	// unfinished remote cancellation or release.
 	DeleteVpc(context.Context, *VpcDeletionRequest) (*VpcDeletionResult, error)
 	FindVpcIds(context.Context, *VpcSearchFilter) (*VpcIdList, error)
 	FindVpcsByIds(context.Context, *VpcsByIdsRequest) (*VpcList, error)
@@ -8456,6 +8494,12 @@ type ForgeServer interface {
 	// interconnect with a scout agent listening via an open ScoutStream connection.
 	//
 	// MlxAdminProfileSync is used to sync an MlxConfigProfile to a given device.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminProfileSync(context.Context, *MlxAdminProfileSyncRequest) (*MlxAdminProfileSyncResponse, error)
 	// MlxAdminProfileShow shows the configuration of a specific MlxConfigProfile
 	// loaded into nico-core-api.
@@ -8471,9 +8515,21 @@ type ForgeServer interface {
 	//
 	// MlxAdminLockdownLock locks a Mellanox device, using whatever key is currently
 	// managed internally within NICo.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminLockdownLock(context.Context, *MlxAdminLockdownLockRequest) (*MlxAdminLockdownLockResponse, error)
 	// MlxAdminLockdownUnlock unlocks a Mellanox device, using whatever key is currently
 	// managed internally within NICo.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminLockdownUnlock(context.Context, *MlxAdminLockdownUnlockRequest) (*MlxAdminLockdownUnlockResponse, error)
 	// MlxAdminLockdownStatus returns the live lock status of a Mellanox device
 	// by querying over an open ScoutStream connection.
@@ -8508,10 +8564,22 @@ type ForgeServer interface {
 	MlxAdminConfigQuery(context.Context, *MlxAdminConfigQueryRequest) (*MlxAdminConfigQueryResponse, error)
 	// MlxAdminConfigSet is used to set one or more running mlxconfig
 	// variable values for the provided target machine device.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminConfigSet(context.Context, *MlxAdminConfigSetRequest) (*MlxAdminConfigSetResponse, error)
 	// MlxAdminConfigSync is used to sync one or more running mlxconfig
 	// variable values for the provided target machine device, reporting back
 	// specifics of what changed.
+	// Reserves the managed host (including commands sent to an attached DPU).
+	// Pending hardware commands or admitted NIC firmware work reject this request
+	// with FAILED_PRECONDITION. A reserved-host reply wait expires after 30 minutes
+	// with DEADLINE_EXCEEDED; timeout or uncertain delivery retains the reservation.
+	// Unattached DPUs have no host reservation or added reply deadline. Do not retry
+	// unresolved work as a replacement command. Read-only requests remain available.
 	MlxAdminConfigSync(context.Context, *MlxAdminConfigSyncRequest) (*MlxAdminConfigSyncResponse, error)
 	// MlxAdminConfigSync is used to compare one or more running mlxconfig
 	// variable values for the provided target machine device, reporting back

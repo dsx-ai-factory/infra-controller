@@ -71,6 +71,7 @@
   - [EventRuleSendAlertAction](#v1-EventRuleSendAlertAction)
   - [EventRuleSubmitTaskAction](#v1-EventRuleSubmitTaskAction)
   - [ExternalRef](#v1-ExternalRef)
+  - [FactoryResetSwitchesRequest](#v1-FactoryResetSwitchesRequest)
   - [FieldDiff](#v1-FieldDiff)
   - [Filter](#v1-Filter)
   - [FirmwareAuthenticationData](#v1-FirmwareAuthenticationData)
@@ -964,6 +965,19 @@ ExternalRef identifies a component by its external identifier and optional type.
 | ----- | ---- | ----- | ----------- |
 | type | [ComponentType](#v1-ComponentType) |  | UNKNOWN requires an unambiguous ID. |
 | id | [string](#string) |  |  |
+
+<a name="v1-FactoryResetSwitchesRequest"></a>
+
+### FactoryResetSwitchesRequest
+
+Targets must resolve exclusively to ingested switches. Domain selectors must
+include the NVSwitch component filter. Existing rack conflict handling applies.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) |  |  |
+| description | [string](#string) |  |  |
+| reset_target | [string](#string) |  | Reset scope: &#34;nvos&#34; or &#34;sdn&#34;. Omission retains NVOS for older clients. |
 
 <a name="v1-FieldDiff"></a>
 
@@ -3272,6 +3286,7 @@ Task kinds include rack lifecycle work not represented by OperationType.
 | TASK_KIND_BRING_UP | 3 | Rack bring-up work. |
 | TASK_KIND_DECOMMISSION | 4 | Rack decommissioning work. |
 | TASK_KIND_INJECT_EXPECTATION | 5 | Installing expected inventory for a rack. |
+| TASK_KIND_COMPONENT_RESET | 6 |  |
 
 <a name="v1-TaskStatus"></a>
 
@@ -3322,6 +3337,7 @@ Task kinds include rack lifecycle work not represented by OperationType.
 | PowerOffRack | [PowerOffRackRequest](#v1-PowerOffRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | PowerResetRack | [PowerResetRackRequest](#v1-PowerResetRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | ACPowerCycleRack | [ACPowerCycleRackRequest](#v1-ACPowerCycleRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
+| FactoryResetSwitches | [FactoryResetSwitchesRequest](#v1-FactoryResetSwitchesRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) | Restores NVOS or SDN configuration defaults on switches. Accepted work is polled; uncertain submissions are never automatically repeated. No reprovisioning. |
 | GetComponentInfoByID | [GetComponentInfoByIDRequest](#v1-GetComponentInfoByIDRequest) | [GetComponentInfoResponse](#v1-GetComponentInfoResponse) | Component CRUD |
 | GetComponentInfoBySerial | [GetComponentInfoBySerialRequest](#v1-GetComponentInfoBySerialRequest) | [GetComponentInfoResponse](#v1-GetComponentInfoResponse) |  |
 | GetComponents | [GetComponentsRequest](#v1-GetComponentsRequest) | [GetComponentsResponse](#v1-GetComponentsResponse) |  |

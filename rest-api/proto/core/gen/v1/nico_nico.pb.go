@@ -14010,7 +14010,11 @@ type VpcCreationRequest struct {
 	NetworkVirtualizationType *VpcVirtualizationType `protobuf:"varint,5,opt,name=network_virtualization_type,json=networkVirtualizationType,proto3,enum=forge.VpcVirtualizationType,oneof" json:"network_virtualization_type,omitempty"`
 	// Desired ID for this VPC. If the ID is not provided, NICo will generate
 	// a random ID.
-	// The VPC ID must be unique within the NICo site.
+	// The VPC ID must be unique within the NICo site, including soft-deleted
+	// VPCs whose rows remain stored.
+	// An existing ID found during admission fails ALREADY_EXISTS before
+	// allocation preparation. Concurrent insertion remains subject to uniqueness
+	// enforcement when the VPC is persisted.
 	Id       *VpcId    `protobuf:"bytes,6,opt,name=id,proto3,oneof" json:"id,omitempty"`
 	Metadata *Metadata `protobuf:"bytes,12,opt,name=metadata,proto3" json:"metadata,omitempty"`
 	// The desired NSG ID and version for a VPC
@@ -70935,6 +70939,23 @@ func (x *ManagedHostResetListResponse) GetHosts() []*ManagedHostResetListRespons
 // inactive VNI, and prevent attachment, peering, and routing changes through
 // cleanup. Unreachable consumers require retaining the allocation unless they
 // have been isolated. Core validates ownership, not dataplane convergence.
+// Integrated release completes in the VPC transaction; its cleanup wait returns
+// immediately.
+// Remote release intent and the advanced VPC version commit before waiting for
+// provider confirmation. Success confirms release; cancellation, timeout, or a
+// provider/database error during that wait does not roll back the committed
+// intent. Recovery finishes the original allocation's release. Keep the original
+// observation on retries, inspect GetVpcRoutingState, and wait for confirmed
+// cleanup before attempting another routing mutation.
+// Remote waits return CANCELLED on API shutdown. With either VNI pool remote,
+// acquisition, admission, and commit share a five-second SQL-phase budget.
+// Expiry returns DEADLINE_EXCEEDED. Remote SQL statements also have a five-second
+// maximum, preserving shorter operator limits. A statement timeout can return
+// INTERNAL before the phase deadline. Integrated keeps its database/session limits.
+// After commit, remote provider confirmation has a separate 30-second budget.
+// Expiry returns DEADLINE_EXCEEDED; provider unavailability returns UNAVAILABLE,
+// and database or invalid-record failures return INTERNAL. These errors after
+// commit leave release intent recoverable.
 type VpcReleaseInactiveVniRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Required VPC whose inactive allocation will be released.
@@ -71005,7 +71026,10 @@ func (x *VpcReleaseInactiveVniRequest) GetExpectedInactiveVni() uint32 {
 
 type VpcReleaseInactiveVniResult struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Authoritative VPC with its advanced version after cleanup committed.
+	// VPC snapshot and advanced version committed with Integrated release or
+	// remote release intent. Remote success confirms provider release; another
+	// mutation during confirmation can make this snapshot older than the current
+	// VPC.
 	Vpc *Vpc `protobuf:"bytes,1,opt,name=vpc,proto3" json:"vpc,omitempty"`
 	// Exact inactive allocation released by this operation.
 	ReleasedInactiveVni uint32 `protobuf:"varint,2,opt,name=released_inactive_vni,json=releasedInactiveVni,proto3" json:"released_inactive_vni,omitempty"`
@@ -71108,7 +71132,11 @@ func (x *VpcRoutingStateRequest) GetId() *VpcId {
 // Supports any virtualization type with one owned allocation matching its
 // active VNI and at most one distinct allocation in the other pool. Missing,
 // duplicate, or inconsistent ownership fails instead of reporting no retained
-// allocation. VPCs without pool ownership (including configured admin VPCs)
+// allocation. One original remote assignment awaiting release confirmation is
+// reported as retained; this response does not distinguish it from an assignment
+// whose release has not started. Unattached pending/cancelling requests are
+// excluded. Routing mutations still reject unfinished cancellation or release.
+// VPCs without pool ownership (including configured admin VPCs)
 // fail FAILED_PRECONDITION. Pool values that cannot be parsed as signed 32-bit
 // integers fail INTERNAL; parsed negative values fail FAILED_PRECONDITION.
 // This is not an effective routing profile or evidence of DPU/fabric convergence;
@@ -71263,14 +71291,28 @@ func (x *VpcRetainedVniAllocation) GetVni() uint32 {
 // separate operator action.
 //
 // Requires FNN configuration, named source/destination profiles, distinct
-// nonoverlapping materialized pools, and VNIs in 1..16777215. Site-global VNIs,
-// substantive VPC/interface routing overrides, and tenant-managed SitePrefix
-// attachments are unsupported. Empty override reset objects are allowed.
+// nonoverlapping pool membership, and VNIs in 1..16777215. Integrated membership
+// uses persisted inventory; remote membership uses acknowledged eligibility.
+// Site-global VNIs, substantive VPC/interface routing overrides, and
+// tenant-managed SitePrefix attachments are unsupported. Empty override reset
+// objects are allowed.
 // Same-polarity changes and a destination pool already holding the active VNI
 // are rejected. Unsupported configurations and inconsistent ownership fail
 // FAILED_PRECONDITION; missing profiles/VPCs fail NOT_FOUND; automatic allocation
-// from an exhausted pool fails RESOURCE_EXHAUSTED. Rejected requests commit
-// no changes.
+// from an exhausted pool fails RESOURCE_EXHAUSTED. Unfinished cancellation or
+// release fails FAILED_PRECONDITION. Updates rejected before VPC commit preserve
+// configuration and the active assignment. An unused remote reservation can
+// remain pending cancellation until recovery confirms cleanup. A lost commit
+// response leaves VPC commit status uncertain; inspect state using the original
+// observation.
+// API shutdown returns CANCELLED. With either VNI pool remote, each SQL phase
+// (acquisition through commit) has a five-second budget; expiry returns
+// DEADLINE_EXCEEDED. Remote SQL statements also have a five-second maximum,
+// preserving shorter operator limits; either bound can fire first, and statement
+// timeout returns INTERNAL. Integrated keeps its database/session limits.
+// Provider unavailability returns UNAVAILABLE; provider deadlines return
+// DEADLINE_EXCEEDED. Other provider rejections follow Core's provider-error
+// mapping, and invalid saved assignments or database failures return INTERNAL.
 //
 // Preserves the VPC ID, prefixes, instances, addresses, NSGs, metadata, and
 // creation-time requested VNI. External routing does not supply public
@@ -71287,8 +71329,8 @@ type VpcChangeRoutingProfileRequest struct {
 	// Required live VPC ID. Omission fails INVALID_ARGUMENT.
 	Id *VpcId `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// Required version from the original observation; missing/malformed values
-	// fail INVALID_ARGUMENT and stale versions fail FAILED_PRECONDITION. Keep this exact
-	// version on retries. A lost response leaves commit status unknown: inspect
+	// fail INVALID_ARGUMENT and stale versions fail FAILED_PRECONDITION. Keep
+	// this exact version on retries. A lost response leaves commit status unknown: inspect
 	// GetVpcRoutingState and never automatically substitute a fresh version.
 	IfVersionMatch *string `protobuf:"bytes,2,opt,name=if_version_match,json=ifVersionMatch,proto3,oneof" json:"if_version_match,omitempty"`
 	// Required nonempty configuration-defined destination name, not a closed
@@ -71298,9 +71340,12 @@ type VpcChangeRoutingProfileRequest struct {
 	// otherwise allocates automatically. A retained destination must match an
 	// explicit request; a different value fails FAILED_PRECONDITION even if free.
 	// Without a retained destination, the requested value must be a free
-	// materialized destination-pool entry, regardless of its auto_assign flag.
-	// Missing or occupied entries and the active VNI fail FAILED_PRECONDITION
-	// without falling back. Zero and values above 16777215 fail INVALID_ARGUMENT.
+	// eligible destination-pool value from either assignment partition. Integrated
+	// uses persisted inventory; remote uses its accepted eligibility revision.
+	// Integrated missing or occupied values and the active VNI fail
+	// FAILED_PRECONDITION without falling back. Remote rejection follows the
+	// provider contract and Core's error mapping; it never falls back to another
+	// value or backend. Zero and values above 16777215 fail INVALID_ARGUMENT.
 	// Use only when every serving Core supports this field: older Core ignores
 	// it and may choose another VNI. Verify the returned profile and active VNI;
 	// a mismatched or lost response does not undo a committed change.

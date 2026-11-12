@@ -467,7 +467,7 @@ async fn create_firmware_object_fixture(
     let env = create_test_env_with_overrides(
         pool.clone(),
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             compute_tray_manager: Some(compute_tray_manager.clone()),
             compute_tray_use_state_controller: Some(true),
             nv_switch_manager: Some(nv_switch_manager.clone()),

@@ -5,14 +5,18 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bmc_backend::BackendBmc;
+use bmc_runtime::DriverConnector;
 use carbide_redfish::libredfish::RedfishClientPool;
 use carbide_redfish::libredfish::conv::IntoModel;
 use carbide_secrets::credentials::Credentials;
+use carbide_utils::redfish::BmcAccessInfo;
 use futures_util::{StreamExt, stream};
 use libredfish::model::ODataId;
 use libredfish::model::software_inventory::SoftwareInventory;
 use mac_address::MacAddress;
 use model::component_manager::{ComputeTrayComponent, PowerAction};
+use sqlx::PgPool;
 use tokio::time::{Instant, timeout_at};
 
 use crate::component_common::ComponentPowerStateResult;
@@ -37,6 +41,16 @@ use crate::firmware_inventory::{
 /// and bundle listing remain unsupported. See `get_firmware_inventory` for its bounds.
 pub struct CoreComputeTrayManager {
     redfish_pool: Arc<dyn RedfishClientPool>,
+    /// Connects moved BMC operations through their drivers when the site
+    /// sets `bmc_backend = "drivers"`; `None` runs them through libredfish.
+    drivers: Option<ComputeTrayDrivers>,
+}
+
+/// The driver connector and the database each tray's explored report is
+/// read from.
+struct ComputeTrayDrivers {
+    connector: Arc<DriverConnector>,
+    db_pool: PgPool,
 }
 
 // Bound request latency even when BMCs are unavailable. Waiting devices
@@ -72,7 +86,70 @@ impl std::fmt::Debug for CoreComputeTrayManager {
 
 impl CoreComputeTrayManager {
     pub fn new(redfish_pool: Arc<dyn RedfishClientPool>) -> Self {
-        Self { redfish_pool }
+        Self {
+            redfish_pool,
+            drivers: None,
+        }
+    }
+
+    /// Runs moved BMC operations through `driver_connector`, reading each
+    /// tray's explored report from `db_pool`; `None` keeps them on libredfish.
+    pub fn with_driver_connector(
+        mut self,
+        driver_connector: Option<Arc<DriverConnector>>,
+        db_pool: PgPool,
+    ) -> Self {
+        self.drivers = driver_connector.map(|connector| ComputeTrayDrivers { connector, db_pool });
+        self
+    }
+
+    /// Connects to `endpoint`'s BMC with its credentials through the
+    /// configured `bmc_backend`.
+    #[expect(
+        dead_code,
+        reason = "callers arrive as operations move to the driver system"
+    )]
+    async fn connect_bmc(&self, endpoint: &ComputeTrayEndpoint) -> Result<BackendBmc, String> {
+        let Some(drivers) = &self.drivers else {
+            let Credentials::UsernamePassword { username, password } = &endpoint.bmc_credentials;
+            return self
+                .redfish_pool
+                .create_client(
+                    &endpoint.bmc_ip.to_string(),
+                    Some(443),
+                    carbide_redfish::libredfish::RedfishAuth::Direct(
+                        username.clone(),
+                        password.clone(),
+                    ),
+                    map_vendor(endpoint.vendor),
+                )
+                .await
+                .map(BackendBmc::Libredfish)
+                .map_err(|error| format!("failed to create Redfish client: {error}"));
+        };
+        let report = db::explored_endpoints::find_by_ips(&drivers.db_pool, vec![endpoint.bmc_ip])
+            .await
+            .map_err(|error| format!("failed to read the explored endpoint: {error}"))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                format!(
+                    "BMC {} has no explored endpoint to select drivers from",
+                    endpoint.bmc_ip
+                )
+            })?
+            .report;
+        let access = BmcAccessInfo {
+            host: endpoint.bmc_ip.to_string(),
+            port: Some(443),
+            mac_address: endpoint.bmc_mac,
+        };
+        drivers
+            .connector
+            .connect_with_credentials(&access, &report, endpoint.bmc_credentials.clone())
+            .await
+            .map(BackendBmc::from)
+            .map_err(|error| format!("failed to connect through drivers: {error}"))
     }
 
     /// Reads one BMC's collection before admitting bounded member requests.

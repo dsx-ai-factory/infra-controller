@@ -87,6 +87,7 @@ mod host_reconciler;
 use host_reconciler::HostReconciler;
 mod boot_order_tracker;
 use boot_order_tracker::BootOrderTracker;
+pub mod dpu_asn;
 pub mod dpu_loopback;
 mod inventory_creator;
 pub use inventory_creator::{
@@ -1197,12 +1198,10 @@ impl SiteExplorer {
         // physical card. BF4 does not expose that serial on the DPU system
         // object, so this uses `EndpointExplorationReport::dpu_pairing_serial_number`
         // rather than reading `systems[0].serial_number` directly.
-        let mut dpu_sn_to_endpoint = HashMap::new();
-        for (_, ep) in explored_dpus {
-            if let Some(sn) = ep.report.dpu_pairing_serial_number() {
-                dpu_sn_to_endpoint.insert(sn.to_string(), ep);
-            }
-        }
+        let dpu_sn_to_endpoint = explored_dpus
+            .values()
+            .filter_map(|ep| ep.report.dpu_pairing_serial_number().map(|sn| (sn, ep)))
+            .collect::<HashMap<_, _>>();
 
         let mut candidates = Vec::with_capacity(explored_hosts.len());
         for (_, ep) in explored_hosts {
