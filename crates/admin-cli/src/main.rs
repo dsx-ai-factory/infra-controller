@@ -29,6 +29,7 @@ use ::rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig, RetryConfig};
 use cfg::cli_options::{CliCommand, CliOptions};
 use clap::CommandFactory;
 use errors::CarbideCliResult;
+use eyre::WrapErr;
 use forge_tls::client_config::{
     get_api_url, get_client_cert_info, get_config_from_file, get_proxy_info, get_root_ca_path,
 };
@@ -257,7 +258,15 @@ async fn main() -> color_eyre::Result<()> {
         ))
     };
 
-    let proxy = get_proxy_info()?;
+    let proxy = match get_proxy_info()? {
+        Some(proxy) => Some(
+            cfg::proxy::resolve_socks_proxy(&proxy)
+                .await
+                .wrap_err_with(|| format!("resolve SOCKS5 proxy {proxy}"))?
+                .to_string(),
+        ),
+        None => None,
+    };
 
     let mut client_config = CarbideClientConfig::new(root_ca_path, client_cert);
     client_config.socks_proxy(proxy);
