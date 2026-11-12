@@ -2261,39 +2261,39 @@ impl Forge for Api {
         crate::handlers::expected_rack::delete_all_expected_racks(self, request).await
     }
 
-    async fn create_expected_nv_link_domain(
+    async fn create_nv_link_domain(
         &self,
-        request: Request<rpc::CreateExpectedNvLinkDomainRequest>,
-    ) -> Result<Response<rpc::ExpectedNvLinkDomain>, Status> {
-        crate::handlers::expected_nvlink_domain::create(self, request).await
+        request: Request<rpc::CreateNvLinkDomainRequest>,
+    ) -> Result<Response<rpc::NvLinkDomain>, Status> {
+        crate::handlers::nvlink_domain::create(self, request).await
     }
 
-    async fn delete_expected_nv_link_domain(
+    async fn delete_nv_link_domain(
         &self,
-        request: Request<rpc::ExpectedNvLinkDomainRequest>,
+        request: Request<rpc::NvLinkDomainRequest>,
     ) -> Result<Response<()>, Status> {
-        crate::handlers::expected_nvlink_domain::delete(self, request).await
+        crate::handlers::nvlink_domain::delete(self, request).await
     }
 
-    async fn get_expected_nv_link_domain(
+    async fn get_nv_link_domain(
         &self,
-        request: Request<rpc::ExpectedNvLinkDomainRequest>,
-    ) -> Result<Response<rpc::ExpectedNvLinkDomain>, Status> {
-        crate::handlers::expected_nvlink_domain::get(self, request).await
+        request: Request<rpc::NvLinkDomainRequest>,
+    ) -> Result<Response<rpc::NvLinkDomain>, Status> {
+        crate::handlers::nvlink_domain::get(self, request).await
     }
 
-    async fn find_expected_nv_link_domain_ids(
+    async fn find_nv_link_domain_ids(
         &self,
-        request: Request<rpc::ExpectedNvLinkDomainSearchFilter>,
-    ) -> Result<Response<rpc::ExpectedNvLinkDomainIdList>, Status> {
-        crate::handlers::expected_nvlink_domain::find_ids(self, request).await
+        request: Request<rpc::NvLinkDomainSearchFilter>,
+    ) -> Result<Response<rpc::NvLinkDomainIdList>, Status> {
+        crate::handlers::nvlink_domain::find_ids(self, request).await
     }
 
-    async fn find_expected_nv_link_domains_by_ids(
+    async fn find_nv_link_domains_by_ids(
         &self,
-        request: Request<rpc::ExpectedNvLinkDomainsByIdsRequest>,
-    ) -> Result<Response<rpc::ExpectedNvLinkDomainList>, Status> {
-        crate::handlers::expected_nvlink_domain::find_by_ids(self, request).await
+        request: Request<rpc::NvLinkDomainsByIdsRequest>,
+    ) -> Result<Response<rpc::NvLinkDomainList>, Status> {
+        crate::handlers::nvlink_domain::find_by_ids(self, request).await
     }
 
     async fn add_expected_rack_group(

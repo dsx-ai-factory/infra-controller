@@ -203,7 +203,7 @@ pub(in crate::tests) type TestManagedHost = test_managed_host::TestManagedHost;
 #[derive(Clone, Debug, Default)]
 pub(in crate::tests) struct TestEnvOverrides {
     pub(in crate::tests) site_prefixes: Option<Vec<IpNetwork>>,
-    pub(in crate::tests) config: Option<CarbideConfig>,
+    pub(in crate::tests) config: Option<Box<CarbideConfig>>,
     pub(in crate::tests) create_network_segments: Option<bool>,
     pub(in crate::tests) dpu_agent_version_staleness_threshold: Option<chrono::Duration>,
     pub(in crate::tests) prevent_allocations_on_stale_dpu_agent_version: Option<bool>,
@@ -244,7 +244,7 @@ pub(in crate::tests) struct TestEnvOverrides {
 impl TestEnvOverrides {
     pub(in crate::tests) fn with_config(config: CarbideConfig) -> Self {
         Self {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         }
     }
@@ -1404,7 +1404,7 @@ async fn create_test_env_with_overrides_inner(
     });
     let nmxc_sim: Arc<dyn NmxcPool> = nmxc_sim_client.clone();
 
-    let mut config = overrides.config.unwrap_or(get_config());
+    let mut config = overrides.config.unwrap_or_else(|| Box::new(get_config()));
     if let Some(threshold) = overrides.dpu_agent_version_staleness_threshold {
         config.host_health.dpu_agent_version_staleness_threshold = threshold;
     }
@@ -1443,7 +1443,7 @@ async fn create_test_env_with_overrides_inner(
         Box::pin(seed_mock_host_attestation_profile(&db_pool)).await;
     }
 
-    let config = Arc::new(config);
+    let config: Arc<CarbideConfig> = Arc::from(config);
 
     let site_fabric_networks = overrides
         .site_prefixes

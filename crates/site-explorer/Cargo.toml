@@ -16,7 +16,7 @@ path = "tests/integration/main.rs"
 
 [features]
 default = []
-test-support = []
+test-support = ["carbide-utils/test-support"]
 
 [dependencies]
 bmc-explorer = { path = "../bmc-explorer" }

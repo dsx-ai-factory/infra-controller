@@ -22,10 +22,6 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-# TODO: rename to carbide_tls in source
-[lib]
-name = "forge_tls"
-
 [dependencies]
 rustls = { workspace = true }
 serde = { features = ["derive"], workspace = true }

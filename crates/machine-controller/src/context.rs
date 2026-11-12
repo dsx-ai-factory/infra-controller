@@ -113,10 +113,6 @@ impl MachineStateHandlerServices {
     }
 
     /// Connects to `machine`'s BMC through the configured `bmc_backend`.
-    #[expect(
-        dead_code,
-        reason = "callers arrive as operations move to the driver system"
-    )]
     pub(crate) async fn connect_bmc(
         &self,
         machine: &Machine<impl MachineIdSubtypeTrait>,
@@ -133,8 +129,8 @@ impl MachineStateHandlerServices {
                     missing: "explored endpoint of the BMC",
                 })
         };
-        self.bmc_connector
-            .connect(&bmc_access_info, report)
+        // Boxed so the state handler's future stays within the query depth limit.
+        Box::pin(self.bmc_connector.connect(&bmc_access_info, report))
             .await
             .map_err(|error| match error {
                 BmcConnectError::Report(error) => error,

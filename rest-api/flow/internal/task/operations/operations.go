@@ -74,6 +74,8 @@ func New(typ taskcommon.TaskType, info json.RawMessage) (Operation, error) {
 
 func newEmpty(typ taskcommon.TaskType) (Operation, error) {
 	switch typ {
+	case taskcommon.TaskTypeComponentReset:
+		return &ComponentResetTaskInfo{}, nil
 	case taskcommon.TaskTypePowerControl:
 		return &PowerControlTaskInfo{}, nil
 	case taskcommon.TaskTypeFirmwareControl:

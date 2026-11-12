@@ -36,6 +36,7 @@ pub mod deleting;
 pub mod discovering;
 pub mod error_state;
 pub mod fabric_manager;
+mod firmware_health;
 pub mod firmware_object;
 pub mod handler;
 pub mod io;

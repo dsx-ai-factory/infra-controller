@@ -1961,6 +1961,7 @@ async fn change_vpc_routing_profile_rejects_unavailable_exact_vni_without_change
         },
     ] {
         let scenario = case.scenario;
+        // Serialize this emission with other metric-asserting tests.
         let metrics = MetricsCapture::start();
         let (result, logs) = capture_logs_async(env.api.change_vpc_routing_profile(
             tonic::Request::new(rpc::forge::VpcChangeRoutingProfileRequest {
@@ -1983,19 +1984,17 @@ async fn change_vpc_routing_profile_rejects_unavailable_exact_vni_without_change
                 events[0].field("event_name"),
                 Some("resource_pool_requested_vni_unavailable")
             );
-            assert_eq!(
-                metrics.counter_delta(
-                    metric,
-                    &[
-                        ("operation", "allocate"),
-                        ("failure", "requested_value_unavailable"),
-                        ("failure_policy", "required"),
-                        ("allocation_mode", "requested"),
-                        ("value_type", "integer"),
-                    ]
-                ),
-                1.0
-            );
+            // Non-capturing tests can increment the shared counter. Check this
+            // request's event and labels instead of the process-wide delta.
+            for (key, value) in [
+                ("operation", "allocate"),
+                ("failure", "requested_value_unavailable"),
+                ("failure_policy", "required"),
+                ("allocation_mode", "requested"),
+                ("value_type", "integer"),
+            ] {
+                assert_eq!(events[0].field(key), Some(value), "{scenario}: {key}");
+            }
         }
         drop(metrics);
         assert_eq!(

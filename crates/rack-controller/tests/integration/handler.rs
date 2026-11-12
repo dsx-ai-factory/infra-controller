@@ -393,6 +393,160 @@ async fn create_two_compute_rack(
     Ok((rack_id, host_a, host_b))
 }
 
+#[sqlx_test]
+async fn test_rack_firmware_health_lifecycle(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config_with_rack_profiles()),
+    )
+    .await;
+    let (rack_id, host_a, host_b) = create_two_compute_rack(&env, &pool).await?;
+    let addresses = [
+        host_a.host_snapshot.status.bmc_info.ip.unwrap(),
+        host_b.host_snapshot.status.bmc_info.ip.unwrap(),
+    ];
+    for (address, version) in addresses.into_iter().zip(["1", "2"]) {
+        let mut connection = pool.acquire().await?;
+        let endpoint = db::explored_endpoints::find_by_ips(connection.as_mut(), vec![address])
+            .await?
+            .pop()
+            .unwrap();
+        let mut report = endpoint.report;
+        report.service = vec![model::site_explorer::Service {
+            id: "UpdateService".to_string(),
+            inventories: ["BMC", "BIOS"]
+                .into_iter()
+                .map(|id| model::site_explorer::Inventory {
+                    id: id.to_string(),
+                    version: Some(version.to_string()),
+                    ..Default::default()
+                })
+                .collect(),
+        }];
+        let result = db::explored_endpoints::try_update(
+            address,
+            endpoint.report_version,
+            &report,
+            false,
+            connection.as_mut(),
+        )
+        .await?;
+        assert!(matches!(result, db::ConditionalWrite::Applied(())));
+    }
+    run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Created).await?;
+    let first = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let report = &first.health_reports.merges["rack-firmware"];
+    assert_eq!(report.alerts.len(), 2);
+    assert_eq!(report.alerts[0].id.as_str(), "RackFirmwareMismatch");
+    assert_eq!(
+        report.alerts[0].classifications,
+        vec![HealthAlertClassification::hardware()]
+    );
+    assert!(report.alerts[0].in_alert_since.is_some());
+    let host = db::managed_host::load_snapshot(
+        &mut env.db_reader(),
+        &host_a.host_snapshot.id,
+        LoadSnapshotOptions::default(),
+    )
+    .await?
+    .unwrap();
+    assert!(
+        !host
+            .aggregate_health
+            .alerts
+            .iter()
+            .any(|alert| alert.id.as_str() == "RackFirmwareMismatch")
+    );
+    assert_eq!(host.is_usable_as_instance(false), Ok(()));
+    for (bmc_version, bios_version, waiting, expected_components) in [
+        ("2", "2", false, 2),
+        ("1", "2", false, 1),
+        ("1", "1", true, 1),
+        ("1", "1", false, 0),
+    ] {
+        let mut connection = pool.acquire().await?;
+        let endpoint = db::explored_endpoints::find_by_ips(connection.as_mut(), vec![addresses[1]])
+            .await?
+            .pop()
+            .unwrap();
+        let mut updated_report = endpoint.report;
+        updated_report.service[0].inventories[0].version = Some(bmc_version.to_string());
+        updated_report.service[0].inventories[1].version = Some(bios_version.to_string());
+        let result = db::explored_endpoints::try_update(
+            addresses[1],
+            endpoint.report_version,
+            &updated_report,
+            waiting,
+            connection.as_mut(),
+        )
+        .await?;
+        assert!(matches!(result, db::ConditionalWrite::Applied(())));
+        drop(connection);
+        run_rack_handler_and_apply_writes(&env, &pool, &rack_id, RackState::Created).await?;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        if expected_components > 0 {
+            let evidence = &rack.health_reports.merges["rack-firmware"].alerts;
+            assert_eq!(evidence.len(), expected_components);
+            for alert in evidence {
+                assert_eq!(
+                    alert.in_alert_since,
+                    report
+                        .alerts
+                        .iter()
+                        .find(|previous| previous.target == alert.target)
+                        .unwrap()
+                        .in_alert_since
+                );
+            }
+        } else {
+            assert!(!rack.health_reports.merges.contains_key("rack-firmware"));
+        }
+        let response = env
+            .api
+            .find_racks_by_ids(Request::new(rpc::forge::RacksByIdsRequest {
+                rack_ids: vec![rack_id.clone()],
+            }))
+            .await?
+            .into_inner();
+        let health = response.racks[0]
+            .status
+            .as_ref()
+            .unwrap()
+            .health
+            .as_ref()
+            .unwrap();
+        let alerts = health
+            .alerts
+            .iter()
+            .filter(|alert| alert.id == "RackFirmwareMismatch")
+            .collect::<Vec<_>>();
+        assert_eq!(alerts.len(), usize::from(expected_components > 0));
+        if let Some(alert) = alerts.first() {
+            assert!(alert.target.is_none());
+            assert!(
+                alert
+                    .message
+                    .contains(&format!("{expected_components} rack component(s)"))
+            );
+            assert!(alert.message.contains("BIOS"));
+            assert_eq!(alert.message.contains("for BMC:"), expected_components == 2);
+            for (device_id, address) in [
+                (host_a.host_snapshot.id, addresses[0]),
+                (host_b.host_snapshot.id, addresses[1]),
+            ] {
+                assert!(
+                    alert
+                        .message
+                        .contains(&format!("{device_id} (bmc ip: {address})"))
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn attach_switches_with_nvos_credentials(
     env: &TestEnv,
     rack_id: &RackId,

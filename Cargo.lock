@@ -1538,6 +1538,7 @@ dependencies = [
  "carbide-resource-pool",
  "carbide-rpc",
  "carbide-secrets",
+ "carbide-site-explorer",
  "carbide-ssh-console",
  "carbide-tls",
  "carbide-utils",
@@ -1631,6 +1632,7 @@ dependencies = [
  "carbide-rms-mock",
  "carbide-rpc",
  "carbide-secrets",
+ "carbide-test-support",
  "carbide-tls",
  "carbide-utils",
  "carbide-uuid",
@@ -2792,6 +2794,7 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "bmc-backend",
+ "bmc-platform",
  "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
@@ -3311,6 +3314,7 @@ dependencies = [
  "axum",
  "axum-server",
  "bmc-mock",
+ "bmc-platform",
  "bmc-vendor",
  "carbide-api-model",
  "carbide-instrument",
@@ -8080,6 +8084,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
@@ -11612,6 +11617,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

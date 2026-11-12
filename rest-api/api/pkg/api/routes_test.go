@@ -82,9 +82,9 @@ func TestNewAPIRoutes(t *testing.T) {
 		"task":                      3,
 		"rule":                      5,
 		"run":                       8,
-		"domain":                    6,
+		"domain":                    7,
 		"rack":                      18,
-		"tray":                      13,
+		"tray":                      14,
 		"stats":                     4,
 		"identity-config":           3,
 		"identity-token-delegation": 3,
@@ -209,6 +209,8 @@ func TestNewAPIRoutes(t *testing.T) {
 				})
 			}
 			trayPowerPath := "/org/:orgName/" + cfg.GetAPIName() + "/tray/:id/power"
+			assertRouteExists(t, got, http.MethodPost, "/org/:orgName/"+cfg.GetAPIName()+"/tray/:id/factory-reset")
+			assertRouteExists(t, got, http.MethodPost, "/org/:orgName/"+cfg.GetAPIName()+"/domain/nvlink/:id/factory-reset")
 			assertRouteExists(t, got, http.MethodGet, trayPowerPath)
 			assertRouteExists(t, got, http.MethodPatch, trayPowerPath)
 			// Verify the read route uses the power-state handler, not the power mutation handler.
