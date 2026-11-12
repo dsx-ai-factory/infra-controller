@@ -5,6 +5,7 @@ package siteprefix
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -18,18 +19,21 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"go.temporal.io/sdk/temporal"
 )
 
 const (
+	sitePrefixMissingMessage         = "SitePrefix missing from Core inventory"
 	sitePrefixInventoryStatusMessage = "Reported by Core SitePrefix inventory"
 	invalidSitePrefixInventory       = "InvalidSitePrefixInventory"
 	sitePrefixNameMaxLength          = 256
 )
 
-// ManageSitePrefix reconciles reported Core roots without inferring absence.
+// ManageSitePrefix reconciles Core SitePrefixes and their absence.
 type ManageSitePrefix struct {
 	dbSession *cdb.Session
 }
@@ -42,9 +46,12 @@ func NewManageSitePrefix(session *cdb.Session) ManageSitePrefix {
 // UpdateSitePrefixesInDB reconciles each reported prefix in its own transaction.
 // It looks up the active IP Block, creates, adopts, or restores one when missing, then
 // applies lifecycle without changing REST metadata or the block's Site, owner, or CIDR.
-// Unreconcilable entries are logged and skipped; later entries still proceed.
-// Publication, absence processing, and retiring the legacy importer belong to
-// the follow-up SitePrefix publication and retirement implementation.
+// Eligible final pages also reconcile absent linked blocks: free operator roots
+// retire with IPAM, allocated roots unlink, and tenant blocks retire only when
+// Deleting (otherwise becoming Error). Recent blocks are protected.
+// Per-entry reconciliation errors are logged and skipped; later entries still
+// proceed. Invalid inventory, page-level lookup failures, and cancellation return
+// errors so the workflow can report or retry the failed collection.
 func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, siteID uuid.UUID, inventory *corev1.SitePrefixInventory) error {
 	logger := log.With().Str("Activity", "UpdateSitePrefixesInDB").Str("Site ID", siteID.String()).Logger()
 	logger.Info().Msg("starting activity")
@@ -75,72 +82,76 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 		logger.Info().Msgf("Received SitePrefix inventory page: %d of %d, page size: %d, total count: %d",
 			page.CurrentPage, page.TotalPages, page.PageSize, page.TotalItems)
 	}
-	// Load the IP Blocks linked to this page's SitePrefix IDs once, as other inventory receivers do.
-	// SitePrefix IDs are global, so validate ownership before changing a matched IP Block.
-	prefixIDs := []uuid.UUID{}
-	for _, prefix := range inventory.SitePrefixes {
-		id, err := uuid.Parse(prefix.GetId().GetValue())
-		if err == nil {
-			prefixIDs = append(prefixIDs, id)
-		}
-	}
+	// Load the Site's linked IP Blocks once for reported entries and absence cleanup.
 	dao := cdbm.NewIPBlockDAO(manager.dbSession)
-	blocks, _, err := dao.GetAll(ctx, nil, cdbm.IPBlockFilterInput{SitePrefixIDs: prefixIDs},
-		paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+	blocks, _, err := dao.GetAll(ctx, nil, cdbm.IPBlockFilterInput{
+		SiteIDs: []uuid.UUID{site.ID}, CoreLinkedOnly: true,
+	}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
 	if err != nil {
-		logger.Error().Err(err).Msg("failed to retrieve IP Blocks for SitePrefix inventory")
+		logger.Error().Err(err).Msg("failed to retrieve IP Blocks for Site from DB")
 		return err
 	}
 	existingBlockMap := make(map[uuid.UUID]*cdbm.IPBlock, len(blocks))
 	for i := range blocks {
 		existingBlockMap[*blocks[i].SitePrefixID] = &blocks[i]
 	}
+	reportedSitePrefixIDMap := map[uuid.UUID]bool{}
+	for _, strID := range page.GetItemIds() {
+		id, err := uuid.Parse(strID)
+		if err != nil {
+			logger.Warn().Err(err).Str("ID", strID).Msg("failed to parse Site Prefix ID from inventory page")
+			continue
+		}
+		reportedSitePrefixIDMap[id] = true
+	}
 
 	for _, prefix := range inventory.SitePrefixes {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// Invalid payloads still protect their reported identity from absence cleanup.
+		reportedID, parseErr := uuid.Parse(prefix.GetId().GetValue())
+		if parseErr == nil {
+			reportedSitePrefixIDMap[reportedID] = true
+		}
 		// Validate per entry so a malformed report cannot hold back the rest of
-		// the page. Page IDs do not imply absence.
+		// the page.
 		err := validatePrefix(prefix)
 		if err != nil {
 			logger.Warn().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
 				Msg("received invalid SitePrefix")
 			continue
 		}
-		// Keep one prefix's IP Block, IPAM changes, and status detail atomic.
+		// Keep one prefix's changes atomic, except retirement cleanup uses a
+		// savepoint so a cleanup failure preserves the Deleting lifecycle.
 		// A failed prefix must not roll back earlier prefixes in the page.
-		isLockContention := false
 		id := uuid.MustParse(prefix.GetId().GetValue()) // validated before the transaction
-		var reconciledBlock *cdbm.IPBlock
-		err = cdb.WithTx(ctx, manager.dbSession, func(tx *cdb.Tx) error {
+		reconciledBlock, err := cdb.WithTxResult(ctx, manager.dbSession, func(tx *cdb.Tx) (*cdbm.IPBlock, error) {
 			err := tx.TryAcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, siteID), nil)
 			if err != nil {
-				// The retry aggregate includes earlier failures; classify its last attempt.
-				lastErr := errors.Unwrap(err)
-				if lastErr == nil {
-					lastErr = err
-				}
-				isLockContention = errors.Is(lastErr, cdb.ErrXactAdvisoryLockFailed)
-				return err
+				return nil, err
 			}
 			lockedSite, err := siteDAO.GetByID(ctx, tx, siteID, nil, false, true)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if lockedSite.InfrastructureProviderID != site.InfrastructureProviderID {
-				return invalidSitePrefixTemporalApplicationError("Site provider changed while acquiring inventory lock")
+				return nil, invalidSitePrefixTemporalApplicationError("Site provider changed while acquiring inventory lock")
 			}
 			block := existingBlockMap[id]
 			if block != nil {
 				// Reload the page snapshot under the row lock before applying lifecycle.
 				block, err = dao.GetByIDForUpdate(ctx, tx, block.ID)
 				if err != nil && !errors.Is(err, cdb.ErrDoesNotExist) {
-					return err
+					return nil, err
 				}
 				if errors.Is(err, cdb.ErrDoesNotExist) {
 					block = nil
 				}
+			}
+			// The snapshot's Core identity must still own this row after locking.
+			if block != nil && (block.SitePrefixID == nil || *block.SitePrefixID != id) {
+				return nil, nil
 			}
 			var tenantID *uuid.UUID
 			if prefix.Status.Authority == corev1.SitePrefixAuthority_SITE_PREFIX_AUTHORITY_TENANT_MANAGED {
@@ -148,51 +159,50 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 					cdbm.TenantFilterInput{Orgs: []string{prefix.Config.GetTenantOrganizationId()}},
 					paginator.PageInput{Limit: cutil.GetPtr(2)}, nil)
 				if err != nil {
-					return err
+					return nil, err
 				}
 				if len(tenants) != 1 {
-					return invalidSitePrefixTemporalApplicationError("tenant organization for SitePrefix %s is unknown or ambiguous", id)
+					return nil, invalidSitePrefixTemporalApplicationError("tenant organization for SitePrefix %s is unknown or ambiguous", id)
 				}
 				tenantID = &tenants[0].ID
 			}
 			if block == nil {
 				block, err = manager.createOrUpdateSitePrefixFromSite(ctx, tx, lockedSite, prefix, tenantID)
 				if err != nil {
-					return err
+					return nil, err
 				}
 				if block == nil {
-					return nil
+					return nil, nil
 				}
 			} else {
 				// Existing links may change lifecycle, but not ownership or CIDR.
 				err = validateIPBlockMatchesSitePrefix(block, lockedSite, prefix, tenantID)
 				if err != nil {
-					return err
+					return nil, err
+				}
+				// A tenant-created IP Block stays Deleting until absent; a delayed report must not revive it.
+				if block.TenantID != nil && block.Status == cdbm.IPBlockStatusDeleting {
+					return nil, nil
 				}
 			}
 
 			// REST owns metadata after creation, including on adopted and restored
 			// roots. Only lifecycle changes produce writes and status details.
 			status := getSitePrefixStatus(prefix.Status.LifecycleState)
-			if status != block.Status {
-				block, err = dao.Update(ctx, tx, cdbm.IPBlockUpdateInput{IPBlockID: block.ID, Status: &status})
-				if err != nil {
-					return err
-				}
-				_, err = cdbm.NewStatusDetailDAO(manager.dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
-					EntityID: block.ID.String(), Status: status, Message: cutil.GetPtr(sitePrefixInventoryStatusMessage),
-				})
-				if err != nil {
-					return err
-				}
+			block, err = manager.updateIPBlockStatusInDB(ctx, tx, block, status, sitePrefixInventoryStatusMessage)
+			if err != nil {
+				return nil, err
 			}
-			reconciledBlock = block
-			return nil
+			if block.Managed && block.TenantID == nil && status == cdbm.IPBlockStatusDeleting {
+				_, err = manager.deleteSiteFabricIPBlockIfUnallocated(ctx, tx, block, logger)
+				return nil, err
+			}
+			return block, nil
 		})
 		if err != nil {
-			if isLockContention {
+			if isSitePrefixLockContention(err) {
 				logger.Warn().Err(err).Str("Site Prefix ID", prefix.GetId().GetValue()).
-					Msg("skipping SitePrefix after bounded Site fabric lock contention retries")
+					Msg("skipping SitePrefix due to Site fabric lock contention")
 				continue
 			}
 			var applicationErr *temporal.ApplicationError
@@ -210,8 +220,153 @@ func (manager ManageSitePrefix) UpdateSitePrefixesInDB(ctx context.Context, site
 			existingBlockMap[id] = reconciledBlock
 		}
 	}
+
+	// Only the final page carries the full ID list used for absence cleanup.
+	ipBlocksToDelete := []*cdbm.IPBlock{}
+	if util.ShouldReconcileDeletions(page) {
+		for id, block := range existingBlockMap {
+			if !reportedSitePrefixIDMap[id] {
+				ipBlocksToDelete = append(ipBlocksToDelete, block)
+			}
+		}
+	}
+	for _, candidate := range ipBlocksToDelete {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		err = cdb.WithTx(ctx, manager.dbSession, func(tx *cdb.Tx) error {
+			err := tx.TryAcquireAdvisoryLock(ctx, cdbm.SiteFabricIPBlockLockID(site.InfrastructureProviderID, site.ID), nil)
+			if err != nil {
+				return err
+			}
+			lockedSite, err := siteDAO.GetByID(ctx, tx, site.ID, nil, false, true)
+			if err != nil {
+				return err
+			}
+			block, err := dao.GetByIDForUpdate(ctx, tx, candidate.ID)
+			if errors.Is(err, cdb.ErrDoesNotExist) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			if block.SitePrefixID == nil || *block.SitePrefixID != *candidate.SitePrefixID || reportedSitePrefixIDMap[*block.SitePrefixID] ||
+				block.SiteID != lockedSite.ID || block.InfrastructureProviderID != lockedSite.InfrastructureProviderID ||
+				lockedSite.IsTimeWithinStaleInventoryThreshold(block.Created) ||
+				(block.Managed && block.TenantID != nil) {
+				return nil
+			}
+			if block.Managed && block.TenantID == nil {
+				_, err = manager.updateIPBlockStatusInDB(ctx, tx, block, cdbm.IPBlockStatusDeleting, sitePrefixMissingMessage)
+				if err != nil {
+					return err
+				}
+				inUse, err := manager.deleteSiteFabricIPBlockIfUnallocated(ctx, tx, block, logger)
+				if err != nil || !inUse {
+					return err
+				}
+				// Keep Deleting even when unlinking fails, so new allocations stay blocked.
+				err = tx.WithSavepoint(ctx, func(sp *cdb.Tx) error {
+					_, err := dao.Clear(ctx, sp, cdbm.IPBlockClearInput{IPBlockID: block.ID, SitePrefixID: true})
+					return err
+				})
+				if errors.Is(err, cdb.ErrTransactionSavepoint) {
+					return err
+				}
+				if err != nil {
+					logger.Error().Err(err).Str("IP Block ID", block.ID.String()).Msg("failed to unlink Site fabric IP Block; will retry on inventory")
+				}
+				return nil
+			}
+			if !block.Managed && block.TenantID != nil {
+				if block.Status == cdbm.IPBlockStatusDeleting {
+					return dao.Delete(ctx, tx, block.ID)
+				}
+				_, err = manager.updateIPBlockStatusInDB(ctx, tx, block, cdbm.IPBlockStatusError, sitePrefixMissingMessage)
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			if isSitePrefixLockContention(err) {
+				logger.Warn().Err(err).Str("IP Block ID", candidate.ID.String()).
+					Msg("skipping missing SitePrefix due to Site fabric lock contention")
+				continue
+			}
+			logger.Error().Err(err).Str("IP Block ID", candidate.ID.String()).Msg("failed to reconcile missing SitePrefix")
+		}
+	}
 	logger.Info().Msg("completing activity")
 	return ctx.Err()
+}
+
+func isSitePrefixLockContention(err error) bool {
+	// The retry aggregate includes earlier failures; classify its last attempt.
+	lastErr := errors.Unwrap(err)
+	if lastErr == nil {
+		lastErr = err
+	}
+	return errors.Is(lastErr, cdb.ErrXactAdvisoryLockFailed)
+}
+
+func (manager ManageSitePrefix) updateIPBlockStatusInDB(ctx context.Context, tx *cdb.Tx, block *cdbm.IPBlock, status, message string) (*cdbm.IPBlock, error) {
+	if block.Status == status {
+		return block, nil
+	}
+	updated, err := cdbm.NewIPBlockDAO(manager.dbSession).Update(ctx, tx, cdbm.IPBlockUpdateInput{IPBlockID: block.ID, Status: &status})
+	if err != nil {
+		return nil, err
+	}
+	_, err = cdbm.NewStatusDetailDAO(manager.dbSession).Create(ctx, tx, cdbm.StatusDetailCreateInput{
+		EntityID: block.ID.String(), Status: status, Message: &message,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+// deleteSiteFabricIPBlockIfUnallocated deletes a free Site fabric IP Block and its
+// IPAM entry together. It reports whether allocations retain the block. The caller
+// holds the Site fabric and row locks. Cleanup errors roll back to a savepoint so
+// the caller can commit Deleting and retry on a later inventory.
+func (manager ManageSitePrefix) deleteSiteFabricIPBlockIfUnallocated(ctx context.Context, tx *cdb.Tx, block *cdbm.IPBlock, logger zerolog.Logger) (bool, error) {
+	inUse := false
+	err := tx.WithSavepoint(ctx, func(sp *cdb.Tx) error {
+		_, allocationCount, err := cdbm.NewAllocationConstraintDAO(manager.dbSession).GetAll(ctx, sp, cdbm.AllocationConstraintFilterInput{
+			ResourceType: cutil.GetPtr(cdbm.AllocationResourceTypeIPBlock), ResourceTypeIDs: []uuid.UUID{block.ID},
+		}, paginator.PageInput{}, nil)
+		if err != nil {
+			return err
+		}
+		storage := ipam.NewIpamStorage(manager.dbSession.DB, sp.GetBunTx())
+		cidr := ipam.GetCidrForIPBlock(ctx, block.Prefix, block.PrefixLength)
+		namespace := ipam.GetIpamNamespaceForIPBlock(ctx, block.RoutingType, block.InfrastructureProviderID.String(), block.SiteID.String())
+		prefix, err := storage.ReadPrefix(ctx, cidr, namespace)
+		// Missing IPAM is already cleaned up; REST Allocations still retain the root.
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		dao := cdbm.NewIPBlockDAO(manager.dbSession)
+		if allocationCount > 0 || block.FullGrant || prefix.HasAllocations() {
+			inUse = true
+			return nil
+		}
+		err = ipam.DeleteIpamEntryForIPBlock(ctx, storage, block.Prefix, block.PrefixLength,
+			block.RoutingType, block.InfrastructureProviderID.String(), block.SiteID.String())
+		if err != nil {
+			return err
+		}
+		return dao.Delete(ctx, sp, block.ID)
+	})
+	if errors.Is(err, cdb.ErrTransactionSavepoint) {
+		return false, err
+	}
+	if err != nil {
+		// Cleanup rolled back, but commit Deleting so allocations remain blocked.
+		logger.Error().Err(err).Str("IP Block ID", block.ID.String()).Msg("failed to delete Site fabric IP Block; will retry on inventory")
+	}
+	return inUse, nil
 }
 
 // createOrUpdateSitePrefixFromSite creates, adopts, or restores the IP Block for
@@ -254,14 +409,22 @@ func (manager ManageSitePrefix) createOrUpdateSitePrefixFromSite(ctx context.Con
 			return nil, err
 		}
 		if existingBlock.Deleted == nil {
-			return dao.GetByIDForUpdate(ctx, tx, existingBlock.ID)
+			block, err := dao.GetByIDForUpdate(ctx, tx, existingBlock.ID)
+			if err != nil {
+				return nil, err
+			}
+			// Another inventory may have marked this tenant-created IP Block Deleting after the page snapshot.
+			if block.TenantID != nil && block.Status == cdbm.IPBlockStatusDeleting {
+				return nil, nil
+			}
+			return block, nil
 		}
 		// REST soft-deleted this block while Core still reports its SitePrefix ID.
 		if prefix.Status.LifecycleState == corev1.SitePrefixLifecycleState_SITE_PREFIX_LIFECYCLE_STATE_DELETING {
 			logger.Info().Msg("Skipping retired SitePrefix still reported as Deleting")
 			return nil, nil
 		}
-		// As with SpectrumX inventory, a recent tenant deletion may postdate
+		// As with SpectrumX inventory, a tenant-created IP Block's recent deletion may postdate
 		// the snapshot. A later inventory can recover it if Core still reports it.
 		if tenantID != nil && site.IsTimeWithinStaleInventoryThreshold(*existingBlock.Deleted) {
 			logger.Info().Msg("Not restoring tenant SitePrefix deleted more recently than the inventory interval")

@@ -381,11 +381,9 @@ message VpcPrefixInventory {
 }
 
 // SitePrefixInventory reports one message from a periodic SitePrefix inventory
-// run. Every SUCCESS message uses the same timestamp and repeats the complete
-// item_ids set in SitePrefix ID order. In a complete nonempty run, the
-// site_prefixes payloads are ordered, disjoint, and together contain exactly
-// one record matching each item_ids entry. Receipt of the final page and that
-// exact union make the run complete. total_pages on a non-final page is an
+// run. Every SUCCESS message uses the same timestamp. Only the final page
+// carries the complete item_ids set in SitePrefix ID order. The site_prefixes
+// payloads are ordered and disjoint. total_pages on a non-final page is an
 // estimate and may increase if later messages must be smaller.
 //
 // An unpaged FAILED message represents a collection failure detected before
@@ -394,9 +392,9 @@ message VpcPrefixInventory {
 // An empty SUCCESS run is one message with current_page 1, zero total_pages and
 // total_items, page_size set to the effective configured publish page size, and
 // empty lists. Omitted repeated fields and empty lists have the same meaning.
-// Receivers must leave REST IP Block records unchanged for a FAILED message.
-// They may process SitePrefixes present on SUCCESS pages, but must not treat
-// any ID as missing until the run is complete.
+// Receivers leave REST IP Block records unchanged for FAILED messages, process
+// each SUCCESS page on arrival, and reconcile absence from the final page's
+// item_ids without requiring receipt of every earlier page.
 message SitePrefixInventory {
   // SitePrefixes included in this page
   repeated forge.SitePrefix site_prefixes = 1;
@@ -406,7 +404,7 @@ message SitePrefixInventory {
   InventoryStatus inventory_status = 3;
   // Message describing the inventory status
   string status_msg = 4;
-  // Page information, including every SitePrefix ID in a successful run
+  // Page information; only the final page includes every SitePrefix ID
   InventoryPage inventory_page = 5;
 }
 

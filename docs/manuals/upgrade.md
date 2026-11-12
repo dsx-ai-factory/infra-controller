@@ -394,6 +394,27 @@ Moving a site off Vault entirely, including certificate issuance and the Vault i
 
 ## Version-specific upgrade notes
 
+### Upgrades That Introduce Automatic Site IP Block Reconciliation
+
+Upgrade the Site Agent in the same rollout as the REST API. Site IP Blocks then
+follow the Site's `site_fabric_prefixes` through the Site Agent's inventory instead
+of the Site configuration report. Until a Site's Site Agent is upgraded, adding,
+removing, or resizing a fabric prefix on that Site does not change its IP Blocks.
+
+Site configuration inventory runs started before the REST upgrade can fail during
+the rollout. Subsequent scheduled runs resume Site metadata updates.
+
+The Site Agent needs NICo Core `2.1.0` or later. With an older Core, collection fails
+and IP Blocks are left unchanged.
+
+Before upgrading, re-add any removed fabric range whose IP Block you need to keep.
+Renaming a Site IP Block no longer prevents deletion when its range is removed
+from the Site configuration. Compatible manually created IP Blocks with the same
+range and routing type as a current or removed fabric prefix are also managed by
+the Site configuration. A Site-managed IP Block whose range is no longer configured
+moves to `Deleting`, blocking new Allocations and resizing, and is deleted once it
+is no longer in use.
+
 ### Upgrades That Introduce Asynchronous Peering Deletion
 
 Follow these steps the first time you upgrade to the peering deletion behavior

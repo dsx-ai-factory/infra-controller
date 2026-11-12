@@ -2426,7 +2426,7 @@ func TestIPBlockHandler_Delete(t *testing.T) {
 			ipbID:           coreLinkedRoot.ID.String(),
 			expectedErr:     true,
 			expectedStatus:  http.StatusConflict,
-			expectedMessage: "This IP Block is linked to an OperatorManaged SitePrefix; remove the corresponding prefix from Core's site_fabric_prefixes configuration instead",
+			expectedMessage: "This IP Block is managed by the Site configuration. Remove its configured address range instead",
 		},
 		{
 			name:               "success case 1",
@@ -2739,7 +2739,7 @@ func TestIPBlockHandler_Delete(t *testing.T) {
 						t.Fatalf("provider deletion did not resume after the Core link committed: %v", raceCtx.Err())
 					}
 					assert.Equal(t, http.StatusConflict, rec.Code)
-					assert.Contains(t, rec.Body.String(), "linked to an OperatorManaged SitePrefix")
+					assert.Contains(t, rec.Body.String(), "managed by the Site configuration")
 
 					linked, err := cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, fixture.ipBlock.ID, nil)
 					require.NoError(t, err)

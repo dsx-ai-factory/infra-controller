@@ -42,9 +42,11 @@ tags:
       Once the Provider and the Tenant are initialized, the user can create resources by making calls to the appropriate endpoints.
 
       ### Creating Site-Level IP Blocks
-      NICo creates a Site-level IP Block for each `site_fabric_prefixes` entry in the Site configuration TOML file when the Site reports its configuration. It names each one after its prefix, for example `site-fabric-ipv4-10-0-0-0-16` for `10.0.0.0/16`. A prefix inside an RFC 1918 or RFC 4193 private range gets a `DatacenterOnly` IP Block, and any other prefix gets a `Public` one. A prefix that already has a Site IP Block of either routing type doesn't get another one.
+      Site fabric IP Blocks are created automatically from the Site's configured address ranges; Providers do not need to create them manually. A compatible existing IP Block can be reused, including one created manually or renamed. Its name and description are preserved. A range wholly inside an RFC 1918 or RFC 4193 private range gets a `DatacenterOnly` IP Block; other ranges get `Public`.
 
-      When a prefix is removed from the Site configuration or resized, NICo removes the IP Block it created for the old prefix once no Allocations use it. Renaming an IP Block that NICo created keeps NICo from removing it. A new prefix that overlaps a remaining Site IP Block doesn't get an IP Block until the overlap is gone. The Site's other IP Block changes still apply. An empty `site_fabric_prefixes` list doesn't remove any IP Blocks.
+      Removing a configured range moves its IP Block to `Deleting`, which prevents new Allocations and changes to allocation size. The IP Block is removed once it is no longer in use. Renaming it does not prevent this. Restoring the same configured range can restore the original IP Block. An overlapping replacement range becomes available after the old IP Block is removed.
+
+      If an IP Block stays `Deleting` after its Allocations are deleted, you can request deletion through the [Delete IP Block endpoint](#tag/IP-Block/operation/delete-ipblock). An IP Block still managed by the Site configuration returns 409. A Site-managed IP Block in `Deleting` is removed automatically once it is no longer in use. Removal can be delayed while the Site is unavailable.
 
       To create any other IP Block, the user must make a call to the [Create IP Block endpoint](#tag/IP-Block/operation/create-ipblock). It rejects a range that overlaps an existing Site IP Block.
 
@@ -2100,16 +2102,16 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: The Allocation conflicts with an existing name, available capacity or address space, or the lifecycle state of an `OperatorManaged` SitePrefix.
+          description: The Allocation conflicts with an existing name, available capacity or address space, or the lifecycle state of the source site-level IP Block.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
               examples:
-                operator-managed-site-prefix-not-ready:
+                site-ip-block-not-ready:
                   value:
                     source: nico
-                    message: 'Could not create child IPAM entry for Allocation Constraint. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 linked to an OperatorManaged SitePrefix is not Ready'
+                    message: 'Could not create child IPAM entry for Allocation Constraint. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 is not Ready'
                     data: null
       description: |-
         Create an Allocation for the org.
@@ -2117,7 +2119,7 @@ paths:
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
         To successfully create a compute Allocation, there must be enough unallocated Machines associated with the Instance Type to satisfy the constraint value.
-        For network Allocation, the source site-level IP Block must have an available prefix with length equal to the constraint value. When that IP Block is linked to an `OperatorManaged` SitePrefix, it must also be `Ready`. A conflict involving capacity, address space, or lifecycle state returns 409.
+        For network Allocation, the source site-level IP Block must have an available prefix with length equal to the constraint value. The source IP Block must also be `Ready`. A conflict involving capacity, address space, or lifecycle state returns 409.
       requestBody:
         content:
           application/json:
@@ -2366,10 +2368,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
               examples:
-                operator-managed-site-prefix-not-ready:
+                site-ip-block-not-ready:
                   value:
                     source: nico
-                    message: "Failed to update Allocation Constraint's parent IP Block. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 linked to an OperatorManaged SitePrefix is not Ready"
+                    message: "Failed to update Allocation Constraint's parent IP Block. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 is not Ready"
                     data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
@@ -2382,7 +2384,7 @@ paths:
 
         For an InstanceType resource, `constraintValue` can be incremented at any time, but not decremented if doing so requires decommissioning Tenant resources.
 
-        For an `IPBlock` resource, `constraintValue` cannot be changed while Subnets or VPC Prefixes reference the allocated Tenant IP Block. If the source IP Block is linked to an `OperatorManaged` SitePrefix, its status must also be `Ready` before `constraintValue` can change. A change blocked by either condition returns 400.
+        For an `IPBlock` resource, `constraintValue` cannot be changed while Subnets or VPC Prefixes reference the allocated Tenant IP Block. The source site-level IP Block must also be `Ready` before `constraintValue` can change. A change blocked by either condition returns 400.
 
         Submitting the existing `constraintValue` leaves the constraint unchanged and does not require the source IP Block to be `Ready`.
       requestBody:
@@ -2581,7 +2583,7 @@ paths:
 
         Tenant IP Blocks are created via Allocation.
 
-        A conflicting name or address range returns 409. A range conflicts when it overlaps any root IP Block of the Site, whatever its routing type. Creation also returns 409 when another Site fabric IP Block update holds the shared Site lock, including another create or Site Config import. Retry the request.
+        A conflicting name or address range returns 409. A range conflicts when it overlaps any root IP Block of the Site, whatever its routing type. Concurrent changes to Site fabric IP Blocks can also return 409. Retry the request.
       requestBody:
         content:
           application/json:
@@ -2713,25 +2715,25 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: The IP Block is linked to an `OperatorManaged` SitePrefix. Remove the corresponding prefix from Core's `site_fabric_prefixes` configuration instead.
+          description: The IP Block is managed by the Site configuration. Remove its configured address range instead.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
               examples:
-                core-linked-site-prefix:
+                site-managed-ip-block:
                   value:
                     source: nico
-                    message: This IP Block is linked to an OperatorManaged SitePrefix; remove the corresponding prefix from Core's site_fabric_prefixes configuration instead
+                    message: This IP Block is managed by the Site configuration. Remove its configured address range instead
                     data: null
       description: |-
         Delete an IP block
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix. Only root IP Blocks can be deleted if there are no allocations associated with them.
 
-        If the IP Block's prefix is still in the Site's `site_fabric_prefixes`, NICo creates a new IP Block for it the next time the Site reports its configuration.
+        For an automatically managed Site fabric IP Block, remove its address range from the Site configuration. The IP Block is removed once it is no longer in use. If an IP Block stays `Deleting` after its Allocations are deleted, you can request deletion through this endpoint. Blocks still managed by the Site configuration return 409. A Site-managed IP Block in `Deleting` is removed automatically once it is no longer in use. Removal can be delayed while the Site is unavailable.
 
-        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404. A Site fabric root linked to an `OperatorManaged` SitePrefix cannot be deleted through this endpoint and returns 409.
+        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404. A Site fabric IP Block managed by the Site configuration cannot be deleted through this endpoint and returns 409.
       tags:
         - IP Block
     patch:
@@ -2776,7 +2778,7 @@ paths:
 
         Org must have an Infrastructure Provider. Specified IP Block must belong to the Provider and requesting user must have `PROVIDER_ADMIN` role. Only root IP Blocks can be patched.
 
-        Renaming an IP Block that NICo created from a Site fabric prefix keeps NICo from removing it.
+        The name and description of a Site fabric IP Block are preserved across Site updates. Renaming it does not prevent automatic deletion when its configured address range is removed.
 
         Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404.
       requestBody:

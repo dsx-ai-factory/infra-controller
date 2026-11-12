@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/managerapi"
+	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/conftypes"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes"
@@ -260,5 +261,48 @@ type siteRegistrationFailure struct {
 }
 
 func (s siteRegistrationFailure) RegisterPublisher() error {
+	return s.err
+}
+
+func checkSitePrefixRegistrationFailure(t *testing.T) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	host, port, err := net.SplitHostPort(listener.Addr().String())
+	require.NoError(t, err)
+	server := grpc.NewServer()
+	workflowservice.RegisterWorkflowServiceServer(server, &temporalConnectionServer{})
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+	t.Cleanup(func() { server.Stop(); require.NoError(t, <-done) })
+	conf := &conftypes.Config{Temporal: conftypes.TemporalConfig{
+		Host: host, Port: port, TemporalPublishNamespace: "publish", TemporalSubscribeNamespace: "subscribe", TemporalSubscribeQueue: "test",
+	}}
+	data := newHealthTestManager(t, conf)
+	t.Cleanup(func() {
+		if data.Managers.Workflow.Temporal.Publisher != nil {
+			data.Managers.Workflow.Temporal.Publisher.Close()
+		}
+		if data.Managers.Workflow.Temporal.Subscriber != nil {
+			data.Managers.Workflow.Temporal.Subscriber.Close()
+		}
+	})
+	registrationErr := errors.New("SitePrefix cron creation failed")
+	registration := &sitePrefixRegistrationFailure{err: registrationErr}
+	ManagerAccess.API = &managerapi.ManagerAPI{Site: siteRegistrationFailure{}, SitePrefix: registration}
+	require.NotPanics(t, Orchestrator, "required registration failure must stop startup before later publishers")
+	require.True(t, registration.called)
+	require.ErrorIs(t, (&API{}).CheckLiveness(), registrationErr)
+	require.Equal(t, computils.CompUnhealthy, computils.CompStatus(data.Managers.Workflow.State.HealthStatus.Load()))
+}
+
+type sitePrefixRegistrationFailure struct {
+	managerapi.SitePrefixInterface
+	err    error
+	called bool
+}
+
+func (s *sitePrefixRegistrationFailure) RegisterPublisher() error {
+	s.called = true
 	return s.err
 }
