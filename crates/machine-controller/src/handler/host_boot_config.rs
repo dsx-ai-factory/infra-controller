@@ -535,6 +535,7 @@ mod tests {
             db_pool: db_pool.clone(),
             db_reader: db_pool.into(),
             redfish_client_pool: redfish_sim.clone(),
+            bmc_connector: bmc_backend::BmcConnector::Libredfish(redfish_sim.clone()),
             bmc_credential_ops: redfish_sim,
             ipmi_tool: carbide_ipmi::test_support(),
             site_config: Arc::new(site_config),

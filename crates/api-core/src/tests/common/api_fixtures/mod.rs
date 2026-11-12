@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
+use bmc_backend::BmcConnector;
 use carbide_extension_service_controller::context::{
     ExtensionServiceStateHandlerServices, ServiceVpcRegistrationConfig,
 };
@@ -367,6 +368,7 @@ impl TestEnv {
             db_pool: self.pool.clone(),
             db_reader: self.pool.clone().into(),
             redfish_client_pool: self.redfish_sim.clone(),
+            bmc_connector: BmcConnector::Libredfish(self.redfish_sim.clone()),
             bmc_credential_ops: self.redfish_sim.clone(),
             ipmi_tool: self.ipmi_tool.clone(),
             site_config: self.config.machine_state_handler_site_config().into(),
@@ -1390,6 +1392,7 @@ async fn create_test_env_with_overrides_inner(
     let nmxc_grpc_simulator = overrides.nmxc_simulator == Some(true);
     let nmxc_sim_client = Arc::new(if nmxc_grpc_simulator {
         NmxcSimClient::simulator_for_nvlink_config(&nvlink_for_nmxc_sim)
+            .expect("test fixture requires valid NMX-C TLS configuration")
     } else if let Some(n) = overrides.nmxc_fail_after_n_creates {
         NmxcSimClient::with_fail_after_n_creates(n)
     } else if overrides.nmxc_default_partition == Some(true) {
@@ -1506,6 +1509,7 @@ async fn create_test_env_with_overrides_inner(
         rms_sim.as_rms_client(),
         None,
         Some(db_pool.clone()),
+        None,
         None,
     )
     .await
@@ -1690,6 +1694,7 @@ async fn create_test_env_with_overrides_inner(
                 db_pool: db_pool.clone(),
                 db_reader: db_pool.clone().into(),
                 redfish_client_pool: redfish_sim.clone(),
+                bmc_connector: BmcConnector::Libredfish(redfish_sim.clone()),
                 bmc_credential_ops: redfish_sim.clone(),
                 ipmi_tool: ipmi_tool.clone(),
                 site_config: config.machine_state_handler_site_config().into(),
@@ -1735,6 +1740,7 @@ async fn create_test_env_with_overrides_inner(
             SpdmStateHandlerServices {
                 db_pool: db_pool.clone(),
                 redfish_client_pool: redfish_sim.clone(),
+                bmc_connector: BmcConnector::Libredfish(redfish_sim.clone()),
             }
             .into(),
         )

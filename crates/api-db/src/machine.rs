@@ -164,16 +164,14 @@ impl<T> Iterator for MachineRowLockOrderIter<T> {
 
 impl<T> ExactSizeIterator for MachineRowLockOrderIter<T> {}
 
-/// Load a Machine object matching an interface, creating it if not already present.
-/// Returns a tuple of (Machine, bool did_we_just_create_it)
-///
-/// Arguments:
-///
-/// * `txn` - A reference to a currently open database transaction
-/// * `interface` - Network interface of the machine
+/// `get_or_create` returns the machine matching an interface, creating it if absent.
+/// `common_pools` selects creation allocations; `None` skips allocation.
+/// For a new DPU with pools, `requested_loopback_v6` claims that exact address;
+/// omitting it permits optional IPv6 auto-assignment. Existing rows retain their
+/// allocations. The caller holds any IPv6 reservation lock through creation.
 pub async fn get_or_create(
     txn: &mut PgConnection,
-    common_pools: Option<&CommonPools>,
+    common_pools: Option<MachineCreationPools<'_>>,
     stable_machine_id: &MachineId,
     interface: &MachineInterfaceSnapshot,
     requested_loopback_v6: Option<Ipv6Addr>,
@@ -2528,6 +2526,10 @@ pub async fn clear_failure_details(
 ///
 /// If metadata.name is empty then it is initialized in
 /// stable_machine_id.to_string().
+///
+/// `common_pools` supplies Integrated DPU ASN and optional IPv6 allocation.
+/// Callers preparing ASNs separately use [`create_with_requested_loopback`] with
+/// [`MachineCreationPools::Ipv6Only`] to preserve IPv6 allocation during creation.
 pub async fn create(
     txn: &mut PgConnection,
     common_pools: Option<&CommonPools>,
@@ -2538,7 +2540,7 @@ pub async fn create(
 ) -> DatabaseResult<AnyMachine> {
     create_with_requested_loopback(
         txn,
-        common_pools,
+        common_pools.map(MachineCreationPools::All),
         stable_machine_id,
         state,
         expected_machine_data,
@@ -2548,11 +2550,20 @@ pub async fn create(
     .await
 }
 
+/// `MachineCreationPools` selects the Integrated allocations made with a new row.
+/// Passing `None` to creation skips all allocation. IPv4 loopbacks attach separately.
+pub enum MachineCreationPools<'a> {
+    /// Preserve normal creation: best-effort ASN and optional IPv6 loopback.
+    All(&'a CommonPools),
+    /// Allocate IPv6 normally while a prepared ASN attaches after interface writes.
+    Ipv6Only(&'a CommonPools),
+}
+
 /// Create a machine with explicit IPv6 loopback intent. The caller's transaction
 /// holds the reservation lock and claims IPv4 before committing creation.
 pub async fn create_with_requested_loopback(
     txn: &mut PgConnection,
-    common_pools: Option<&CommonPools>,
+    common_pools: Option<MachineCreationPools<'_>>,
     stable_machine_id: &MachineId,
     state: ManagedHostState,
     expected_machine_data: Option<&ExpectedMachineData>,
@@ -2560,6 +2571,11 @@ pub async fn create_with_requested_loopback(
     requested_loopback_v6: Option<Ipv6Addr>,
 ) -> DatabaseResult<AnyMachine> {
     let stable_machine_id_string = stable_machine_id.to_string();
+    let (common_pools, asn_pool) = match common_pools {
+        Some(MachineCreationPools::All(pools)) => (Some(pools), Some(&pools.ethernet.pool_fnn_asn)),
+        Some(MachineCreationPools::Ipv6Only(pools)) => (Some(pools), None),
+        None => (None, None),
+    };
 
     let default_metadata = &Metadata::default();
     let metadata = expected_machine_data
@@ -2614,9 +2630,9 @@ pub async fn create_with_requested_loopback(
         ..Default::default()
     };
     let asn: Option<i64> = if stable_machine_id.machine_type() == MachineType::Dpu {
-        if let Some(common_pools) = common_pools {
+        if let Some(asn_pool) = asn_pool {
             match crate::resource_pool::allocate(
-                &common_pools.ethernet.pool_fnn_asn,
+                asn_pool,
                 txn,
                 resource_pool::OwnerType::Machine,
                 &stable_machine_id_string,
@@ -2627,7 +2643,7 @@ pub async fn create_with_requested_loopback(
                 Ok(asn) => Some(asn as i64),
                 Err(e) => {
                     crate::resource_pool::emit_best_effort_dpu_asn_allocation_failure(
-                        common_pools.ethernet.pool_fnn_asn.value_type,
+                        asn_pool.value_type,
                         &stable_machine_id_string,
                         &e,
                     );
@@ -4258,6 +4274,67 @@ pub async fn get_lockdown_ikm_credential_rotation_requested(
             },
             e => DatabaseError::new("get_lockdown_ikm_credential_rotation_requested", e),
         })
+}
+
+/// `get_asn` reads a machine's optional ASN, returning an error for a missing row.
+pub async fn get_asn(
+    database: impl DbReader<'_>,
+    machine_id: &MachineId,
+) -> DatabaseResult<Option<u32>> {
+    let query = "SELECT asn FROM machines WHERE id = $1";
+    let asn: Option<i64> = sqlx::query_scalar(query)
+        .bind(machine_id)
+        .fetch_one(database)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    asn.map(|asn| u32::try_from(asn).map_err(|error| DatabaseError::internal(error.to_string())))
+        .transpose()
+}
+
+/// The ASN target is missing, replaced, already assigned or marked `ForceDeletion`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineAsnNotCurrent;
+
+/// `try_update_asn_for_created` fills only an absent ASN on the captured live row.
+/// Missing, replaced, `ForceDeletion` and already assigned rows return `NotApplied`.
+/// Roll back the associated allocation when this conditional write loses.
+pub async fn try_update_asn_for_created(
+    txn: &mut PgConnection,
+    machine_id: &MachineId,
+    created: DateTime<Utc>,
+    asn: u32,
+) -> DatabaseResult<ConditionalWrite<(), MachineAsnNotCurrent>> {
+    let query = "UPDATE machines SET asn = $1 WHERE id = $2 AND created = $3
+        AND asn IS NULL AND controller_state != $4::jsonb";
+    let updated = sqlx::query(query)
+        .bind(i64::from(asn))
+        .bind(machine_id)
+        .bind(created)
+        .bind(sqlx::types::Json(&ManagedHostState::ForceDeletion))
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .rows_affected();
+    Ok(if updated == 0 {
+        ConditionalWrite::NotApplied(MachineAsnNotCurrent)
+    } else {
+        ConditionalWrite::Applied(())
+    })
+}
+
+/// `find_dpu_ids_without_asn` lists the DPU rows eligible for ASN backfill.
+/// A later assignment must recheck the row's lifetime, ASN and deletion state.
+pub async fn find_dpu_ids_without_asn(
+    database: impl DbReader<'_>,
+) -> DatabaseResult<Vec<MachineId>> {
+    let query = "SELECT id FROM machines WHERE starts_with(id, $1) AND asn IS NULL
+        AND controller_state != $2::jsonb ORDER BY id";
+    sqlx::query_as(query)
+        .bind(MachineType::Dpu.id_prefix())
+        .bind(sqlx::types::Json(&ManagedHostState::ForceDeletion))
+        .fetch_all(database)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
 }
 
 /// `update_dpu_asns` backfills missing DPU ASNs. If an assignment no longer

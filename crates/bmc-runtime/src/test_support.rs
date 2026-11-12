@@ -16,10 +16,15 @@
  */
 
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use async_trait::async_trait;
 use bmc_drivers::{CapabilitySelection, DriverMap, ResolvedSelection, Rules};
 use bmc_platform::{PlatformIdentity, Quirk};
-use carbide_secrets::credentials::{BmcCredentialType, CredentialKey};
+use carbide_secrets::SecretsError;
+use carbide_secrets::credentials::{
+    BmcCredentialType, CredentialKey, CredentialReader, Credentials,
+};
 use mac_address::MacAddress;
 
 use crate::BmcRef;
@@ -54,4 +59,39 @@ pub(crate) fn endpoint(quirks: BTreeSet<Quirk>) -> BmcRef {
         selection(DriverMap::filled(CapabilitySelection::Standard), quirks),
     )
     .expect("root credential key is valid")
+}
+
+/// A credential store that answers every key with the same result and counts
+/// how often it was read; `Err(())` answers as an unavailable store.
+pub(crate) struct RecordingStore {
+    stored: Result<Option<Credentials>, ()>,
+    reads: AtomicUsize,
+}
+
+impl RecordingStore {
+    pub(crate) fn new(stored: Result<Option<Credentials>, ()>) -> Self {
+        Self {
+            stored,
+            reads: AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl CredentialReader for RecordingStore {
+    async fn get_credentials(
+        &self,
+        _key: &CredentialKey,
+    ) -> Result<Option<Credentials>, SecretsError> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.stored
+            .clone()
+            .map_err(|()| SecretsError::UfmCredentialReadBlocked {
+                fabric: "store unavailable".to_string(),
+            })
+    }
 }

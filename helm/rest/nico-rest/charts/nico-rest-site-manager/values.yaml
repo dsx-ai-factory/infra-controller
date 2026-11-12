@@ -80,3 +80,14 @@ rbac:
 # the binary exports traces when OTEL_EXPORTER_OTLP_ENDPOINT (or the traces
 # specific endpoint) is set and otherwise only forwards trace context.
 extraEnv: {}
+
+# A separate, client-only identity; the serving certificate is not used for admission.
+clientCertificate:
+  # -- Override only the client issuer; empty uses global.certificate.issuerRef.
+  issuerRef: {}
+  enabled: true
+  secretName: site-manager-client-tls
+  duration: 2160h
+  renewBefore: 360h
+  # -- Empty derives spiffe://<global.spiffe.trustDomain>/<namespace>/sa/<service-account>.
+  spiffeID: ""

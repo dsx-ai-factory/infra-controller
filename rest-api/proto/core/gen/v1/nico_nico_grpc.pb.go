@@ -627,12 +627,16 @@ type ForgeClient interface {
 	// allocation. Success means Core committed, not that the dataplane converged.
 	ChangeVpcRoutingProfile(ctx context.Context, in *VpcChangeRoutingProfileRequest, opts ...grpc.CallOption) (*VpcRoutingState, error)
 	// Operator cleanup after independently verifying that no DPU or fabric route
-	// still uses the retained VNI. Core does not verify dataplane convergence.
+	// still uses the retained VNI. Integrated release completes in the VPC
+	// transaction. Remote success follows provider release confirmation; an error
+	// can follow committed release intent and an advanced VPC version.
+	// Core does not verify dataplane convergence.
 	ReleaseVpcInactiveVni(ctx context.Context, in *VpcReleaseInactiveVniRequest, opts ...grpc.CallOption) (*VpcReleaseInactiveVniResult, error)
 	UpdateVpcVirtualization(ctx context.Context, in *VpcUpdateVirtualizationRequest, opts ...grpc.CallOption) (*VpcUpdateVirtualizationResult, error)
 	// Deletion does not release a retained VNI implicitly. Call
 	// ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
-	// Retained or inconsistent owned allocations cause FailedPrecondition.
+	// Retained or inconsistent owned allocations cause FailedPrecondition, as do
+	// unfinished remote cancellation or release.
 	DeleteVpc(ctx context.Context, in *VpcDeletionRequest, opts ...grpc.CallOption) (*VpcDeletionResult, error)
 	FindVpcIds(ctx context.Context, in *VpcSearchFilter, opts ...grpc.CallOption) (*VpcIdList, error)
 	FindVpcsByIds(ctx context.Context, in *VpcsByIdsRequest, opts ...grpc.CallOption) (*VpcList, error)
@@ -7496,12 +7500,16 @@ type ForgeServer interface {
 	// allocation. Success means Core committed, not that the dataplane converged.
 	ChangeVpcRoutingProfile(context.Context, *VpcChangeRoutingProfileRequest) (*VpcRoutingState, error)
 	// Operator cleanup after independently verifying that no DPU or fabric route
-	// still uses the retained VNI. Core does not verify dataplane convergence.
+	// still uses the retained VNI. Integrated release completes in the VPC
+	// transaction. Remote success follows provider release confirmation; an error
+	// can follow committed release intent and an advanced VPC version.
+	// Core does not verify dataplane convergence.
 	ReleaseVpcInactiveVni(context.Context, *VpcReleaseInactiveVniRequest) (*VpcReleaseInactiveVniResult, error)
 	UpdateVpcVirtualization(context.Context, *VpcUpdateVirtualizationRequest) (*VpcUpdateVirtualizationResult, error)
 	// Deletion does not release a retained VNI implicitly. Call
 	// ReleaseVpcInactiveVni after verifying convergence before deleting the VPC.
-	// Retained or inconsistent owned allocations cause FailedPrecondition.
+	// Retained or inconsistent owned allocations cause FailedPrecondition, as do
+	// unfinished remote cancellation or release.
 	DeleteVpc(context.Context, *VpcDeletionRequest) (*VpcDeletionResult, error)
 	FindVpcIds(context.Context, *VpcSearchFilter) (*VpcIdList, error)
 	FindVpcsByIds(context.Context, *VpcsByIdsRequest) (*VpcList, error)

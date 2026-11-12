@@ -790,6 +790,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "bmc-backend"
+version = "0.1.0"
+dependencies = [
+ "bmc-drivers",
+ "bmc-platform",
+ "bmc-runtime",
+ "carbide-api-model",
+ "carbide-redfish",
+ "carbide-test-support",
+ "carbide-utils",
+ "http",
+ "libredfish",
+ "nv-redfish",
+]
+
+[[package]]
 name = "bmc-driver-validator"
 version = "0.1.0"
 dependencies = [
@@ -951,6 +967,7 @@ dependencies = [
 name = "bmc-runtime"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "axum",
  "bmc-drivers",
@@ -1253,6 +1270,7 @@ dependencies = [
  "async-trait",
  "axum",
  "base64",
+ "bmc-backend",
  "bmc-drivers",
  "bmc-explorer",
  "bmc-runtime",
@@ -1400,6 +1418,7 @@ name = "carbide-api-core-integration-tests"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
  "carbide-api-core",
  "carbide-api-db",
  "carbide-api-model",
@@ -2772,6 +2791,8 @@ name = "carbide-machine-controller"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
+ "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
  "carbide-api-model",
@@ -3065,6 +3086,7 @@ name = "carbide-power-shelf-controller"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-credential-rotation",
@@ -3098,6 +3120,8 @@ name = "carbide-preingestion-manager"
 version = "0.0.1"
 dependencies = [
  "async-trait",
+ "bmc-backend",
+ "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
  "carbide-api-model",
@@ -3176,6 +3200,7 @@ dependencies = [
  "carbide-version",
  "clap",
  "http-body",
+ "httpdate",
  "hyper",
  "hyper-util",
  "logfmt",
@@ -3626,6 +3651,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "axum",
+ "bmc-backend",
  "bmc-explorer",
  "bmc-mock",
  "bmc-runtime",
@@ -3733,6 +3759,7 @@ name = "carbide-spdm-controller"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-instrument",
@@ -3877,6 +3904,7 @@ name = "carbide-switch-controller"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
  "carbide-api-db",
  "carbide-api-model",
  "carbide-credential-rotation",
@@ -4427,6 +4455,8 @@ name = "component-manager"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bmc-backend",
+ "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
  "carbide-api-model",
@@ -4438,6 +4468,7 @@ dependencies = [
  "carbide-secrets",
  "carbide-sqlx-testing",
  "carbide-test-support",
+ "carbide-utils",
  "carbide-uuid",
  "chrono",
  "futures-util",

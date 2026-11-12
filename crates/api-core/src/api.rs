@@ -30,6 +30,7 @@ use ::rpc::protos::dns::{
     UpdateDomainRequest,
 };
 use ::rpc::protos::{measured_boot as measured_boot_pb, mlx_device as mlx_device_pb};
+use bmc_runtime::DriverConnector;
 use carbide_ib_fabric::ib::IBFabricManager;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_machine_controller::io::MachineStateControllerIO;
@@ -105,6 +106,9 @@ pub struct Api {
     /// handing these to a wrapper pool is a compile error (a wrong-pool
     /// guard, not a wire-path guarantee -- see [`BmcCredentialOps`]).
     pub(crate) bmc_credential_ops: Arc<dyn BmcCredentialOps>,
+    /// Connects moved BMC operations through their drivers when the site
+    /// sets `bmc_backend = "drivers"`; `None` runs them through libredfish.
+    pub(crate) driver_connector: Option<Arc<DriverConnector>>,
     /// HTTP client for the raw Redfish passthrough when `[bmc_proxy]` is
     /// enabled; `None` keeps the passthrough dialing BMCs directly.
     pub(crate) bmc_proxy_passthrough: Option<Arc<crate::bmc_proxy::PassthroughClient>>,
