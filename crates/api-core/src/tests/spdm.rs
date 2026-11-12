@@ -443,6 +443,9 @@ pub(in crate::tests) mod tests {
             }
             txn.commit().await?;
 
+            let metrics = carbide_instrument::testing::MetricsCapture::for_registry(
+                env.test_meter.registry(),
+            );
             let response = env
                 .api
                 .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
@@ -453,6 +456,27 @@ pub(in crate::tests) mod tests {
                 .into_inner();
 
             assert_eq!(case.expect_outcome, response.outcome(), "{}", case.scenario);
+            if case.expect_outcome == SpdmSchedulingOutcome::Scheduled {
+                assert_eq!(
+                    metrics.counter_delta(
+                        "carbide_attestation_scheduling_total",
+                        &[
+                            ("outcome", "scheduled"),
+                            (
+                                "profile_source",
+                                if case.expect_fallback {
+                                    "any_fallback"
+                                } else {
+                                    "class"
+                                }
+                            ),
+                        ],
+                    ),
+                    1.0,
+                    "{}",
+                    case.scenario,
+                );
+            }
             assert_eq!(
                 case.expect_devices, response.devices_under_attestation,
                 "{}",

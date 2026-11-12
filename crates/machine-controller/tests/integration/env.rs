@@ -167,6 +167,7 @@ impl EnvBuilder {
             std::time::Duration::from_secs(60),
         );
         let services = MachineStateHandlerServices {
+            instrumentation: api.instrumentation().clone(),
             db_pool: pool.clone(),
             db_reader: pool.clone().into(),
             redfish_client_pool: controller_redfish_sim.clone(),

@@ -3961,6 +3961,7 @@ dependencies = [
  "carbide-api-core",
  "carbide-api-db",
  "carbide-api-model",
+ "carbide-instrument",
  "carbide-macros",
  "carbide-network",
  "carbide-network-segment-controller",

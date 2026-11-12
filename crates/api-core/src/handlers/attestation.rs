@@ -112,6 +112,7 @@ pub(crate) async fn trigger_machine_attestation(
 
     let result = trigger_attestation(
         api.pg_pool(),
+        &api.instrumentation,
         connect,
         bmc_info,
         &machine_id,
