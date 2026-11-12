@@ -472,6 +472,10 @@ async fn vpc_creation_rolls_back_allocation_on_entity_write_failure(
             .fetch_all(&mut *observer)
             .await?;
         assert_eq!(after, before, "{name}");
+        let unfinished: i64 = sqlx::query_scalar("SELECT count(*) FROM vpc_creation_requests")
+            .fetch_one(&mut *observer)
+            .await?;
+        assert_eq!(unfinished, 0, "{name}");
     }
     Ok(())
 }
@@ -878,6 +882,29 @@ async fn find_vpcs_by_ids_omits_retained_incompatible_effective_profile(
             .as_ref()
             .and_then(|status| status.effective_routing_profile.as_ref())
             .is_some()
+    );
+
+    // Cancellation must return a committed VPC even if its derived routing
+    // profile became incompatible. REST can then follow ordinary deletion.
+    let cancelled = api
+        .cancel_vpc_creation(tonic::Request::new(rpc::forge::CancelVpcCreationRequest {
+            id: Some(incompatible_id),
+            tenant_organization_id: incompatible
+                .config
+                .as_ref()
+                .unwrap()
+                .tenant_organization_id
+                .clone(),
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(
+        cancelled.result,
+        Some(
+            rpc::forge::cancel_vpc_creation_response::Result::CreatedVpc(
+                found_by_id[&incompatible_id].clone()
+            )
+        )
     );
 
     // Emit one actionable warning identifying the incompatible retained VPC.

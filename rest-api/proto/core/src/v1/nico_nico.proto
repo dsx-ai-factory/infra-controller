@@ -65,6 +65,9 @@ service Forge {
 
   // VPC
   rpc CreateVpc(VpcCreationRequest) returns (Vpc);
+  // Returns the committed VPC, or prevents this ID from being created and waits
+  // for unfinished allocation cleanup. Safe to repeat after a lost reply.
+  rpc CancelVpcCreation(CancelVpcCreationRequest) returns (CancelVpcCreationResponse);
   rpc UpdateVpc(VpcUpdateRequest) returns (VpcUpdateResult);
   // Changes an FNN VPC's named profile and active VNI while retaining the old
   // allocation. Success means Core committed, not that the dataplane converged.
@@ -2551,6 +2554,8 @@ message VpcCreationRequest {
   // An existing ID found during admission fails ALREADY_EXISTS before
   // allocation preparation. Concurrent insertion remains subject to uniqueness
   // enforcement when the VPC is persisted.
+  // CancelVpcCreation also reserves cancelled IDs. Reusing one returns
+  // FAILED_PRECONDITION before allocation preparation; choose a new ID.
   optional common.VpcId id = 6;
   Metadata metadata = 12;
 
@@ -14285,4 +14290,22 @@ message ComponentFirmwareLocalStage {
   ComponentFirmwareLocalStageState state = 1;
   // Exact preceding system-image handle, not a whole-update identity.
   string system_image_job_id = 2;
+}
+
+// Resolves a saved creation without starting or deleting a committed VPC.
+// Both fields are required. A tenant mismatch returns FAILED_PRECONDITION.
+message CancelVpcCreationRequest {
+  common.VpcId id = 1;
+  string tenant_organization_id = 2;
+}
+
+message CancelVpcCreationResponse {
+  // Exactly one result is required. A missing result, timeout or error is
+  // inconclusive; retry cancellation with the same ID and tenant.
+  oneof result {
+    // Creation committed first; this operation did not delete the VPC.
+    Vpc created_vpc = 1;
+    // This ID cannot be created later and unfinished allocation cleanup is complete.
+    google.protobuf.Empty cancelled = 2;
+  }
 }

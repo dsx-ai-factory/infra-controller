@@ -1307,6 +1307,8 @@ func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
 			code = http.StatusNotImplemented
 		case codes.Unavailable:
 			code = http.StatusServiceUnavailable
+		case codes.DeadlineExceeded:
+			code = http.StatusGatewayTimeout
 		case codes.PermissionDenied:
 			code = http.StatusForbidden
 		case codes.AlreadyExists, codes.Aborted:
@@ -1338,6 +1340,8 @@ func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
 		code = http.StatusForbidden
 	case swe.ErrTypeNICoUnavailable, swe.ErrTypeCarbideUnavailable:
 		code = http.StatusServiceUnavailable
+	case swe.ErrTypeNICoDeadlineExceeded:
+		code = http.StatusGatewayTimeout
 	case swe.ErrTypeNICoAlreadyExists, swe.ErrTypeCarbideAlreadyExists, swe.ErrTypeNICoAborted:
 		code = http.StatusConflict
 	case swe.ErrTypeNICoFailedPrecondition, swe.ErrTypeCarbideFailedPrecondition:

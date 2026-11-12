@@ -415,6 +415,12 @@ func TestUnwrapWorkflowError(t *testing.T) {
 		wantApplicationErrorType string
 	}{
 		{
+			name:                     "preserves Core deadline after Temporal serialization",
+			err:                      failureConverter.FailureToError(failureConverter.ErrorToFailure(swe.WrapErr(status.Error(codes.DeadlineExceeded, "cancellation is unresolved")))),
+			wantCode:                 http.StatusGatewayTimeout,
+			wantApplicationErrorType: swe.ErrTypeNICoDeadlineExceeded,
+		},
+		{
 			name:     "maps direct rack conflict",
 			err:      grpcAborted,
 			wantCode: http.StatusConflict,

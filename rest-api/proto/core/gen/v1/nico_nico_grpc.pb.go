@@ -36,6 +36,7 @@ const (
 	Forge_DeleteDomainLegacy_FullMethodName                                 = "/forge.Forge/DeleteDomainLegacy"
 	Forge_FindDomainLegacy_FullMethodName                                   = "/forge.Forge/FindDomainLegacy"
 	Forge_CreateVpc_FullMethodName                                          = "/forge.Forge/CreateVpc"
+	Forge_CancelVpcCreation_FullMethodName                                  = "/forge.Forge/CancelVpcCreation"
 	Forge_UpdateVpc_FullMethodName                                          = "/forge.Forge/UpdateVpc"
 	Forge_ChangeVpcRoutingProfile_FullMethodName                            = "/forge.Forge/ChangeVpcRoutingProfile"
 	Forge_ReleaseVpcInactiveVni_FullMethodName                              = "/forge.Forge/ReleaseVpcInactiveVni"
@@ -627,6 +628,9 @@ type ForgeClient interface {
 	FindDomainLegacy(ctx context.Context, in *DomainSearchQueryLegacy, opts ...grpc.CallOption) (*DomainListLegacy, error)
 	// VPC
 	CreateVpc(ctx context.Context, in *VpcCreationRequest, opts ...grpc.CallOption) (*Vpc, error)
+	// Returns the committed VPC, or prevents this ID from being created and waits
+	// for unfinished allocation cleanup. Safe to repeat after a lost reply.
+	CancelVpcCreation(ctx context.Context, in *CancelVpcCreationRequest, opts ...grpc.CallOption) (*CancelVpcCreationResponse, error)
 	UpdateVpc(ctx context.Context, in *VpcUpdateRequest, opts ...grpc.CallOption) (*VpcUpdateResult, error)
 	// Changes an FNN VPC's named profile and active VNI while retaining the old
 	// allocation. Success means Core committed, not that the dataplane converged.
@@ -1985,6 +1989,16 @@ func (c *forgeClient) CreateVpc(ctx context.Context, in *VpcCreationRequest, opt
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(Vpc)
 	err := c.cc.Invoke(ctx, Forge_CreateVpc_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) CancelVpcCreation(ctx context.Context, in *CancelVpcCreationRequest, opts ...grpc.CallOption) (*CancelVpcCreationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CancelVpcCreationResponse)
+	err := c.cc.Invoke(ctx, Forge_CancelVpcCreation_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -7590,6 +7604,9 @@ type ForgeServer interface {
 	FindDomainLegacy(context.Context, *DomainSearchQueryLegacy) (*DomainListLegacy, error)
 	// VPC
 	CreateVpc(context.Context, *VpcCreationRequest) (*Vpc, error)
+	// Returns the committed VPC, or prevents this ID from being created and waits
+	// for unfinished allocation cleanup. Safe to repeat after a lost reply.
+	CancelVpcCreation(context.Context, *CancelVpcCreationRequest) (*CancelVpcCreationResponse, error)
 	UpdateVpc(context.Context, *VpcUpdateRequest) (*VpcUpdateResult, error)
 	// Changes an FNN VPC's named profile and active VNI while retaining the old
 	// allocation. Success means Core committed, not that the dataplane converged.
@@ -8848,6 +8865,9 @@ func (UnimplementedForgeServer) FindDomainLegacy(context.Context, *DomainSearchQ
 }
 func (UnimplementedForgeServer) CreateVpc(context.Context, *VpcCreationRequest) (*Vpc, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateVpc not implemented")
+}
+func (UnimplementedForgeServer) CancelVpcCreation(context.Context, *CancelVpcCreationRequest) (*CancelVpcCreationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CancelVpcCreation not implemented")
 }
 func (UnimplementedForgeServer) UpdateVpc(context.Context, *VpcUpdateRequest) (*VpcUpdateResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateVpc not implemented")
@@ -10760,6 +10780,24 @@ func _Forge_CreateVpc_Handler(srv interface{}, ctx context.Context, dec func(int
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ForgeServer).CreateVpc(ctx, req.(*VpcCreationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_CancelVpcCreation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CancelVpcCreationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).CancelVpcCreation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_CancelVpcCreation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).CancelVpcCreation(ctx, req.(*CancelVpcCreationRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -20815,6 +20853,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CreateVpc",
 			Handler:    _Forge_CreateVpc_Handler,
+		},
+		{
+			MethodName: "CancelVpcCreation",
+			Handler:    _Forge_CancelVpcCreation_Handler,
 		},
 		{
 			MethodName: "UpdateVpc",

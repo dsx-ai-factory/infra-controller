@@ -338,6 +338,13 @@ impl Forge for Api {
         crate::handlers::vpc::create(self, request).await
     }
 
+    async fn cancel_vpc_creation(
+        &self,
+        request: Request<rpc::CancelVpcCreationRequest>,
+    ) -> Result<Response<rpc::CancelVpcCreationResponse>, Status> {
+        crate::handlers::vpc::cancel_creation(self, request).await
+    }
+
     async fn update_vpc(
         &self,
         request: Request<rpc::VpcUpdateRequest>,
