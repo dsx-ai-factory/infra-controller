@@ -22,11 +22,11 @@ use config_version::ConfigVersion;
 // Represents Instance returned via RPC call.
 // Adds some widely used helpers.
 #[derive(Debug, PartialEq)]
-pub(in crate::tests) struct RpcInstance(rpc::forge::Instance);
+pub(in crate::tests) struct RpcInstance(Box<rpc::forge::Instance>);
 
 impl RpcInstance {
     pub(in crate::tests) fn new(v: rpc::forge::Instance) -> Self {
-        Self(v)
+        Self(Box::new(v))
     }
 
     pub(in crate::tests) fn id(&self) -> InstanceId {
@@ -45,7 +45,7 @@ impl RpcInstance {
         &self.0
     }
 
-    pub(in crate::tests) fn into_inner(self) -> rpc::forge::Instance {
+    pub(in crate::tests) fn into_inner(self) -> Box<rpc::forge::Instance> {
         self.0
     }
 

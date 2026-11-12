@@ -143,7 +143,7 @@ async fn generic_nic_results_without_admission_are_ignored_without_dpa(pool: sql
     let env = create_test_env_with_overrides(
         pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
@@ -1481,7 +1481,7 @@ async fn startup_retains_generic_observations_without_svpc(pool: sqlx::PgPool) {
     let env = create_test_env_with_overrides(
         pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )

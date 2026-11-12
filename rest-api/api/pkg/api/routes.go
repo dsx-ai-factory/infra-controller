@@ -1306,6 +1306,8 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodPost,
 			Handler: apiHandler.NewCancelTaskRunHandler(dbSession, tc, scp, cfg),
 		},
+		{Path: apiPathPrefix + "/domain/nvlink/:id/factory-reset", Method: http.MethodPost, Handler: apiHandler.NewResetNVLinkDomainHandler(dbSession, scp)},
+		{Path: apiPathPrefix + "/tray/:id/factory-reset", Method: http.MethodPost, Handler: apiHandler.NewResetTrayHandler(dbSession, scp)},
 		// NVLink Domain endpoints (Flow).
 		{
 			Path:    apiPathPrefix + "/domain/nvlink",
