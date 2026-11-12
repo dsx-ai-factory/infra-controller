@@ -26,7 +26,7 @@ use bmc_platform::{PlatformError, ResetType};
 use carbide_redfish::libredfish::RedfishAuth;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
 use carbide_site_explorer::dpu_asn::DPU_ASN_SLOT;
-use carbide_site_explorer::dpu_loopback::DPU_IPV4_LOOPBACK_SLOT;
+use carbide_site_explorer::dpu_loopback::{DPU_IPV4_LOOPBACK_SLOT, DPU_IPV6_LOOPBACK_SLOT};
 use carbide_uuid::machine::{
     DpuMachineId, HostMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait,
 };
@@ -772,29 +772,21 @@ async fn force_delete_cleanup_txn(
                 .await?;
         }
 
-        // The machine snapshot predates `ForceDeletion`, so a concurrent
-        // backfill can make its IPv6 field stale. The pool owner remains the
-        // authoritative reservation source during deletion.
-        if let Some(loopback_ip_v6) = db::resource_pool::find_owned_allocation(
-            &api.common_pools.ethernet.pool_loopback_ip_v6,
-            &mut txn,
-            model::resource_pool::OwnerType::Machine,
-            &owner_id,
-        )
-        .await
-        .map_err(CarbideError::from)?
-        {
-            // The lookup locks this DPU's reservation, so a rejected release
-            // is an invariant failure.
-            match db::resource_pool::release(
+        // Ownership remains authoritative when a concurrent backfill made
+        // the machine snapshot's IPv6 field stale.
+        if let Some(owned) = api
+            .resource_pool_registry
+            .find_owned(
                 &api.common_pools.ethernet.pool_loopback_ip_v6,
                 &mut txn,
-                loopback_ip_v6,
                 model::resource_pool::OwnerType::Machine,
                 &owner_id,
+                DPU_IPV6_LOOPBACK_SLOT,
             )
             .await?
-            {
+        {
+            let loopback_ip_v6 = *owned.value();
+            match owned.release(&mut txn).await? {
                 ConditionalWrite::Applied(()) => {}
                 ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {
                     return Err(CarbideError::FailedPrecondition(format!(
@@ -803,6 +795,15 @@ async fn force_delete_cleanup_txn(
                     )));
                 }
             }
+        } else {
+            api.resource_pool_registry
+                .request_cancellation(
+                    &mut txn,
+                    model::resource_pool::OwnerType::Machine,
+                    &owner_id,
+                    DPU_IPV6_LOOPBACK_SLOT,
+                )
+                .await?;
         }
 
         db::network_devices::dpu_to_network_device_map::delete(&mut txn, &dpu_machine.id).await?;

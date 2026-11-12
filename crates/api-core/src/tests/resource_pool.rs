@@ -399,6 +399,14 @@ prefix = "2001:db8:2390::/126"
         .expect_err("the injected non-lock database failure must propagate");
     assert_eq!(error.code(), tonic::Code::Internal);
     assert_eq!(error.message(), "internal database error");
+    assert!(
+        error
+            .metadata()
+            .get("nico-error-mitigation")
+            .unwrap()
+            .to_str()?
+            .starts_with("Pool growth has committed or been acknowledged.")
+    );
     let wrapped = error
         .source()
         .unwrap()

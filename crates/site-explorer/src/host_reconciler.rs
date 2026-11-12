@@ -347,7 +347,7 @@ impl HostReconciler {
             }
             Self::reconcile_desired_boot_interface(txn.as_pgconn(), &host_machine_id, None).await?;
             for prepared in &loopbacks {
-                prepared.attach(&mut txn, false).await?;
+                prepared.attach(&mut txn).await?;
             }
             for prepared in &asns {
                 prepared.attach(&mut txn).await?;

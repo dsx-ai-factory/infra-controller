@@ -91,7 +91,7 @@ component-manager = { path = "../component-manager", features = [
   "test-support",
 ] }
 
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 tonic = { workspace = true }
 uuid = { workspace = true }
 

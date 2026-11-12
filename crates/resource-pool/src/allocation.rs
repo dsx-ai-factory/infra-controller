@@ -335,12 +335,11 @@ where
             match allocation.state {
                 StoredAllocationState::Attached if allocation.pool_name != self.pool.name() => {}
                 StoredAllocationState::Pending => {}
-                StoredAllocationState::CancelRequested | StoredAllocationState::ReleaseRequested => {
+                StoredAllocationState::CancelRequested
+                | StoredAllocationState::ReleaseRequested => {
                     return Err(ResourcePoolBackendError::CleanupPending);
                 }
-                _ => return Err(DatabaseError::FailedPrecondition(format!(
-                    "{owner_type} `{owner_id}` already has an allocation or unfinished request for slot `{slot}`",
-                )).into()),
+                _ => return Err(owner_slot_in_use(owner_type, owner_id, slot)),
             }
         }
         let (generation, replay) = if let Some(previous) = previous {
@@ -385,10 +384,7 @@ where
                     return Err(ResourcePoolBackendError::CleanupPending);
                 }
                 (StoredAllocationState::Attached | StoredAllocationState::Pending, _) => {
-                    return Err(DatabaseError::FailedPrecondition(format!(
-                        "{owner_type} `{owner_id}` already has an allocation or unfinished request for slot `{slot}`",
-                    ))
-                    .into());
+                    return Err(owner_slot_in_use(owner_type, owner_id, slot));
                 }
             }
         } else {
@@ -403,9 +399,7 @@ where
                     .as_ref()
                     .is_none_or(|(id, _)| *id != allocation.allocation_id)
         }) {
-            return Err(DatabaseError::FailedPrecondition(format!(
-                "{owner_type} `{owner_id}` already has an allocation or unfinished request for slot `{slot}`",
-            )).into());
+            return Err(owner_slot_in_use(owner_type, owner_id, slot));
         }
 
         let revision = replay
@@ -704,4 +698,18 @@ fn model_value<T: ToString>(
             ResourcePoolValue::Ipv6Prefix(value_from_wire(domain, &value)?)
         }
     })
+}
+
+/// Report owner-slot admission conflicts with the same typed error as a racing insert.
+fn owner_slot_in_use(
+    owner_type: OwnerType,
+    owner_id: &str,
+    slot: &str,
+) -> ResourcePoolBackendError {
+    RemoteResourcePoolError::from(storage::RemoteAllocationError::SlotInUse(
+        DatabaseError::FailedPrecondition(format!(
+            "{owner_type} `{owner_id}` already has an allocation or unfinished request for slot `{slot}`",
+        )),
+    ))
+    .into()
 }

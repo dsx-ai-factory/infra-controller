@@ -18,7 +18,8 @@ use carbide_resource_pool::{
 use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_site_explorer::dpu_asn::{DPU_ASN_SLOT, PreparedDpuAsn, update_dpu_asns};
 use carbide_site_explorer::dpu_loopback::{
-    DPU_IPV4_LOOPBACK_SLOT, PreparedDpuLoopback, acquire_admin_admission,
+    DPU_IPV4_LOOPBACK_SLOT, DPU_IPV6_LOOPBACK_SLOT, PreparedDpuLoopback, acquire_admin_admission,
+    update_dpu_loopback_ips_v6,
 };
 use carbide_site_explorer::errors::SiteExplorerError;
 use carbide_site_explorer::{MachineCreator, SiteExplorer};
@@ -31,8 +32,8 @@ use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
 use model::resource_pool::OwnerType;
 use model::resource_pool::allocation::{AllocationSource, AllocationState, ResourcePoolAllocation};
-use model::resource_pool::common::{FNN_ASN, LOOPBACK_IP};
-use model::resource_pool::remote::AllocationResult;
+use model::resource_pool::common::{FNN_ASN, LOOPBACK_IP, LOOPBACK_IP_V6};
+use model::resource_pool::remote::{AllocationFailureCode, AllocationResult};
 use model::site_explorer::{EndpointExplorationReport, ExploredDpu, ExploredManagedHost};
 use rpc::forge;
 use rpc::forge::forge_server::Forge;
@@ -845,142 +846,80 @@ async fn integrated_dpu_asn_creation_retries_a_busy_group(database: PgPool) -> e
 async fn integrated_dpu_asn_allocation_failures_preserve_creation(
     database: PgPool,
 ) -> eyre::Result<()> {
-    let (fixture, mut inputs) = fixture(database).await?;
-    sqlx::query("ALTER TABLE resource_pool_allocations ADD CONSTRAINT reject_fnn_asn CHECK (pool_name != 'fnn-asn')")
-        .execute(&fixture.env.pool).await?;
-    let metrics = MetricsCapture::start();
-    let creator = creator(&fixture);
-    let (result, logs) = capture_logs_async(creator.create_managed_host(
-        &inputs.explored,
-        &mut inputs.host_report,
-        Some(&inputs.expected),
-        &fixture.env.pool,
-    ))
-    .await;
-    assert!(result?);
-    let machine = db::machine::find_one(
-        &fixture.env.pool,
-        &inputs.machine_id,
-        MachineSearchConfig::default(),
-    )
-    .await?
-    .expect("DPU creation committed despite ASN allocation failure");
-    assert_eq!(machine.asn, None);
-    assert!(machine.network_config.loopback_ip.is_some());
-    assert_eq!(
-        db::resource_pool::stats(&fixture.env.pool, FNN_ASN)
-            .await?
-            .used,
-        0
-    );
-    assert_native_asn_failure(&logs, &metrics, inputs.machine_id, "database");
-    drop(metrics);
+    // This test polls several large creation/discovery futures. Box its body
+    // so the SQLx/log-capture harness does not copy their size into each layer.
+    Box::pin(async move {
+        let (fixture, mut inputs) = fixture(database).await?;
+        sqlx::query("ALTER TABLE resource_pool_allocations ADD CONSTRAINT reject_fnn_asn CHECK (pool_name != 'fnn-asn')")
+            .execute(&fixture.env.pool).await?;
+        let metrics = MetricsCapture::start();
+        let creator = creator(&fixture);
+        let (result, logs) = capture_logs_async(creator.create_managed_host(
+            &inputs.explored,
+            &mut inputs.host_report,
+            Some(&inputs.expected),
+            &fixture.env.pool,
+        ))
+        .await;
+        assert!(result?);
+        let machine = db::machine::find_one(
+            &fixture.env.pool,
+            &inputs.machine_id,
+            MachineSearchConfig::default(),
+        )
+        .await?
+        .expect("DPU creation committed despite ASN allocation failure");
+        assert_eq!(machine.asn, None);
+        assert!(machine.network_config.loopback_ip.is_some());
+        assert_eq!(
+            db::resource_pool::stats(&fixture.env.pool, FNN_ASN)
+                .await?
+                .used,
+            0
+        );
+        assert_native_asn_failure(&logs, &metrics, inputs.machine_id, "database");
+        drop(metrics);
 
-    let (result, logs) = capture_logs_async(
-        fixture
-            .env
-            .api
-            .discover_machine(Request::new(inputs.request.clone())),
-    )
-    .await;
-    result?;
-    assert!(
-        !logs
-            .iter()
-            .any(|log| log.metadata_name == "dpu_asn_allocation_failed"),
-        "Integrated rediscovery must not retry or count another creation failure"
-    );
-    assert!(
-        fixture
-            .env
-            .api
-            .admin_force_delete_machine(Request::new(forge::AdminForceDeleteMachineRequest {
-                host_query: inputs.machine_id.to_string(),
-                ..Default::default()
-            }))
-            .await?
-            .into_inner()
-            .all_done
-    );
-    let loopback = receipt(&fixture, inputs.machine_id).await?;
-    fixture
-        .remote(LOOPBACK_IP)
-        .reconcile(loopback.allocation_id, &fixture.cancel)
-        .await?;
-    sqlx::query("ALTER TABLE resource_pool_allocations DROP CONSTRAINT reject_fnn_asn")
-        .execute(&fixture.env.pool)
-        .await?;
-    sqlx::query(
-        "UPDATE resource_pool SET value = (value::bigint + 4294967296)::text WHERE name = $1",
-    )
-    .bind(FNN_ASN)
-    .execute(&fixture.env.pool)
-    .await?;
-    let metrics = MetricsCapture::start();
-    let (result, logs) = capture_logs_async(
-        fixture
-            .env
-            .api
-            .discover_machine(Request::new(inputs.request.clone())),
-    )
-    .await;
-    result?;
-    assert_eq!(
-        db::machine::get_asn(&fixture.env.pool, &inputs.machine_id).await?,
-        None
-    );
-    assert_eq!(
-        db::resource_pool::stats(&fixture.env.pool, FNN_ASN)
-            .await?
-            .used,
-        0
-    );
-    assert_native_asn_failure(&logs, &metrics, inputs.machine_id, "parse");
-    drop(metrics);
-
-    // The moved production path must retain the two ordinary inventory labels.
-    for (expected_failure, exhausted) in [("exhausted", true), ("configuration", false)] {
-        fixture
-            .env
-            .api
-            .admin_force_delete_machine(Request::new(forge::AdminForceDeleteMachineRequest {
-                host_query: inputs.machine_id.to_string(),
-                ..Default::default()
-            }))
-            .await?;
+        let (result, logs) = capture_logs_async(
+            fixture
+                .env
+                .api
+                .discover_machine(Request::new(inputs.request.clone())),
+        )
+        .await;
+        result?;
+        assert!(
+            !logs
+                .iter()
+                .any(|log| log.metadata_name == "dpu_asn_allocation_failed"),
+            "Integrated rediscovery must not retry or count another creation failure"
+        );
+        assert!(
+            fixture
+                .env
+                .api
+                .admin_force_delete_machine(Request::new(forge::AdminForceDeleteMachineRequest {
+                    host_query: inputs.machine_id.to_string(),
+                    ..Default::default()
+                }))
+                .await?
+                .into_inner()
+                .all_done
+        );
         let loopback = receipt(&fixture, inputs.machine_id).await?;
         fixture
             .remote(LOOPBACK_IP)
             .reconcile(loopback.allocation_id, &fixture.cancel)
             .await?;
-        let mut txn = fixture.env.pool.begin().await?;
-        sqlx::query("DELETE FROM resource_pool WHERE name = $1")
-            .bind(FNN_ASN)
-            .execute(&mut *txn)
+        sqlx::query("ALTER TABLE resource_pool_allocations DROP CONSTRAINT reject_fnn_asn")
+            .execute(&fixture.env.pool)
             .await?;
-        if exhausted {
-            db::resource_pool::populate(
-                &fixture.env.common_pools.ethernet.pool_fnn_asn,
-                &mut txn,
-                vec![64512],
-                true,
-            )
-            .await?;
-            db::resource_pool::allocate(
-                &fixture.env.common_pools.ethernet.pool_fnn_asn,
-                &mut txn,
-                OwnerType::Machine,
-                "another-dpu",
-                None,
-            )
-            .await?;
-        }
-        txn.commit().await?;
-        let stats = db::resource_pool::stats(&fixture.env.pool, FNN_ASN).await?;
-        assert_eq!(
-            (stats.auto_assign_free, stats.auto_assign_used),
-            (0, usize::from(exhausted))
-        );
+        sqlx::query(
+            "UPDATE resource_pool SET value = (value::bigint + 4294967296)::text WHERE name = $1",
+        )
+        .bind(FNN_ASN)
+        .execute(&fixture.env.pool)
+        .await?;
         let metrics = MetricsCapture::start();
         let (result, logs) = capture_logs_async(
             fixture
@@ -994,16 +933,83 @@ async fn integrated_dpu_asn_allocation_failures_preserve_creation(
             db::machine::get_asn(&fixture.env.pool, &inputs.machine_id).await?,
             None
         );
-        assert_native_asn_failure(&logs, &metrics, inputs.machine_id, expected_failure);
-        drop(metrics);
         assert_eq!(
             db::resource_pool::stats(&fixture.env.pool, FNN_ASN)
                 .await?
                 .used,
-            usize::from(exhausted)
+            0
         );
-    }
-    fixture.stop().await
+        assert_native_asn_failure(&logs, &metrics, inputs.machine_id, "parse");
+        drop(metrics);
+
+        // The moved production path must retain the two ordinary inventory labels.
+        for (expected_failure, exhausted) in [("exhausted", true), ("configuration", false)] {
+            fixture
+                .env
+                .api
+                .admin_force_delete_machine(Request::new(forge::AdminForceDeleteMachineRequest {
+                    host_query: inputs.machine_id.to_string(),
+                    ..Default::default()
+                }))
+                .await?;
+            let loopback = receipt(&fixture, inputs.machine_id).await?;
+            fixture
+                .remote(LOOPBACK_IP)
+                .reconcile(loopback.allocation_id, &fixture.cancel)
+                .await?;
+            let mut txn = fixture.env.pool.begin().await?;
+            sqlx::query("DELETE FROM resource_pool WHERE name = $1")
+                .bind(FNN_ASN)
+                .execute(&mut *txn)
+                .await?;
+            if exhausted {
+                db::resource_pool::populate(
+                    &fixture.env.common_pools.ethernet.pool_fnn_asn,
+                    &mut txn,
+                    vec![64512],
+                    true,
+                )
+                .await?;
+                db::resource_pool::allocate(
+                    &fixture.env.common_pools.ethernet.pool_fnn_asn,
+                    &mut txn,
+                    OwnerType::Machine,
+                    "another-dpu",
+                    None,
+                )
+                .await?;
+            }
+            txn.commit().await?;
+            let stats = db::resource_pool::stats(&fixture.env.pool, FNN_ASN).await?;
+            assert_eq!(
+                (stats.auto_assign_free, stats.auto_assign_used),
+                (0, usize::from(exhausted))
+            );
+            let metrics = MetricsCapture::start();
+            let (result, logs) = capture_logs_async(
+                fixture
+                    .env
+                    .api
+                    .discover_machine(Request::new(inputs.request.clone())),
+            )
+            .await;
+            result?;
+            assert_eq!(
+                db::machine::get_asn(&fixture.env.pool, &inputs.machine_id).await?,
+                None
+            );
+            assert_native_asn_failure(&logs, &metrics, inputs.machine_id, expected_failure);
+            drop(metrics);
+            assert_eq!(
+                db::resource_pool::stats(&fixture.env.pool, FNN_ASN)
+                    .await?
+                    .used,
+                usize::from(exhausted)
+            );
+        }
+        fixture.stop().await
+    })
+    .await
 }
 
 fn assert_native_asn_failure(
@@ -1968,6 +1974,16 @@ async fn integrated_dpu_requested_loopback_preserves_existing_ownership(
         false,
     )
     .await?;
+    db::resource_pool::populate(
+        &env.common_pools.ethernet.pool_loopback_ip_v6,
+        &mut setup,
+        vec![
+            "2001:db8::1".parse::<std::net::Ipv6Addr>()?,
+            "2001:db8::2".parse()?,
+        ],
+        true,
+    )
+    .await?;
     setup.commit().await?;
 
     for (machine_id, prior_allocation, requested, expected) in [
@@ -1997,12 +2013,13 @@ async fn integrated_dpu_requested_loopback_preserves_existing_ownership(
             .await?;
             txn.commit().await?;
         }
-        let prepared = PreparedDpuLoopback::prepare(
+        let prepared = PreparedDpuLoopback::prepare_with_ipv6(
             &env.pool,
             &env.api.resource_pool_registry,
             &env.common_pools,
             machine_id,
             Some(requested),
+            None,
             &env.api.cancel_token,
             env.api.instrumentation.clone(),
         )
@@ -2013,14 +2030,14 @@ async fn integrated_dpu_requested_loopback_preserves_existing_ownership(
         prepared.check_identity(&mut txn).await?;
         db::machine::create(
             &mut txn,
-            Some(&env.common_pools),
+            None,
             &machine_id,
             ManagedHostState::Created,
             None,
             CURRENT_STATE_MODEL_VERSION,
         )
         .await?;
-        prepared.attach(&mut txn, true).await?;
+        prepared.attach(&mut txn).await?;
         txn.commit().await?;
         prepared.cancel(&env.pool).await?;
         let (mut config, version) = db::machine::get_network_config(&env.pool, &machine_id)
@@ -2028,7 +2045,9 @@ async fn integrated_dpu_requested_loopback_preserves_existing_ownership(
             .take();
         assert_eq!(config.loopback_ip, Some(IpAddr::V4(expected)));
 
+        assert!(config.loopback_ip_v6.is_some());
         config.loopback_ip = None;
+        config.loopback_ip_v6 = None;
         let mut txn = env.pool.begin().await?;
         assert_eq!(
             db::machine::try_update_network_config(&mut txn, &machine_id, version, &config).await?,
@@ -2047,9 +2066,16 @@ async fn integrated_dpu_requested_loopback_preserves_existing_ownership(
         .await?;
         let mut txn = env.pool.begin().await?;
         repair.check_identity(&mut txn).await?;
-        repair.attach(&mut txn, false).await?;
+        repair.attach(&mut txn).await?;
         txn.commit().await?;
         repair.cancel(&env.pool).await?;
+        // Plain preparation intentionally repairs IPv4 only, even with IPv6 values.
+        assert_eq!(
+            db::machine::get_network_config(&env.pool, &machine_id)
+                .await?
+                .loopback_ip_v6,
+            None
+        );
         assert_eq!(
             db::machine::get_network_config(&env.pool, &machine_id)
                 .await?
@@ -2099,9 +2125,14 @@ async fn remote_dpu_discovery_and_site_repair_reuse_a_lost_reply(
         let occupied = creator.create_managed_host(
             &inputs.explored, &mut inputs.host_report, Some(&inputs.expected), &fixture.env.pool,
         ).await.expect_err("the pending owner slot belongs to discovery");
-        assert!(matches!(occupied, SiteExplorerError::DatabaseError(
-            db::DatabaseError::FailedPrecondition(ref message),
-        ) if message.contains("unfinished request") && message.contains(DPU_IPV4_LOOPBACK_SLOT)));
+        let SiteExplorerError::ResourcePool(error) = occupied else {
+            panic!("expected the competing resource-pool request: {occupied}");
+        };
+        assert!(matches!(*error, ResourcePoolBackendError::Remote(
+            carbide_resource_pool::remote::RemoteResourcePoolError::Storage(ref error)
+        ) if matches!(error.as_ref(), remote::RemoteAllocationError::SlotInUse(
+            db::DatabaseError::FailedPrecondition(message)
+        ) if message.contains("unfinished request") && message.contains(DPU_IPV4_LOOPBACK_SLOT))));
 
         // Preflight has finished. Hold the caller interface so the real provider
         // reply can be saved while the entity transaction cannot attach it.
@@ -2362,7 +2393,7 @@ async fn remote_dpu_discovery_rechecks_host_link_after_preparation(
         let mut txn = fixture.env.pool.begin().await?;
         let host_interface = db::machine_interface::find_one(&mut *txn, host_interface_id).await?;
         db::machine::get_or_create(
-            &mut txn, Some(db::machine::MachineCreationPools::All(&fixture.env.common_pools)), &host_id, &host_interface, None,
+            &mut txn, Some(&fixture.env.common_pools), &host_id, &host_interface,
         ).await?;
         txn.commit().await?;
         assert!(db::machine_interface::mac_address_has_machine(&fixture.env.pool, host_mac).await?);
@@ -2458,16 +2489,16 @@ async fn remote_dpu_stale_force_delete_preserves_same_id_replacement(
             assert!(db::machine::find_one(&fixture.env.pool, &inputs.machine_id, MachineSearchConfig::default()).await?.is_none());
             assert_eq!(receipt(&fixture, inputs.machine_id).await?.state, AllocationState::ReleaseRequested);
             fixture.remote(LOOPBACK_IP).reconcile(original.allocation_id, &fixture.cancel).await?;
-            let prepared = PreparedDpuLoopback::prepare(
+            let prepared = PreparedDpuLoopback::prepare_with_ipv6(
                 &fixture.env.pool, &fixture.env.api.resource_pool_registry,
-                &fixture.env.common_pools, inputs.machine_id, None, &fixture.cancel,
+                &fixture.env.common_pools, inputs.machine_id, None, None, &fixture.cancel,
                 fixture.env.api.instrumentation.clone(),
             ).await?;
             assert!(prepared.has_provider_reservation(), "a new provider assignment retains bounded admission");
             prepared.check_identity(&mut replacement_txn).await?;
-            db::machine::create(&mut replacement_txn, Some(&fixture.env.common_pools), &inputs.machine_id,
+            db::machine::create(&mut replacement_txn, None, &inputs.machine_id,
                 ManagedHostState::Created, None, CURRENT_STATE_MODEL_VERSION).await?;
-            prepared.attach(&mut replacement_txn, true).await?;
+            prepared.attach(&mut replacement_txn).await?;
             replacement_txn.commit().await?;
             let created = db::machine::MachineCreationIdentity::capture(&fixture.env.pool, &inputs.machine_id).await?.created();
             let config = db::machine::get_network_config(&fixture.env.pool, &inputs.machine_id).await?;
@@ -3072,4 +3103,1069 @@ async fn remote_dpu_rejected_discovery_has_no_provider_effects(
         fixture.stop().await
     })
     .await
+}
+
+/// Creates DPUs with empty network configuration so backfill owns their first
+/// IPv6 assignment, independently of foreground discovery.
+async fn seed_missing_loopbacks(
+    fixture: &RemotePoolFixture,
+    ids: &[MachineId],
+) -> eyre::Result<()> {
+    let mut txn = fixture.env.pool.begin().await?;
+    for id in ids {
+        db::machine::create(
+            &mut txn,
+            None,
+            id,
+            ManagedHostState::Ready,
+            None,
+            CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+    }
+    txn.commit().await?;
+    Ok(())
+}
+
+/// A failed compare-and-swap retries the same provider assignment in a fresh
+/// transaction and preserves the concurrent network setting.
+#[crate::sqlx_test]
+async fn remote_ipv6_backfill_reuses_preparation_after_configuration_conflict(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let mut fixture = RemotePoolFixture::start_ipv6(database).await?;
+    fixture
+        .initialize(PoolDefinitionSource::SeedConfiguration)
+        .await?;
+    let machine_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [141; 32],
+        MachineType::Dpu,
+    );
+    seed_missing_loopbacks(&fixture, &[machine_id]).await?;
+    let before = db::machine::get_network_config(&fixture.env.pool, &machine_id).await?;
+    sqlx::raw_sql(
+        "CREATE FUNCTION gate_ipv6_attachment() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN PERFORM pg_advisory_xact_lock(8561); RETURN NEW; END $$;
+        CREATE TRIGGER gate_ipv6_attachment BEFORE UPDATE ON resource_pool_allocations
+        FOR EACH ROW WHEN (NEW.pool_name = 'lo-ip-v6' AND NEW.state = 'attached')
+        EXECUTE FUNCTION gate_ipv6_attachment();",
+    )
+    .execute(&fixture.env.pool)
+    .await?;
+    let mut gate = fixture.env.pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(8561)")
+        .execute(&mut *gate)
+        .await?;
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await?;
+    let mut backfill = Box::pin(update_dpu_loopback_ips_v6(
+        &fixture.env.pool,
+        &fixture.env.api.resource_pool_registry,
+        &fixture.env.common_pools,
+        &fixture.cancel,
+        &fixture.env.api.instrumentation,
+    ));
+    tokio::select! {
+        result = &mut backfill => panic!("backfill finished before its attachment gate: {result:?}"),
+        _ = db::test_support::postgres::wait_for_blocked_query(&fixture.env.pool, gate_pid, "UPDATE resource_pool_allocations") => {}
+    }
+    let pending = allocation_receipt(&fixture, machine_id, DPU_IPV6_LOOPBACK_SLOT).await?;
+    assert_eq!(pending.state, AllocationState::Pending);
+    assert!(matches!(
+        &pending.source,
+        AllocationSource::Remote {
+            result: Some(AllocationResult::Allocated(_)),
+            ..
+        }
+    ));
+    let mut changed = before.value.clone();
+    changed.use_admin_network = Some(false);
+    let mut txn = fixture.env.pool.begin().await?;
+    assert_eq!(
+        db::machine::try_update_network_config(&mut txn, &machine_id, before.version, &changed)
+            .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await?;
+    gate.rollback().await?;
+    tokio::time::timeout(Duration::from_secs(10), &mut backfill).await??;
+    let after = db::machine::get_network_config(&fixture.env.pool, &machine_id).await?;
+    changed.loopback_ip_v6 = after.value.loopback_ip_v6;
+    assert!(changed.loopback_ip_v6.is_some());
+    assert_eq!(after.value, changed);
+    assert_eq!(after.version.version_nr(), before.version.version_nr() + 2);
+    let attached = allocation_receipt(&fixture, machine_id, DPU_IPV6_LOOPBACK_SLOT).await?;
+    assert_eq!(attached.allocation_id, pending.allocation_id);
+    assert_eq!(attached.source, pending.source);
+    assert_eq!(attached.state, AllocationState::Attached);
+    assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 1);
+    sqlx::raw_sql("DROP TRIGGER gate_ipv6_attachment ON resource_pool_allocations; DROP FUNCTION gate_ipv6_attachment();").execute(&fixture.env.pool).await?;
+    drop(backfill);
+    fixture.stop().await
+}
+
+/// A competing foreground attempt retains its exact request and reservation while
+/// backfill reports that conflict after attaching an unrelated DPU's IPv6 address.
+#[crate::sqlx_test]
+async fn remote_ipv6_backfill_continues_past_foreground_preparation(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let mut fixture = RemotePoolFixture::start_ipv6(database).await?;
+    fixture
+        .initialize(PoolDefinitionSource::SeedConfiguration)
+        .await?;
+    let mut ids = [71, 72].map(|seed| {
+        MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [seed; 32],
+            MachineType::Dpu,
+        )
+    });
+    ids.sort();
+    seed_missing_loopbacks(&fixture, &ids).await?;
+
+    // Leave a real foreground assignment awaiting attachment. Backfill must
+    // neither adopt that caller's authority nor request its cancellation.
+    let mut txn = fixture.env.pool.begin().await?;
+    let selected = fixture
+        .env
+        .api
+        .resource_pool_registry
+        .select(
+            &mut txn,
+            &fixture.env.common_pools.ethernet.pool_loopback_ip_v6,
+        )
+        .await?
+        .expect("configured IPv6 backend");
+    txn.commit().await?;
+    let pending = selected
+        .prepare_allocation(
+            &fixture.env.pool,
+            OwnerType::Machine,
+            &ids[0].to_string(),
+            DPU_IPV6_LOOPBACK_SLOT,
+            None,
+            &fixture.cancel,
+        )
+        .await?;
+    let before = allocation_receipt(&fixture, ids[0], DPU_IPV6_LOOPBACK_SLOT).await?;
+    assert_eq!(before.state, AllocationState::Pending);
+
+    let error = update_dpu_loopback_ips_v6(
+        &fixture.env.pool,
+        &fixture.env.api.resource_pool_registry,
+        &fixture.env.common_pools,
+        &fixture.cancel,
+        &fixture.env.api.instrumentation,
+    )
+    .await
+    .expect_err("the first DPU still belongs to its foreground caller");
+    assert!(matches!(error, ResourcePoolBackendError::Remote(
+        carbide_resource_pool::remote::RemoteResourcePoolError::Storage(ref error)
+    ) if matches!(error.as_ref(), remote::RemoteAllocationError::SlotInUse(_))));
+
+    // Persisted state proves the pass reached the second DPU and left the
+    // competing request unchanged, without dispatching another first-DPU call.
+    assert_eq!(
+        allocation_receipt(&fixture, ids[0], DPU_IPV6_LOOPBACK_SLOT).await?,
+        before
+    );
+    assert!(
+        db::machine::get_network_config(&fixture.env.pool, &ids[0])
+            .await?
+            .value
+            .loopback_ip_v6
+            .is_none()
+    );
+    assert_eq!(
+        allocation_receipt(&fixture, ids[1], DPU_IPV6_LOOPBACK_SLOT)
+            .await?
+            .state,
+        AllocationState::Attached
+    );
+    assert!(
+        db::machine::get_network_config(&fixture.env.pool, &ids[1])
+            .await?
+            .value
+            .loopback_ip_v6
+            .is_some()
+    );
+    assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 2);
+    assert_eq!(fixture.provider.local.provisioned_count(), 2);
+
+    pending.cancel(&fixture.env.pool).await?;
+    drop(pending);
+    fixture.stop().await
+}
+
+/// Completed IPv6 assignments survive a later unavailable provider and an API
+/// reconstruction. Unfinished cleanup for one DPU lets later DPUs proceed.
+/// Discovery reuses the saved assignment; inventory preserves
+/// its existing-host skip without changing that ownership.
+#[crate::sqlx_test]
+async fn remote_ipv6_backfill_restart_preserves_progress_and_discovery_reuse(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let (mut fixture, mut inputs) =
+        inputs_for_fixture(RemotePoolFixture::start_ipv6(database).await?, 1).await?;
+    let mut later_ids = (0..=255)
+        .map(|seed| {
+            MachineId::new(
+                MachineIdSource::ProductBoardChassisSerial,
+                [seed; 32],
+                MachineType::Dpu,
+            )
+        })
+        .filter(|id| *id > inputs.machine_id)
+        .take(2)
+        .collect::<Vec<_>>();
+    later_ids.sort();
+    let [later_id, last_id]: [MachineId; 2] = later_ids.try_into().expect("two later DPU IDs");
+    seed_missing_loopbacks(&fixture, &[inputs.machine_id, later_id, last_id]).await?;
+    fixture
+        .provider
+        .allocate_pause
+        .pause_next
+        .store(true, Ordering::SeqCst);
+    let mut backfill = Box::pin(update_dpu_loopback_ips_v6(
+        &fixture.env.pool,
+        &fixture.env.api.resource_pool_registry,
+        &fixture.env.common_pools,
+        &fixture.cancel,
+        &fixture.env.api.instrumentation,
+    ));
+    tokio::select! {
+        result = &mut backfill => panic!("backfill stopped before its first provider reply: {result:?}"),
+        result = wait_for_preparation(&fixture.provider.allocate_pause) => result?,
+    }
+    fixture
+        .provider
+        .allocate_pause
+        .pause_next
+        .store(true, Ordering::SeqCst);
+    fixture.provider.allocate_pause.resume.notify_one();
+    tokio::select! {
+        result = &mut backfill => panic!("backfill stopped before its second provider reply: {result:?}"),
+        result = wait_for_preparation(&fixture.provider.allocate_pause) => result?,
+    }
+    let completed = db::machine::get_network_config(&fixture.env.pool, &inputs.machine_id).await?;
+    let completed_receipt =
+        allocation_receipt(&fixture, inputs.machine_id, DPU_IPV6_LOOPBACK_SLOT).await?;
+    assert!(completed.value.loopback_ip_v6.is_some());
+    assert_eq!(completed_receipt.state, AllocationState::Attached);
+    // Lose the held reply, then fail the actual recovery calls for this pass.
+    fixture
+        .provider
+        .lose_allocate_reply
+        .store(true, Ordering::SeqCst);
+    fixture
+        .provider
+        .allocation_unavailable
+        .store(true, Ordering::SeqCst);
+    fixture.provider.allocate_pause.resume.notify_one();
+    let error = tokio::time::timeout(Duration::from_secs(10), &mut backfill)
+        .await?
+        .expect_err("the actual unavailable Recover calls must stop this pass");
+    assert!(matches!(error, ResourcePoolBackendError::Remote(
+        carbide_resource_pool::remote::RemoteResourcePoolError::Provider(
+            carbide_resource_pool::grpc::GrpcResourcePoolError::Rpc(ref status)
+        )
+    ) if status.code() == tonic::Code::Unavailable));
+    assert!(fixture.provider.recoveries.load(Ordering::SeqCst) > 2);
+    drop(backfill);
+    fixture
+        .provider
+        .allocation_unavailable
+        .store(false, Ordering::SeqCst);
+    let incomplete = allocation_receipt(&fixture, later_id, DPU_IPV6_LOOPBACK_SLOT).await?;
+    assert_eq!(incomplete.state, AllocationState::CancelRequested);
+    // A provider-wide failure stopped the pass before the third DPU. Rebuilding
+    // with cleanup pending must now let that DPU proceed without rewriting the first.
+    assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 2);
+    assert!(
+        remote::latest_for_owner_slot(
+            &fixture.env.pool,
+            OwnerType::Machine,
+            &last_id.to_string(),
+            DPU_IPV6_LOOPBACK_SLOT,
+        )
+        .await?
+        .is_none()
+    );
+    fixture
+        .initialize(PoolDefinitionSource::SeedConfiguration)
+        .await?;
+    assert!(matches!(
+        update_dpu_loopback_ips_v6(
+            &fixture.env.pool,
+            &fixture.env.api.resource_pool_registry,
+            &fixture.env.common_pools,
+            &fixture.cancel,
+            &fixture.env.api.instrumentation,
+        )
+        .await,
+        Err(ResourcePoolBackendError::CleanupPending)
+    ));
+    let later_completed = allocation_receipt(&fixture, last_id, DPU_IPV6_LOOPBACK_SLOT).await?;
+    assert_eq!(later_completed.state, AllocationState::Attached);
+    assert!(
+        db::machine::get_network_config(&fixture.env.pool, &last_id)
+            .await?
+            .value
+            .loopback_ip_v6
+            .is_some()
+    );
+    assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        allocation_receipt(&fixture, later_id, DPU_IPV6_LOOPBACK_SLOT).await?,
+        incomplete
+    );
+    let still_completed =
+        db::machine::get_network_config(&fixture.env.pool, &inputs.machine_id).await?;
+    assert_eq!(still_completed.value, completed.value);
+    assert_eq!(still_completed.version, completed.version);
+    assert_eq!(
+        allocation_receipt(&fixture, inputs.machine_id, DPU_IPV6_LOOPBACK_SLOT).await?,
+        completed_receipt
+    );
+    fixture
+        .remote(LOOPBACK_IP_V6)
+        .reconcile(incomplete.allocation_id, &fixture.cancel)
+        .await?;
+    update_dpu_loopback_ips_v6(
+        &fixture.env.pool,
+        &fixture.env.api.resource_pool_registry,
+        &fixture.env.common_pools,
+        &fixture.cancel,
+        &fixture.env.api.instrumentation,
+    )
+    .await?;
+    let restored = db::machine::get_network_config(&fixture.env.pool, &inputs.machine_id).await?;
+    assert_eq!(restored.value, completed.value);
+    assert_eq!(restored.version, completed.version);
+    assert_eq!(
+        allocation_receipt(&fixture, inputs.machine_id, DPU_IPV6_LOOPBACK_SLOT).await?,
+        completed_receipt
+    );
+    assert!(
+        db::machine::get_network_config(&fixture.env.pool, &later_id)
+            .await?
+            .value
+            .loopback_ip_v6
+            .is_some()
+    );
+    assert_eq!(
+        allocation_receipt(&fixture, last_id, DPU_IPV6_LOOPBACK_SLOT).await?,
+        later_completed,
+    );
+    let address = restored
+        .value
+        .loopback_ip_v6
+        .expect("saved IPv6 assignment");
+    let mut cleared = restored.value.clone();
+    cleared.loopback_ip_v6 = None;
+    let mut txn = fixture.env.pool.begin().await?;
+    assert_eq!(
+        db::machine::try_update_network_config(
+            &mut txn,
+            &inputs.machine_id,
+            restored.version,
+            &cleared
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
+    txn.commit().await?;
+    let found = fixture
+        .env
+        .api
+        .find_ip_address(Request::new(forge::FindIpAddressRequest {
+            ip: address.to_string(),
+        }))
+        .await?
+        .into_inner();
+    assert!(
+        found
+            .matches
+            .iter()
+            .any(|entry| entry.ip_type == forge::IpType::LoopbackIp as i32
+                && entry.owner_id.as_deref() == Some(inputs.machine_id.to_string().as_str()))
+    );
+    let allocations_before_reuse = fixture.provider.allocations.load(Ordering::SeqCst);
+    fixture
+        .env
+        .api
+        .discover_machine(Request::new(inputs.request.clone()))
+        .await?;
+    assert_eq!(
+        db::machine::get_network_config(&fixture.env.pool, &inputs.machine_id)
+            .await?
+            .value
+            .loopback_ip_v6,
+        completed.value.loopback_ip_v6
+    );
+    let discovered = db::machine::get_network_config(&fixture.env.pool, &inputs.machine_id).await?;
+    // Inventory intentionally skips an existing host. It must not claim a new
+    // IPv6 preparation or alter the assignment restored by discovery.
+    assert!(
+        !creator(&fixture)
+            .create_managed_host(
+                &inputs.explored,
+                &mut inputs.host_report,
+                Some(&inputs.expected),
+                &fixture.env.pool,
+            )
+            .await?
+    );
+    let after_inventory =
+        db::machine::get_network_config(&fixture.env.pool, &inputs.machine_id).await?;
+    assert_eq!(after_inventory.value, discovered.value);
+    assert_eq!(after_inventory.version, discovered.version);
+    assert_eq!(
+        allocation_receipt(&fixture, inputs.machine_id, DPU_IPV6_LOOPBACK_SLOT).await?,
+        completed_receipt
+    );
+    assert_eq!(
+        fixture.provider.allocations.load(Ordering::SeqCst),
+        allocations_before_reuse
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 3);
+    fixture.stop().await
+}
+
+/// Force deletion captures the pending IPv6 request before a held provider
+/// reply arrives; neither that reply nor its backfill can attach to a replacement.
+#[crate::sqlx_test]
+async fn remote_ipv6_backfill_deletion_prevents_stale_attachment(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let mut fixture = RemotePoolFixture::start_ipv6(database).await?;
+    fixture
+        .initialize(PoolDefinitionSource::SeedConfiguration)
+        .await?;
+    let machine_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [142; 32],
+        MachineType::Dpu,
+    );
+    seed_missing_loopbacks(&fixture, &[machine_id]).await?;
+    fixture
+        .provider
+        .allocate_pause
+        .pause_next
+        .store(true, Ordering::SeqCst);
+    let api = fixture.env.api.clone();
+    let mut backfill = Box::pin(update_dpu_loopback_ips_v6(
+        &fixture.env.pool,
+        &api.resource_pool_registry,
+        &fixture.env.common_pools,
+        &fixture.cancel,
+        &fixture.env.api.instrumentation,
+    ));
+    tokio::select! {
+        result = &mut backfill => panic!("backfill stopped before its provider reply: {result:?}"),
+        result = wait_for_preparation(&fixture.provider.allocate_pause) => result?,
+    }
+    let pending = allocation_receipt(&fixture, machine_id, DPU_IPV6_LOOPBACK_SLOT).await?;
+    // A provider reservation is not yet a discoverable loopback owner.
+    assert!(
+        db::machine::find_by_loopback_ip(&fixture.env.pool, "2001:db8::a".parse()?)
+            .await?
+            .is_none()
+    );
+    let deleted = api
+        .admin_force_delete_machine(Request::new(forge::AdminForceDeleteMachineRequest {
+            host_query: machine_id.to_string(),
+            ..Default::default()
+        }))
+        .await?
+        .into_inner();
+    assert!(deleted.all_done);
+    let cancelled_before_reply =
+        allocation_receipt(&fixture, machine_id, DPU_IPV6_LOOPBACK_SLOT).await?;
+    assert_eq!(cancelled_before_reply.allocation_id, pending.allocation_id);
+    assert_eq!(
+        cancelled_before_reply.state,
+        AllocationState::CancelRequested
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 1);
+    seed_missing_loopbacks(&fixture, &[machine_id]).await?;
+    let replacement = db::machine::get_network_config(&fixture.env.pool, &machine_id).await?;
+    fixture.provider.allocate_pause.resume.notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), &mut backfill)
+            .await?
+            .is_err()
+    );
+    let after = db::machine::get_network_config(&fixture.env.pool, &machine_id).await?;
+    assert_eq!(after.value, replacement.value);
+    assert_eq!(after.version, replacement.version);
+    let cleanup = allocation_receipt(&fixture, machine_id, DPU_IPV6_LOOPBACK_SLOT).await?;
+    assert_eq!(cleanup.allocation_id, pending.allocation_id);
+    assert_eq!(cleanup.state, AllocationState::CancelRequested);
+    fixture
+        .remote(LOOPBACK_IP_V6)
+        .reconcile(cleanup.allocation_id, &fixture.cancel)
+        .await?;
+    assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    assert_eq!(
+        allocation_receipt(&fixture, machine_id, DPU_IPV6_LOOPBACK_SLOT)
+            .await?
+            .state,
+        AllocationState::Cancelled
+    );
+    drop(backfill);
+    fixture.stop().await
+}
+
+/// The public additive request acknowledges remote eligibility before invoking
+/// the real IPv6 backfill; repeated and later growth preserve existing assignments.
+#[crate::sqlx_test]
+async fn remote_ipv6_public_growth_backfills_and_reuses_acknowledged_revisions(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let mut fixture = RemotePoolFixture::start_ipv6(database).await?;
+    fixture
+        .definitions
+        .get_mut(LOOPBACK_IP_V6)
+        .expect("IPv6 definition")
+        .ranges[0]
+        .end = "2001:db8::b".to_owned();
+    let (fixture, mut inputs) = inputs_for_fixture(fixture, 1).await?;
+    fixture
+        .provider
+        .stats_unavailable
+        .store(true, Ordering::SeqCst);
+    let ids = [143, 144].map(|seed| {
+        MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [seed; 32],
+            MachineType::Dpu,
+        )
+    });
+    seed_missing_loopbacks(&fixture, &ids[..2]).await?;
+    let grow = |start: &str, end: &str| forge::GrowResourcePoolRequest {
+        text: format!(
+            "[lo-ip-v6]\ntype = \"ipv6\"\nranges = [{{ start = \"{start}\", end = \"{end}\" }}]\n"
+        ),
+    };
+    fixture
+        .env
+        .api
+        .admin_grow_resource_pool(Request::new(grow("2001:db8::b", "2001:db8::c")))
+        .await?;
+    let mut completed = Vec::new();
+    for id in &ids[..2] {
+        let config = db::machine::get_network_config(&fixture.env.pool, id).await?;
+        assert!(config.value.loopback_ip_v6.is_some());
+        completed.push(config);
+    }
+    let binding = &fixture
+        .env
+        .api
+        .resource_pool_registry
+        .get(LOOPBACK_IP_V6)
+        .expect("IPv6 binding")
+        .binding;
+    assert_eq!(
+        carbide_resource_pool::registration::latest_accepted(&fixture.env.pool, binding)
+            .await?
+            .expect("accepted growth")
+            .eligibility_revision,
+        "2"
+    );
+    fixture
+        .env
+        .api
+        .admin_grow_resource_pool(Request::new(grow("2001:db8::b", "2001:db8::c")))
+        .await?;
+    fixture
+        .env
+        .api
+        .admin_grow_resource_pool(Request::new(grow("2001:db8::c", "2001:db8::d")))
+        .await?;
+    assert!(
+        creator(&fixture)
+            .create_managed_host(
+                &inputs.explored,
+                &mut inputs.host_report,
+                Some(&inputs.expected),
+                &fixture.env.pool
+            )
+            .await?
+    );
+    let created = allocation_receipt(&fixture, inputs.machine_id, DPU_IPV6_LOOPBACK_SLOT).await?;
+    fixture
+        .env
+        .api
+        .discover_machine(Request::new(inputs.request.clone()))
+        .await?;
+    assert_eq!(
+        allocation_receipt(&fixture, inputs.machine_id, DPU_IPV6_LOOPBACK_SLOT).await?,
+        created
+    );
+    for (id, expected) in ids.iter().zip(completed) {
+        let actual = db::machine::get_network_config(&fixture.env.pool, id).await?;
+        assert_eq!(actual.value, expected.value);
+        assert_eq!(actual.version, expected.version);
+    }
+    assert!(
+        db::machine::get_network_config(&fixture.env.pool, &inputs.machine_id)
+            .await?
+            .value
+            .loopback_ip_v6
+            .is_some()
+    );
+    assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 3);
+    assert_eq!(fixture.provider.defines.load(Ordering::SeqCst), 3);
+    assert!(
+        carbide_resource_pool::registration::accepted(&fixture.env.pool, binding, 1)
+            .await?
+            .is_some()
+    );
+    let local_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_pool WHERE name = $1")
+        .bind(LOOPBACK_IP_V6)
+        .fetch_one(&fixture.env.pool)
+        .await?;
+    assert_eq!(local_rows, 0);
+    assert!(
+        fixture
+            .env
+            .api
+            .admin_force_delete_machine(Request::new(forge::AdminForceDeleteMachineRequest {
+                host_query: inputs.machine_id.to_string(),
+                ..Default::default()
+            }))
+            .await?
+            .into_inner()
+            .all_done
+    );
+    let releasing = allocation_receipt(&fixture, inputs.machine_id, DPU_IPV6_LOOPBACK_SLOT).await?;
+    assert_eq!(releasing.allocation_id, created.allocation_id);
+    assert_eq!(releasing.source, created.source);
+    assert_eq!(releasing.state, AllocationState::ReleaseRequested);
+    fixture
+        .remote(LOOPBACK_IP_V6)
+        .reconcile(releasing.allocation_id, &fixture.cancel)
+        .await?;
+    assert_eq!(
+        allocation_receipt(&fixture, inputs.machine_id, DPU_IPV6_LOOPBACK_SLOT)
+            .await?
+            .state,
+        AllocationState::Released
+    );
+    assert_eq!(fixture.provider.local.provisioned_count(), 2);
+    fixture.stop().await
+}
+
+/// A sole IPv6 provider reservation participates in admission and carries the
+/// requested manual value through fresh discovery and transactional attachment.
+#[crate::sqlx_test]
+async fn remote_ipv6_requested_discovery_attaches_its_preparation(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let mut fixture = RemotePoolFixture::start_ipv6(database).await?;
+    let definition = fixture.definitions.get_mut(LOOPBACK_IP_V6).unwrap();
+    definition.ranges[0] = model::resource_pool::Range {
+        start: "2001:db8::b".to_owned(),
+        end: "2001:db8::c".to_owned(),
+        auto_assign: false,
+    };
+    let (fixture, inputs) = inputs_for_fixture(fixture, 1).await?;
+    let requested: std::net::Ipv6Addr = "2001:db8::b".parse()?;
+    {
+        let prepared = PreparedDpuLoopback::prepare_with_ipv6(
+            &fixture.env.pool,
+            &fixture.env.api.resource_pool_registry,
+            &fixture.env.common_pools,
+            inputs.machine_id,
+            None,
+            Some(requested),
+            &fixture.cancel,
+            fixture.env.api.instrumentation.clone(),
+        )
+        .await?;
+        assert!(
+            prepared.has_provider_reservation(),
+            "only IPv6 needs provider admission"
+        );
+        prepared.cancel(&fixture.env.pool).await?;
+        let unused =
+            allocation_receipt(&fixture, inputs.machine_id, DPU_IPV6_LOOPBACK_SLOT).await?;
+        fixture
+            .remote(LOOPBACK_IP_V6)
+            .reconcile(unused.allocation_id, &fixture.cancel)
+            .await?;
+        assert_eq!(
+            allocation_receipt(&fixture, inputs.machine_id, DPU_IPV6_LOOPBACK_SLOT)
+                .await?
+                .state,
+            AllocationState::Cancelled
+        );
+    }
+    // Seed existing intent below public admission. Public expected-machine
+    // validation still requires native inventory and is an activation follow-up.
+    let interface = db::machine_interface::find_one(
+        &fixture.env.pool,
+        inputs.request.machine_interface_id.unwrap(),
+    )
+    .await?;
+    sqlx::query("INSERT INTO expected_dpu_loopback_reservations (host_bmc_mac_address, dpu_oob_net0_mac_address, loopback_ipv6) VALUES ($1, $2, $3)")
+        .bind(inputs.expected.bmc_mac_address).bind(interface.mac_address).bind(IpAddr::V6(requested))
+        .execute(&fixture.env.pool).await?;
+    fixture
+        .env
+        .api
+        .discover_machine(Request::new(inputs.request))
+        .await?;
+    let attached = allocation_receipt(&fixture, inputs.machine_id, DPU_IPV6_LOOPBACK_SLOT).await?;
+    assert_eq!(attached.state, AllocationState::Attached);
+    let AllocationSource::Remote {
+        request,
+        result: Some(AllocationResult::Allocated(assignment)),
+        ..
+    } = &attached.source
+    else {
+        panic!("expected attached remote assignment: {attached:?}");
+    };
+    assert_eq!(
+        request.selection,
+        model::resource_pool::remote::AllocationSelection::Requested(
+            model::resource_pool::allocation::ResourcePoolValue::IpAddress(IpAddr::V6(requested))
+        )
+    );
+    assert_eq!(
+        assignment.value,
+        model::resource_pool::allocation::ResourcePoolValue::IpAddress(IpAddr::V6(requested))
+    );
+    assert_eq!(
+        db::machine::get_network_config(&fixture.env.pool, &inputs.machine_id)
+            .await?
+            .loopback_ip_v6,
+        Some(requested)
+    );
+    assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 2);
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_pool WHERE name = $1")
+        .bind(LOOPBACK_IP_V6)
+        .fetch_one(&fixture.env.pool)
+        .await?;
+    assert_eq!(rows, 0);
+    fixture.stop().await
+}
+
+/// Each mixed-result arm must return the failed provider's error and cancel
+/// the successful family, rather than leave an unused reservation occupying it.
+#[crate::sqlx_test]
+async fn remote_loopback_family_failure_cancels_the_successful_sibling(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let mut fixture = RemotePoolFixture::start_loopbacks(database).await?;
+    fixture
+        .initialize(PoolDefinitionSource::SeedConfiguration)
+        .await?;
+    let machine_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [151; 32],
+        MachineType::Dpu,
+    );
+    for fail_ipv6 in [true, false] {
+        let allocations_before = fixture.provider.allocations.load(Ordering::SeqCst);
+        let result = PreparedDpuLoopback::prepare_with_ipv6(
+            &fixture.env.pool,
+            &fixture.env.api.resource_pool_registry,
+            &fixture.env.common_pools,
+            machine_id,
+            (!fail_ipv6).then_some("198.51.100.254".parse()?),
+            fail_ipv6.then_some("2001:db8::ffff".parse()?),
+            &fixture.cancel,
+            fixture.env.api.instrumentation.clone(),
+        )
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("the unavailable manual partition must reject preparation"),
+        };
+        // Recover confirms the provider's saved rejection after Allocate fails.
+        assert!(
+            matches!(
+                &error,
+                ResourcePoolBackendError::Remote(
+                    carbide_resource_pool::remote::RemoteResourcePoolError::Rejected(
+                        AllocationFailureCode::ResourceExhausted
+                    )
+                )
+            ),
+            "expected a saved provider rejection, got {error:?}"
+        );
+        assert_eq!(
+            fixture.provider.allocations.load(Ordering::SeqCst),
+            allocations_before + 2,
+            "both families must reach the provider"
+        );
+        assert!(
+            db::machine::find_one(
+                &fixture.env.pool,
+                &machine_id,
+                MachineSearchConfig::default()
+            )
+            .await?
+            .is_none()
+        );
+        let (successful_pool, successful_slot) = if fail_ipv6 {
+            (LOOPBACK_IP, DPU_IPV4_LOOPBACK_SLOT)
+        } else {
+            (LOOPBACK_IP_V6, DPU_IPV6_LOOPBACK_SLOT)
+        };
+        let successful = allocation_receipt(&fixture, machine_id, successful_slot).await?;
+        assert_eq!(successful.state, AllocationState::CancelRequested);
+        assert!(matches!(
+            successful.source,
+            AllocationSource::Remote {
+                result: Some(AllocationResult::Allocated(_)),
+                ..
+            }
+        ));
+        assert_eq!(fixture.provider.local.provisioned_count(), 1);
+        fixture
+            .remote(successful_pool)
+            .reconcile(successful.allocation_id, &fixture.cancel)
+            .await?;
+        assert_eq!(
+            allocation_receipt(&fixture, machine_id, successful_slot)
+                .await?
+                .state,
+            AllocationState::Cancelled
+        );
+        let failed_slot = if fail_ipv6 {
+            DPU_IPV6_LOOPBACK_SLOT
+        } else {
+            DPU_IPV4_LOOPBACK_SLOT
+        };
+        let failed_pool = if fail_ipv6 {
+            LOOPBACK_IP_V6
+        } else {
+            LOOPBACK_IP
+        };
+        let failed = allocation_receipt(&fixture, machine_id, failed_slot).await?;
+        assert!(matches!(
+            &failed.source,
+            AllocationSource::Remote {
+                result: Some(AllocationResult::Failed(failure)),
+                ..
+            } if failure.code == AllocationFailureCode::ResourceExhausted
+        ));
+        fixture
+            .remote(failed_pool)
+            .reconcile(failed.allocation_id, &fixture.cancel)
+            .await?;
+        assert_eq!(fixture.provider.local.provisioned_count(), 0);
+        let retry = PreparedDpuLoopback::prepare_with_ipv6(
+            &fixture.env.pool,
+            &fixture.env.api.resource_pool_registry,
+            &fixture.env.common_pools,
+            machine_id,
+            None,
+            None,
+            &fixture.cancel,
+            fixture.env.api.instrumentation.clone(),
+        )
+        .await?;
+        retry.cancel(&fixture.env.pool).await?;
+        for (pool, slot) in [
+            (LOOPBACK_IP, DPU_IPV4_LOOPBACK_SLOT),
+            (LOOPBACK_IP_V6, DPU_IPV6_LOOPBACK_SLOT),
+        ] {
+            let pending = allocation_receipt(&fixture, machine_id, slot).await?;
+            fixture
+                .remote(pool)
+                .reconcile(pending.allocation_id, &fixture.cancel)
+                .await?;
+        }
+        assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    }
+    fixture.stop().await
+}
+
+/// Cancellation after provider preparation must interrupt an actual attachment
+/// wait, roll back entity work and save cleanup for that exact unused request.
+#[crate::sqlx_test]
+async fn remote_ipv6_backfill_cancellation_rolls_back_attachment(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let mut fixture = RemotePoolFixture::start_ipv6(database).await?;
+    fixture
+        .initialize(PoolDefinitionSource::SeedConfiguration)
+        .await?;
+    let machine_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [152; 32],
+        MachineType::Dpu,
+    );
+    seed_missing_loopbacks(&fixture, &[machine_id]).await?;
+    let before = db::machine::get_network_config(&fixture.env.pool, &machine_id).await?;
+    sqlx::raw_sql(
+        "CREATE FUNCTION gate_cancelled_ipv6_attachment() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN PERFORM pg_advisory_xact_lock(856103); RETURN NEW; END $$;
+         CREATE TRIGGER gate_cancelled_ipv6_attachment BEFORE UPDATE ON resource_pool_allocations
+         FOR EACH ROW WHEN (NEW.pool_name = 'lo-ip-v6' AND NEW.state = 'attached')
+         EXECUTE FUNCTION gate_cancelled_ipv6_attachment();",
+    )
+    .execute(&fixture.env.pool)
+    .await?;
+    let mut gate = fixture.env.pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(856103)")
+        .execute(&mut *gate)
+        .await?;
+    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *gate)
+        .await?;
+    let cancel = CancellationToken::new();
+    let mut backfill = Box::pin(update_dpu_loopback_ips_v6(
+        &fixture.env.pool,
+        &fixture.env.api.resource_pool_registry,
+        &fixture.env.common_pools,
+        &cancel,
+        &fixture.env.api.instrumentation,
+    ));
+    tokio::select! {
+        result = &mut backfill => panic!("backfill passed its attachment gate: {result:?}"),
+        _ = db::test_support::postgres::wait_for_blocked_query(&fixture.env.pool, gate_pid, "UPDATE resource_pool_allocations") => {}
+    }
+    let pending = allocation_receipt(&fixture, machine_id, DPU_IPV6_LOOPBACK_SLOT).await?;
+    assert_eq!(pending.state, AllocationState::Pending);
+    cancel.cancel();
+    // Poll cancellation while the statement is still blocked. SQLx queues
+    // rollback; cleanup can finish only after PostgreSQL releases that row.
+    assert!(
+        poll_fn(|cx| Poll::Ready(backfill.as_mut().poll(cx)))
+            .await
+            .is_pending()
+    );
+    gate.rollback().await?;
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(10), &mut backfill).await?,
+        Err(ResourcePoolBackendError::Cancelled {
+            operation: "DPU IPv6 loopback backfill attachment"
+        })
+    ));
+    drop(backfill);
+    let after = db::machine::get_network_config(&fixture.env.pool, &machine_id).await?;
+    assert_eq!(after.value, before.value);
+    assert_eq!(after.version, before.version);
+    let cleanup = allocation_receipt(&fixture, machine_id, DPU_IPV6_LOOPBACK_SLOT).await?;
+    assert_eq!(cleanup.allocation_id, pending.allocation_id);
+    assert_eq!(cleanup.state, AllocationState::CancelRequested);
+    fixture
+        .remote(LOOPBACK_IP_V6)
+        .reconcile(cleanup.allocation_id, &fixture.cancel)
+        .await?;
+    assert_eq!(fixture.provider.local.provisioned_count(), 0);
+    sqlx::raw_sql("DROP TRIGGER gate_cancelled_ipv6_attachment ON resource_pool_allocations; DROP FUNCTION gate_cancelled_ipv6_attachment();")
+        .execute(&fixture.env.pool).await?;
+    update_dpu_loopback_ips_v6(
+        &fixture.env.pool,
+        &fixture.env.api.resource_pool_registry,
+        &fixture.env.common_pools,
+        &fixture.cancel,
+        &fixture.env.api.instrumentation,
+    )
+    .await?;
+    assert!(
+        db::machine::get_network_config(&fixture.env.pool, &machine_id)
+            .await?
+            .loopback_ip_v6
+            .is_some()
+    );
+    fixture.stop().await
+}
+
+/// Exhausting the shared lock retries must abandon remote preparation while a
+/// later independent DPU commits. Cleanup permits a later pass without churn.
+#[crate::sqlx_test]
+async fn remote_ipv6_backfill_exhausted_attempts_cancel_preparation(
+    database: PgPool,
+) -> eyre::Result<()> {
+    let mut fixture = RemotePoolFixture::start_ipv6(database).await?;
+    fixture
+        .initialize(PoolDefinitionSource::SeedConfiguration)
+        .await?;
+    let ids = [153, 154].map(|seed| {
+        MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [seed; 32],
+            MachineType::Dpu,
+        )
+    });
+    seed_missing_loopbacks(&fixture, &ids).await?;
+    let ordered = db::machine::find_dpu_ids_without_loopback_ipv6(&fixture.env.pool).await?;
+    assert_eq!(ordered.len(), 2);
+    let busy = ordered[0];
+    let later = ordered[1];
+    let before = db::machine::get_network_config(&fixture.env.pool, &busy).await?;
+    let mut gate = fixture.env.pool.begin().await?;
+    sqlx::query("SELECT id FROM machines WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(busy)
+        .fetch_one(&mut *gate)
+        .await?;
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        update_dpu_loopback_ips_v6(
+            &fixture.env.pool,
+            &fixture.env.api.resource_pool_registry,
+            &fixture.env.common_pools,
+            &fixture.cancel,
+            &fixture.env.api.instrumentation,
+        ),
+    )
+    .await?
+    .expect_err("the busy DPU must retain the aggregate lock error");
+    assert!(
+        matches!(error, ResourcePoolBackendError::Database(ref source) if source.is_lock_not_available())
+    );
+    let unchanged = db::machine::get_network_config(&fixture.env.pool, &busy).await?;
+    assert_eq!(unchanged.value, before.value);
+    assert_eq!(unchanged.version, before.version);
+    let cleanup = allocation_receipt(&fixture, busy, DPU_IPV6_LOOPBACK_SLOT).await?;
+    assert_eq!(cleanup.state, AllocationState::CancelRequested);
+    assert!(matches!(
+        cleanup.source,
+        AllocationSource::Remote {
+            result: Some(AllocationResult::Allocated(_)),
+            ..
+        }
+    ));
+    let completed = db::machine::get_network_config(&fixture.env.pool, &later).await?;
+    let completed_receipt = allocation_receipt(&fixture, later, DPU_IPV6_LOOPBACK_SLOT).await?;
+    assert!(completed.loopback_ip_v6.is_some());
+    assert_eq!(completed_receipt.state, AllocationState::Attached);
+    assert_eq!(fixture.provider.allocations.load(Ordering::SeqCst), 2);
+    gate.rollback().await?;
+    fixture
+        .remote(LOOPBACK_IP_V6)
+        .reconcile(cleanup.allocation_id, &fixture.cancel)
+        .await?;
+    update_dpu_loopback_ips_v6(
+        &fixture.env.pool,
+        &fixture.env.api.resource_pool_registry,
+        &fixture.env.common_pools,
+        &fixture.cancel,
+        &fixture.env.api.instrumentation,
+    )
+    .await?;
+    assert!(
+        db::machine::get_network_config(&fixture.env.pool, &busy)
+            .await?
+            .loopback_ip_v6
+            .is_some()
+    );
+    let after = db::machine::get_network_config(&fixture.env.pool, &later).await?;
+    assert_eq!(after.value, completed.value);
+    assert_eq!(after.version, completed.version);
+    assert_eq!(
+        allocation_receipt(&fixture, later, DPU_IPV6_LOOPBACK_SLOT).await?,
+        completed_receipt
+    );
+    fixture.stop().await
 }
