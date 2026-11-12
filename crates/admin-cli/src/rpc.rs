@@ -844,6 +844,15 @@ impl ApiClient {
         Ok(self.0.find_domain(request).await?)
     }
 
+    pub(crate) async fn delete_domain(
+        &self,
+        id: ::carbide_uuid::domain::DomainId,
+    ) -> CarbideCliResult<()> {
+        let request = ::rpc::protos::dns::DomainDeletionRequest { id: Some(id) };
+        self.0.delete_domain(request).await?;
+        Ok(())
+    }
+
     pub(crate) async fn update_domain(
         &self,
         domain: ::rpc::protos::dns::Domain,

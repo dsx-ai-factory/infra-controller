@@ -16,8 +16,12 @@
  */
 
 mod create;
+mod delete;
 mod show;
 mod update;
+
+#[cfg(test)]
+mod tests;
 
 // Cross-module re-exports for jump module
 use clap::Parser;
@@ -28,8 +32,6 @@ use crate::cfg::dispatch::Dispatch;
 
 #[derive(Parser, Debug, Dispatch)]
 pub(crate) enum Cmd {
-    #[clap(about = "Display Domain information")]
-    Show(show::Args),
     #[clap(
         about = "Create a Domain",
         long_about = "Create a Domain.\n\n\
@@ -38,6 +40,10 @@ pub(crate) enum Cmd {
             The inherited --extended and --sort-by options have no effect on this command."
     )]
     Create(create::Args),
+    #[clap(about = "Delete an unreferenced DNS domain")]
+    Delete(delete::Args),
+    #[clap(about = "Display Domain information")]
+    Show(show::Args),
     #[clap(about = "Update domain default TTL")]
     Update(update::Args),
 }

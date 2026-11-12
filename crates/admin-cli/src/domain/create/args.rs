@@ -21,14 +21,17 @@ use clap::Parser;
 #[command(after_long_help = "\
 EXAMPLES:
 
-Create a domain:
+Create a domain using the site default TTL:
     $ nico-admin-cli domain create mysite.example.com
+
+Create a domain with a ten-minute default record TTL:
+    $ nico-admin-cli domain create example.com --default-ttl 600
 
 ")]
 pub(crate) struct Args {
     #[clap(
         value_name = "NAME",
-        help = "Lowercase domain name. Reverse zones (in-addr.arpa, ip6.arpa) and duplicate live names are rejected"
+        help = "Lowercase domain name. Reverse zones (in-addr.arpa, ip6.arpa) are rejected"
     )]
     pub(super) name: String,
 

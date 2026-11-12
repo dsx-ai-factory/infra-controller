@@ -138,12 +138,7 @@ fn render_node(
     let man_file = man_dir.join(format!("{}.1", path.join("-")));
     let body = strip_sections(&man_to_markdown(&man_file)?, &["SUBCOMMANDS", "EXTRA"]);
     let body = clean_pandoc_markdown(&format_markdown_links(&body));
-    let body = if uses_clap_synopsis(&path) {
-        let usage = cmd.clone().render_usage().to_string();
-        replace_synopsis(&body, usage.strip_prefix("Usage: ").unwrap_or(&usage))
-    } else {
-        body
-    };
+    let body = render_synopsis(cmd, &path, &body);
 
     let children: Vec<&Command> = cmd
         .get_subcommands()
@@ -409,15 +404,25 @@ fn plain_cli_syntax(line: &str) -> String {
         .replace("\\`", "`")
 }
 
+fn render_synopsis(cmd: &Command, path: &[String], body: &str) -> String {
+    if uses_clap_synopsis(path) {
+        let usage = cmd.clone().render_usage().to_string();
+        replace_synopsis(body, usage.strip_prefix("Usage: ").unwrap_or(&usage))
+    } else {
+        body.to_owned()
+    }
+}
+
 /// Use Clap's usage for commands whose required or repeated arguments, selector
-/// groups, or explicit usage are not preserved by `clap_mangen`.
+/// groups, option operands, or explicit usage are not preserved by `clap_mangen`.
 fn uses_clap_synopsis(path: &[String]) -> bool {
     matches!(
         (
             path.get(1).map(String::as_str),
             path.get(2).map(String::as_str),
         ),
-        (Some("machine-validation"), Some("logs"))
+        (Some("domain"), Some("create" | "delete" | "update"))
+            | (Some("machine-validation"), Some("logs"))
             | (Some("machine"), Some("states"))
             | (Some("firmware"), Some("nic"))
             | (Some("spx-maintenance"), _)
@@ -590,8 +595,8 @@ mod tests {
     use carbide_test_support::value_scenarios;
 
     use super::{
-        BIN, clean_pandoc_markdown, command_tree, format_markdown_links, replace_synopsis,
-        uses_clap_synopsis,
+        BIN, clean_pandoc_markdown, command_tree, format_markdown_links, render_synopsis,
+        replace_synopsis, uses_clap_synopsis,
     };
 
     #[test]
@@ -673,6 +678,27 @@ An inline `HostInband` value and `mac=<mac>` selector.
         assert_eq!(
             replace_synopsis(markdown, "nico-admin-cli logs --id <ID>"),
             "## NAME\n\nlogs\n\n## SYNOPSIS\n\n```text\nnico-admin-cli logs --id <ID>\n```\n\n## DESCRIPTION\n\ntext\n"
+        );
+    }
+
+    #[test]
+    fn domain_write_synopses_use_valid_cli_usage() {
+        let root = command_tree();
+        value_scenarios!(run = |subcommand| {
+            let command = root
+                .find_subcommand("domain")
+                .unwrap()
+                .find_subcommand(subcommand)
+                .unwrap();
+            let path = [BIN, "domain", subcommand].map(String::from);
+            let man_body = "## SYNOPSIS\n\n```text\nusage without option operands\n```\n\n## OPTIONS\n\nRetained options.\n";
+            render_synopsis(command, &path, man_body)
+        };
+            "write commands retain required IDs and option operands" {
+                "create" => "## SYNOPSIS\n\n```text\nnico-admin-cli domain create [OPTIONS] <NAME>\n```\n\n## OPTIONS\n\nRetained options.\n".to_string(),
+                "delete" => "## SYNOPSIS\n\n```text\nnico-admin-cli domain delete [OPTIONS] <DomainId>\n```\n\n## OPTIONS\n\nRetained options.\n".to_string(),
+                "update" => "## SYNOPSIS\n\n```text\nnico-admin-cli domain update [OPTIONS] --default-ttl <SECONDS> <DomainId>\n```\n\n## OPTIONS\n\nRetained options.\n".to_string(),
+            }
         );
     }
 

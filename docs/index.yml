@@ -411,6 +411,18 @@ navigation:
               path: development/tls.md
             - page: nico-admin-cli
               path: manuals/nico-admin-cli.md
+            - section: Domain CLI Reference
+              contents:
+                - link: Domain Overview
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/domain/domain.md
+                - link: Create a Domain
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/domain/domain-create.md
+                - link: Show Domains
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/domain/domain-show.md
+                - link: Update a Domain
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/domain/domain-update.md
+                - link: Delete a Domain
+                  href: https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/domain/domain-delete.md
             - page: SPDM Attestation Jobs
               path: design/attestation/spdm-jobs.md
             - page: SPDM Job Commands
