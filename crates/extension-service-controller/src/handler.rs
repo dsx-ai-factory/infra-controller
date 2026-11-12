@@ -20,14 +20,14 @@
 use carbide_dpf::{
     DetachedDpfResourceObservation, DetachedDpuServiceChainDefinition,
     DetachedDpuServiceDefinition, DetachedDpuServiceInterfaceDefinition, DpfError,
-    DpuServiceObservation, detached_dpu_service_chain_spec, detached_dpu_service_interface_spec,
+    DpuServiceObservation, detached_dpu_service_interface_spec,
 };
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_uuid::extension_service::ExtensionServiceId;
 use db::DatabaseError;
 use futures::{StreamExt, stream};
 use model::extension_service::{
-    DPF_HELM_CHART_OWNER_LABEL, DpfHelmChartServiceData, ExtensionService,
+    DPF_HELM_CHART_OWNER_LABEL, DpfHelmChartIdentity, DpfHelmChartServiceData, ExtensionService,
     ExtensionServiceLifecycleState, ServiceVpcAddressFamily,
 };
 use state_controller::state_handler::{
@@ -121,7 +121,7 @@ async fn reconcile_registration(
 ) -> Result<StateHandlerOutcome<ExtensionServiceLifecycleState>, StateHandlerError> {
     // Load and commit the service row, V1 definition, references, and MAC before contacting DPF so
     // this pass cannot mix database versions.
-    let desired = match load_desired_registration(
+    let mut desired = match load_desired_registration(
         service_id,
         mode,
         &ctx.services.db_pool,
@@ -374,6 +374,27 @@ async fn reconcile_registration(
                     "could not read service-VPC chain; retrying",
                     error,
                 ));
+            }
+        }
+    }
+
+    // Read durable exclusions after the Kubernetes observations so repair cannot pair an old
+    // selector snapshot with a newer resource version. Intervening Kubernetes writes to that chain
+    // invalidate the repair's observed UID/resource-version preconditions.
+    if !desired.resources.chains.is_empty() {
+        let selectors =
+            db::extension_service::find_chain_selectors(&ctx.services.db_pool, service_id).await?;
+        let identity = DpfHelmChartIdentity::from_service_id(service_id);
+        for selector in selectors {
+            let name = identity.slot_chain_name(selector.interface_ordinal, selector.slot);
+            if let Some(chain) = desired
+                .resources
+                .chains
+                .iter_mut()
+                .find(|chain| chain.name == name)
+            {
+                chain.excluded_dpu_ids = selector.excluded_dpu_ids;
+                chain.selector_version = Some(selector.version);
             }
         }
     }
@@ -1286,37 +1307,18 @@ async fn reconcile_obsolete_chains(
         ));
     }
 
-    // The observed resource version fences each repair without another Kubernetes read.
+    // Both observed identities fence each repair without a pre-write Kubernetes read.
     for (existing, definition) in repairs {
-        let Some(name) = existing.name.as_deref() else {
-            return Some(permanent_failure(
-                service_id,
-                "DPUServiceChain is missing metadata.name",
-                "observed owned chain has no name",
-            ));
-        };
-        let Some(resource_version) = existing.resource_version.as_deref() else {
-            return Some(permanent_failure(
-                service_id,
-                "DPUServiceChain update requires metadata.resourceVersion",
-                "observed DPUServiceChain is missing metadata.resourceVersion",
-            ));
-        };
-        let spec = match detached_dpu_service_chain_spec(definition) {
-            Ok(spec) => spec,
-            Err(error) => {
-                return Some(permanent_failure(
-                    service_id,
-                    "could not project desired DPUServiceChain specification",
-                    error,
+        let preconditions = match existing.delete_preconditions() {
+            Ok(preconditions) => preconditions,
+            Err(_) => {
+                return Some(StateHandlerOutcome::wait(
+                    "DPUServiceChain repair requires metadata.uid and metadata.resourceVersion; retrying".to_owned(),
                 ));
             }
         };
         let patched = match dpf_sdk
-            .patch_detached_dpu_service_chain(
-                name,
-                detached_resource_spec_patch(spec, resource_version),
-            )
+            .patch_detached_dpu_service_chain(definition, &preconditions)
             .await
         {
             Ok(patched) => patched,

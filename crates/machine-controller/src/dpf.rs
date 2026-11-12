@@ -25,7 +25,9 @@ use async_trait::async_trait;
 use carbide_dpf::types::{
     DetachedDpfResourceObservation, DetachedDpuServiceChainDefinition,
     DetachedDpuServiceDefinition, DetachedDpuServiceInterfaceDefinition, DpfDeletePreconditions,
-    DpuServiceObservation, DpuServiceVersion, HostDpfSnapshot, ServiceTemplateVersion,
+    DpfResourcePreconditions, DpuServiceObservation, DpuServiceVersion, HostDpfSnapshot,
+    ServiceTemplateVersion, ServiceVpcChainObservation, ServiceVpcChainRequest,
+    ServiceVpcNodeIdentity,
 };
 use carbide_dpf::{
     AstraRoutePrefixes, BmcPasswordProvider, DPU_ENABLED_NODE_LABEL, DpfError, DpfSdk,
@@ -49,7 +51,7 @@ use crate::io::MachineStateControllerIO;
 
 /// Label key used by [`CarbideDPFLabeler`] to stamp the carbide `MachineId` of
 /// the DPU onto its DPUDevice. Propagates to the DPU CR via DPF.
-const DPU_MACHINE_ID_LABEL: &str = "carbide.nvidia.com/dpu-machine-id";
+const DPU_MACHINE_ID_LABEL: &str = carbide_dpf::DPU_MACHINE_ID_LABEL;
 
 /// Label key used by [`CarbideDPFLabeler`] to mark a DPU device as
 /// carbide-controlled. Propagates to the DPU CR.
@@ -280,11 +282,11 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
         definition: &DetachedDpuServiceChainDefinition,
     ) -> Result<DetachedDpfResourceObservation, DpfError>;
 
-    /// Apply a revision-fenced JSON Patch to one detached DPUServiceChain.
+    /// Replace the owned chain spec and stamp its observed UID using both write preconditions.
     async fn patch_detached_dpu_service_chain(
         &self,
-        name: &str,
-        patch: serde_json::Value,
+        definition: &DetachedDpuServiceChainDefinition,
+        preconditions: &DpfResourcePreconditions,
     ) -> Result<DetachedDpfResourceObservation, DpfError>;
 
     /// Delete the exact detached DPUServiceChain registration parent observed.
@@ -294,7 +296,38 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
         preconditions: &DpfDeletePreconditions,
     ) -> Result<(), DpfError>;
 
+    /// Backfills this DPU's declared Node identity, rejecting reassignment and stale patches.
+    /// Callers must pair the raw device ID with its persisted DPU ID and verify the remote Node.
+    /// Each management read or patch has a ten-second deadline without automatic retries.
+    async fn ensure_dpu_device_node_identity(
+        &self,
+        dpu_device_name: &str,
+        dpu_id: DpuMachineId,
+    ) -> Result<(), DpfError>;
+
+    /// Resolves current remote Node UIDs from persisted DPU/device pairs before ServiceChain activation.
+    ///
+    /// Device IDs exclude the device- prefix. The caller must retain each returned identity before
+    /// authorizing creation and must not replace that baseline during retirement. Missing or
+    /// ambiguous mappings fail the complete lookup; this operation never changes placement.
+    /// See [DpfSdk::resolve_service_vpc_nodes] for batching and attempt deadlines.
+    async fn resolve_service_vpc_nodes(
+        &self,
+        devices: &BTreeMap<DpuMachineId, String>,
+    ) -> Result<BTreeMap<DpuMachineId, ServiceVpcNodeIdentity>, DpfError>;
+
+    /// Observes each requested chain using committed selector desire and retained Node identity.
+    ///
+    /// Results retain input order and caller correlation; failures are explicit ReadFailure evidence.
+    /// Callers must revalidate persisted desire and correlation before consuming conclusive evidence.
+    /// See [DpfSdk::observe_service_vpc_chains] for acknowledgement ordering and supported cleanup.
+    async fn observe_service_vpc_chains(
+        &self,
+        requests: &[ServiceVpcChainRequest],
+    ) -> Vec<ServiceVpcChainObservation>;
+
     /// Merge changes into a DPUDevice's DPU-cluster node labels.
+    /// Attempts to set or remove [`carbide_dpf::DPU_MACHINE_ID_LABEL`] return an error.
     async fn merge_dpu_device_node_labels(
         &self,
         dpu_device_name: &str,
@@ -1129,10 +1162,12 @@ impl DpfOperations for DpfSdkOps {
 
     async fn patch_detached_dpu_service_chain(
         &self,
-        name: &str,
-        patch: serde_json::Value,
+        definition: &DetachedDpuServiceChainDefinition,
+        preconditions: &DpfResourcePreconditions,
     ) -> Result<DetachedDpfResourceObservation, DpfError> {
-        self.sdk.patch_detached_dpu_service_chain(name, patch).await
+        self.sdk
+            .patch_detached_dpu_service_chain(definition, preconditions)
+            .await
     }
 
     async fn delete_detached_dpu_service_chain(
@@ -1143,6 +1178,33 @@ impl DpfOperations for DpfSdkOps {
         self.sdk
             .delete_detached_dpu_service_chain(name, preconditions)
             .await
+    }
+
+    /// Forwards Node identity backfill to DpfSdk so machine reconciliation uses its fenced update.
+    async fn ensure_dpu_device_node_identity(
+        &self,
+        dpu_device_name: &str,
+        dpu_id: DpuMachineId,
+    ) -> Result<(), DpfError> {
+        self.sdk
+            .ensure_dpu_device_node_identity(dpu_device_name, dpu_id)
+            .await
+    }
+
+    /// Resolves DPU/device pairs through DpfSdk so callers can retain the actual remote Node UIDs.
+    async fn resolve_service_vpc_nodes(
+        &self,
+        devices: &BTreeMap<DpuMachineId, String>,
+    ) -> Result<BTreeMap<DpuMachineId, ServiceVpcNodeIdentity>, DpfError> {
+        self.sdk.resolve_service_vpc_nodes(devices).await
+    }
+
+    /// Reads chain evidence through DpfSdk so callers receive its ordered identity checks.
+    async fn observe_service_vpc_chains(
+        &self,
+        requests: &[ServiceVpcChainRequest],
+    ) -> Vec<ServiceVpcChainObservation> {
+        self.sdk.observe_service_vpc_chains(requests).await
     }
 
     async fn merge_dpu_device_node_labels(
