@@ -1163,6 +1163,13 @@ pub struct HostProfile {
     /// When `true` the ingestion state machine skips re-enabling lockdown
     /// after BIOS/UEFI configuration.
     pub disable_lockdown: bool,
+    /// When `true` this machine is designated to retain-hbn-config-on-boot.
+    /// This allows the machine to boot while NICO's DHCP and gRPC services
+    /// are unavailable. No
+    /// state machine reads this field yet. Defaulted on deserialization
+    /// because snapshots written before this field exists omit it.
+    #[serde(default)]
+    pub retain_hbn_config_on_boot: bool,
 }
 
 impl HostProfile {
@@ -1178,6 +1185,10 @@ impl HostProfile {
                 disable_lockdown: d
                     .host_lifecycle_profile
                     .disable_lockdown
+                    .unwrap_or_default(),
+                retain_hbn_config_on_boot: d
+                    .host_lifecycle_profile
+                    .retain_hbn_config_on_boot
                     .unwrap_or_default(),
             },
             None => Self::default(),
@@ -2956,8 +2967,11 @@ pub enum MachineMaintenanceOperation {
         #[serde(default)]
         graceful: bool,
     },
-    /// Reset the host (restart / AC power cycle).
-    Reset,
+    /// Restart the host, gracefully when requested and forcibly otherwise.
+    Reset {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        graceful: bool,
+    },
     /// Gracefully reboot the host without falling back to a forced restart.
     Reboot,
     /// Reset the identified Redfish chassis through the host BMC.
@@ -4530,28 +4544,53 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_reboot_preserves_legacy_reset_serialization() {
-        for (encoded, operation) in [
-            (
-                serde_json::json!({"operation": "reset"}),
-                MachineMaintenanceOperation::Reset,
-            ),
-            (
-                serde_json::json!({"operation": "reboot"}),
-                MachineMaintenanceOperation::Reboot,
-            ),
-        ] {
-            let wire = serde_json::json!({"state": "maintenance", "operation": encoded});
-            let state: ManagedHostState = serde_json::from_value(wire.clone()).unwrap();
-            assert_eq!(
-                state,
-                ManagedHostState::Maintenance {
-                    operation,
-                    request: None
-                }
-            );
-            assert_eq!(serde_json::to_value(state).unwrap(), wire);
-        }
+    fn maintenance_restart_preserves_mode_and_reads_legacy_operations() {
+        check_values(
+            [
+                Check {
+                    scenario: "legacy reset preserves its serialized shape",
+                    input: serde_json::json!({"operation": "reset"}),
+                    expect: (
+                        MachineMaintenanceOperation::Reset { graceful: false },
+                        serde_json::json!({"operation": "reset"}),
+                    ),
+                },
+                Check {
+                    scenario: "explicit forced restart",
+                    input: serde_json::json!({"operation": "reset", "graceful": false}),
+                    expect: (
+                        MachineMaintenanceOperation::Reset { graceful: false },
+                        serde_json::json!({"operation": "reset"}),
+                    ),
+                },
+                Check {
+                    scenario: "graceful restart",
+                    input: serde_json::json!({"operation": "reset", "graceful": true}),
+                    expect: (
+                        MachineMaintenanceOperation::Reset { graceful: true },
+                        serde_json::json!({"operation": "reset", "graceful": true}),
+                    ),
+                },
+                Check {
+                    scenario: "existing reboot remains readable",
+                    input: serde_json::json!({"operation": "reboot"}),
+                    expect: (
+                        MachineMaintenanceOperation::Reboot,
+                        serde_json::json!({"operation": "reboot"}),
+                    ),
+                },
+            ],
+            |encoded| {
+                let wire = serde_json::json!({"state": "maintenance", "operation": encoded});
+                let state: ManagedHostState = serde_json::from_value(wire).unwrap();
+                let serialized = serde_json::to_value(&state).unwrap();
+                let ManagedHostState::Maintenance { operation, request } = state else {
+                    panic!("expected maintenance state");
+                };
+                assert!(request.is_none());
+                (operation, serialized["operation"].clone())
+            },
+        );
     }
 
     #[test]
@@ -6468,10 +6507,12 @@ mod tests {
             "lockdown disabled (true)" {
                 HostProfile {
                     disable_lockdown: true,
+                    retain_hbn_config_on_boot: false,
                 } => Yields((
-                    r#"{"disable_lockdown":true}"#.to_string(),
+                    r#"{"disable_lockdown":true,"retain_hbn_config_on_boot":false}"#.to_string(),
                     HostProfile {
                         disable_lockdown: true,
+                        retain_hbn_config_on_boot: false,
                     },
                 )),
             }
@@ -6479,10 +6520,25 @@ mod tests {
             "lockdown enabled (false)" {
                 HostProfile {
                     disable_lockdown: false,
+                    retain_hbn_config_on_boot: false,
                 } => Yields((
-                    r#"{"disable_lockdown":false}"#.to_string(),
+                    r#"{"disable_lockdown":false,"retain_hbn_config_on_boot":false}"#.to_string(),
                     HostProfile {
                         disable_lockdown: false,
+                        retain_hbn_config_on_boot: false,
+                    },
+                )),
+            }
+
+            "retain-hbn-config-on-boot designated (true)" {
+                HostProfile {
+                    disable_lockdown: false,
+                    retain_hbn_config_on_boot: true,
+                } => Yields((
+                    r#"{"disable_lockdown":false,"retain_hbn_config_on_boot":true}"#.to_string(),
+                    HostProfile {
+                        disable_lockdown: false,
+                        retain_hbn_config_on_boot: true,
                     },
                 )),
             }
@@ -6494,6 +6550,7 @@ mod tests {
         let db_default = r#"{"disable_lockdown": false}"#;
         let profile: HostProfile = serde_json::from_str(db_default).unwrap();
         assert!(!profile.disable_lockdown);
+        assert!(!profile.retain_hbn_config_on_boot);
     }
 
     #[test]
@@ -6501,7 +6558,8 @@ mod tests {
         assert_eq!(
             HostProfile::default(),
             HostProfile {
-                disable_lockdown: false
+                disable_lockdown: false,
+                retain_hbn_config_on_boot: false,
             }
         );
     }
@@ -6528,6 +6586,17 @@ mod tests {
 
         data.host_lifecycle_profile.disable_lockdown = Some(false);
         assert!(!HostProfile::from_expected_machine(Some(&data)).disable_lockdown);
+    }
+
+    #[test]
+    fn host_profile_from_expected_resolves_retain_hbn_config_on_boot() {
+        let mut data = ExpectedMachineData::default();
+
+        data.host_lifecycle_profile.retain_hbn_config_on_boot = Some(true);
+        assert!(HostProfile::from_expected_machine(Some(&data)).retain_hbn_config_on_boot);
+
+        data.host_lifecycle_profile.retain_hbn_config_on_boot = Some(false);
+        assert!(!HostProfile::from_expected_machine(Some(&data)).retain_hbn_config_on_boot);
     }
 
     #[test]

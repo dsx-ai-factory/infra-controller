@@ -35,7 +35,8 @@ use carbide_uuid::{DbColumns, DbTable};
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
 pub use routing_profile::{
-    PrefixFilterPolicyEntry, RouteTargetConfig, RouteTargetConfigError, VpcRoutingProfileOverrides,
+    PrefixFilterPolicyEntry, PrefixRouteTargetConfig, RouteTargetConfig, RouteTargetConfigError,
+    VpcRoutingProfileOverrides,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;

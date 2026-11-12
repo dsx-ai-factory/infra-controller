@@ -38,7 +38,7 @@ use metrics_endpoint::{
     HealthController, MetricsEndpointConfig, MetricsSetup, new_metrics_setup, run_metrics_endpoint,
 };
 use opentelemetry::StringValue;
-use rpc::forge_tls_client::{self, ApiConfig, ForgeClientConfig};
+use rpc::carbide_tls_client::{self, ApiConfig, CarbideClientConfig};
 use tokio::runtime::Runtime;
 use tokio::time::{interval, timeout};
 
@@ -424,7 +424,7 @@ async fn certificate_loop() {
             .metrics
             .clone();
         if let Some(metrics) = metrics
-            && let Some(client_expiry) = metrics.forge_client_config.client_cert_expiry()
+            && let Some(client_expiry) = metrics.carbide_client_config.client_cert_expiry()
         {
             metrics
                 .certificate_expiration_value
@@ -436,7 +436,7 @@ async fn certificate_loop() {
 fn initialize_metrics(mconf: &MetricsSetup) -> CarbideDhcpMetrics {
     let certificate_expiration_value = Arc::new(AtomicI64::new(0));
     let metrics = CarbideDhcpMetrics {
-        forge_client_config: tls::build_forge_client_config(),
+        carbide_client_config: tls::build_carbide_client_config(),
         certificate_expiration_value: certificate_expiration_value.clone(),
     };
 
@@ -529,9 +529,12 @@ pub(super) fn metrics_server() {
     }
 }
 
-async fn check_api_connectivity(carbide_api_url: &str, client_config: &ForgeClientConfig) -> bool {
+async fn check_api_connectivity(
+    carbide_api_url: &str,
+    client_config: &CarbideClientConfig,
+) -> bool {
     let api_config: ApiConfig<'_> = ApiConfig::new(carbide_api_url, client_config);
-    match forge_tls_client::ForgeTlsClient::retry_build(&api_config).await {
+    match carbide_tls_client::CarbideTlsClient::retry_build(&api_config).await {
         Ok(mut client) => {
             let request = tonic::Request::new(rpc::forge::EchoRequest {
                 message: "dhcp_echo".into(),
@@ -554,7 +557,7 @@ async fn check_api_connectivity(carbide_api_url: &str, client_config: &ForgeClie
 
 async fn start_readiness_monitoring() {
     let mut readiness_interval = interval(READINESS_CHECK_FREQUENCY);
-    let forge_client_config = tls::build_forge_client_config();
+    let carbide_client_config = tls::build_carbide_client_config();
 
     let url = &CONFIG.read().expect("config poisoned").api_endpoint.clone();
 
@@ -562,7 +565,7 @@ async fn start_readiness_monitoring() {
         readiness_interval.tick().await;
         match timeout(
             Duration::from_secs(10),
-            check_api_connectivity(url, &forge_client_config),
+            check_api_connectivity(url, &carbide_client_config),
         )
         .await
         {

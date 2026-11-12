@@ -20,12 +20,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bmc_backend::BackendBmc;
+use bmc_runtime::DriverConnector;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::{
     BmcCredentialOps, RedfishAuth, RedfishClientCreationError, RedfishClientPool,
 };
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
+use carbide_utils::redfish::BmcAccessInfo;
 use libredfish::model::oem::nvidia_dpu::NicMode;
 use libredfish::model::service_root::RedfishVendor;
 use libredfish::{Redfish, RedfishError};
@@ -48,6 +51,9 @@ pub(super) struct RedfishClient {
     /// and everything when `None`, uses the direct pools above exactly as
     /// before the proxy existed.
     proxied: Option<ProxiedPools>,
+    /// Connects moved BMC operations through their drivers when the site
+    /// sets `bmc_backend = "drivers"`; `None` runs them through libredfish.
+    pub(super) driver_connector: Option<Arc<DriverConnector>>,
 }
 
 /// The pools that reach nico-bmc-proxy, handed to site-explorer only when
@@ -91,7 +97,41 @@ impl RedfishClient {
             redfish_client_pool,
             nv_redfish_client_pool,
             proxied,
+            driver_connector: None,
         }
+    }
+
+    /// Connects to an established endpoint through the configured
+    /// `bmc_backend`, selecting drivers for the identity `report` recorded.
+    #[expect(
+        dead_code,
+        reason = "callers arrive as operations move to the driver system"
+    )]
+    pub(super) async fn connect_established(
+        &self,
+        bmc_ip_address: SocketAddr,
+        bmc: EstablishedBmc,
+        report: &EndpointExplorationReport,
+    ) -> Result<BackendBmc, EndpointExplorationError> {
+        let Some(connector) = &self.driver_connector else {
+            return self
+                .create_established_redfish_client(bmc_ip_address, bmc, None)
+                .await
+                .map(BackendBmc::Libredfish)
+                .map_err(map_redfish_client_creation_error);
+        };
+        let bmc_access_info = BmcAccessInfo {
+            host: bmc_ip_address.ip().to_string(),
+            port: Some(bmc_ip_address.port()),
+            mac_address: bmc.bmc_mac_address,
+        };
+        connector
+            .connect(&bmc_access_info, report)
+            .await
+            .map(BackendBmc::from)
+            .map_err(|error| EndpointExplorationError::Other {
+                details: format!("Cannot connect to {bmc_ip_address} through its drivers: {error}"),
+            })
     }
 
     /// Client for an established endpoint. With `[bmc_proxy]` enabled it
@@ -848,29 +888,13 @@ pub(crate) fn map_redfish_error(error: RedfishError) -> EndpointExplorationError
     }
 }
 
-fn nv_error_classifier(
-    err: &carbide_redfish::nv_redfish::BmcError,
-) -> Option<bmc_explorer::ErrorClass> {
-    type BmcError = carbide_redfish::nv_redfish::BmcError;
-    match err {
-        BmcError::InvalidResponse { status, .. } => match *status {
-            http::StatusCode::NOT_FOUND => Some(bmc_explorer::ErrorClass::NotFound),
-            http::StatusCode::INTERNAL_SERVER_ERROR => {
-                Some(bmc_explorer::ErrorClass::InternalServerError)
-            }
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 fn nv_bmc_explore_config(
     boot_interface: Option<&BootInterfaceTarget>,
     explore_drive_firmware: bool,
 ) -> bmc_explorer::Config<'static, carbide_redfish::nv_redfish::RedfishBmc> {
     bmc_explorer::Config {
         boot_interface_mac: boot_interface.map(BootInterfaceTarget::mac_address),
-        error_classifier: &nv_error_classifier,
+        error_classifier: &bmc_explorer::nv_redfish_error_class,
         // Chosen arbitrarily: we want to wait a bit between tries,
         // but not for too long relative to the total exploration
         // time.

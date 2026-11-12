@@ -36,6 +36,193 @@ use crate::tests::common::api_fixtures::site_explorer::create_expected_switch;
 use crate::tests::common::api_fixtures::{TestEnv, create_test_env};
 
 #[crate::sqlx_test]
+async fn compute_restart_preserves_intent_and_rejects_rms_ac_cycle(pool: sqlx::PgPool) {
+    use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
+    use component_manager::component_manager::ComponentManager;
+    use component_manager::mock::{MockComputeTrayManager, MockPowerShelfManager};
+    use model::expected_machine::ExpectedMachineData;
+    use model::machine::{
+        CURRENT_STATE_MODEL_VERSION, MachineMaintenanceOperation, ManagedHostState,
+    };
+
+    use crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder;
+
+    let env = create_test_env(pool.clone()).await;
+    let rack_id = RackId::new("queued-compute-restart");
+    let machine_id = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [91; 32],
+        MachineType::Host,
+    );
+    let host_id = HostMachineId::try_from(machine_id).unwrap();
+    let mut txn = pool.begin().await.unwrap();
+    TestRackDbBuilder::new()
+        .with_rack_id(rack_id.clone())
+        .persist(&mut txn)
+        .await
+        .unwrap();
+    db::machine::create(
+        &mut txn,
+        None,
+        &machine_id,
+        ManagedHostState::Ready,
+        Some(&ExpectedMachineData {
+            rack_id: Some(rack_id),
+            ..Default::default()
+        }),
+        CURRENT_STATE_MODEL_VERSION,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let manager = ComponentManager::new(
+        Arc::new(MockNvSwitchManager::default()),
+        Arc::new(MockPowerShelfManager),
+        Arc::new(MockComputeTrayManager),
+        false,
+        false,
+        true,
+    );
+    let api = TestApiBuilder::new(
+        pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_component_manager(Arc::new(manager))
+    .build();
+    let response = crate::handlers::component_manager::component_power_control(
+        &api,
+        Request::new(rpc::ComponentPowerControlRequest {
+            target: Some(rpc::component_power_control_request::Target::MachineIds(
+                ::rpc::common::HostMachineIdList {
+                    machine_ids: vec![host_id],
+                },
+            )),
+            action: ::rpc::common::SystemPowerControl::GracefulRestart as i32,
+            bypass_state_controller: false,
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(response.results.len(), 1);
+    assert_eq!(
+        response.results[0].status,
+        rpc::ComponentManagerStatusCode::Success as i32
+    );
+
+    let mut txn = pool.begin().await.unwrap();
+    let machine = db::machine::find_one(txn.as_mut(), &host_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let request = machine.machine_maintenance_requested.unwrap();
+    assert_eq!(
+        request.operation,
+        MachineMaintenanceOperation::Reset { graceful: true }
+    );
+    assert_eq!(request.initiator, "component-manager");
+    assert_eq!(machine.state.value, ManagedHostState::Ready);
+
+    let power = db::power_options::get_by_ids(&[host_id], &mut txn)
+        .await
+        .unwrap()
+        .remove(0);
+    let before = db::power_options::update_desired_state(
+        &host_id,
+        model::power_manager::PowerState::Off,
+        &power.desired_power_state_version,
+        &mut txn,
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
+    let mock = Arc::new(api_test_helper::mock_rms::MockRmsApi::new());
+    for (scenario, use_state_controller, bypass_state_controller) in [
+        ("queued RMS", true, false),
+        ("direct RMS", false, false),
+        ("bypassed RMS", true, true),
+    ] {
+        let backend = Arc::new(component_manager::rms::RmsBackend::new(
+            mock.clone(),
+            None,
+            pool.clone(),
+            Arc::new(
+                crate::tests::common::api_fixtures::get_config_with_rack_profiles().rack_profiles,
+            ),
+            false,
+        ));
+        let manager = ComponentManager::new(
+            Arc::new(MockNvSwitchManager::default()),
+            Arc::new(MockPowerShelfManager),
+            backend,
+            false,
+            false,
+            use_state_controller,
+        );
+        let api = TestApiBuilder::new(
+            pool.clone(),
+            env.common_pools.clone(),
+            env.api.work_lock_manager_handle.clone(),
+        )
+        .with_component_manager(Arc::new(manager))
+        .build();
+        let response = crate::handlers::component_manager::component_power_control(
+            &api,
+            Request::new(rpc::ComponentPowerControlRequest {
+                target: Some(rpc::component_power_control_request::Target::MachineIds(
+                    ::rpc::common::HostMachineIdList {
+                        machine_ids: vec![host_id],
+                    },
+                )),
+                action: ::rpc::common::SystemPowerControl::AcPowercycle as i32,
+                bypass_state_controller,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(
+            response.results[0].status,
+            rpc::ComponentManagerStatusCode::InternalError as i32,
+            "{scenario}"
+        );
+        assert!(
+            response.results[0]
+                .error
+                .contains("does not support AC power cycle")
+        );
+
+        let mut txn = pool.begin().await.unwrap();
+        let after = db::power_options::get_by_ids(&[host_id], &mut txn)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            serde_json::to_value(after).unwrap(),
+            serde_json::to_value(&before).unwrap(),
+            "{scenario}"
+        );
+        let machine = db::machine::find_one(txn.as_mut(), &host_id, Default::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(machine.machine_maintenance_requested, Some(request.clone()));
+        assert_eq!(machine.state.value, ManagedHostState::Ready);
+
+        assert!(
+            mock.batch_set_power_state_calls().await.is_empty(),
+            "{scenario}"
+        );
+    }
+}
+
+#[crate::sqlx_test]
 async fn switch_firmware_status_uses_only_current_cycle_persistence(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {

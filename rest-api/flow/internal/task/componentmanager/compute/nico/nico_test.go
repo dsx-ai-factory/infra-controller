@@ -6,6 +6,7 @@ package nico
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -543,26 +544,41 @@ func TestFirmwareControl_RefusesInUseMachine(t *testing.T) {
 	assert.Contains(t, err.Error(), "timed out")
 }
 
-// TestPowerControl_OverrideBypassesReadinessCheck verifies that
-// OverrideReadinessCheck short-circuits the readiness gate on
-// PowerControl. The host is reported as in-use — which would otherwise
-// block the call — yet the operation is expected to proceed past the
-// gate.
+type powerControlClient struct {
+	nicoapi.Client
+	request *corev1.ComponentPowerControlRequest
+	err     error
+}
+
+func (c *powerControlClient) ComponentPowerControl(_ context.Context, req *corev1.ComponentPowerControlRequest) (*corev1.ComponentPowerControlResponse, error) {
+	c.request = req
+	return &corev1.ComponentPowerControlResponse{}, c.err
+}
+
 func TestPowerControl_OverrideBypassesReadinessCheck(t *testing.T) {
-	reader := readiness.NewMemReader()
-	reader.SetStatus("machine-1", inUseStatus())
-
-	m := newManagerForReadinessTest(t, nicoapi.NewMockClient(), reader)
-	target := common.Target{
-		Type:        devicetypes.ComponentTypeCompute,
-		Identifiers: []string{"machine-1"},
+	backendError := errors.New("power backend unavailable")
+	for name, backendErr := range map[string]error{"success": nil, "backend failure": backendError} {
+		t.Run(name, func(t *testing.T) {
+			reader := readiness.NewMemReader()
+			reader.SetStatus("machine-1", inUseStatus())
+			client := &powerControlClient{Client: nicoapi.NewMockClient(), err: backendErr}
+			m := newManagerForReadinessTest(t, client, reader)
+			target := common.Target{Type: devicetypes.ComponentTypeCompute, Identifiers: []string{"machine-1"}}
+			err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
+				Operation:              operations.PowerOperationForcePowerOff,
+				OverrideReadinessCheck: true,
+			})
+			if backendErr != nil {
+				require.ErrorIs(t, err, backendErr)
+			} else {
+				require.NoError(t, err)
+			}
+			require.NotNil(t, client.request)
+			assert.True(t, client.request.GetBypassStateController())
+			assert.Equal(t, corev1.SystemPowerControl_SYSTEM_POWER_CONTROL_FORCE_OFF, client.request.GetAction())
+			assert.Len(t, client.request.GetMachineIds().GetMachineIds(), 1)
+		})
 	}
-
-	err := m.PowerControl(context.Background(), target, operations.PowerControlTaskInfo{
-		Operation:              operations.PowerOperationPowerOn,
-		OverrideReadinessCheck: true,
-	})
-	require.NoError(t, err)
 }
 
 func TestBringUpControl_RefusesInUseMachine(t *testing.T) {

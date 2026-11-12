@@ -27,7 +27,7 @@ use axum::body::Body;
 use carbide_instrument::emit;
 use carbide_utils::HostPortPair;
 use http::{HeaderMap, Method, Response, StatusCode, Uri};
-use rpc::forge_api_client::ForgeApiClient;
+use rpc::carbide_api_client::CarbideApiClient;
 use tokio_rustls::rustls;
 use trace_propagation::is_propagated_header;
 use url::Url;
@@ -405,7 +405,7 @@ pub(super) fn build_authority(host: Cow<'_, str>, port: Option<u16>) -> Cow<'_, 
 
 async fn create_client(
     ip: IpAddr,
-    api_client: &ForgeApiClient,
+    api_client: &CarbideApiClient,
     credential_cache: &CredentialCache,
     switch_probe: &SwitchProbe,
     upstream_clients: &UpstreamClients,
@@ -620,8 +620,8 @@ mod tests {
     use carbide_test_support::Outcome::Yields;
     use carbide_test_support::{Case, Check, check_cases_async, check_values, value_scenarios};
     use carbide_utils::HostPortPair;
-    use rpc::forge_api_client::ForgeApiClient;
-    use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
+    use rpc::carbide_api_client::CarbideApiClient;
+    use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
     use tokio::task::JoinSet;
     use tokio_util::sync::CancellationToken;
     use url::Url;
@@ -967,7 +967,7 @@ mod tests {
     async fn summarize_created_client(case: ProxyOverrideCase) -> Result<ClientSummary, String> {
         let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
         // Prepopulate the cache so this test never falls through to the real
-        // ForgeApiClient path.
+        // CarbideApiClient path.
         let credential_cache: CredentialCache = idle_bounded_cache(CREDENTIAL_CACHE_IDLE_TTL);
         credential_cache
             .insert(
@@ -978,9 +978,9 @@ mod tests {
                 }),
             )
             .await;
-        let client_config = ForgeClientConfig::default();
+        let client_config = CarbideClientConfig::default();
         let api_config = ApiConfig::new("https://example.com", &client_config);
-        let api_client = ForgeApiClient::new(&api_config);
+        let api_client = CarbideApiClient::new(&api_config);
 
         create_client(
             ip,

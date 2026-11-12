@@ -24,7 +24,7 @@ pub mod packet_handler_v6;
 mod rpc;
 pub mod util;
 
-use ::rpc::forge_tls_client::ForgeClientConfig;
+use ::rpc::carbide_tls_client::CarbideClientConfig;
 use carbide_rpc_utils::dhcp::{
     DhcpConfig, DhcpDataError, DhcpV4Config, DhcpV6ServerId, HostConfig, ServiceConfig,
 };
@@ -72,7 +72,7 @@ pub struct Config {
     pub(crate) dhcp_config: DhcpConfig,
     pub(crate) host_config: Option<HostConfig>,
     pub(crate) relay_response_port: u16,
-    pub(crate) forge_client_config: ForgeClientConfig,
+    pub(crate) carbide_client_config: CarbideClientConfig,
     pub(crate) service_config: ServiceConfig,
     pub(crate) reply_retirement: ReplyRetirement,
 }
@@ -143,13 +143,13 @@ impl Config {
         dhcp_config: DhcpConfig,
         host_config: Option<HostConfig>,
         relay_response_port: u16,
-        forge_client_config: ForgeClientConfig,
+        carbide_client_config: CarbideClientConfig,
     ) -> Self {
         Self {
             dhcp_config,
             host_config,
             relay_response_port,
-            forge_client_config,
+            carbide_client_config,
             service_config: ServiceConfig::default(),
             reply_retirement: ReplyRetirement::new(CancellationToken::new()),
         }

@@ -24,10 +24,10 @@ use chrono::{DateTime, Utc};
 use nonempty::NonEmpty;
 use tonic::Status;
 
-use crate::forge_tls_client::{
-    ApiConfig, ForgeClientConfig, ForgeClientT, ForgeTlsClient, RetryConfig,
+use crate::carbide_tls_client::{
+    ApiConfig, CarbideClientConfig, CarbideClientT, CarbideTlsClient, RetryConfig,
 };
-pub use crate::protos::forge_api_client::ForgeApiClient;
+pub use crate::protos::carbide_api_client::CarbideApiClient;
 
 pub const EXPECTED_SWITCH_UPDATE_MASK_HEADER: &str = "x-nico-expected-switch-update-mask";
 
@@ -180,9 +180,9 @@ pub fn expected_switch_update_mask(
     fields
 }
 
-impl ForgeApiClient {
+impl CarbideApiClient {
     pub fn new(api_config: &ApiConfig<'_>) -> Self {
-        Self::build(ForgeTlsConnectionProvider {
+        Self::build(CarbideTlsConnectionProvider {
             urls: NonEmpty::from((
                 api_config.url.to_string(),
                 api_config.additional_urls.to_vec(),
@@ -198,7 +198,7 @@ impl ForgeApiClient {
         api_config: &ApiConfig<'_>,
         fail_over_on: FailOverOn,
     ) -> Self {
-        Self::build(ForgeTlsConnectionProvider {
+        Self::build(CarbideTlsConnectionProvider {
             urls: NonEmpty::from((
                 api_config.url.to_string(),
                 api_config.additional_urls.to_vec(),
@@ -240,16 +240,16 @@ impl ForgeApiClient {
 }
 
 #[derive(Debug)]
-pub struct ForgeTlsConnectionProvider {
+pub struct CarbideTlsConnectionProvider {
     pub urls: NonEmpty<String>,
-    pub client_config: ForgeClientConfig,
+    pub client_config: CarbideClientConfig,
     pub retry_config: RetryConfig,
     pub fail_over_on: FailOverOn,
     pub last_connection_index: AtomicUsize,
 }
 
 #[derive(Debug, Clone, Copy)]
-/// Determines when ForgeTlsConnectionProvider should select the next server in the list, if
+/// Determines when CarbideTlsConnectionProvider should select the next server in the list, if
 /// configured for multiple carbide-api servers.
 pub enum FailOverOn {
     /// Fail over whenever there is a failure connecting to carbide-api. Note that fail-back is not
@@ -261,7 +261,7 @@ pub enum FailOverOn {
     EveryApiCall,
 }
 
-impl ForgeTlsConnectionProvider {
+impl CarbideTlsConnectionProvider {
     fn current_endpoint_url(&self) -> &str {
         // SAFETY: last_connection_index is always modulo urls.len()
         self.urls
@@ -282,8 +282,8 @@ impl ForgeTlsConnectionProvider {
 }
 
 #[async_trait::async_trait]
-impl tonic_client_wrapper::ConnectionProvider<ForgeClientT> for ForgeTlsConnectionProvider {
-    async fn provide_connection(&self) -> Result<ForgeClientT, Status> {
+impl tonic_client_wrapper::ConnectionProvider<CarbideClientT> for CarbideTlsConnectionProvider {
+    async fn provide_connection(&self) -> Result<CarbideClientT, Status> {
         let mut url = if self.urls.len() <= 1 {
             self.urls.first()
         } else {
@@ -295,7 +295,7 @@ impl tonic_client_wrapper::ConnectionProvider<ForgeClientT> for ForgeTlsConnecti
 
         let mut retries = 0;
         loop {
-            match ForgeTlsClient::retry_build(
+            match CarbideTlsClient::retry_build(
                 &ApiConfig::new(url, &self.client_config).with_retry_config(RetryConfig {
                     // We do our own retry counting
                     retries: 1,
@@ -333,7 +333,7 @@ impl tonic_client_wrapper::ConnectionProvider<ForgeClientT> for ForgeTlsConnecti
                         cert_path = &client_cert.cert_path,
                         %old_cert_date,
                         %new_cert_date,
-                        "ForgeApiClient: Reconnecting to pick up newer client certificate"
+                        "CarbideApiClient: Reconnecting to pick up newer client certificate"
                     );
                     true
                 } else {
@@ -350,7 +350,7 @@ impl tonic_client_wrapper::ConnectionProvider<ForgeClientT> for ForgeTlsConnecti
                         key_path = &client_cert.key_path,
                         %old_key_date,
                         %new_key_date,
-                        "ForgeApiClient: Reconnecting to pick up newer client key"
+                        "CarbideApiClient: Reconnecting to pick up newer client key"
                     );
                     true
                 } else {

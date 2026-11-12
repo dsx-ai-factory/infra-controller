@@ -178,6 +178,24 @@ func (c stuckDeadline) Deadline() (time.Time, bool) { return c.at, true }
 
 const leasePath = "/apis/coordination.k8s.io/v1/namespaces/ns/leases"
 
+func TestListsHaveFleetHeadroom(t *testing.T) {
+	const services = 88_000
+	var pages atomic.Int32
+	k := served(t, map[string]http.HandlerFunc{"GET /api/v1/namespaces/ns/services": func(w http.ResponseWriter, r *http.Request) {
+		pages.Add(1)
+		start, _ := strconv.Atoi(r.URL.Query().Get("continue"))
+		next := ""
+		if start+listPage < 2*services {
+			next = strconv.Itoa(start + listPage)
+		}
+		_, _ = fmt.Fprintf(w, `{"metadata":{"resourceVersion":"9","continue":%q},"items":[%s{}]}`, next, strings.Repeat("{},", listPage-1))
+	}})
+	// Empty objects exercise the same paged reader without retaining thousands of irrelevant Service fields.
+	items, err := listAll[struct{}](bg, k, k.url(core, "ns", "services", ""), managedByMat, maxListItems)
+	is(t, []any{err, len(items), int(pages.Load()), k.listTimeout >= 2*(services/listPage)*CallTimeout},
+		[]any{nil, 2 * services, 2 * services / listPage, true}, "at least twice the fleet's objects and full page timeouts")
+}
+
 func TestKube(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -233,14 +251,14 @@ func TestKube(t *testing.T) {
 			started := time.Now()
 			_, err = listAll[corev1.Pod](bg, k, k.url(core, "ns", "pods", ""), "app=x", 1000)
 			is(t, [2]any{err, time.Since(started) < 3*time.Second}, [2]any{error(Error{Kind: Timeout, Secs: 2}), true}, "endless")
-			is(t, listTimeout, 200*time.Second, "a second a page")
+			is(t, listTimeout, maxListItems/listPage*CallTimeout, "the list allows a full call timeout per page")
 		}},
 		{"a service and a pod map their fields", func(t *testing.T) {
 			svc := `{"metadata":{"name":"host-1","labels":{"nvidia-infra-controller/mat-machine-type":"host",` +
 				`"nvidia-infra-controller/mat-machine-id":"m1","nvidia-infra-controller/mat-id":"7"},` +
 				`"annotations":{"nvidia-infra-controller/mat-bmc-ip":"10.0.0.1","nvidia-infra-controller/mat-hardware-type":"gb200"}},` +
 				`"spec":{"externalIPs":["10.0.0.1","bad","2001:db8::1"]}}`
-			pod := `{"metadata":{"name":"mat-0","creationTimestamp":"2026-01-02T03:04:05Z","labels":{"app":"x"}},` +
+			pod := `{"metadata":{"name":"mat-0","uid":"u-0","creationTimestamp":"2026-01-02T03:04:05Z","labels":{"app":"x"}},` +
 				`"status":{"phase":"Running","podIP":"10.1.2.3","conditions":[{"type":"Ready","status":"True"}],` +
 				`"containerStatuses":[{"restartCount":2}],"initContainerStatuses":[{"restartCount":3}]}}`
 			list := func(kind, item string) http.HandlerFunc {
@@ -259,7 +277,7 @@ func TestKube(t *testing.T) {
 				ExternalIPs: []netip.Addr{netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("2001:db8::1")},
 			}, nil}, "service")
 			is(t, [2]any{pods[0], err2}, [2]any{PodInfo{
-				Name: "mat-0", Labels: map[string]string{"app": "x"}, Phase: "Running",
+				Name: "mat-0", UID: "u-0", Labels: map[string]string{"app": "x"}, Phase: "Running",
 				Ready: true, CreatedAt: at.UTC(), Restarts: 5, IP: "10.1.2.3",
 			}, nil}, "pod")
 		}},

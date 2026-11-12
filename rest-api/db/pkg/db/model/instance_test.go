@@ -498,6 +498,7 @@ func TestInstanceSQLDAO_GetByID(t *testing.T) {
 		id                             uuid.UUID
 		instance                       *Instance
 		paramRelations                 []string
+		forUpdate                      bool
 		expectedError                  bool
 		expectedErrVal                 error
 		expectedTenant                 bool
@@ -555,10 +556,26 @@ func TestInstanceSQLDAO_GetByID(t *testing.T) {
 			expectedMachine:                true,
 			expectedOperatingSystem:        true,
 		},
+		{
+			desc:                           "GetById for update with supported relations",
+			id:                             i1.ID,
+			instance:                       i1,
+			paramRelations:                 []string{TenantRelationName, InfrastructureProviderRelationName, SiteRelationName, InstanceTypeRelationName, VpcRelationName, MachineRelationName, OperatingSystemRelationName, NetworkSecurityGroupRelationName},
+			forUpdate:                      true,
+			expectedError:                  false,
+			expectedTenant:                 true,
+			expectedInfrastructureProvider: true,
+			expectedSite:                   true,
+			expectedInstanceType:           true,
+			expectedNetworkSecurityGroup:   true,
+			expectedVpc:                    true,
+			expectedMachine:                true,
+			expectedOperatingSystem:        true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			got, err := isd.GetByID(ctx, nil, tc.id, tc.paramRelations)
+			got, err := isd.GetByID(ctx, nil, tc.id, tc.paramRelations, tc.forUpdate)
 			assert.Equal(t, tc.expectedError, err != nil)
 			if tc.expectedError {
 				assert.Equal(t, tc.expectedErrVal, err)
@@ -3203,7 +3220,7 @@ func TestInstanceSQLDAO_Delete(t *testing.T) {
 			err := isd.Delete(ctx, nil, tc.id)
 			assert.Equal(t, tc.expectedError, err != nil)
 			if !tc.expectedError {
-				tmp, err := isd.GetByID(ctx, nil, tc.id, nil)
+				tmp, err := isd.GetByID(ctx, nil, tc.id, nil, false)
 				assert.NotNil(t, err)
 				assert.Nil(t, tmp)
 			}

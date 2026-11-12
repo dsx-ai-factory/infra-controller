@@ -1140,6 +1140,8 @@ pub(crate) mod tests {
                 read_at: at,
                 sweep_age_seconds: age,
                 sweep_interval_seconds: 20.0,
+                last_attempt_succeeded: None,
+                last_attempt_error: None,
             },
             units: ids
                 .iter()

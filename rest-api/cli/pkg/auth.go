@@ -294,12 +294,13 @@ func ExchangeAPIKey(cfg *ConfigFile, configPath string) (string, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		// An authn endpoint can echo the API key; do not read its error body.
+		return "", fmt.Errorf("NGC token exchange failed (HTTP %d)", resp.StatusCode)
+	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("reading response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("NGC token exchange failed (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
 	token := extractNGCToken(body)
@@ -340,12 +341,13 @@ func loginWithAPIKey(cfg *ConfigFile, authnURL, apiKey string) error {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		// An authn endpoint can echo the API key; do not read its error body.
+		return fmt.Errorf("NGC token exchange failed (HTTP %d)", resp.StatusCode)
+	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("reading response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("NGC token exchange failed (HTTP %d): %s", resp.StatusCode, string(body))
 	}
 
 	token := extractNGCToken(body)
@@ -613,22 +615,34 @@ func postToken(tokenURL string, data url.Values) (*TokenResponse, error) {
 	return parseTokenResponse(resp)
 }
 
+// tokenErrorCode returns only standard OAuth error identifiers. A token endpoint
+// controls both the error strings and HTTP reason phrase, and may echo credentials.
+func tokenErrorCode(code string) string {
+	switch code {
+	case "invalid_request", "invalid_client", "invalid_grant", "unauthorized_client",
+		"unsupported_grant_type", "invalid_scope", "server_error", "temporarily_unavailable":
+		return code
+	default:
+		return ""
+	}
+}
+
 func parseTokenResponse(resp *http.Response) (*TokenResponse, error) {
 	defer resp.Body.Close()
 
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		// Limit untrusted response size and never print the endpoint's description,
+		// raw body, custom error identifier, or HTTP reason phrase.
 		var errBody struct {
-			Error       string `json:"error"`
-			Description string `json:"error_description"`
+			Error string `json:"error"`
 		}
-		if json.Unmarshal(body, &errBody) == nil && errBody.Description != "" {
-			return nil, fmt.Errorf("authentication failed: %s", errBody.Description)
+		if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&errBody) == nil {
+			code := tokenErrorCode(errBody.Error)
+			if code != "" {
+				return nil, fmt.Errorf("authentication failed (HTTP %d, %s); check OIDC client credentials, scopes, and token endpoint configuration", resp.StatusCode, code)
+			}
 		}
-		if len(body) > 0 {
-			return nil, fmt.Errorf("authentication failed (%s): %s", resp.Status, string(body))
-		}
-		return nil, fmt.Errorf("authentication failed: %s", resp.Status)
+		return nil, fmt.Errorf("authentication failed (HTTP %d); check OIDC client credentials, scopes, and token endpoint configuration", resp.StatusCode)
 	}
 
 	var tokenResp TokenResponse

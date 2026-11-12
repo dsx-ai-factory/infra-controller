@@ -18,7 +18,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ::rpc::forge_tls_client::ForgeClientConfig;
+use ::rpc::carbide_tls_client::CarbideClientConfig;
 use carbide_host_support::agent_config::AgentConfig;
 use carbide_systemd::systemd;
 use forge_certs::cert_renewal::ClientCertRenewer;
@@ -30,7 +30,7 @@ use tokio::time::sleep;
 use crate::command_line;
 
 pub(super) async fn setup_and_run(
-    forge_client_config: Arc<ForgeClientConfig>,
+    carbide_client_config: Arc<CarbideClientConfig>,
     agent_config: AgentConfig,
     options: command_line::RunOptions,
 ) -> eyre::Result<()> {
@@ -45,7 +45,7 @@ pub(super) async fn setup_and_run(
     // Setup client certificate renewal
     let forge_api_server = agent_config.forge_system.api_server.clone();
     let client_cert_renewer =
-        ClientCertRenewer::new(forge_api_server.clone(), Arc::clone(&forge_client_config));
+        ClientCertRenewer::new(forge_api_server.clone(), Arc::clone(&carbide_client_config));
 
     let main_loop = MainLoop {
         agent_config,

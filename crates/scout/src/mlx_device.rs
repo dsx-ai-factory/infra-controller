@@ -1426,6 +1426,7 @@ fn firmware_update_result(
                     FirmwareSupervisorClientError::Transport(_) => ("connection", None),
                     FirmwareSupervisorClientError::Deadline => ("deadline", None),
                     FirmwareSupervisorClientError::InvalidResponse(_) => ("response", None),
+                    FirmwareSupervisorClientError::NotAdmitted { .. } => ("response", None),
                 },
                 SupervisorLaunchError::InvalidConfiguration(_) => ("configuration", None),
                 SupervisorLaunchError::Environment(_) => ("environment", None),
@@ -1456,6 +1457,12 @@ fn firmware_update_result(
                 ) => (
                     Code::Unavailable,
                     "firmware supervisor protocol version does not match the client",
+                ),
+                SupervisorLaunchError::Client(FirmwareSupervisorClientError::NotAdmitted {
+                    ..
+                }) => (
+                    Code::Unavailable,
+                    "firmware supervisor rejected this submission before admission",
                 ),
                 SupervisorLaunchError::Client(FirmwareSupervisorClientError::Rpc(status)) => {
                     match status.code() {
@@ -2618,6 +2625,7 @@ mod tests {
             ) -> Result<Response<SubmitFirmwareOperationResponse>, Status> {
                 let request = request.into_inner();
                 if self.site_cache {
+                    assert!(!request.report_rejection_details);
                     assert_eq!(
                         request.expected_supervisor_instance_id.as_deref(),
                         Some("cache-instance")
@@ -3523,7 +3531,7 @@ mod tests {
             GetFirmwareOperationRequest, GetFirmwareOperationResponse, GetSupervisorStatusRequest,
             GetSupervisorStatusResponse, ObserveFirmwareOperationResponse,
             ObserveFirmwareUpdateRequest, SubmitFirmwareOperationRequest,
-            SubmitFirmwareOperationResponse,
+            SubmitFirmwareOperationResponse, submit_firmware_operation_response,
         };
         use tokio_stream::wrappers::UnixListenerStream;
         use tokio_util::sync::CancellationToken;
@@ -3554,7 +3562,9 @@ mod tests {
                 }
                 self.admission.clone().map(|operation| {
                     Response::new(SubmitFirmwareOperationResponse {
-                        operation: Some(operation),
+                        result: Some(submit_firmware_operation_response::Result::Operation(
+                            operation,
+                        )),
                     })
                 })
             }
@@ -4005,6 +4015,7 @@ mod tests {
                 assert_eq!(
                     *submitted,
                     [SubmitFirmwareOperationRequest {
+                        report_rejection_details: false,
                         operation_id,
                         profile: case.profile.map(Into::into),
                         observer_exit_behavior: 0,

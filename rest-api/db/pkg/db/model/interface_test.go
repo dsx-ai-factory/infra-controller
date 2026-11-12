@@ -2106,7 +2106,7 @@ func TestInterfaceSQLDAO_Delete(t *testing.T) {
 			err := ifcd.Delete(ctx, nil, tc.id)
 			assert.Equal(t, tc.expectedError, err != nil)
 			if !tc.expectedError {
-				tmp, err := isd.GetByID(ctx, nil, tc.id, nil)
+				tmp, err := isd.GetByID(ctx, nil, tc.id, nil, false)
 				assert.NotNil(t, err)
 				assert.Nil(t, tmp)
 			}

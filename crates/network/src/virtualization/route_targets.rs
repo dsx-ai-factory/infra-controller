@@ -15,6 +15,120 @@
  * limitations under the License.
  */
 
+use crate::ip::address_family::IdentifyAddressFamily;
+use crate::ip::prefix::IpNet;
+
+// Share the per-profile expansion bound between Core admission and agent validation.
+const PREFIX_ROUTE_TARGET_PAIRS_MAX: usize = 256;
+
+/// Selects the contained prefixes that receive additional export route targets.
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportPrefixMatchType {
+    /// Matches the configured prefix and all its more-specific prefixes (the default).
+    #[default]
+    Ge,
+    /// Matches contained prefixes through `max_prefix_length`, defaulting to the family width.
+    Le,
+    /// Matches only the configured prefix.
+    Exact,
+}
+
+/// Adds route targets to matching type-5 exports without originating or admitting routes.
+///
+/// The route-target type differs between Core's symbolic configuration and the
+/// agent's concrete configuration; both use the same prefix matching contract.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PrefixRouteTargetConfig<T> {
+    /// IPv4 or IPv6 CIDR prefix; RPC conversion and rendering clear host bits.
+    pub prefix: IpNet,
+    /// Contained-prefix matching mode; omission defaults to `ge`.
+    #[serde(default)]
+    pub match_type: ExportPrefixMatchType,
+    /// Inclusive maximum prefix length, accepted only with `le`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_prefix_length: Option<u32>,
+    /// Required, nonempty targets added cumulatively with every matching rule.
+    pub route_targets: Vec<T>,
+}
+
+/// Rejects conditional export rules that cannot express a valid NVUE policy.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PrefixRouteTargetConfigError {
+    /// Rejects rules that would have no effect.
+    #[error("route_targets must contain at least one route target")]
+    EmptyRouteTargets,
+    /// Rejects a maximum that the selected match mode would ignore.
+    #[error("max_prefix_length is only accepted with match_type = le")]
+    UnexpectedMaximum,
+    /// Rejects a maximum outside the prefix's address family and containment range.
+    #[error("max_prefix_length {maximum} must be between {prefix_length} and {address_width}")]
+    InvalidMaximum {
+        /// Supplied inclusive maximum.
+        maximum: u32,
+        /// Configured prefix length.
+        prefix_length: u32,
+        /// Address-family width.
+        address_width: u32,
+    },
+    /// Rejects policies above the shared configured-pair limit.
+    #[error(
+        "route_targets_on_exports_by_prefix exceeds {PREFIX_ROUTE_TARGET_PAIRS_MAX} prefix/route-target pairs"
+    )]
+    TooManyRules,
+}
+
+impl<T> PrefixRouteTargetConfig<T> {
+    /// Validates matching and nonempty targets, returning the inclusive maximum length.
+    ///
+    /// Callers must validate each target's encoding and resolve symbolic values
+    /// before sending the policy to a DPU.
+    pub fn validate(&self) -> Result<u32, PrefixRouteTargetConfigError> {
+        if self.route_targets.is_empty() {
+            return Err(PrefixRouteTargetConfigError::EmptyRouteTargets);
+        }
+        // Reject ignored maxima so a typo cannot silently widen an export policy.
+        if self.match_type != ExportPrefixMatchType::Le && self.max_prefix_length.is_some() {
+            return Err(PrefixRouteTargetConfigError::UnexpectedMaximum);
+        }
+        let prefix_length = u32::from(self.prefix.prefix_len());
+        let address_width = u32::from(self.prefix.address_family().interface_prefix_len());
+        let maximum = match self.match_type {
+            ExportPrefixMatchType::Exact => prefix_length,
+            ExportPrefixMatchType::Ge => address_width,
+            ExportPrefixMatchType::Le => self.max_prefix_length.unwrap_or(address_width),
+        };
+        if !(prefix_length..=address_width).contains(&maximum) {
+            return Err(PrefixRouteTargetConfigError::InvalidMaximum {
+                maximum,
+                prefix_length,
+                address_width,
+            });
+        }
+        Ok(maximum)
+    }
+
+    /// Validates every rule and limits the profile to 256 configured pairs across both address families.
+    ///
+    /// Count pairs before rendering groups prefixes by target or removes duplicate matches.
+    /// Each distinct target gets its own continuing action, so multiple targets need no
+    /// NVUE scalar containing a vendor-specific route-target list.
+    /// The limit leaves sequence 65535 available for each family's terminal permit.
+    pub fn validate_entries(entries: &[Self]) -> Result<(), PrefixRouteTargetConfigError> {
+        let mut pair_count = 0_usize;
+        for entry in entries {
+            entry.validate()?;
+            // Count repeated configured pairs so grouping cannot bypass the admission limit.
+            pair_count = pair_count.saturating_add(entry.route_targets.len());
+            if pair_count > PREFIX_ROUTE_TARGET_PAIRS_MAX {
+                return Err(PrefixRouteTargetConfigError::TooManyRules);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// `RouteTargetContributions` groups the profile and site targets added to a VPC.
 /// Core checks its configured targets before admission; the agent composes its
 /// resolved targets for FNN. Both use the same sources without sharing wire types.
@@ -80,6 +194,83 @@ mod tests {
     use carbide_test_support::value_scenarios;
 
     use super::*;
+
+    /// Verifies omitted matching uses GE and malformed rules fail before they can widen exports.
+    #[test]
+    fn conditional_export_rules_validate_matching_and_required_targets() {
+        use carbide_test_support::Outcome::*;
+        use carbide_test_support::scenarios;
+
+        scenarios!(run = |input: &str| {
+            // Decode the operator-facing representation before validating its semantic bounds.
+            let entry: PrefixRouteTargetConfig<u32> =
+                serde_json::from_str(input).map_err(|error| error.to_string())?;
+            entry.validate().map_err(|error| error.to_string())
+        };
+            "matching defaults and bounds" {
+                // Omitted matching includes all contained IPv4 prefixes.
+                r#"{"prefix":"0.0.0.0/0","route_targets":[1]}"# => Yields(32),
+                // Family width must follow IPv6 rather than the IPv4 default.
+                r#"{"prefix":"::/0","route_targets":[1]}"# => Yields(128),
+                // Exact default-route selection must not include more-specific routes.
+                r#"{"prefix":"0.0.0.0/0","match_type":"exact","route_targets":[1]}"# => Yields(0),
+                // A bounded LE rule must retain the operator's upper limit.
+                r#"{"prefix":"10.0.0.0/16","match_type":"le","max_prefix_length":24,"route_targets":[1]}"# => Yields(24),
+                // Omitted LE maximum deliberately has the same range as GE.
+                r#"{"prefix":"2001:db8::/64","match_type":"le","route_targets":[1]}"# => Yields(128),
+                // A maximum equal to the prefix length selects only that prefix.
+                r#"{"prefix":"10.0.0.0/16","match_type":"le","max_prefix_length":16,"route_targets":[1]}"# => Yields(16),
+                // An explicit zero remains a valid maximum for an LE default-route rule.
+                r#"{"prefix":"0.0.0.0/0","match_type":"le","max_prefix_length":0,"route_targets":[1]}"# => Yields(0),
+            }
+            "invalid rules" {
+                // A missing target list is malformed rather than an implicit no-op.
+                r#"{"prefix":"10.0.0.0/16"}"# => Fails,
+                // An explicit empty list must not activate a rule with no effect.
+                r#"{"prefix":"10.0.0.0/16","route_targets":[]}"# => Fails,
+                // A missing prefix cannot become an implicit default-route match.
+                r#"{"route_targets":[1]}"# => Fails,
+                // Invalid CIDRs must never reach template substitution.
+                r#"{"prefix":"10.0.0.0/33","route_targets":[1]}"# => Fails,
+                // Unknown match names must not fall back to the broad GE default.
+                r#"{"prefix":"10.0.0.0/16","match_type":"unknown","route_targets":[1]}"# => Fails,
+                // GE does not consume a maximum, so accepting one would conceal a typo.
+                r#"{"prefix":"10.0.0.0/16","max_prefix_length":24,"route_targets":[1]}"# => Fails,
+                // Containment excludes maxima shorter than the configured prefix.
+                r#"{"prefix":"10.0.0.0/16","match_type":"le","max_prefix_length":15,"route_targets":[1]}"# => Fails,
+                // IPv4 maxima cannot escape the 32-bit address family.
+                r#"{"prefix":"10.0.0.0/16","match_type":"le","max_prefix_length":33,"route_targets":[1]}"# => Fails,
+                // IPv6 maxima must still have an upper bound.
+                r#"{"prefix":"2001:db8::/64","match_type":"le","max_prefix_length":129,"route_targets":[1]}"# => Fails,
+            }
+        );
+    }
+
+    /// Accepts 256 prefix/target pairs and rejects larger profiles so neither
+    /// address-family splitting nor multiple targets on one prefix bypasses the expansion limit.
+    #[test]
+    fn conditional_export_pair_limit_counts_both_families_and_every_target() {
+        // Use valid default-prefix matches so only configured-pair counts vary.
+        let entry = |prefix: &str, target_count| PrefixRouteTargetConfig {
+            prefix: prefix.parse().expect("valid default prefix"),
+            match_type: ExportPrefixMatchType::Ge,
+            max_prefix_length: None,
+            route_targets: vec![0_u32; target_count],
+        };
+
+        carbide_test_support::value_scenarios!(run = |entries: Vec<PrefixRouteTargetConfig<u32>>| {
+            // Apply the shared policy check used by Core and the agent.
+            PrefixRouteTargetConfig::validate_entries(&entries)
+        };
+            "configured pair capacity" {
+                // Both families share one profile capacity, including its exact upper bound.
+                vec![entry("0.0.0.0/0", 128), entry("::/0", 128)] => Ok(()),
+                // Individually small family maps must not bypass the combined limit.
+                vec![entry("0.0.0.0/0", 128), entry("::/0", 129)] =>
+                    Err(PrefixRouteTargetConfigError::TooManyRules),
+            }
+        );
+    }
 
     /// Verifies composition preserves source order and repeated configured targets.
     #[test]
