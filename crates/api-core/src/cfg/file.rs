@@ -515,6 +515,10 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub bmc_driver_rules: Vec<Rule>,
 
+    /// Which client BMC operations moved to the driver system run through.
+    #[serde(default)]
+    pub bmc_backend: BmcBackend,
+
     /// Deprecated compatibility key. This setting no longer affects runtime
     /// behavior; keep accepting it temporarily so existing site files can be
     /// migrated without weakening unknown-field validation.
@@ -1239,6 +1243,18 @@ pub struct CredentialFileSourceConfig {
         serialize_with = "as_std_duration"
     )]
     pub poll_interval: std::time::Duration,
+}
+
+/// The client BMC operations run through.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BmcBackend {
+    /// libredfish clients.
+    #[default]
+    Libredfish,
+    /// The drivers selected for each BMC by `bmc_driver_rules` and the
+    /// compiled rules.
+    Drivers,
 }
 
 /// Read precedence and mutation policy for site UFM credentials.

@@ -3362,7 +3362,7 @@ async fn set_pending_boot_interface(
 async fn backdate_boot_interface_observation(
     env: &TestEnv,
     managed_host: &TestManagedHost,
-) -> model::machine::StableHostMachine {
+) -> Box<model::machine::StableHostMachine> {
     let mut txn = env.db_txn().await;
     let host_before = managed_host.host().db_machine(&mut txn).await;
     let desired_boot_interface = host_before
@@ -4543,7 +4543,7 @@ async fn test_assigned_periodic_boot_interface_drift_defers_convergence(pool: sq
 async fn load_test_host(
     env: &TestEnv,
     managed_host: &TestManagedHost,
-) -> model::machine::StableHostMachine {
+) -> Box<model::machine::StableHostMachine> {
     let mut txn = env.db_txn().await;
     managed_host.host().db_machine(&mut txn).await
 }

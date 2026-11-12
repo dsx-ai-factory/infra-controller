@@ -161,6 +161,16 @@ pub async fn update(txn: &mut PgConnection, group: &ExpectedRackGroup) -> Databa
     if let Some(existing) = find_by_rack_group_id(&mut *txn, &group.rack_group_id).await?
         && existing.racks != group.racks
     {
+        if group
+            .racks
+            .iter()
+            .flat_map(|rack| &rack.members)
+            .any(|member| member.cartridge_index.is_none())
+        {
+            return Err(DatabaseError::InvalidArgument(
+                "member cartridge_index is required".into(),
+            ));
+        }
         let query = "SELECT EXISTS (SELECT 1 FROM expected_nvlink_domains WHERE rack_group_id=$1)";
         let used: bool = sqlx::query_scalar(query)
             .bind(&group.rack_group_id)

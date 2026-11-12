@@ -37,13 +37,18 @@ const DPU_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// `cancel`, leaving the remaining reservation lifetime for SQL attachment.
 /// Cancellation returns `ResourcePoolBackendError::Cancelled`; expiration
 /// returns `ResourcePoolBackendError::DeadlineExceeded`. Without a provider
-/// reservation, the wait has no deadline and ignores `cancel`.
+/// reservation, the wait has no deadline but still observes `cancel`.
 pub async fn acquire_admin_admission(
     has_provider_reservation: bool,
     cancel: &CancellationToken,
 ) -> Result<OwnedSemaphorePermit, ResourcePoolBackendError> {
     if !has_provider_reservation {
-        return Ok(db::machine_interface::admin_lock_admission().await);
+        return cancel
+            .run_until_cancelled(db::machine_interface::admin_lock_admission())
+            .await
+            .ok_or(ResourcePoolBackendError::Cancelled {
+                operation: "DPU admin lock admission",
+            });
     }
 
     cancel

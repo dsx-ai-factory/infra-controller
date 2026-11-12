@@ -347,6 +347,7 @@ impl TestApiBuilder {
             // dyn upcast: the ops handle is also the general pool in tests.
             redfish_pool: redfish_pool.clone(),
             bmc_credential_ops: redfish_pool,
+            driver_connector: None,
             bmc_proxy_passthrough: None,
             eth_data,
             common_pools: self.common_pools,

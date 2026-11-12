@@ -1645,6 +1645,8 @@ func TestBuildCommands_RunnablePaths(t *testing.T) {
 		name string
 		path []string
 	}{
+		{name: "tray factory reset", path: []string{"tray", "factory-reset"}},
+		{name: "domain factory reset", path: []string{"domain", "nvlink", "factory-reset"}},
 		{name: "tenant current", path: []string{"tenant", "current"}},
 		{name: "infrastructure provider current", path: []string{"infrastructure-provider", "current"}},
 		{name: "service account current", path: []string{"service-account", "current"}},
@@ -2407,6 +2409,7 @@ func testNewAppPowerCommands(t *testing.T) {
 		method    string
 		wantQuery string
 		wantBody  string
+		wantPath  string
 	}{
 		{
 			// The OpenAPI getter must produce an executable command with a
@@ -2416,6 +2419,7 @@ func testNewAppPowerCommands(t *testing.T) {
 			args:      []string{"--site-id", siteID, trayID},
 			method:    http.MethodGet,
 			wantQuery: "siteId=" + siteID,
+			wantPath:  "/v2/org/test-org/nico/tray/" + trayID + "/power",
 		},
 		{
 			// Adding a getter at the same REST path must preserve the
@@ -2425,6 +2429,25 @@ func testNewAppPowerCommands(t *testing.T) {
 			args:     []string{"--site-id", siteID, "--state", "On", trayID},
 			method:   http.MethodPatch,
 			wantBody: `{"siteId":"550e8400-e29b-41d4-a716-446655440000","state":"On"}`,
+			wantPath: "/v2/org/test-org/nico/tray/" + trayID + "/power",
+		},
+		{
+			// The rack getter must execute the new operation from the embedded OpenAPI spec.
+			name:      "read rack power state",
+			command:   []string{"rack", "power-state", "get"},
+			args:      []string{"--site-id", siteID, "rack-01"},
+			method:    http.MethodGet,
+			wantQuery: "siteId=" + siteID,
+			wantPath:  "/v2/org/test-org/nico/rack/rack-01/power",
+		},
+		{
+			// The existing rack power alias must keep sending PATCH after GET is added.
+			name:     "change rack power",
+			command:  []string{"rack", "power"},
+			args:     []string{"--site-id", siteID, "--state", "On", "rack-01"},
+			method:   http.MethodPatch,
+			wantBody: `{"siteId":"550e8400-e29b-41d4-a716-446655440000","state":"On"}`,
+			wantPath: "/v2/org/test-org/nico/rack/rack-01/power",
 		},
 	}
 
@@ -2433,7 +2456,7 @@ func testNewAppPowerCommands(t *testing.T) {
 			var requestCount atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 				assert.Equal(t, test.method, request.Method)
-				assert.Equal(t, "/v2/org/test-org/nico/tray/"+trayID+"/power", request.URL.Path)
+				assert.Equal(t, test.wantPath, request.URL.Path)
 				assert.Equal(t, test.wantQuery, request.URL.RawQuery)
 				body, err := io.ReadAll(request.Body)
 				assert.NoError(t, err)

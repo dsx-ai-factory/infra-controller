@@ -85,6 +85,7 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+carbide-test-support = { path = "../test-support" }
 tokio = { workspace = true, features = ["test-util"] }
 
 [build-dependencies]

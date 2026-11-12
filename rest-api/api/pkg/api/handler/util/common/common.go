@@ -200,7 +200,7 @@ func GetInstanceFromIDString(ctx context.Context, tx *cdb.Tx, instanceID string,
 	if err != nil {
 		return nil, ErrInvalidID
 	}
-	return cdbm.NewInstanceDAO(dbSession).GetByID(ctx, tx, instanceid, nil)
+	return cdbm.NewInstanceDAO(dbSession).GetByID(ctx, tx, instanceid, nil, false)
 }
 
 // GetVpcFromIDString gets the vpc DB model from the id string
@@ -1309,7 +1309,7 @@ func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
 			code = http.StatusServiceUnavailable
 		case codes.PermissionDenied:
 			code = http.StatusForbidden
-		case codes.AlreadyExists:
+		case codes.AlreadyExists, codes.Aborted:
 			code = http.StatusConflict
 		case codes.FailedPrecondition:
 			code = http.StatusPreconditionFailed
@@ -1338,7 +1338,7 @@ func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
 		code = http.StatusForbidden
 	case swe.ErrTypeNICoUnavailable, swe.ErrTypeCarbideUnavailable:
 		code = http.StatusServiceUnavailable
-	case swe.ErrTypeNICoAlreadyExists, swe.ErrTypeCarbideAlreadyExists:
+	case swe.ErrTypeNICoAlreadyExists, swe.ErrTypeCarbideAlreadyExists, swe.ErrTypeNICoAborted:
 		code = http.StatusConflict
 	case swe.ErrTypeNICoFailedPrecondition, swe.ErrTypeCarbideFailedPrecondition:
 		code = http.StatusPreconditionFailed

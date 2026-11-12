@@ -55,7 +55,16 @@ pub async fn start(args: StartArgs) -> eyre::Result<()> {
     start_with_config(args, toml::Table::new()).await
 }
 
-pub(crate) async fn start_with_config(
+pub(crate) fn start_with_config(
+    args: StartArgs,
+    overrides: toml::Table,
+) -> impl Future<Output = eyre::Result<()>> {
+    // Server bootstrap has a large future; do not copy it through the startup
+    // helpers and the task that owns the running server.
+    Box::pin(start_with_config_inner(args, overrides))
+}
+
+async fn start_with_config_inner(
     StartArgs {
         addr,
         metrics_addr,

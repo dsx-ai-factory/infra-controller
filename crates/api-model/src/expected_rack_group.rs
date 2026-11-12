@@ -60,6 +60,9 @@ impl fmt::Display for RackGroupProtocol {
 /// A device expected to participate in the rack group's NVLink domain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExpectedRackGroupMember {
+    /// Cartridge index; absent in legacy records and required in new declarations.
+    #[serde(default)]
+    pub cartridge_index: Option<u32>,
     /// Core rack capability type, serialized under the inventory field `type`.
     #[serde(rename = "type")]
     pub device_type: RackCapabilityType,
