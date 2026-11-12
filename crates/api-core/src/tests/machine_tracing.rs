@@ -210,8 +210,16 @@ async fn machine_rpc_errors_keep_resolved_identity(pool: sqlx::PgPool) {
         ("database_unavailable", id.to_machine_id()),
     ] {
         let span = spans.iter().find(|span| span.name == name).unwrap();
-        assert_eq!(attribute(span, "nico.machine.id"), Some(id.to_string()));
-        assert_eq!(attribute(span, "forge.machine_id"), Some(id.to_string()));
+        assert_eq!(
+            attribute(span, "nico.machine.id"),
+            Some(id.to_string()),
+            "span {name} has wrong nico.machine.id"
+        );
+        assert_eq!(
+            attribute(span, "forge.machine_id"),
+            Some(id.to_string()),
+            "span {name} has wrong forge.machine_id"
+        );
     }
     let missing = spans
         .iter()

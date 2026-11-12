@@ -289,7 +289,6 @@ pub(crate) async fn get_next_remediation_for_machine(
     request: Request<rpc::GetNextRemediationForMachineRequest>,
 ) -> Result<Response<rpc::GetNextRemediationForMachineResponse>, Status> {
     crate::api::log_request_data(&request);
-    let mut txn = api.txn_begin().await?;
 
     let request = request.into_inner();
     let machine_id = request
@@ -297,6 +296,7 @@ pub(crate) async fn get_next_remediation_for_machine(
         .ok_or(CarbideError::MissingArgument("machine id"))?;
     crate::api::log_machine_id(&machine_id.into());
 
+    let mut txn = api.txn_begin().await?;
     let remediation_to_apply =
         db::dpu_remediation::find_next_remediation_for_machine(&mut txn, machine_id).await?;
 
