@@ -1,0 +1,27 @@
+---
+tags: ["unreleased", "rest-api", "networking", "deployment"]
+---
+
+## Upcoming: automatic Site IP Block reconciliation
+
+Builds containing [PR #8246](https://github.com/dsx-ai-factory/infra-controller/pull/8246)
+reconcile Site IP Blocks from SitePrefix inventory, including removal and restoration
+of configured address ranges.
+
+### Before upgrading
+
+Before upgrading, re-add any removed fabric range whose IP Block you need to keep.
+Renaming a Site IP Block no longer prevents deletion when its range is removed
+from the Site configuration. Compatible manually created IP Blocks with the same
+range and routing type as a current or removed fabric prefix are also managed by
+the Site configuration. A Site-managed IP Block whose range is no longer configured
+moves to `Deleting`, blocking new Allocations and resizing, and is deleted once it
+is no longer in use.
+
+Site configuration inventory runs started before the REST upgrade can fail during
+the rollout. Subsequent scheduled runs resume Site metadata updates.
+
+Upgrade the Site Agent with the REST API and use NICo Core `2.1.0` or later. Sites
+with an older Agent stop reconciling fabric-prefix changes until the Agent is
+upgraded. See [Upgrading NICo](../../docs/manuals/upgrade.md#upgrades-that-introduce-automatic-site-ip-block-reconciliation)
+for rollout guidance.

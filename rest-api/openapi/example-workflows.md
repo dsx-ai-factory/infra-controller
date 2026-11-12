@@ -18,7 +18,7 @@ This section provides example REST API workflows for common NICo tasks. All exam
   </Accordion>
   <Accordion title="View Existing IP Blocks">
     Use the value of `id` from the output of the preceding example as the value for the `infrastructureProviderId` and `siteId` URL parameters.
-    The response includes the IP Block NICo creates for each fabric prefix the Site reports, such as `site-fabric-ipv4-192-168-20-0-24` in the example response.
+    The response includes automatically created Site fabric IP Blocks. New blocks use the CIDR as their name. Reused blocks retain their name and description, including the `site-fabric-ipv4-192-168-20-0-24` name shown in this example response.
     <Code src="snippets/input/view_ip_blocks.sh" title="Example Call" />
     <Code src="snippets/output/view_ip_blocks.json" title="Example Response" />
   </Accordion>

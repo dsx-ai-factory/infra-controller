@@ -28,11 +28,9 @@ func TestUpdateSiteConfigInventory(t *testing.T) {
 		prefixes             []string
 		buildVersion         string
 		updateSiteInDBErr    error
-		updateIPBlocksErr    error
 		wantErr              bool
 		wantErrContains      []string
 		expectUpdateSiteInDB bool
-		expectUpdateIPBlocks bool
 		expectRecordLatency  bool
 		recordLatencyFailed  bool
 	}
@@ -43,48 +41,16 @@ func TestUpdateSiteConfigInventory(t *testing.T) {
 			prefixes:             []string{"10.0.0.0/16", "2001:db8::/64"},
 			buildVersion:         "1.2.3",
 			expectUpdateSiteInDB: true,
-			expectUpdateIPBlocks: true,
 			expectRecordLatency:  true,
 		},
 		{
-			name:                 "UpdateIPBlocksInDBFails",
-			prefixes:             []string{"10.0.0.0/16"},
-			buildVersion:         "1.2.3",
-			updateIPBlocksErr:    errors.New("failed to update Site IP Blocks"),
-			wantErr:              true,
-			wantErrContains:      []string{"failed to update Site IP Blocks"},
-			expectUpdateSiteInDB: true,
-			expectUpdateIPBlocks: true,
-			expectRecordLatency:  true,
-			recordLatencyFailed:  true,
-		},
-		{
-			// UpdateSiteInDB failures do not stop the workflow from creating Site
-			// fabric IP Blocks, but they still fail the inventory workflow.
-			name:                 "UpdateSiteInDBFailsContinues",
+			name:                 "UpdateSiteInDBFails",
 			prefixes:             []string{"10.0.0.0/16"},
 			buildVersion:         "1.2.3",
 			updateSiteInDBErr:    errors.New("failed to update Site metadata"),
 			wantErr:              true,
 			wantErrContains:      []string{"failed to update Site metadata"},
 			expectUpdateSiteInDB: true,
-			expectUpdateIPBlocks: true,
-			expectRecordLatency:  true,
-			recordLatencyFailed:  true,
-		},
-		{
-			name:              "BothInventoryUpdatesFail",
-			prefixes:          []string{"10.0.0.0/16"},
-			buildVersion:      "1.2.3",
-			updateSiteInDBErr: errors.New("failed to update Site metadata"),
-			updateIPBlocksErr: errors.New("failed to update Site IP Blocks"),
-			wantErr:           true,
-			wantErrContains: []string{
-				"failed to update Site metadata",
-				"failed to update Site IP Blocks",
-			},
-			expectUpdateSiteInDB: true,
-			expectUpdateIPBlocks: true,
 			expectRecordLatency:  true,
 			recordLatencyFailed:  true,
 		},
@@ -121,16 +87,11 @@ func TestUpdateSiteConfigInventory(t *testing.T) {
 
 			var siteManager siteActivity.ManageSite
 			var metricsManager cwm.ManageInventoryMetrics
-
 			if tt.expectUpdateSiteInDB {
 				env.RegisterActivity(siteManager.UpdateSiteInDB)
 				// V1 carries no Site Agent build info, so the activity receives a typed nil.
 				env.OnActivity(siteManager.UpdateSiteInDB, mock.Anything, siteID, buildInfo,
 					(*corev1.SiteAgentBuildInfo)(nil)).Return(tt.updateSiteInDBErr)
-			}
-			if tt.expectUpdateIPBlocks {
-				env.RegisterActivity(siteManager.UpdateIPBlocksInDBFromFabricPrefixes)
-				env.OnActivity(siteManager.UpdateIPBlocksInDBFromFabricPrefixes, mock.Anything, siteID, tt.prefixes).Return(tt.updateIPBlocksErr)
 			}
 			if tt.expectRecordLatency {
 				env.RegisterActivity(metricsManager.RecordLatency)
@@ -169,11 +130,9 @@ func TestUpdateSiteConfigInventoryV2(t *testing.T) {
 		buildVersion         string
 		siteAgentBuildInfo   *corev1.SiteAgentBuildInfo
 		updateSiteInDBErr    error
-		updateIPBlocksErr    error
 		wantErr              bool
 		wantErrContains      []string
 		expectUpdateSiteInDB bool
-		expectUpdateIPBlocks bool
 		expectRecordLatency  bool
 		recordLatencyFailed  bool
 	}
@@ -189,7 +148,6 @@ func TestUpdateSiteConfigInventoryV2(t *testing.T) {
 				FlowEnabled:       proto.Bool(true),
 			},
 			expectUpdateSiteInDB: true,
-			expectUpdateIPBlocks: true,
 			expectRecordLatency:  true,
 		},
 		{
@@ -199,13 +157,10 @@ func TestUpdateSiteConfigInventoryV2(t *testing.T) {
 			prefixes:             []string{"10.0.0.0/16"},
 			buildVersion:         "1.2.3",
 			expectUpdateSiteInDB: true,
-			expectUpdateIPBlocks: true,
 			expectRecordLatency:  true,
 		},
 		{
-			// UpdateSiteInDB failures do not stop the workflow from creating Site fabric IP
-			// Blocks, but they still fail the inventory workflow.
-			name:                 "UpdateSiteInDBFailsContinues",
+			name:                 "UpdateSiteInDBFails",
 			prefixes:             []string{"10.0.0.0/16"},
 			buildVersion:         "1.2.3",
 			siteAgentBuildInfo:   &corev1.SiteAgentBuildInfo{Version: "2.0.0"},
@@ -213,24 +168,6 @@ func TestUpdateSiteConfigInventoryV2(t *testing.T) {
 			wantErr:              true,
 			wantErrContains:      []string{"failed to update Site metadata"},
 			expectUpdateSiteInDB: true,
-			expectUpdateIPBlocks: true,
-			expectRecordLatency:  true,
-			recordLatencyFailed:  true,
-		},
-		{
-			name:               "BothInventoryUpdatesFail",
-			prefixes:           []string{"10.0.0.0/16"},
-			buildVersion:       "1.2.3",
-			siteAgentBuildInfo: &corev1.SiteAgentBuildInfo{Version: "2.0.0"},
-			updateSiteInDBErr:  errors.New("failed to update Site metadata"),
-			updateIPBlocksErr:  errors.New("failed to update Site IP Blocks"),
-			wantErr:            true,
-			wantErrContains: []string{
-				"failed to update Site metadata",
-				"failed to update Site IP Blocks",
-			},
-			expectUpdateSiteInDB: true,
-			expectUpdateIPBlocks: true,
 			expectRecordLatency:  true,
 			recordLatencyFailed:  true,
 		},
@@ -271,17 +208,12 @@ func TestUpdateSiteConfigInventoryV2(t *testing.T) {
 
 			var siteManager siteActivity.ManageSite
 			var metricsManager cwm.ManageInventoryMetrics
-
 			if tt.expectUpdateSiteInDB {
 				env.RegisterActivity(siteManager.UpdateSiteInDB)
 				// A message without Site Agent build info reaches the activity as a typed nil,
 				// which is what the pointer carries here when the case leaves it unset.
 				env.OnActivity(siteManager.UpdateSiteInDB, mock.Anything, siteID, buildInfo,
 					tt.siteAgentBuildInfo).Return(tt.updateSiteInDBErr)
-			}
-			if tt.expectUpdateIPBlocks {
-				env.RegisterActivity(siteManager.UpdateIPBlocksInDBFromFabricPrefixes)
-				env.OnActivity(siteManager.UpdateIPBlocksInDBFromFabricPrefixes, mock.Anything, siteID, tt.prefixes).Return(tt.updateIPBlocksErr)
 			}
 			if tt.expectRecordLatency {
 				env.RegisterActivity(metricsManager.RecordLatency)
