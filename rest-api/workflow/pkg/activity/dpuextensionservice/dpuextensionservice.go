@@ -65,9 +65,9 @@ func (mde ManageDpuExtensionService) UpdateDpuExtensionServicesInDB(ctx context.
 		logger.Warn().Msg("received failed inventory status from Site Agent, skipping inventory processing")
 
 		if inventory.StatusMsg != "" {
-			err = fmt.Errorf("the Site Agent inventory collection failure: %s", inventory.StatusMsg)
+			err = fmt.Errorf("inventory collection failure in Site Agent: %s", inventory.StatusMsg)
 		} else {
-			err = errors.New("the Site Agent reported unknown inventory collection failure")
+			err = errors.New("unknown inventory collection failure in Site Agent")
 		}
 
 		return temporal.NewNonRetryableApplicationError(err.Error(), util.ErrTypeSiteAgentInventoryCollectionFailure, err)
