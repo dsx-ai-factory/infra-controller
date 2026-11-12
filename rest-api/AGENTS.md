@@ -474,6 +474,26 @@ use `ProxyFlowGRPCWithSecrets` when redaction is needed. Callers supply the
 workflow ID and conflict policy. Do not add bespoke workflows per method.
 Preserve the skill's multi-release registration, migration, and retirement order.
 
+Do not persist Temporal execution state in the REST DB, whether as a column,
+a JSONB field or a dedicated table. This covers workflow and run IDs, attempt
+and retry markers, completion flags and observed-at timestamps for a Site
+call. Do not walk workflow history to reconstruct what an earlier run did.
+Instead:
+
+- To dedupe or rejoin an in-flight Site call, use a deterministic workflow ID
+  with a conflict policy, as `common.ExecuteCoreGRPCWithWorkflowID` and
+  `common.ExecuteFlowGRPC` allow.
+- Make a retry safe through Core's idempotent replies, such as treating
+  `NotFound` on deletion as done.
+- Report an operation's effect on a resource through its existing status,
+  status detail and flags. Site inventory then reconciles them against Core.
+
+A saved run ID outlives its history once the Site namespace expunges the
+closed run, so an unresolved attempt can never be resolved. Tracking state also
+forces every read, write and inventory path for the resource to special-case
+it. Removing it later needs a column drop that waits until no supported release
+reads it.
+
 When adding or renaming Site inventory workflows, update their registration in
 `workflow/cmd/workflow/main.go` and `inventoryWorkflowTypes` in
 `workflow/pkg/activity/site/retention.go`. Missing types retain successful runs
