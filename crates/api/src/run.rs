@@ -23,6 +23,7 @@ use carbide_api_core::start_runtime;
 use carbide_secrets::CredentialConfig;
 use eyre::WrapErr;
 use ipnetwork::IpNetwork;
+use metrics_endpoint::MetricsSetup;
 use opentelemetry::metrics::Meter;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot::Sender;
@@ -32,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::subscriber::NoSubscriber;
 
 use crate::logging::setup_logging;
-use crate::metrics::{Metrics, setup_metrics};
+use crate::metrics::register_runtime_metrics;
 use crate::resources::{RuntimeResources, setup_resources};
 
 /// Effective addresses owned by a running carbide-api server.
@@ -58,12 +59,16 @@ pub struct ApiServerReady {
 /// Once startup completes, `ready_channel` receives the effective API and metrics listener
 /// addresses and the server's metric registration handle. This includes OS-selected ports when
 /// either endpoint is configured with port zero.
+///
+/// Uses the supplied metrics setup without installing a global provider. Retains
+/// its provider until shutdown and exports its registry through the metrics listener.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     debug: u8,
     config_path: PathBuf,
     site_config_path: Option<PathBuf>,
     credential_config: CredentialConfig,
+    metrics: MetricsSetup,
     skip_logging_setup: bool,
     cancel_token: CancellationToken,
     ready_channel: Sender<ApiServerReady>,
@@ -126,11 +131,13 @@ pub async fn run(
     };
     carbide_api_core::validate_resource_pool_config(&carbide_config, initial_objects.as_ref())?;
 
-    let Metrics {
+    let MetricsSetup {
         registry,
         meter,
-        _meter_provider,
-    } = setup_metrics(logging.spancount_reader.clone())?;
+        meter_provider: _meter_provider,
+        ..
+    } = metrics;
+    register_runtime_metrics(&meter, logging.spancount_reader.clone());
 
     // All background tasks that run "forever" (until canceled) are added to this JoinSet. When
     // initialization is complete, we use [`JoinSet::join_all`] to wait for them all to complete,

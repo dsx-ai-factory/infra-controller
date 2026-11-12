@@ -244,11 +244,13 @@ impl PartialEq for ApproxHistogramSum {
 
 /// A serialized window onto the process-global test meter.
 ///
-/// The first capture installs a Prometheus-backed meter provider as the
-/// global OpenTelemetry meter (instruments are cached per event type, so
-/// tests share one provider for the whole process); the mutex serializes
-/// metric-asserting tests, and deltas are measured against the snapshot taken
-/// at [`MetricsCapture::start`].
+/// Uses a Prometheus-backed provider installed before tests start. The global
+/// compatibility instrumentation retains its meter and cached instruments,
+/// so captures share one provider. The mutex serializes captures, and deltas
+/// are measured against the snapshot taken at [`MetricsCapture::start`].
+/// Unrelated emitters can still contribute during a capture; this helper does
+/// not isolate them. Independently owned [`crate::Instrumentation`] instances
+/// need their own providers and registries, which this helper does not read.
 pub struct MetricsCapture {
     _serialized: MutexGuard<'static, ()>,
     baseline: Snapshot,
@@ -362,10 +364,10 @@ fn snapshot(registry: &prometheus::Registry) -> Snapshot {
 }
 
 /// Installs the test meter at test-binary load, before any test (and so any
-/// `emit()`) runs. Instruments are cached per event type on first emit, so a
-/// test that emits without a `MetricsCapture` must still find the real
-/// provider installed -- otherwise that event type would bind to the no-op
-/// global meter and later counter assertions would sit at zero.
+/// `emit()`) runs. The global compatibility instance retains its meter on the
+/// first metric recording, so a test that emits without a `MetricsCapture`
+/// must still find the real provider installed. Otherwise compatibility
+/// recording would retain the no-op meter and later assertions would see zero.
 #[ctor::ctor(unsafe)]
 fn install_test_meter_eagerly() {
     let _ = test_registry();
