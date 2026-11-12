@@ -600,7 +600,7 @@ impl PreingestionManagerStatic {
             db::machine_interface::lookup_bmc_access_info(db_pool, endpoint.address, None).await?;
         self.bmc_connector
             .connect(&bmc_access_info, || async {
-                Ok::<_, Infallible>(Some(endpoint.report.clone()))
+                Ok::<_, Infallible>(endpoint.report.clone())
             })
             .await
             .map_err(|error| match error {

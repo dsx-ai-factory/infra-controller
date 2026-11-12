@@ -49,7 +49,7 @@ impl BmcConnector {
         report: impl FnOnce() -> Fut,
     ) -> Result<BackendBmc, BmcConnectError<E>>
     where
-        Fut: Future<Output = Result<Option<EndpointExplorationReport>, E>>,
+        Fut: Future<Output = Result<EndpointExplorationReport, E>>,
     {
         match self {
             Self::Libredfish(pool) => pool
@@ -60,7 +60,7 @@ impl BmcConnector {
             Self::Drivers(drivers) => {
                 let report = report().await.map_err(BmcConnectError::Report)?;
                 drivers
-                    .connect(access, report.as_ref())
+                    .connect(access, &report)
                     .await
                     .map(BackendBmc::from)
                     .map_err(BmcConnectError::Drivers)

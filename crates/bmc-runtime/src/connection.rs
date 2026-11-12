@@ -213,7 +213,7 @@ impl DriverConnector {
     pub async fn connect(
         &self,
         access: &BmcAccessInfo,
-        report: Option<&EndpointExplorationReport>,
+        report: &EndpointExplorationReport,
     ) -> Result<ConnectedBmc<RedfishBmc>, ExploredConnectError> {
         let endpoint = BmcRef::from_exploration(access, report, &self.rules)?;
         let ipmi = EndpointIpmiOps::new(
@@ -236,7 +236,7 @@ impl DriverConnector {
     pub async fn connect_with_credentials(
         &self,
         access: &BmcAccessInfo,
-        report: Option<&EndpointExplorationReport>,
+        report: &EndpointExplorationReport,
         Credentials::UsernamePassword { username, password }: Credentials,
     ) -> Result<ConnectedBmc<RedfishBmc>, ExploredConnectError> {
         let endpoint = BmcRef::from_exploration(access, report, &self.rules)?;
@@ -267,9 +267,10 @@ impl DriverConnector {
     }
 }
 
-fn ipmi_address(endpoint: &BmcRef, report: Option<&EndpointExplorationReport>) -> SocketAddr {
+fn ipmi_address(endpoint: &BmcRef, report: &EndpointExplorationReport) -> SocketAddr {
     let port = report
-        .and_then(|report| report.managers.first())
+        .managers
+        .first()
         .and_then(|manager| manager.ipmi_port)
         .unwrap_or(carbide_ipmi::DEFAULT_IPMI_PORT);
     SocketAddr::new(endpoint.address().ip(), port)
@@ -477,27 +478,13 @@ mod tests {
         let store = stored_root();
 
         let connected = connector(direct_pool(), &store)
-            .connect(&bmc.access, Some(&bmc.report))
+            .connect(&bmc.access, &bmc.report)
             .await
             .expect("the explored BMC connects");
 
         assert_eq!(power_state(connected).await, Some(PowerState::On));
         assert_eq!(store.reads(), 1);
         assert!(bmc.authenticated_only_as("root", "password"));
-    }
-
-    /// Without an explored report the standard drivers run, acting on the
-    /// system exploration would have chosen.
-    #[tokio::test]
-    async fn an_unexplored_bmc_runs_the_standard_drivers_on_its_primary_system() {
-        let bmc = ExploredMock::serve();
-
-        let connected = connector(direct_pool(), &stored_root())
-            .connect(&bmc.access, None)
-            .await
-            .expect("the unexplored BMC connects");
-
-        assert_eq!(power_state(connected).await, Some(PowerState::On));
     }
 
     /// Explicit credentials reach the BMC directly even when the stored ones
@@ -510,7 +497,7 @@ mod tests {
         let connected = connector(proxied_pool(), &store)
             .connect_with_credentials(
                 &bmc.access,
-                Some(&bmc.report),
+                &bmc.report,
                 Credentials::new("operator", "secret"),
             )
             .await
@@ -531,7 +518,7 @@ mod tests {
                     .collect(),
                 ..Default::default()
             };
-            ipmi_address(&endpoint(BTreeSet::new()), Some(&report)).to_string()
+            ipmi_address(&endpoint(BTreeSet::new()), &report).to_string()
         };
             "reported" {
                 vec![Some(6230), Some(6231)] => "192.0.2.10:6230".to_string(),
@@ -563,11 +550,7 @@ mod tests {
     async fn explicit_credentials_require_a_password() {
         let bmc = ExploredMock::serve();
         let result = connector(direct_pool(), &stored_root())
-            .connect_with_credentials(
-                &bmc.access,
-                Some(&bmc.report),
-                Credentials::new("operator", ""),
-            )
+            .connect_with_credentials(&bmc.access, &bmc.report, Credentials::new("operator", ""))
             .await;
         assert!(matches!(
             result,

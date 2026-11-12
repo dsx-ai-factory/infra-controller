@@ -59,6 +59,4 @@ pub use operation::{
 };
 pub use quirk::Quirk;
 pub use selection::Capability;
-pub use transport::{
-    ClassifyBmcError, Fetched, IpmiOps, OpCx, manager_index_for, primary_system_index,
-};
+pub use transport::{ClassifyBmcError, Fetched, IpmiOps, OpCx};

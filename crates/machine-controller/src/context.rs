@@ -19,6 +19,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
+use bmc_runtime::{ExploredBmcRefError, ExploredConnectError};
 use carbide_credential_rotation::RotationGate;
 use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_ipmi::IPMITool;
@@ -118,13 +119,15 @@ impl MachineStateHandlerServices {
     ) -> Result<BackendBmc, StateHandlerError> {
         let bmc_access_info = self.bmc_access_info_for_machine(machine).await?;
         let report = || async {
-            Ok(
-                db::explored_endpoints::find_by_ips(&self.db_pool, vec![bmc_addr(machine)?.ip()])
-                    .await?
-                    .into_iter()
-                    .next()
-                    .map(|endpoint| endpoint.report),
-            )
+            db::explored_endpoints::find_by_ips(&self.db_pool, vec![bmc_addr(machine)?.ip()])
+                .await?
+                .into_iter()
+                .next()
+                .map(|endpoint| endpoint.report)
+                .ok_or_else(|| StateHandlerError::MissingData {
+                    object_id: machine.id.to_string(),
+                    missing: "explored endpoint of the BMC",
+                })
         };
         // Boxed so the state handler's future stays within the query depth limit.
         Box::pin(self.bmc_connector.connect(&bmc_access_info, report))
@@ -132,6 +135,12 @@ impl MachineStateHandlerServices {
             .map_err(|error| match error {
                 BmcConnectError::Report(error) => error,
                 BmcConnectError::Libredfish(error) => error.into(),
+                BmcConnectError::Drivers(ExploredConnectError::Reference(
+                    ExploredBmcRefError::NoServiceRoot,
+                )) => StateHandlerError::MissingData {
+                    object_id: machine.id.to_string(),
+                    missing: "service root in the BMC's explored endpoint",
+                },
                 BmcConnectError::Drivers(error) => ExternalServiceError::with_source(
                     "redfish",
                     "create_client",

@@ -19,10 +19,8 @@ mod context;
 mod errors;
 mod fetched;
 mod ipmi;
-mod primary;
 
 pub use context::OpCx;
 pub use errors::ClassifyBmcError;
 pub use fetched::Fetched;
 pub use ipmi::IpmiOps;
-pub use primary::{manager_index_for, primary_system_index};

@@ -2793,6 +2793,7 @@ dependencies = [
  "async-trait",
  "bmc-backend",
  "bmc-platform",
+ "bmc-runtime",
  "bmc-vendor",
  "carbide-api-db",
  "carbide-api-model",
